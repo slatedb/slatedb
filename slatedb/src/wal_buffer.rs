@@ -15,7 +15,7 @@ use crate::utils::{format_bytes_si, WatchableOnceCell, WatchableOnceCellReader};
 use crate::wal_buffer_stats::WalBufferStats;
 use async_trait::async_trait;
 use futures::{stream::BoxStream, StreamExt};
-use log::{error, trace};
+use log::{error, trace, warn};
 use slatedb_common::metrics::MetricsRecorderHelper;
 use tokio::{runtime::Handle, sync::oneshot};
 use tracing::instrument;
@@ -80,8 +80,6 @@ struct WalBufferManagerInner {
     last_flushed_wal_id: u64,
     /// The last seq that was flushed to the WAL. This value will be None until the first flush.
     last_flushed_seq: Option<u64>,
-    /// The last wal id that was deallocated from the buffer
-    last_purged_wal_id: u64,
 }
 
 /// Stores entries to the write-ahead log (WAL) in memory.
@@ -126,7 +124,6 @@ impl WalBufferManager {
             immutable_wals,
             flush_epoch: 1,
             last_flushed_wal_id,
-            last_purged_wal_id: last_flushed_wal_id,
             next_wal_id: last_flushed_wal_id + 1,
             last_flushed_seq: None,
         };
@@ -287,11 +284,9 @@ impl WalBufferManagerInner {
     /// Returns the list of immutable WALs that need to be flushed.
     /// Used by the handler to determine which WALs to write to storage.
     fn flushing_wals(&self) -> Vec<(u64, Arc<WalBuffer>)> {
-        let mut flushing_wals = Vec::new();
-        for (wal_id, wal) in self.immutable_wals.iter() {
-            if *wal_id > self.last_flushed_wal_id {
-                flushing_wals.push((*wal_id, wal.clone()));
-            }
+        let flushing_wals: Vec<_> = self.immutable_wals.iter().cloned().collect();
+        for (wal_id, _wal) in flushing_wals.iter() {
+            assert!(*wal_id > self.last_flushed_wal_id);
         }
         flushing_wals
     }
@@ -318,7 +313,6 @@ impl WalBufferManagerInner {
         WalStatus {
             estimated_bytes: self.estimated_bytes(table_store),
             last_flushed_wal_id: self.last_flushed_wal_id,
-            last_purged_wal_id: self.last_purged_wal_id,
             last_flushed_seq: self.last_flushed_seq,
             buffered_wal_entries_count,
         }
@@ -336,47 +330,27 @@ impl WalBufferManagerInner {
             .push_back((next_wal_id, Arc::new(current_wal)));
     }
 
-    fn record_flushed_wal(&mut self, wal_id: u64, wal: &Arc<WalBuffer>) {
-        self.last_flushed_wal_id = wal_id;
-        if let Some(seq) = wal.last_seq() {
+    fn record_flushed_wal(&mut self, flushed_wal_id: u64, flushed_wal: &Arc<WalBuffer>) {
+        let (front_wal_id, front_wal_buffer) = self
+            .immutable_wals
+            .pop_front()
+            .expect("no immutable wals found to pop");
+        assert_eq!(front_wal_id, flushed_wal_id);
+        assert!(Arc::ptr_eq(&front_wal_buffer, flushed_wal));
+        assert_eq!(
+            flushed_wal_id,
+            self.last_flushed_wal_id + 1,
+            "flushed wal id {} not next wal id after previous flushed {}",
+            flushed_wal_id,
+            self.last_flushed_wal_id
+        );
+        self.last_flushed_wal_id = flushed_wal_id;
+        if let Some(seq) = flushed_wal.last_seq() {
             if let Some(last_flushed_seq) = self.last_flushed_seq {
                 assert!(seq >= last_flushed_seq);
             }
             self.last_flushed_seq = Some(seq);
         }
-    }
-
-    fn maybe_release_immutable_wals(&mut self) -> usize {
-        let last_flushed_seq = self.last_flushed_seq;
-
-        let mut releaseable_count = 0;
-        for (_id, wal) in self.immutable_wals.iter() {
-            if wal
-                .last_seq()
-                .map(|seq| seq <= last_flushed_seq.unwrap_or(0))
-                .unwrap_or(false)
-            {
-                releaseable_count += 1;
-            } else {
-                break;
-            }
-        }
-
-        if releaseable_count > 0 {
-            trace!(
-                "draining immutable wals [releaseable_count={}]",
-                releaseable_count
-            );
-            let last_purged = self
-                .immutable_wals
-                .drain(..releaseable_count)
-                .map(|(id, _wal)| id)
-                .max();
-            if let Some(last_purged) = last_purged {
-                self.last_purged_wal_id = last_purged;
-            }
-        }
-        releaseable_count
     }
 }
 
@@ -493,8 +467,8 @@ impl WalFlushHandler {
             inner.flushing_wals()
         };
 
-        for (wal_id, wal) in flushing_wals.iter() {
-            let result = self.do_flush_one_wal(*wal_id, wal.clone()).await;
+        for (wal_id, wal) in flushing_wals {
+            let result = self.do_flush_one_wal(wal_id, wal.clone()).await;
             if let Err(e) = &result {
                 // a WAL buffer can be retried to flush multiple times, but WatchableOnceCell is only set once.
                 // we do NOT call `wal.notify_durable` as soon as encountered any error here, but notify
@@ -506,29 +480,19 @@ impl WalFlushHandler {
             // increment the last flushed wal id, and last flushed seq
             let status = {
                 let mut inner = self.inner.write();
-                inner.record_flushed_wal(*wal_id, wal);
+                inner.record_flushed_wal(wal_id, &wal);
                 inner.status(&self.table_store)
             };
 
-            self.notify_listener(WalEvent::WalFlushed(status));
             wal.notify_durable(result.clone());
+            if Arc::strong_count(&wal) > 1 {
+                warn!("outstanding references to wal id {} after flushing", wal_id);
+            }
+            drop(wal);
+            self.notify_listener(WalEvent::WalFlushed(status));
         }
-
-        self.maybe_release_immutable_wals();
 
         Ok(())
-    }
-
-    fn maybe_release_immutable_wals(&self) {
-        let (status, released_wals) = {
-            let mut inner = self.inner.write();
-            let released_wals = inner.maybe_release_immutable_wals();
-            let status = inner.status(&self.table_store);
-            (status, released_wals)
-        };
-        if released_wals > 0 {
-            self.notify_listener(WalEvent::MemoryReleased(status));
-        }
     }
 
     async fn do_flush_one_wal(&self, wal_id: u64, wal: Arc<WalBuffer>) -> Result<(), SlateDBError> {
@@ -639,8 +603,6 @@ pub(crate) struct WalStatus {
     pub(crate) last_flushed_wal_id: u64,
     /// The last sequence number that was durably flushed
     pub(crate) last_flushed_seq: Option<u64>,
-    /// The last WAL file id whose memory was released
-    pub(crate) last_purged_wal_id: u64,
     /// The number of writes currently buffered
     #[allow(dead_code)]
     pub(crate) buffered_wal_entries_count: usize,
@@ -652,8 +614,6 @@ pub(crate) enum WalEvent {
     /// Emitted when a WAL file is durably flushed to storage. On receipt of this event, SlateDB
     /// notifies write tasks blocked on [`crate::config::WriteOptions::await_durable`]
     WalFlushed(WalStatus),
-    /// Emitted when `WalBufferManager` releases buffer memory.
-    MemoryReleased(WalStatus),
 }
 
 impl WalObserver {
@@ -951,9 +911,7 @@ mod tests {
         observer
             .subscribe(Arc::new(move |status| {
                 (*listener)(status.clone());
-                let WalEvent::WalFlushed(status) = status else {
-                    return;
-                };
+                let WalEvent::WalFlushed(status) = status;
                 oracle.advance_durable_seq(status.last_flushed_seq.unwrap_or(0))
             }))
             .unwrap();
@@ -1042,26 +1000,6 @@ mod tests {
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 0);
     }
 
-    #[tokio::test]
-    async fn test_immutable_wal_reclaim_with_flush_check() {
-        let (wal_buffer, _, _, _) = setup_wal_buffer_with_flush_interval(Duration::MAX).await;
-
-        // Append entries to create multiple WALs
-        for i in 0..100 {
-            let seq = i + 1;
-            let entry = make_entry(&format!("key{}", i), &format!("value{}", i), seq, None);
-            wal_buffer.append(&[entry]).unwrap();
-            wal_buffer.inner.write().freeze_current_wal();
-        }
-        // simulate flushing just some of the wals
-        wal_buffer.inner.write().last_flushed_seq = Some(50);
-
-        let released = wal_buffer.inner.write().maybe_release_immutable_wals();
-
-        assert_eq!(released, 50);
-        assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_maybe_trigger_flush_spams_flush_requests() {
         let (wal_buffer, _, _, recorder) =
@@ -1127,49 +1065,14 @@ mod tests {
         let recorded = events.lock().unwrap().clone();
         let mut flushed: Vec<_> = recorded
             .iter()
-            .filter_map(|e| {
-                if let WalEvent::WalFlushed(status) = e {
-                    Some(status)
-                } else {
-                    None
-                }
+            .map(|e| {
+                let WalEvent::WalFlushed(status) = e;
+                status
             })
             .collect();
         assert_eq!(flushed.len(), 1);
         let status = flushed.pop().unwrap();
         assert_eq!(status.last_flushed_wal_id, 1);
         assert_eq!(status.last_flushed_seq, Some(1));
-    }
-
-    #[tokio::test]
-    async fn test_listener_notified_when_flush_task_releases_wal() {
-        // given:
-        let (listener, events) = recording_listener();
-        let (wal_buffer, _, _, _) = setup_wal_buffer_with_args(Duration::MAX, listener).await;
-
-        // when:
-        wal_buffer
-            .append(&[make_entry("key1", "value1", 1, None)])
-            .unwrap();
-        wal_buffer.flush().unwrap().await.unwrap().unwrap();
-        // The flush should have released the immutable wal from memory.
-        assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 0);
-
-        // The listener should have been notified that wal 1 was purged.
-        // then: the listener should have been notified that wal 1 was flushed.
-        let recorded = events.lock().unwrap().clone();
-        let mut flushed: Vec<_> = recorded
-            .iter()
-            .filter_map(|e| {
-                if let WalEvent::MemoryReleased(status) = e {
-                    Some(status)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert_eq!(flushed.len(), 1);
-        let status = flushed.pop().unwrap();
-        assert_eq!(status.last_purged_wal_id, 1);
     }
 }
