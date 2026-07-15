@@ -237,6 +237,11 @@ pub trait WalIterator: Send + 'static {
     /// Returns [`WalError::WalTruncated`] if the iterator observes that the WAL was truncated
     /// while iterating.
     async fn next(&mut self) -> Result<Option<WalRows>, WalError>;
+
+    /// Closes the iterator and releases resources
+    async fn close(&mut self) -> Result<(), WalError> {
+        Ok(())
+    }
 }
 
 /// API for reading from the WAL. Used by the Reader/
