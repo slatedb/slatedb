@@ -74,6 +74,12 @@ pub(crate) enum SlateDBError {
     #[error("invalid DB state error")]
     InvalidDBState,
 
+    #[error("tail_wal cannot be enabled when skip_wal_replay is true")]
+    TailWalWithSkipWalReplay,
+
+    #[error("tail_wal cannot be enabled for a checkpoint reader")]
+    TailWalWithCheckpoint,
+
     #[error("wal store reconfiguration unsupported")]
     WalStoreReconfigurationError,
 
@@ -652,6 +658,8 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidCheckpointLifetime(_) => Error::invalid(msg),
             SlateDBError::InvalidManifestPollInterval(_) => Error::invalid(msg),
             SlateDBError::CheckpointLifetimeTooShort { .. } => Error::invalid(msg),
+            SlateDBError::TailWalWithSkipWalReplay => Error::invalid(msg),
+            SlateDBError::TailWalWithCheckpoint => Error::invalid(msg),
             SlateDBError::SeekKeyOutOfRange { .. } => Error::invalid(msg),
             SlateDBError::SeekKeyLessThanLastReturnedKey => Error::invalid(msg),
             SlateDBError::IdenticalClonePaths { .. } => Error::invalid(msg),

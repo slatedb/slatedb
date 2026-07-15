@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 use log::warn;
 use std::error::Error;
-use std::ops::{Bound, Range};
+use std::ops::{Bound, Range, RangeFrom};
 use std::sync::Arc;
 
 pub mod kafka;
@@ -16,11 +16,17 @@ pub(crate) mod wal_sst_builder;
 pub(crate) mod writer_init;
 
 /// A range of WAL File IDs
-pub struct WalFileRange(Bound<u64>, Bound<u64>);
+pub struct WalFileRange(pub Bound<u64>, pub Bound<u64>);
 
 impl From<Range<u64>> for WalFileRange {
     fn from(range: Range<u64>) -> Self {
         WalFileRange(Bound::Included(range.start), Bound::Excluded(range.end))
+    }
+}
+
+impl From<RangeFrom<u64>> for WalFileRange {
+    fn from(range: RangeFrom<u64>) -> Self {
+        WalFileRange(Bound::Included(range.start), Bound::Unbounded)
     }
 }
 
@@ -213,6 +219,7 @@ pub trait WalWriter: Send {
 }
 
 /// Rows returned by [`WalIterator`]
+#[derive(Debug)]
 pub struct WalRows {
     /// The rows read from the WAL File. All the rows with a given sequence number must be present
     /// in th same [`WalRows`].
@@ -234,6 +241,9 @@ pub trait WalIterator: Send + 'static {
     /// Returns None when iterator's range is exhausted. Iterators created using an unbounded
     /// end range that have exhausted the current WAL block until new rows are appended and neverCollapse annotation
     /// return `None`.
+    ///
+    /// This fn MUST be cancellation-safe so that it can be wrapped in tokio::select
+    ///
     /// Returns [`WalError::WalTruncated`] if the iterator observes that the WAL was truncated
     /// while iterating.
     async fn next(&mut self) -> Result<Option<WalRows>, WalError>;
@@ -246,7 +256,7 @@ pub trait WalIterator: Send + 'static {
 
 /// API for reading from the WAL. Used by the Reader/
 #[async_trait]
-pub trait WalReader {
+pub trait WalReader: Send + Sync + 'static {
     /// Returns an iterator over the specified range of WAL File IDs. The start of the range must
     /// not be `Unbounded`. If the end of the range is `Unbounded` then the returned iterator
     /// continues returning writes as new writes are appended to the WAL. Otherwise, it returns
@@ -287,7 +297,7 @@ impl From<WalError> for SlateDBError {
             WalError::Fenced => SlateDBError::Fenced,
             WalError::IoError(err) => SlateDBError::IoError(err),
             WalError::InternalError(_err) => SlateDBError::InvalidDBState,
-            WalError::WalTruncated => todo!(),
+            WalError::WalTruncated => SlateDBError::InvalidDBState,
             WalError::SlateDBError(err) => match err.downcast_ref::<SlateDBError>() {
                 Some(err) => err.clone(),
                 None => {

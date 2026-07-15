@@ -290,9 +290,13 @@ impl MemTableIterator {
 
 impl ImmutableMemtable {
     pub(crate) fn new(table: WritableKVTable, replay_after_wal_id: u64) -> Self {
-        let sequence_tracker = table.table.sequence_tracker_snapshot();
+        Self::from_table(table.table, replay_after_wal_id)
+    }
+
+    pub(crate) fn from_table(table: Arc<KVTable>, replay_after_wal_id: u64) -> Self {
+        let sequence_tracker = table.sequence_tracker_snapshot();
         Self {
-            table: table.table,
+            table,
             replay_after_wal_id,
             uploaded: WatchableOnceCell::new(),
             sequence_tracker,

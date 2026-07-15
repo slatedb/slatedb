@@ -200,6 +200,9 @@ pub struct ReaderOptions {
     /// up after `n` retries and surfaces the underlying error.
     #[uniffi(default = None)]
     pub object_store_max_retries: Option<u32>,
+    /// Whether the reader should continuously tail the WAL.
+    #[uniffi(default = false)]
+    pub tail_wal: bool,
 }
 
 impl Default for ReaderOptions {
@@ -210,6 +213,7 @@ impl Default for ReaderOptions {
             max_memtable_bytes: 64 * 1024 * 1024,
             skip_wal_replay: false,
             object_store_max_retries: None,
+            tail_wal: false,
         }
     }
 }
@@ -222,6 +226,7 @@ impl From<ReaderOptions> for slatedb::config::DbReaderOptions {
             max_memtable_bytes: value.max_memtable_bytes,
             skip_wal_replay: value.skip_wal_replay,
             object_store_max_retries: value.object_store_max_retries,
+            tail_wal: value.tail_wal,
             ..Default::default()
         }
     }

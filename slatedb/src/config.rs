@@ -1083,6 +1083,14 @@ pub struct DbReaderOptions {
     /// Defaults to false.
     pub skip_wal_replay: bool,
 
+    /// When true, continuously tail the WAL and apply newly durable writes to the reader's
+    /// in-memory tables. This is only supported for readers that follow the latest database
+    /// state and cannot be combined with `skip_wal_replay`.
+    ///
+    /// Defaults to false.
+    #[serde(default)]
+    pub tail_wal: bool,
+
     /// Optional metrics reporting level for standalone readers. Defaults to
     /// [`MetricLevel::default`] when unset.
     pub metric_level: Option<MetricLevel>,
@@ -1101,6 +1109,7 @@ impl Default for DbReaderOptions {
             max_memtable_bytes: 64 * 1024 * 1024,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             skip_wal_replay: false,
+            tail_wal: false,
             metric_level: None,
             object_store_max_retries: None,
         }

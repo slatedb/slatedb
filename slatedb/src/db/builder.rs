@@ -160,6 +160,7 @@ use crate::retrying_object_store::RetryingObjectStore;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
+use crate::wal;
 use crate::wal::wal_disabled::DisabledWalObserver;
 use crate::wal::WalObserver;
 use slatedb_common::clock::DefaultSystemClock;
@@ -169,7 +170,6 @@ use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::metrics::NoopMetricsRecorder;
 use slatedb_common::DbRand;
 use uuid::Uuid;
-use crate::wal;
 
 /// A builder for creating a new Db instance.
 ///
@@ -1619,6 +1619,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     path: P,
     object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
+    wal_reader: Option<Box<dyn wal::WalReader>>,
     db_cache: Option<Arc<dyn DbCache>>,
     mode: DbReaderMode,
     merge_operator: Option<MergeOperatorType>,
@@ -1638,6 +1639,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             path,
             object_store,
             wal_object_store: None,
+            wal_reader: None,
             db_cache: default_db_cache(),
             mode: DbReaderMode::default(),
             merge_operator: None,
@@ -1661,6 +1663,14 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// Use this when the database was configured with a separate WAL object store.
     pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
         self.wal_object_store = Some(wal_object_store);
+        self
+    }
+
+    /// Sets the [`wal::WalReader`] used to create iterators that replay and tail the WAL.
+    /// Use this to plug a custom WAL implementation into the reader. By default, SlateDB uses
+    /// its object-store-backed WAL.
+    pub fn with_wal_reader(mut self, wal_reader: Box<dyn wal::WalReader>) -> Self {
+        self.wal_reader = Some(wal_reader);
         self
     }
 
@@ -1868,6 +1878,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             manifest_store,
             table_store,
             self.mode,
+            self.wal_reader,
             self.merge_operator,
             self.segment_extractor,
             self.options,

@@ -7,17 +7,18 @@ use crate::mem_table::WritableKVTable;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::utils::panic_string;
+use crate::wal::{WalError, WalIterator as WalIteratorTrait, WalRows};
+use async_trait::async_trait;
 use log::error;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
-use async_trait::async_trait;
 use tokio::task;
 use tokio::task::JoinHandle;
-use crate::wal::{WalError, WalIterator as WalIteratorTrait, WalRows};
 
 pub(crate) struct WalReplayOptions {
-    /// The number of SSTs to preload while replaying
+    /// The number of SSTs to preload while replaying in object-store tests.
+    #[cfg(test)]
     pub(crate) sst_batch_size: usize,
 
     /// The target maximum number of bytes in each returned table. WAL replay only
@@ -25,7 +26,8 @@ pub(crate) struct WalReplayOptions {
     /// a returned table may exceed this if a single write batch is larger.
     pub(crate) max_memtable_bytes: usize,
 
-    /// Options to pass through to underlying SST iterators
+    /// Options to pass through to underlying SST iterators in object-store tests.
+    #[cfg(test)]
     pub(crate) sst_iter_options: SstIteratorOptions,
 
     /// The minimum seq number to replay. If unset, will replay all
@@ -36,8 +38,10 @@ pub(crate) struct WalReplayOptions {
 impl Default for WalReplayOptions {
     fn default() -> Self {
         Self {
+            #[cfg(test)]
             sst_batch_size: 4,
             max_memtable_bytes: 64 * 1024 * 1024,
+            #[cfg(test)]
             sst_iter_options: SstIteratorOptions::default(),
             min_seq: None,
         }
@@ -72,6 +76,7 @@ pub(crate) struct WalReplayIterator {
 }
 
 impl WalReplayIterator {
+    #[cfg(test)]
     pub(crate) async fn range(
         wal_id_range: Range<u64>,
         db_state: &ManifestCore,
@@ -86,13 +91,8 @@ impl WalReplayIterator {
             options.sst_iter_options.clone(),
             Arc::clone(&table_store),
         )
-            .await?;
-        Self::for_wal_iterator(
-            Box::new(wal_iter),
-            db_state,
-            options,
-            table_store,
-        )
+        .await?;
+        Self::for_wal_iterator(Box::new(wal_iter), db_state, options, table_store)
     }
 
     pub(crate) fn for_wal_iterator(
@@ -300,7 +300,7 @@ impl WalIterator {
                 Arc::clone(&table_store),
                 sst_iter_options,
             )
-                .await?;
+            .await?;
             // An unbounded, unfiltered scan over a WAL SST always yields an
             // iterator. `None` means the file cannot be read, and replay must
             // fail rather than silently end early and drop the remaining WALs.
@@ -403,7 +403,9 @@ impl WalIteratorTrait for WalIterator {
                         file_iter.wal_id, min_seq, last_seq,
                     );
                     self.finished = true;
-                    return Err(WalError::SlateDBError(Arc::new(SlateDBError::InvalidDBState)));
+                    return Err(WalError::SlateDBError(Arc::new(
+                        SlateDBError::InvalidDBState,
+                    )));
                 }
             }
             let max_seq = rows
