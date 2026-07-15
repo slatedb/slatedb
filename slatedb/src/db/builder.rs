@@ -169,6 +169,7 @@ use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::metrics::NoopMetricsRecorder;
 use slatedb_common::DbRand;
 use uuid::Uuid;
+use crate::wal;
 
 /// A builder for creating a new Db instance.
 ///
@@ -192,6 +193,7 @@ pub struct DbBuilder<P: Into<Path>> {
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+    wal_writer_init: Option<Box<dyn wal::WriterInit>>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -215,6 +217,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             filter_policies: default_filter_policies(),
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             segment_extractor: None,
+            wal_writer_init: None,
         }
     }
 
@@ -408,6 +411,14 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Sets the `[WalWriterInit]` used to initialize a `[WalWriter]` to append new
+    /// entries to the WAL. Use this to plug in custom WAL implementations to SlateDB.
+    /// By default, SlateDB uses its own object-store based WAL.
+    pub fn with_wal_writer(mut self, wal_writer_init: Box<dyn wal::WriterInit>) -> Self {
+        self.wal_writer_init = Some(wal_writer_init);
+        self
+    }
+
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
         self.settings.validate()?;
@@ -588,6 +599,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             &self.settings,
             system_clock.clone(),
             task_executor.clone(),
+            self.wal_writer_init,
         );
         let WriterFenceResult {
             manifest,

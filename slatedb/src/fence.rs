@@ -2,11 +2,11 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, StoredManifest};
 use crate::tablestore::TableStore;
-use crate::Settings;
+use crate::{wal, Settings};
 use fail_parallel::{fail_point_send, FailPointTx};
 use crate::utils::WatchableOnceCellReader;
 use crate::wal::writer_init::WalWriterInit;
-use crate::wal::{WalIterator, WalWriter, WriterInit};
+use crate::wal::{WalIterator, WalWriter};
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::SystemClock;
 use std::sync::Arc;
@@ -20,6 +20,7 @@ pub(crate) struct WriterFencer {
     manifest_update_timeout: Duration,
     system_clock: Arc<dyn SystemClock>,
     task_executor: Arc<MessageHandlerExecutor>,
+    wal_writer_init: Option<Box<dyn wal::WriterInit>>,
     #[cfg_attr(not(test), allow(dead_code))]
     fp_tx: FailPointTx,
 }
@@ -38,6 +39,7 @@ impl WriterFencer {
         settings: &Settings,
         system_clock: Arc<dyn SystemClock>,
         task_executor: Arc<MessageHandlerExecutor>,
+        wal_writer_init: Option<Box<dyn wal::WriterInit>>,
     ) -> Self {
         Self::new_with_fp_handle(
             closed_result_reader,
@@ -46,6 +48,7 @@ impl WriterFencer {
             settings,
             system_clock,
             task_executor,
+            wal_writer_init,
             FailPointTx::dummy(),
         )
     }
@@ -57,6 +60,7 @@ impl WriterFencer {
         settings: &Settings,
         system_clock: Arc<dyn SystemClock>,
         task_executor: Arc<MessageHandlerExecutor>,
+        wal_writer_init: Option<Box<dyn wal::WriterInit>>,
         fp_tx: FailPointTx,
     ) -> Self {
         Self {
@@ -67,6 +71,7 @@ impl WriterFencer {
             manifest_update_timeout: settings.manifest_update_timeout,
             system_clock,
             task_executor,
+            wal_writer_init,
             fp_tx,
         }
     }
@@ -81,19 +86,23 @@ impl WriterFencer {
     /// to "re-write" this file. Returns a `WriterFence` with the `FenceableManifest` and iterator
     /// that must be replayed to recover up to the current epoch.
     pub(crate) async fn fence(
-        self,
+        mut self,
         stored_manifest: StoredManifest,
     ) -> Result<WriterFenceResult, SlateDBError> {
-        let wal_writer_init = WalWriterInit::load(
-            self.closed_result_reader.clone(),
-            self.recorder.clone(),
-            self.table_store.clone(),
-            &self.settings,
-            stored_manifest.manifest(),
-            self.task_executor.clone(),
-            self.fp_tx.clone(),
-        )
-        .await?;
+        let wal_writer_init = match self.wal_writer_init.take() {
+            None => Box::new(
+                WalWriterInit::load(
+                    self.closed_result_reader.clone(),
+                    self.recorder.clone(),
+                    self.table_store.clone(),
+                    &self.settings,
+                    stored_manifest.manifest(),
+                    self.task_executor.clone(),
+                    self.fp_tx.clone(),
+                ).await?
+            ),
+            Some(wal_writer_init) => wal_writer_init,
+        };
 
         let manifest = FenceableManifest::init_writer(
             stored_manifest,
@@ -203,6 +212,7 @@ mod tests {
                 &settings,
                 system_clock.clone(),
                 task_executor.clone(),
+                None,
                 fp_tx,
             );
             Self {

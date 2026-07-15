@@ -127,7 +127,7 @@ pub struct WriterInitResult {
 ///     rows in WAL files between [`WriterManifest::replay_after_wal_id`] (exclusive) and the
 ///     current end of the WAL.
 #[async_trait]
-pub trait WriterInit {
+pub trait WriterInit: Send + 'static {
     /// Fences the WAL and returns a [`WriterInitResult`] with a [`WalWriter`] and
     /// [`WalReplayIterator`] used to recover writes that have not yet been flushed to the tree.
     async fn fence_and_init(
