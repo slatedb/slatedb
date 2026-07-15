@@ -10,6 +10,8 @@
 mod codec;
 mod observer;
 mod reader;
+#[cfg(test)]
+mod tests;
 mod writer;
 
 pub use observer::KafkaWalObserver;
