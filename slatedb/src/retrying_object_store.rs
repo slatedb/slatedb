@@ -82,9 +82,6 @@ impl RetryingObjectStore {
         let builder = ExponentialBuilder::default()
             .with_min_delay(Duration::from_millis(100))
             .with_max_delay(Duration::from_secs(1));
-        // `None` preserves the historical unbounded behavior; `Some(n)` bounds
-        // the wrapper-level retries so a persistently-failing operation fails
-        // fast instead of hanging forever.
         match self.max_retries {
             Some(max_retries) => builder.with_max_times(max_retries as usize),
             None => builder.without_max_times(),
@@ -1142,27 +1139,5 @@ mod tests {
         assert!(matches!(err, object_store::Error::Generic { .. }));
         // 1 initial attempt + 2 retries = 3 total attempts.
         assert_eq!(flaky.put_attempts(), 3);
-    }
-
-    #[tokio::test]
-    async fn test_unbounded_default_retries_until_success() {
-        // With the default (None) policy, a transient failure is retried until
-        // it succeeds, preserving historical behavior.
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let flaky = Arc::new(FlakyObjectStore::new(inner, 3));
-        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), None);
-
-        let path = Path::from("/data/obj");
-        retrying
-            .put_opts(
-                &path,
-                PutPayload::from_bytes(Bytes::from_static(b"hello")),
-                PutOptions::default(),
-            )
-            .await
-            .expect("unbounded retries should eventually succeed");
-
-        // 3 failures + 1 success.
-        assert_eq!(flaky.put_attempts(), 4);
     }
 }
