@@ -867,6 +867,7 @@ impl CompactorEventHandler {
             return Ok(());
         }
 
+        let mut manifest_changed = false;
         for compaction in compacted {
             let id = compaction.id();
             match self.validate_compaction(&compaction) {
@@ -884,6 +885,7 @@ impl CompactorEventHandler {
                             .collect(),
                     };
                     self.state_mut().finish_compaction(id, output_sr);
+                    manifest_changed = true;
                     self.stats
                         .last_compaction_ts
                         .set(self.system_clock.now().timestamp());
@@ -902,7 +904,13 @@ impl CompactorEventHandler {
         }
 
         self.log_compaction_state();
-        self.state_writer.write_state_safely().await?;
+        if manifest_changed {
+            self.state_writer.write_state_safely().await?;
+        } else {
+            // Validation failures only change `.compactions`. Avoid creating a
+            // checkpoint and writing an unchanged manifest.
+            self.state_writer.write_compactions_safely().await?;
+        }
 
         Ok(())
     }
@@ -6155,6 +6163,12 @@ mod tests {
             .handler
             .state_mut()
             .insert_compaction_for_test(compaction);
+        let manifest_id_before = fixture
+            .manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .id;
 
         // when:
         fixture
@@ -6176,6 +6190,16 @@ mod tests {
                 .expect("missing compaction")
                 .status(),
             CompactionStatus::Failed,
+        );
+        let manifest_id_after = fixture
+            .manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .id;
+        assert_eq!(
+            manifest_id_after, manifest_id_before,
+            "validation-only failures must not checkpoint or rewrite the manifest"
         );
     }
 
