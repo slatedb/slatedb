@@ -70,9 +70,6 @@ struct WalBufferManagerInner {
     /// When the current WAL is ready to be flushed, it'll be moved to the `immutable_wals`.
     /// The flusher will try flush all the immutable wals to remote storage.
     immutable_wals: VecDeque<(u64, Arc<WalBuffer>)>,
-    /// Whenever a WAL is applied to Memtable and successfully flushed to remote storage,
-    /// the immutable wal can be recycled in memory.
-    last_applied_seq: Option<u64>,
     /// The next wal id that will be generated
     next_wal_id: u64,
     /// Monotonically increasing epoch incremented each time the current WAL is
@@ -127,7 +124,6 @@ impl WalBufferManager {
         let inner = WalBufferManagerInner {
             current_wal,
             immutable_wals,
-            last_applied_seq: None,
             flush_epoch: 1,
             last_flushed_wal_id,
             last_purged_wal_id: last_flushed_wal_id,
@@ -253,18 +249,6 @@ impl WalBufferManager {
         Ok(result_rx)
     }
 
-    /// Track the last applied sequence number. It's called when some WAL entries are applied to the memtable.
-    /// This information of the last applied seq is used to determine if the immutable wals can be recycled.
-    ///
-    /// It's the caller's duty to ensure the seq is monotonically increasing.
-    pub(crate) fn track_last_applied_seq(&self, seq: u64) {
-        {
-            let mut inner = self.inner.write();
-            inner.last_applied_seq = Some(seq);
-            inner.maybe_release_immutable_wals();
-        }
-    }
-
     #[allow(dead_code)]
     pub(crate) async fn close(&self) -> Result<(), SlateDBError> {
         let task_executor = self
@@ -363,19 +347,13 @@ impl WalBufferManagerInner {
     }
 
     fn maybe_release_immutable_wals(&mut self) -> usize {
-        let last_applied_seq = match self.last_applied_seq {
-            Some(seq) => seq,
-            None => return 0,
-        };
-
         let last_flushed_seq = self.last_flushed_seq;
 
         let mut releaseable_count = 0;
-        for (_, wal) in self.immutable_wals.iter() {
+        for (_id, wal) in self.immutable_wals.iter() {
             if wal
                 .last_seq()
-                // TODO: check me (make sure seq starts at 1)
-                .map(|seq| seq <= last_applied_seq && seq <= last_flushed_seq.unwrap_or(0))
+                .map(|seq| seq <= last_flushed_seq.unwrap_or(0))
                 .unwrap_or(false)
             {
                 releaseable_count += 1;
@@ -1061,34 +1039,27 @@ mod tests {
             wal_buffer.flush().unwrap().await.unwrap().unwrap();
         }
         assert_eq!(wal_buffer.last_flushed_wal_id(), 100);
-        assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 100);
-
-        wal_buffer.track_last_applied_seq(50);
-        assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
+        assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 0);
     }
 
     #[tokio::test]
     async fn test_immutable_wal_reclaim_with_flush_check() {
-        let (wal_buffer, _, _, _) = setup_wal_buffer().await;
+        let (wal_buffer, _, _, _) = setup_wal_buffer_with_flush_interval(Duration::MAX).await;
 
         // Append entries to create multiple WALs
         for i in 0..100 {
             let seq = i + 1;
             let entry = make_entry(&format!("key{}", i), &format!("value{}", i), seq, None);
             wal_buffer.append(&[entry]).unwrap();
-            wal_buffer.flush().unwrap().await.unwrap().unwrap();
+            wal_buffer.inner.write().freeze_current_wal();
         }
-        wal_buffer.track_last_applied_seq(50);
-        assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
-        assert_eq!(wal_buffer.last_flushed_wal_id(), 100);
+        // simulate flushing just some of the wals
+        wal_buffer.inner.write().last_flushed_seq = Some(50);
 
-        // set flush seq to 80, and track last applied seq to 90, it should release 20 wals
-        {
-            let mut inner = wal_buffer.inner.write();
-            inner.last_flushed_seq = Some(80);
-        }
-        wal_buffer.track_last_applied_seq(90);
-        assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 20);
+        let released = wal_buffer.inner.write().maybe_release_immutable_wals();
+
+        assert_eq!(released, 50);
+        assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 50);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1175,7 +1146,6 @@ mod tests {
         // given:
         let (listener, events) = recording_listener();
         let (wal_buffer, _, _, _) = setup_wal_buffer_with_args(Duration::MAX, listener).await;
-        wal_buffer.track_last_applied_seq(10);
 
         // when:
         wal_buffer
