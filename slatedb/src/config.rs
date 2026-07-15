@@ -761,6 +761,16 @@ pub struct Settings {
     /// Default: no TTL (insertions will remain until deleted)
     pub default_ttl: Option<u64>,
 
+    /// Maximum number of wrapper-level retries for a single object-store
+    /// operation, on top of the `object_store` client's own HTTP retries.
+    /// Applies to both foreground (user API) and background-task operations,
+    /// since both share the same retrying object store.
+    ///
+    /// * `None` (default): retry transient errors indefinitely (historical behavior).
+    /// * `Some(n)`: give up after `n` retries and return the underlying error.
+    #[serde(default)]
+    pub object_store_max_retries: Option<u32>,
+
     /// The block format for SST files. This is only available in tests
     /// to verify backward compatibility between V1 and V2 formats.
     #[cfg(test)]
@@ -997,6 +1007,7 @@ impl Default for Settings {
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             metric_level: MetricLevel::default(),
             default_ttl: None,
+            object_store_max_retries: None,
             #[cfg(test)]
             block_format: None,
         }
@@ -1042,6 +1053,11 @@ pub struct DbReaderOptions {
     /// Optional metrics reporting level for standalone readers. Defaults to
     /// [`MetricLevel::default`] when unset.
     pub metric_level: Option<MetricLevel>,
+
+    /// Controls wrapper-level retries for this reader's object-store operations.
+    /// Defaults to unbounded retries.
+    #[serde(default)]
+    pub object_store_max_retries: Option<u32>,
 }
 
 impl Default for DbReaderOptions {
@@ -1053,6 +1069,7 @@ impl Default for DbReaderOptions {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             skip_wal_replay: false,
             metric_level: None,
+            object_store_max_retries: None,
         }
     }
 }
@@ -1145,6 +1162,11 @@ pub struct CompactorOptions {
     #[serde(deserialize_with = "deserialize_duration")]
     #[serde(serialize_with = "serialize_duration")]
     pub worker_heartbeat_timeout: Duration,
+
+    /// Controls wrapper-level retries for this compactor's object-store
+    /// operations. Defaults to unbounded retries.
+    #[serde(default)]
+    pub object_store_max_retries: Option<u32>,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -1162,6 +1184,7 @@ impl Default for CompactorOptions {
             metric_level: None,
             commit_compacted_interval: Duration::from_secs(1),
             worker_heartbeat_timeout: Duration::from_secs(30),
+            object_store_max_retries: None,
         }
     }
 }
@@ -1181,6 +1204,7 @@ impl std::fmt::Debug for CompactorOptions {
             .field("metric_level", &self.metric_level)
             .field("commit_compacted_interval", &self.commit_compacted_interval)
             .field("worker_heartbeat_timeout", &self.worker_heartbeat_timeout)
+            .field("object_store_max_retries", &self.object_store_max_retries)
             .finish()
     }
 }
@@ -1447,6 +1471,11 @@ pub struct GarbageCollectorOptions {
     /// garbage collector operating on the database.
     #[serde(default = "default_boundary_files_enabled")]
     pub boundary_files_enabled: bool,
+
+    /// Controls wrapper-level retries for this garbage collector's object-store
+    /// operations. Defaults to unbounded retries.
+    #[serde(default)]
+    pub object_store_max_retries: Option<u32>,
 }
 
 impl GarbageCollectorOptions {
@@ -1548,6 +1577,7 @@ impl Default for GarbageCollectorOptions {
             detach_options: Some(GarbageCollectorScheduleOptions::default()),
             metric_level: None,
             boundary_files_enabled: true,
+            object_store_max_retries: None,
         }
     }
 }

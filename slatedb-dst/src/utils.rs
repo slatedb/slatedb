@@ -126,6 +126,7 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
         commit_compacted_interval: rng
             .random_range(Duration::from_millis(1)..Duration::from_secs(5)),
         worker_heartbeat_timeout,
+        object_store_max_retries: None,
     }
 }
 
@@ -158,6 +159,7 @@ pub fn build_settings_gc(rng: &mut impl Rng) -> GarbageCollectorOptions {
         }),
         metric_level: None,
         boundary_files_enabled: true,
+        object_store_max_retries: None,
     }
 }
 

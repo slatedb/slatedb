@@ -46,12 +46,20 @@ impl Sleeper for SystemClockSleeper {
 }
 
 /// A thin wrapper around an `ObjectStore` that retries transient errors with
-/// exponential backoff forever using the configured [`SystemClock`] for sleeps.
+/// exponential backoff using the configured [`SystemClock`] for sleeps.
+///
+/// Retries are unbounded by default; a bound can be configured via
+/// `max_retries`, in which case an operation that keeps failing eventually
+/// returns its underlying error instead of retrying forever. This applies to
+/// both foreground and background object-store operations, since both go
+/// through this wrapper.
 #[derive(Debug, Clone)]
 pub(crate) struct RetryingObjectStore {
     inner: Arc<dyn ObjectStore>,
     rand: Arc<DbRand>,
     clock: Arc<dyn SystemClock>,
+    /// Maximum wrapper-level retries per operation. `None` = unbounded.
+    max_retries: Option<u32>,
 }
 
 impl RetryingObjectStore {
@@ -59,16 +67,25 @@ impl RetryingObjectStore {
         inner: Arc<dyn ObjectStore>,
         rand: Arc<DbRand>,
         clock: Arc<dyn SystemClock>,
+        max_retries: Option<u32>,
     ) -> Self {
-        Self { inner, rand, clock }
+        Self {
+            inner,
+            rand,
+            clock,
+            max_retries,
+        }
     }
 
     #[inline]
-    fn retry_builder() -> ExponentialBuilder {
-        ExponentialBuilder::default()
-            .without_max_times()
+    fn retry_builder(&self) -> ExponentialBuilder {
+        let builder = ExponentialBuilder::default()
             .with_min_delay(Duration::from_millis(100))
-            .with_max_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(1));
+        match self.max_retries {
+            Some(max_retries) => builder.with_max_times(max_retries as usize),
+            None => builder.without_max_times(),
+        }
     }
 
     #[inline]
@@ -116,7 +133,7 @@ impl RetryingObjectStore {
             ..Default::default()
         };
         let result = (|| async { self.inner.get_opts(location, get_opts.clone()).await })
-            .retry(Self::retry_builder())
+            .retry(self.retry_builder())
             .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
@@ -283,7 +300,7 @@ impl ObjectStore for RetryingObjectStore {
                 extensions,
             })
         })
-        .retry(Self::retry_builder())
+        .retry(self.retry_builder())
         .sleep(self.sleeper())
         .notify(Self::notify)
         .when(Self::should_retry)
@@ -321,7 +338,7 @@ impl ObjectStore for RetryingObjectStore {
                 .put_opts(location, payload.clone(), opts_with_id.clone())
                 .await
         })
-        .retry(Self::retry_builder())
+        .retry(self.retry_builder())
         .sleep(self.sleeper())
         .notify(Self::notify)
         .when(Self::should_retry)
@@ -339,7 +356,7 @@ impl ObjectStore for RetryingObjectStore {
                     .put_opts(location, payload.clone(), opts.clone())
                     .await
             })
-            .retry(Self::retry_builder())
+            .retry(self.retry_builder())
             .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
@@ -379,7 +396,7 @@ impl ObjectStore for RetryingObjectStore {
                 .put_multipart_opts(location, opts_with_id.clone())
                 .await
         })
-        .retry(Self::retry_builder())
+        .retry(self.retry_builder())
         .sleep(self.sleeper())
         .notify(Self::notify)
         .when(Self::should_retry)
@@ -393,7 +410,7 @@ impl ObjectStore for RetryingObjectStore {
                 | object_store::Error::NotImplemented { .. },
             ) => {
                 (|| async { self.inner.put_multipart_opts(location, opts.clone()).await })
-                    .retry(Self::retry_builder())
+                    .retry(self.retry_builder())
                     .sleep(self.sleeper())
                     .notify(Self::notify)
                     .when(Self::should_retry)
@@ -416,7 +433,7 @@ impl ObjectStore for RetryingObjectStore {
     ) -> BoxStream<'static, object_store::Result<Path>> {
         let inner = Arc::clone(&self.inner);
         let sleeper = self.sleeper();
-        let retry_builder = Self::retry_builder();
+        let retry_builder = self.retry_builder();
         locations
             .then(move |loc| {
                 let inner = Arc::clone(&inner);
@@ -438,6 +455,7 @@ impl ObjectStore for RetryingObjectStore {
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
         let inner = Arc::clone(&self.inner);
         let sleeper = self.sleeper();
+        let retry_builder = self.retry_builder();
         let prefix_owned = prefix.cloned();
 
         // list() is a little more complex than the other functions because:
@@ -456,7 +474,7 @@ impl ObjectStore for RetryingObjectStore {
                 // Any error in the stream will return an error for try_collect
                 stream.try_collect::<Vec<_>>().await
             })
-            .retry(Self::retry_builder())
+            .retry(retry_builder)
             .sleep(sleeper)
             .notify(Self::notify)
             .when(Self::should_retry)
@@ -483,6 +501,7 @@ impl ObjectStore for RetryingObjectStore {
     ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
         let inner = Arc::clone(&self.inner);
         let sleeper = self.sleeper();
+        let retry_builder = self.retry_builder();
         let prefix_owned = prefix.cloned();
         let offset_owned = offset.clone();
 
@@ -492,7 +511,7 @@ impl ObjectStore for RetryingObjectStore {
                 let stream = inner.list_with_offset(prefix_owned.as_ref(), &offset_owned);
                 stream.try_collect::<Vec<_>>().await
             })
-            .retry(Self::retry_builder())
+            .retry(retry_builder)
             .sleep(sleeper)
             .notify(Self::notify)
             .when(Self::should_retry)
@@ -512,7 +531,7 @@ impl ObjectStore for RetryingObjectStore {
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
         (|| async { self.inner.list_with_delimiter(prefix).await })
-            .retry(Self::retry_builder())
+            .retry(self.retry_builder())
             .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
@@ -526,7 +545,7 @@ impl ObjectStore for RetryingObjectStore {
         options: CopyOptions,
     ) -> object_store::Result<()> {
         (|| async { self.inner.copy_opts(from, to, options.clone()).await })
-            .retry(Self::retry_builder())
+            .retry(self.retry_builder())
             .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
@@ -540,7 +559,7 @@ impl ObjectStore for RetryingObjectStore {
         options: RenameOptions,
     ) -> object_store::Result<()> {
         (|| async { self.inner.rename_opts(from, to, options.clone()).await })
-            .retry(Self::retry_builder())
+            .retry(self.retry_builder())
             .sleep(self.sleeper())
             .notify(Self::notify)
             .when(Self::should_retry)
@@ -575,7 +594,7 @@ mod tests {
     async fn test_put_opts_retries_transient_until_success() {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(inner, 1));
-        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), None);
 
         let path = Path::from("/data/obj");
         retrying
@@ -598,7 +617,7 @@ mod tests {
     async fn test_put_opts_preserves_extensions() {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let marking: Arc<dyn ObjectStore> = Arc::new(ExtensionObjectStore::new(inner));
-        let retrying = RetryingObjectStore::new(marking, test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(marking, test_rand(), test_clock(), None);
 
         let path = Path::from("/data/extension-put");
         let result = retrying
@@ -625,7 +644,7 @@ mod tests {
             .await
             .unwrap();
         let marking: Arc<dyn ObjectStore> = Arc::new(ExtensionObjectStore::new(inner));
-        let retrying = RetryingObjectStore::new(marking, test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(marking, test_rand(), test_clock(), None);
 
         let result = retrying
             .get_opts(
@@ -647,7 +666,7 @@ mod tests {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(inner, 1));
         let clock = Arc::new(MockSystemClock::new());
-        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), clock.clone());
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), clock.clone(), None);
         let path = Path::from("/data/obj");
 
         let handle = tokio::spawn({
@@ -690,7 +709,7 @@ mod tests {
     async fn test_put_opts_does_not_retry_on_already_exists() {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(inner, 0));
-        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), None);
         let path = Path::from("/data/obj");
 
         retrying
@@ -732,7 +751,7 @@ mod tests {
             .unwrap();
 
         let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_head_failures(1));
-        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), None);
 
         let meta = retrying.head(&path).await.expect("head should succeed");
         assert_eq!(meta.size, 4);
@@ -743,7 +762,7 @@ mod tests {
     async fn test_put_opts_does_not_retry_on_precondition() {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let failing = Arc::new(FlakyObjectStore::new(inner, 0).with_put_precondition_always());
-        let retrying = RetryingObjectStore::new(failing.clone(), test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(failing.clone(), test_rand(), test_clock(), None);
         let path = Path::from("/p");
 
         let err = retrying
@@ -765,7 +784,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_opts_does_not_retry_on_not_modified() {
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let retrying = RetryingObjectStore::new(inner.clone(), test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(inner.clone(), test_rand(), test_clock(), None);
         let path = Path::from("/data/obj");
 
         retrying
@@ -810,7 +829,7 @@ mod tests {
         }
 
         let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(1, 1));
-        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), None);
 
         let listed: Vec<_> = retrying
             .list(None)
@@ -845,7 +864,7 @@ mod tests {
         }
 
         let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_list_with_offset_failures(1, 1));
-        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), None);
         let offset = Path::from("/items/a");
 
         let listed: Vec<_> = retrying
@@ -870,7 +889,7 @@ mod tests {
         let flaky = Arc::new(
             FlakyObjectStore::new(inner, 0).with_put_succeeds_but_returns_already_exists(),
         );
-        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), None);
         let path = Path::from("/data/obj");
 
         // Must use PutMode::Create to trigger ULID verification
@@ -905,7 +924,7 @@ mod tests {
             .unwrap();
 
         // Now try to write via RetryingObjectStore - should fail because ULID won't match
-        let retrying = RetryingObjectStore::new(inner.clone(), test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(inner.clone(), test_rand(), test_clock(), None);
         let err = retrying
             .put_opts(
                 &path,
@@ -940,7 +959,7 @@ mod tests {
             .unwrap();
 
         let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_get_range_failures(2));
-        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), None);
 
         let result = retrying
             .get_range(&path, 0..5)
@@ -965,7 +984,7 @@ mod tests {
 
         // get_ranges calls get_range internally, so flaky get_range failures will trigger retries
         let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_get_range_failures(2));
-        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), None);
 
         let ranges = vec![0..5, 6..11];
         let result = retrying
@@ -983,7 +1002,7 @@ mod tests {
         use std::borrow::Cow;
 
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let retrying = RetryingObjectStore::new(inner.clone(), test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(inner.clone(), test_rand(), test_clock(), None);
         let path = Path::from("/data/obj");
 
         let mut user_attrs = Attributes::new();
@@ -1038,7 +1057,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_opts_range_read_size_check_passes() {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let retrying = RetryingObjectStore::new(inner.clone(), test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(inner.clone(), test_rand(), test_clock(), None);
         let path = Path::from("/data/obj");
 
         inner
@@ -1077,7 +1096,7 @@ mod tests {
             .unwrap();
 
         let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_truncate_get_range_bytes(1, 1));
-        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock());
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), None);
 
         // First attempt returns truncated body (1 byte vs 5 expected),
         // triggering the size check error. The retry succeeds normally.
@@ -1096,5 +1115,29 @@ mod tests {
         assert_eq!(bytes, Bytes::from_static(b"hello"));
         // 1 truncated attempt + 1 successful retry
         assert_eq!(flaky.get_range_attempts(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_bounded_max_retries_gives_up_instead_of_retrying_forever() {
+        // Store fails more times (5) than the configured retry bound (2).
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 5));
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), Some(2));
+
+        let path = Path::from("/data/obj");
+        let err = retrying
+            .put_opts(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"hello")),
+                PutOptions::default(),
+            )
+            .await
+            .expect_err("bounded retries should exhaust and surface the underlying error");
+
+        // The underlying transient error is returned rather than being retried
+        // forever, so callers/background tasks can fail fast.
+        assert!(matches!(err, object_store::Error::Generic { .. }));
+        // 1 initial attempt + 2 retries = 3 total attempts.
+        assert_eq!(flaky.put_attempts(), 3);
     }
 }
