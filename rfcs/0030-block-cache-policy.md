@@ -10,9 +10,9 @@ Table of Contents:
 - [Non-Goals](#non-goals)
 - [Design](#design)
   - [Public API](#public-api)
-  - [Wiring](#wiring)
-  - [Write admission](#write-admission)
-  - [Read resolution](#read-resolution)
+  - [Compaction Output Behavior](#compaction-output-behavior)
+  - [Compaction Input Behavior](#compaction-input-behavior)
+  - [Embedded Compactor](#embedded-compactor)
 - [Impact Analysis](#impact-analysis)
 - [Operations](#operations)
 - [Testing](#testing)
@@ -30,57 +30,223 @@ Authors:
 
 ## Summary
 
-Apart from `cache_blocks` in read APIs and the cache warming APIs in `CacheManager`,
-SlateDB has a fixed block cache usage today for internal operations (memtable
-flush or SST compaction) where it inserts every block of a flushed SST into
-the block cache, and compaction doesn't read or write from the cache. This RFC
-adds a `BlockCachePolicy` trait, set on `DbBuilder`, that controls block cache
-behavior in flush, compaction reads and writes. The default implementation
-preserves current behavior; users implement the trait for different behavior.
+This RFC adds a `BlockCachePolicy` to `DbBuilder`. The policy controls:
+
+- Which decoded SST components are requested for insertion into `DbCache` when
+  a memtable flush or compaction produces an SST.
+- Whether the embedded compactor probes existing decoded cache entries for L0
+  or sorted-run inputs.
 
 ## Motivation
 
-There are multiple use cases that can benefit from controlling the block cache
-behavior in internal operations, some examples are:
-- If L0 blocks are in the block cache, the embedded compactor can be much more
-efficient in L0 reads if it attempts reading from the block cache.
-- Some use cases might need to keep the indices and filters always in memory to
-avoid multiple read requests per point get to read the index and filter for the
-new compacted SST.
-- For use cases that use the hybrid block cache, they might wish to cache the
-compaction output to disk to avoid reading from ObjectStore.
+Several internal operations could benefit from configurable block-cache
+behavior. Examples include:
 
-These different needs show that a flexible policy where users can clearly set
-their block cache behavior can help these scenarios.
+- If L0 blocks are already cached, the embedded compactor can avoid rereading
+  and decoding them.
+- Some workloads may keep indexes and filters in memory to reduce object-store
+  requests for point gets against newly compacted SSTs.
+- Workloads using a hybrid block cache may cache compaction output on disk to
+  avoid later object-store reads.
+
+This policy lets users configure those behaviors explicitly.
 
 ## Goals
 
 - Let users choose which SST components enter the block cache on flush and on
-compaction output.
-- Let users choose to make compaction reads attempt reading from the block cache.
+  compaction output.
+- Let users choose whether compaction reads probe the block cache.
 
 ## Non-Goals
 
 - Change foreground block cache behavior under the default policy. It stays per
-request in `ReadOptions::cache_blocks` and `ScanOptions::cache_blocks`.
+  request in `ReadOptions::cache_blocks` and `ScanOptions::cache_blocks`.
+- Unify policies across `CachedObjectStore` and `DbCache`.
 
 ## Design
 
 ### Public API
 
-The policy is a trait. It is consulted per SST component, through one method
-for writes and one for reads:
+The policy is a concrete struct value. Components are represented by an enum
+similar to `CacheTarget`, except that `Data` selects all data blocks and
+therefore has no key range:
 
 ```rust
 /// A component of an SST that can be inserted into the block cache.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CacheComponent {
     Data,
-    Index,
     Filters,
+    Index,
     Stats,
 }
 
-/// The write operation that produced an SST.
+/// Block-cache policy for controlling block cache behavior during flush and
+/// compaction.
+#[derive(Clone, Debug)]
+pub struct BlockCachePolicy {
+    flush_components: Vec<CacheComponent>,
+    compaction_output_components: Vec<CacheComponent>,
+    l0_compaction_cache_probe: bool,
+    sorted_run_compaction_cache_probe: bool,
+}
+
+impl BlockCachePolicy {
+    pub fn with_flush_components(
+        self,
+        components: &[CacheComponent],
+    ) -> Self {}
+
+    pub fn with_compaction_output_components(
+        self,
+        components: &[CacheComponent],
+    ) -> Self {}
+
+    pub fn with_l0_compaction_cache_probe(self, enabled: bool) -> Self {}
+
+    pub fn with_sorted_run_compaction_cache_probe(self, enabled: bool) -> Self {}
+}
+
+impl Default for BlockCachePolicy {
+    fn default() -> Self {
+        Self {
+            flush_components: vec![
+                CacheComponent::Data,
+                CacheComponent::Index,
+                CacheComponent::Filters,
+            ],
+            compaction_output_components: Vec::new(),
+            l0_compaction_cache_probe: false,
+            sorted_run_compaction_cache_probe: false,
+        }
+    }
+}
+```
+
+
+`DbBuilder` gains:
+
+```rust
+pub fn with_block_cache_policy(self, policy: BlockCachePolicy) -> Self;
+```
+
+### Compaction Output Behavior
+
+- Compaction output data is inserted as it is produced by the streaming writer.
+- Metadata components are inserted when they become available at writer close.
+- If a compaction write fails after entries have been inserted, unreachable
+entries may remain until normal eviction or restart. This is safe because the
+failed SST is not visible through the manifest.
+
+### Compaction Input Behavior
+
+- Compaction probes existing entries but does not insert misses because
+  compaction inputs are short-lived and large scans could pollute the cache.
+- The L0 and sorted-run settings independently control whether each input type
+  probes the cache.
+
+### Embedded Compactor
+
+`DbBuilder` passes the same scoped `DbCacheWrapper` to the main and embedded-
+compactor `TableStore`s so compaction can reuse entries inserted by main table
+store and vice versa.
+
+## Impact Analysis
+
+SlateDB features and components that this RFC interacts with. Check all that apply.
+
+### Core API & Query Semantics
+
+- [ ] Basic KV API (`get`/`put`/`delete`)
+- [ ] Range queries, iterators, seek semantics
+- [ ] Range deletions
+- [ ] Error model, API errors
+
+### Consistency, Isolation, and Multi-Versioning
+
+- [ ] Transactions
+- [ ] Snapshots
+- [ ] Sequence numbers
+
+### Time, Retention, and Derived State
+
+- [ ] Time to live (TTL)
+- [ ] Compaction filters
+- [ ] Merge operator
+- [ ] Change Data Capture (CDC)
+
+### Metadata, Coordination, and Lifecycles
+
+- [ ] Manifest format
+- [ ] Checkpoints
+- [ ] Clones
+- [ ] Garbage collection
+- [ ] Database splitting and merging
+- [ ] Multi-writer
+
+### Compaction
+
+- [ ] Compaction state persistence
+- [ ] Compaction filters
+- [ ] Compaction strategies
+- [ ] Distributed compaction
+- [ ] Compactions format
+
+Compaction execution I/O is affected, but compaction selection, strategy, and
+output semantics are unchanged.
+
+### Storage Engine Internals
+
+- [ ] Write-ahead log (WAL)
+- [x] Block cache
+- [ ] Object store cache
+- [x] Indexing (bloom filters, metadata)
+- [ ] SST format or block format
+
+### Ecosystem & Operations
+
+- [ ] CLI tools
+- [x] Language bindings (Go/Python/etc)
+- [x] Observability (metrics/logging/tracing)
+
+## Operations
+
+### Performance & Cost
+
+- The default policy changes nothing on the read or write path.
+- A non-default policy impacts read performance and, when it caches SST
+  components on write, write performance.
+
+### Configuration
+
+- New configuration: `BlockCachePolicy` on `DbBuilder`.
+
+### Metrics
+
+- Block-cache hit and miss metrics gain a `TableStoreKind` label to distinguish
+  between main and compactor table-store reads.
+
+### Compatibility
+
+- The API is additive, so no compatibility impact.
+
+## Testing
+
+- Unit tests.
+- Performance tests for different use cases.
+
+## Alternatives
+
+**Status quo.**
+Rejected because of the use cases mentioned in Motivation.
+
+
+**Trait-based policy (previous design).**
+Exposed a user-implemented `BlockCachePolicy` trait along with read and write
+source and action types. The types were:
+
+```rust
+/// The operation that produced an SST.
 pub enum WriteSource {
     /// A memtable flush writing an L0 SST.
     Flush,
@@ -125,7 +291,11 @@ pub enum CacheReadMode {
 pub trait BlockCachePolicy: Send + Sync + 'static {
     /// How `component` of an SST written by `source` interacts with the
     /// block cache.
-    fn write_mode(&self, source: WriteSource, component: CacheComponent) -> CacheWriteMode;
+    fn write_mode(
+        &self,
+        source: WriteSource,
+        component: CacheComponent,
+    ) -> CacheWriteMode;
 
     /// How a read of `component` issued by `source` interacts with the
     /// block cache.
@@ -133,205 +303,30 @@ pub trait BlockCachePolicy: Send + Sync + 'static {
 }
 ```
 
-The default policy, `DefaultBlockCachePolicy`, is an implementation of the
-trait that preserves current behavior (its exact answers are the tables in the
-next two sections). Users who want different behavior implement the trait. For
-example, a policy that lets compaction serve L0 input reads from the cache:
+This design allows more dynamic control, but it exposes more types and gives
+control to all possible uses of the block cache without clear use cases.
 
-```rust
-struct CompactionL0ReadsPolicy;
-
-impl BlockCachePolicy for CompactionL0ReadsPolicy {
-    fn write_mode(&self, source: WriteSource, component: CacheComponent) -> CacheWriteMode {
-        DefaultBlockCachePolicy.write_mode(source, component)
-    }
-
-    fn read_mode(&self, source: ReadSource, component: CacheComponent) -> CacheReadMode {
-        match source {
-            ReadSource::CompactionL0Input => CacheReadMode::Probe,
-            _ => DefaultBlockCachePolicy.read_mode(source, component),
-        }
-    }
-}
-```
-
-The policy is set with `DbBuilder::with_block_cache_policy(Arc<dyn BlockCachePolicy>)`.
-
-### Wiring
-
-The builder wraps the configured `DbCache` once and hands the same wrapped
-handle to the main and compactor table stores, together with the policy.
-
-### Write admission
-
-For flush and compaction output writes, the table store asks the policy per
-component: `write_mode(source, component)`.
-
-The default policy answers:
-
-| Write | Policy input | Default policy |
-|---|---|---|
-| Memtable flush (main store) | `WriteSource::Flush` | data, index, filters |
-| Compaction output (compactor store) | `WriteSource::CompactionOutput` | none |
-| WAL SST (any store) | not consulted | never inserted |
-
-### Read resolution
-
-Callers to the table store pass a `ReadSource` tag stating what kind of
-operation is reading, and the table store calls `policy.read_mode(source, component)`.
-The tag replaces both internal booleans threaded through the read path today
-(`cache_blocks` and `cache_metadata` on `SstIteratorOptions` and the `TableStore`
-read methods). A store with no block cache resolves everything to `Bypass`
-without consulting the policy.
-
-The default policy resolves (metadata means index, filters, and stats):
-
-| ReadSource | Data | Metadata |
-|---|---|---|
-| `Foreground { cache_blocks: true }` | `ReadThrough` | `ReadThrough` |
-| `Foreground { cache_blocks: false }` | `Probe` | `ReadThrough` |
-| `CompactionL0Input` | `Bypass` | `Bypass` |
-| `CompactionSortedRunInput` | `Bypass` | `Bypass` |
-| `WalReplay` | `Bypass` | `Bypass` |
-| `WalTail` | `ReadThrough` | `Probe` |
-
-
-A custom policy receives every source, including `Foreground` with the
-per-request option, and may resolve them differently from the table above. The
-engine executes whatever mode the policy returns.
-
-This design means the cache interaction is resolved in one place for both
-reads and writes instead of passing booleans around.
-
-## Impact Analysis
-
-SlateDB features and components that this RFC interacts with. Check all that apply.
-
-### Core API & Query Semantics
-
-- [ ] Basic KV API (`get`/`put`/`delete`)
-- [ ] Range queries, iterators, seek semantics
-- [ ] Range deletions
-- [ ] Error model, API errors
-
-### Consistency, Isolation, and Multi-Versioning
-
-- [ ] Transactions
-- [ ] Snapshots
-- [ ] Sequence numbers
-
-### Time, Retention, and Derived State
-
-- [ ] Time to live (TTL)
-- [ ] Compaction filters
-- [ ] Merge operator
-- [ ] Change Data Capture (CDC)
-
-### Metadata, Coordination, and Lifecycles
-
-- [ ] Manifest format
-- [ ] Checkpoints
-- [ ] Clones
-- [ ] Garbage collection
-- [ ] Database splitting and merging
-- [ ] Multi-writer
-
-### Compaction
-
-- [ ] Compaction state persistence
-- [ ] Compaction filters
-- [ ] Compaction strategies
-- [ ] Distributed compaction
-- [ ] Compactions format
-
-### Storage Engine Internals
-
-- [ ] Write-ahead log (WAL)
-- [x] Block cache
-- [ ] Object store cache
-- [ ] Indexing (bloom filters, metadata)
-- [ ] SST format or block format
-
-### Ecosystem & Operations
-
-- [ ] CLI tools
-- [ ] Language bindings (Go/Python/etc)
-- [x] Observability (metrics/logging/tracing)
-
-## Operations
-
-### Performance & Cost
-
-- The default policy changes nothing on the read or write path.
-- A custom policy impacts read performance, and write performance when it
-caches SST components on write.
-
-### Configuration
-
-- New configuration: `BlockCachePolicy` on `DbBuilder`.
-
-### Metrics
-- Hit and miss metrics for the block cache gain a label that is `TableStoreKind`
-to distinguish between main and compactor table store reads.
-
-### Compatibility
-
-- The API is additive, so no compatibility impact.
-
-## Testing
-
-- Unit tests.
-- Performance tests for different use cases.
-
-## Alternatives
-
-**Status quo.**
-Rejected because of the use cases mentioned in Motivation.
-
-**A declarative policy struct.**
-`BlockCachePolicy` can be a plain struct, with the resolution tables fixed in
-the engine and consulting its fields.
-
-```rust
-/// A compaction input type.
-pub enum CompactionInput {
-    L0,
-    SortedRuns,
-}
-
-pub struct BlockCachePolicy {
-    /// Components cached when a memtable flush writes an L0 SST.
-    /// Default: data, index, filters.
-    pub flush: HashSet<CacheComponent>,
-
-    /// Components cached when compaction writes an output SST.
-    /// Default: empty.
-    pub compaction_output: HashSet<CacheComponent>,
-
-    /// Compaction inputs whose reads serve hits from the block cache,
-    /// without inserting on miss. Default: empty.
-    pub compaction_reads_from_cache: HashSet<CompactionInput>,
-}
-```
-
-This keeps a smaller public surface (no trait, and `ReadSource`,
-`WriteSource`, `CacheReadMode`, and `CacheWriteMode` stay internal) and cannot express invalid
-states, but every new caching behavior needs a new field. The proposed design
-is more flexible and lets the user handle all cases for reads and writes.
+The proposed policy can grow with focused builder methods when concrete use
+cases arise.
 
 **Coarse knobs.**
 Five booleans (`cache_blocks_on_flush`, `cache_metadata_on_flush`, and so on)
 or a `CachedSections { None, MetadataOnly, All }` enum per write source.
-Rejected because it's a lot of knobs and new scenarios will just add more knobs.
+Rejected because it introduces many knobs, and new scenarios would add more.
 
 ## Open Questions
-- The `CacheComponent` in the design is different from `CacheTarget` in
-`CacheManager` because `CacheManager` allows for loading a certain data range
-in the cache. The current design doesn't support data range in the cache policy,
-but it can be added later if needed, is there any issue here?
+
+- `CacheComponent` differs from the `CacheTarget` used by
+  `DbCacheManagerOps`: `CacheTarget::Data` supports a key range, while
+  `CacheComponent::Data` selects all data blocks. Is keeping them as separate
+  types a concern?
+
+  **Answer**: We will revisit whether these types can be unified after the
+  initial implementation. Until then, they remain separate, and range-based
+  automatic caching remains out of scope.
 
 ## References
 
 - [Issue #1799: Use block cache for L0 compaction if compactor is running on writer](https://github.com/slatedb/slatedb/issues/1799)
-- [RFC-0027: Decoupled Pluggable Object Store Cache](./0027-decoupled-object-store-cache.md)
 - [RFC-0023: Cache Manager](./0023-cache-manager.md)
+- [RFC-0027: Decoupled Pluggable Object Store Cache](./0027-decoupled-object-store-cache.md)
