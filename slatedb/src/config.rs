@@ -458,6 +458,32 @@ impl Default for FlushOptions {
     }
 }
 
+/// Options controlling how a database is closed.
+#[derive(Clone, Debug)]
+pub struct CloseOptions {
+    /// Whether to trigger a final flush of the active memtable before closing.
+    ///
+    /// When `false`, memtables already being flushed continue through the
+    /// existing shutdown pipeline. Defaults to `true`.
+    pub flush_memtables: bool,
+}
+
+impl Default for CloseOptions {
+    fn default() -> Self {
+        Self {
+            flush_memtables: true,
+        }
+    }
+}
+
+impl CloseOptions {
+    /// Configure whether the active memtable is flushed before closing.
+    pub fn with_flush_memtables(mut self, flush_memtables: bool) -> Self {
+        self.flush_memtables = flush_memtables;
+        self
+    }
+}
+
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
 #[derive(Clone, Debug)]
