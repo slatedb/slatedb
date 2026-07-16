@@ -39,6 +39,7 @@ use std::ops::Sub;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use tokio::runtime::Handle;
+use tokio::sync::{OwnedRwLockReadGuard, RwLock as AsyncRwLock};
 use uuid::Uuid;
 
 pub(crate) const DB_READER_TASK_NAME: &str = "manifest_poller";
@@ -74,12 +75,27 @@ pub struct DbReader {
     task_executor: MessageHandlerExecutor,
 }
 
+/// A stable, read-only view of a [`DbReader`].
+///
+/// The snapshot pins the reader's current state and durable sequence. While any
+/// snapshot is alive, the reader's background poller may not replace that state
+/// or its managed checkpoint. This lets a caller execute multiple point reads
+/// and scans against one consistent durable view without creating a manifest
+/// checkpoint for every query.
+pub struct DbReaderSnapshot {
+    inner: Arc<DbReaderInner>,
+    state: Arc<ReaderState>,
+    started_seq: u64,
+    _refresh_guard: OwnedRwLockReadGuard<()>,
+}
+
 struct DbReaderInner {
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
     options: DbReaderOptions,
     mode: DbReaderMode,
     state: RwLock<Arc<ReaderState>>,
+    snapshot_gate: Arc<AsyncRwLock<()>>,
     system_clock: Arc<dyn SystemClock>,
     oracle: Arc<DbReaderOracle>,
     reader: Reader,
@@ -206,6 +222,7 @@ impl DbReaderInner {
             options,
             mode,
             state,
+            snapshot_gate: Arc::new(AsyncRwLock::new(())),
             system_clock,
             oracle,
             reader,
@@ -720,6 +737,7 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
 
     async fn handle(&mut self, message: DbReaderMessage) -> Result<(), SlateDBError> {
         assert!(matches!(message, DbReaderMessage::PollManifest));
+        let _snapshot_guard = self.inner.snapshot_gate.write().await;
         match self.inner.mode {
             DbReaderMode::ManagedCheckpoint => {
                 let mut manifest = StoredManifest::load(
@@ -761,6 +779,7 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
         if self.inner.mode != DbReaderMode::ManagedCheckpoint {
             return Ok(());
         }
+        let _snapshot_guard = self.inner.snapshot_gate.write().await;
         let mut manifest = StoredManifest::load(
             Arc::clone(&self.inner.manifest_store),
             self.inner.system_clock.clone(),
@@ -1230,6 +1249,27 @@ impl DbReader {
             .map_err(Into::into)
     }
 
+    /// Creates a stable snapshot of the reader's current durable state.
+    ///
+    /// The snapshot prevents the background manifest poller from replacing its
+    /// reader state until the snapshot is dropped. It does not prevent the
+    /// writer from advancing the database, and it does not write a new manifest.
+    pub async fn snapshot(&self) -> Result<Arc<DbReaderSnapshot>, crate::Error> {
+        self.inner.check_closed()?;
+        let refresh_guard = Arc::clone(&self.inner.snapshot_gate).read_owned().await;
+        self.inner.check_closed()?;
+        let state = Arc::clone(&self.inner.state.read());
+        let started_seq = state
+            .last_remote_persisted_seq
+            .max(state.core().last_l0_seq);
+        Ok(Arc::new(DbReaderSnapshot {
+            inner: Arc::clone(&self.inner),
+            state,
+            started_seq,
+            _refresh_guard: refresh_guard,
+        }))
+    }
+
     /// Close the database reader.
     ///
     /// ## Returns
@@ -1269,6 +1309,169 @@ impl DbReader {
         }
 
         Ok(())
+    }
+}
+
+impl DbReaderSnapshot {
+    /// Returns the highest durable sequence visible to this snapshot.
+    pub fn seq(&self) -> u64 {
+        self.started_seq
+    }
+
+    pub async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, crate::Error> {
+        self.get_with_options(key, &ReadOptions::default()).await
+    }
+
+    pub async fn get_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<Bytes>, crate::Error> {
+        self.get_key_value_with_options(key, options)
+            .await
+            .map(|value| value.map(|value| value.value))
+    }
+
+    pub async fn get_key_value<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        self.get_key_value_with_options(key, &ReadOptions::default())
+            .await
+    }
+
+    pub async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        self.inner.check_closed()?;
+        self.inner
+            .reader
+            .get_key_value_with_options(
+                key,
+                options,
+                self.state.as_ref(),
+                None,
+                Some(self.started_seq),
+            )
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn scan<T>(&self, range: T) -> Result<DbIterator, crate::Error>
+    where
+        T: ByteRangeBounds + Send,
+    {
+        self.scan_with_options(range, &ScanOptions::default()).await
+    }
+
+    pub async fn scan_with_options<T>(
+        &self,
+        range: T,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        T: ByteRangeBounds + Send,
+    {
+        let start = range.start_bound().map(Bytes::copy_from_slice);
+        let end = range.end_bound().map(Bytes::copy_from_slice);
+        self.scan_inner(BytesRange::from((start, end)), options, None)
+            .await
+    }
+
+    pub async fn scan_prefix<P, T>(
+        &self,
+        prefix: P,
+        subrange: T,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+        T: ByteRangeBounds + Send,
+    {
+        self.scan_prefix_with_options(prefix, subrange, &ScanOptions::default())
+            .await
+    }
+
+    pub async fn scan_prefix_with_options<P, T>(
+        &self,
+        prefix: P,
+        subrange: T,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+        T: ByteRangeBounds + Send,
+    {
+        let prefix = Bytes::copy_from_slice(prefix.as_ref());
+        let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
+        self.scan_inner(range, options, Some(prefix)).await
+    }
+
+    async fn scan_inner(
+        &self,
+        range: BytesRange,
+        options: &ScanOptions,
+        prefix: Option<Bytes>,
+    ) -> Result<DbIterator, crate::Error> {
+        self.inner.check_closed()?;
+        self.inner
+            .reader
+            .scan_with_options(
+                range,
+                options,
+                ScanContext {
+                    db_state: self.state.as_ref(),
+                    write_batch_iter: None,
+                    max_seq: Some(self.started_seq),
+                    prefix,
+                },
+            )
+            .await
+            .map_err(Into::into)
+    }
+}
+
+#[async_trait::async_trait]
+impl DbReadOps for DbReaderSnapshot {
+    async fn get_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<Bytes>, crate::Error> {
+        DbReaderSnapshot::get_with_options(self, key, options).await
+    }
+
+    async fn get_key_value_with_options<K: AsRef<[u8]> + Send>(
+        &self,
+        key: K,
+        options: &ReadOptions,
+    ) -> Result<Option<KeyValue>, crate::Error> {
+        DbReaderSnapshot::get_key_value_with_options(self, key, options).await
+    }
+
+    async fn scan_with_options<T>(
+        &self,
+        range: T,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        T: ByteRangeBounds + Send,
+    {
+        DbReaderSnapshot::scan_with_options(self, range, options).await
+    }
+
+    async fn scan_prefix_with_options<P, T>(
+        &self,
+        prefix: P,
+        subrange: T,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+        T: ByteRangeBounds + Send,
+    {
+        DbReaderSnapshot::scan_prefix_with_options(self, prefix, subrange, options).await
     }
 }
 
@@ -2227,6 +2430,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reader_snapshot_pins_one_durable_view_across_manifest_refresh() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_reader_snapshot_pins_view");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+
+        db.put(b"key", b"before").await.unwrap();
+        db.flush().await.unwrap();
+        let reader = test_provider
+            .new_db_reader(
+                DbReaderOptions {
+                    manifest_poll_interval: Duration::from_millis(10),
+                    checkpoint_lifetime: Duration::from_secs(1),
+                    ..DbReaderOptions::default()
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let snapshot = reader.snapshot().await.unwrap();
+        let snapshot_seq = snapshot.seq();
+
+        db.put(b"key", b"after").await.unwrap();
+        db.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        assert_eq!(snapshot.seq(), snapshot_seq);
+        assert_eq!(
+            snapshot.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"before"))
+        );
+
+        drop(snapshot);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if reader.get(b"key").await.unwrap() == Some(Bytes::from_static(b"after")) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn replay_wal_into_should_use_latest_existing_table_and_keep_newest_first_order() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_db_reader_replay_order");
@@ -2965,6 +3218,7 @@ mod tests {
             },
             mode: DbReaderMode::ManagedCheckpoint,
             state: parking_lot::RwLock::new(Arc::new(prior_state)),
+            snapshot_gate: Arc::new(tokio::sync::RwLock::new(())),
             system_clock: test_provider.system_clock.clone(),
             oracle,
             reader,
@@ -3048,6 +3302,7 @@ mod tests {
             options: DbReaderOptions::default(),
             mode: DbReaderMode::ManagedCheckpoint,
             state: parking_lot::RwLock::new(Arc::new(prior_state)),
+            snapshot_gate: Arc::new(tokio::sync::RwLock::new(())),
             system_clock: test_provider.system_clock.clone(),
             oracle,
             reader,
