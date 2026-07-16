@@ -1289,7 +1289,7 @@ impl Default for CompactionWorkerOptions {
         Self {
             max_concurrent_compactions: 4,
             compactions_poll_interval: Duration::from_secs(5),
-            heartbeat_interval: Duration::from_secs(5),
+            heartbeat_interval: Duration::from_secs(10),
             max_sst_size: 256 * 1024 * 1024,
             max_fetch_tasks: 4,
             bytes_to_fetch: 2 * 1024 * 1024,
