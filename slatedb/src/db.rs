@@ -58,6 +58,7 @@ use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::manifest::{Manifest, VersionedManifest};
+use crate::mem_table::KVTableMetadata;
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
@@ -314,46 +315,46 @@ impl DbInner {
     pub(crate) async fn maybe_apply_backpressure(&self) -> Result<(), SlateDBError> {
         loop {
             self.check_closed()?;
-            let (wal_status, imm_memtable_size_bytes) = {
-                let wal_status = self.wal_observer.status();
-                let imm_memtable_size_bytes = {
-                    let guard = self.state.read();
-                    // Exclude active memtable to avoid a write lock.
-                    guard
-                        .state()
-                        .imm_memtable
-                        .iter()
-                        .map(|imm| {
-                            let metadata = imm.table().metadata();
-                            self.table_store.estimate_encoded_size_compacted(
-                                metadata.entry_num,
-                                metadata.entries_size_in_bytes,
-                            )
-                        })
-                        .sum::<usize>()
+            let wal_status = self.wal_observer.status();
+            let (active_memtable_size_bytes, imm_memtable_size_bytes) = {
+                let guard = self.state.read();
+                let estimate = |metadata: KVTableMetadata| {
+                    self.table_store.estimate_encoded_size_compacted(
+                        metadata.entry_num,
+                        metadata.entries_size_in_bytes,
+                    )
                 };
-                (wal_status, imm_memtable_size_bytes)
+                let active_memtable_size_bytes = estimate(guard.memtable().table().metadata());
+                let imm_memtable_size_bytes = guard
+                    .state()
+                    .imm_memtable
+                    .iter()
+                    .map(|imm| estimate(imm.table().metadata()))
+                    .sum::<usize>();
+                (active_memtable_size_bytes, imm_memtable_size_bytes)
             };
-            let total_mem_size_bytes = wal_status.estimated_bytes + imm_memtable_size_bytes;
+            let total_mem_size_bytes = active_memtable_size_bytes + imm_memtable_size_bytes;
             self.db_stats
                 .total_mem_size_bytes
                 .set(total_mem_size_bytes as i64);
 
             trace!(
-                "checking backpressure [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
+                "checking backpressure [total_mem_size_bytes={}, active_memtable_size_bytes={}, imm_memtable_size_bytes={}, wal_size_bytes={}, max_unflushed_bytes={}]",
                 format_bytes_si(total_mem_size_bytes as u64),
-                format_bytes_si(wal_status.estimated_bytes as u64),
+                format_bytes_si(active_memtable_size_bytes as u64),
                 format_bytes_si(imm_memtable_size_bytes as u64),
+                format_bytes_si(wal_status.estimated_bytes as u64),
                 format_bytes_si(self.settings.max_unflushed_bytes as u64),
             );
 
             if total_mem_size_bytes >= self.settings.max_unflushed_bytes {
                 self.db_stats.backpressure_count.increment(1);
                 warn!(
-                    "unflushed memtable size exceeds max_unflushed_bytes. applying backpressure. [total_mem_size_bytes={}, wal_size_bytes={}, imm_memtable_size_bytes={}, max_unflushed_bytes={}]",
+                    "unflushed memtable size exceeds max_unflushed_bytes. applying backpressure. [total_mem_size_bytes={}, active_memtable_size_bytes={}, imm_memtable_size_bytes={}, wal_size_bytes={}, max_unflushed_bytes={}]",
                     format_bytes_si(total_mem_size_bytes as u64),
-                    format_bytes_si(wal_status.estimated_bytes as u64),
+                    format_bytes_si(active_memtable_size_bytes as u64),
                     format_bytes_si(imm_memtable_size_bytes as u64),
+                    format_bytes_si(wal_status.estimated_bytes as u64),
                     format_bytes_si(self.settings.max_unflushed_bytes as u64),
                 );
 
@@ -9525,6 +9526,48 @@ mod tests {
         );
         assert_eq!(db.get(b"key1").await.unwrap(), None);
 
+        db.close().await.unwrap();
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn test_should_record_total_mem_size_bytes_with_wal_disabled() {
+        // given: WAL disabled, so writes land only in the active memtable.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let mut opts = test_db_options(0, 1024, None);
+        opts.flush_interval = None;
+        opts.max_unflushed_bytes = 1024 * 1024;
+        opts.wal_enabled = false;
+        let db = Db::builder(
+            "/tmp/test_should_record_total_mem_size_bytes_with_wal_disabled",
+            object_store,
+        )
+        .with_settings(opts)
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        // when: two writes (the second triggers maybe_apply_backpressure for the first's bytes)
+        let write_opts = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+        db.put_with_options(b"k1", b"v1", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+        db.put_with_options(b"k2", b"v2", &PutOptions::default(), &write_opts)
+            .await
+            .unwrap();
+
+        // then: total_mem_size_bytes reflects the active memtable even with the WAL off
+        let mem_size = lookup_metric(&metrics_recorder, crate::db_stats::TOTAL_MEM_SIZE_BYTES);
+        assert!(
+            mem_size.is_some_and(|v| v > 0),
+            "expected total_mem_size_bytes > 0 with WAL disabled, got {:?}",
+            mem_size
+        );
         db.close().await.unwrap();
     }
 
