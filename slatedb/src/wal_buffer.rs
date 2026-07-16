@@ -484,12 +484,18 @@ impl WalFlushHandler {
                 inner.status(&self.table_store)
             };
 
+            // we notify the listener first since that updates the oracle, and then notify
+            // the table waiters. blocked writes wait on the table, so we have to update the oracle
+            // first to preserve read-your-writes. This does mean that there is a small window
+            // after notifying flushed before the wal memory is actually released.
+            // TODO: once we change writes to block on the durable seq num from the oracle we
+            //       can simplify this and fully drop the wal before notifying listeners
+            self.notify_listener(WalEvent::WalFlushed(status));
             wal.notify_durable(result.clone());
             if Arc::strong_count(&wal) > 1 {
                 warn!("outstanding references to wal id {} after flushing", wal_id);
             }
             drop(wal);
-            self.notify_listener(WalEvent::WalFlushed(status));
         }
 
         Ok(())
@@ -682,6 +688,7 @@ mod tests {
         lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
     use slatedb_common::MockSystemClock;
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -1074,5 +1081,54 @@ mod tests {
         let status = flushed.pop().unwrap();
         assert_eq!(status.last_flushed_wal_id, 1);
         assert_eq!(status.last_flushed_seq, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_listener_notified_before_table_waiters() {
+        // given:
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            SsTableFormat::default(),
+            Path::from("/root"),
+            None,
+            TableStoreKind::Main,
+        ));
+        let system_clock = Arc::new(DefaultSystemClock::new());
+        let status_manager = DbStatusManager::new(0);
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let mut wal_buffer = WalBufferManager::new(
+            status_manager.clone(),
+            &helper,
+            0,
+            table_store.clone(),
+            1000,
+            Some(Duration::MAX),
+        );
+        let task_executor = Arc::new(MessageHandlerExecutor::new(
+            Arc::new(status_manager),
+            system_clock.clone(),
+        ));
+        wal_buffer.init(task_executor.clone()).await.unwrap();
+        task_executor
+            .monitor_on(&Handle::current())
+            .expect("failed to monitor executor");
+        let waiter = wal_buffer
+            .append(&[make_entry("key1", "value1", 1, None)])
+            .unwrap();
+        let called = Arc::new(AtomicBool::new(false));
+        let this_called = called.clone();
+        let listener = move |event| {
+            this_called.store(true, Ordering::SeqCst);
+            assert!(matches!(event, WalEvent::WalFlushed(_)));
+            // verifies that the table is not yet notified
+            assert!(waiter.read().is_none())
+        };
+        wal_buffer.observer().subscribe(Arc::new(listener)).unwrap();
+
+        // when/then:
+        wal_buffer.flush().unwrap().await.unwrap().unwrap();
+        assert!(called.load(Ordering::SeqCst));
     }
 }
