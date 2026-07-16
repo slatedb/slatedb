@@ -344,8 +344,9 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
+    use crate::manifest::{ExternalDb, Manifest, ManifestCore, VersionedManifest};
     use crate::subcompaction::Subcompaction;
+    use crate::test_utils::GatedObjectStore;
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -978,7 +979,9 @@ mod tests {
 
     #[tokio::test]
     async fn write_manifest_safely_retries_on_version_conflict() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let inner_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated_store = Arc::new(GatedObjectStore::new(Arc::clone(&inner_store)));
+        let object_store: Arc<dyn ObjectStore> = gated_store.clone();
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(ROOT),
             Arc::clone(&object_store),
@@ -989,13 +992,24 @@ mod tests {
         ));
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
 
-        StoredManifest::create_new_db(
+        let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
             ManifestCore::new(),
             system_clock.clone(),
         )
         .await
         .unwrap();
+        let stale_sst_id = SsTableId::Compacted(Ulid::new());
+        let source_checkpoint_id = uuid::Uuid::new_v4();
+        let final_checkpoint_id = uuid::Uuid::new_v4();
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        dirty.value.external_dbs = vec![ExternalDb {
+            path: "/parent/db".to_string(),
+            source_checkpoint_id,
+            final_checkpoint_id: Some(final_checkpoint_id),
+            sst_ids: vec![stale_sst_id],
+        }];
+        stored_manifest.update(dirty).await.unwrap();
 
         let options = CompactorOptions::default();
         let rand = Arc::new(DbRand::new(7));
@@ -1013,25 +1027,51 @@ mod tests {
         // Record the version after fencing.
         let start_id = manifest_store.read_latest_manifest().await.unwrap().id;
 
-        // Simulate an external writer creating a checkpoint of the manifest and updating it.
-        let admin = AdminBuilder::new(ROOT, object_store.clone()).build();
-        admin
+        // Allow write_manifest's checkpoint through, then block its manifest update.
+        // The safe path has already loaded and pruned local state at that boundary.
+        let baseline_puts = gated_store.put_opts_gate.arrivals();
+        gated_store.put_opts_gate.close();
+        gated_store.put_opts_gate.admit(1);
+        let write_task = tokio::spawn(async move { writer.write_manifest_safely().await });
+        gated_store
+            .put_opts_gate
+            .wait_for_arrivals(baseline_puts + 2)
+            .await;
+
+        // Race a checkpoint into the exact version intended by the blocked update.
+        let admin = AdminBuilder::new(ROOT, inner_store).build();
+        let remote_checkpoint = admin
             .create_detached_checkpoint(&CheckpointOptions::default())
             .await
             .expect("create checkpoint failed");
 
         let conflicting_id = manifest_store.read_latest_manifest().await.unwrap().id;
-        assert_eq!(conflicting_id, start_id + 1);
+        assert_eq!(conflicting_id, start_id + 2);
 
-        // This should retry on conflict and succeed with a new version.
-        writer.write_manifest_safely().await.unwrap();
+        // Reloading and retrying must neither resurrect the pruned SST nor lose
+        // checkpoint metadata from either the external DB or the racing writer.
+        gated_store.put_opts_gate.release();
+        write_task.await.unwrap().unwrap();
 
-        let final_id = manifest_store.read_latest_manifest().await.unwrap().id;
+        let final_manifest = manifest_store.read_latest_manifest().await.unwrap();
+        let external = &final_manifest.manifest.external_dbs[0];
+        assert!(external.sst_ids.is_empty());
+        assert_eq!(external.source_checkpoint_id, source_checkpoint_id);
+        assert_eq!(external.final_checkpoint_id, Some(final_checkpoint_id));
+        assert!(final_manifest
+            .manifest
+            .core
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.id == remote_checkpoint.id));
+
+        let final_id = final_manifest.id;
         // write_manifest_safely now bumps the manifest twice per successful call because write_manifest
         // writes a checkpoint first:
         // - write_manifest() calls self.manifest.write_checkpoint(...) to create the checkpoint, then
         // - write_manifest() calls self.manifest.update(...) to update the manifest
-        // So we do +1 for the external update and +2 for the successful write_manifest_safely call.
-        assert_eq!(final_id, start_id + 3);
+        // So we do +1 for the first checkpoint, +1 for the external update, and +2 for
+        // the successful retry.
+        assert_eq!(final_id, start_id + 4);
     }
 }
