@@ -712,15 +712,15 @@ mod tests {
         boundary.check(MonotonicId::new(3)).await.unwrap();
 
         // Replace the file directly rather than calling BoundaryObject::advance, since
-        // LocalFileSystem does not support PutMode::Update. The stale ETag should cause
-        // the next check to read and enforce the new boundary.
+        // LocalFileSystem does not support PutMode::Update. Use a differently sized value
+        // so filesystems with coarse mtime resolution still produce a different ETag.
         object_store
-            .put(&boundary_path, PutPayload::from("4"))
+            .put(&boundary_path, PutPayload::from("40"))
             .await
             .unwrap();
         let err = boundary.check(MonotonicId::new(3)).await.unwrap_err();
         assert!(matches!(err, TransactionalObjectError::ObjectVersionExists));
-        boundary.check(MonotonicId::new(5)).await.unwrap();
+        boundary.check(MonotonicId::new(41)).await.unwrap();
     }
 
     #[tokio::test]
