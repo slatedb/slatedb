@@ -550,9 +550,15 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
             CompactorMessage::LogStats => self.handle_log_ticker(),
             CompactorMessage::PollManifest => self.handle_ticker().await?,
             CompactorMessage::CommitCompacted => {
-                self.state_writer.load_compactions().await?;
-                self.update_distributed_compaction_metrics();
-                self.commit_compacted_entries().await?;
+                // A remote worker can only produce a new Compacted result for a
+                // job the coordinator already tracks as active. When there are no
+                // active jobs, the regular manifest poll is sufficient to discover
+                // new submissions; avoid an otherwise idle object-store refresh.
+                if self.state().active_compactions().next().is_some() {
+                    self.state_writer.load_compactions().await?;
+                    self.update_distributed_compaction_metrics();
+                    self.commit_compacted_entries().await?;
+                }
             }
         }
         Ok(())
@@ -5025,6 +5031,71 @@ mod tests {
                 .expect("missing stored compaction")
                 .status(),
             CompactionStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_commit_compacted_ticker_skips_remote_refresh_when_idle() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        assert!(fixture
+            .handler
+            .state()
+            .active_compactions()
+            .next()
+            .is_none());
+
+        // Simulate an external submission arriving after the coordinator's last
+        // regular poll. An idle fast-commit tick must not read it from storage.
+        let remote_id = Ulid::new();
+        let mut external = StoredCompactions::try_load(fixture.compactions_store.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut dirty = external.prepare_dirty().unwrap();
+        dirty.value.insert(Compaction::new(
+            remote_id,
+            CompactionSpec::new(Vec::new(), 0),
+        ));
+        external.update(dirty).await.unwrap();
+
+        fixture
+            .handler
+            .handle(CompactorMessage::CommitCompacted)
+            .await
+            .unwrap();
+        assert!(
+            !fixture
+                .handler
+                .state()
+                .compactions()
+                .value
+                .contains(&remote_id),
+            "idle fast-commit tick should not refresh .compactions"
+        );
+
+        // Once the coordinator has active work, the same fast tick must resume
+        // refreshing so it can observe worker transitions promptly.
+        let local_id = Ulid::new();
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(Compaction::new(
+                local_id,
+                CompactionSpec::new(Vec::new(), 0),
+            ));
+        fixture
+            .handler
+            .handle(CompactorMessage::CommitCompacted)
+            .await
+            .unwrap();
+        assert!(
+            fixture
+                .handler
+                .state()
+                .compactions()
+                .value
+                .contains(&remote_id),
+            "active fast-commit tick should refresh .compactions"
         );
     }
 
