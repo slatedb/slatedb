@@ -593,6 +593,31 @@ impl DbReaderInner {
         result
     }
 
+    async fn refresh(&self) -> Result<(), SlateDBError> {
+        let _snapshot_guard = self.snapshot_gate.write().await;
+        match self.mode {
+            DbReaderMode::ManagedCheckpoint => {
+                let mut manifest = StoredManifest::load(
+                    Arc::clone(&self.manifest_store),
+                    self.system_clock.clone(),
+                )
+                .await?;
+
+                let latest_manifest = manifest.manifest();
+                if self.should_reestablish_checkpoint(&latest_manifest.core) {
+                    let checkpoint = self.replace_checkpoint(&mut manifest).await?;
+                    self.reestablish_checkpoint(checkpoint).await?;
+                } else {
+                    self.maybe_replay_new_wals().await?;
+                }
+
+                self.maybe_refresh_checkpoint(&mut manifest).await
+            }
+            DbReaderMode::FollowLatest => self.refresh_latest_manifest().await,
+            DbReaderMode::Checkpoint(_) => Ok(()),
+        }
+    }
+
     async fn replay_wal_into(
         table_store: Arc<TableStore>,
         reader_options: &DbReaderOptions,
@@ -737,38 +762,14 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
 
     async fn handle(&mut self, message: DbReaderMessage) -> Result<(), SlateDBError> {
         assert!(matches!(message, DbReaderMessage::PollManifest));
-        let _snapshot_guard = self.inner.snapshot_gate.write().await;
-        match self.inner.mode {
-            DbReaderMode::ManagedCheckpoint => {
-                let mut manifest = StoredManifest::load(
-                    Arc::clone(&self.inner.manifest_store),
-                    self.inner.system_clock.clone(),
-                )
-                .await?;
-
-                let latest_manifest = manifest.manifest();
-                if self
-                    .inner
-                    .should_reestablish_checkpoint(&latest_manifest.core)
-                {
-                    let checkpoint = self.inner.replace_checkpoint(&mut manifest).await?;
-                    self.inner.reestablish_checkpoint(checkpoint).await?;
-                } else {
-                    self.inner.maybe_replay_new_wals().await?;
-                }
-
-                self.inner.maybe_refresh_checkpoint(&mut manifest).await
+        let result = self.inner.refresh().await;
+        if self.inner.mode == DbReaderMode::FollowLatest {
+            if let Err(error) = result {
+                warn!("failed to refresh reader to latest manifest [error={error:?}]");
+                return Ok(());
             }
-            DbReaderMode::FollowLatest => {
-                let result = self.inner.refresh_latest_manifest().await;
-                if let Err(error) = result {
-                    warn!("failed to refresh reader to latest manifest [error={error:?}]");
-                }
-                Ok(())
-            }
-            // No polling is needed for a pinned checkpoint, so we just return Ok(()).
-            DbReaderMode::Checkpoint(_) => Ok(()),
         }
+        result
     }
 
     async fn cleanup(
@@ -1534,6 +1535,16 @@ impl DbMetadataOps for DbReader {
 }
 
 impl DbReader {
+    /// Refreshes this reader from durable object-store state immediately.
+    ///
+    /// Managed readers replay newly durable WAL records and advance their
+    /// checkpoint when needed. Follow-latest readers load the latest manifest.
+    /// A reader pinned to a user checkpoint remains unchanged.
+    pub async fn refresh(&self) -> Result<(), crate::Error> {
+        self.inner.check_closed()?;
+        self.inner.refresh().await.map_err(Into::into)
+    }
+
     /// See [`DbMetadataOps::manifest`].
     pub fn manifest(&self) -> VersionedManifest {
         <Self as DbMetadataOps>::manifest(self)
@@ -2474,6 +2485,39 @@ mod tests {
         })
         .await
         .unwrap();
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_refresh_replays_durable_wal_without_waiting_for_poller() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_reader_explicit_refresh");
+        let db = Db::open(path.clone(), Arc::clone(&object_store))
+            .await
+            .unwrap();
+        let reader = DbReader::open(
+            path,
+            Arc::clone(&object_store),
+            DbReaderMode::ManagedCheckpoint,
+            DbReaderOptions {
+                manifest_poll_interval: Duration::from_secs(60 * 60),
+                checkpoint_lifetime: Duration::from_secs(3 * 60 * 60),
+                ..DbReaderOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        db.put(b"key", b"value").await.unwrap();
+        assert_eq!(reader.get(b"key").await.unwrap(), None);
+
+        reader.refresh().await.unwrap();
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"value"))
+        );
 
         reader.close().await.unwrap();
         db.close().await.unwrap();
