@@ -19,7 +19,7 @@ use super::uploader::UploadedMemtable;
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
-use crate::db_state::{collect_touched_segments, DbState, SsTableView};
+use crate::db_state::{collect_touched_segments, DbState, SsTableId, SsTableView};
 use crate::dispatcher::MessageHandler;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
@@ -33,7 +33,7 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use parking_lot::RwLockWriteGuard;
 use std::cmp;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -674,6 +674,33 @@ impl ManifestWriterHandler {
                 .fold((0usize, 0usize), |(sum, max), n| (sum + n, max.max(n)));
             self.db.db_stats.l0_sst_count.set(total as i64);
             self.db.db_stats.segment_max_l0_sst_count.set(max as i64);
+            // Structural manifest counts span every tree (root + each named segment
+            // per RFC-0024), matching the `l0_sst_count` scope above. `sst_view_count`
+            // sums L0 views and every sorted-run SST view; `sst_count` deduplicates
+            // those views by physical SST id (a range clone/rescale can project one
+            // SST into several views, so `sst_count <= sst_view_count`); `sorted_run_count`
+            // sums the sorted runs across trees; `external_db_count` is a top-level field.
+            let mut sorted_runs = 0usize;
+            let mut sst_views = 0usize;
+            let mut distinct_ssts: HashSet<SsTableId> = HashSet::new();
+            for tree in cow.core().trees() {
+                let all_views = tree
+                    .l0
+                    .iter()
+                    .chain(tree.compacted.iter().flat_map(|run| run.sst_views.iter()));
+                for view in all_views {
+                    sst_views += 1;
+                    distinct_ssts.insert(view.sst.id);
+                }
+                sorted_runs += tree.compacted.len();
+            }
+            self.db.db_stats.sorted_run_count.set(sorted_runs as i64);
+            self.db.db_stats.sst_view_count.set(sst_views as i64);
+            self.db.db_stats.sst_count.set(distinct_ssts.len() as i64);
+            self.db
+                .db_stats
+                .external_db_count
+                .set(cow.manifest.value.external_dbs.len() as i64);
             cow.manifest.clone()
         };
         self.db

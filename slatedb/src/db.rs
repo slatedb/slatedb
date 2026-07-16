@@ -9622,16 +9622,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_record_l0_sst_count() {
+    async fn test_should_record_manifest_structural_counts() {
         // given:
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
-        let db = Db::builder("/tmp/test_should_record_l0_sst_count", object_store)
-            .with_settings(test_db_options(0, 1024, None))
-            .with_metrics_recorder(metrics_recorder.clone())
-            .build()
-            .await
-            .unwrap();
+        let db = Db::builder(
+            "/tmp/test_should_record_manifest_structural_counts",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024, None))
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
 
         // when: write data and flush memtable to L0
         db.put(b"k1", b"v1").await.unwrap();
@@ -9659,6 +9662,29 @@ mod tests {
         assert_eq!(
             segment_max, l0_count,
             "expected segment_max_l0_sst_count == l0_sst_count for an unsegmented DB"
+        );
+
+        // The single flushed L0 SST shows up as one SST view, with no sorted
+        // runs and no external DBs. These gauges are set at the same call site.
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::SST_VIEW_COUNT),
+            Some(1),
+            "expected sst_view_count == 1 for a single flushed L0 SST"
+        );
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::SST_COUNT),
+            Some(1),
+            "expected sst_count == 1 (one distinct physical SST) for a single flushed L0 SST"
+        );
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::SORTED_RUN_COUNT),
+            Some(0),
+            "expected sorted_run_count == 0 before any compaction"
+        );
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::EXTERNAL_DB_COUNT),
+            Some(0),
+            "expected external_db_count == 0 for a standalone DB"
         );
         db.close().await.unwrap();
     }
