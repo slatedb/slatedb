@@ -505,6 +505,7 @@ impl From<GarbageCollectorOptions> for slatedb::config::GarbageCollectorOptions 
             detach_options: value.detach_options.map(Into::into),
             metric_level: None,
             boundary_files_enabled: !value.disable_boundary_files,
+            object_store_max_retries: None,
         }
     }
 }

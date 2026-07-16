@@ -1170,6 +1170,7 @@ mod tests {
             detach_options: None,
             metric_level: None,
             boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
         let gc = GarbageCollector::new(
             manifest_store.clone(),
@@ -1237,6 +1238,7 @@ mod tests {
             detach_options: None,
             metric_level: None,
             boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let helper = MetricsRecorderHelper::new(recorder.clone(), Default::default());
@@ -1303,6 +1305,7 @@ mod tests {
             detach_options: None,
             metric_level: None,
             boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
         let gc = GarbageCollector::new(
             manifest_store.clone(),
@@ -1382,6 +1385,7 @@ mod tests {
             detach_options: None,
             metric_level: None,
             boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
         let gc = GarbageCollector::new(
             manifest_store.clone(),
@@ -1837,6 +1841,7 @@ mod tests {
             detach_options: None,
             metric_level: None,
             boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
 
         let gc = GarbageCollector::new(
@@ -1913,6 +1918,7 @@ mod tests {
             detach_options: None,
             metric_level: None,
             boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
 
         let mut gc = GarbageCollector::new(
@@ -1984,6 +1990,7 @@ mod tests {
             detach_options: None,
             metric_level: None,
             boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
 
         let gc = GarbageCollector::new(
@@ -2034,6 +2041,7 @@ mod tests {
             detach_options: None,
             metric_level: None,
             boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
 
         let mut gc = GarbageCollector::new(
@@ -2088,6 +2096,7 @@ mod tests {
             detach_options: None,
             metric_level: None,
             boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
 
         let gc = GarbageCollector::new(
@@ -2419,6 +2428,7 @@ mod tests {
             detach_options: None,
             metric_level: None,
             boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
         let recorder = MetricsRecorderHelper::noop();
         let gc = GarbageCollector::new(
@@ -2518,6 +2528,7 @@ mod tests {
             detach_options: None,
             metric_level: None,
             boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let helper = MetricsRecorderHelper::new(recorder.clone(), Default::default());
@@ -2652,6 +2663,7 @@ mod tests {
             detach_options: None,
             metric_level: None,
             boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
         let recorder = MetricsRecorderHelper::noop();
         let gc = GarbageCollector::new(

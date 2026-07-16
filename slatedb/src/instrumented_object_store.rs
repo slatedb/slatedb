@@ -651,6 +651,7 @@ mod tests {
             instrumented,
             Arc::new(DbRand::default()),
             Arc::new(DefaultSystemClock::default()),
+            None,
         );
 
         // when:

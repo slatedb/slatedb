@@ -2099,6 +2099,7 @@ mod tests {
             garbage_collector_options: None,
             metric_level: MetricLevel::default(),
             default_ttl: None,
+            object_store_max_retries: None,
             block_format: None,
         }
     }

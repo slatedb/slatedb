@@ -433,6 +433,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let metrics_recorder = self.metrics_recorder.clone();
         let recorder =
             MetricsRecorderHelper::new(self.metrics_recorder, self.settings.metric_level);
+        let max_retries = self.settings.object_store_max_retries;
         let retrying_main_object_store = instrumented_retrying_object_store(
             self.main_object_store.clone(),
             &recorder,
@@ -440,6 +441,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             ObjectStoreType::Main,
             rand.clone(),
             system_clock.clone(),
+            max_retries,
         );
         let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> =
             self.wal_object_store.map(|s| {
@@ -450,6 +452,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     ObjectStoreType::Wal,
                     rand.clone(),
                     system_clock.clone(),
+                    max_retries,
                 )
             });
 
@@ -665,6 +668,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                     ObjectStoreType::Main,
                     rand.clone(),
                     system_clock.clone(),
+                    max_retries,
                 );
                 let main: Arc<dyn ObjectStore> = match &cached_object_store {
                     Some(cached) if Arc::ptr_eq(&raw_store, &self.main_object_store) => {
@@ -823,6 +827,7 @@ pub struct AdminBuilder<P: Into<Path>> {
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
+    object_store_max_retries: Option<u32>,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
     merge_operator: Option<MergeOperatorType>,
@@ -837,6 +842,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
             wal_object_store: None,
             system_clock: Arc::new(DefaultSystemClock::new()),
             rand: Arc::new(DbRand::default()),
+            object_store_max_retries: None,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
             merge_operator: None,
@@ -896,6 +902,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
             object_stores: ObjectStores::new(self.main_object_store, self.wal_object_store),
             system_clock: self.system_clock,
             rand: self.rand,
+            object_store_max_retries: self.object_store_max_retries,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: self.compaction_filter_supplier,
             merge_operator: self.merge_operator,
@@ -1022,6 +1029,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             ObjectStoreType::Main,
             self.rand.clone(),
             self.system_clock.clone(),
+            self.options.object_store_max_retries,
         );
         let retrying_wal_object_store = self.wal_object_store.map(|s| {
             instrumented_retrying_object_store(
@@ -1031,6 +1039,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
                 ObjectStoreType::Wal,
                 self.rand.clone(),
                 self.system_clock.clone(),
+                self.options.object_store_max_retries,
             )
         });
         let manifest_store = Arc::new(ManifestStore::new(
@@ -1253,6 +1262,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             ObjectStoreType::Main,
             self.rand.clone(),
             self.system_clock.clone(),
+            self.options.object_store_max_retries,
         );
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
@@ -1747,6 +1757,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             ObjectStoreType::Main,
             self.rand.clone(),
             self.system_clock.clone(),
+            self.options.object_store_max_retries,
         );
 
         let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> =
@@ -1758,6 +1769,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
                     ObjectStoreType::Wal,
                     self.rand.clone(),
                     self.system_clock.clone(),
+                    self.options.object_store_max_retries,
                 )
             });
 
@@ -2044,6 +2056,7 @@ fn instrumented_retrying_object_store(
     store_type: ObjectStoreType,
     rand: Arc<DbRand>,
     system_clock: Arc<dyn SystemClock>,
+    max_retries: Option<u32>,
 ) -> Arc<dyn ObjectStore> {
     let instrumented: Arc<dyn ObjectStore> = Arc::new(InstrumentedObjectStore::new(
         object_store,
@@ -2051,7 +2064,12 @@ fn instrumented_retrying_object_store(
         component,
         store_type,
     ));
-    Arc::new(RetryingObjectStore::new(instrumented, rand, system_clock))
+    Arc::new(RetryingObjectStore::new(
+        instrumented,
+        rand,
+        system_clock,
+        max_retries,
+    ))
 }
 
 #[allow(unreachable_code)]
