@@ -194,6 +194,12 @@ pub struct ReaderOptions {
     pub max_memtable_bytes: u64,
     /// Whether WAL replay should be skipped entirely.
     pub skip_wal_replay: bool,
+    /// Maximum number of wrapper-level retries for a single object-store
+    /// operation, on top of the `object_store` client's own HTTP retries.
+    /// `None` (default) retries transient errors indefinitely; `Some(n)` gives
+    /// up after `n` retries and surfaces the underlying error.
+    #[uniffi(default = None)]
+    pub object_store_max_retries: Option<u32>,
 }
 
 impl Default for ReaderOptions {
@@ -203,6 +209,7 @@ impl Default for ReaderOptions {
             checkpoint_lifetime_ms: 600_000,
             max_memtable_bytes: 64 * 1024 * 1024,
             skip_wal_replay: false,
+            object_store_max_retries: None,
         }
     }
 }
@@ -214,6 +221,7 @@ impl From<ReaderOptions> for slatedb::config::DbReaderOptions {
             checkpoint_lifetime: Duration::from_millis(value.checkpoint_lifetime_ms),
             max_memtable_bytes: value.max_memtable_bytes,
             skip_wal_replay: value.skip_wal_replay,
+            object_store_max_retries: value.object_store_max_retries,
             ..Default::default()
         }
     }
@@ -459,6 +467,12 @@ pub struct GarbageCollectorOptions {
     /// same setting for every GC operating on the database.
     #[uniffi(default = false)]
     pub disable_boundary_files: bool,
+    /// Maximum number of wrapper-level retries for a single object-store
+    /// operation, on top of the `object_store` client's own HTTP retries.
+    /// `None` (default) retries transient errors indefinitely; `Some(n)` gives
+    /// up after `n` retries and surfaces the underlying error.
+    #[uniffi(default = None)]
+    pub object_store_max_retries: Option<u32>,
 }
 
 impl Default for GarbageCollectorOptions {
@@ -472,6 +486,7 @@ impl Default for GarbageCollectorOptions {
             compactions_options: core.compactions_options.map(Into::into),
             detach_options: core.detach_options.map(Into::into),
             disable_boundary_files: !core.boundary_files_enabled,
+            object_store_max_retries: core.object_store_max_retries,
         }
     }
 }
@@ -505,14 +520,14 @@ impl From<GarbageCollectorOptions> for slatedb::config::GarbageCollectorOptions 
             detach_options: value.detach_options.map(Into::into),
             metric_level: None,
             boundary_files_enabled: !value.disable_boundary_files,
-            object_store_max_retries: None,
+            object_store_max_retries: value.object_store_max_retries,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::GarbageCollectorOptions;
+    use super::{GarbageCollectorOptions, ReaderOptions};
 
     #[test]
     fn boundary_files_are_enabled_by_default() {
@@ -531,6 +546,43 @@ mod tests {
         .into();
 
         assert!(!gc.boundary_files_enabled);
+    }
+
+    #[test]
+    fn gc_object_store_max_retries_defaults_to_unbounded() {
+        let gc: slatedb::config::GarbageCollectorOptions =
+            GarbageCollectorOptions::default().into();
+
+        assert_eq!(gc.object_store_max_retries, None);
+    }
+
+    #[test]
+    fn gc_object_store_max_retries_threads_through() {
+        let gc: slatedb::config::GarbageCollectorOptions = GarbageCollectorOptions {
+            object_store_max_retries: Some(3),
+            ..GarbageCollectorOptions::default()
+        }
+        .into();
+
+        assert_eq!(gc.object_store_max_retries, Some(3));
+    }
+
+    #[test]
+    fn reader_object_store_max_retries_defaults_to_unbounded() {
+        let reader: slatedb::config::DbReaderOptions = ReaderOptions::default().into();
+
+        assert_eq!(reader.object_store_max_retries, None);
+    }
+
+    #[test]
+    fn reader_object_store_max_retries_threads_through() {
+        let reader: slatedb::config::DbReaderOptions = ReaderOptions {
+            object_store_max_retries: Some(5),
+            ..ReaderOptions::default()
+        }
+        .into();
+
+        assert_eq!(reader.object_store_max_retries, Some(5));
     }
 }
 

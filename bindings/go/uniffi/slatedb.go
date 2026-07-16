@@ -9471,6 +9471,11 @@ type GarbageCollectorOptions struct {
 	// as successful. Set `min_age` longer than the maximum lifetime of a stale process, and use the
 	// same setting for every GC operating on the database.
 	DisableBoundaryFiles bool
+	// Maximum number of wrapper-level retries for a single object-store
+	// operation, on top of the `object_store` client's own HTTP retries.
+	// `None` (default) retries transient errors indefinitely; `Some(n)` gives
+	// up after `n` retries and surfaces the underlying error.
+	ObjectStoreMaxRetries *uint32
 }
 
 func (r *GarbageCollectorOptions) Destroy() {
@@ -9481,6 +9486,7 @@ func (r *GarbageCollectorOptions) Destroy() {
 	FfiDestroyerOptionalGarbageCollectorDirectoryOptions{}.Destroy(r.CompactionsOptions)
 	FfiDestroyerOptionalGarbageCollectorScheduleOptions{}.Destroy(r.DetachOptions)
 	FfiDestroyerBool{}.Destroy(r.DisableBoundaryFiles)
+	FfiDestroyerOptionalUint32{}.Destroy(r.ObjectStoreMaxRetries)
 }
 
 type FfiConverterGarbageCollectorOptions struct{}
@@ -9500,6 +9506,7 @@ func (c FfiConverterGarbageCollectorOptions) Read(reader io.Reader) GarbageColle
 		FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Read(reader),
 		FfiConverterOptionalGarbageCollectorScheduleOptionsINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterOptionalUint32INSTANCE.Read(reader),
 	}
 }
 
@@ -9519,6 +9526,7 @@ func (c FfiConverterGarbageCollectorOptions) Write(writer io.Writer, value Garba
 	FfiConverterOptionalGarbageCollectorDirectoryOptionsINSTANCE.Write(writer, value.CompactionsOptions)
 	FfiConverterOptionalGarbageCollectorScheduleOptionsINSTANCE.Write(writer, value.DetachOptions)
 	FfiConverterBoolINSTANCE.Write(writer, value.DisableBoundaryFiles)
+	FfiConverterOptionalUint32INSTANCE.Write(writer, value.ObjectStoreMaxRetries)
 }
 
 type FfiDestroyerGarbageCollectorOptions struct{}
@@ -10244,6 +10252,11 @@ type ReaderOptions struct {
 	MaxMemtableBytes uint64
 	// Whether WAL replay should be skipped entirely.
 	SkipWalReplay bool
+	// Maximum number of wrapper-level retries for a single object-store
+	// operation, on top of the `object_store` client's own HTTP retries.
+	// `None` (default) retries transient errors indefinitely; `Some(n)` gives
+	// up after `n` retries and surfaces the underlying error.
+	ObjectStoreMaxRetries *uint32
 }
 
 func (r *ReaderOptions) Destroy() {
@@ -10251,6 +10264,7 @@ func (r *ReaderOptions) Destroy() {
 	FfiDestroyerUint64{}.Destroy(r.CheckpointLifetimeMs)
 	FfiDestroyerUint64{}.Destroy(r.MaxMemtableBytes)
 	FfiDestroyerBool{}.Destroy(r.SkipWalReplay)
+	FfiDestroyerOptionalUint32{}.Destroy(r.ObjectStoreMaxRetries)
 }
 
 type FfiConverterReaderOptions struct{}
@@ -10267,6 +10281,7 @@ func (c FfiConverterReaderOptions) Read(reader io.Reader) ReaderOptions {
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterOptionalUint32INSTANCE.Read(reader),
 	}
 }
 
@@ -10283,6 +10298,7 @@ func (c FfiConverterReaderOptions) Write(writer io.Writer, value ReaderOptions) 
 	FfiConverterUint64INSTANCE.Write(writer, value.CheckpointLifetimeMs)
 	FfiConverterUint64INSTANCE.Write(writer, value.MaxMemtableBytes)
 	FfiConverterBoolINSTANCE.Write(writer, value.SkipWalReplay)
+	FfiConverterOptionalUint32INSTANCE.Write(writer, value.ObjectStoreMaxRetries)
 }
 
 type FfiDestroyerReaderOptions struct{}
