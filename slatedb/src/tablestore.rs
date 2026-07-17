@@ -978,8 +978,8 @@ impl TableStore {
         .await
     }
 
-    pub(crate) fn path(&self, id: &SsTableId) -> Path {
-        self.path_resolver.table_path(id)
+    fn path(&self, id: &SsTableId) -> Path {
+        self.path_resolver.sst_path(id)
     }
 
     pub(crate) fn estimate_encoded_size_compacted(

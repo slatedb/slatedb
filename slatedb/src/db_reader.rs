@@ -1299,10 +1299,6 @@ impl DbMetadataOps for DbReader {
         VersionedManifest::from(state.as_ref())
     }
 
-    fn sst_path(&self, sst_id: &SsTableId) -> object_store::path::Path {
-        self.inner.table_store.path(sst_id)
-    }
-
     fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
         self.inner.status_manager.subscribe()
     }

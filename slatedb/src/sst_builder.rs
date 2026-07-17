@@ -521,7 +521,7 @@ mod tests {
 
         let actual_size = |id: &SsTableId| {
             let object_store = object_store.clone();
-            let path = path_resolver.table_path(id);
+            let path = path_resolver.sst_path(id);
             async move { object_store.head(&path).await.unwrap().size as usize }
         };
 

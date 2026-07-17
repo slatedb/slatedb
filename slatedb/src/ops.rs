@@ -527,16 +527,6 @@ pub trait DbMetadataOps {
     /// with its manifest version ID.
     fn manifest(&self) -> VersionedManifest;
 
-    /// Returns the object store path of the SST with the given id.
-    ///
-    /// The path is resolved the same way the read path resolves it, including
-    /// external SSTs attached from other databases, which live outside this
-    /// database's root.
-    ///
-    /// Combine with [`manifest`](Self::manifest) to map the current SST set to
-    /// paths, for example to warm `CachedObjectStore`.
-    fn sst_path(&self, sst_id: &SsTableId) -> object_store::path::Path;
-
     /// Subscribe to database state changes.
     ///
     /// Returns a [`tokio::sync::watch::Receiver<DbStatus>`] that always

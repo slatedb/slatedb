@@ -1909,10 +1909,6 @@ impl DbMetadataOps for Db {
         self.inner.manifest()
     }
 
-    fn sst_path(&self, sst_id: &SsTableId) -> object_store::path::Path {
-        self.inner.table_store.path(sst_id)
-    }
-
     fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
         self.inner.status_manager.subscribe()
     }
@@ -11244,7 +11240,7 @@ mod tests {
 
             /// The upstream path of a compacted SST id.
             fn compacted_sst_path(&self, id: &SsTableId) -> object_store::path::Path {
-                self.db.sst_path(id)
+                crate::paths::PathResolver::new(self.db_path.as_str()).sst_path(id)
             }
 
             fn l0_ids(&self) -> Vec<SsTableId> {
@@ -11421,8 +11417,8 @@ mod tests {
         }
 
         /// Warming a disk cache by enumerating SSTs from the manifest,
-        /// resolving their paths with `sst_path`, and load their raw bytes with
-        ///  `load_files_to_cache`.
+        /// resolving their paths with `PathResolver`, and loading their raw
+        /// bytes with `load_files_to_cache`.
         #[tokio::test]
         async fn test_preload_disk_cache_from_manifest() {
             let fixture =
@@ -11445,7 +11441,10 @@ mod tests {
 
             let ids = fixture.l0_ids();
             assert_eq!(ids.len(), 2);
-            let paths: Vec<_> = ids.iter().map(|id| fixture.db().sst_path(id)).collect();
+            let paths: Vec<_> = ids
+                .iter()
+                .map(|id| fixture.compacted_sst_path(id))
+                .collect();
             for path in &paths {
                 fixture.assert_cached(path, 0);
             }
