@@ -1,5 +1,4 @@
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
-use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
 use crate::db_cache_manager::{self, CacheTarget};
@@ -15,7 +14,6 @@ use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::merge_operator::MergeOperatorType;
 use crate::oracle::DbReaderOracle;
-use crate::paths::PathResolver;
 use crate::prefix_extractor::PrefixExtractor;
 use crate::reader::{DbStateReader, Reader, ScanContext};
 use crate::sst_iter::SstIteratorOptions;
@@ -806,26 +804,6 @@ impl DbReader {
         Ok(())
     }
 
-    /// Preload the disk cache from the current manifest state.
-    pub(crate) async fn preload_cache(
-        &self,
-        cached_obj_store: &CachedObjectStore,
-        path: object_store::path::Path,
-    ) -> Result<(), SlateDBError> {
-        let state = Arc::clone(&self.inner.state.read());
-        let external_ssts = state.manifest.external_ssts();
-        let path_resolver = PathResolver::new_with_external_ssts(path, external_ssts);
-        let cache_opts = &self.inner.options.object_store_cache_options;
-        crate::utils::preload_cache_from_manifest(
-            &state.manifest.core,
-            cached_obj_store,
-            &path_resolver,
-            cache_opts.preload_disk_cache_on_startup,
-            cache_opts.max_cache_size_bytes.unwrap_or(usize::MAX),
-        )
-        .await
-    }
-
     /// Creates a database reader that can read the contents of a database (but cannot write any
     /// data). [`DbReaderMode`] controls whether the reader manages a checkpoint, remains pinned to
     /// a supplied checkpoint, or follows the latest manifest without garbage-collection
@@ -1319,6 +1297,10 @@ impl DbMetadataOps for DbReader {
     fn manifest(&self) -> VersionedManifest {
         let state = Arc::clone(&self.inner.state.read());
         VersionedManifest::from(state.as_ref())
+    }
+
+    fn sst_path(&self, sst_id: &SsTableId) -> object_store::path::Path {
+        self.inner.table_store.path(sst_id)
     }
 
     fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
@@ -3198,22 +3180,27 @@ mod tests {
         db.flush().await.unwrap();
         db.close().await.unwrap();
 
-        // Open a DbReader with disk caching enabled
+        // Open a DbReader over a user-constructed cached store
         let cache_dir = tempfile::Builder::new()
             .prefix("dbreader_cache_test_")
             .tempdir()
             .unwrap();
         let cache_path = cache_dir.keep();
 
-        let mut reader_opts = DbReaderOptions::default();
-        reader_opts.object_store_cache_options.root_folder = Some(cache_path.clone());
-        reader_opts.object_store_cache_options.part_size_bytes = 1024;
+        let cached_store = crate::cached_object_store::CachedObjectStore::builder(
+            cache_path.clone(),
+            Arc::clone(&object_store),
+        )
+        .with_part_size_bytes(1024)
+        .build()
+        .await
+        .unwrap();
 
         let reader = DbReader::open(
             path.clone(),
-            Arc::clone(&object_store),
+            cached_store,
             DbReaderMode::ManagedCheckpoint,
-            reader_opts,
+            DbReaderOptions::default(),
         )
         .await
         .unwrap();
