@@ -820,6 +820,37 @@ impl Settings {
         serde_json::to_string(self)
     }
 
+    /// Validates that the settings are internally consistent, rejecting field
+    /// combinations that would deadlock or fail at runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`crate::Error`] with [`crate::ErrorKind::Invalid`] describing
+    /// the first invalid setting or combination encountered.
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        if self.l0_flush_parallelism == 0 {
+            return Err(crate::Error::invalid(
+                "invalid configuration: l0_flush_parallelism must be at least 1".into(),
+            ));
+        }
+        if self.max_wal_flushes_before_l0_flush < 4096 {
+            return Err(crate::Error::invalid(
+                "invalid configuration: max_wal_flushes_before_l0_flush must be at least 4096"
+                    .into(),
+            ));
+        }
+        // `max_unflushed_bytes` must exceed `l0_sst_size_bytes` so the active
+        // memtable is always frozen before backpressure permanently blocks writes.
+        if self.max_unflushed_bytes <= self.l0_sst_size_bytes {
+            return Err(crate::Error::invalid(format!(
+                "invalid configuration: max_unflushed_bytes ({}) must be greater than \
+                 l0_sst_size_bytes ({})",
+                self.max_unflushed_bytes, self.l0_sst_size_bytes,
+            )));
+        }
+        Ok(())
+    }
+
     /// Loads Settings from a file.
     ///
     /// This function attempts to read and parse a configuration file to create a Settings instance.
@@ -2006,5 +2037,59 @@ object_store_cache_options:
         assert_eq!(ts1, Some(99999));
         assert_eq!(ts2, Some(99999));
         assert_eq!(ts3, Some(99999));
+    }
+
+    #[test]
+    fn test_validate_accepts_default_settings() {
+        assert!(Settings::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_l0_flush_parallelism() {
+        let settings = Settings {
+            l0_flush_parallelism: 0,
+            ..Settings::default()
+        };
+        let err = settings.validate().expect_err("expected invalid settings");
+        assert!(err.to_string().contains("l0_flush_parallelism"));
+    }
+
+    #[test]
+    fn test_validate_rejects_low_max_wal_flushes_before_l0_flush() {
+        let settings = Settings {
+            max_wal_flushes_before_l0_flush: 4095,
+            ..Settings::default()
+        };
+        let err = settings.validate().expect_err("expected invalid settings");
+        assert!(err.to_string().contains("max_wal_flushes_before_l0_flush"));
+    }
+
+    #[test]
+    fn test_validate_rejects_max_unflushed_bytes_not_greater_than_l0_sst_size() {
+        // Equal is invalid: must be strictly greater.
+        let equal = Settings {
+            l0_sst_size_bytes: 64 * 1024 * 1024,
+            max_unflushed_bytes: 64 * 1024 * 1024,
+            ..Settings::default()
+        };
+        let err = equal.validate().expect_err("expected invalid settings");
+        assert!(err.to_string().contains("max_unflushed_bytes"));
+
+        let smaller = Settings {
+            l0_sst_size_bytes: 64 * 1024 * 1024,
+            max_unflushed_bytes: 32 * 1024 * 1024,
+            ..Settings::default()
+        };
+        assert!(smaller.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_max_unflushed_bytes_greater_than_l0_sst_size() {
+        let settings = Settings {
+            l0_sst_size_bytes: 64 * 1024 * 1024,
+            max_unflushed_bytes: 64 * 1024 * 1024 + 1,
+            ..Settings::default()
+        };
+        assert!(settings.validate().is_ok());
     }
 }
