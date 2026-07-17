@@ -497,12 +497,18 @@ impl std::fmt::Display for ErrorKind {
 /// Why a recoverable SST read is being reissued (the reason it failed validation
 /// the first time).
 ///
-/// Carried on the reissued read's tag so a caching wrapper can try a different
-/// strategy on the retry.
+/// Carried on the reissued read's
+/// [`ObjectStoreCallTag`](crate::object_store_tag::ObjectStoreCallTag) so a
+/// caching wrapper can drop its local copy and refetch instead of serving the
+/// same bytes again.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RetryReason {
+pub enum RetryReason {
+    /// The read bytes failed a checksum validation.
     CrcMismatch,
+    /// The read bytes could not be decoded as a block.
     BlockDecodeError,
+    /// The read bytes could not be decompressed.
     #[cfg(any(
         feature = "snappy",
         feature = "zlib",

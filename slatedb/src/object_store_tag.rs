@@ -1,22 +1,45 @@
-//! The per-call tag SlateDB attaches to the object store calls which the
-//! [`TableStore`](crate::tablestore::TableStore) issues for an SST.
+//! The per-call tag SlateDB attaches to the object store calls it issues for
+//! an SST (through its internal TableStore component).
 //!
-//! The tag is part of the [`object_store::Extensions`] on every `GetOptions`,
-//! `PutOptions`, and `PutMultipartOptions` the TableStore builds for an SST.
-//! The TableStore is the only writer of the tag; a caching object store wrapper
-//! is the reader.
+//! This module is the contract between SlateDB and a caching
+//! [`ObjectStore`](object_store::ObjectStore) wrapper, whether the bundled
+//! [`CachedObjectStore`](crate::cached_object_store::CachedObjectStore) or an
+//! external implementation passed to
+//! [`Db::builder`](crate::Db::builder) as the object store.
+//!
+//! SlateDB inserts an [`ObjectStoreCallTag`] into the
+//! [`object_store::Extensions`] of every `GetOptions`, `PutOptions`, and
+//! `PutMultipartOptions` the TableStore builds for an SST. A wrapper reads it
+//! back with one lookup:
+//!
+//! ```ignore
+//! if let Some(tag) = ObjectStoreCallTag::from_extensions(&options.extensions) {
+//!     // classify by tag.kind, tag.sst_type, tag.retry
+//! }
+//! ```
+//!
+//! Manifest reads and writes, compaction state, garbage collector listings,
+//! and other coordination I/O carry no tag.
+//!
+//! When decoding a read fails with a recoverable validation error, SlateDB
+//! reissues the read once with `retry` set. A caching wrapper must not serve
+//! the same locally cached bytes for a retry-tagged read: drop the cached
+//! entry for the path and refetch from the wrapped store, otherwise the
+//! caller keeps receiving the corrupt bytes and the read fails permanently.
 
 use object_store::Extensions;
 
-use crate::db_state::SstType;
-use crate::error::RetryReason;
+pub use crate::db_state::SstType;
+pub use crate::error::RetryReason;
 
-/// Identifies the component whose [`TableStore`](crate::tablestore::TableStore)
-/// issued an object store call (the call source). Tagged on every SST read and
-/// write alongside the [`SstType`]. A caching wrapper combines it with the call
-/// type (get vs put) to decide admission.
+/// Identifies the component whose TableStore issued an object store call (the
+/// call source). Tagged on every SST read and write alongside the
+/// [`SstType`].
+///
+/// A caching wrapper combines it with the call type (get vs put)
+/// to decide admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TableStoreKind {
+pub enum TableStoreKind {
     /// The primary database store: foreground reads and memtable flush writes.
     Main,
     /// A read-only store.
@@ -30,23 +53,23 @@ pub(crate) enum TableStoreKind {
 /// The tag carried on every TableStore SST object store call via
 /// [`object_store::Extensions`].
 ///
-/// An `ObjectStore` wrapper (such as the bundled object store cache) reads the
-/// tag to decide the action for the call.
+/// An `ObjectStore` wrapper (such as an object store cache) reads the tag to
+/// decide the action for the call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ObjectStoreCallTag {
+pub struct ObjectStoreCallTag {
     /// The source of the call, to distinguish main store, compactor, etc.
-    pub(crate) kind: TableStoreKind,
+    pub kind: TableStoreKind,
     /// The kind of SST the call is targeting (WAL vs compacted).
-    pub(crate) sst_type: SstType,
+    pub sst_type: SstType,
     /// The reason for retry if this call is reissued after a validation failure
     /// on a read.
-    pub(crate) retry: Option<RetryReason>,
+    pub retry: Option<RetryReason>,
 }
 
 impl ObjectStoreCallTag {
     /// A tag with no retry reason: the common case (a read sets the retry reason
     /// itself on a reissue).
-    pub(crate) fn new(kind: TableStoreKind, sst_type: SstType) -> Self {
+    pub fn new(kind: TableStoreKind, sst_type: SstType) -> Self {
         Self {
             kind,
             sst_type,
@@ -55,7 +78,7 @@ impl ObjectStoreCallTag {
     }
 
     /// Reads the tag back from an extensions map, if present.
-    pub(crate) fn from_extensions(extensions: &Extensions) -> Option<Self> {
+    pub fn from_extensions(extensions: &Extensions) -> Option<Self> {
         extensions.get::<Self>().copied()
     }
 }
