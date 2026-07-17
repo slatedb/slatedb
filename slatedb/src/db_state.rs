@@ -822,6 +822,7 @@ impl<'a> StateModifier<'a> {
             checkpoints: remote_manifest.value.core.checkpoints,
             wal_object_store_uri: my_db_state.wal_object_store_uri.clone(),
         };
+        remote_manifest.value.prune_external_sst_ids();
         self.state.manifest = remote_manifest;
     }
 
@@ -877,6 +878,29 @@ mod tests {
 
         // then:
         assert_eq!(vec![checkpoint], db_state.state.core().checkpoints);
+    }
+
+    #[test]
+    fn test_merge_remote_manifest_reestablishes_external_sst_invariant() {
+        let mut db_state = DbState::new(new_dirty_manifest());
+        let stale_id = SsTableId::Compacted(ulid::Ulid::new());
+        let mut remote = new_dirty_manifest();
+        remote.value.external_dbs = vec![crate::manifest::ExternalDb {
+            path: "/parent/db".to_string(),
+            source_checkpoint_id: uuid::Uuid::new_v4(),
+            final_checkpoint_id: Some(uuid::Uuid::new_v4()),
+            sst_ids: vec![stale_id],
+        }];
+
+        db_state.merge_remote_manifest(remote);
+
+        let external = &db_state.state.manifest.value.external_dbs;
+        assert_eq!(external.len(), 1, "detach metadata must be retained");
+        assert!(
+            external[0].sst_ids.is_empty(),
+            "IDs absent from the merged tree must not be resurrected"
+        );
+        assert!(external[0].final_checkpoint_id.is_some());
     }
 
     #[test]

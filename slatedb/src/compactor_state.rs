@@ -970,6 +970,7 @@ impl CompactorState {
             sequence_tracker: remote_manifest.value.core.sequence_tracker,
         };
         remote_manifest.value.core = merged;
+        remote_manifest.value.prune_external_sst_ids();
         self.manifest = remote_manifest;
     }
 
@@ -1715,6 +1716,31 @@ mod tests {
             .map(|h| h.sst.id.unwrap_compacted_id())
             .collect();
         assert_eq!(expected_merged_l0s, merged_l0s);
+    }
+
+    #[test]
+    fn test_merge_remote_manifest_reestablishes_external_sst_invariant() {
+        let manifest = new_dirty_manifest();
+        let compactions = new_dirty_compactions(manifest.value.compactor_epoch);
+        let mut state = CompactorState::new(manifest, compactions);
+        let stale_id = SsTableId::Compacted(Ulid::new());
+        let mut remote = new_dirty_manifest();
+        remote.value.external_dbs = vec![crate::manifest::ExternalDb {
+            path: "/parent/db".to_string(),
+            source_checkpoint_id: uuid::Uuid::new_v4(),
+            final_checkpoint_id: Some(uuid::Uuid::new_v4()),
+            sst_ids: vec![stale_id],
+        }];
+
+        state.merge_remote_manifest(remote);
+
+        let external = &state.manifest().value.external_dbs;
+        assert_eq!(external.len(), 1, "detach metadata must be retained");
+        assert!(
+            external[0].sst_ids.is_empty(),
+            "IDs absent from the merged tree must not be resurrected"
+        );
+        assert!(external[0].final_checkpoint_id.is_some());
     }
 
     #[test]
