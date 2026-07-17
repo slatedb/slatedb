@@ -542,17 +542,50 @@ impl CachedObjectStore {
                         .get_opts(
                             &location,
                             GetOptions {
-                                range: Some(GetRange::Bounded(part_range)),
+                                range: Some(GetRange::Bounded(part_range.clone())),
                                 ..Default::default()
                             },
                         )
                         .await?;
 
-                    // Save the head and the part to cache for future accesses.
-                    let entry = this.cache_storage.entry(&location, this.part_size_bytes);
                     let meta = get_result.meta.clone();
                     let attrs = get_result.attributes.clone();
                     let bytes = get_result.bytes().await?;
+
+                    // A truncated but successful ranged body is possible and
+                    // should be caught here because the rest of the code
+                    // assumes the size is correct.
+                    //
+                    // We return a retryable error before anything is saved or
+                    // sliced and the retry layer above will retry.
+                    //
+                    // We also have to take the min of the part range end and
+                    // the object size because the part range may extend beyond
+                    // the object size.
+                    let expected_len = usize::try_from(
+                        meta.size
+                            .min(part_range.end)
+                            .saturating_sub(part_range.start),
+                    )
+                    .expect("part length exceeds usize");
+                    if bytes.len() != expected_len {
+                        return Err(object_store::Error::Generic {
+                            store: "cached_object_store",
+                            source: format!(
+                                "part fetch size check failed: {} bytes read, but expected \
+                                 {expected_len} bytes (part range {}..{} truncated at object \
+                                 size {})",
+                                bytes.len(),
+                                part_range.start,
+                                part_range.end,
+                                meta.size
+                            )
+                            .into(),
+                        });
+                    }
+
+                    // Save the head and the part to cache for future accesses.
+                    let entry = this.cache_storage.entry(&location, this.part_size_bytes);
                     entry.save_head((&meta, &attrs)).await.ok();
                     entry.save_part(part_id, bytes.clone()).await.ok();
 
@@ -1124,7 +1157,10 @@ mod tests {
     use crate::cached_object_store::storage_fs::FsCacheEntry;
     use crate::cached_object_store::storage_fs::FsCacheStorage;
     use crate::db_state::SstType;
+    use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
     use crate::object_store_tag::{ObjectStoreCallTag, TableStoreKind};
+    use crate::object_stores::ObjectStoreType;
+    use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::{
         gen_rand_bytes, ExtensionMarker, ExtensionObjectStore, FlakyObjectStore, GatedObjectStore,
     };
@@ -2121,6 +2157,92 @@ mod tests {
         assert!(result.is_ok());
         let bytes = result.unwrap().bytes().await.unwrap();
         assert_eq!(&bytes[..], &payload[..512]);
+    }
+
+    #[tokio::test]
+    async fn test_part_fetch_validates_truncated_body_and_retries() {
+        let part_size = 1024usize;
+        let payload = gen_rand_bytes(part_size * 3);
+        let location = Path::from("/data/testfile1");
+        let inner: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        inner
+            .put(&location, PutPayload::from_bytes(payload.clone()))
+            .await
+            .unwrap();
+
+        let test_cache_folder = new_test_cache_folder();
+        let recorder = MetricsRecorderHelper::noop();
+        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            test_cache_folder.clone(),
+            None,
+            None,
+            stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            1000,
+        ));
+        let opts = || GetOptions {
+            range: Some(GetRange::Bounded(0..(part_size as u64 * 3))),
+            extensions: ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Compacted).into(),
+            ..Default::default()
+        };
+
+        // Prefill the cache through a clean handle, then delete one part file
+        // so the read below must fill it from the backend lazily.
+        let prefill = CachedObjectStore::new(
+            inner.clone(),
+            cache_storage.clone(),
+            part_size,
+            CachePutConfig::default(),
+            stats.clone(),
+        )
+        .unwrap();
+        prefill
+            .get_opts(&location, opts())
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let part_path =
+            FsCacheEntry::make_part_path(test_cache_folder.clone(), &location, 1, part_size);
+        std::fs::remove_file(&part_path).unwrap();
+
+        // The backend truncates the next ranged body to 1 byte but reports
+        // success, mimicking a response cut mid-body without a stream error.
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_truncate_get_range_bytes(1, 1));
+        let cached = CachedObjectStore::new(
+            flaky.clone(),
+            cache_storage,
+            part_size,
+            CachePutConfig::default(),
+            stats,
+        )
+        .unwrap();
+        let instrumented = Arc::new(InstrumentedObjectStore::new(
+            cached,
+            &recorder,
+            ObjectStoreComponent::Db,
+            ObjectStoreType::Main,
+        ));
+        let retrying = RetryingObjectStore::new(
+            instrumented,
+            Arc::new(DbRand::default()),
+            Arc::new(DefaultSystemClock::new()),
+            None,
+        );
+
+        let got = retrying
+            .get_opts(&location, opts())
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(got, payload);
+        // The truncated fill plus the successful fill on the reissued read.
+        assert_eq!(flaky.get_range_attempts(), 2);
     }
 
     #[rstest::rstest]
