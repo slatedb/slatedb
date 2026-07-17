@@ -379,7 +379,7 @@ impl DbInner {
 
                 let await_flush_wal = self
                     .wal_observer
-                    .wait_until_wal_released(wal_status.last_purged_wal_id);
+                    .wait_until_wal_released(wal_status.last_flushed_wal_id);
 
                 let timeout_fut = self.system_clock.sleep(Duration::from_secs(30));
                 let await_closed = async {
@@ -2076,10 +2076,7 @@ impl DbWalObserver {
         let (status_tx, status_rx) = tokio::sync::watch::channel(wrapped.status());
         wrapped
             .subscribe(Arc::new(move |event| {
-                let status = match event {
-                    WalEvent::WalFlushed(status) => status,
-                    WalEvent::MemoryReleased(status) => status,
-                };
+                let WalEvent::WalFlushed(status) = event;
                 if let Some(seq) = status.last_flushed_seq {
                     oracle.advance_durable_seq(seq);
                 }
@@ -2116,8 +2113,8 @@ impl DbWalObserver {
     }
 
     /// Waits until the wal a given wal id is released by the wal writer
-    async fn wait_until_wal_released(&self, last_purged_wal_id: u64) -> Result<(), SlateDBError> {
-        self.wait_on_condition(|status| status.last_purged_wal_id > last_purged_wal_id)
+    async fn wait_until_wal_released(&self, last_flushed_wal_id: u64) -> Result<(), SlateDBError> {
+        self.wait_on_condition(|status| status.last_flushed_wal_id > last_flushed_wal_id)
             .await
     }
 }
