@@ -380,7 +380,7 @@ impl DbInner {
 
                 let await_flush_wal = self
                     .wal_observer
-                    .wait_until_wal_released(wal_status.last_flushed_wal_id);
+                    .wait_until_wal_flushed(wal_status.last_flushed_wal_id);
 
                 let timeout_fut = self.system_clock.sleep(Duration::from_secs(30));
                 let await_closed = async {
@@ -2114,7 +2114,7 @@ impl DbWalObserver {
     }
 
     /// Waits until the wal a given wal id is released by the wal writer
-    async fn wait_until_wal_released(&self, last_flushed_wal_id: u64) -> Result<(), SlateDBError> {
+    async fn wait_until_wal_flushed(&self, last_flushed_wal_id: u64) -> Result<(), SlateDBError> {
         self.wait_on_condition(|status| status.last_flushed_wal_id > last_flushed_wal_id)
             .await
     }
