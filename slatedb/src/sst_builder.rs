@@ -129,6 +129,7 @@ pub(crate) struct EncodedSsTableBuilder {
     first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'static, u8>>>,
     sst_first_key: Option<Bytes>,
     sst_last_key: Option<Bytes>,
+    current_block_first_key: Option<Bytes>,
     current_block_max_key: Option<Bytes>,
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'static>>>,
     current_len: u64,
@@ -163,6 +164,7 @@ impl EncodedSsTableBuilder {
             first_key: None,
             sst_first_key: None,
             sst_last_key: None,
+            current_block_first_key: None,
             current_block_max_key: None,
             block_size,
             block_format: BlockFormat::Latest,
@@ -223,7 +225,7 @@ impl EncodedSsTableBuilder {
         self.stats.raw_key_size += entry.key.len() as u64;
         self.stats.raw_val_size += entry.value.len() as u64;
 
-        let index_key = compute_index_key(self.current_block_max_key.take(), &entry.key);
+        let index_key = compute_index_key(self.current_block_max_key.clone(), &entry.key);
         let is_sst_first_key = self.sst_first_key.is_none();
 
         let mut block_size = None;
@@ -241,6 +243,9 @@ impl EncodedSsTableBuilder {
             self.sst_first_key = Some(entry.key.clone());
         }
         self.sst_last_key = Some(entry.key.clone());
+        if self.builder.is_empty() {
+            self.current_block_first_key = Some(entry.key.clone());
+        }
         self.current_block_max_key = Some(entry.key.clone());
 
         self.builder.add(entry)?;
@@ -285,6 +290,13 @@ impl EncodedSsTableBuilder {
         let old_builder = std::mem::replace(&mut self.builder, new_builder);
         let (builder, block_stats) = old_builder.into_parts();
         let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.current_len);
+        if let Some((first_key, last_key)) = self
+            .current_block_first_key
+            .take()
+            .zip(self.current_block_max_key.take())
+        {
+            block_builder = block_builder.with_key_span(first_key, last_key);
+        }
         if let Some(codec) = self.compression_codec {
             block_builder = block_builder.with_compression_codec(codec);
         }
@@ -728,6 +740,46 @@ mod tests {
                 .unwrap();
             assert!(*encoded_block.block == read_block);
         }
+    }
+
+    #[tokio::test]
+    async fn test_builder_should_track_block_key_spans() {
+        // one entry per block
+        let format = SsTableFormat {
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
+        let mut builder = format.table_builder();
+        for i in 0..4u8 {
+            builder
+                .add_value(&[b'a' + i; 16], &[i; 16], None, None)
+                .await
+                .unwrap();
+        }
+        let sst = builder.build().await.unwrap();
+        assert_eq!(sst.unconsumed_blocks.len(), 4);
+        for (i, block) in sst.unconsumed_blocks.iter().enumerate() {
+            let key = Bytes::copy_from_slice(&[b'a' + i as u8; 16]);
+            assert_eq!(block.key_span, Some((key.clone(), key)));
+        }
+
+        // all entries in one block
+        let mut builder = SsTableFormat::default().table_builder();
+        for i in 0..4u8 {
+            builder
+                .add_value(&[b'a' + i; 16], &[i; 16], None, None)
+                .await
+                .unwrap();
+        }
+        let sst = builder.build().await.unwrap();
+        assert_eq!(sst.unconsumed_blocks.len(), 1);
+        assert_eq!(
+            sst.unconsumed_blocks[0].key_span,
+            Some((
+                Bytes::copy_from_slice(&[b'a'; 16]),
+                Bytes::copy_from_slice(&[b'd'; 16])
+            ))
+        );
     }
 
     #[rstest]
