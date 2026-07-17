@@ -1,13 +1,61 @@
 //! Block cache policy for controlling which SST components are cached.
 
+use std::ops::{Bound, RangeBounds};
+
+use bytes::Bytes;
+
+use crate::bytes_range::BytesRange;
+
 /// A decoded SST component that can be inserted into the block cache after an
 /// SST write.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum CacheComponent {
-    Data,
+    /// Data blocks whose key span overlaps the supplied key range.
+    Data((Bound<Bytes>, Bound<Bytes>)),
     Filters,
     Index,
     Stats,
+}
+
+impl CacheComponent {
+    /// Convenience constructor for [`CacheComponent::Data`] that accepts any
+    /// [`RangeBounds`], mirroring the `Db::scan` signature. Pass `..` to
+    /// select all data blocks.
+    pub fn data<K, T>(range: T) -> Self
+    where
+        K: AsRef<[u8]>,
+        T: RangeBounds<K>,
+    {
+        let start = range
+            .start_bound()
+            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        let end = range
+            .end_bound()
+            .map(|b| Bytes::copy_from_slice(b.as_ref()));
+        CacheComponent::Data((start, end))
+    }
+}
+
+/// Whether any [`CacheComponent::Data`] range in `components` overlaps a data
+/// block whose first and last key are `key_span`.
+pub(crate) fn should_cache_data_block(
+    components: &[CacheComponent],
+    key_span: &(Bytes, Bytes),
+) -> bool {
+    components.iter().any(|component| {
+        let CacheComponent::Data(range) = component else {
+            return false;
+        };
+        let (first_key, last_key) = key_span;
+        let Some(range) = BytesRange::try_new(range.0.clone(), range.1.clone()) else {
+            return false;
+        };
+        let span = BytesRange::new(
+            Bound::Included(first_key.clone()),
+            Bound::Included(last_key.clone()),
+        );
+        range.intersect(&span).is_some()
+    })
 }
 
 /// Controls block-cache insertion for memtable flush and compaction output.
@@ -50,7 +98,7 @@ impl Default for BlockCachePolicy {
     fn default() -> Self {
         Self {
             flush_components: vec![
-                CacheComponent::Data,
+                CacheComponent::data::<&[u8], _>(..),
                 CacheComponent::Index,
                 CacheComponent::Filters,
             ],
@@ -70,7 +118,7 @@ mod tests {
         assert_eq!(
             policy.flush_components(),
             &[
-                CacheComponent::Data,
+                CacheComponent::data::<&[u8], _>(..),
                 CacheComponent::Index,
                 CacheComponent::Filters
             ]
@@ -79,6 +127,30 @@ mod tests {
             policy.compaction_output_components(),
             &[CacheComponent::Index, CacheComponent::Filters]
         );
+    }
+
+    #[test]
+    fn should_cache_data_block_by_key_span_overlap() {
+        let components = [CacheComponent::data(b"c".as_slice()..b"f".as_slice())];
+        let span = |first: &[u8], last: &[u8]| {
+            (Bytes::copy_from_slice(first), Bytes::copy_from_slice(last))
+        };
+
+        assert!(should_cache_data_block(&components, &span(b"a", b"c")));
+        assert!(should_cache_data_block(&components, &span(b"d", b"e")));
+        assert!(should_cache_data_block(&components, &span(b"e", b"z")));
+        // end bound is exclusive
+        assert!(!should_cache_data_block(&components, &span(b"f", b"z")));
+        assert!(!should_cache_data_block(&components, &span(b"a", b"b")));
+
+        assert!(!should_cache_data_block(
+            &[CacheComponent::Index],
+            &span(b"d", b"e")
+        ));
+        assert!(should_cache_data_block(
+            &[CacheComponent::data::<&[u8], _>(..)],
+            &span(b"a", b"b")
+        ));
     }
 
     #[test]

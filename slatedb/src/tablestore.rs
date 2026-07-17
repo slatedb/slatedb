@@ -17,7 +17,7 @@ use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 use crate::blob::ReadOnlyBlob;
-use crate::block_cache_policy::{BlockCachePolicy, CacheComponent};
+use crate::block_cache_policy::{should_cache_data_block, BlockCachePolicy, CacheComponent};
 use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
 use crate::db_cache_manager::CacheTarget;
 use crate::db_state::{SsTableHandle, SsTableId, SstType};
@@ -429,18 +429,23 @@ impl TableStore {
             return;
         };
         let components = self.components_to_cache(&sst_table_id);
-        if components.contains(&CacheComponent::Data) {
-            // Data blocks come from `unconsumed_blocks`, so a caller that already
-            // streamed the data blocks out (the streaming writer) can only insert
-            // metadata.
-            for block in &encoded_sst.unconsumed_blocks {
-                cache
-                    .insert(
-                        (sst_table_id, block.offset).into(),
-                        CachedEntry::with_block(Arc::clone(&block.block)),
-                    )
-                    .await;
+        // Data blocks come from `unconsumed_blocks`, so a caller that already
+        // streamed the data blocks out (the streaming writer) can only insert
+        // metadata.
+        for block in &encoded_sst.unconsumed_blocks {
+            // Blocks without a tracked key span (WAL blocks) are never cached.
+            let Some(key_span) = &block.key_span else {
+                continue;
+            };
+            if !should_cache_data_block(components, key_span) {
+                continue;
             }
+            cache
+                .insert(
+                    (sst_table_id, block.offset).into(),
+                    CachedEntry::with_block(Arc::clone(&block.block)),
+                )
+                .await;
         }
         if components.contains(&CacheComponent::Index) {
             cache
@@ -1264,12 +1269,9 @@ impl EncodedSsTableWriter {
 
     async fn write_block(&mut self, block: EncodedSsTableBlock) -> Result<(), SlateDBError> {
         self.writer.write_all(block.encoded_bytes.as_ref()).await?;
-        if let Some(cache) = &self.table_store.cache {
-            if self
-                .table_store
-                .components_to_cache(&self.id)
-                .contains(&CacheComponent::Data)
-            {
+        if let (Some(cache), Some(key_span)) = (&self.table_store.cache, &block.key_span) {
+            let components = self.table_store.components_to_cache(&self.id);
+            if should_cache_data_block(components, key_span) {
                 cache
                     .insert(
                         (self.id, block.offset).into(),
@@ -2270,7 +2272,7 @@ mod tests {
     #[case::filters_only(&[CacheComponent::Filters])]
     #[case::index_and_filters(&[CacheComponent::Index, CacheComponent::Filters])]
     #[case::all(&[
-        CacheComponent::Data,
+        CacheComponent::data::<&[u8], _>(..),
         CacheComponent::Filters,
         CacheComponent::Index,
         CacheComponent::Stats,
@@ -2297,7 +2299,9 @@ mod tests {
 
         assert_eq!(
             cache.get_block(&data_key).await.unwrap().is_some(),
-            selected.contains(&CacheComponent::Data)
+            selected
+                .iter()
+                .any(|c| matches!(c, CacheComponent::Data(_)))
         );
         assert_eq!(
             cache.get_index(&index_key).await.unwrap().is_some(),
@@ -2329,7 +2333,7 @@ mod tests {
             Some(cache.clone()),
             TableStoreKind::Compactor,
             BlockCachePolicy::default().with_compaction_output_components(&[
-                CacheComponent::Data,
+                CacheComponent::data::<&[u8], _>(..),
                 CacheComponent::Index,
                 CacheComponent::Stats,
             ]),
@@ -2367,6 +2371,97 @@ mod tests {
         // be used and reading the index will just return an error.
         os.delete(&ts.path(&id)).await.unwrap();
         assert!(ts.read_index(&handle, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn write_sst_should_cache_only_blocks_in_data_range() {
+        let cache = Arc::new(TestCache::new());
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(Arc::new(InMemory::new()), None),
+            format,
+            Path::from("/root"),
+            Some(cache.clone()),
+            TableStoreKind::Main,
+            BlockCachePolicy::default().with_flush_components(&[CacheComponent::data(
+                [b'b'; 16].as_slice()..=[b'c'; 16].as_slice(),
+            )]),
+        ));
+        // single-entry blocks for keys aa.., bb.., cc.., dd..
+        let mut builder = ts.table_builder();
+        for i in 0..4 {
+            builder
+                .add(RowEntry::new_value(&[b'a' + i; 16], &[i; 16], 0))
+                .await
+                .unwrap();
+        }
+        let sst = builder.build().await.unwrap();
+        assert_eq!(sst.unconsumed_blocks.len(), 4);
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+
+        ts.write_sst(&id, &sst).await.unwrap();
+
+        for (block, expected) in sst.unconsumed_blocks.iter().zip([false, true, true, false]) {
+            let data_key: CachedKey = (id, block.offset).into();
+            assert_eq!(
+                cache.get_block(&data_key).await.unwrap().is_some(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_writer_should_cache_only_blocks_in_data_range() {
+        let cache = Arc::new(TestCache::new());
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(Arc::new(InMemory::new()), None),
+            format,
+            Path::from("/root"),
+            Some(cache.clone()),
+            TableStoreKind::Compactor,
+            BlockCachePolicy::default().with_compaction_output_components(&[
+                CacheComponent::data([b'b'; 16].as_slice()..=[b'c'; 16].as_slice()),
+                CacheComponent::Index,
+            ]),
+        ));
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        // single-entry blocks for keys aa.., bb.., cc.., dd..
+        let mut writer = ts.table_writer(id);
+        for i in 0..4 {
+            writer
+                .add(RowEntry::new_value(&[b'a' + i; 16], &[i; 16], 0))
+                .await
+                .unwrap();
+        }
+
+        let handle = writer.close().await.unwrap();
+
+        let index_key: CachedKey = (id, handle.info.index_offset).into();
+        let index = cache
+            .get_index(&index_key)
+            .await
+            .unwrap()
+            .unwrap()
+            .sst_index()
+            .unwrap();
+        let block_metas = index.borrow().block_meta();
+        assert_eq!(block_metas.len(), 4);
+        for (i, expected) in [false, true, true, false].into_iter().enumerate() {
+            let data_key: CachedKey = (id, block_metas.get(i).offset()).into();
+            assert_eq!(
+                cache.get_block(&data_key).await.unwrap().is_some(),
+                expected
+            );
+        }
     }
 
     #[tokio::test]
