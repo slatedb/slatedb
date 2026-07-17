@@ -829,24 +829,26 @@ impl Settings {
     /// the first invalid setting or combination encountered.
     pub fn validate(&self) -> Result<(), crate::Error> {
         if self.l0_flush_parallelism == 0 {
-            return Err(crate::Error::invalid(
-                "invalid configuration: l0_flush_parallelism must be at least 1".into(),
-            ));
+            return Err(SlateDBError::InvalidConfiguration(
+                "l0_flush_parallelism must be at least 1".into(),
+            )
+            .into());
         }
         if self.max_wal_flushes_before_l0_flush < 4096 {
-            return Err(crate::Error::invalid(
-                "invalid configuration: max_wal_flushes_before_l0_flush must be at least 4096"
-                    .into(),
-            ));
+            return Err(SlateDBError::InvalidConfiguration(
+                "max_wal_flushes_before_l0_flush must be at least 4096".into(),
+            )
+            .into());
         }
-        // `max_unflushed_bytes` must exceed `l0_sst_size_bytes` so the active
-        // memtable is always frozen before backpressure permanently blocks writes.
+        // `max_unflushed_bytes` (the backpressure threshold) must exceed
+        // `l0_sst_size_bytes` (the memtable freeze threshold) so that memory can
+        // hold a memtable up to the freeze point before backpressure kicks in.
         if self.max_unflushed_bytes <= self.l0_sst_size_bytes {
-            return Err(crate::Error::invalid(format!(
-                "invalid configuration: max_unflushed_bytes ({}) must be greater than \
-                 l0_sst_size_bytes ({})",
+            return Err(SlateDBError::InvalidConfiguration(format!(
+                "max_unflushed_bytes ({}) must be greater than l0_sst_size_bytes ({})",
                 self.max_unflushed_bytes, self.l0_sst_size_bytes,
-            )));
+            ))
+            .into());
         }
         Ok(())
     }

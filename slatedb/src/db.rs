@@ -4987,7 +4987,9 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let mut options = test_db_options(0, 1, None);
-        options.max_unflushed_bytes = 1;
+        // Must stay above l0_sst_size_bytes (1) but small enough that a single
+        // write exceeds it and triggers backpressure.
+        options.max_unflushed_bytes = 2;
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
@@ -7046,8 +7048,8 @@ mod tests {
         let path = "/tmp/test_recent_snapshot_min_seq_monotonic";
         let object_store = Arc::new(InMemory::new());
         let settings = Settings {
-            l0_sst_size_bytes: 4 * 1024,   // Smaller to trigger flush more easily
-            max_unflushed_bytes: 2 * 1024, // Smaller to trigger flush more easily
+            l0_sst_size_bytes: 2 * 1024,   // Smaller to trigger flush more easily
+            max_unflushed_bytes: 4 * 1024, // Smaller to trigger flush more easily
             min_filter_keys: 0,
             flush_interval: Some(Duration::from_millis(100)),
             ..Default::default()
