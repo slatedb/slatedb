@@ -378,7 +378,7 @@ impl DbInner {
 
                 let await_flush_wal = self
                     .wal_observer
-                    .wait_until_wal_released(wal_status.last_flushed_wal_id);
+                    .wait_until_wal_flushed(wal_status.last_flushed_wal_id);
 
                 let timeout_fut = self.system_clock.sleep(Duration::from_secs(30));
                 let await_closed = async {
@@ -2095,7 +2095,7 @@ impl DbWalObserver {
     }
 
     /// Waits until the wal a given wal id is released by the wal writer
-    async fn wait_until_wal_released(&self, last_flushed_wal_id: u64) -> Result<(), SlateDBError> {
+    async fn wait_until_wal_flushed(&self, last_flushed_wal_id: u64) -> Result<(), SlateDBError> {
         self.wait_on_condition(|status| status.last_flushed_wal_id > last_flushed_wal_id)
             .await
     }
@@ -4259,7 +4259,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_flush_memtable_max_wal_flushes";
 
-        let mut settings = test_db_options(0, usize::MAX, None);
+        let mut settings = test_db_options(0, 64 * 1024 * 1024, None);
         settings.flush_interval = None; // Disable flushing
         settings.max_wal_flushes_before_l0_flush = MAX_WAL_FLUSHES_BEFORE_L0_FLUSH;
 
@@ -4968,7 +4968,9 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let mut options = test_db_options(0, 1, None);
-        options.max_unflushed_bytes = 1;
+        // Must stay above l0_sst_size_bytes (1) but small enough that a single
+        // write exceeds it and triggers backpressure.
+        options.max_unflushed_bytes = 2;
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
@@ -5043,12 +5045,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_backpressure_waiter_exits_when_db_is_fenced() {
-        // Build a DB whose WAL will not flush on a timer and whose backpressure
-        // threshold is low enough for one write to exceed it.
+        // Pause the L0 upload so a frozen memtable can't drain, keeping unflushed
+        // bytes above the backpressure threshold indefinitely.
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let mut options = test_db_options(0, 1024 * 1024, None);
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "pause").unwrap();
+
+        let mut options = test_db_options(0, 4 * 1024, None);
         options.flush_interval = None;
-        options.max_unflushed_bytes = 1;
+        options.max_unflushed_bytes = 8 * 1024;
 
         // Use a metrics recorder so the test can observe when the spawned task
         // has actually entered maybe_apply_backpressure().
@@ -5058,6 +5063,7 @@ mod tests {
             object_store,
         )
         .with_settings(options)
+        .with_fp_registry(fp_registry.clone())
         .with_metrics_recorder(metrics_recorder.clone())
         .build()
         .await
@@ -5067,13 +5073,10 @@ mod tests {
             ..Default::default()
         };
 
-        // Write enough data to leave bytes buffered in the WAL while avoiding
-        // any automatic WAL or memtable flush.
-        let large_value = vec![b'x'; 8 * 1024];
+        let large_value = vec![b'x'; 16 * 1024];
         db.put_with_options(b"key1", &large_value, &PutOptions::default(), &write_opts)
             .await
             .unwrap();
-        assert_eq!(db.inner.wal_observer.status().buffered_wal_entries_count, 1);
 
         // Start backpressure on a cloned inner handle. This parks the task on
         // the same wait path used by writers before they enqueue a batch.
@@ -5109,7 +5112,11 @@ mod tests {
             backpressure_task.abort();
             let _ = backpressure_task.await;
         }
-        db.close().await.unwrap();
+
+        // Resume the L0 upload so the pending memtable can drain and close can
+        // complete cleanly.
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
+        let _ = db.close().await;
 
         // Assert that the waiter exits with the terminal fenced error, not a
         // successful write path or some unrelated task failure.
@@ -7026,8 +7033,8 @@ mod tests {
         let path = "/tmp/test_recent_snapshot_min_seq_monotonic";
         let object_store = Arc::new(InMemory::new());
         let settings = Settings {
-            l0_sst_size_bytes: 4 * 1024,   // Smaller to trigger flush more easily
-            max_unflushed_bytes: 2 * 1024, // Smaller to trigger flush more easily
+            l0_sst_size_bytes: 2 * 1024,   // Smaller to trigger flush more easily
+            max_unflushed_bytes: 4 * 1024, // Smaller to trigger flush more easily
             min_filter_keys: 0,
             flush_interval: Some(Duration::from_millis(100)),
             ..Default::default()

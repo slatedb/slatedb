@@ -413,17 +413,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
-        if self.settings.l0_flush_parallelism == 0 {
-            return Err(crate::Error::invalid(
-                "invalid configuration: l0_flush_parallelism must be at least 1".into(),
-            ));
-        }
-        if self.settings.max_wal_flushes_before_l0_flush < 4096 {
-            return Err(crate::Error::invalid(
-                "invalid configuration: max_wal_flushes_before_l0_flush must be at least 4096"
-                    .into(),
-            ));
-        }
+        self.settings.validate()?;
 
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
