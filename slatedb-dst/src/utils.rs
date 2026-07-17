@@ -43,7 +43,8 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
     let l0_sst_size_bytes = rng.random_range(MIB_1..MIB_500);
     let l0_max_ssts = rng.random_range(4..8);
     let l0_max_ssts_per_key = l0_max_ssts;
-    let max_unflushed_bytes = rng.random_range(MIB_1..GIB_2);
+    // Keep `max_unflushed_bytes` strictly greater than `l0_sst_size_bytes`.
+    let max_unflushed_bytes = rng.random_range((l0_sst_size_bytes + 1)..GIB_2);
     let compression_codec_idx = rng.random_range(0..COMPRESSION_CODECS.len());
     let compression_codec =
         if let Some(compression_codec) = COMPRESSION_CODECS[compression_codec_idx] {
