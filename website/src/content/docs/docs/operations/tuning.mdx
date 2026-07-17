@@ -45,8 +45,10 @@ SlateDB provides several configuration options to tune performance. See [slatedb
 
 * **`flush_interval`**: How long SlateDB waits before flushing the mutable WAL to object storage. Lower values reduce durable write latency but increase object-store PUT frequency.
 * **`l0_sst_size_bytes`**: The size of L0 SSTs. Larger SSTs provide better compression but take longer to upload.
-* **`max_unflushed_bytes`**: The total amount of unflushed WAL and memtable data allowed in memory before SlateDB applies backpressure to writers.
+* **`max_unflushed_bytes`**: The total amount of unflushed WAL and memtable data allowed in memory before SlateDB applies backpressure to writers. Must be strictly greater than `l0_sst_size_bytes` (validated when opening the database). If `max_unflushed_bytes` is less than or equal to `l0_sst_size_bytes`, a single write can push the active memtable past the backpressure limit before it is ever frozen, causing writes to permanently block since there's no immutable memtable or WAL to drain.
 * **`l0_max_ssts`**: The maximum number of L0 SSTs SlateDB allows before it stops flushing memtables and waits for compaction to catch up.
+* **`l0_flush_parallelism`**: Must be at least 1 (validated when opening the database).
+* **`max_wal_flushes_before_l0_flush`**: Must be at least 4096 (validated when opening the database).
 
 ### Read Performance
 
