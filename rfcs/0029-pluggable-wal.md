@@ -587,6 +587,14 @@ The prototype branch has an example implementation of the WAL traits that writes
 a Kafka topic and implements fencing using Kafka transactions:
 https://github.com/slatedb/slatedb/tree/wal-rfc-prototype/slatedb/src/wal/kafka
 
+It also includes a benchmark test that steadily writes rows to a `Db`. Every 100ms it samples
+the last written row and measures how long it took to become available on the reader. With
+a Kafka backed WAL it sees the following distribution for latency between durably writing
+and being available to read on the reader:
+- p50: 11.1ms
+- p90: 12.1ms
+- p99: 15.8ms
+
 ## Impact Analysis
 
 SlateDB features and components that this RFC interacts with. Check all that apply.
