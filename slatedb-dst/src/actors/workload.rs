@@ -8,7 +8,7 @@ use rand::RngCore;
 use slatedb::config::{
     DurabilityLevel, MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
 };
-use slatedb::{Error, MergeOperator, MergeOperatorError, WriteBatch};
+use slatedb::{Error, IterationOrder, MergeOperator, MergeOperatorError, WriteBatch};
 use tracing::instrument;
 
 use crate::{Actor, ActorCtx};
@@ -351,7 +351,7 @@ async fn verify_scan(
     read_durability: DurabilityLevel,
     observed: &mut BTreeMap<Bytes, Observation>,
 ) -> Result<(), Error> {
-    let scan_options = ScanOptions::new().with_durability_filter(read_durability);
+    let scan_options = sample_scan_options(&mut *ctx.rand().rng(), read_durability);
     let mut iter = ctx
         .db()
         .scan_prefix_with_options(key_prefix.as_bytes(), .., &scan_options)
@@ -388,6 +388,36 @@ async fn verify_scan(
     }
 
     Ok(())
+}
+
+fn sample_scan_options(rng: &mut impl RngCore, read_durability: DurabilityLevel) -> ScanOptions {
+    let sample = rng.next_u64();
+    scan_options_from_sample(sample, read_durability)
+}
+
+fn scan_options_from_sample(sample: u64, read_durability: DurabilityLevel) -> ScanOptions {
+    let read_ahead_bytes = match sample & 0b11 {
+        0 => 1,
+        1 => 4 * 1024,
+        2 => 64 * 1024,
+        _ => 1024 * 1024,
+    };
+    let cache_blocks = sample & (1 << 2) != 0;
+    let max_fetch_tasks = 1 + ((sample >> 3) & 0b11) as usize;
+    let order = if sample & (1 << 5) == 0 {
+        IterationOrder::Ascending
+    } else {
+        IterationOrder::Descending
+    };
+
+    // Keep visibility semantics fixed so actor-local observations remain comparable.
+    // The remaining options only vary how the same logical scan is executed.
+    ScanOptions::new()
+        .with_durability_filter(read_durability)
+        .with_read_ahead_bytes(read_ahead_bytes)
+        .with_cache_blocks(cache_blocks)
+        .with_max_fetch_tasks(max_fetch_tasks)
+        .with_order(order)
 }
 
 fn observe_present(
@@ -445,4 +475,30 @@ pub(crate) fn decode_workload_value(value: &[u8]) -> u64 {
         .try_into()
         .expect("workload value version slice has fixed size");
     u64::from_be_bytes(version_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sample_scan_options_varies_safe_scan_parameters() {
+        let options = scan_options_from_sample(0, DurabilityLevel::Remote);
+
+        assert_eq!(options.durability_filter, DurabilityLevel::Remote);
+        assert!(!options.dirty);
+        assert_eq!(options.read_ahead_bytes, 1);
+        assert!(!options.cache_blocks);
+        assert_eq!(options.max_fetch_tasks, 1);
+        assert!(matches!(options.order, IterationOrder::Ascending));
+
+        let options = scan_options_from_sample(0b11_1111, DurabilityLevel::Memory);
+
+        assert_eq!(options.durability_filter, DurabilityLevel::Memory);
+        assert!(!options.dirty);
+        assert_eq!(options.read_ahead_bytes, 1024 * 1024);
+        assert!(options.cache_blocks);
+        assert_eq!(options.max_fetch_tasks, 4);
+        assert!(matches!(options.order, IterationOrder::Descending));
+    }
 }
