@@ -46,6 +46,10 @@ pub(crate) struct CachedObjectStore {
     part_flights: SingleFlight<(Path, PartID), Bytes>,
 }
 
+fn copy_part_range(bytes: &Bytes, range: Range<usize>) -> Bytes {
+    Bytes::copy_from_slice(&bytes[range])
+}
+
 impl CachedObjectStore {
     pub(crate) fn new(
         object_store: Arc<dyn ObjectStore>,
@@ -565,7 +569,10 @@ impl CachedObjectStore {
                 })
                 .await?;
 
-            Ok((bytes.slice(range_in_part), ReadResultSource::Upstream))
+            Ok((
+                copy_part_range(&bytes, range_in_part),
+                ReadResultSource::Upstream,
+            ))
         })
     }
 
@@ -1009,7 +1016,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::CachedObjectStore;
+    use super::{copy_part_range, CachedObjectStore};
     use crate::cached_object_store::policy::CachePutConfig;
     use crate::cached_object_store::stats::CachedObjectStoreStats;
     use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
@@ -1032,6 +1039,19 @@ mod tests {
         let path = format!("/tmp/testcache-{}", dir_name);
         let _ = std::fs::remove_dir_all(&path);
         std::path::PathBuf::from(path)
+    }
+
+    #[test]
+    fn test_copy_part_range_does_not_retain_full_part() {
+        let part = Bytes::from(vec![7_u8; 4 * 1024 * 1024]);
+        let range = 1024..5120;
+        let source_range_ptr = part[range.clone()].as_ptr();
+
+        let copied = copy_part_range(&part, range);
+
+        assert_eq!(copied.len(), 4096);
+        assert!(copied.iter().all(|byte| *byte == 7));
+        assert_ne!(copied.as_ptr(), source_range_ptr);
     }
 
     fn new_cached_store(object_store: Arc<dyn ObjectStore>) -> Arc<CachedObjectStore> {
