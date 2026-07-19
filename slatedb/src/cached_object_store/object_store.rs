@@ -534,7 +534,7 @@ impl CachedObjectStore {
             // Cache miss, so we need to fetch from the object store.
             // Read Part — deduplicate concurrent fetches of the same part.
             // The SingleFlight fetches the full part and saves it to cache; each
-            // caller then slices out their own range_in_part.
+            // caller then copies out their own range_in_part.
             let bytes = this
                 .part_flights
                 .call((location.clone(), part_id), || async {
@@ -565,7 +565,10 @@ impl CachedObjectStore {
                 })
                 .await?;
 
-            Ok((bytes.slice(range_in_part), ReadResultSource::Upstream))
+            Ok((
+                Bytes::copy_from_slice(&bytes[range_in_part]),
+                ReadResultSource::Upstream,
+            ))
         })
     }
 
@@ -1009,7 +1012,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::CachedObjectStore;
+    use super::{CachedObjectStore, ReadResultSource};
     use crate::cached_object_store::policy::CachePutConfig;
     use crate::cached_object_store::stats::CachedObjectStoreStats;
     use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
@@ -1035,6 +1038,13 @@ mod tests {
     }
 
     fn new_cached_store(object_store: Arc<dyn ObjectStore>) -> Arc<CachedObjectStore> {
+        new_cached_store_with_part_size(object_store, 1024)
+    }
+
+    fn new_cached_store_with_part_size(
+        object_store: Arc<dyn ObjectStore>,
+        part_size_bytes: usize,
+    ) -> Arc<CachedObjectStore> {
         let test_cache_folder = new_test_cache_folder();
         let recorder = MetricsRecorderHelper::noop();
         let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
@@ -1050,11 +1060,36 @@ mod tests {
         CachedObjectStore::new(
             object_store,
             cache_storage,
-            1024,
+            part_size_bytes,
             CachePutConfig::default(),
             stats,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_upstream_part_range_does_not_retain_full_part() {
+        let part_size = 4 * 1024 * 1024;
+        let part = Bytes::from(vec![7_u8; part_size]);
+        let range = 1024..5120;
+        let source_range_ptr = part[range.clone()].as_ptr();
+        let location = Path::from("test");
+        let object_store = Arc::new(object_store::memory::InMemory::new());
+        object_store
+            .put(&location, PutPayload::from_bytes(part))
+            .await
+            .unwrap();
+        let cached_store = new_cached_store_with_part_size(object_store, part_size);
+
+        let (copied, source) = cached_store
+            .read_part(&location, 0, range, false)
+            .await
+            .unwrap();
+
+        assert!(matches!(source, ReadResultSource::Upstream));
+        assert_eq!(copied.len(), 4096);
+        assert!(copied.iter().all(|byte| *byte == 7));
+        assert_ne!(copied.as_ptr(), source_range_ptr);
     }
 
     #[tokio::test]
