@@ -17,9 +17,9 @@ use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 use crate::blob::ReadOnlyBlob;
-use crate::block_cache_policy::{should_cache_data_block, BlockCachePolicy, CacheComponent};
+use crate::block_cache_policy::{should_cache_data_block, BlockCachePolicy};
+use crate::db_cache::CacheTarget;
 use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
-use crate::db_cache_manager::CacheTarget;
 use crate::db_state::{SsTableHandle, SsTableId, SstType};
 use crate::error::SlateDBError;
 use crate::filter_policy::NamedFilter;
@@ -406,15 +406,15 @@ impl TableStore {
         ))
     }
 
-    /// Components a write of the SST inserts into the block cache.
-    fn components_to_cache(&self, id: &SsTableId) -> &[CacheComponent] {
+    /// Targets a write of the SST inserts into the block cache.
+    fn targets_to_cache(&self, id: &SsTableId) -> &[CacheTarget] {
         match (id, self.kind) {
             (SsTableId::Wal(_), _) => &[],
             (SsTableId::Compacted(_), TableStoreKind::Compactor) => {
-                self.block_cache_policy.compaction_output_components()
+                self.block_cache_policy.compaction_output_targets()
             }
             (SsTableId::Compacted(_), TableStoreKind::Main) => {
-                self.block_cache_policy.flush_components()
+                self.block_cache_policy.flush_targets()
             }
             // We only cache from the main store (flush) and the compactor
             // (compaction output) right now.
@@ -422,22 +422,23 @@ impl TableStore {
         }
     }
 
-    /// Inserts the components selected by the block cache policy for
+    /// Inserts the targets selected by the block cache policy for
     /// `sst_table_id` into the block cache.
+    ///
+    /// Data blocks come from `unconsumed_blocks`, so a caller that already
+    /// streamed the data blocks out (the streaming writer) can only insert
+    /// metadata.
     async fn cache_on_sst_write(&self, sst_table_id: SsTableId, encoded_sst: &EncodedSsTable) {
         let Some(cache) = &self.cache else {
             return;
         };
-        let components = self.components_to_cache(&sst_table_id);
-        // Data blocks come from `unconsumed_blocks`, so a caller that already
-        // streamed the data blocks out (the streaming writer) can only insert
-        // metadata.
+        let targets = self.targets_to_cache(&sst_table_id);
         for block in &encoded_sst.unconsumed_blocks {
             // Blocks without a tracked key span (WAL blocks) are never cached.
             let Some(key_span) = &block.key_span else {
                 continue;
             };
-            if !should_cache_data_block(components, key_span) {
+            if !should_cache_data_block(targets, key_span) {
                 continue;
             }
             cache
@@ -447,7 +448,7 @@ impl TableStore {
                 )
                 .await;
         }
-        if components.contains(&CacheComponent::Index) {
+        if targets.contains(&CacheTarget::Index) {
             cache
                 .insert(
                     (sst_table_id, encoded_sst.info.index_offset).into(),
@@ -455,7 +456,7 @@ impl TableStore {
                 )
                 .await;
         }
-        if components.contains(&CacheComponent::Filters) && !encoded_sst.filters.is_empty() {
+        if targets.contains(&CacheTarget::Filters) && !encoded_sst.filters.is_empty() {
             cache
                 .insert(
                     (sst_table_id, encoded_sst.info.filter_offset).into(),
@@ -463,7 +464,7 @@ impl TableStore {
                 )
                 .await;
         }
-        if components.contains(&CacheComponent::Stats) {
+        if targets.contains(&CacheTarget::Stats) {
             if let Some(stats) = &encoded_sst.stats {
                 cache
                     .insert(
@@ -1270,8 +1271,8 @@ impl EncodedSsTableWriter {
     async fn write_block(&mut self, block: EncodedSsTableBlock) -> Result<(), SlateDBError> {
         self.writer.write_all(block.encoded_bytes.as_ref()).await?;
         if let (Some(cache), Some(key_span)) = (&self.table_store.cache, &block.key_span) {
-            let components = self.table_store.components_to_cache(&self.id);
-            if should_cache_data_block(components, key_span) {
+            let targets = self.table_store.targets_to_cache(&self.id);
+            if should_cache_data_block(targets, key_span) {
                 cache
                     .insert(
                         (self.id, block.offset).into(),
@@ -1315,8 +1316,9 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
 
-    use crate::block_cache_policy::{BlockCachePolicy, CacheComponent};
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::db_cache::test_utils::TestCache;
+    use crate::db_cache::CacheTarget;
     use crate::db_cache::SplitCache;
     use crate::db_cache::{CachedKey, DbCache, DbCacheWrapper};
     use crate::error;
@@ -2243,7 +2245,7 @@ mod tests {
             Path::from("/root"),
             Some(wrapper),
             TableStoreKind::Main,
-            BlockCachePolicy::default().with_flush_components(&[CacheComponent::Filters]),
+            BlockCachePolicy::default().with_flush_targets(&[CacheTarget::Filters]),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst = build_test_sst(&ts.sst_format, 3).await;
@@ -2269,16 +2271,16 @@ mod tests {
     }
 
     #[rstest]
-    #[case::filters_only(&[CacheComponent::Filters])]
-    #[case::index_and_filters(&[CacheComponent::Index, CacheComponent::Filters])]
+    #[case::filters_only(&[CacheTarget::Filters])]
+    #[case::index_and_filters(&[CacheTarget::Index, CacheTarget::Filters])]
     #[case::all(&[
-        CacheComponent::data::<&[u8], _>(..),
-        CacheComponent::Filters,
-        CacheComponent::Index,
-        CacheComponent::Stats,
+        CacheTarget::data::<&[u8], _>(..),
+        CacheTarget::Filters,
+        CacheTarget::Index,
+        CacheTarget::Stats,
     ])]
     #[tokio::test]
-    async fn write_sst_should_cache_only_selected_components(#[case] selected: &[CacheComponent]) {
+    async fn write_sst_should_cache_only_selected_components(#[case] selected: &[CacheTarget]) {
         let cache = Arc::new(TestCache::new());
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(Arc::new(InMemory::new()), None),
@@ -2286,7 +2288,7 @@ mod tests {
             Path::from("/root"),
             Some(cache.clone()),
             TableStoreKind::Main,
-            BlockCachePolicy::default().with_flush_components(selected),
+            BlockCachePolicy::default().with_flush_targets(selected),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst = build_test_sst(&ts.sst_format, 3).await;
@@ -2299,21 +2301,19 @@ mod tests {
 
         assert_eq!(
             cache.get_block(&data_key).await.unwrap().is_some(),
-            selected
-                .iter()
-                .any(|c| matches!(c, CacheComponent::Data(_)))
+            selected.iter().any(|c| matches!(c, CacheTarget::Data(_)))
         );
         assert_eq!(
             cache.get_index(&index_key).await.unwrap().is_some(),
-            selected.contains(&CacheComponent::Index)
+            selected.contains(&CacheTarget::Index)
         );
         assert_eq!(
             cache.get_filter(&filter_key).await.unwrap().is_some(),
-            selected.contains(&CacheComponent::Filters)
+            selected.contains(&CacheTarget::Filters)
         );
         assert_eq!(
             cache.get_stats(&stats_key).await.unwrap().is_some(),
-            selected.contains(&CacheComponent::Stats)
+            selected.contains(&CacheTarget::Stats)
         );
     }
 
@@ -2332,10 +2332,10 @@ mod tests {
             Path::from("/root"),
             Some(cache.clone()),
             TableStoreKind::Compactor,
-            BlockCachePolicy::default().with_compaction_output_components(&[
-                CacheComponent::data::<&[u8], _>(..),
-                CacheComponent::Index,
-                CacheComponent::Stats,
+            BlockCachePolicy::default().with_compaction_output_targets(&[
+                CacheTarget::data::<&[u8], _>(..),
+                CacheTarget::Index,
+                CacheTarget::Stats,
             ]),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
@@ -2387,7 +2387,7 @@ mod tests {
             Path::from("/root"),
             Some(cache.clone()),
             TableStoreKind::Main,
-            BlockCachePolicy::default().with_flush_components(&[CacheComponent::data(
+            BlockCachePolicy::default().with_flush_targets(&[CacheTarget::data(
                 [b'b'; 16].as_slice()..=[b'c'; 16].as_slice(),
             )]),
         ));
@@ -2428,9 +2428,9 @@ mod tests {
             Path::from("/root"),
             Some(cache.clone()),
             TableStoreKind::Compactor,
-            BlockCachePolicy::default().with_compaction_output_components(&[
-                CacheComponent::data([b'b'; 16].as_slice()..=[b'c'; 16].as_slice()),
-                CacheComponent::Index,
+            BlockCachePolicy::default().with_compaction_output_targets(&[
+                CacheTarget::data([b'b'; 16].as_slice()..=[b'c'; 16].as_slice()),
+                CacheTarget::Index,
             ]),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());

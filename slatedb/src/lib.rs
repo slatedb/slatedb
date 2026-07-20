@@ -33,7 +33,7 @@ pub use fail_parallel;
 pub use object_store;
 
 pub use batch::WriteBatch;
-pub use block_cache_policy::{BlockCachePolicy, CacheComponent};
+pub use block_cache_policy::BlockCachePolicy;
 pub use bytes_range::ByteRangeBounds;
 pub use cached_object_store::stats as cached_object_store_stats;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};
@@ -49,7 +49,7 @@ pub use config::{Settings, SstBlockSize};
 pub use db::builder::{CloneSourceSpec, CompactionWorkerBuilder};
 pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, SegmentPrefix, WriteHandle};
 pub use db_cache::stats as db_cache_stats;
-pub use db_cache_manager::CacheTarget;
+pub use db_cache::CacheTarget;
 pub use db_iter::{DbIterator, DbRecencyIterator};
 pub use db_reader::{DbReader, DbReaderMode};
 pub use db_snapshot::DbSnapshot;

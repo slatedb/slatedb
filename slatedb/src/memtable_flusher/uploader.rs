@@ -298,10 +298,11 @@ impl MessageHandler<UploadJob> for UploadHandler {
 #[cfg(test)]
 mod tests {
     use super::{TrackerMessage, UploadJob, Uploader};
-    use crate::block_cache_policy::{BlockCachePolicy, CacheComponent};
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::config::Settings;
     use crate::db::DbInner;
     use crate::db_cache::test_utils::TestCache;
+    use crate::db_cache::CacheTarget;
     use crate::db_cache::{CachedKey, DbCache};
     use crate::db_state::{SsTableId, SsTableView};
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
@@ -600,7 +601,7 @@ mod tests {
             Arc::new(FailPointRegistry::new()),
             None,
             Some(cache.clone()),
-            BlockCachePolicy::default().with_flush_components(&[CacheComponent::Filters]),
+            BlockCachePolicy::default().with_flush_targets(&[CacheTarget::Filters]),
         )
         .await;
         let job = next_upload_job(&db, b"key", b"value", 1);

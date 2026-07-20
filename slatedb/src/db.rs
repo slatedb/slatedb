@@ -22,7 +22,8 @@
 
 pub use crate::db_status::{DbStatus, SegmentPrefix};
 
-use crate::db_cache_manager::{self, CacheTarget};
+use crate::db_cache::CacheTarget;
+use crate::db_cache_manager;
 use std::ops::Range;
 use std::sync::Arc;
 

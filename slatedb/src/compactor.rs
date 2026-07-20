@@ -1441,7 +1441,7 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
-    use crate::block_cache_policy::{BlockCachePolicy, CacheComponent};
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::compaction_worker::WorkerMessage;
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
@@ -1459,6 +1459,7 @@ mod tests {
     };
     use crate::db::Db;
     use crate::db_cache::test_utils::TestCache;
+    use crate::db_cache::CacheTarget;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
@@ -1738,8 +1739,8 @@ mod tests {
             .with_db_cache(cache.clone())
             .with_block_cache_policy(
                 BlockCachePolicy::default()
-                    .with_flush_components(&[])
-                    .with_compaction_output_components(&[CacheComponent::Filters]),
+                    .with_flush_targets(&[])
+                    .with_compaction_output_targets(&[CacheTarget::Filters]),
             )
             .build()
             .await

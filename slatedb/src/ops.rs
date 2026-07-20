@@ -7,7 +7,7 @@ use crate::config::{
     FlushOptions, MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
 };
 use crate::db::WriteHandle;
-use crate::db_cache_manager::CacheTarget;
+use crate::db_cache::CacheTarget;
 use crate::db_state::SsTableId;
 use crate::db_status::DbStatus;
 use crate::manifest::VersionedManifest;
@@ -600,6 +600,9 @@ pub trait DbCacheManagerOps {
     /// Callers fan out over SSTs themselves (for example with
     /// `FuturesUnordered`) to get the concurrency they want. Per-target
     /// outcomes are reflected in cache-manager metrics, not the return value.
+    ///
+    /// Warming [`CacheTarget::Data`] also warms the SST index, since block
+    /// planning depends on it.
     ///
     /// Returns `Err` on the first failing target. If no block cache is
     /// configured, or if the SST is not reachable from the current manifest,
