@@ -67,39 +67,29 @@ This policy lets users configure those behaviors explicitly.
 
 ### Public API
 
-The policy is a concrete struct value. Components are represented by an enum
-similar to `CacheTarget`, except that `Data` selects all data blocks and
-therefore has no key range:
+The policy is a concrete struct value. Components are selected with the
+existing `CacheTarget` enum used by `DbCacheManagerOps` (RFC-0023).:
 
 ```rust
-/// A component of an SST that can be inserted into the block cache.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum CacheComponent {
-    Data,
-    Filters,
-    Index,
-    Stats,
-}
-
 /// Block-cache policy for controlling block cache behavior during flush and
 /// compaction.
 #[derive(Clone, Debug)]
 pub struct BlockCachePolicy {
-    flush_components: Vec<CacheComponent>,
-    compaction_output_components: Vec<CacheComponent>,
+    flush_targets: Vec<CacheTarget>,
+    compaction_output_targets: Vec<CacheTarget>,
     l0_compaction_cache_probe: bool,
     sorted_run_compaction_cache_probe: bool,
 }
 
 impl BlockCachePolicy {
-    pub fn with_flush_components(
+    pub fn with_flush_targets(
         self,
-        components: &[CacheComponent],
+        targets: Vec<CacheTarget>,
     ) -> Self {}
 
-    pub fn with_compaction_output_components(
+    pub fn with_compaction_output_targets(
         self,
-        components: &[CacheComponent],
+        targets: Vec<CacheTarget>,
     ) -> Self {}
 
     pub fn with_l0_compaction_cache_probe(self, enabled: bool) -> Self {}
@@ -110,12 +100,15 @@ impl BlockCachePolicy {
 impl Default for BlockCachePolicy {
     fn default() -> Self {
         Self {
-            flush_components: vec![
-                CacheComponent::Data,
-                CacheComponent::Index,
-                CacheComponent::Filters,
+            flush_targets: vec![
+                CacheTarget::data::<&[u8], _>(..),
+                CacheTarget::Index,
+                CacheTarget::Filters,
             ],
-            compaction_output_components: Vec::new(),
+            compaction_output_targets: vec![
+                CacheTarget::Index,
+                CacheTarget::Filters,
+            ],
             l0_compaction_cache_probe: false,
             sorted_run_compaction_cache_probe: false,
         }
@@ -133,9 +126,14 @@ pub fn with_block_cache_policy(self, policy: BlockCachePolicy) -> Self;
 ### Compaction Output Behavior
 
 - Compaction output data is inserted as it is produced by the streaming writer.
+  When `CacheTarget::Data` carries a bounded key range, only the data blocks
+  that overlap the range are inserted. Each block streamed to the writer
+  will carry its first and last key, so the writer can decide overlap with the
+  configured range per block without waiting for the SST index.
 - Metadata components are inserted when they become available at writer close.
-- If a compaction write fails after entries have been inserted, unreachable
-entries may remain until normal eviction or restart. This is safe because the
+- If a compaction write fails after entries have been inserted, a best-effort
+cleanup removes the inserted entries from the cache. Entries that survive the
+cleanup remain until normal eviction or restart. This is safe because the
 failed SST is not visible through the manifest.
 
 ### Compaction Input Behavior
@@ -213,7 +211,10 @@ output semantics are unchanged.
 
 ### Performance & Cost
 
-- The default policy changes nothing on the read or write path.
+- The default policy keeps current flush behavior. It also inserts the index
+  and filters of compaction output SSTs, which reduces object-store requests
+  for point gets against newly compacted SSTs at the cost of the cache space
+  those entries occupy.
 - A non-default policy impacts read performance and, when it caches SST
   components on write, write performance.
 
@@ -289,17 +290,17 @@ pub enum CacheReadMode {
 }
 
 pub trait BlockCachePolicy: Send + Sync + 'static {
-    /// How `component` of an SST written by `source` interacts with the
+    /// How `target` of an SST written by `source` interacts with the
     /// block cache.
     fn write_mode(
         &self,
         source: WriteSource,
-        component: CacheComponent,
+        target: CacheTarget,
     ) -> CacheWriteMode;
 
-    /// How a read of `component` issued by `source` interacts with the
+    /// How a read of `target` issued by `source` interacts with the
     /// block cache.
-    fn read_mode(&self, source: ReadSource, component: CacheComponent) -> CacheReadMode;
+    fn read_mode(&self, source: ReadSource, target: CacheTarget) -> CacheReadMode;
 }
 ```
 
@@ -316,14 +317,7 @@ Rejected because it introduces many knobs, and new scenarios would add more.
 
 ## Open Questions
 
-- `CacheComponent` differs from the `CacheTarget` used by
-  `DbCacheManagerOps`: `CacheTarget::Data` supports a key range, while
-  `CacheComponent::Data` selects all data blocks. Is keeping them as separate
-  types a concern?
-
-  **Answer**: We will revisit whether these types can be unified after the
-  initial implementation. Until then, they remain separate, and range-based
-  automatic caching remains out of scope.
+None.
 
 ## References
 
