@@ -182,7 +182,8 @@ pub enum WalError {
     Closed,
 }
 
-/// The writer's manifest after fencing. Created by calling [`ManifestFencer::fence`]
+/// The writer's manifest after fencing. [`crate::Db`] creates this after fencing the manifest
+/// and passes it into [`WriterInit::fence_and_init`]
 pub struct WriterManifest {
     manifest: FenceableManifest,
 }
@@ -246,6 +247,10 @@ pub struct WriterInitResult {
 ///     current end of the WAL.
 #[async_trait]
 pub trait WriterInit {
+    /// Returns the name of the WAL implementation. Will be used to stamp the initial db manifest
+    /// and to validate that Dbs use the correct WAL implementation.
+    fn name(&self) -> String;
+    
     /// Fences the WAL and returns a [`WriterInitResult`] with a [`WalWriter`] and
     /// [`WalReplayIterator`] used to recover writes that have not yet been flushed to the tree.
     async fn fence_and_init(
@@ -295,8 +300,9 @@ pub trait WalObserver: Send + Sync + 'static {
     /// Returns the current [`WalStatus`].
     fn status(&self) -> Result<WalStatus, WalStatus>;
 
-    /// Adds a listener that subscribes to event callbacks.
-    fn subscribe(&self, listener: WalStatusListener) -> Result<(), WalError>;
+    /// Adds a listener that subscribes to event callbacks. On success, returns an initial 
+    /// [`WalStatus`]. The listener receives all updates after this initial status.
+    fn subscribe(&self, listener: WalStatusListener) -> Result<WalStatus, WalError>;
 }
 
 /// A future that yields the result of flushing the WAL. Returned by [`WalWriter::flush`]
@@ -355,7 +361,7 @@ pub struct WalRows {
 pub trait WalIterator: Send + 'static {
     /// Returns the next set of rows. Rows must be returned in sequence and WAL File order.
     /// Returns None when iterator's range is exhausted. Iterators created using an unbounded
-    /// end range that have exhausted the current WAL block until new rows are appended and neverCollapse annotation
+    /// end range that have exhausted the current WAL block until new rows are appended and never
     /// return `None`.
     /// Returns [`WalError::WalTruncated`] if the iterator observes that the WAL was truncated
     /// while iterating.
@@ -365,6 +371,9 @@ pub trait WalIterator: Send + 'static {
 /// API for reading from the WAL. Used by the Reader/
 #[async_trait]
 pub trait WalReader {
+    /// Returns the name of the WAL implementation
+    fn name(&self) -> String
+    
     /// Returns an iterator over the specified range of WAL File IDs. The start of the range must
     /// not be `Unbounded`. If the end of the range is `Unbounded` then the returned iterator
     /// continues returning writes as new writes are appended to the WAL. Otherwise, it returns
@@ -414,6 +423,23 @@ impl <P: Into<Path>> GarbageCollectorBuilder<P>{
     pub fn with_wal_gc(mut self, wal_gc: Arc<dyn WalGc>) -> Self {
         self.wal_gc = Some(wal_gc);
     }
+}
+```
+
+### Manifest Changes
+
+We'll add the WAL name to the manifest and validate that the provided `WalInit` and `WalReader` 
+match when starting `Db`/`DbReader`. The field is only set if the user provides a custom WAL 
+implementation. Otherwise, it is left unset. It is an error to use a custom WAL implementation
+with an unset `wal_name` or to use an implementation whose name does not match the set name.
+
+```
+table ManifestV2 {
+    ...
+    /// Name of the WAL implementation to use. The value is initially set based on the value
+    /// returned by `WalInit::name`. If the DB is built without a custom WAL implementation then
+    /// this field is left unset.
+    wal_name: string;
 }
 ```
 
@@ -558,6 +584,10 @@ tailing the current WAL:
 
 ```rust
 struct ObjectStoreWalReader {
+    // ...
+}
+
+impl ObjectStoreWalReader {
     pub fn new<P: Into<Path>>(
         path: P,
         object_store: Arc<dyn ObjectStore>,
@@ -565,11 +595,13 @@ struct ObjectStoreWalReader {
         buffered_files: usize,
         /// The interval at which the next WAL file will be polled when streaming the latest updates
         poll_interval: Duration
-    )
+    ) {
+        todo!()
+    }
 }
 
 impl WalReader for ObjectStoreWalReader {
-    ...
+    // ...
 }
 ```
 
@@ -693,6 +725,11 @@ benchmark tools that instantiate `DbBench` with a db configured to use a custom 
 - Phase 2: introduce traits and pluggability
 - Phase 3: add conformance test harnesses and an example implementation
 
+## Packaging
+
+The WAL traits and conformance tests will reside in a new crate called `slatedb-wal`. The native
+WAL implementation remains in `slatedb`.
+
 ## Alternatives
 
 List the serious alternatives and why they were rejected (including “status quo”). Include
@@ -734,9 +771,10 @@ layering. It also forces implementations to map each write batch to a single WAL
 
 ## Open Questions
 
-- This RFC proposes an API for streaming new writes via `WalReader`/`WalIterator`. Should this be 
-  used for CDC in lieu of the existing `WalReader`/`WalFile` API? Does it make sense to retain both?
-- Should we put the traits and conformance tests in a separate `slatedb-wal` crate?
+- ~~This RFC proposes an API for streaming new writes via `WalReader`/`WalIterator`. Should this be 
+  used for CDC in lieu of the existing `WalReader`/`WalFile` API? Does it make sense to retain 
+  both?~~
+- ~~Should we put the traits and conformance tests in a separate `slatedb-wal` crate?~~
 
 ## References
 
