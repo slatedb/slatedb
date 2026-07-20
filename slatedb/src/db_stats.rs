@@ -23,12 +23,13 @@ pub const L0_STALL_TYPE_LABEL: &str = "type";
 pub const L0_STALL_TYPE_NUM_SSTS: &str = "num_ssts";
 pub const L0_STALL_TYPE_NUM_SSTS_PER_KEY: &str = "num_ssts_per_key";
 pub const IMMUTABLE_MEMTABLE_FLUSHES: &str = db_stat_name!("immutable_memtable_flushes");
-pub const WAL_BUFFER_FLUSHES: &str = db_stat_name!("wal_buffer_flushes");
-pub const WAL_BUFFER_FLUSH_REQUESTS: &str = db_stat_name!("wal_buffer_flush_requests");
-pub const WAL_BUFFER_ESTIMATED_BYTES: &str = db_stat_name!("wal_buffer_estimated_bytes");
 pub const TOTAL_MEM_SIZE_BYTES: &str = db_stat_name!("total_mem_size_bytes");
 pub const L0_SST_COUNT: &str = db_stat_name!("l0_sst_count");
 pub const SEGMENT_MAX_L0_SST_COUNT: &str = db_stat_name!("segment_max_l0_sst_count");
+pub const SORTED_RUN_COUNT: &str = db_stat_name!("sorted_run_count");
+pub const SST_VIEW_COUNT: &str = db_stat_name!("sst_view_count");
+pub const SST_COUNT: &str = db_stat_name!("sst_count");
+pub const EXTERNAL_DB_COUNT: &str = db_stat_name!("external_db_count");
 pub const L0_FLUSH_BYTES: &str = db_stat_name!("l0_flush_bytes");
 pub const SST_FILTER_FALSE_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_false_positive_count");
 pub const SST_FILTER_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_positive_count");
@@ -39,7 +40,6 @@ pub const SST_FILTER_NEGATIVE_COUNT: &str = db_stat_name!("sst_filter_negative_c
 ///   write_amp = (`WAL_FLUSH_BYTES` + `L0_FLUSH_BYTES` + `compactor::stats::BYTES_COMPACTED`)
 ///               / `MEMTABLE_WRITE_BYTES`
 pub const MEMTABLE_WRITE_BYTES: &str = db_stat_name!("memtable_write_bytes");
-pub const WAL_FLUSH_BYTES: &str = db_stat_name!("wal_flush_bytes");
 
 /// Label key distinguishing filter metrics for point lookups from those for
 /// prefix scans. Value is one of [`FILTER_KIND_POINT`] or
@@ -50,9 +50,6 @@ pub const FILTER_KIND_PREFIX: &str = "prefix";
 
 pub(crate) struct DbStatsInner {
     pub(crate) immutable_memtable_flushes: Arc<dyn CounterFn>,
-    pub(crate) wal_buffer_estimated_bytes: Arc<dyn GaugeFn>,
-    pub(crate) wal_buffer_flushes: Arc<dyn CounterFn>,
-    pub(crate) wal_buffer_flush_requests: Arc<dyn CounterFn>,
     pub(crate) sst_filter_point_false_positives: Arc<dyn CounterFn>,
     pub(crate) sst_filter_point_positives: Arc<dyn CounterFn>,
     pub(crate) sst_filter_point_negatives: Arc<dyn CounterFn>,
@@ -70,11 +67,14 @@ pub(crate) struct DbStatsInner {
     pub(crate) total_mem_size_bytes: Arc<dyn GaugeFn>,
     pub(crate) l0_sst_count: Arc<dyn GaugeFn>,
     pub(crate) segment_max_l0_sst_count: Arc<dyn GaugeFn>,
+    pub(crate) sorted_run_count: Arc<dyn GaugeFn>,
+    pub(crate) sst_view_count: Arc<dyn GaugeFn>,
+    pub(crate) sst_count: Arc<dyn GaugeFn>,
+    pub(crate) external_db_count: Arc<dyn GaugeFn>,
     pub(crate) l0_flush_bytes: Arc<dyn CounterFn>,
     pub(crate) merge_operator_read_operands: Arc<dyn CounterFn>,
     pub(crate) merge_operator_flush_operands: Arc<dyn CounterFn>,
     pub(crate) memtable_write_bytes: Arc<dyn CounterFn>,
-    pub(crate) wal_flush_bytes: Arc<dyn CounterFn>,
 }
 
 #[derive(Clone)]
@@ -95,9 +95,6 @@ impl DbStats {
     pub(crate) fn new(recorder: &MetricsRecorderHelper) -> DbStats {
         let inner = DbStatsInner {
             immutable_memtable_flushes: recorder.counter(IMMUTABLE_MEMTABLE_FLUSHES).register(),
-            wal_buffer_estimated_bytes: recorder.gauge(WAL_BUFFER_ESTIMATED_BYTES).register(),
-            wal_buffer_flushes: recorder.counter(WAL_BUFFER_FLUSHES).register(),
-            wal_buffer_flush_requests: recorder.counter(WAL_BUFFER_FLUSH_REQUESTS).register(),
             sst_filter_point_false_positives: recorder
                 .counter(SST_FILTER_FALSE_POSITIVE_COUNT)
                 .labels(&[(FILTER_KIND_LABEL, FILTER_KIND_POINT)])
@@ -148,6 +145,10 @@ impl DbStats {
             total_mem_size_bytes: recorder.gauge(TOTAL_MEM_SIZE_BYTES).register(),
             l0_sst_count: recorder.gauge(L0_SST_COUNT).register(),
             segment_max_l0_sst_count: recorder.gauge(SEGMENT_MAX_L0_SST_COUNT).register(),
+            sorted_run_count: recorder.gauge(SORTED_RUN_COUNT).register(),
+            sst_view_count: recorder.gauge(SST_VIEW_COUNT).register(),
+            sst_count: recorder.gauge(SST_COUNT).register(),
+            external_db_count: recorder.gauge(EXTERNAL_DB_COUNT).register(),
             l0_flush_bytes: recorder.counter(L0_FLUSH_BYTES).register(),
             merge_operator_read_operands: recorder
                 .counter(MERGE_OPERATOR_OPERANDS)
@@ -160,7 +161,6 @@ impl DbStats {
                 .description(MERGE_OPERATOR_OPERANDS_DESCRIPTION)
                 .register(),
             memtable_write_bytes: recorder.counter(MEMTABLE_WRITE_BYTES).register(),
-            wal_flush_bytes: recorder.counter(WAL_FLUSH_BYTES).register(),
         };
         DbStats {
             inner: Arc::new(inner),

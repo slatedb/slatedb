@@ -233,6 +233,9 @@ pub(crate) enum SlateDBError {
     #[error("invalid sst batch size. size=`{0}`")]
     InvalidSSTBatchSize(usize),
 
+    #[error("invalid configuration: {0}")]
+    InvalidConfiguration(String),
+
     #[error("cannot seek to a key outside the iterator range. key=`{key:?}`, start_key=`{start_key:?}`, end_key=`{end_key:?}`")]
     SeekKeyOutOfKeyRange {
         key: Vec<u8>,
@@ -645,6 +648,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidObjectStorePath(_) => Error::invalid(msg),
             SlateDBError::UnknownConfigurationFormat(_) => Error::invalid(msg),
             SlateDBError::InvalidSSTBatchSize(_) => Error::invalid(msg),
+            SlateDBError::InvalidConfiguration(_) => Error::invalid(msg),
             SlateDBError::InvalidCheckpointLifetime(_) => Error::invalid(msg),
             SlateDBError::InvalidManifestPollInterval(_) => Error::invalid(msg),
             SlateDBError::CheckpointLifetimeTooShort { .. } => Error::invalid(msg),

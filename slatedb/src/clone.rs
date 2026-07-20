@@ -491,6 +491,7 @@ mod tests {
     };
     use crate::db::builder::CloneSourceSpec;
     use crate::db::Db;
+    use crate::db_reader::DbReader;
     use crate::db_state::SsTableId;
     use crate::error::SlateDBError;
     use crate::iter::IterationOrder;
@@ -511,6 +512,7 @@ mod tests {
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::DbRand;
     use slatedb_common::SystemClock;
+    use slatedb_txn_obj::TransactionalObject;
     use std::collections::BTreeMap;
     use std::ops::Bound;
     use std::ops::RangeBounds;
@@ -584,6 +586,150 @@ mod tests {
         test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut db_iter)
             .await;
         clone_db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_read_clone_with_db_reader() {
+        let mut rng = rng::new_test_rng(None);
+        let table = sample::table(&mut rng, 5000, 10);
+
+        let object_store = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent");
+        let clone_path = Path::from("/tmp/test_clone");
+
+        let parent_db = Db::open(parent_path.clone(), object_store.clone())
+            .await
+            .unwrap();
+        test_utils::seed_database(&parent_db, &table, false)
+            .await
+            .unwrap();
+        parent_db.flush().await.unwrap();
+        // Flush the memtable so the parent's data lives in L0 SSTs, which the
+        // clone references as external SSTs instead of replaying WALs.
+        parent_db
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        parent_db.close().await.unwrap();
+
+        create_clone(
+            clone_path.clone(),
+            parent_path.clone(),
+            object_store.clone(),
+            object_store.clone(),
+            None,
+            Arc::new(FailPointRegistry::new()),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+        )
+        .await
+        .unwrap();
+
+        // Sanity check that reads must resolve parent-resident SSTs.
+        let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
+        let clone_manifest = clone_manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .manifest;
+        assert!(!clone_manifest.external_ssts().is_empty());
+
+        let reader = DbReader::builder(clone_path.clone(), object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        let mut db_iter = reader.scan(..).await.unwrap();
+        test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut db_iter)
+            .await;
+        reader.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_read_clone_with_db_reader_from_checkpoint_with_pruned_external_ssts() {
+        let mut rng = rng::new_test_rng(None);
+        let table = sample::table(&mut rng, 5000, 10);
+
+        let object_store = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent");
+        let clone_path = Path::from("/tmp/test_clone");
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let rand = Arc::new(DbRand::default());
+
+        let parent_db = Db::open(parent_path.clone(), object_store.clone())
+            .await
+            .unwrap();
+        test_utils::seed_database(&parent_db, &table, false)
+            .await
+            .unwrap();
+        parent_db.flush().await.unwrap();
+        parent_db
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        parent_db.close().await.unwrap();
+
+        create_clone(
+            clone_path.clone(),
+            parent_path.clone(),
+            object_store.clone(),
+            object_store.clone(),
+            None,
+            Arc::new(FailPointRegistry::new()),
+            system_clock.clone(),
+            rand.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Pin a checkpoint to the clone's current manifest, which references
+        // the parent's SSTs externally.
+        let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
+        let mut clone_sm = StoredManifest::load(clone_manifest_store.clone(), system_clock.clone())
+            .await
+            .unwrap();
+        let checkpoint_id = rand.rng().gen_uuid();
+        clone_sm
+            .write_checkpoint(checkpoint_id, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        // Simulate a post-checkpoint compaction that re-localized all external
+        // SSTs and pruned their ids from the latest manifest. The checkpoint's
+        // manifest still references them.
+        clone_sm
+            .maybe_apply_update(|sr| {
+                let mut dirty = sr.prepare_dirty()?;
+                dirty
+                    .value
+                    .external_dbs
+                    .iter_mut()
+                    .for_each(|external_db| external_db.sst_ids.clear());
+                Ok(Some(dirty))
+            })
+            .await
+            .unwrap();
+        let latest_manifest = clone_manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .manifest;
+        assert!(latest_manifest.external_ssts().is_empty());
+
+        // A reader pinned to the checkpoint must resolve the external SSTs
+        // referenced by the checkpoint's manifest.
+        let reader = DbReader::builder(clone_path.clone(), object_store.clone())
+            .with_reader_mode(crate::DbReaderMode::Checkpoint(checkpoint_id))
+            .build()
+            .await
+            .unwrap();
+        let mut db_iter = reader.scan(..).await.unwrap();
+        test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut db_iter)
+            .await;
+        reader.close().await.unwrap();
     }
 
     #[tokio::test]

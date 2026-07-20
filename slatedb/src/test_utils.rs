@@ -6,7 +6,8 @@ use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView, SstType}
 use crate::error::{RetryReason, SlateDBError};
 use crate::format::row::SstRowCodecV0;
 use crate::iter::{IterationOrder, RowEntryIterator};
-use crate::tablestore::{ObjectStoreCallTag, TableStore, TableStoreKind};
+use crate::object_store_tag::ObjectStoreCallTag;
+use crate::tablestore::{TableStore, TableStoreKind};
 use crate::types::{KeyValue, RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -938,6 +939,9 @@ impl ObjectStore for FlakyObjectStore {
 /// [`set_error`](Self::set_error) before releasing to inject a specific error.
 pub(crate) struct Gate {
     open: std::sync::atomic::AtomicBool,
+    /// Callers waiting at a closed gate may pass by consuming one permit
+    /// (see [`admit`](Self::admit)).
+    permits: AtomicUsize,
     arrival_count: AtomicUsize,
     /// If `Some`, callers receive the produced error after the gate opens.
     error_fn: std::sync::Mutex<Option<Box<dyn Fn() -> object_store::Error + Send + Sync>>>,
@@ -957,6 +961,7 @@ impl Default for Gate {
     fn default() -> Self {
         Self {
             open: std::sync::atomic::AtomicBool::new(true),
+            permits: AtomicUsize::new(0),
             arrival_count: AtomicUsize::new(0),
             error_fn: std::sync::Mutex::new(None),
         }
@@ -981,6 +986,14 @@ impl Gate {
     /// Open the gate, allowing all blocked (and future) callers to proceed.
     pub(crate) fn release(&self) {
         self.open.store(true, Ordering::Release);
+    }
+
+    /// Let exactly `n` callers through a closed gate. Blocked (and future)
+    /// callers each consume one permit to pass; once the permits are used the
+    /// gate blocks again. Permits are ignored while the gate is open.
+    #[allow(dead_code)]
+    pub(crate) fn admit(&self, n: usize) {
+        self.permits.fetch_add(n, Ordering::AcqRel);
     }
 
     /// Set an error factory. After the gate opens, callers will receive the
@@ -1009,14 +1022,36 @@ impl Gate {
         self.arrival_count.load(Ordering::Acquire)
     }
 
-    /// Block at this gate until released. Returns the configured error (if any)
-    /// or `Ok(())` to let the caller proceed to the inner store.
+    /// Block at this gate until released or admitted. Returns the configured
+    /// error (if any) or `Ok(())` to let the caller proceed to the inner store.
     async fn wait(&self) -> object_store::Result<()> {
         // Signal arrival.
         self.arrival_count.fetch_add(1, Ordering::AcqRel);
 
-        // Spin-yield until the gate is opened.
-        while !self.open.load(Ordering::Acquire) {
+        // Spin-yield until the gate is opened or a permit is available.
+        loop {
+            if self.open.load(Ordering::Acquire) {
+                break;
+            }
+            let mut permits = self.permits.load(Ordering::Acquire);
+            let mut admitted = false;
+            while permits > 0 {
+                match self.permits.compare_exchange(
+                    permits,
+                    permits - 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        admitted = true;
+                        break;
+                    }
+                    Err(current) => permits = current,
+                }
+            }
+            if admitted {
+                break;
+            }
             tokio::task::yield_now().await;
         }
 

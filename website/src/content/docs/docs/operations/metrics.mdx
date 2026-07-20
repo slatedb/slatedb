@@ -97,15 +97,24 @@ All metric names use dot-separated notation: `slatedb.<subsystem>.<metric>`.
 | `slatedb.db.backpressure_count` | counter | | Backpressure events |
 | `slatedb.db.l0_stall_count` | counter | `type`: num_ssts, num_ssts_per_key | L0 flush dispatch stalls by cause |
 | `slatedb.db.immutable_memtable_flushes` | counter | | Immutable memtable flushes |
-| `slatedb.db.wal_buffer_flushes` | counter | | WAL buffer flushes |
-| `slatedb.db.wal_buffer_flush_requests` | counter | | WAL buffer flush requests |
-| `slatedb.db.wal_buffer_estimated_bytes` | gauge | | Estimated WAL buffer size |
 | `slatedb.db.total_mem_size_bytes` | gauge | | Total memory usage |
 | `slatedb.db.l0_sst_count` | gauge | | L0 SST count summed across all segment trees |
 | `slatedb.db.segment_max_l0_sst_count` | gauge | | Maximum L0 SST count across all segments (useful for detecting backpressure on specific segments) |
+| `slatedb.db.sorted_run_count` | gauge | | Number of sorted runs across all trees (root tree plus each named segment tree per RFC-0024) |
+| `slatedb.db.sst_view_count` | gauge | | Total number of SST views including L0 views and every sorted-run SST view across all trees |
+| `slatedb.db.sst_count` | gauge | | Number of distinct physical SSTables (deduplicates sst_view_count by SsTableId, so sst_count is at most sst_view_count) |
+| `slatedb.db.external_db_count` | gauge | | Number of external databases referenced in the manifest |
 | `slatedb.db.sst_filter_false_positive_count` | counter | | Bloom filter false positives |
 | `slatedb.db.sst_filter_positive_count` | counter | | Bloom filter positives |
 | `slatedb.db.sst_filter_negative_count` | counter | | Bloom filter negatives |
+
+### Write-Ahead Log (WAL) (`slatedb.wal.*`)
+
+| Name | Type | Labels | Description |
+|------|------|--------|-------------|
+| `slatedb.wal.wal_buffer_flushes` | counter | | WAL buffer flushes |
+| `slatedb.wal.wal_buffer_flush_requests` | counter | | WAL buffer flush requests |
+| `slatedb.wal.wal_buffer_estimated_bytes` | gauge | | Estimated WAL buffer size |
 
 ### Block cache (`slatedb.db_cache.*`)
 

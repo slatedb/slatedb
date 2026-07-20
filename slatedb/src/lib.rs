@@ -50,7 +50,7 @@ pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, SegmentPrefix, WriteHandl
 pub use db_cache::stats as db_cache_stats;
 pub use db_cache_manager::CacheTarget;
 pub use db_iter::{DbIterator, DbRecencyIterator};
-pub use db_reader::DbReader;
+pub use db_reader::{DbReader, DbReaderMode};
 pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
@@ -75,6 +75,7 @@ pub use sst_stats::{BlockStats, SstStats};
 pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
 pub use types::{RowEntry, ValueDeletable};
+pub use wal_buffer::stats as wal_buffer_stats;
 pub use wal_reader::{WalFile, WalFileIterator, WalReader};
 
 pub mod admin;
@@ -140,6 +141,7 @@ mod mem_table;
 mod memtable_flusher;
 mod merge_iterator;
 mod merge_operator;
+mod object_store_tag;
 mod object_stores;
 mod ops;
 mod oracle;
@@ -159,7 +161,6 @@ mod sst_builder;
 mod sst_iter;
 mod sst_reader;
 mod sst_stats;
-mod store_provider;
 mod subcompaction;
 mod tablestore;
 #[cfg(test)]
@@ -171,7 +172,6 @@ mod utils;
 mod fence;
 mod wal;
 mod wal_buffer;
-mod wal_id;
 mod wal_reader;
 mod wal_replay;
 

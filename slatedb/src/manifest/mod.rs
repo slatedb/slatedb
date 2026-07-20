@@ -1067,13 +1067,8 @@ impl Manifest {
         }
         projected.core.segments = kept;
 
-        // Drop unused external_dbs based on the surviving SST set across
-        // every tree (unsegmented + segments).
-        let used_sst_ids: HashSet<SsTableId> =
-            projected.core.all_sst_views().map(|v| v.sst.id).collect();
-        projected
-            .external_dbs
-            .retain(|e| e.sst_ids.iter().any(|id| used_sst_ids.contains(id)));
+        projected.prune_external_sst_ids();
+        projected.external_dbs.retain(|e| !e.sst_ids.is_empty());
         Ok(projected)
     }
 
@@ -1183,7 +1178,14 @@ impl Manifest {
             if let Some(intersection) =
                 current_handle.compacted_intersection(next_handle, projection_range)
             {
-                filtered_handles.push(current_handle.with_visible_range(intersection));
+                // `compacted_intersection` bounds a sorted-run SST's coverage by
+                // the next SST's start key, so `intersection` can fall into the
+                // gap beyond this SST's physical keys. `try_with_visible_range`
+                // drops the SST in that case instead of panicking on an empty
+                // physical/visible intersection.
+                if let Some(view) = current_handle.try_with_visible_range(intersection) {
+                    filtered_handles.push(view);
+                }
             }
         }
         filtered_handles
@@ -1429,27 +1431,47 @@ impl Manifest {
             core.last_l0_seq = max(core.last_l0_seq, source.manifest.core.last_l0_seq);
         }
 
-        // Canonicalize before generating final checkpoint IDs. The manifest
-        // stores both external_dbs and nested sst_ids as vectors, so unordered
-        // iteration here would make manifest bytes and UUID assignment depend
-        // on HashMap/HashSet seed order.
+        // Coalesce borrows of the same physical ancestor, keyed on (path, sst_ids) rather than
+        // source_checkpoint_id: the carried-forward checkpoint id is regenerated on every clone,
+        // so keying on it would leave identical borrows from independently-created clones
+        // (the real rescale topology) un-coalesced and external_dbs would grow without bound
+        // across generations. Identical sst_ids mean the exact same physical SSTs, already
+        // pinned by any member's checkpoint, so collapsing is safe. BTreeMap/BTreeSet keep
+        // iteration order — and hence manifest bytes and UUID assignment — deterministic.
+        let user_supplied_checkpoints: HashMap<String, Uuid> = ordered_sources
+            .iter()
+            .map(|source| (source.path.clone().into(), source.checkpoint.id))
+            .collect();
         let external_dbs_merged = Self::build_external_dbs(&ordered_sources)
             .into_iter()
             .fold(
                 BTreeMap::new(),
-                |mut map: BTreeMap<(String, Uuid), BTreeSet<SsTableId>>, db| {
-                    map.entry((db.path, db.source_checkpoint_id))
-                        .or_default()
-                        .extend(db.sst_ids);
+                |mut map: BTreeMap<(String, BTreeSet<SsTableId>), Uuid>, db| {
+                    let sst_ids: BTreeSet<SsTableId> = db.sst_ids.into_iter().collect();
+                    let user_supplied_cp = user_supplied_checkpoints.get(&db.path).copied();
+                    map.entry((db.path, sst_ids))
+                        .and_modify(|cp| match user_supplied_cp {
+                            // The incoming entry carries the user-supplied checkpoint id from
+                            // the clone source spec: it must win the group so clone retries can
+                            // re-validate the spec against the stored manifest
+                            // (validate_attached_to_external_db).
+                            Some(user_cp) if user_cp == db.source_checkpoint_id => *cp = user_cp,
+                            // The stored entry carries the user-supplied id: keep it.
+                            Some(user_cp) if user_cp == *cp => {}
+                            // Neither id is user-supplied (both are slatedb-generated): keep
+                            // the smallest for a deterministic result.
+                            _ => *cp = (*cp).min(db.source_checkpoint_id),
+                        })
+                        .or_insert(db.source_checkpoint_id);
                     map
                 },
             )
-            .iter()
-            .map(|((path, checkpoint), sst_ids)| ExternalDb {
-                path: path.clone(),
-                source_checkpoint_id: *checkpoint,
+            .into_iter()
+            .map(|((path, sst_ids), source_checkpoint_id)| ExternalDb {
+                path,
+                source_checkpoint_id,
                 final_checkpoint_id: Some(rand.rng().gen_uuid()),
-                sst_ids: sst_ids.iter().copied().collect(),
+                sst_ids: sst_ids.into_iter().collect(),
             })
             .collect();
 
@@ -3129,6 +3151,10 @@ mod tests {
 
         assert_eq!(projected.external_dbs.len(), 1);
         assert_eq!(projected.external_dbs[0].path, "/path/to/db1");
+        // The retained entry must have its out-of-range ID (sst_id_2) trimmed.
+        // Carrying it forward would keep the parent SST pinned in detach GC even
+        // though the projected tree no longer references it.
+        assert_eq!(projected.external_dbs[0].sst_ids, vec![sst_id_1]);
     }
 
     #[test]
@@ -3265,17 +3291,16 @@ mod tests {
     }
 
     #[test]
-    fn test_union_deduplicates_external_dbs() {
-        use std::collections::HashSet;
-
+    fn test_union_collapses_identical_borrows_of_same_ancestor() {
         let shared_path = "shared_ancestor".to_string();
         let shared_source_cp = Uuid::new_v4();
         let original_final_cp = Uuid::new_v4();
 
         let sst_a = SsTableId::Compacted(Ulid::from_parts(1000, 0));
         let sst_b = SsTableId::Compacted(Ulid::from_parts(1001, 0));
-        let sst_c = SsTableId::Compacted(Ulid::from_parts(1002, 0));
 
+        // Two sources borrow the SAME sst_ids from the SAME ancestor. They must
+        // collapse to a single external_dbs entry.
         let sst_own1 = SsTableId::Compacted(Ulid::from_parts(2000, 0));
         let mut m1 =
             manifest_with_one_compacted_sst(sst_own1, b"a", BytesRange::from_ref("a".."m"));
@@ -3292,7 +3317,7 @@ mod tests {
             path: shared_path.clone(),
             source_checkpoint_id: shared_source_cp,
             final_checkpoint_id: Some(original_final_cp),
-            sst_ids: vec![sst_b, sst_c],
+            sst_ids: vec![sst_b, sst_a],
         });
 
         let rand = Arc::new(DbRand::default());
@@ -3311,28 +3336,303 @@ mod tests {
 
         let result = Manifest::cloned_from_union(sources, rand).unwrap();
 
-        // After the commit, carried-over external_dbs use the parent's final_checkpoint_id
-        // as their source_checkpoint_id (not the original user-supplied source_cp), so
-        // dedup on the union side keys off original_final_cp.
         let shared_entries: Vec<_> = result
             .external_dbs
             .iter()
-            .filter(|db| db.path == shared_path && db.source_checkpoint_id == original_final_cp)
+            .filter(|db| db.path == shared_path)
             .collect();
         assert_eq!(
             shared_entries.len(),
             1,
-            "Should have exactly one entry for the shared (path, source_checkpoint_id)"
+            "identical borrows of the same ancestor must collapse to one entry"
         );
-        // No entry should still reference the user-supplied shared_source_cp.
+        // Carry-forward replaces the user-supplied source_cp with the parent's
+        // final_checkpoint_id, and no entry references the user-supplied cp.
+        assert_eq!(shared_entries[0].source_checkpoint_id, original_final_cp);
         assert!(result
             .external_dbs
             .iter()
             .all(|db| db.source_checkpoint_id != shared_source_cp));
 
-        let merged_ids: HashSet<SsTableId> = shared_entries[0].sst_ids.iter().copied().collect();
-        let expected_ids: HashSet<SsTableId> = [sst_a, sst_b, sst_c].iter().copied().collect();
-        assert_eq!(merged_ids, expected_ids);
+        let merged_ids: BTreeSet<SsTableId> = shared_entries[0].sst_ids.iter().copied().collect();
+        assert_eq!(merged_ids, BTreeSet::from([sst_a, sst_b]));
+    }
+
+    #[test]
+    fn test_union_keeps_distinct_sst_sets_of_same_ancestor_separate() {
+        // Two borrows of the same ancestor with DIFFERENT sst_ids must NOT be
+        // merged: each pins a distinct set of physical SSTs, so collapsing them
+        // would conflate distinct borrows. All SSTs must remain resolvable.
+        let shared_path = "shared_ancestor".to_string();
+        let final_cp = Uuid::from_u128(7);
+
+        let sst_a = SsTableId::Compacted(Ulid::from_parts(1000, 0));
+        let sst_b = SsTableId::Compacted(Ulid::from_parts(1001, 0));
+        let sst_c = SsTableId::Compacted(Ulid::from_parts(1002, 0));
+
+        let sst_own1 = SsTableId::Compacted(Ulid::from_parts(2000, 0));
+        let mut m1 =
+            manifest_with_one_compacted_sst(sst_own1, b"a", BytesRange::from_ref("a".."m"));
+        m1.external_dbs.push(ExternalDb {
+            path: shared_path.clone(),
+            source_checkpoint_id: Uuid::from_u128(70),
+            final_checkpoint_id: Some(final_cp),
+            sst_ids: vec![sst_a, sst_b],
+        });
+
+        let sst_own2 = SsTableId::Compacted(Ulid::from_parts(3000, 0));
+        let mut m2 = manifest_with_one_compacted_sst(sst_own2, b"m", BytesRange::from_ref("m"..));
+        m2.external_dbs.push(ExternalDb {
+            path: shared_path.clone(),
+            source_checkpoint_id: Uuid::from_u128(71),
+            final_checkpoint_id: Some(final_cp),
+            sst_ids: vec![sst_b, sst_c],
+        });
+
+        let sources = vec![
+            CloneSource {
+                manifest: m1,
+                path: Path::from("/tmp/db1"),
+                checkpoint: new_checkpoint(Uuid::new_v4()),
+            },
+            CloneSource {
+                manifest: m2,
+                path: Path::from("/tmp/db2"),
+                checkpoint: new_checkpoint(Uuid::new_v4()),
+            },
+        ];
+
+        let result = Manifest::cloned_from_union(sources, Arc::new(DbRand::default())).unwrap();
+
+        let shared_entries: Vec<_> = result
+            .external_dbs
+            .iter()
+            .filter(|db| db.path == shared_path)
+            .collect();
+        assert_eq!(
+            shared_entries.len(),
+            2,
+            "borrows with distinct sst_ids must not be merged"
+        );
+        // No SST is lost across the two entries.
+        let all_ids: BTreeSet<SsTableId> = shared_entries
+            .iter()
+            .flat_map(|db| db.sst_ids.iter().copied())
+            .collect();
+        assert_eq!(all_ids, BTreeSet::from([sst_a, sst_b, sst_c]));
+    }
+
+    /// Reproduces the clone-union `external_dbs` accumulation bug: two clones
+    /// created independently from the SAME physical ancestor each carry a borrow
+    /// of that ancestor with IDENTICAL `sst_ids` but DIFFERENT
+    /// `source_checkpoint_id`s. The latter happens because `cloned_from_union`
+    /// stamps every carried-forward borrow with a freshly generated
+    /// `final_checkpoint_id` (`gen_uuid()`), and that final becomes the borrow's
+    /// `source_checkpoint_id` on the next generation. Keyed on
+    /// `(path, source_checkpoint_id)`, the two borrows do NOT collapse and
+    /// `external_dbs` grows 1:1 with union fan-in. Keyed on `(path, sst_ids)`,
+    /// identical borrows collapse to a single entry.
+    #[test]
+    fn repro_union_collapses_shared_ancestor_with_distinct_finals() {
+        let shared_path = "shared_ancestor".to_string();
+        let sst_a = SsTableId::Compacted(Ulid::from_parts(1000, 0));
+        let sst_b = SsTableId::Compacted(Ulid::from_parts(1001, 0));
+
+        // Distinct finals: each independent clone rotated its own final for the
+        // shared ancestor. After carry-forward these become the borrows'
+        // (differing) source_checkpoint_ids. The first-folded source carries
+        // the LARGER final so the min tie-break must actually update the
+        // stored id, not just keep the first insert.
+        let final_cp_1 = Uuid::from_u128(2);
+        let final_cp_2 = Uuid::from_u128(1);
+
+        let sst_own1 = SsTableId::Compacted(Ulid::from_parts(2000, 0));
+        let mut m1 =
+            manifest_with_one_compacted_sst(sst_own1, b"a", BytesRange::from_ref("a".."m"));
+        m1.external_dbs.push(ExternalDb {
+            path: shared_path.clone(),
+            source_checkpoint_id: Uuid::from_u128(101),
+            final_checkpoint_id: Some(final_cp_1),
+            sst_ids: vec![sst_a, sst_b],
+        });
+
+        let sst_own2 = SsTableId::Compacted(Ulid::from_parts(3000, 0));
+        let mut m2 = manifest_with_one_compacted_sst(sst_own2, b"m", BytesRange::from_ref("m"..));
+        m2.external_dbs.push(ExternalDb {
+            path: shared_path.clone(),
+            source_checkpoint_id: Uuid::from_u128(102),
+            final_checkpoint_id: Some(final_cp_2),
+            sst_ids: vec![sst_a, sst_b],
+        });
+
+        let sources = vec![
+            CloneSource {
+                manifest: m1,
+                path: Path::from("/tmp/db1"),
+                checkpoint: new_checkpoint(Uuid::new_v4()),
+            },
+            CloneSource {
+                manifest: m2,
+                path: Path::from("/tmp/db2"),
+                checkpoint: new_checkpoint(Uuid::new_v4()),
+            },
+        ];
+
+        let result = Manifest::cloned_from_union(sources, Arc::new(DbRand::default())).unwrap();
+
+        let shared_entries: Vec<_> = result
+            .external_dbs
+            .iter()
+            .filter(|db| db.path == shared_path)
+            .collect();
+        assert_eq!(
+            shared_entries.len(),
+            1,
+            "borrows of the same ancestor with identical sst_ids must collapse \
+             regardless of differing (rotated) checkpoint ids"
+        );
+        assert_eq!(
+            shared_entries[0].source_checkpoint_id, final_cp_2,
+            "with no user-supplied id in the group, the smallest generated id must be kept"
+        );
+        let ids: BTreeSet<SsTableId> = shared_entries[0].sst_ids.iter().copied().collect();
+        assert_eq!(ids, BTreeSet::from([sst_a, sst_b]));
+    }
+
+    /// Same defect, demonstrating the unbounded growth directly: N independent
+    /// clones of the same ancestor (each with a distinct rotated final but
+    /// identical `sst_ids`) must still collapse to a single `external_dbs` entry
+    /// rather than producing N entries.
+    #[test]
+    fn repro_union_shared_ancestor_does_not_grow_with_number_of_sources() {
+        let shared_path = "shared_ancestor".to_string();
+        let sst_a = SsTableId::Compacted(Ulid::from_parts(1000, 0));
+        let sst_b = SsTableId::Compacted(Ulid::from_parts(1001, 0));
+
+        // Three non-overlapping key ranges so the union is valid.
+        let ranges = [
+            ("a", BytesRange::from_ref("a".."i")),
+            ("i", BytesRange::from_ref("i".."r")),
+            ("r", BytesRange::from_ref("r"..)),
+        ];
+
+        let sources: Vec<CloneSource> = ranges
+            .iter()
+            .enumerate()
+            .map(|(i, (first, range))| {
+                let owned = SsTableId::Compacted(Ulid::from_parts(2000 + i as u64, 0));
+                let mut m = manifest_with_one_compacted_sst(
+                    owned,
+                    first.as_bytes().to_vec().leak(),
+                    range.clone(),
+                );
+                m.external_dbs.push(ExternalDb {
+                    path: shared_path.clone(),
+                    source_checkpoint_id: Uuid::from_u128(200 + i as u128),
+                    // distinct rotated final per independent clone
+                    final_checkpoint_id: Some(Uuid::from_u128(1 + i as u128)),
+                    sst_ids: vec![sst_a, sst_b],
+                });
+                CloneSource {
+                    manifest: m,
+                    path: Path::from(format!("/tmp/db{}", i)),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                }
+            })
+            .collect();
+
+        let result = Manifest::cloned_from_union(sources, Arc::new(DbRand::default())).unwrap();
+
+        let shared_entries = result
+            .external_dbs
+            .iter()
+            .filter(|db| db.path == shared_path)
+            .count();
+        assert_eq!(
+            shared_entries, 1,
+            "external_dbs must not grow 1:1 with union fan-in for a shared ancestor"
+        );
+    }
+
+    /// A union source may itself be the ancestor another source borrows from:
+    /// the direct source's owned entry (keyed by the user-supplied checkpoint
+    /// id from the clone source spec) and the carried borrow (keyed by a
+    /// rotated final) can then collapse when their sst_ids match. The
+    /// user-supplied checkpoint id must survive the collapse — clone retries
+    /// re-validate the spec against the stored manifest
+    /// (validate_attached_to_external_db) and would otherwise fail permanently
+    /// with CloneIncorrectExternalDbCheckpoint. Sources are folded in
+    /// key-range order, so the parent's range position controls whether its
+    /// owned entry is merged before the carried borrow (the borrow must not
+    /// replace the stored id) or after it (the owned entry must overwrite the
+    /// stored carried final).
+    #[rstest]
+    #[case::parent_folded_first(true)]
+    #[case::borrow_folded_first(false)]
+    fn test_union_collapse_keeps_user_supplied_checkpoint_id(#[case] parent_folded_first: bool) {
+        let parent_path = Path::from("/tmp/parent");
+        let parent_path_str: String = parent_path.clone().into();
+
+        // Byte-wise largest so a plain min() would discard it in favor of the
+        // carried final below.
+        let user_cp = Uuid::from_u128(u128::MAX);
+        let carried_final_cp = Uuid::from_u128(1);
+
+        let lower = (b"a" as &'static [u8], BytesRange::from_ref("a".."m"));
+        let upper = (b"m" as &'static [u8], BytesRange::from_ref("m"..));
+        let (parent_range, descendant_range) = if parent_folded_first {
+            (lower, upper)
+        } else {
+            (upper, lower)
+        };
+
+        // Direct source: the parent itself, owning a single SST.
+        let sst_p = SsTableId::Compacted(Ulid::from_parts(1000, 0));
+        let parent_manifest =
+            manifest_with_one_compacted_sst(sst_p, parent_range.0, parent_range.1);
+
+        // Descendant clone of the parent, borrowing the exact same SSTs.
+        let sst_own = SsTableId::Compacted(Ulid::from_parts(2000, 0));
+        let mut descendant_manifest =
+            manifest_with_one_compacted_sst(sst_own, descendant_range.0, descendant_range.1);
+        descendant_manifest.external_dbs.push(ExternalDb {
+            path: parent_path_str.clone(),
+            source_checkpoint_id: Uuid::from_u128(100),
+            final_checkpoint_id: Some(carried_final_cp),
+            sst_ids: vec![sst_p],
+        });
+
+        let sources = vec![
+            CloneSource {
+                manifest: parent_manifest,
+                path: parent_path,
+                checkpoint: new_checkpoint(user_cp),
+            },
+            CloneSource {
+                manifest: descendant_manifest,
+                path: Path::from("/tmp/descendant"),
+                checkpoint: new_checkpoint(Uuid::new_v4()),
+            },
+        ];
+
+        let result = Manifest::cloned_from_union(sources, Arc::new(DbRand::default())).unwrap();
+
+        let parent_entries: Vec<_> = result
+            .external_dbs
+            .iter()
+            .filter(|db| db.path == parent_path_str)
+            .collect();
+        assert_eq!(
+            parent_entries.len(),
+            1,
+            "owned entry and identical carried borrow must still collapse"
+        );
+        assert_eq!(
+            parent_entries[0].source_checkpoint_id, user_cp,
+            "the direct source's user-supplied checkpoint id must survive the collapse"
+        );
+        let ids: BTreeSet<SsTableId> = parent_entries[0].sst_ids.iter().copied().collect();
+        assert_eq!(ids, BTreeSet::from([sst_p]));
     }
 
     #[test]
@@ -4445,6 +4745,72 @@ mod tests {
         );
         assert_eq!(projected.core.segments[0].tree.l0.len(), 1);
         assert_eq!(projected.core.segments[0].tree.compacted.len(), 1);
+    }
+
+    /// Build a single-sorted-run tree of two compacted SSTs with a key gap
+    /// between them: SST1 physically covers `[a, c]`, SST2 covers `[m, p]`,
+    /// so the keyspace `(c, m)` is owned by SST1 logically (up to SST2's start
+    /// key) but holds no physical keys in SST1.
+    fn manifest_with_two_sst_sorted_run_gap() -> Manifest {
+        let sst1 = SsTableId::Compacted(Ulid::new());
+        let sst2 = SsTableId::Compacted(Ulid::new());
+        let make = |id: SsTableId, first: &'static [u8], last: &'static [u8], vis: BytesRange| {
+            SsTableView::new_projected(
+                id.unwrap_compacted_id(),
+                SsTableHandle::new(
+                    id,
+                    SST_FORMAT_VERSION_LATEST,
+                    SsTableInfo {
+                        first_entry: Some(Bytes::from_static(first)),
+                        last_entry: Some(Bytes::from_static(last)),
+                        ..SsTableInfo::default()
+                    },
+                ),
+                Some(vis),
+            )
+        };
+        let mut core = ManifestCore::new();
+        Arc::make_mut(&mut core.tree).compacted.push(SortedRun {
+            id: 0,
+            sst_views: vec![
+                make(sst1, b"a", b"c", BytesRange::from_ref("a".."d")),
+                make(sst2, b"m", b"p", BytesRange::from_ref("m".."q")),
+            ],
+        });
+        Manifest::initial(core)
+    }
+
+    #[test]
+    fn test_projected_drops_sorted_run_sst_when_range_falls_in_key_gap() {
+        // Regression: a projection range that lands entirely in the gap between a sorted-run SST's
+        // last physical key and the next SST's start key must drop the SST, not panic.
+        // `compacted_intersection` bounds the SST by the next SST's start key (logical), so it
+        // reports overlap for `(c, m)`, but the SST has no physical keys there.
+        let manifest = manifest_with_two_sst_sorted_run_gap();
+
+        // ["e", "g") sits in the gap (c, m): both SSTs are physically disjoint
+        // from it, so the sorted run becomes empty and is dropped.
+        let projected = Manifest::projected(
+            &manifest,
+            &ProjectionConfig::from_global_range(BytesRange::from_ref("e".."g")),
+        )
+        .unwrap();
+        assert!(projected.core.tree.compacted.is_empty());
+    }
+
+    #[test]
+    fn test_projected_keeps_sorted_run_sst_overlapping_physical_keys() {
+        // Sanity check that the gap fix does not over-drop: a range that
+        // overlaps SST1's physical keys keeps it (with the SST projected).
+        let manifest = manifest_with_two_sst_sorted_run_gap();
+
+        let projected = Manifest::projected(
+            &manifest,
+            &ProjectionConfig::from_global_range(BytesRange::from_ref("b".."f")),
+        )
+        .unwrap();
+        assert_eq!(projected.core.tree.compacted.len(), 1);
+        assert_eq!(projected.core.tree.compacted[0].sst_views.len(), 1);
     }
 
     #[test]

@@ -19,7 +19,7 @@ use super::uploader::UploadedMemtable;
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
-use crate::db_state::{collect_touched_segments, DbState, SsTableView};
+use crate::db_state::{collect_touched_segments, COWDbState, DbState, SsTableId, SsTableView};
 use crate::dispatcher::MessageHandler;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
@@ -33,7 +33,7 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use parking_lot::RwLockWriteGuard;
 use std::cmp;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -663,22 +663,49 @@ impl ManifestWriterHandler {
             let mut wguard_state = self.db.state.write();
             wguard_state.merge_remote_manifest(remote_dirty);
             let cow = wguard_state.state();
-            // L0 SST counters span every tree (root + each named segment per
-            // RFC-0024). `l0_sst_count` reports the total; `segment_max_*`
-            // reports the largest single tree, which is the right quantity
-            // for backpressure since `l0_max_ssts` is enforced per-tree.
-            let (total, max) = cow
-                .core()
-                .trees()
-                .map(|t| t.l0.len())
-                .fold((0usize, 0usize), |(sum, max), n| (sum + n, max.max(n)));
-            self.db.db_stats.l0_sst_count.set(total as i64);
-            self.db.db_stats.segment_max_l0_sst_count.set(max as i64);
+            self.update_stats_for_manifest(&cow);
             cow.manifest.clone()
         };
         self.db
             .status_manager
             .report_manifest(dirty_manifest.into());
+    }
+
+    fn update_stats_for_manifest(&self, cow: &COWDbState) {
+        let mut l0_ssts = 0usize;
+        let mut segment_max_l0_ssts = 0usize;
+        let mut sorted_runs = 0usize;
+        let mut sst_views = 0usize;
+        let mut distinct_ssts: HashSet<SsTableId> = HashSet::new();
+        for tree in cow.core().trees() {
+            l0_ssts += tree.l0.len();
+            // Track the largest single tree: backpressure is driven by `segment_max_l0_sst_count`
+            // because `l0_max_ssts` is enforced per-tree.
+            segment_max_l0_ssts = segment_max_l0_ssts.max(tree.l0.len());
+            sorted_runs += tree.compacted.len();
+            let all_views = tree
+                .l0
+                .iter()
+                .chain(tree.compacted.iter().flat_map(|run| run.sst_views.iter()));
+            for view in all_views {
+                sst_views += 1;
+                // Dedupe by physical SST id: a range clone/rescale can project one SST into
+                // several views, so `sst_count <= sst_view_count`.
+                distinct_ssts.insert(view.sst.id);
+            }
+        }
+        self.db.db_stats.l0_sst_count.set(l0_ssts as i64);
+        self.db
+            .db_stats
+            .segment_max_l0_sst_count
+            .set(segment_max_l0_ssts as i64);
+        self.db.db_stats.sorted_run_count.set(sorted_runs as i64);
+        self.db.db_stats.sst_view_count.set(sst_views as i64);
+        self.db.db_stats.sst_count.set(distinct_ssts.len() as i64);
+        self.db
+            .db_stats
+            .external_db_count
+            .set(cow.manifest.value.external_dbs.len() as i64);
     }
 
     async fn write_checkpoint_safely(
@@ -880,6 +907,7 @@ mod tests {
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
+    use crate::wal_buffer::WalBufferManager;
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -887,7 +915,7 @@ mod tests {
     use object_store::ObjectStore;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::SystemClock;
-    use slatedb_common::metrics::MetricsRecorderHelper;
+    use slatedb_common::metrics::{DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper};
     use slatedb_common::DbRand;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1040,6 +1068,16 @@ mod tests {
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =
             crate::utils::SafeSender::unbounded_channel(status_manager.result_reader());
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder, MetricLevel::Info);
+        let wal_buffer = Arc::new(WalBufferManager::new(
+            status_manager.clone(),
+            &helper,
+            0,
+            table_store.clone(),
+            1024,
+            None,
+        ));
         let inner = Arc::new(
             DbInner::new(
                 settings.clone(),
@@ -1051,6 +1089,7 @@ mod tests {
                     &WatchableOnceCell::new(),
                 )),
                 write_tx,
+                wal_buffer.observer(),
                 db_metrics,
                 fp_registry,
                 None,

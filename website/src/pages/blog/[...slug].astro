@@ -12,6 +12,10 @@ const { post } = Astro.props;
 const { Content, headings } = await render(post);
 const { title, author, authorGithub, pubDate, ogImage } = post.data;
 
+// Default the social card to the per-post image generated at build time
+// (src/pages/blog/og/[...slug].png.ts); frontmatter `ogImage` can override it.
+const socialImage = ogImage ?? new URL(`/blog/og/${post.id}.png`, Astro.site ?? Astro.url).href;
+
 const dateLabel = pubDate.toLocaleDateString('en-US', {
 	year: 'numeric',
 	month: 'long',
@@ -21,7 +25,7 @@ const dateLabel = pubDate.toLocaleDateString('en-US', {
 const isoDate = pubDate.toISOString();
 ---
 
-<Blog title={`${title} — SlateDB`} ogImage={ogImage}>
+<Blog title={`${title} — SlateDB`} ogImage={socialImage}>
 	<PostToc headings={headings} />
 	<article class="post">
 		<header class="post-head">

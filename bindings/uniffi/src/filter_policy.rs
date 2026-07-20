@@ -39,7 +39,7 @@ impl From<&slatedb::PrefixTarget> for PrefixTarget {
 }
 
 /// Application-provided prefix extractor used to configure prefix-based
-/// bloom filters.
+/// bloom filters and segmented compaction.
 #[uniffi::export(with_foreign)]
 pub trait PrefixExtractor: Send + Sync {
     /// Stable identifier for this extractor's configuration. Included in the

@@ -22,6 +22,7 @@ from slatedb.uniffi import (
     FlushOptions,
     FlushType,
     KeyRange,
+    ReaderMode,
 )
 
 
@@ -267,11 +268,13 @@ async def test_reader_builder_validation_and_errors() -> None:
 
         invalid_builder = DbReaderBuilder(TEST_DB_PATH, store)
         with pytest.raises(Error.Invalid) as exc:
-            invalid_builder.with_checkpoint_id("not-a-uuid")
+            invalid_builder.with_reader_mode(ReaderMode.CHECKPOINT("not-a-uuid"))
         assert exc.value.message.startswith("invalid checkpoint_id UUID:")
 
         missing_builder = DbReaderBuilder(TEST_DB_PATH, store)
-        missing_builder.with_checkpoint_id("ffffffff-ffff-ffff-ffff-ffffffffffff")
+        missing_builder.with_reader_mode(
+            ReaderMode.CHECKPOINT("ffffffff-ffff-ffff-ffff-ffffffffffff")
+        )
         with pytest.raises(Error.Data) as exc:
             await missing_builder.build()
         assert "checkpoint missing" in exc.value.message

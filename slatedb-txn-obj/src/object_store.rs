@@ -437,6 +437,7 @@ mod tests {
     use chrono::Utc;
     use futures::stream::{self, BoxStream};
     use futures::StreamExt;
+    use object_store::local::LocalFileSystem;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{
@@ -681,6 +682,45 @@ mod tests {
             ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store, "manifest");
 
         boundary.check(MonotonicId::new(1)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_boundary_check_supports_local_filesystem_conditional_get() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let object_store: Arc<dyn ObjectStore> = Arc::new(
+            LocalFileSystem::new_with_prefix(tempdir.path()).expect("create local object store"),
+        );
+        let root = Path::from("root");
+        let boundary_path = root.clone().join("gc").join("manifest.boundary");
+        object_store
+            .put(&boundary_path, PutPayload::from("2"))
+            .await
+            .unwrap();
+        let boundary = ObjectStoreBoundaryObject::new(&root, object_store.clone(), "manifest");
+
+        // The first check reads and caches the boundary and its filesystem ETag.
+        boundary.check(MonotonicId::new(3)).await.unwrap();
+        assert!(boundary
+            .cache
+            .lock()
+            .as_ref()
+            .and_then(|(_, version)| version.e_tag.as_ref())
+            .is_some());
+
+        // The second check sends GET If-None-Match. LocalFileSystem returns NotModified,
+        // which the boundary implementation must handle by reusing its cache.
+        boundary.check(MonotonicId::new(3)).await.unwrap();
+
+        // Replace the file directly rather than calling BoundaryObject::advance, since
+        // LocalFileSystem does not support PutMode::Update. Use a differently sized value
+        // so filesystems with coarse mtime resolution still produce a different ETag.
+        object_store
+            .put(&boundary_path, PutPayload::from("40"))
+            .await
+            .unwrap();
+        let err = boundary.check(MonotonicId::new(3)).await.unwrap_err();
+        assert!(matches!(err, TransactionalObjectError::ObjectVersionExists));
+        boundary.check(MonotonicId::new(41)).await.unwrap();
     }
 
     #[tokio::test]

@@ -1,0 +1,24 @@
+---
+// Google Analytics 4 (gtag.js). Single source of truth — included from every
+// <head>: Starlight docs/rfcs (Head.astro), the homepage, the 404 page, and
+// the blog layout (Blog.astro).
+//
+// `is:inline` keeps Astro from bundling/transforming these tags, so the gtag
+// snippet ships verbatim. The Measurement ID is a public client-side value, so
+// hardcoding it here is fine.
+const GA_MEASUREMENT_ID = 'G-NZVNL1PGYN';
+---
+
+<script
+	is:inline
+	async
+	src={`https://www.googletagmanager.com/gtag/js?id=${GA_MEASUREMENT_ID}`}
+></script>
+<script is:inline define:vars={{ GA_MEASUREMENT_ID }}>
+	window.dataLayer = window.dataLayer || [];
+	function gtag() {
+		dataLayer.push(arguments);
+	}
+	gtag('js', new Date());
+	gtag('config', GA_MEASUREMENT_ID);
+</script>

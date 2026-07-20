@@ -33,7 +33,7 @@ The defaults reflect the usual access patterns. Point reads default to `cache_bl
 
 The disk cache stays disabled unless `object_store_cache_options.root_folder` is set. If you want it warm before serving traffic, you can preload it on startup with [`PreloadLevel::L0Sst`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html#variant.L0Sst) or [`PreloadLevel::AllSst`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html#variant.AllSst). SlateDB loads recent SSTs, or all SSTs, into the local cache until the cache size limit is reached.
 
-By default, writes go straight to the upstream object store and do not populate the object-store cache. Setting [`cache_puts`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.cache_puts) to `true` also stores `PUT` payloads locally, which can help if readers are likely to touch freshly written SSTs soon afterward.
+By default, writes go straight to the upstream object store and do not populate the object-store cache. Each SST write source has its own admission flag: [`cache_on_flush`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.cache_on_flush) stores SSTs written by memtable flushes locally, and [`cache_on_compaction`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.cache_on_compaction) does the same for compaction output. Enabling them can help if readers are likely to touch freshly written SSTs soon afterward. WAL and manifest writes are never cached.
 
 ## Sharing Between Instances
 
@@ -44,6 +44,8 @@ For the object-store cache, sharing is straightforward. If multiple instances on
 If you provide an object store directly with `PrefixStore` or other custom wrapping instead of using `Db::resolve_object_store`, you must configure different [`root_folder`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.root_folder) values for each instance to prevent cache collisions. SlateDB no longer automatically resolves root prefixes from metadata locations.
 
 The block cache is different. Both [`DbBuilder::with_db_cache`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_db_cache) and [`DbReaderBuilder::with_db_cache`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbReaderBuilder.html#method.with_db_cache) let you pass in your own cache object, so you can choose to reuse the same process-local cache implementation across builders. For `Db`, that mainly gives you a shared memory or disk budget, not shared hits: SlateDB scopes each instance's entries so one `Db` does not read another `Db`'s cached blocks by accident. If your main goal is cross-instance warming, the object-store cache is the better fit.
+
+A cache you pass in stays owned by you: `Db::close()` and `DbReader::close()` never close it, so closing one instance does not affect the others sharing it. Once every instance using the cache is closed, call [`DbCache::close`](https://docs.rs/slatedb/latest/slatedb/db_cache/trait.DbCache.html#method.close) yourself so hybrid implementations can flush their memory tier to disk.
 
 For `DbReader`, treat a caller-managed block cache as an advanced optimization. It can make sense to keep one reader-side cache per database in a single process, but if you want a cache that is naturally shared between writers and readers, or across many short-lived instances, the object-store cache is the simpler mechanism to share.
 

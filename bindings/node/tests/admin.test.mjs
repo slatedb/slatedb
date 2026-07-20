@@ -138,6 +138,34 @@ test("admin compaction queries handle empty store and invalid ids", async (t) =>
   assert.match(invalidCompactionId.message, /invalid compaction_id ULID/);
 });
 
+test("admin run_gc_once accepts default and custom options", async (t) => {
+  const cleanup = createCleanup(t);
+  const path = uniquePath("admin-run-gc-once");
+  const store = cleanup.track(newMemoryStore());
+  const admin = openAdmin(store, { path, cleanup });
+  const db = await openDb(store, { path, cleanup });
+
+  await db.put(bytes("key"), bytes("value"));
+  await db.flush();
+
+  await admin.run_gc_once(undefined);
+
+  const directoryOptions = {
+    interval_ms: undefined,
+    min_age_ms: 0n,
+    dry_run: true,
+  };
+  await admin.run_gc_once({
+    manifest_options: undefined,
+    wal_options: directoryOptions,
+    wal_fence_options: directoryOptions,
+    compacted_options: undefined,
+    compactions_options: undefined,
+    detach_options: { interval_ms: undefined },
+    disable_boundary_files: true,
+  });
+});
+
 test("admin checkpoint listing tracks reader lifecycle", async (t) => {
   const cleanup = createCleanup(t);
   const path = uniquePath("admin-checkpoints");

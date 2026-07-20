@@ -350,7 +350,7 @@ final class TestSupport {
     }
 
     static ReaderOptions readerOptions(boolean skipWalReplay) {
-        return new ReaderOptions(100L, 1000L, 64L * 1024 * 1024, skipWalReplay);
+        return new ReaderOptions(100L, 1000L, 64L * 1024 * 1024, skipWalReplay, null);
     }
 
     private static Throwable unwrap(Throwable thrown) {

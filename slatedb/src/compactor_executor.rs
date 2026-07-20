@@ -5,7 +5,6 @@ use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use chrono::TimeDelta;
 use futures::future::{join, join_all};
 use parking_lot::Mutex;
 use tokio::task::JoinHandle;
@@ -522,7 +521,7 @@ impl TokioCompactionExecutorInner {
     ///   (RFC-0028)
     /// - Streams and merges input keys across all sources (per range)
     /// - Applies merge and retention policies
-    /// - Writes output SSTs up to `max_sst_size`, reporting periodic progress
+    /// - Writes output SSTs up to `max_sst_size`, reporting resumable progress
     ///
     /// ## Returns
     /// - The compaction context with all output SST handles.
@@ -587,15 +586,15 @@ impl TokioCompactionExecutorInner {
     /// Executes a compaction job's subcompactions (RFC-0028), running every
     /// range concurrently.
     ///
-    /// The plan is reported (and therefore persisted by the orchestrator)
-    /// before any range output is recorded against it; per-range output SSTs
-    /// are then reported as they advance so an interrupted compaction can
-    /// resume at range granularity. Subcompactions carry no persisted status,
-    /// so every range is run: a range resumes from the output recorded against
-    /// it, and one that is already complete finds nothing left to merge and
-    /// finishes immediately. On the first range failure the remaining
-    /// subcompactions are aborted and the job fails; progress recorded by then
-    /// stays resumable.
+    /// The plan is reported (and buffered by the worker for its next
+    /// heartbeat to publish) before any range output is recorded against it;
+    /// per-range output SSTs are then reported as they advance so an
+    /// interrupted compaction can resume at range granularity. Subcompactions
+    /// carry no persisted status, so every range is run: a range resumes from
+    /// the output recorded against it, and one that is already complete finds
+    /// nothing left to merge and finishes immediately. On the first range
+    /// failure the remaining subcompactions are aborted and the job fails;
+    /// progress recorded by then stays resumable.
     async fn execute_compaction_job(
         self: &Arc<Self>,
         id: Ulid,
@@ -621,13 +620,14 @@ impl TokioCompactionExecutorInner {
         // full estimated size up front.
         let mut bytes_processed_by_sub: Vec<u64> = vec![0; subcompaction_args.len()];
 
-        // For a fresh job, report the plan immediately so it is persisted
-        // before any range records output against it; bytes are genuinely zero
-        // at this point. A resumed job's plan is already persisted (it arrived
-        // in `args.subcompactions`), so reporting it here would only republish
-        // zero bytes processed before the ranges re-report their resumed
-        // progress — a momentary drop to zero. Skip it; the per-range progress
-        // emitted as each range starts carries the resumed totals instead.
+        // For a fresh job, report the plan immediately so the worker buffers
+        // it before any range records output against it; bytes are genuinely
+        // zero at this point. A resumed job's plan is already persisted (it
+        // arrived in `args.subcompactions`), so reporting it here would only
+        // republish zero bytes processed before the ranges re-report their
+        // resumed progress — a momentary drop to zero. Skip it; the per-range
+        // progress emitted as each range starts carries the resumed totals
+        // instead.
         if ctx
             .subcompactions()
             .iter()
@@ -809,22 +809,11 @@ impl TokioCompactionExecutorInner {
             before_key.saturating_sub(before_range)
         });
 
-        // Cadence for the time-based progress send below. Caps sends at 1s (the
-        // pre-distributed-compaction default), but never coarser than the
-        // worker's `heartbeat_min_interval`, so progress heartbeats still use
-        // the worker's configured write throttle.
-        let progress_interval = TimeDelta::from_std(
-            self.options
-                .heartbeat_min_interval
-                .min(std::time::Duration::from_secs(1)),
-        )
-        .expect("clamped to <= 1s, which always fits in a TimeDelta");
         // Report the resume point up front so a resumed range surfaces the bytes
         // already processed in prior attempts immediately. A range that resumes
         // already-complete reports its full estimated size here (its resume
         // cursor sits at the range's last key) and never enters the loop below.
         progress(start_bytes_processed, &output_ssts);
-        let mut last_progress_report = self.clock.now();
 
         // At most one SST close runs in the background at a time (depth-1
         // pipeline). While a finished SST flushes to the object store we keep
@@ -844,15 +833,6 @@ impl TokioCompactionExecutorInner {
                 self.collect_close(pending, &mut output_ssts).await?;
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
                 progress(total_bytes, &output_ssts);
-                last_progress_report = self.clock.now();
-            }
-
-            let duration_since_last_report =
-                self.clock.now().signed_duration_since(last_progress_report);
-            if duration_since_last_report > progress_interval {
-                let total_bytes = start_bytes_processed + all_iter.bytes_processed();
-                progress(total_bytes, &output_ssts);
-                last_progress_report = self.clock.now();
             }
 
             if let Some(block_size) = current_writer.add(kv).await? {
@@ -880,7 +860,6 @@ impl TokioCompactionExecutorInner {
                 bytes_written = 0;
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
                 progress(total_bytes, &output_ssts);
-                last_progress_report = self.clock.now();
             }
         }
 

@@ -29,5 +29,8 @@
   },
   "overrides": {
     "lodash-es": ">=4.17.23"
+  },
+  "devDependencies": {
+    "satori": "^0.12.2"
   }
 }

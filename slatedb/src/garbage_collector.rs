@@ -55,6 +55,11 @@ pub use filter::GcFilter;
 pub(crate) const DEFAULT_MIN_AGE: Duration = Duration::from_secs(300);
 pub(crate) const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) const GC_TASK_NAME: &str = "garbage_collector";
+/// Maximum number of concurrent object-store deletes issued by a GC task's
+/// deletion pass. Deletes are independent single-object operations, so a small
+/// bounded fan-out keeps large backlogs tractable without overwhelming the
+/// object store.
+pub(crate) const GC_DELETE_CONCURRENCY: usize = 8;
 
 trait GcTask {
     fn resource(&self) -> &str;
@@ -273,6 +278,7 @@ impl GarbageCollector {
                 stats.clone(),
                 compactions_options,
                 gc_filter.clone(),
+                options.boundary_files_enabled,
             )
         });
         let manifest_gc_task = options.manifest_options.map(|manifest_options| {
@@ -281,6 +287,7 @@ impl GarbageCollector {
                 stats.clone(),
                 manifest_options,
                 gc_filter.clone(),
+                options.boundary_files_enabled,
             )
         });
         let detach_gc_task = options.detach_options.map(|detach_options| {
@@ -1162,6 +1169,8 @@ mod tests {
             compactions_options: None,
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
         let gc = GarbageCollector::new(
             manifest_store.clone(),
@@ -1228,6 +1237,8 @@ mod tests {
             compactions_options: None,
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let helper = MetricsRecorderHelper::new(recorder.clone(), Default::default());
@@ -1293,6 +1304,8 @@ mod tests {
             compactions_options: None,
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
         let gc = GarbageCollector::new(
             manifest_store.clone(),
@@ -1371,6 +1384,8 @@ mod tests {
             compactions_options: None,
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
         let gc = GarbageCollector::new(
             manifest_store.clone(),
@@ -1825,6 +1840,8 @@ mod tests {
             }),
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
 
         let gc = GarbageCollector::new(
@@ -1900,6 +1917,8 @@ mod tests {
             }),
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
 
         let mut gc = GarbageCollector::new(
@@ -1970,6 +1989,8 @@ mod tests {
             }),
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
 
         let gc = GarbageCollector::new(
@@ -2019,6 +2040,8 @@ mod tests {
             }),
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
 
         let mut gc = GarbageCollector::new(
@@ -2072,6 +2095,8 @@ mod tests {
             }),
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
 
         let gc = GarbageCollector::new(
@@ -2402,6 +2427,8 @@ mod tests {
             compactions_options: Some(options),
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
         let recorder = MetricsRecorderHelper::noop();
         let gc = GarbageCollector::new(
@@ -2500,6 +2527,8 @@ mod tests {
             compactions_options: None,
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let helper = MetricsRecorderHelper::new(recorder.clone(), Default::default());
@@ -2633,6 +2662,8 @@ mod tests {
             compactions_options: Some(dry_run_options),
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled: true,
+            object_store_max_retries: None,
         };
         let recorder = MetricsRecorderHelper::noop();
         let gc = GarbageCollector::new(

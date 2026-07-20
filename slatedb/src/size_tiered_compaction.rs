@@ -185,6 +185,14 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
             .flat_map(|c| c.core().recent_compactions())
             .filter(|c| c.active())
             .collect::<Vec<_>>();
+        // A Compacted job has finished using a worker slot, even though it
+        // remains active until its output is committed to the manifest. Keep
+        // it in `active_compactions` for conflict checks and destination-id
+        // reservation, but do not count it against execution capacity.
+        let compaction_slots_in_use = active_compactions
+            .iter()
+            .filter(|c| c.status().counts_against_max_concurrent())
+            .count();
         let mut next_fresh_sr_id = next_global_sr_id(db_state, &active_compactions);
 
         // Precompute per-tree (sources, conflict checker, backpressure) once
@@ -235,7 +243,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         loop {
             let mut picked_any = false;
             for tree in &mut trees {
-                if active_compactions.len() + compactions.len() >= self.max_concurrent_compactions {
+                if compaction_slots_in_use + compactions.len() >= self.max_concurrent_compactions {
                     break;
                 }
                 if let Some(compaction) = self.pick_next_compaction(tree, &mut next_fresh_sr_id) {
@@ -501,7 +509,7 @@ mod tests {
     use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 
     use crate::compactor_state::{
-        Compaction, CompactionSpec, Compactions, CompactorState, SourceId,
+        Compaction, CompactionSpec, CompactionStatus, Compactions, CompactorState, SourceId,
     };
     use crate::config::{CompactorOptions, SizeTieredCompactionSchedulerOptions};
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
@@ -692,6 +700,37 @@ mod tests {
 
         // then:
         assert_eq!(requests.len(), 0);
+    }
+
+    #[test]
+    fn test_compacted_job_does_not_consume_compaction_slot() {
+        // A finished worker job in one tree is still waiting for its manifest
+        // commit, while a disjoint tree has eligible work. With one worker
+        // slot, the scheduler should immediately refill that slot.
+        let scheduler =
+            SizeTieredCompactionScheduler::new(SizeTieredCompactionSchedulerOptions::default(), 1);
+        let root_l0: Vec<SsTableView> = (0..4).map(|_| create_sst_view(1)).collect();
+        let segment_l0: Vec<SsTableView> = (0..4).map(|_| create_sst_view(1)).collect();
+        let mut core = create_db_state(root_l0.iter().cloned().collect(), Vec::new());
+        core.segments = vec![segment_with(
+            b"finished/",
+            segment_l0.iter().cloned().collect(),
+            Vec::new(),
+        )];
+        let mut state = create_compactor_state(core);
+
+        let completed_worker_job = Compaction::new(
+            ulid::Ulid::new(),
+            create_segment_l0_compaction(b"finished/", &segment_l0, 0),
+        )
+        .with_status(CompactionStatus::Compacted);
+        state.insert_compaction_for_test(completed_worker_job);
+
+        let requests = scheduler.propose(&(&state).into());
+
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].segment().is_empty());
+        assert_eq!(requests[0].destination(), Some(1));
     }
 
     #[test]

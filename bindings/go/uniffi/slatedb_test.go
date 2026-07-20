@@ -60,6 +60,21 @@ func newMemoryStore(t *testing.T) *slatedb.ObjectStore {
 	return store
 }
 
+// newLocalStore returns a local-filesystem object store rooted at `/` together
+// with a fresh temp-directory DB path relative to that root. SlateDB requires
+// the resolved store to have an empty path, so the directory is carried as the
+// path passed to the builders rather than baked into the store URL.
+func newLocalStore(t *testing.T) (*slatedb.ObjectStore, string) {
+	t.Helper()
+
+	store, err := slatedb.ObjectStoreResolve("file:///")
+	if err != nil {
+		t.Fatalf("ObjectStoreResolve(file:///): %v", err)
+	}
+	t.Cleanup(store.Destroy)
+	return store, strings.TrimPrefix(t.TempDir(), "/")
+}
+
 func openTestDB(t *testing.T, store *slatedb.ObjectStore, configure func(*testing.T, *slatedb.DbBuilder)) *testDB {
 	t.Helper()
 
@@ -1516,9 +1531,9 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		builder := slatedb.NewDbReaderBuilder(testDBPath, store)
 		defer builder.Destroy()
 
-		err := builder.WithCheckpointId("not-a-uuid")
+		err := builder.WithReaderMode(slatedb.ReaderModeCheckpoint{Field0: "not-a-uuid"})
 		if !errors.Is(err, slatedb.ErrErrorInvalid) {
-			t.Fatalf("DbReaderBuilder.WithCheckpointId(invalid): got %v, want invalid error", err)
+			t.Fatalf("DbReaderBuilder.WithReaderMode(invalid checkpoint): got %v, want invalid error", err)
 		}
 	})
 
@@ -1535,8 +1550,10 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		builder := slatedb.NewDbReaderBuilder(testDBPath, store)
 		defer builder.Destroy()
 
-		if err := builder.WithCheckpointId("ffffffff-ffff-ffff-ffff-ffffffffffff"); err != nil {
-			t.Fatalf("DbReaderBuilder.WithCheckpointId(valid): %v", err)
+		if err := builder.WithReaderMode(slatedb.ReaderModeCheckpoint{
+			Field0: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+		}); err != nil {
+			t.Fatalf("DbReaderBuilder.WithReaderMode(checkpoint): %v", err)
 		}
 
 		_, err := builder.Build()
@@ -1888,6 +1905,42 @@ func TestAdminQueries(t *testing.T) {
 	}
 }
 
+func TestAdminRunGcOnce(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key"), []byte("value")); err != nil {
+		t.Fatalf("Put(key): %v", err)
+	}
+	if err := dbHandle.db.Flush(); err != nil {
+		t.Fatalf("Flush(): %v", err)
+	}
+
+	if err := admin.RunGcOnce(nil); err != nil {
+		t.Fatalf("RunGcOnce(nil): %v", err)
+	}
+
+	directoryOptions := &slatedb.GarbageCollectorDirectoryOptions{
+		IntervalMs: nil,
+		MinAgeMs:   0,
+		DryRun:     true,
+	}
+	options := &slatedb.GarbageCollectorOptions{
+		ManifestOptions:      nil,
+		WalOptions:           directoryOptions,
+		WalFenceOptions:      directoryOptions,
+		CompactedOptions:     nil,
+		CompactionsOptions:   nil,
+		DetachOptions:        &slatedb.GarbageCollectorScheduleOptions{IntervalMs: nil},
+		DisableBoundaryFiles: true,
+	}
+
+	if err := admin.RunGcOnce(options); err != nil {
+		t.Fatalf("RunGcOnce(custom): %v", err)
+	}
+}
+
 func TestAdminClone(t *testing.T) {
 	store := newMemoryStore(t)
 
@@ -2127,6 +2180,174 @@ func TestAdminCreateDetachedCheckpointWithName(t *testing.T) {
 	}
 	if len(filteredOther) != 0 {
 		t.Fatalf("ListCheckpoints(other-name): got %d checkpoints, want 0", len(filteredOther))
+	}
+}
+
+func TestAdminDrainSegment(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, func(t *testing.T, builder *slatedb.DbBuilder) {
+		t.Helper()
+		if err := builder.WithSegmentExtractor(fixedThreeByteSegmentExtractor{}); err != nil {
+			t.Fatalf("WithSegmentExtractor(): %v", err)
+		}
+	})
+
+	// Write to two segments and flush so they land in the manifest as L0.
+	if _, err := dbHandle.db.Put([]byte("aaa-1"), []byte("value")); err != nil {
+		t.Fatalf("Put(aaa-1): %v", err)
+	}
+	if _, err := dbHandle.db.Put([]byte("bbb-1"), []byte("value")); err != nil {
+		t.Fatalf("Put(bbb-1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	// Locate the "aaa" segment in the manifest and enumerate its sources.
+	view, err := admin.ReadCompactorStateView()
+	if err != nil {
+		t.Fatalf("ReadCompactorStateView(): %v", err)
+	}
+	sources := collectSegmentSources(view.Manifest.Segments, []byte("aaa"))
+	if len(sources) == 0 {
+		t.Fatal("segment aaa: got 0 sources, want its L0 SSTs")
+	}
+
+	// Submitting a drain spec retires the segment.
+	compaction, err := admin.SubmitCompaction(slatedb.CompactionSpecDrainSegment{
+		Segment: []byte("aaa"),
+		Sources: sources,
+	})
+	if err != nil {
+		t.Fatalf("SubmitCompaction(drain aaa): %v", err)
+	}
+	spec, ok := compaction.Spec.(slatedb.CompactionSpecDrainSegment)
+	if !ok {
+		t.Fatalf("submitted spec: got %T, want CompactionSpecDrainSegment", compaction.Spec)
+	}
+	if !bytes.Equal(spec.Segment, []byte("aaa")) {
+		t.Fatalf("drain spec segment: got %q, want %q", spec.Segment, "aaa")
+	}
+	if len(spec.Sources) != len(sources) {
+		t.Fatalf("drain spec sources: got %d, want %d", len(spec.Sources), len(sources))
+	}
+}
+
+// collectSegmentSources returns every L0 SST and sorted run of the segment with
+// the given prefix as drain/compaction sources.
+func collectSegmentSources(segments []slatedb.Segment, prefix []byte) []slatedb.SourceId {
+	var sources []slatedb.SourceId
+	for i := range segments {
+		if !bytes.Equal(segments[i].Prefix, prefix) {
+			continue
+		}
+		for _, v := range segments[i].L0 {
+			sources = append(sources, slatedb.SourceIdSstView{Field0: v.Id})
+		}
+		for _, r := range segments[i].Compacted {
+			sources = append(sources, slatedb.SourceIdSortedRun{Field0: r.Id})
+		}
+	}
+	return sources
+}
+
+// segmentDrained reports whether the segment with the given prefix has been
+// retired: either absent from the manifest, or reduced to an empty drain marker.
+func segmentDrained(segments []slatedb.Segment, prefix []byte) bool {
+	for i := range segments {
+		if bytes.Equal(segments[i].Prefix, prefix) {
+			return len(segments[i].L0) == 0 && len(segments[i].Compacted) == 0
+		}
+	}
+	return true
+}
+
+// TestAdminDrainSegmentEndToEnd exercises the full drain lifecycle against a
+// local-filesystem object store: write two segments, submit a drain for one,
+// and let the embedded compactor retire it while the other is left intact.
+func TestAdminDrainSegmentEndToEnd(t *testing.T) {
+	store, dbPath := newLocalStore(t)
+
+	// Writer with a segment extractor and a fast compactor poll so the
+	// submitted drain is executed promptly by the embedded compactor.
+	dbBuilder := slatedb.NewDbBuilder(dbPath, store)
+	defer dbBuilder.Destroy()
+	if err := dbBuilder.WithSegmentExtractor(fixedThreeByteSegmentExtractor{}); err != nil {
+		t.Fatalf("WithSegmentExtractor(): %v", err)
+	}
+	settings := slatedb.SettingsDefault()
+	defer settings.Destroy()
+	if err := settings.Set("compactor_options.poll_interval", `"200ms"`); err != nil {
+		t.Fatalf("Set(compactor_options.poll_interval): %v", err)
+	}
+	if err := dbBuilder.WithSettings(settings); err != nil {
+		t.Fatalf("WithSettings(): %v", err)
+	}
+	db, err := dbBuilder.Build()
+	if err != nil {
+		t.Fatalf("DbBuilder.Build(): %v", err)
+	}
+	defer func() {
+		if err := db.Shutdown(); err != nil {
+			t.Errorf("Shutdown(): %v", err)
+		}
+		db.Destroy()
+	}()
+
+	// Two segments, flushed to L0 so they are visible in the manifest.
+	if _, err := db.Put([]byte("aaa-1"), []byte("value")); err != nil {
+		t.Fatalf("Put(aaa-1): %v", err)
+	}
+	if _, err := db.Put([]byte("bbb-1"), []byte("value")); err != nil {
+		t.Fatalf("Put(bbb-1): %v", err)
+	}
+	if err := db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	adminBuilder := slatedb.NewAdminBuilder(dbPath, store)
+	defer adminBuilder.Destroy()
+	admin, err := adminBuilder.Build()
+	if err != nil {
+		t.Fatalf("AdminBuilder.Build(): %v", err)
+	}
+	defer admin.Destroy()
+
+	// Build the drain from the segment's current L0s and sorted runs.
+	view, err := admin.ReadCompactorStateView()
+	if err != nil {
+		t.Fatalf("ReadCompactorStateView(): %v", err)
+	}
+	sources := collectSegmentSources(view.Manifest.Segments, []byte("aaa"))
+	if len(sources) == 0 {
+		t.Fatal("segment aaa: got 0 sources before drain")
+	}
+	if _, err := admin.SubmitCompaction(slatedb.CompactionSpecDrainSegment{
+		Segment: []byte("aaa"),
+		Sources: sources,
+	}); err != nil {
+		t.Fatalf("SubmitCompaction(drain aaa): %v", err)
+	}
+
+	// The embedded compactor picks up the drain and retires "aaa". Poll the
+	// manifest until it is drained, and confirm "bbb" is left intact.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		view, err := admin.ReadCompactorStateView()
+		if err != nil {
+			t.Fatalf("ReadCompactorStateView(): %v", err)
+		}
+		if segmentDrained(view.Manifest.Segments, []byte("aaa")) {
+			if len(collectSegmentSources(view.Manifest.Segments, []byte("bbb"))) == 0 {
+				t.Fatal("segment bbb was retired by a drain targeting aaa")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for segment aaa to drain")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

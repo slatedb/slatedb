@@ -550,9 +550,15 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
             CompactorMessage::LogStats => self.handle_log_ticker(),
             CompactorMessage::PollManifest => self.handle_ticker().await?,
             CompactorMessage::CommitCompacted => {
-                self.state_writer.load_compactions().await?;
-                self.update_distributed_compaction_metrics();
-                self.commit_compacted_entries().await?;
+                // A remote worker can only produce a new Compacted result for a
+                // job the coordinator already tracks as active. When there are no
+                // active jobs, the regular manifest poll is sufficient to discover
+                // new submissions. We can avoid an otherwise idle object-store refresh.
+                if self.state().active_compactions().next().is_some() {
+                    self.state_writer.load_compactions().await?;
+                    self.update_distributed_compaction_metrics();
+                    self.commit_compacted_entries().await?;
+                }
             }
         }
         Ok(())
@@ -867,6 +873,7 @@ impl CompactorEventHandler {
             return Ok(());
         }
 
+        let mut manifest_changed = false;
         for compaction in compacted {
             let id = compaction.id();
             match self.validate_compaction(&compaction) {
@@ -884,6 +891,7 @@ impl CompactorEventHandler {
                             .collect(),
                     };
                     self.state_mut().finish_compaction(id, output_sr);
+                    manifest_changed = true;
                     self.stats
                         .last_compaction_ts
                         .set(self.system_clock.now().timestamp());
@@ -902,7 +910,13 @@ impl CompactorEventHandler {
         }
 
         self.log_compaction_state();
-        self.state_writer.write_state_safely().await?;
+        if manifest_changed {
+            self.state_writer.write_state_safely().await?;
+        } else {
+            // Validation failures only change `.compactions`. Avoid creating a
+            // checkpoint and writing an unchanged manifest.
+            self.state_writer.write_compactions_safely().await?;
+        }
 
         Ok(())
     }
@@ -967,7 +981,7 @@ impl CompactorEventHandler {
             SourceId::SstView(id) => !l0_view_ids.contains(id),
             SourceId::SortedRun(id) => !sr_ids.contains(id),
         }) {
-            warn!("compaction source missing from db state: {:?}", missing);
+            debug!("compaction source missing from db state: {:?}", missing);
             return Err(SlateDBError::InvalidCompaction);
         }
 
@@ -1714,18 +1728,27 @@ mod tests {
                     .with_options(compactor_options())
                     .with_scheduler_supplier(Arc::new(SegmentTestSchedulerSupplier::new(
                         Bytes::from_static(b"aaa"),
-                        2,
+                        // Must match the number of aaa keys flushed below. The
+                        // compactor's first poll tick fires immediately and can
+                        // land mid-flush; a lower threshold lets it compact a
+                        // subset of the aaa L0s and strand the rest, since the
+                        // scheduler never proposes with fewer than this many L0s.
+                        3,
                     ))),
             )
             .build()
             .await
             .unwrap();
 
+        // bbb gets as many L0s as aaa, so it would qualify for compaction if
+        // segment scoping were ignored; it must still be left alone.
         for (key, value) in [
             (b"aaa-001".as_slice(), b"v1".as_slice()),
             (b"aaa-002".as_slice(), b"v2".as_slice()),
             (b"aaa-003".as_slice(), b"v3".as_slice()),
             (b"bbb-001".as_slice(), b"v4".as_slice()),
+            (b"bbb-002".as_slice(), b"v5".as_slice()),
+            (b"bbb-003".as_slice(), b"v6".as_slice()),
         ] {
             put_and_flush_memtable(&db, key, value).await;
         }
@@ -1748,7 +1771,7 @@ mod tests {
                 .expect("missing segment bbb");
             if aaa.tree.l0.is_empty()
                 && !aaa.tree.compacted.is_empty()
-                && bbb.tree.l0.len() == 1
+                && bbb.tree.l0.len() == 3
                 && bbb.tree.compacted.is_empty()
             {
                 Some(core)
@@ -1771,7 +1794,7 @@ mod tests {
             .expect("missing segment bbb");
         assert!(aaa.tree.l0.is_empty());
         assert_eq!(aaa.tree.compacted.len(), 1);
-        assert_eq!(bbb.tree.l0.len(), 1);
+        assert_eq!(bbb.tree.l0.len(), 3);
         assert!(bbb.tree.compacted.is_empty());
 
         for (key, value) in [
@@ -1779,6 +1802,8 @@ mod tests {
             (b"aaa-002".as_slice(), b"v2".as_slice()),
             (b"aaa-003".as_slice(), b"v3".as_slice()),
             (b"bbb-001".as_slice(), b"v4".as_slice()),
+            (b"bbb-002".as_slice(), b"v5".as_slice()),
+            (b"bbb-003".as_slice(), b"v6".as_slice()),
         ] {
             assert_eq!(
                 db.get(key).await.unwrap(),
@@ -5010,6 +5035,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_commit_compacted_ticker_skips_remote_refresh_when_idle() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        assert!(fixture
+            .handler
+            .state()
+            .active_compactions()
+            .next()
+            .is_none());
+
+        // Simulate an external submission arriving after the coordinator's last
+        // regular poll. An idle fast-commit tick must not read it from storage.
+        let remote_id = Ulid::new();
+        let mut external = StoredCompactions::try_load(fixture.compactions_store.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut dirty = external.prepare_dirty().unwrap();
+        dirty.value.insert(Compaction::new(
+            remote_id,
+            CompactionSpec::new(Vec::new(), 0),
+        ));
+        external.update(dirty).await.unwrap();
+
+        fixture
+            .handler
+            .handle(CompactorMessage::CommitCompacted)
+            .await
+            .unwrap();
+        assert!(
+            !fixture
+                .handler
+                .state()
+                .compactions()
+                .value
+                .contains(&remote_id),
+            "idle fast-commit tick should not refresh .compactions"
+        );
+
+        // Once the coordinator has active work, the same fast tick must resume
+        // refreshing so it can observe worker transitions promptly.
+        let local_id = Ulid::new();
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(Compaction::new(
+                local_id,
+                CompactionSpec::new(Vec::new(), 0),
+            ));
+        fixture
+            .handler
+            .handle(CompactorMessage::CommitCompacted)
+            .await
+            .unwrap();
+        assert!(
+            fixture
+                .handler
+                .state()
+                .compactions()
+                .value
+                .contains(&remote_id),
+            "active fast-commit tick should refresh .compactions"
+        );
+    }
+
+    #[tokio::test]
     async fn test_handle_ticker_starts_preexisting_submitted_compaction() {
         let compactor_options = Arc::new(compactor_options());
         let options = db_options(None);
@@ -5867,7 +5957,7 @@ mod tests {
                 let db_state = db.inner.state.read();
                 let cow_db_state = db_state.state();
                 (
-                    db.inner.wal_buffer.is_empty(),
+                    db.inner.wal_observer.status().buffered_wal_entries_count == 0,
                     db_state.memtable().is_empty() && cow_db_state.imm_memtable.is_empty(),
                     db_state.state().core().clone(),
                 )
@@ -6144,6 +6234,12 @@ mod tests {
             .handler
             .state_mut()
             .insert_compaction_for_test(compaction);
+        let manifest_id_before = fixture
+            .manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .id;
 
         // when:
         fixture
@@ -6165,6 +6261,16 @@ mod tests {
                 .expect("missing compaction")
                 .status(),
             CompactionStatus::Failed,
+        );
+        let manifest_id_after = fixture
+            .manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .id;
+        assert_eq!(
+            manifest_id_after, manifest_id_before,
+            "validation-only failures must not checkpoint or rewrite the manifest"
         );
     }
 

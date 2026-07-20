@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.14.0"
+version = "0.14.1"
 edition = "2021"
 repository = "https://github.com/slatedb/slatedb"
 license = "Apache-2.0"
@@ -21,6 +21,12 @@ readme = "README.md"
 
 [profile.bench]
 lto = true
+
+[profile.dst]
+inherits = "test"
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
 
 [workspace.dependencies]
 
@@ -40,7 +46,7 @@ crossbeam-channel = "0.5.15"
 crossbeam-skiplist = "0.1.3"
 dotenvy = "0.15.7"
 duration-str = { version = "0.11.2", default-features = false }
-fail-parallel = "0.5.2"
+fail-parallel = "0.6.0"
 figment = "0.10.19"
 flate2 = "1.1.2"
 flatbuffers = "25.2.10"
@@ -63,9 +69,9 @@ serde = "1.0"
 serde_json = "1.0.142"
 siphasher = "1"
 smallvec = "1.15.1"
-slatedb = { path = "slatedb", version = "0.14.0" }
-slatedb-common = { path = "slatedb-common", version = "0.14.0" }
-slatedb-txn-obj = { path = "slatedb-txn-obj", version = "0.14.0" }
+slatedb = { path = "slatedb", version = "0.14.1" }
+slatedb-common = { path = "slatedb-common", version = "0.14.1" }
+slatedb-txn-obj = { path = "slatedb-txn-obj", version = "0.14.1" }
 snap = "1.1.1"
 sysinfo = "0.35.2"
 thiserror = "1.0.63"

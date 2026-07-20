@@ -158,6 +158,40 @@ class SlateDbAdminTest {
     }
 
     @Test
+    void adminRunGcOnceAcceptsDefaultAndCustomOptions() throws Exception {
+        String path = TestSupport.uniquePath("admin-run-gc-once");
+
+        try (ObjectStore store = TestSupport.newMemoryStore();
+                TestSupport.ManagedDb dbHandle = TestSupport.openDb(path, store, null);
+                AdminBuilder adminBuilder = new AdminBuilder(path, store);
+                Admin admin = adminBuilder.build()) {
+            Db db = dbHandle.db();
+
+            TestSupport.await(db.put(TestSupport.bytes("key"), TestSupport.bytes("value")));
+            TestSupport.await(db.flush());
+
+            TestSupport.await(admin.runGcOnce(null));
+
+            GarbageCollectorDirectoryOptions directoryOptions =
+                    new GarbageCollectorDirectoryOptions(null, 0L, true);
+            GarbageCollectorScheduleOptions scheduleOptions =
+                    new GarbageCollectorScheduleOptions(null);
+            GarbageCollectorOptions options =
+                    new GarbageCollectorOptions(
+                            null,
+                            directoryOptions,
+                            directoryOptions,
+                            null,
+                            null,
+                            scheduleOptions,
+                            true,
+                            null);
+
+            TestSupport.await(admin.runGcOnce(options));
+        }
+    }
+
+    @Test
     void adminCheckpointListingTracksReaderLifecycle() throws Exception {
         String path = TestSupport.uniquePath("admin-checkpoints");
 

@@ -157,6 +157,32 @@ impl From<ReadOptions> for slatedb::config::ReadOptions {
     }
 }
 
+/// Determines how a [`crate::DbReader`] chooses and refreshes database state.
+#[derive(Clone, Debug, Default, uniffi::Enum)]
+pub enum ReaderMode {
+    /// Create and maintain checkpoints while following the latest database state.
+    #[default]
+    ManagedCheckpoint,
+    /// Remain pinned to the database state referenced by the supplied checkpoint UUID string.
+    Checkpoint(String),
+    /// Follow the latest manifest without creating or maintaining a checkpoint.
+    FollowLatest,
+}
+
+impl TryFrom<ReaderMode> for slatedb::DbReaderMode {
+    type Error = Error;
+
+    fn try_from(value: ReaderMode) -> Result<Self, Self::Error> {
+        Ok(match value {
+            ReaderMode::ManagedCheckpoint => Self::ManagedCheckpoint,
+            ReaderMode::Checkpoint(checkpoint_id) => {
+                Self::Checkpoint(try_checkpoint_id_from_str(&checkpoint_id)?)
+            }
+            ReaderMode::FollowLatest => Self::FollowLatest,
+        })
+    }
+}
+
 /// Options for opening a [`crate::DbReader`].
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ReaderOptions {
@@ -168,6 +194,12 @@ pub struct ReaderOptions {
     pub max_memtable_bytes: u64,
     /// Whether WAL replay should be skipped entirely.
     pub skip_wal_replay: bool,
+    /// Maximum number of wrapper-level retries for a single object-store
+    /// operation, on top of the `object_store` client's own HTTP retries.
+    /// `None` (default) retries transient errors indefinitely; `Some(n)` gives
+    /// up after `n` retries and surfaces the underlying error.
+    #[uniffi(default = None)]
+    pub object_store_max_retries: Option<u32>,
 }
 
 impl Default for ReaderOptions {
@@ -177,6 +209,7 @@ impl Default for ReaderOptions {
             checkpoint_lifetime_ms: 600_000,
             max_memtable_bytes: 64 * 1024 * 1024,
             skip_wal_replay: false,
+            object_store_max_retries: None,
         }
     }
 }
@@ -188,6 +221,7 @@ impl From<ReaderOptions> for slatedb::config::DbReaderOptions {
             checkpoint_lifetime: Duration::from_millis(value.checkpoint_lifetime_ms),
             max_memtable_bytes: value.max_memtable_bytes,
             skip_wal_replay: value.skip_wal_replay,
+            object_store_max_retries: value.object_store_max_retries,
             ..Default::default()
         }
     }
@@ -337,6 +371,218 @@ impl From<FlushOptions> for slatedb::config::FlushOptions {
         slatedb::config::FlushOptions {
             flush_type: value.flush_type.into(),
         }
+    }
+}
+
+/// Garbage collector options for one age-thresholded directory.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GarbageCollectorDirectoryOptions {
+    /// How often recurring garbage collection runs, in milliseconds.
+    ///
+    /// Ignored by [`crate::Admin::run_gc_once`], but preserved so the same option
+    /// shape matches SlateDB's core garbage collector configuration.
+    #[uniffi(default = None)]
+    pub interval_ms: Option<u64>,
+    /// Minimum file age before it can be garbage collected, in milliseconds.
+    pub min_age_ms: u64,
+    /// Whether to log files that would be deleted without deleting them.
+    pub dry_run: bool,
+}
+
+impl Default for GarbageCollectorDirectoryOptions {
+    fn default() -> Self {
+        let core = slatedb::config::GarbageCollectorDirectoryOptions::default();
+        Self {
+            interval_ms: core.interval.map(|duration| duration.as_millis() as u64),
+            min_age_ms: core.min_age.as_millis() as u64,
+            dry_run: core.dry_run,
+        }
+    }
+}
+
+impl From<GarbageCollectorDirectoryOptions> for slatedb::config::GarbageCollectorDirectoryOptions {
+    fn from(value: GarbageCollectorDirectoryOptions) -> Self {
+        Self {
+            interval: value.interval_ms.map(Duration::from_millis),
+            min_age: Duration::from_millis(value.min_age_ms),
+            dry_run: value.dry_run,
+        }
+    }
+}
+
+/// Schedule options for a garbage collector task without a file-age threshold.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GarbageCollectorScheduleOptions {
+    /// How often recurring garbage collection runs, in milliseconds.
+    ///
+    /// Ignored by [`crate::Admin::run_gc_once`].
+    #[uniffi(default = None)]
+    pub interval_ms: Option<u64>,
+}
+
+impl Default for GarbageCollectorScheduleOptions {
+    fn default() -> Self {
+        let core = slatedb::config::GarbageCollectorScheduleOptions::default();
+        Self {
+            interval_ms: core.interval.map(|duration| duration.as_millis() as u64),
+        }
+    }
+}
+
+impl From<GarbageCollectorScheduleOptions> for slatedb::config::GarbageCollectorScheduleOptions {
+    fn from(value: GarbageCollectorScheduleOptions) -> Self {
+        Self {
+            interval: value.interval_ms.map(Duration::from_millis),
+        }
+    }
+}
+
+/// Options controlling which garbage collector tasks run.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct GarbageCollectorOptions {
+    /// Options for manifest files. `None` disables manifest garbage collection.
+    #[uniffi(default = None)]
+    pub manifest_options: Option<GarbageCollectorDirectoryOptions>,
+    /// Options for WAL SST files. `None` disables WAL garbage collection.
+    #[uniffi(default = None)]
+    pub wal_options: Option<GarbageCollectorDirectoryOptions>,
+    /// Options for zero-byte WAL fence objects. `None` disables WAL fence garbage collection.
+    #[uniffi(default = None)]
+    pub wal_fence_options: Option<GarbageCollectorDirectoryOptions>,
+    /// Options for compacted SST files. `None` disables compacted SST garbage collection.
+    #[uniffi(default = None)]
+    pub compacted_options: Option<GarbageCollectorDirectoryOptions>,
+    /// Options for compactor job state files. `None` disables compactions garbage collection.
+    #[uniffi(default = None)]
+    pub compactions_options: Option<GarbageCollectorDirectoryOptions>,
+    /// Options for detaching clone references. `None` disables detach garbage collection.
+    #[uniffi(default = None)]
+    pub detach_options: Option<GarbageCollectorScheduleOptions>,
+    /// Whether GC should delete eligible manifest/compactions metadata without advancing boundary
+    /// files. This supports object stores without conditional overwrites (`If-Match`), but allows a
+    /// SlateDB client or compactor to begin updating a manifest or compactions file, stop making
+    /// progress (for example, because its process or host is suspended), then resume after GC's
+    /// `min_age`. It can then recreate a deleted metadata ID and incorrectly report its stale update
+    /// as successful. Set `min_age` longer than the maximum lifetime of a stale process, and use the
+    /// same setting for every GC operating on the database.
+    #[uniffi(default = false)]
+    pub disable_boundary_files: bool,
+    /// Maximum number of wrapper-level retries for a single object-store
+    /// operation, on top of the `object_store` client's own HTTP retries.
+    /// `None` (default) retries transient errors indefinitely; `Some(n)` gives
+    /// up after `n` retries and surfaces the underlying error.
+    #[uniffi(default = None)]
+    pub object_store_max_retries: Option<u32>,
+}
+
+impl Default for GarbageCollectorOptions {
+    fn default() -> Self {
+        let core = slatedb::config::GarbageCollectorOptions::default();
+        Self {
+            manifest_options: core.manifest_options.map(Into::into),
+            wal_options: core.wal_options.map(Into::into),
+            wal_fence_options: core.wal_fence_options.map(Into::into),
+            compacted_options: core.compacted_options.map(Into::into),
+            compactions_options: core.compactions_options.map(Into::into),
+            detach_options: core.detach_options.map(Into::into),
+            disable_boundary_files: !core.boundary_files_enabled,
+            object_store_max_retries: core.object_store_max_retries,
+        }
+    }
+}
+
+impl From<slatedb::config::GarbageCollectorDirectoryOptions> for GarbageCollectorDirectoryOptions {
+    fn from(value: slatedb::config::GarbageCollectorDirectoryOptions) -> Self {
+        Self {
+            interval_ms: value.interval.map(|duration| duration.as_millis() as u64),
+            min_age_ms: value.min_age.as_millis() as u64,
+            dry_run: value.dry_run,
+        }
+    }
+}
+
+impl From<slatedb::config::GarbageCollectorScheduleOptions> for GarbageCollectorScheduleOptions {
+    fn from(value: slatedb::config::GarbageCollectorScheduleOptions) -> Self {
+        Self {
+            interval_ms: value.interval.map(|duration| duration.as_millis() as u64),
+        }
+    }
+}
+
+impl From<GarbageCollectorOptions> for slatedb::config::GarbageCollectorOptions {
+    fn from(value: GarbageCollectorOptions) -> Self {
+        Self {
+            manifest_options: value.manifest_options.map(Into::into),
+            wal_options: value.wal_options.map(Into::into),
+            wal_fence_options: value.wal_fence_options.map(Into::into),
+            compacted_options: value.compacted_options.map(Into::into),
+            compactions_options: value.compactions_options.map(Into::into),
+            detach_options: value.detach_options.map(Into::into),
+            metric_level: None,
+            boundary_files_enabled: !value.disable_boundary_files,
+            object_store_max_retries: value.object_store_max_retries,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GarbageCollectorOptions, ReaderOptions};
+
+    #[test]
+    fn boundary_files_are_enabled_by_default() {
+        let gc: slatedb::config::GarbageCollectorOptions =
+            GarbageCollectorOptions::default().into();
+
+        assert!(gc.boundary_files_enabled);
+    }
+
+    #[test]
+    fn boundary_files_can_be_disabled() {
+        let gc: slatedb::config::GarbageCollectorOptions = GarbageCollectorOptions {
+            disable_boundary_files: true,
+            ..GarbageCollectorOptions::default()
+        }
+        .into();
+
+        assert!(!gc.boundary_files_enabled);
+    }
+
+    #[test]
+    fn gc_object_store_max_retries_defaults_to_unbounded() {
+        let gc: slatedb::config::GarbageCollectorOptions =
+            GarbageCollectorOptions::default().into();
+
+        assert_eq!(gc.object_store_max_retries, None);
+    }
+
+    #[test]
+    fn gc_object_store_max_retries_threads_through() {
+        let gc: slatedb::config::GarbageCollectorOptions = GarbageCollectorOptions {
+            object_store_max_retries: Some(3),
+            ..GarbageCollectorOptions::default()
+        }
+        .into();
+
+        assert_eq!(gc.object_store_max_retries, Some(3));
+    }
+
+    #[test]
+    fn reader_object_store_max_retries_defaults_to_unbounded() {
+        let reader: slatedb::config::DbReaderOptions = ReaderOptions::default().into();
+
+        assert_eq!(reader.object_store_max_retries, None);
+    }
+
+    #[test]
+    fn reader_object_store_max_retries_threads_through() {
+        let reader: slatedb::config::DbReaderOptions = ReaderOptions {
+            object_store_max_retries: Some(5),
+            ..ReaderOptions::default()
+        }
+        .into();
+
+        assert_eq!(reader.object_store_max_retries, Some(5));
     }
 }
 
