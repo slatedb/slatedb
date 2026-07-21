@@ -23,13 +23,16 @@ use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::dispatcher::MessageHandler;
 use crate::error::SlateDBError;
+use crate::mem_table::ImmutableMemtable;
 use crate::memtable_flusher::manifest_writer::{FlushResult, ManifestWriter};
 use crate::memtable_flusher::uploader::{UploadJob, UploadedMemtable, Uploader};
 use crate::memtable_flusher::FlushTarget;
+use crate::utils::IdGenerator;
 use fail_parallel::fail_point;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use ulid::Ulid;
 
 macro_rules! memtable_flush_stat_name {
     ($suffix:expr) => {
@@ -352,7 +355,12 @@ impl FlushTracker {
                 tracked.first_seq, last_seq
             );
 
-            self.uploader.submit(UploadJob::new(imm_memtable))?;
+            // Allocate physical SST ids here, in seqno-ordered dispatch, so
+            // their ULID timestamps never fall below an earlier-dispatched
+            // (and thus earlier-published) L0's (RFC-0029).
+            let segment_sst_ids = allocate_segment_sst_ids(&self.inner, &imm_memtable);
+            self.uploader
+                .submit(UploadJob::new(imm_memtable, segment_sst_ids))?;
         }
     }
 
@@ -381,6 +389,31 @@ impl FlushTracker {
             }
         }
     }
+}
+
+/// Allocate one physical SST id per segment `imm` will flush to, keyed by
+/// segment prefix.
+///
+/// Kept module-private to the tracker on purpose: L0 physical SST ids must be
+/// minted only here, in seqno-ordered dispatch, so their ULID timestamps match
+/// the order in which the manifest writer publishes L0s (RFC-0029). Exposing a
+/// reusable minting helper would invite an out-of-order minting path and
+/// reintroduce the GC race this fixes.
+///
+/// Without an extractor the sole segment is the compatibility-encoded
+/// `prefix=""` segment; with one, the segments are the imm's touched prefixes.
+/// A segment that retention later prunes to empty simply leaves its id unused.
+fn allocate_segment_sst_ids(inner: &DbInner, imm: &ImmutableMemtable) -> BTreeMap<Bytes, Ulid> {
+    let prefixes: BTreeSet<Bytes> = if inner.segment_extractor.is_some() {
+        imm.touched_segments()
+    } else {
+        BTreeSet::from([Bytes::new()])
+    };
+    let mut rng = inner.rand.rng();
+    prefixes
+        .into_iter()
+        .map(|prefix| (prefix, rng.gen_ulid(inner.system_clock.as_ref())))
+        .collect()
 }
 
 struct TrackedImm {
@@ -532,11 +565,14 @@ mod tests {
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
+    use crate::mem_table::{ImmutableMemtable, WritableKVTable};
     use crate::memtable_flusher::uploader::Uploader;
     use crate::memtable_flusher::{FlushTarget, MemtableFlusher};
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
+    use crate::prefix_extractor::PrefixExtractor;
     use crate::tablestore::{TableStore, TableStoreKind};
+    use crate::test_utils::FixedThreeBytePrefixExtractor;
     use crate::types::RowEntry;
     use crate::utils::{SafeSender, WatchableOnceCell};
     use crate::wal_buffer::WalBufferManager;
@@ -545,7 +581,7 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
-    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorder,
         MetricsRecorderHelper,
@@ -568,8 +604,15 @@ mod tests {
         settings: Settings,
         fp_registry: Arc<FailPointRegistry>,
     ) -> TestHarness {
-        setup_harness_with_recorder(path, settings, fp_registry, MetricsRecorderHelper::noop())
-            .await
+        setup_harness_with_recorder(
+            path,
+            settings,
+            fp_registry,
+            MetricsRecorderHelper::noop(),
+            None,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
     }
 
     async fn setup_harness_with_recorder(
@@ -577,10 +620,11 @@ mod tests {
         settings: Settings,
         fp_registry: Arc<FailPointRegistry>,
         db_metrics: MetricsRecorderHelper,
+        segment_extractor: Option<Arc<dyn PrefixExtractor>>,
+        system_clock: Arc<dyn SystemClock>,
     ) -> TestHarness {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = path.to_string();
-        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand = Arc::new(DbRand::new(42));
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(path.clone()),
@@ -628,7 +672,7 @@ mod tests {
                 fp_registry,
                 None,
                 status_manager,
-                None,
+                segment_extractor,
             )
             .await
             .unwrap(),
@@ -1189,6 +1233,8 @@ mod tests {
             settings,
             Arc::new(FailPointRegistry::new()),
             helper,
+            None,
+            Arc::new(DefaultSystemClock::new()),
         )
         .await;
         set_local_l0_len(&harness, 1);
@@ -1487,6 +1533,8 @@ mod tests {
             settings,
             Arc::new(FailPointRegistry::new()),
             helper,
+            None,
+            Arc::new(DefaultSystemClock::new()),
         )
         .await;
         let ranges: &[(&[u8], &[u8])] = &[(b"aaa", b"zzz")];
@@ -1571,6 +1619,89 @@ mod tests {
             .await
             .expect("timed out waiting for flush result");
         assert!(result.is_ok() || result.is_err());
+    }
+
+    fn imm_with_touched(entries: &[(&[u8], &[u8], u64)], touched: &[&[u8]]) -> ImmutableMemtable {
+        let table = WritableKVTable::new();
+        for (key, value, seq) in entries {
+            table.put(RowEntry::new_value(key, value, *seq));
+        }
+        if !touched.is_empty() {
+            table.record_touched_segments(
+                touched.iter().map(|p| Bytes::copy_from_slice(p)).collect(),
+            );
+        }
+        ImmutableMemtable::new(table, 0)
+    }
+
+    #[tokio::test]
+    async fn allocate_segment_sst_ids_without_extractor_uses_empty_prefix() {
+        let harness = setup_harness(
+            "/tmp/test_allocate_segment_sst_ids_empty_prefix",
+            Settings::default(),
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let imm = imm_with_touched(&[(b"k1", b"v1", 1)], &[]);
+
+        let ids = super::allocate_segment_sst_ids(&harness.inner, &imm);
+
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains_key(&Bytes::new()));
+    }
+
+    #[tokio::test]
+    async fn allocate_segment_sst_ids_with_extractor_covers_touched_segments() {
+        let harness = setup_harness_with_recorder(
+            "/tmp/test_allocate_segment_sst_ids_segments",
+            Settings::default(),
+            Arc::new(FailPointRegistry::new()),
+            MetricsRecorderHelper::noop(),
+            Some(Arc::new(FixedThreeBytePrefixExtractor)),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await;
+        let imm = imm_with_touched(
+            &[(b"aaa-1", b"v1", 1), (b"bbb-1", b"v2", 2)],
+            &[b"aaa", b"bbb"],
+        );
+
+        let ids = super::allocate_segment_sst_ids(&harness.inner, &imm);
+
+        let prefixes: Vec<&[u8]> = ids.keys().map(|k| k.as_ref()).collect();
+        assert_eq!(prefixes, vec![&b"aaa"[..], &b"bbb"[..]]);
+    }
+
+    /// RFC-0029 ordering guarantee at the allocation level: ids minted for a
+    /// later-dispatched memtable never carry an earlier ULID timestamp than an
+    /// earlier-dispatched one, so `newest_l0` cannot advance past a pending L0.
+    #[tokio::test]
+    async fn allocate_segment_sst_ids_do_not_regress_across_dispatch() {
+        let clock = Arc::new(MockSystemClock::new());
+        let harness = setup_harness_with_recorder(
+            "/tmp/test_allocate_segment_sst_ids_ordering",
+            Settings::default(),
+            Arc::new(FailPointRegistry::new()),
+            MetricsRecorderHelper::noop(),
+            None,
+            clock.clone(),
+        )
+        .await;
+
+        let imm1 = imm_with_touched(&[(b"k1", b"v1", 1)], &[]);
+        let first =
+            super::allocate_segment_sst_ids(&harness.inner, &imm1)[&Bytes::new()].timestamp_ms();
+
+        clock.advance(Duration::from_millis(10)).await;
+
+        let imm2 = imm_with_touched(&[(b"k2", b"v2", 2)], &[]);
+        let second =
+            super::allocate_segment_sst_ids(&harness.inner, &imm2)[&Bytes::new()].timestamp_ms();
+
+        assert!(
+            second > first,
+            "later dispatch must not regress: first={first}, second={second}"
+        );
     }
 
     mod frontier_tests {
