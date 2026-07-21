@@ -33,6 +33,7 @@ pub use fail_parallel;
 pub use object_store;
 
 pub use batch::WriteBatch;
+pub use block_cache_policy::{BlockCachePolicy, CacheComponent};
 pub use bytes_range::ByteRangeBounds;
 pub use cached_object_store::stats as cached_object_store_stats;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult};

@@ -298,8 +298,11 @@ impl MessageHandler<UploadJob> for UploadHandler {
 #[cfg(test)]
 mod tests {
     use super::{TrackerMessage, UploadJob, Uploader};
+    use crate::block_cache_policy::{BlockCachePolicy, CacheComponent};
     use crate::config::Settings;
     use crate::db::DbInner;
+    use crate::db_cache::test_utils::TestCache;
+    use crate::db_cache::{CachedKey, DbCache};
     use crate::db_state::{SsTableId, SsTableView};
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
@@ -351,6 +354,23 @@ mod tests {
         fp_registry: Arc<FailPointRegistry>,
         segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     ) -> Arc<DbInner> {
+        setup_db_with_cache_policy(
+            path,
+            fp_registry,
+            segment_extractor,
+            None,
+            BlockCachePolicy::default(),
+        )
+        .await
+    }
+
+    async fn setup_db_with_cache_policy(
+        path: &str,
+        fp_registry: Arc<FailPointRegistry>,
+        segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+        cache: Option<Arc<dyn DbCache>>,
+        block_cache_policy: BlockCachePolicy,
+    ) -> Arc<DbInner> {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let settings = Settings::default();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
@@ -372,8 +392,9 @@ mod tests {
             SsTableFormat::default(),
             PathResolver::new(Path::from(path)),
             fp_registry.clone(),
-            None,
+            cache,
             TableStoreKind::Main,
+            block_cache_policy,
         ));
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =
@@ -568,6 +589,36 @@ mod tests {
             SsTableId::Compacted(expected_id)
         );
 
+        test.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_apply_flush_cache_policy() {
+        let cache = Arc::new(TestCache::new());
+        let db = setup_db_with_cache_policy(
+            "/tmp/test_parallel_l0_flush_cache_policy",
+            Arc::new(FailPointRegistry::new()),
+            None,
+            Some(cache.clone()),
+            BlockCachePolicy::default().with_flush_components(&[CacheComponent::Filters]),
+        )
+        .await;
+        let job = next_upload_job(&db, b"key", b"value", 1);
+        let test = start_test_uploader(&db);
+
+        test.submit(job).unwrap();
+        let msg = timeout(Duration::from_secs(5), test.tracker_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let TrackerMessage::UploadComplete(event) = msg else {
+            panic!("expected UploadComplete");
+        };
+        let handle = &event.segments[0].sst_handle;
+        let filter_key: CachedKey = (handle.id, handle.info.filter_offset).into();
+
+        assert!(cache.get_filter(&filter_key).await.unwrap().is_some());
+        assert_eq!(cache.entry_count(), 1);
         test.shutdown().await;
     }
 

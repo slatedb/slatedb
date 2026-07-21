@@ -269,6 +269,7 @@ impl GcTask for CompactedGcTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::cached_object_store::policy::CachePutConfig;
     use crate::cached_object_store::stats::CachedObjectStoreStats;
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
@@ -300,6 +301,7 @@ mod tests {
             Path::from("/root"),
             None,
             TableStoreKind::GC,
+            BlockCachePolicy::default(),
         ));
 
         // Manifest store and initial manifest
@@ -406,6 +408,7 @@ mod tests {
             Path::from("/root"),
             None,
             TableStoreKind::GC,
+            BlockCachePolicy::default(),
         ));
 
         // Manifest store and initial manifest
@@ -511,6 +514,7 @@ mod tests {
             Path::from("/root"),
             None,
             TableStoreKind::GC,
+            BlockCachePolicy::default(),
         ));
 
         // Manifest store with empty DB
@@ -615,6 +619,7 @@ mod tests {
             Path::from("/root"),
             None,
             TableStoreKind::GC,
+            BlockCachePolicy::default(),
         ));
 
         // Manifest with an L0 newer than the compaction output.
@@ -874,6 +879,7 @@ mod tests {
             Path::from("/root"),
             None,
             TableStoreKind::GC,
+            BlockCachePolicy::default(),
         ));
         let main_table_store = Arc::new(TableStore::new(
             ObjectStores::new(cached_store.clone(), None),
@@ -881,6 +887,7 @@ mod tests {
             Path::from("/root"),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Written through the Main store so cache_on_flush admits it.

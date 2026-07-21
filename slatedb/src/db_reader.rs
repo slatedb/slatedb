@@ -1386,6 +1386,7 @@ fn has_not_found_object_store_error(err: &(dyn std::error::Error + 'static)) -> 
 #[cfg(test)]
 mod tests {
     use super::{DbReaderMessage, ManifestPoller, ReaderState};
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::clock::MonotonicClock;
     use crate::config::{
         CheckpointOptions, CheckpointScope, FlushOptions, FlushType, MergeOptions, PutOptions,
@@ -3277,6 +3278,7 @@ mod tests {
                 Arc::clone(&self.fp_registry),
                 None,
                 TableStoreKind::Reader,
+                BlockCachePolicy::default(),
             ))
         }
 

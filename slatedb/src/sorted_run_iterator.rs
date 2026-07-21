@@ -248,6 +248,7 @@ impl RowEntryIterator for SortedRunIterator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_state::{SsTableHandle, SsTableId};
     use crate::format::sst::SsTableFormat;
@@ -281,6 +282,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let mut builder = table_store.table_builder();
         builder
@@ -339,6 +341,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let mut builder = table_store.table_builder();
         builder
@@ -406,6 +409,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let mut builder = table_store.table_builder();
         for i in 1..=4 {
@@ -491,6 +495,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let mut test_case_key_gen = key_gen.clone();
@@ -536,6 +541,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let mut expected_key_gen = key_gen.clone();
@@ -575,6 +581,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&[b'a'; 16], b'a', b'z');
         let val_gen = OrderedBytesGenerator::new_with_byte_range(&[0u8; 16], 0u8, 26u8);
@@ -602,6 +609,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let mut rng = proptest_util::rng::new_test_rng(None);
@@ -749,6 +757,7 @@ mod tests {
                 root_path,
                 None,
                 TableStoreKind::Main,
+                BlockCachePolicy::default(),
             ));
 
             // Build a sorted run with v1, v2, v1, v2 SSTs
@@ -821,6 +830,7 @@ mod tests {
                 root_path,
                 None,
                 TableStoreKind::Main,
+                BlockCachePolicy::default(),
             ));
 
             // Build a sorted run with v1, v2, v1, v2 SSTs

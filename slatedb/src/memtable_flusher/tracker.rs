@@ -546,6 +546,7 @@ enum TrackedImmState {
 #[cfg(test)]
 mod tests {
     use crate::batch_write::BatchWriterMessage;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_state::{
@@ -638,6 +639,7 @@ mod tests {
             Arc::clone(&fp_registry),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =

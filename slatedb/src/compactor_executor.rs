@@ -1010,6 +1010,7 @@ impl TokioCompactionExecutorInner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_range::BytesRange;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::ManifestCore;
@@ -1470,6 +1471,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
         StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
@@ -1691,7 +1693,7 @@ mod tests {
                     },
                     root_path.clone(),
                     None,
-                    TableStoreKind::Compactor));
+                    TableStoreKind::Compactor, BlockCachePolicy::default()));
                 let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
                 StoredManifest::create_new_db(
                     manifest_store.clone(),
@@ -1926,6 +1928,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
         StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
@@ -2486,6 +2489,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
         StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
@@ -2619,6 +2623,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
         StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())

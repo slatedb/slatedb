@@ -1441,6 +1441,7 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
+    use crate::block_cache_policy::{BlockCachePolicy, CacheComponent};
     use crate::compaction_worker::WorkerMessage;
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
@@ -1457,6 +1458,7 @@ mod tests {
         SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
     };
     use crate::db::Db;
+    use crate::db_cache::test_utils::TestCache;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
@@ -1708,6 +1710,79 @@ mod tests {
             }
         }
         assert!(expected.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_compactor_applies_output_cache_policy() {
+        let os = Arc::new(InMemory::new());
+        let system_clock = Arc::new(MockSystemClock::new());
+        let cache = Arc::new(TestCache::new());
+        let mut options = db_options(Some(compactor_options()));
+        options.flush_interval = None;
+        // Ensure that filter is built.
+        options.min_filter_keys = 1;
+        options
+            .compactor_options
+            .as_mut()
+            .expect("compactor options must be set")
+            .scheduler_options = SizeTieredCompactionSchedulerOptions {
+            // Compact even a single L0 so one flush is enough to trigger.
+            min_compaction_sources: 1,
+            ..Default::default()
+        }
+        .into();
+
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(options)
+            .with_system_clock(system_clock.clone())
+            .with_db_cache(cache.clone())
+            .with_block_cache_policy(
+                BlockCachePolicy::default()
+                    .with_flush_components(&[])
+                    .with_compaction_output_components(&[CacheComponent::Filters]),
+            )
+            .build()
+            .await
+            .unwrap();
+
+        db.put_with_options(
+            b"key",
+            b"value",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let db_state = await_compaction(&db, os, Some(system_clock))
+            .await
+            .expect("db was not compacted");
+
+        let output_ssts: Vec<_> = db_state
+            .tree
+            .compacted
+            .iter()
+            .flat_map(|sr| &sr.sst_views)
+            .collect();
+        assert!(!output_ssts.is_empty());
+
+        let cached_keys = cache.keys();
+        for view in output_ssts {
+            let id = view.sst.id;
+            let keys_for_id: Vec<_> = cached_keys.iter().filter(|k| k.sst_id == id).collect();
+            // Exactly the filter entry: no data, index, or stats entries.
+            assert_eq!(keys_for_id.len(), 1);
+            assert_eq!(keys_for_id[0].block_id, view.sst.info.filter_offset);
+        }
+        db.close().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5925,6 +6000,7 @@ mod tests {
             Path::from(PATH),
             None,
             TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
         ));
         (manifest_store, compactions_store, table_store)
     }

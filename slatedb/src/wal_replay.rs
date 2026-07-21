@@ -275,6 +275,7 @@ impl WalReplayIterator {
 #[cfg(test)]
 mod tests {
     use super::{WalReplayIterator, WalReplayOptions};
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_range::BytesRange;
     use crate::db_state::SsTableId;
     use crate::format::sst::SsTableFormat;
@@ -766,6 +767,7 @@ mod tests {
             path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ))
     }
 

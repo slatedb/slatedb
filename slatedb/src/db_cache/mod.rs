@@ -1062,6 +1062,10 @@ pub(crate) mod test_utils {
                 items: Mutex::new(HashMap::new()),
             }
         }
+
+        pub(crate) fn keys(&self) -> Vec<CachedKey> {
+            self.items.lock().unwrap().keys().cloned().collect()
+        }
     }
 
     #[async_trait]

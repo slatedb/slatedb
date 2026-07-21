@@ -776,6 +776,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_range::BytesRange;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo, SsTableView};
@@ -1321,6 +1322,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&root_path, inner.clone()));
         let compactions_store = Arc::new(CompactionsStore::new(&root_path, inner.clone()));

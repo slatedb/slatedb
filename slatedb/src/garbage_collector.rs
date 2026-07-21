@@ -445,6 +445,7 @@ impl GarbageCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::tablestore::TableStoreKind;
 
     use std::collections::HashSet;
@@ -1669,6 +1670,7 @@ mod tests {
             path,
             None,
             TableStoreKind::GC,
+            BlockCachePolicy::default(),
         ));
 
         (

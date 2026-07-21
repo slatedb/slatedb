@@ -424,6 +424,7 @@ mod tests {
 
     use super::*;
     use crate::blob::ReadOnlyBlob;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::block_iterator::{BlockIteratorLatest, BlockLike};
     use crate::bytes_range::BytesRange;
     use crate::db_state::{SsTableId, SsTableView};
@@ -487,6 +488,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let path_resolver = PathResolver::new(root_path);
 
@@ -590,6 +592,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -646,6 +649,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -745,6 +749,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
         for k in 1..=8 {
@@ -830,6 +835,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -898,6 +904,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -926,6 +933,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -985,6 +993,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1038,6 +1047,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1107,6 +1117,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1163,6 +1174,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let mut builder = table_store.table_builder();
         for key in 'a'..='z' {
@@ -1283,6 +1295,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1339,6 +1352,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1427,6 +1441,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store
             .table_builder()
@@ -1494,6 +1509,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
         let mut expected = Vec::new();
@@ -1558,6 +1574,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
 
@@ -1666,6 +1683,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1709,6 +1727,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
         builder
@@ -1755,6 +1774,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = table_store.table_builder();
         // Block 0: put
@@ -1853,6 +1873,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
 
         // Write keys whose 3-byte prefix is "key".
@@ -1910,6 +1931,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let handle_partial = store_partial.open_sst(&SsTableId::Wal(0)).await.unwrap();
         let partial = store_partial

@@ -894,6 +894,7 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
 #[cfg(test)]
 mod tests {
     use super::{ManifestWriter, ManifestWriterCommand, ManifestWriterHandler, TrackerMessage};
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
@@ -1064,6 +1065,7 @@ mod tests {
             Arc::clone(&fp_registry),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =
