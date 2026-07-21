@@ -484,7 +484,6 @@ pub(crate) struct EncodedSsTable {
     pub(crate) info: SsTableInfo,
     pub(crate) index: SsTableIndexOwned,
     pub(crate) filters: Arc<[NamedFilter]>,
-    #[allow(dead_code)]
     pub(crate) stats: Option<SstStats>,
     pub(crate) unconsumed_blocks: VecDeque<EncodedSsTableBlock>,
     pub(crate) footer: Bytes,

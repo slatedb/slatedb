@@ -368,7 +368,7 @@ mod tests {
         builder.add(row.clone()).await.unwrap();
         let encoded_sst = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(2), &encoded_sst, false)
+            .write_sst(&SsTableId::Wal(2), &encoded_sst)
             .await
             .unwrap();
 
@@ -500,7 +500,7 @@ mod tests {
             }
             let encoded_sst = builder.build().await.unwrap();
             table_store
-                .write_sst(&SsTableId::Wal(wal_id as u64 + 1), &encoded_sst, false)
+                .write_sst(&SsTableId::Wal(wal_id as u64 + 1), &encoded_sst)
                 .await
                 .unwrap();
         }
@@ -567,7 +567,7 @@ mod tests {
         }
         let encoded_sst = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(1), &encoded_sst, false)
+            .write_sst(&SsTableId::Wal(1), &encoded_sst)
             .await
             .unwrap();
 
@@ -626,7 +626,7 @@ mod tests {
         }
         let encoded_sst = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(1), &encoded_sst, false)
+            .write_sst(&SsTableId::Wal(1), &encoded_sst)
             .await
             .unwrap();
 

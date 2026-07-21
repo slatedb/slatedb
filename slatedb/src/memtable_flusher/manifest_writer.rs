@@ -1205,10 +1205,7 @@ mod tests {
         value: &[u8],
     ) -> UploadedMemtable {
         let imm_memtable = freeze_imm(inner, key, value);
-        let handles = inner
-            .flush_l0_for_test(imm_memtable.table(), true)
-            .await
-            .unwrap();
+        let handles = inner.flush_l0_for_test(imm_memtable.table()).await.unwrap();
         let sst_handle = handles.into_iter().next().expect("expected single SST");
         let first_seq = imm_memtable.table().first_seq().unwrap();
         let last_seq = imm_memtable.table().last_seq().unwrap();
@@ -1842,7 +1839,7 @@ mod tests {
             let id = crate::db_state::SsTableId::Compacted(
                 inner.rand.rng().gen_ulid(inner.system_clock.as_ref()),
             );
-            let sst_handle = inner.upload_sst(&id, &encoded_sst, false).await.unwrap();
+            let sst_handle = inner.upload_sst(&id, &encoded_sst).await.unwrap();
             segments.push(SegmentedSstHandle {
                 prefix: Bytes::copy_from_slice(prefix),
                 sst_handle,

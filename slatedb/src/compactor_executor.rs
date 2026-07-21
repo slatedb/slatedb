@@ -2909,10 +2909,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
-        let l0 = table_store
-            .write_sst(&id, &encoded_sst, false)
-            .await
-            .unwrap();
+        let l0 = table_store.write_sst(&id, &encoded_sst).await.unwrap();
         let retention_min_seq_num = 2;
 
         let result = ctx
@@ -3054,10 +3051,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
-        let l0 = table_store
-            .write_sst(&id, &encoded_sst, false)
-            .await
-            .unwrap();
+        let l0 = table_store.write_sst(&id, &encoded_sst).await.unwrap();
 
         let result = ctx.run_compaction(vec![l0], true, None).await.unwrap();
 
@@ -3155,10 +3149,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
-        let l0 = table_store
-            .write_sst(&id, &encoded_sst, false)
-            .await
-            .unwrap();
+        let l0 = table_store.write_sst(&id, &encoded_sst).await.unwrap();
 
         let result = ctx.run_compaction(vec![l0], true, None).await;
 
@@ -3221,10 +3212,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
-        let l0 = table_store
-            .write_sst(&id, &encoded_sst, false)
-            .await
-            .unwrap();
+        let l0 = table_store.write_sst(&id, &encoded_sst).await.unwrap();
 
         let result = ctx.run_compaction(vec![l0], true, None).await;
 

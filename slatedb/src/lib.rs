@@ -98,6 +98,7 @@ mod batch;
 pub use batch::benches as write_batch_benches;
 mod batch_write;
 mod blob;
+mod block_cache_policy;
 mod block_iterator;
 mod block_iterator_v2;
 #[cfg(feature = "bench-internal")]

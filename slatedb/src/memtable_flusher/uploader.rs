@@ -243,7 +243,7 @@ impl UploadHandler {
     ) -> Result<SegmentedSstHandle, SlateDBError> {
         let written_bytes = sst.encoded.remaining_len() as u64;
         loop {
-            match self.db.upload_sst(&sst_id, &sst.encoded, true).await {
+            match self.db.upload_sst(&sst_id, &sst.encoded).await {
                 Ok(sst_handle) => {
                     self.db.db_stats.l0_flush_bytes.increment(written_bytes);
                     return Ok(SegmentedSstHandle {
