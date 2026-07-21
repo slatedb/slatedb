@@ -505,6 +505,9 @@ impl DbInner {
         .await?;
 
         loop {
+            self.maybe_freeze_memtable(current_memtable_wal_id);
+            self.maybe_apply_backpressure().await?;
+
             let replayed_table = match replay_iter.next().await {
                 Ok(Some(replayed_table)) => replayed_table,
                 Ok(None) => break,
@@ -551,7 +554,6 @@ impl DbInner {
             // ensure the assertion holds true.
             assert!(self.oracle.last_remote_persisted_seq() <= replayed_table.last_seq);
             self.oracle.advance_durable_seq(replayed_table.last_seq);
-            self.maybe_apply_backpressure().await?;
             let replayed_table_last_wal_id = replayed_table.last_wal_id;
             self.replay_memtable(current_memtable_wal_id, replayed_table)?;
             current_memtable_wal_id = replayed_table_last_wal_id;
@@ -9935,6 +9937,77 @@ mod tests {
                 Some(Bytes::copy_from_slice(value))
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_wal_replay_flushes_oversized_active_memtable_before_backpressure() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_wal_replay_flushes_oversized_active_memtable";
+
+        // Leave a single WAL SST whose replayed table is smaller than the
+        // source's freeze threshold. Keeping the source open simulates a crash:
+        // the recovery writer fences it without first flushing its memtable to L0.
+        let mut source_settings = test_db_options(0, 64 * 1024, None);
+        source_settings.flush_interval = None;
+        let source = Db::builder(path, object_store.clone())
+            .with_settings(source_settings)
+            .build()
+            .await
+            .unwrap();
+        let value = vec![b'x'; 16 * 1024];
+        source
+            .put_with_options(
+                b"oversized-replay-value",
+                &value,
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        source
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+
+        // On recovery, one complete WAL SST exceeds both thresholds. Replay
+        // must freeze it before backpressure; otherwise open spins forever with
+        // an oversized active memtable and nothing for the flusher to drain.
+        let mut replay_settings = test_db_options(0, 1024, None);
+        replay_settings.flush_interval = None;
+        replay_settings.max_unflushed_bytes = 2 * 1024;
+        let recovered = tokio::time::timeout(
+            Duration::from_secs(5),
+            Db::builder(path, object_store)
+                .with_settings(replay_settings)
+                .build(),
+        )
+        .await
+        .expect("WAL replay deadlocked on an oversized active memtable")
+        .expect("failed to recover database");
+
+        assert_eq!(
+            recovered.get(b"oversized-replay-value").await.unwrap(),
+            Some(Bytes::from(value))
+        );
+        recovered
+            .put_with_options(
+                b"write-after-replay",
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("write after oversized WAL replay should succeed");
+
+        recovered.close().await.unwrap();
     }
 
     /// RFC-0024: WAL replay through a conforming extractor preserves the
