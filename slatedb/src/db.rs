@@ -784,11 +784,15 @@ impl Db {
         }
 
         // With the WAL disabled, writes wait on their memtable's durability
-        // watcher. Any tables still present after the writer and flusher stop
-        // will be discarded, so release those waiters with the close error.
-        if should_flush && !options.flush_memtables && !self.inner.wal_enabled {
-            self.inner
-                .fail_memtable_durability_waiters(SlateDBError::Closed);
+        // watcher. If close skipped the final flush, any tables still present
+        // after the writer and flusher stop will be discarded, so release their
+        // waiters with the terminal database error.
+        if !self.inner.wal_enabled && (!should_flush || !options.flush_memtables) {
+            let waiter_error = match self.inner.status_manager.result_reader().read() {
+                Some(Err(error)) => error,
+                Some(Ok(())) | None => SlateDBError::Closed,
+            };
+            self.inner.fail_memtable_durability_waiters(waiter_error);
         }
 
         if let Err(e) = self.task_executor.shutdown_task(WAL_BUFFER_TASK_NAME).await {
@@ -3487,6 +3491,46 @@ mod tests {
             error.kind(),
             crate::ErrorKind::Closed(CloseReason::Clean)
         ));
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn test_fenced_close_fails_pending_memtable_durability_waiter() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut settings = test_db_options(0, 1024, None);
+        settings.flush_interval = None;
+        settings.wal_enabled = false;
+        let db = Db::builder(
+            "/tmp/test_fenced_close_fails_pending_memtable_durability_waiter",
+            object_store,
+        )
+        .with_settings(settings)
+        .build()
+        .await
+        .unwrap();
+
+        db.put_with_options(
+            b"key",
+            b"value",
+            &PutOptions::default(),
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut durable_watcher = db.inner.state.read().memtable().table().durable_watcher();
+
+        db.inner
+            .status_manager
+            .write_result(Err(SlateDBError::Fenced));
+        db.close().await.unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), durable_watcher.await_value())
+            .await
+            .expect("memtable durability waiter remained blocked after fenced close");
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
     }
 
     #[tokio::test]
