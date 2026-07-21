@@ -176,8 +176,6 @@ pub enum WalError {
     InternalError(Arc<dyn Error + Sync + Send + 'static>),
     /// A WalIterator observed that the tail of the WAL was truncated while iterating.
     WalTruncated,
-    /// Used internally by SlateDB to propagate its internal error type.
-    SlateDBError(Arc<dyn Error + Sync + Send + 'static>),
     /// Operation against wal after it was closed
     Closed,
 }
@@ -233,7 +231,8 @@ pub struct WriterInitResult {
 /// fencing the Manifest. A given Db instance writes both the WAL and its Manifest (e.g. with new
 /// SSTs) independently. The fencing protocol that yields epoch E must ensure that:
 /// (1) After the first write to the Manifest with epoch E, there are no further writes to either
-///     the Manifest or WAL with epoch E' < E
+///     the Manifest or WAL with epoch E' < E. Note that write here excludes the manifest bump
+///     itself.
 /// (2) After the first write to the WAL with epoch E, there are no further writes to either the
 ///     Manifest or WAL with epoch E' < E
 /// (3) All rows from the WAL from writers with epoch E' < E that are not present in L0/SRs are
@@ -372,7 +371,7 @@ pub trait WalIterator: Send + 'static {
 #[async_trait]
 pub trait WalReader {
     /// Returns the name of the WAL implementation
-    fn name(&self) -> String
+    fn name(&self) -> String,
     
     /// Returns an iterator over the specified range of WAL File IDs. The start of the range must
     /// not be `Unbounded`. If the end of the range is `Unbounded` then the returned iterator
@@ -452,7 +451,9 @@ Every [`crate::db::Db`] instance is assigned a unique `u64` epoch. The epoch is 
 fencing the Manifest. A given Db instance writes both the WAL and its Manifest (e.g. with new
 SSTs) independently. The fencing protocol that yields epoch `E` must ensure that:
 1. After the first write to the Manifest with epoch E, there are no further writes to either
-   the Manifest or WAL with epoch `E' < E`
+   the Manifest or WAL with epoch `E' < E`. Note that the write here excludes the epoch bump
+   itself. Instead, it refers to the set of writes (pushing new L0 files, updating the various
+   sequence trackers, updating wal trackers, etc) protected by the epoch.
 2. After the first write to the WAL with epoch `E`, there are no further writes to either the
    Manifest or WAL with epoch `E' < E`
 3. All rows from the WAL from writers with epoch `E'` < E that are not present in L0/SRs are
