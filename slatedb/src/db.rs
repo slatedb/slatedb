@@ -505,9 +505,6 @@ impl DbInner {
         .await?;
 
         loop {
-            self.maybe_freeze_memtable(current_memtable_wal_id);
-            self.maybe_apply_backpressure().await?;
-
             let replayed_table = match replay_iter.next().await {
                 Ok(Some(replayed_table)) => replayed_table,
                 Ok(None) => break,
@@ -554,6 +551,8 @@ impl DbInner {
             // ensure the assertion holds true.
             assert!(self.oracle.last_remote_persisted_seq() <= replayed_table.last_seq);
             self.oracle.advance_durable_seq(replayed_table.last_seq);
+            self.maybe_freeze_memtable(current_memtable_wal_id);
+            self.maybe_apply_backpressure().await?;
             let replayed_table_last_wal_id = replayed_table.last_wal_id;
             self.replay_memtable(current_memtable_wal_id, replayed_table)?;
             current_memtable_wal_id = replayed_table_last_wal_id;
