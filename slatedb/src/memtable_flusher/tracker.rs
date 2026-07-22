@@ -394,12 +394,6 @@ impl FlushTracker {
 /// Allocate one physical SST id per segment `imm` will flush to, keyed by
 /// segment prefix.
 ///
-/// Kept module-private to the tracker on purpose: L0 physical SST ids must be
-/// minted only here, in seqno-ordered dispatch, so their ULID timestamps match
-/// the order in which the manifest writer publishes L0s (RFC-0029). Exposing a
-/// reusable minting helper would invite an out-of-order minting path and
-/// reintroduce the GC race this fixes.
-///
 /// Without an extractor the sole segment is the compatibility-encoded
 /// `prefix=""` segment; with one, the segments are the imm's touched prefixes.
 /// A segment that retention later prunes to empty simply leaves its id unused.
