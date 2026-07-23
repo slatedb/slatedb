@@ -310,6 +310,18 @@ impl EncodedSsTableBuilder {
         self.blocks.push_back(block);
         self.first_key = None;
 
+        // Cooperative scheduling point. Block encode (compression and the
+        // block transformer) is CPU work whose futures resolve immediately,
+        // so without an explicit yield an entire SST build executes as one
+        // uninterrupted poll — tens to hundreds of milliseconds for a
+        // multi-MB SST. A poll that long starves peer tasks and, when the
+        // polling worker holds the runtime's timer/IO driver, stalls the
+        // whole runtime (measured: tokio timer p99 of 848ms vs 3.6ms for
+        // an OS thread on the same host under flush+compaction load).
+        // Yielding once per finished block bounds each poll to roughly one
+        // block of CPU at negligible cost.
+        tokio::task::yield_now().await;
+
         Ok(Some(block_size))
     }
 
