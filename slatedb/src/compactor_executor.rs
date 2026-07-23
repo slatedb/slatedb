@@ -823,7 +823,19 @@ impl TokioCompactionExecutorInner {
         let mut pending_close: Option<AbortOnDropHandle<Result<SsTableHandle, SlateDBError>>> =
             None;
 
+        let mut entries_since_yield: u32 = 0;
         while let Some(kv) = all_iter.next().await? {
+            // Cooperative scheduling point for long ready-to-ready runs:
+            // when the source blocks are already fetched, next()/add()
+            // resolve immediately and the merge loop can process many
+            // thousands of entries in a single poll (block-encode yields
+            // in the SST builder only fire when a block fills). Yield
+            // every 1024 entries so compaction never monopolizes a worker.
+            entries_since_yield += 1;
+            if entries_since_yield >= 1024 {
+                entries_since_yield = 0;
+                tokio::task::yield_now().await;
+            }
             // Opportunistically collect a finished background close without
             // stalling the merge loop to promptly lets us report progress
             // and persist the newly uploaded output SST in compactor state
