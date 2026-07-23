@@ -160,6 +160,8 @@ use crate::retrying_object_store::RetryingObjectStore;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
+use crate::wal::wal_disabled::DisabledWalObserver;
+use crate::wal::WalObserver;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorder;
@@ -590,9 +592,22 @@ impl<P: Into<Path>> DbBuilder<P> {
         let WriterFenceResult {
             manifest,
             replay_range,
-            wal_writer,
+            mut wal_writer,
         } = fencer.fence(stored_manifest).await?;
-        let wal_observer = wal_writer.observer();
+        let (wal_writer, wal_observer) = if DbInner::wal_enabled_in_options(&self.settings) {
+            let wal_observer = wal_writer.observer();
+            (Some(wal_writer), wal_observer)
+        } else {
+            wal_writer.close().await.map_err(SlateDBError::from)?;
+            let Err(final_status) = wal_writer.status() else {
+                return Err(crate::Error::internal(
+                    "closed wal writer did not return terminal status".to_string(),
+                ));
+            };
+            let wal_observer =
+                Box::new(DisabledWalObserver::new(final_status)) as Box<dyn WalObserver>;
+            (None, wal_observer)
+        };
 
         let manifest_dirty = manifest.prepare_dirty()?;
         status_manager.report_fence_manifest(

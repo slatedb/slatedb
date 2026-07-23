@@ -269,7 +269,7 @@ impl DbInner {
     }
 
     #[allow(unused_variables)]
-    fn wal_enabled_in_options(settings: &Settings) -> bool {
+    pub(crate) fn wal_enabled_in_options(settings: &Settings) -> bool {
         #[cfg(feature = "wal_disable")]
         return settings.wal_enabled;
         #[cfg(not(feature = "wal_disable"))]
