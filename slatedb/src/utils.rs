@@ -1,18 +1,14 @@
 use crate::block_iterator::BlockIterator;
 use crate::block_iterator_v2::BlockIteratorV2;
-use crate::cached_object_store::CachedObjectStore;
-use crate::config::PreloadLevel;
 use crate::db_state::SortedRun;
 use crate::db_state::SsTableHandle;
 use crate::error::SlateDBError;
 use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::iter::{IterationOrder, RowEntryIterator};
-use crate::manifest::ManifestCore;
-use crate::paths::PathResolver;
 use crate::tablestore::TableStore;
 use bytes::{Buf, BufMut, Bytes};
 use futures::FutureExt;
-use log::{error, warn};
+use log::error;
 use rand::{Rng, RngCore};
 use slatedb_common::clock::SystemClock;
 use std::any::Any;
@@ -648,51 +644,6 @@ pub(crate) fn varint_len(mut value: u32) -> usize {
         len += 1;
     }
     len
-}
-
-/// Preload SST files into the disk cache based on the configured [`PreloadLevel`].
-pub(crate) async fn preload_cache_from_manifest(
-    core: &ManifestCore,
-    cached_obj_store: &CachedObjectStore,
-    path_resolver: &PathResolver,
-    preload_level: Option<PreloadLevel>,
-    max_cache_size: usize,
-) -> Result<(), SlateDBError> {
-    match preload_level {
-        Some(PreloadLevel::AllSst) => {
-            let all_sst_paths: Vec<object_store::path::Path> = core
-                .all_sst_views()
-                .map(|view| path_resolver.table_path(&view.sst.id))
-                .collect();
-            if !all_sst_paths.is_empty() {
-                if let Err(e) = cached_obj_store
-                    .load_files_to_cache(all_sst_paths, max_cache_size)
-                    .await
-                {
-                    warn!("Failed to preload all SSTs to cache: {:?}", e);
-                }
-            }
-        }
-        Some(PreloadLevel::L0Sst) => {
-            let l0_sst_paths: Vec<object_store::path::Path> = core
-                .trees()
-                .flat_map(|tree| tree.l0.iter())
-                .map(|view| path_resolver.table_path(&view.sst.id))
-                .collect();
-            if !l0_sst_paths.is_empty() {
-                if let Err(e) = cached_obj_store
-                    .load_files_to_cache(l0_sst_paths, max_cache_size)
-                    .await
-                {
-                    warn!("Failed to preload L0 SSTs to cache: {:?}", e);
-                }
-            }
-        }
-        None => {
-            // No preloading
-        }
-    }
-    Ok(())
 }
 
 /// A channel sender that checks the DB's closed result when the underlying

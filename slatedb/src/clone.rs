@@ -347,7 +347,7 @@ async fn validate_no_data_wal(
         let path_resolver = PathResolver::new(source.path.clone());
         let mut has_data_wal = false;
         for wal_id in (core.replay_after_wal_id + 1)..core.next_wal_sst_id {
-            let path = path_resolver.table_path(&SsTableId::Wal(wal_id));
+            let path = path_resolver.sst_path(&SsTableId::Wal(wal_id));
             match wal_object_store.head(&path).await {
                 Ok(meta) => {
                     // Fence WALs are zero-byte `SsTableId::Wal` objects (written via
@@ -472,8 +472,8 @@ async fn copy_wal_ssts(
         ));
 
         let id = SsTableId::Wal(wal_id);
-        let parent_path = parent_path_resolver.table_path(&id);
-        let clone_path = clone_path_resolver.table_path(&id);
+        let parent_path = parent_path_resolver.sst_path(&id);
+        let clone_path = clone_path_resolver.sst_path(&id);
         object_store
             .as_ref()
             .copy(&parent_path, &clone_path)
@@ -1318,7 +1318,7 @@ mod tests {
             "expected cloned state to retain WAL-only SSTs"
         );
         let expected_missing_wal_path = PathResolver::new(Path::from(parent_path))
-            .table_path(&SsTableId::Wal(
+            .sst_path(&SsTableId::Wal(
                 manifest.manifest.core.replay_after_wal_id + 1,
             ))
             .to_string();
@@ -1997,7 +1997,7 @@ mod tests {
 
         // Plant the WAL object directly in the object store at the resolved path.
         use object_store::ObjectStoreExt;
-        let wal_path = PathResolver::new(path.clone()).table_path(&SsTableId::Wal(planted_wal_id));
+        let wal_path = PathResolver::new(path.clone()).sst_path(&SsTableId::Wal(planted_wal_id));
         object_store.put(&wal_path, wal_bytes.into()).await.unwrap();
 
         planted_wal_id
@@ -2184,7 +2184,7 @@ mod tests {
         build_plain_wal_disabled_parent(&parent_path_b, object_store.clone(), &table_b).await;
 
         let expected_missing_wal_path = PathResolver::new(parent_path_a.clone())
-            .table_path(&SsTableId::Wal({
+            .sst_path(&SsTableId::Wal({
                 let manifest_store =
                     Arc::new(ManifestStore::new(&parent_path_a, object_store.clone()));
                 let sm = StoredManifest::load(manifest_store, system_clock.clone())

@@ -490,7 +490,7 @@ mod tests {
         assert!(metadata.metadata.size > 0);
         assert_eq!(
             metadata.metadata.location,
-            PathResolver::new(path).table_path(&view.sst.id)
+            PathResolver::new(path).sst_path(&view.sst.id)
         );
     }
 

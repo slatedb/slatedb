@@ -945,7 +945,7 @@ mod tests {
         // Set the first WAL SST file to be a day old
         let now_minus_24h = set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&SsTableId::Wal(1)),
+            &path_resolver.sst_path(&SsTableId::Wal(1)),
             86400,
         );
 
@@ -1028,7 +1028,7 @@ mod tests {
         for i in 1..=3 {
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&SsTableId::Wal(i)),
+                &path_resolver.sst_path(&SsTableId::Wal(i)),
                 86400,
             );
         }
@@ -1076,12 +1076,12 @@ mod tests {
         // Set the both WAL SST file to be a day old
         let now_minus_24h_1 = set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&SsTableId::Wal(1)),
+            &path_resolver.sst_path(&SsTableId::Wal(1)),
             86400,
         );
         let now_minus_24h_2 = set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&SsTableId::Wal(2)),
+            &path_resolver.sst_path(&SsTableId::Wal(2)),
             86400,
         );
 
@@ -1142,7 +1142,7 @@ mod tests {
         for id in [fence_id, regular_wal_id] {
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&id),
+                &path_resolver.sst_path(&id),
                 86400,
             );
         }
@@ -1210,7 +1210,7 @@ mod tests {
         for id in [old_fence_id, regular_wal_id, newer_fence_id] {
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&id),
+                &path_resolver.sst_path(&id),
                 86400,
             );
         }
@@ -1278,7 +1278,7 @@ mod tests {
         table_store.write_wal_fence(1).await.unwrap();
         set_modified(
             local_object_store,
-            &path_resolver.table_path(&fence_id),
+            &path_resolver.sst_path(&fence_id),
             86400,
         );
 
@@ -1353,7 +1353,7 @@ mod tests {
         ] {
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&id),
+                &path_resolver.sst_path(&id),
                 86400,
             );
         }
@@ -2168,7 +2168,7 @@ mod tests {
         write_sst(table_store.clone(), &id1).await.unwrap();
         let id2 = SsTableId::Wal(2);
         write_sst(table_store.clone(), &id2).await.unwrap();
-        set_modified(local_object_store, &path_resolver.table_path(&id1), 86400);
+        set_modified(local_object_store, &path_resolver.sst_path(&id1), 86400);
 
         let mut state = ManifestCore::new();
         state.replay_after_wal_id = id2.unwrap_wal_id();
@@ -2347,12 +2347,12 @@ mod tests {
 
         set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&old_wal_id),
+            &path_resolver.sst_path(&old_wal_id),
             86400,
         );
         set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&old_fence_id),
+            &path_resolver.sst_path(&old_fence_id),
             86400,
         );
 
@@ -2498,7 +2498,7 @@ mod tests {
             write_sst(table_store.clone(), &id).await.unwrap();
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&id),
+                &path_resolver.sst_path(&id),
                 86400,
             );
         }
@@ -2541,7 +2541,7 @@ mod tests {
             &helper,
             Arc::new(DefaultSystemClock::default()),
             Some(Arc::new(LocationGcFilter {
-                allowed_locations: HashSet::from([path_resolver.table_path(&allowed_wal_id)]),
+                allowed_locations: HashSet::from([path_resolver.sst_path(&allowed_wal_id)]),
             })),
         );
 
@@ -2586,12 +2586,12 @@ mod tests {
 
         set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&old_wal_id),
+            &path_resolver.sst_path(&old_wal_id),
             86400,
         );
         set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&old_fence_id),
+            &path_resolver.sst_path(&old_fence_id),
             86400,
         );
 
