@@ -8,6 +8,8 @@ use std::fmt::{Display, Formatter};
 use std::ops::{Bound, Range};
 use std::sync::Arc;
 
+#[cfg(test)]
+pub(crate) mod test_utils;
 pub(crate) mod wal_sst_builder;
 pub(crate) mod writer_init;
 
