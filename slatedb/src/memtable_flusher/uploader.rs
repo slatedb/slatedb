@@ -19,23 +19,29 @@ use crate::dispatcher::{MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::flush::EncodedSegmentSst;
 use crate::mem_table::ImmutableMemtable;
-use crate::utils::{IdGenerator, SafeSender};
+use crate::utils::SafeSender;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::{info, warn};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
+use ulid::Ulid;
 
 const UPLOADER_TASK_NAME: &str = "l0_sst_uploader";
 
-/// One immutable-memtable upload request submitted to the uploader. The
-/// worker allocates SST ids for each segment internally.
+/// One immutable-memtable upload request submitted to the uploader. Physical
+/// SST ids are allocated at dispatch (in sequence order) and carried here, so
+/// the parallel upload workers never mint ids out of publish order (RFC-0029).
 pub(crate) struct UploadJob {
     /// Immutable memtable to build into one or more SSTs.
     pub(crate) imm_memtable: Arc<ImmutableMemtable>,
+    /// Pre-allocated physical SST id per segment prefix. A segment that
+    /// retention prunes to empty simply leaves its id unused.
+    pub(crate) segment_sst_ids: BTreeMap<Bytes, Ulid>,
 }
 
 impl std::fmt::Debug for UploadJob {
@@ -45,9 +51,15 @@ impl std::fmt::Debug for UploadJob {
 }
 
 impl UploadJob {
-    /// Creates a new upload job.
-    pub(crate) fn new(imm_memtable: Arc<ImmutableMemtable>) -> Self {
-        Self { imm_memtable }
+    /// Creates a new upload job with pre-allocated segment SST ids.
+    pub(crate) fn new(
+        imm_memtable: Arc<ImmutableMemtable>,
+        segment_sst_ids: BTreeMap<Bytes, Ulid>,
+    ) -> Self {
+        Self {
+            imm_memtable,
+            segment_sst_ids,
+        }
     }
 }
 
@@ -195,11 +207,22 @@ impl UploadHandler {
         // Upload all segment SSTs concurrently. `try_join_all` short-circuits
         // on the first fatal error and drops the remaining futures; sibling
         // uploads that already landed before the abort are left for the
-        // garbage collector to reclaim, since the worker allocates ids
-        // internally and they are not visible here for explicit cleanup.
-        let segments =
-            futures::future::try_join_all(built.iter().map(|sst| self.upload_segment_sst(sst)))
-                .await?;
+        // garbage collector to reclaim.
+        let segments = futures::future::try_join_all(built.iter().map(|sst| {
+            // Ids are pre-allocated at dispatch keyed by segment prefix. Every
+            // built prefix is a subset of the dispatched touched set, so a
+            // missing id is an internal invariant violation.
+            let sst_id = job
+                .segment_sst_ids
+                .get(&sst.prefix)
+                .copied()
+                .map(SsTableId::Compacted);
+            async move {
+                let sst_id = sst_id.ok_or(SlateDBError::InvalidDBState)?;
+                self.upload_segment_sst(sst, sst_id).await
+            }
+        }))
+        .await?;
 
         Ok(UploadedMemtable {
             imm_memtable: Arc::clone(&job.imm_memtable),
@@ -209,15 +232,15 @@ impl UploadHandler {
         })
     }
 
-    /// Upload a single segment SST with retry. Each retry reuses the
+    /// Upload a single segment SST with retry, writing it to the id
+    /// pre-allocated for its segment at dispatch. Each retry reuses the
     /// already-encoded SST so the upload loop never rebuilds from the
     /// memtable.
     async fn upload_segment_sst(
         &self,
         sst: &EncodedSegmentSst,
+        sst_id: SsTableId,
     ) -> Result<SegmentedSstHandle, SlateDBError> {
-        let sst_id =
-            SsTableId::Compacted(self.db.rand.rng().gen_ulid(self.db.system_clock.as_ref()));
         let written_bytes = sst.encoded.remaining_len() as u64;
         loop {
             match self.db.upload_sst(&sst_id, &sst.encoded, true).await {
@@ -277,12 +300,13 @@ mod tests {
     use super::{TrackerMessage, UploadJob, Uploader};
     use crate::config::Settings;
     use crate::db::DbInner;
-    use crate::db_state::SsTableView;
+    use crate::db_state::{SsTableId, SsTableView};
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
     use crate::manifest::ManifestCore;
+    use crate::mem_table::ImmutableMemtable;
     use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -299,10 +323,24 @@ mod tests {
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use slatedb_common::metrics::{DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper};
     use slatedb_common::DbRand;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;
     use tokio::time::timeout;
+    use ulid::Ulid;
+
+    /// Build a pre-allocated id map for a test job, mirroring dispatch-time
+    /// allocation: one id per segment prefix, falling back to the empty prefix
+    /// when no extractor recorded segments. The tracker owns the real
+    /// allocation path; tests only need a valid map covering the built SSTs.
+    fn preallocate_ids(imm: &ImmutableMemtable) -> BTreeMap<Bytes, Ulid> {
+        let mut prefixes = imm.touched_segments();
+        if prefixes.is_empty() {
+            prefixes.insert(Bytes::new());
+        }
+        prefixes.into_iter().map(|p| (p, Ulid::new())).collect()
+    }
 
     async fn setup_db(path: &str, fp_registry: Arc<FailPointRegistry>) -> Arc<DbInner> {
         setup_db_with_extractor(path, fp_registry, None).await
@@ -387,7 +425,8 @@ mod tests {
 
     fn next_upload_job(db: &DbInner, key: &[u8], value: &[u8], seq: u64) -> UploadJob {
         let imm_memtable = freeze_imm(db, key, value, seq);
-        UploadJob::new(imm_memtable)
+        let segment_sst_ids = preallocate_ids(&imm_memtable);
+        UploadJob::new(imm_memtable, segment_sst_ids)
     }
 
     struct TestUploader {
@@ -499,6 +538,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_write_sst_to_preallocated_id() {
+        // The worker must write each segment SST to the id allocated at
+        // dispatch (carried in the job), not mint a fresh one (RFC-0029).
+        let db = setup_db(
+            "/tmp/test_parallel_l0_flush_uploader_preallocated_id",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let job = next_upload_job(&db, b"key", b"value", 1);
+        let expected_id = *job
+            .segment_sst_ids
+            .get(&Bytes::new())
+            .expect("empty-prefix id should be pre-allocated");
+
+        let test = start_test_uploader(&db);
+        test.submit(job).unwrap();
+
+        let msg = timeout(Duration::from_secs(5), test.tracker_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let TrackerMessage::UploadComplete(event) = msg else {
+            panic!("expected UploadComplete");
+        };
+        assert_eq!(event.segments.len(), 1);
+        assert_eq!(
+            event.segments[0].sst_handle.id,
+            SsTableId::Compacted(expected_id)
+        );
+
+        test.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn should_retry_upload_failures_until_success() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         fail_parallel::cfg(
@@ -550,7 +623,8 @@ mod tests {
             .front()
             .cloned()
             .unwrap();
-        let job = UploadJob::new(imm_memtable);
+        let segment_sst_ids = preallocate_ids(&imm_memtable);
+        let job = UploadJob::new(imm_memtable, segment_sst_ids);
 
         let test = start_test_uploader(&db);
         test.submit(job).unwrap();
@@ -623,7 +697,8 @@ mod tests {
             .front()
             .cloned()
             .unwrap();
-        let bad_job = UploadJob::new(imm_memtable);
+        let segment_sst_ids = preallocate_ids(&imm_memtable);
+        let bad_job = UploadJob::new(imm_memtable, segment_sst_ids);
 
         let test = start_test_uploader(&db);
         test.submit(bad_job).unwrap();
@@ -716,7 +791,8 @@ mod tests {
             .front()
             .cloned()
             .unwrap();
-        let job = UploadJob::new(imm_memtable);
+        let segment_sst_ids = preallocate_ids(&imm_memtable);
+        let job = UploadJob::new(imm_memtable, segment_sst_ids);
 
         let test = start_test_uploader(&db);
         test.submit(job).unwrap();
@@ -782,6 +858,16 @@ mod tests {
             ] {
                 guard.memtable().put(RowEntry::new_value(key, value, seq));
             }
+            // The production write path stamps these inline; this test
+            // bypasses that, so record explicitly.
+            guard
+                .memtable()
+                .table()
+                .record_touched_segments(std::collections::BTreeSet::from([
+                    Bytes::from_static(b"aaa"),
+                    Bytes::from_static(b"bbb"),
+                    Bytes::from_static(b"ccc"),
+                ]));
             guard.freeze_memtable(0);
         }
         let imm_memtable = db
@@ -792,7 +878,8 @@ mod tests {
             .front()
             .cloned()
             .unwrap();
-        let job = UploadJob::new(imm_memtable);
+        let segment_sst_ids = preallocate_ids(&imm_memtable);
+        let job = UploadJob::new(imm_memtable, segment_sst_ids);
 
         let test = start_test_uploader(&db);
         test.submit(job).unwrap();

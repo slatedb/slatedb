@@ -502,10 +502,10 @@ impl ManifestWriterHandler {
                 // still advances. (This is true with or without an
                 // extractor configured.)
                 for segment in &uploaded.segments {
-                    let view = SsTableView::new(
-                        self.db.rand.rng().gen_ulid(self.db.system_clock.as_ref()),
-                        segment.sst_handle.clone(),
-                    );
+                    // Identity view: the view id is the physical SST ULID, so
+                    // the timestamp `last_compacted_l0_sst_view_id` reads
+                    // equals the one GC deletion reads (RFC-0029).
+                    let view = SsTableView::identity(segment.sst_handle.clone());
                     let tree = if segmented {
                         // Extractor configured — every flush handle, including
                         // any with empty prefix, is routed into `segments`.
@@ -1909,6 +1909,41 @@ mod tests {
         assert_eq!(core.segments[1].tree.l0.len(), 1);
         assert_eq!(core.segments[0].tree.l0[0].sst.id, aaa_id);
         assert_eq!(core.segments[1].tree.l0[0].sst.id, bbb_id);
+        // Newly flushed L0s are identity views: the view id equals the
+        // physical SST ULID (RFC-0029).
+        assert_eq!(core.segments[0].tree.l0[0].id, aaa_id.unwrap_compacted_id());
+        assert_eq!(core.segments[1].tree.l0[0].id, bbb_id.unwrap_compacted_id());
+
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_create_identity_l0_view_on_flush() {
+        let harness = setup_harness(
+            "/tmp/test_manifest_writer_identity_l0_view",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        let uploaded = next_uploaded_memtable(&inner, b"k1", b"v1").await;
+        let physical_id = uploaded.segments[0].sst_handle.id;
+        started.notify_uploaded(uploaded).await.unwrap();
+        let _ = expect_flushed(&started.tracker_rx).await;
+
+        // The published L0 view id must equal the physical SST ULID so the
+        // timestamp `last_compacted_l0_sst_view_id` reads matches the one GC
+        // deletion reads (RFC-0029).
+        let core = inner.state.read().state().core().clone();
+        assert_eq!(core.tree.l0.len(), 1);
+        let view = &core.tree.l0[0];
+        assert_eq!(view.sst.id, physical_id);
+        assert_eq!(view.id, physical_id.unwrap_compacted_id());
 
         started.shutdown().await;
     }
