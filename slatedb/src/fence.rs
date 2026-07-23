@@ -1,12 +1,13 @@
-use crate::db_status::DbStatusManager;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, StoredManifest};
 use crate::tablestore::TableStore;
+use crate::utils::WatchableOnceCellReader;
 use crate::wal::writer_init::WalWriterInit;
-use crate::wal_buffer::WalBufferManager;
+use crate::wal::{WalWriter, WriterInit};
 use crate::Settings;
 use fail_parallel::{fail_point_send, FailPointTx};
+use log::error;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::SystemClock;
 use std::ops::Range;
@@ -14,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) struct WriterFencer {
-    status_manager: DbStatusManager,
+    closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
     recorder: MetricsRecorderHelper,
     settings: Settings,
     table_store: Arc<TableStore>,
@@ -28,12 +29,12 @@ pub(crate) struct WriterFencer {
 pub(crate) struct WriterFenceResult {
     pub(crate) manifest: FenceableManifest,
     pub(crate) replay_range: Range<u64>,
-    pub(crate) wal_buffer: WalBufferManager,
+    pub(crate) wal_writer: Box<dyn WalWriter>,
 }
 
 impl WriterFencer {
     pub(crate) fn new(
-        status_manager: DbStatusManager,
+        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         recorder: MetricsRecorderHelper,
         table_store: Arc<TableStore>,
         settings: &Settings,
@@ -41,7 +42,7 @@ impl WriterFencer {
         task_executor: Arc<MessageHandlerExecutor>,
     ) -> Self {
         Self::new_with_fp_handle(
-            status_manager,
+            closed_result_reader,
             recorder,
             table_store,
             settings,
@@ -52,7 +53,7 @@ impl WriterFencer {
     }
 
     fn new_with_fp_handle(
-        status_manager: DbStatusManager,
+        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         recorder: MetricsRecorderHelper,
         table_store: Arc<TableStore>,
         settings: &Settings,
@@ -61,10 +62,10 @@ impl WriterFencer {
         fp_tx: FailPointTx,
     ) -> Self {
         Self {
-            status_manager,
+            closed_result_reader,
             recorder,
-            settings: settings.clone(),
             table_store,
+            settings: settings.clone(),
             manifest_update_timeout: settings.manifest_update_timeout,
             system_clock,
             task_executor,
@@ -86,7 +87,7 @@ impl WriterFencer {
         stored_manifest: StoredManifest,
     ) -> Result<WriterFenceResult, SlateDBError> {
         let wal_writer_init = WalWriterInit::load(
-            self.status_manager.clone(),
+            self.closed_result_reader.clone(),
             self.recorder.clone(),
             self.table_store.clone(),
             &self.settings,
@@ -96,7 +97,7 @@ impl WriterFencer {
         )
         .await?;
 
-        let mut manifest = FenceableManifest::init_writer(
+        let manifest = FenceableManifest::init_writer(
             stored_manifest,
             self.manifest_update_timeout,
             self.system_clock.clone(),
@@ -104,16 +105,25 @@ impl WriterFencer {
         .await?;
         self.fail_point_send("FenceManifest");
 
+        let mut manifest = manifest.into();
         let result = wal_writer_init.fence_and_init(&mut manifest).await?;
+        let mut manifest: FenceableManifest = manifest.into();
 
         // Refresh validates that we own the latest epoch still.
         manifest.refresh().await?;
         fail_point_send!(self.fp_tx, "FinalRefreshManifest");
 
+        let replay_range = match result.replay_range.try_into() {
+            Ok(replay_range) => replay_range,
+            Err(_) => {
+                error!("replay range must use inclusive lower bound and exclusive upper bound");
+                return Err(SlateDBError::InvalidDBState);
+            }
+        };
         Ok(WriterFenceResult {
             manifest,
-            replay_range: result.replay_range,
-            wal_buffer: result.wal_buffer,
+            wal_writer: result.wal_writer,
+            replay_range,
         })
     }
 }
@@ -124,7 +134,6 @@ mod tests {
     use crate::config::{
         FlushOptions, FlushType, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
     };
-    use crate::db_status::DbStatusManager;
     use crate::dispatcher::MessageHandlerExecutor;
     use crate::error::SlateDBError;
     use crate::fence::WriterFencer;
@@ -135,6 +144,7 @@ mod tests {
     use crate::memtable_flusher::MANIFEST_REFRESH_COUNT;
     use crate::object_stores::ObjectStores;
     use crate::tablestore::{TableStore, TableStoreKind};
+    use crate::utils::WatchableOnceCell;
     use crate::{CloseReason, Db, ErrorKind, Settings};
     use bytes::Bytes;
     use fail_parallel::fail_point_channel;
@@ -186,22 +196,22 @@ mod tests {
             .unwrap();
             let fp_registry = Arc::new(FailPointRegistry::new());
             let (fp_tx, event_rx) = fail_point_channel(fp_registry.clone());
-            let status_manager = DbStatusManager::new(0);
+            let cell = Arc::new(WatchableOnceCell::new());
             let recorder = MetricsRecorderHelper::new(
                 Arc::new(DefaultMetricsRecorder::new()),
                 MetricLevel::Info,
             );
             let task_executor = Arc::new(MessageHandlerExecutor::new(
-                Arc::new(status_manager.clone()),
+                cell.clone(),
                 system_clock.clone(),
             ));
             let fencer = WriterFencer::new_with_fp_handle(
-                status_manager,
+                cell.reader(),
                 recorder,
                 table_store.clone(),
                 &settings,
                 system_clock.clone(),
-                task_executor,
+                task_executor.clone(),
                 fp_tx,
             );
             Self {

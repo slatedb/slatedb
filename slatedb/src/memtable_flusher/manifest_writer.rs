@@ -907,7 +907,9 @@ mod tests {
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
-    use crate::wal_buffer::WalBufferManager;
+
+    use crate::wal::test_utils::FakeWalWriter;
+    use crate::wal::WalWriter;
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -915,7 +917,7 @@ mod tests {
     use object_store::ObjectStore;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::SystemClock;
-    use slatedb_common::metrics::{DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper};
+    use slatedb_common::metrics::MetricsRecorderHelper;
     use slatedb_common::DbRand;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1068,16 +1070,7 @@ mod tests {
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =
             crate::utils::SafeSender::unbounded_channel(status_manager.result_reader());
-        let recorder = Arc::new(DefaultMetricsRecorder::new());
-        let helper = MetricsRecorderHelper::new(recorder, MetricLevel::Info);
-        let wal_buffer = Arc::new(WalBufferManager::new(
-            status_manager.clone(),
-            &helper,
-            0,
-            table_store.clone(),
-            1024,
-            None,
-        ));
+        let wal_writer = Box::new(FakeWalWriter::new(0));
         let inner = Arc::new(
             DbInner::new(
                 settings.clone(),
@@ -1089,11 +1082,11 @@ mod tests {
                     &WatchableOnceCell::new(),
                 )),
                 write_tx,
-                wal_buffer.observer(),
+                wal_writer.observer(),
                 db_metrics,
                 fp_registry,
                 None,
-                status_manager,
+                Arc::new(status_manager),
                 segment_extractor,
             )
             .await

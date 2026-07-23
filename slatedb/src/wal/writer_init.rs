@@ -1,24 +1,19 @@
-use crate::db_status::DbStatusManager;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
-use crate::manifest::store::FenceableManifest;
 use crate::manifest::Manifest;
 use crate::tablestore::TableStore;
+use crate::utils::WatchableOnceCellReader;
+use crate::wal::{WalError, WriterInitResult, WriterManifest};
 use crate::wal_buffer::WalBufferManager;
-use crate::Settings;
+use crate::{wal, Settings};
+use async_trait::async_trait;
 use fail_parallel::{fail_point_send, FailPointTx};
 use slatedb_common::metrics::MetricsRecorderHelper;
-use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(crate) struct WalWriterInitResult {
-    pub(crate) replay_range: Range<u64>,
-    pub(crate) wal_buffer: WalBufferManager,
-}
-
 pub(crate) struct WalWriterInit {
-    status_manager: DbStatusManager,
+    closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
     recorder: MetricsRecorderHelper,
     table_store: Arc<TableStore>,
     max_wal_bytes_size: usize,
@@ -31,7 +26,7 @@ pub(crate) struct WalWriterInit {
 
 impl WalWriterInit {
     pub(crate) async fn load(
-        status_manager: DbStatusManager,
+        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         recorder: MetricsRecorderHelper,
         table_store: Arc<TableStore>,
         settings: &Settings,
@@ -44,7 +39,7 @@ impl WalWriterInit {
             .await?;
         fail_point_send!(fp_tx, "LoadEmptyWalId");
         Ok(Self {
-            status_manager,
+            closed_result_reader,
             recorder,
             table_store,
             max_wal_bytes_size: settings.l0_sst_size_bytes,
@@ -54,30 +49,34 @@ impl WalWriterInit {
             fp_tx,
         })
     }
+}
 
-    pub(crate) async fn fence_and_init(
+#[async_trait]
+impl wal::WriterInit for WalWriterInit {
+    async fn fence_and_init(
         &self,
-        manifest: &mut FenceableManifest,
-    ) -> Result<WalWriterInitResult, SlateDBError> {
+        writer_manifest: &mut WriterManifest,
+    ) -> Result<WriterInitResult, WalError> {
         let mut empty_wal_id = self.empty_wal_id;
-        let mut manifest_dirty = manifest.prepare_dirty()?;
+        let mut manifest = writer_manifest.manifest();
         // verify that the empty_wal_id we computed is still valid. Its possible that between
         // computing empty_wal_id and fencing the manifest, the fenced writer advanced the gc
         // boundary (replay_after_wal_id)
-        if empty_wal_id <= manifest_dirty.value.core.replay_after_wal_id {
+        if empty_wal_id <= manifest.core().replay_after_wal_id {
             // the wal gc boundary advanced because the old writer finished a flush - recompute
             // the next wal id
             empty_wal_id = self
                 .table_store
-                .next_wal_sst_id(manifest_dirty.value.core.replay_after_wal_id)
+                .next_wal_sst_id(manifest.core().replay_after_wal_id)
                 .await?;
-            manifest.refresh().await?;
-            manifest_dirty = manifest.prepare_dirty()?;
+            writer_manifest.refresh().await?;
+            manifest = writer_manifest.manifest();
             fail_point_send!(self.fp_tx, "ReloadEmptyWalId");
             // at this point we still hold the epoch, so it should not be possible for the barrier
             // to have advanced past the computed empty_wal_id
-            assert!(empty_wal_id > manifest_dirty.value.core.replay_after_wal_id);
+            assert!(empty_wal_id > manifest.core().replay_after_wal_id);
         }
+        let manifest = manifest.clone();
 
         let mut _attempt = 0;
         loop {
@@ -85,7 +84,7 @@ impl WalWriterInit {
             let wrote_fence = match self.table_store.write_wal_fence(empty_wal_id).await {
                 Ok(()) => true,
                 Err(SlateDBError::Fenced) => false,
-                Err(err) => return Err(err),
+                Err(err) => return Err(err.into()),
             };
             fail_point_send!(self.fp_tx, format!("{}:{}", "WriteWalFence", _attempt));
 
@@ -93,25 +92,26 @@ impl WalWriterInit {
                 // this writer is the only writer that could have written replay_after_wal_id,
                 // so it should not be possible for it to have advanced past the fencing wal.
                 // older writers would have failed with a stale epoch
-                let replay_after_wal_id = manifest_dirty.value.core.replay_after_wal_id;
+                let replay_after_wal_id = manifest.core().replay_after_wal_id;
                 assert!(empty_wal_id > replay_after_wal_id);
-                let mut wal_buffer = WalBufferManager::new(
-                    self.status_manager.clone(),
+                let wal_writer = WalBufferManager::start_new(
+                    self.closed_result_reader.clone(),
                     &self.recorder,
                     empty_wal_id,
                     self.table_store.clone(),
                     self.max_wal_bytes_size,
                     self.max_flush_interval,
-                );
-                wal_buffer.init(self.task_executor.clone()).await?;
-                return Ok(WalWriterInitResult {
-                    replay_range: replay_after_wal_id + 1..empty_wal_id + 1,
-                    wal_buffer,
-                });
+                    self.task_executor.clone(),
+                )
+                .await?;
+                let result = WriterInitResult {
+                    replay_range: (replay_after_wal_id + 1..empty_wal_id + 1).into(),
+                    wal_writer: Box::new(wal_writer),
+                };
+                return Ok(result);
             } else {
                 // Refresh validates that we own the latest epoch still.
-                manifest.refresh().await?;
-                manifest_dirty = manifest.prepare_dirty()?;
+                writer_manifest.refresh().await?;
                 fail_point_send!(self.fp_tx, format!("{}:{}", "RefreshManifest", _attempt));
                 // The old writer managed to write a WAL before we could write the fencing wal.
                 // Try the next wal ID

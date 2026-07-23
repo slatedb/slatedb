@@ -568,19 +568,19 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
 
         let manifest_dirty = stored_manifest.prepare_dirty()?;
-        let status_manager = DbStatusManager::new_with_initial_values(
+        let status_manager = Arc::new(DbStatusManager::new_with_initial_values(
             manifest_dirty.value.core.last_l0_seq,
             manifest_dirty.into(),
             BTreeSet::new(),
-        );
+        ));
 
         let task_executor = Arc::new(MessageHandlerExecutor::new(
-            Arc::new(status_manager.clone()),
+            status_manager.clone(),
             system_clock.clone(),
         ));
 
         let fencer = WriterFencer::new(
-            status_manager.clone(),
+            status_manager.result_reader(),
             recorder.clone(),
             table_store.clone(),
             &self.settings,
@@ -590,8 +590,9 @@ impl<P: Into<Path>> DbBuilder<P> {
         let WriterFenceResult {
             manifest,
             replay_range,
-            wal_buffer,
+            wal_writer,
         } = fencer.fence(stored_manifest).await?;
+        let wal_observer = wal_writer.observer();
 
         let manifest_dirty = manifest.prepare_dirty()?;
         status_manager.report_fence_manifest(
@@ -604,7 +605,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let (write_tx, write_rx) = SafeSender::unbounded_channel(reader);
 
         // Create the database inner state
-        let memtable_flusher = Arc::new(MemtableFlusher::new(&status_manager));
+        let memtable_flusher = Arc::new(MemtableFlusher::new(status_manager.as_ref()));
         let inner = Arc::new(
             DbInner::new(
                 self.settings.clone(),
@@ -614,11 +615,11 @@ impl<P: Into<Path>> DbBuilder<P> {
                 manifest_dirty,
                 Arc::clone(&memtable_flusher),
                 write_tx,
-                wal_buffer.observer(),
+                wal_observer,
                 recorder.clone(),
                 self.fp_registry.clone(),
                 self.merge_operator.clone(),
-                status_manager.clone(),
+                status_manager,
                 self.segment_extractor.clone(),
             )
             .await?,
@@ -628,7 +629,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let tokio_handle = Handle::current();
         task_executor.add_handler(
             WRITE_BATCH_TASK_NAME.to_string(),
-            Box::new(WriteBatchEventHandler::new(inner.clone(), wal_buffer)),
+            Box::new(WriteBatchEventHandler::new(inner.clone(), wal_writer)),
             write_rx,
             &tokio_handle,
         )?;
@@ -782,7 +783,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             manifest,
             &tokio_handle,
             &task_executor,
-            &inner.status_manager,
+            inner.status_manager.as_ref(),
         )?;
 
         // Monitor background tasks
