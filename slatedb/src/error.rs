@@ -77,6 +77,18 @@ pub(crate) enum SlateDBError {
     #[error("wal store reconfiguration unsupported")]
     WalStoreReconfigurationError,
 
+    #[error("wal truncated")]
+    WalTruncated,
+
+    #[error("wal unavailable")]
+    WalUnavailable(Arc<dyn std::error::Error + Sync + Send + 'static>),
+
+    #[error("wal internal error")]
+    WalInternalError(Arc<dyn std::error::Error + Sync + Send + 'static>),
+
+    #[error("wal data error")]
+    WalDataError(Arc<dyn std::error::Error + Sync + Send + 'static>),
+
     #[error("invalid compaction")]
     InvalidCompaction,
 
@@ -634,6 +646,7 @@ impl From<SlateDBError> for Error {
             #[cfg(feature = "foyer")]
             SlateDBError::FoyerError(err) => Error::unavailable(msg).with_source(Box::new(err)),
             SlateDBError::TransactionalObjectTimeout { .. } => Error::unavailable(msg),
+            SlateDBError::WalUnavailable(src) => Error::unavailable(msg).with_source(Box::new(src)),
 
             // Invalid errors
             SlateDBError::InvalidCachePartSize => Error::invalid(msg),
@@ -708,6 +721,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::CloneExternalDbMissing => Error::data(msg),
             SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::data(msg),
             SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::data(msg),
+            SlateDBError::WalDataError(src) => Error::data(msg).with_source(Box::new(src)),
 
             // Internal errors
             SlateDBError::CompactorExecutorFailed => Error::internal(msg),
@@ -722,6 +736,8 @@ impl From<SlateDBError> for Error {
             SlateDBError::TransactionalObjectError(err) => {
                 Error::internal(msg).with_source(Box::new(err))
             }
+            SlateDBError::WalTruncated => Error::internal(msg),
+            SlateDBError::WalInternalError(src) => Error::internal(msg).with_source(Box::new(src)),
         }
     }
 }
