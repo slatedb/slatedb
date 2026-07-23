@@ -162,6 +162,7 @@ test("admin run_gc_once accepts default and custom options", async (t) => {
     compacted_options: undefined,
     compactions_options: undefined,
     detach_options: { interval_ms: undefined },
+    disable_boundary_files: true,
   });
 });
 

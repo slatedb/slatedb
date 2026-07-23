@@ -58,7 +58,7 @@ pub(crate) trait PutPolicy: Send + Sync + 'static + std::fmt::Debug {
     fn put_action(&self, tag: Option<&ObjectStoreCallTag>) -> PutAction;
 }
 
-/// The built-in put policy, configured by [`CachePutPolicy`].
+/// The built-in put policy, configured by [`CachePutConfig`].
 #[derive(Debug, Clone)]
 pub(crate) struct DefaultPutPolicy {
     pub(crate) put: CachePutConfig,
@@ -70,15 +70,14 @@ impl PutPolicy for DefaultPutPolicy {
             // Untagged writes (manifest, compaction state) are never cached.
             return PutAction::Skip;
         };
-        if !self.put.cache_puts {
-            return PutAction::Skip;
-        }
         match tag.sst_type {
             SstType::Wal => PutAction::Skip,
-            // Only the stores that write compacted SSTs (the main store on flush
-            // and the compactor) are cached; other sources bypass the cache.
+            // Each compacted SST write source has its own config gate: the
+            // main store writes on flush, the compactor on compaction. Other
+            // sources never write compacted SSTs and skip the cache.
             SstType::Compacted => match tag.kind {
-                TableStoreKind::Main | TableStoreKind::Compactor => PutAction::Cache,
+                TableStoreKind::Main if self.put.cache_on_flush => PutAction::Cache,
+                TableStoreKind::Compactor if self.put.cache_on_compaction => PutAction::Cache,
                 _ => PutAction::Skip,
             },
         }
@@ -126,13 +125,17 @@ pub(crate) enum PutAction {
     Skip,
 }
 
-/// Whether compacted SST writes are cached.
+/// Which compacted SST write sources are cached.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CachePutConfig {
-    /// Cache compacted SSTs written through the cache.
+    /// Cache compacted SSTs written by a memtable flush.
     ///
     /// Default is false.
-    pub(crate) cache_puts: bool,
+    pub(crate) cache_on_flush: bool,
+    /// Cache compacted SSTs written by compaction.
+    ///
+    /// Default is false.
+    pub(crate) cache_on_compaction: bool,
 }
 
 #[cfg(test)]
@@ -275,50 +278,49 @@ mod tests {
     }
 
     #[rstest]
-    // WAL writes are never cached, even with cache_puts on.
+    // WAL writes are never cached, even with both flags on.
     #[case(
         Some(tag(TableStoreKind::Main, SstType::Wal, None)),
-        CachePutConfig { cache_puts: true },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: true },
         PutAction::Skip
     )]
     // Untagged writes (manifest, compaction state) are never cached.
     #[case(
         None,
-        CachePutConfig { cache_puts: true },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: true },
         PutAction::Skip
     )]
-    // Compacted writes from the main store (flush) and the compactor are cached
-    // when cache_puts is set.
+    // Flush writes (main store, compacted) gated by cache_on_flush.
     #[case(
         Some(tag(TableStoreKind::Main, SstType::Compacted, None)),
-        CachePutConfig { cache_puts: true },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: false },
+        PutAction::Cache
+    )]
+    #[case(
+        Some(tag(TableStoreKind::Main, SstType::Compacted, None)),
+        CachePutConfig { cache_on_flush: false, cache_on_compaction: true },
+        PutAction::Skip
+    )]
+    // Compaction writes (compactor store, compacted) gated by cache_on_compaction.
+    #[case(
+        Some(tag(TableStoreKind::Compactor, SstType::Compacted, None)),
+        CachePutConfig { cache_on_flush: false, cache_on_compaction: true },
         PutAction::Cache
     )]
     #[case(
         Some(tag(TableStoreKind::Compactor, SstType::Compacted, None)),
-        CachePutConfig { cache_puts: true },
-        PutAction::Cache
-    )]
-    // Nothing is cached when cache_puts is off.
-    #[case(
-        Some(tag(TableStoreKind::Main, SstType::Compacted, None)),
-        CachePutConfig { cache_puts: false },
-        PutAction::Skip
-    )]
-    #[case(
-        Some(tag(TableStoreKind::Compactor, SstType::Compacted, None)),
-        CachePutConfig { cache_puts: false },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: false },
         PutAction::Skip
     )]
     // Reader/GC never write compacted SSTs, but if they did the policy is Skip.
     #[case(
         Some(tag(TableStoreKind::Reader, SstType::Compacted, None)),
-        CachePutConfig { cache_puts: true },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: true },
         PutAction::Skip
     )]
     #[case(
         Some(tag(TableStoreKind::GC, SstType::Compacted, None)),
-        CachePutConfig { cache_puts: true },
+        CachePutConfig { cache_on_flush: true, cache_on_compaction: true },
         PutAction::Skip
     )]
     fn test_put_action(
@@ -335,7 +337,8 @@ mod tests {
     #[test]
     fn test_default_put_policy_caches_nothing() {
         let policy = CachePutConfig::default();
-        assert!(!policy.cache_puts);
+        assert!(!policy.cache_on_flush);
+        assert!(!policy.cache_on_compaction);
         for kind in [
             TableStoreKind::Main,
             TableStoreKind::Compactor,

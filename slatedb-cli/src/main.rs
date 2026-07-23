@@ -67,9 +67,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         CliCommands::DeleteCheckpoint { id } => exec_delete_checkpoint(&admin, id).await?,
         CliCommands::ListCheckpoints { name } => exec_list_checkpoints(&admin, name).await?,
-        CliCommands::RunGarbageCollection { resource, min_age } => {
-            exec_gc_once(&admin, resource, min_age).await?
-        }
+        CliCommands::RunGarbageCollection {
+            resource,
+            min_age,
+            disable_boundary_files,
+        } => exec_gc_once(&admin, resource, min_age, !disable_boundary_files).await?,
         CliCommands::RunCompactor { no_embedded_worker } => {
             admin
                 .run_compactor_with_options(
@@ -112,6 +114,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             wal_fence,
             compacted,
             compactions,
+            disable_boundary_files,
         } => {
             schedule_gc(
                 &admin,
@@ -120,6 +123,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 wal_fence,
                 compacted,
                 compactions,
+                !disable_boundary_files,
                 cancellation_token.clone(),
             )
             .await?
@@ -290,6 +294,7 @@ async fn exec_gc_once(
     admin: &Admin,
     resource: GcResource,
     min_age: Duration,
+    boundary_files_enabled: bool,
 ) -> Result<(), Box<dyn Error>> {
     fn create_gc_dir_opts(min_age: Duration) -> Option<GarbageCollectorDirectoryOptions> {
         Some(GarbageCollectorDirectoryOptions {
@@ -307,6 +312,8 @@ async fn exec_gc_once(
             compactions_options: None,
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled,
+            object_store_max_retries: None,
         },
         GcResource::Wal => GarbageCollectorOptions {
             manifest_options: None,
@@ -316,6 +323,8 @@ async fn exec_gc_once(
             compactions_options: None,
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled,
+            object_store_max_retries: None,
         },
         GcResource::WalFence => GarbageCollectorOptions {
             manifest_options: None,
@@ -325,6 +334,8 @@ async fn exec_gc_once(
             compactions_options: None,
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled,
+            object_store_max_retries: None,
         },
         GcResource::Compacted => GarbageCollectorOptions {
             manifest_options: None,
@@ -334,6 +345,8 @@ async fn exec_gc_once(
             compactions_options: None,
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled,
+            object_store_max_retries: None,
         },
         GcResource::Compactions => GarbageCollectorOptions {
             manifest_options: None,
@@ -343,12 +356,15 @@ async fn exec_gc_once(
             compactions_options: create_gc_dir_opts(min_age),
             detach_options: None,
             metric_level: None,
+            boundary_files_enabled,
+            object_store_max_retries: None,
         },
     };
     admin.run_gc_once(gc_opts).await?;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn schedule_gc(
     admin: &Admin,
     manifest_schedule: Option<GcSchedule>,
@@ -356,6 +372,7 @@ async fn schedule_gc(
     wal_fence_schedule: Option<GcSchedule>,
     compacted_schedule: Option<GcSchedule>,
     compactions_schedule: Option<GcSchedule>,
+    boundary_files_enabled: bool,
     cancellation_token: CancellationToken,
 ) -> Result<(), Box<dyn Error>> {
     fn create_gc_dir_opts(schedule: GcSchedule) -> Option<GarbageCollectorDirectoryOptions> {
@@ -373,6 +390,8 @@ async fn schedule_gc(
         compactions_options: compactions_schedule.and_then(create_gc_dir_opts),
         detach_options: None,
         metric_level: None,
+        boundary_files_enabled,
+        object_store_max_retries: None,
     };
 
     admin

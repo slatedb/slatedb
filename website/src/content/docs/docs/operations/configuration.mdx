@@ -67,6 +67,17 @@ default is `Info`; set it to `Debug` to enable debug-level metrics when using a
 metrics recorder. See [Metric levels](/docs/operations/metrics/#metric-levels) for more
 information.
 
+## Garbage-collection boundary files
+
+`GarbageCollectorOptions::boundary_files_enabled` controls whether manifest and compactions garbage
+collection advances durable boundary files before deleting eligible metadata. Boundary advancement
+is enabled by default. Set it to `false` for object stores that do not support conditional overwrite
+(`If-Match`), and use the same setting for every garbage collector operating on the database.
+
+Metadata readers and writers always honor existing boundary files. Without boundary advancement,
+configure manifest and compactions garbage collection `min_age` values longer than any stale writer
+or compactor can remain alive.
+
 ## Reconfiguring Object Stores
 
 Reconfiguring an object store only changes how SlateDB reaches storage. It does not migrate data between stores for you. The new `ObjectStore` must still have the existing database contents for the database path.

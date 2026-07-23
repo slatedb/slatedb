@@ -14,6 +14,7 @@ use crate::manifest::VersionedManifest;
 use slatedb_common::clock::SystemClock;
 
 use crate::object_stores::{ObjectStoreType, ObjectStores};
+use crate::retrying_object_store::RetryingObjectStore;
 use crate::seq_tracker::FindOption;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
@@ -49,6 +50,8 @@ pub struct Admin {
     pub(crate) system_clock: Arc<dyn SystemClock>,
     /// The random number generator to use for randomness.
     pub(crate) rand: Arc<DbRand>,
+    /// The retry policy applied to admin object-store operations.
+    pub(crate) object_store_max_retries: Option<u32>,
     #[cfg(feature = "compaction_filters")]
     pub(crate) compaction_filter_supplier:
         Option<Arc<dyn crate::compaction_filter::CompactionFilterSupplier>>,
@@ -68,10 +71,7 @@ impl Admin {
         &self,
         maybe_id: Option<u64>,
     ) -> Result<Option<VersionedManifest>, crate::Error> {
-        let manifest_store = ManifestStore::new(
-            &self.path,
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
-        );
+        let manifest_store = self.manifest_store();
         let manifest = if let Some(id) = maybe_id {
             manifest_store
                 .try_read_manifest(id)
@@ -96,10 +96,7 @@ impl Admin {
         &self,
         range: R,
     ) -> Result<Vec<VersionedManifest>, crate::Error> {
-        let manifest_store = ManifestStore::new(
-            &self.path,
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
-        );
+        let manifest_store = self.manifest_store();
         let manifest_metadata = manifest_store
             .list_manifests(range)
             .await
@@ -183,10 +180,7 @@ impl Admin {
 
     /// Returns a read-only view of the current compactor state.
     pub async fn read_compactor_state_view(&self) -> Result<CompactorStateView, crate::Error> {
-        let manifest_store = Arc::new(ManifestStore::new(
-            &self.path,
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
-        ));
+        let manifest_store = Arc::new(self.manifest_store());
         let compactions_store = Arc::new(self.compactions_store());
         let reader = CompactorStateReader::new(&manifest_store, &compactions_store);
         reader.read_view().await.map_err(crate::Error::from)
@@ -249,10 +243,7 @@ impl Admin {
         &self,
         name_filter: Option<&str>,
     ) -> Result<Vec<Checkpoint>, crate::Error> {
-        let manifest_store = ManifestStore::new(
-            &self.path,
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
-        );
+        let manifest_store = self.manifest_store();
         let manifest = manifest_store
             .read_latest_manifest()
             .await
@@ -462,9 +453,9 @@ impl Admin {
     /// If you have a [`crate::Db`] instance open, you can use the [`crate::Db::create_checkpoint`]
     /// method instead. That method will flush the memtables and WALs before creating the checkpoint.
     ///
-    /// If you're using a [`crate::DbReader`], you might wish to have the reader manage the checkpoint
-    /// for you by calling [`crate::DbReader::open`] with no `checkpoint_id` set. The reader will
-    /// create a checkpoint for you and periodically refresh it.
+    /// If you're using a [`crate::DbReader`], you might wish to use
+    /// [`crate::DbReaderMode::ManagedCheckpoint`]. The reader will create a checkpoint for you and
+    /// periodically refresh it.
     ///
     /// # Examples
     ///
@@ -495,10 +486,7 @@ impl Admin {
         &self,
         options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, crate::Error> {
-        let manifest_store = Arc::new(ManifestStore::new(
-            &self.path,
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
-        ));
+        let manifest_store = Arc::new(self.manifest_store());
         let mut stored_manifest =
             StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
 
@@ -526,10 +514,7 @@ impl Admin {
         id: Uuid,
         lifetime: Option<Duration>,
     ) -> Result<(), crate::Error> {
-        let manifest_store = Arc::new(ManifestStore::new(
-            &self.path,
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
-        ));
+        let manifest_store = Arc::new(self.manifest_store());
         let mut stored_manifest =
             StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
         stored_manifest
@@ -553,10 +538,7 @@ impl Admin {
 
     /// Deletes the checkpoint with the specified id.
     pub async fn delete_checkpoint(&self, id: Uuid) -> Result<(), crate::Error> {
-        let manifest_store = Arc::new(ManifestStore::new(
-            &self.path,
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
-        ));
+        let manifest_store = Arc::new(self.manifest_store());
         let mut stored_manifest =
             StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
         stored_manifest
@@ -621,18 +603,27 @@ impl Admin {
         Ok(manifest.core().sequence_tracker.find_seq(ts, opt))
     }
 
+    /// Wraps the configured object store of the given type in a
+    /// [`RetryingObjectStore`] so that admin operations retry transient object
+    /// store failures with exponential backoff. Retrying is safe here because
+    /// `RetryingObjectStore` verifies conditional puts via a ULID written to
+    /// object metadata, so an ambiguous failure after a successful write is
+    /// detected rather than surfaced as a spurious error.
+    fn retrying_store(&self, store_type: ObjectStoreType) -> Arc<dyn ObjectStore> {
+        Arc::new(RetryingObjectStore::new(
+            self.object_stores.store_of(store_type).clone(),
+            self.rand.clone(),
+            self.system_clock.clone(),
+            self.object_store_max_retries,
+        ))
+    }
+
     fn manifest_store(&self) -> ManifestStore {
-        ManifestStore::new(
-            &self.path,
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
-        )
+        ManifestStore::new(&self.path, self.retrying_store(ObjectStoreType::Main))
     }
 
     fn compactions_store(&self) -> CompactionsStore {
-        CompactionsStore::new(
-            &self.path,
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
-        )
+        CompactionsStore::new(&self.path, self.retrying_store(ObjectStoreType::Main))
     }
 
     /// Clone a database using a builder pattern. If no db already exists at the specified path,
@@ -677,9 +668,9 @@ impl Admin {
         CloneBuilder::new(
             self.path.clone(),
             source,
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.retrying_store(ObjectStoreType::Main),
         )
-        .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
+        .with_wal_object_store(self.retrying_store(ObjectStoreType::Wal))
     }
 
     /// Creates a new builder for an admin client at the given path.
@@ -829,7 +820,9 @@ mod tests {
     use crate::admin::{load_object_store_from_env, AdminBuilder};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
-    use crate::config::{CompactionWorkerOptions, CompactorOptions, GarbageCollectorOptions};
+    use crate::config::{
+        CheckpointOptions, CompactionWorkerOptions, CompactorOptions, GarbageCollectorOptions,
+    };
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
     use crate::test_utils::{FlakyObjectStore, StringConcatMergeOperator};
@@ -1075,19 +1068,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_admin_list_manifests_list_failure_maps_to_unavailable() {
+    async fn test_admin_list_manifests_retries_transient_failure() {
+        // Admin operations wrap the object store in a RetryingObjectStore, so a
+        // transient list failure should be retried rather than surfaced.
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let object_store: Arc<dyn ObjectStore> =
-            Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(1, 0));
-        let path = Path::from("/tmp/test_admin_list_manifests_list_failure");
-        let admin = AdminBuilder::new(path, object_store).build();
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(1, 0));
+        let path = Path::from("/tmp/test_admin_list_manifests_retries_transient_failure");
+        let admin = AdminBuilder::new(path, flaky.clone()).build();
 
-        let err = admin
+        let manifests = admin
             .list_manifests(..)
             .await
-            .expect_err("expected list failure");
+            .expect("list should succeed after retrying the transient failure");
+
+        assert!(manifests.is_empty());
+        // 1 transient failure + 1 successful retry.
+        assert_eq!(flaky.list_attempts(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_admin_create_detached_checkpoint_retries_transient_put() {
+        // A transient put failure during checkpoint creation should be retried
+        // by the RetryingObjectStore rather than failing the operation.
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_create_detached_checkpoint_retries_transient_put");
+        let db = crate::Db::open(path.clone(), inner.clone()).await.unwrap();
+        db.put(b"key", b"value").await.unwrap();
+        db.close().await.unwrap();
+
+        // Fail the first put_opts, which the retrying store should transparently retry.
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 1));
+        let admin = AdminBuilder::new(path, flaky.clone()).build();
+
+        admin
+            .create_detached_checkpoint(&CheckpointOptions::default())
+            .await
+            .expect("checkpoint should succeed after retrying the transient put");
+
+        assert!(flaky.put_attempts() >= 2);
+    }
+
+    #[tokio::test]
+    async fn test_admin_terminal_object_store_error_maps_to_unavailable() {
+        // The retry layer retries transient errors forever, so it never exhausts
+        // and surfaces a transient failure. A terminal (non-retryable) error,
+        // however, must still pass through the retry wrapper and map to
+        // ErrorKind::Unavailable rather than being swallowed. A conditional put
+        // that always fails with Precondition is such a terminal error.
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_admin_terminal_object_store_error_maps_to_unavailable");
+        let db = crate::Db::open(path.clone(), inner.clone()).await.unwrap();
+        db.put(b"key", b"value").await.unwrap();
+        db.close().await.unwrap();
+
+        let failing = Arc::new(FlakyObjectStore::new(inner, 0).with_put_precondition_always());
+        let admin = AdminBuilder::new(path, failing.clone()).build();
+
+        let err = admin
+            .create_detached_checkpoint(&CheckpointOptions::default())
+            .await
+            .expect_err("expected terminal precondition failure to surface");
 
         assert_eq!(err.kind(), ErrorKind::Unavailable);
+        // Terminal error: attempted exactly once, no retries.
+        assert_eq!(failing.put_attempts(), 1);
     }
 
     #[tokio::test]

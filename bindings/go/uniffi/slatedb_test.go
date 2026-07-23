@@ -1531,9 +1531,9 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		builder := slatedb.NewDbReaderBuilder(testDBPath, store)
 		defer builder.Destroy()
 
-		err := builder.WithCheckpointId("not-a-uuid")
+		err := builder.WithReaderMode(slatedb.ReaderModeCheckpoint{Field0: "not-a-uuid"})
 		if !errors.Is(err, slatedb.ErrErrorInvalid) {
-			t.Fatalf("DbReaderBuilder.WithCheckpointId(invalid): got %v, want invalid error", err)
+			t.Fatalf("DbReaderBuilder.WithReaderMode(invalid checkpoint): got %v, want invalid error", err)
 		}
 	})
 
@@ -1550,8 +1550,10 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		builder := slatedb.NewDbReaderBuilder(testDBPath, store)
 		defer builder.Destroy()
 
-		if err := builder.WithCheckpointId("ffffffff-ffff-ffff-ffff-ffffffffffff"); err != nil {
-			t.Fatalf("DbReaderBuilder.WithCheckpointId(valid): %v", err)
+		if err := builder.WithReaderMode(slatedb.ReaderModeCheckpoint{
+			Field0: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+		}); err != nil {
+			t.Fatalf("DbReaderBuilder.WithReaderMode(checkpoint): %v", err)
 		}
 
 		_, err := builder.Build()
@@ -1925,12 +1927,13 @@ func TestAdminRunGcOnce(t *testing.T) {
 		DryRun:     true,
 	}
 	options := &slatedb.GarbageCollectorOptions{
-		ManifestOptions:    nil,
-		WalOptions:         directoryOptions,
-		WalFenceOptions:    directoryOptions,
-		CompactedOptions:   nil,
-		CompactionsOptions: nil,
-		DetachOptions:      &slatedb.GarbageCollectorScheduleOptions{IntervalMs: nil},
+		ManifestOptions:      nil,
+		WalOptions:           directoryOptions,
+		WalFenceOptions:      directoryOptions,
+		CompactedOptions:     nil,
+		CompactionsOptions:   nil,
+		DetachOptions:        &slatedb.GarbageCollectorScheduleOptions{IntervalMs: nil},
+		DisableBoundaryFiles: true,
 	}
 
 	if err := admin.RunGcOnce(options); err != nil {

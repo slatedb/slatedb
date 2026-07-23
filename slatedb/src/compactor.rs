@@ -550,9 +550,15 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
             CompactorMessage::LogStats => self.handle_log_ticker(),
             CompactorMessage::PollManifest => self.handle_ticker().await?,
             CompactorMessage::CommitCompacted => {
-                self.state_writer.load_compactions().await?;
-                self.update_distributed_compaction_metrics();
-                self.commit_compacted_entries().await?;
+                // A remote worker can only produce a new Compacted result for a
+                // job the coordinator already tracks as active. When there are no
+                // active jobs, the regular manifest poll is sufficient to discover
+                // new submissions. We can avoid an otherwise idle object-store refresh.
+                if self.state().active_compactions().next().is_some() {
+                    self.state_writer.load_compactions().await?;
+                    self.update_distributed_compaction_metrics();
+                    self.commit_compacted_entries().await?;
+                }
             }
         }
         Ok(())
@@ -867,6 +873,7 @@ impl CompactorEventHandler {
             return Ok(());
         }
 
+        let mut manifest_changed = false;
         for compaction in compacted {
             let id = compaction.id();
             match self.validate_compaction(&compaction) {
@@ -884,6 +891,7 @@ impl CompactorEventHandler {
                             .collect(),
                     };
                     self.state_mut().finish_compaction(id, output_sr);
+                    manifest_changed = true;
                     self.stats
                         .last_compaction_ts
                         .set(self.system_clock.now().timestamp());
@@ -902,7 +910,13 @@ impl CompactorEventHandler {
         }
 
         self.log_compaction_state();
-        self.state_writer.write_state_safely().await?;
+        if manifest_changed {
+            self.state_writer.write_state_safely().await?;
+        } else {
+            // Validation failures only change `.compactions`. Avoid creating a
+            // checkpoint and writing an unchanged manifest.
+            self.state_writer.write_compactions_safely().await?;
+        }
 
         Ok(())
     }
@@ -5021,6 +5035,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_commit_compacted_ticker_skips_remote_refresh_when_idle() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        assert!(fixture
+            .handler
+            .state()
+            .active_compactions()
+            .next()
+            .is_none());
+
+        // Simulate an external submission arriving after the coordinator's last
+        // regular poll. An idle fast-commit tick must not read it from storage.
+        let remote_id = Ulid::new();
+        let mut external = StoredCompactions::try_load(fixture.compactions_store.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut dirty = external.prepare_dirty().unwrap();
+        dirty.value.insert(Compaction::new(
+            remote_id,
+            CompactionSpec::new(Vec::new(), 0),
+        ));
+        external.update(dirty).await.unwrap();
+
+        fixture
+            .handler
+            .handle(CompactorMessage::CommitCompacted)
+            .await
+            .unwrap();
+        assert!(
+            !fixture
+                .handler
+                .state()
+                .compactions()
+                .value
+                .contains(&remote_id),
+            "idle fast-commit tick should not refresh .compactions"
+        );
+
+        // Once the coordinator has active work, the same fast tick must resume
+        // refreshing so it can observe worker transitions promptly.
+        let local_id = Ulid::new();
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(Compaction::new(
+                local_id,
+                CompactionSpec::new(Vec::new(), 0),
+            ));
+        fixture
+            .handler
+            .handle(CompactorMessage::CommitCompacted)
+            .await
+            .unwrap();
+        assert!(
+            fixture
+                .handler
+                .state()
+                .compactions()
+                .value
+                .contains(&remote_id),
+            "active fast-commit tick should refresh .compactions"
+        );
+    }
+
+    #[tokio::test]
     async fn test_handle_ticker_starts_preexisting_submitted_compaction() {
         let compactor_options = Arc::new(compactor_options());
         let options = db_options(None);
@@ -6155,6 +6234,12 @@ mod tests {
             .handler
             .state_mut()
             .insert_compaction_for_test(compaction);
+        let manifest_id_before = fixture
+            .manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .id;
 
         // when:
         fixture
@@ -6176,6 +6261,16 @@ mod tests {
                 .expect("missing compaction")
                 .status(),
             CompactionStatus::Failed,
+        );
+        let manifest_id_after = fixture
+            .manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .id;
+        assert_eq!(
+            manifest_id_after, manifest_id_before,
+            "validation-only failures must not checkpoint or rewrite the manifest"
         );
     }
 

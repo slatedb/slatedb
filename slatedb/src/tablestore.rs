@@ -2396,6 +2396,7 @@ mod tests {
             flaky.clone(),
             Arc::new(DbRand::default()),
             Arc::new(DefaultSystemClock::new()),
+            None,
         ));
 
         let format = SsTableFormat {

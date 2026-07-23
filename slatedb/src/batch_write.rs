@@ -109,11 +109,11 @@ impl std::fmt::Debug for BatchWriterMessage {
 pub(crate) struct WriteBatchEventHandler {
     db_inner: Arc<DbInner>,
     is_first_write: bool,
-    wal_buffer: Arc<WalBufferManager>,
+    wal_buffer: WalBufferManager,
 }
 
 impl WriteBatchEventHandler {
-    pub(crate) fn new(db_inner: Arc<DbInner>, wal_buffer: Arc<WalBufferManager>) -> Self {
+    pub(crate) fn new(db_inner: Arc<DbInner>, wal_buffer: WalBufferManager) -> Self {
         Self {
             db_inner,
             is_first_write: true,
@@ -134,7 +134,7 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
             }) => {
                 let result = self
                     .db_inner
-                    .write_batch(batch, &options, txn.as_ref(), self.wal_buffer.as_ref())
+                    .write_batch(batch, &options, txn.as_ref(), &self.wal_buffer)
                     .await;
                 // if this is the first write and the WAL is disabled, make sure users are flushing
                 // their memtables in a timely manner.
@@ -158,7 +158,7 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
                 } = flush_msg;
                 let result = self
                     .db_inner
-                    .flush_batch_writer(freeze_memtable, self.wal_buffer.as_ref());
+                    .flush_batch_writer(freeze_memtable, &self.wal_buffer);
                 let _ = done.send(result);
                 Ok(())
             }
@@ -268,10 +268,6 @@ impl DbInner {
         // increment memtable_write_bytes by the size of the keys and values inserted into the memtable
         // after merge operators and overwrites are collapsed
         self.db_stats.memtable_write_bytes.increment(entries_size);
-
-        // update the last_applied_seq to wal buffer. if a chunk of WAL entries are applied to the memtable
-        // and flushed to the remote storage, WAL buffer manager will recycle these WAL entries.
-        wal_buffer.track_last_applied_seq(commit_seq);
 
         // insert a fail point to make it easier to test the case where the last_committed_seq is not updated.
         // this is useful for testing the case where the reader is not able to see the writes.
@@ -558,14 +554,14 @@ mod tests {
         )
         .await
         .unwrap();
-        let wal_buffer = Arc::new(WalBufferManager::new(
+        let wal_buffer = WalBufferManager::new(
             db.inner.status_manager.clone(),
             &db.inner.recorder,
             0,
             db.inner.table_store.clone(),
             1024,
             None,
-        ));
+        );
 
         let mut handler = WriteBatchEventHandler::new(db.inner.clone(), wal_buffer);
         assert!(handler.is_first_write);
@@ -587,14 +583,14 @@ mod tests {
         let db = Db::open("/tmp/test_user_defined_seqnum", object_store)
             .await
             .unwrap();
-        let wal_buffer = Arc::new(WalBufferManager::new(
+        let wal_buffer = WalBufferManager::new(
             db.inner.status_manager.clone(),
             &db.inner.recorder,
             0,
             db.inner.table_store.clone(),
             1024,
             None,
-        ));
+        );
 
         let mut handler = WriteBatchEventHandler::new(db.inner.clone(), wal_buffer);
 
@@ -630,14 +626,14 @@ mod tests {
         )
         .await
         .unwrap();
-        let wal_buffer = Arc::new(WalBufferManager::new(
+        let wal_buffer = WalBufferManager::new(
             db.inner.status_manager.clone(),
             &db.inner.recorder,
             0,
             db.inner.table_store.clone(),
             1024,
             None,
-        ));
+        );
 
         let mut handler = WriteBatchEventHandler::new(db.inner.clone(), wal_buffer);
 

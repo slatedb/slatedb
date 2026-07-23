@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::admin::Admin;
-use crate::config::{ReaderOptions, SstBlockSize};
+use crate::config::{ReaderMode, ReaderOptions, SstBlockSize};
 use crate::db::Db;
 use crate::db_cache::DbCache;
 use crate::db_reader::DbReader;
@@ -17,7 +17,6 @@ use crate::settings::Settings;
 use crate::types::{CloneSourceSpec, KeyRange};
 use crate::MetricsRecorder;
 use parking_lot::Mutex;
-use uuid::Uuid;
 
 /// Builder for opening a writable [`crate::Db`].
 ///
@@ -124,7 +123,10 @@ impl DbBuilder {
     /// Sets the segment extractor (RFC-0024). When configured, every write is
     /// routed through the extractor and the database tracks per-segment LSM
     /// state. The extractor must be configured at database creation time and
-    /// cannot be changed thereafter.
+    /// remain configured thereafter. Its name must remain stable; its
+    /// implementation may evolve only if it preserves routing for all existing
+    /// key schemas and keeps segment prefixes across schema versions an
+    /// antichain (no prefix may be a proper prefix of another).
     pub fn with_segment_extractor(&self, extractor: Arc<dyn PrefixExtractor>) -> Result<(), Error> {
         self.update_builder(|builder| {
             builder.with_segment_extractor(adapt_prefix_extractor(extractor))
@@ -181,11 +183,10 @@ impl DbReaderBuilder {
         })
     }
 
-    /// Pins the reader to an existing checkpoint UUID string.
-    pub fn with_checkpoint_id(&self, checkpoint_id: String) -> Result<(), Error> {
-        let checkpoint_id = Uuid::parse_str(&checkpoint_id)
-            .map_err(|source| SlateDbError::InvalidCheckpointId { source })?;
-        self.update_builder(|builder| builder.with_checkpoint_id(checkpoint_id))
+    /// Sets how the reader chooses and refreshes database state.
+    pub fn with_reader_mode(&self, mode: ReaderMode) -> Result<(), Error> {
+        let mode = mode.try_into()?;
+        self.update_builder(|builder| builder.with_reader_mode(mode))
             .map_err(Into::into)
     }
 
