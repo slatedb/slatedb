@@ -160,7 +160,6 @@ use crate::retrying_object_store::RetryingObjectStore;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
-use crate::wal_buffer::WalBufferManager;
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorder;
@@ -568,30 +567,36 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
         };
 
-        let fencer = WriterFencer::new(table_store.clone(), &self.settings, system_clock.clone());
-        let WriterFenceResult {
-            manifest,
-            replay_range,
-        } = fencer.fence(stored_manifest).await?;
-
-        let manifest_dirty = manifest.prepare_dirty()?;
-
-        // Shared lifecycle state — created before DbInner so it can be shared
-        // with the executor and future channel construction.
+        let manifest_dirty = stored_manifest.prepare_dirty()?;
         let status_manager = DbStatusManager::new_with_initial_values(
             manifest_dirty.value.core.last_l0_seq,
-            manifest_dirty.clone().into(),
+            manifest_dirty.into(),
             BTreeSet::new(),
         );
 
-        let recent_flushed_wal_id = replay_range.end - 1;
-        let mut wal_buffer = WalBufferManager::new(
+        let task_executor = Arc::new(MessageHandlerExecutor::new(
+            Arc::new(status_manager.clone()),
+            system_clock.clone(),
+        ));
+
+        let fencer = WriterFencer::new(
             status_manager.clone(),
-            &recorder,
-            recent_flushed_wal_id,
+            recorder.clone(),
             table_store.clone(),
-            self.settings.l0_sst_size_bytes,
-            self.settings.flush_interval,
+            &self.settings,
+            system_clock.clone(),
+            task_executor.clone(),
+        );
+        let WriterFenceResult {
+            manifest,
+            replay_range,
+            wal_buffer,
+        } = fencer.fence(stored_manifest).await?;
+
+        let manifest_dirty = manifest.prepare_dirty()?;
+        status_manager.report_fence_manifest(
+            manifest_dirty.value.core.last_l0_seq,
+            manifest_dirty.clone().into(),
         );
 
         // Setup communication channels wired to the shared closed state.
@@ -621,13 +626,6 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Setup background tasks
         let tokio_handle = Handle::current();
-        let task_executor = Arc::new(MessageHandlerExecutor::new(
-            Arc::new(status_manager),
-            system_clock.clone(),
-        ));
-        if inner.wal_enabled {
-            wal_buffer.init(task_executor.clone()).await?;
-        };
         task_executor.add_handler(
             WRITE_BATCH_TASK_NAME.to_string(),
             Box::new(WriteBatchEventHandler::new(inner.clone(), wal_buffer)),

@@ -109,6 +109,14 @@ impl DbStatusManager {
         }
     }
 
+    pub(crate) fn report_fence_manifest(&self, durable_seq: u64, manifest: VersionedManifest) {
+        self.tx.send_if_modified(|s| {
+            s.durable_seq = durable_seq;
+            s.current_manifest = manifest;
+            true
+        });
+    }
+
     pub(crate) fn report_durable_seq(&self, seq: u64) {
         self.tx.send_if_modified(|s| {
             if seq > s.durable_seq {
