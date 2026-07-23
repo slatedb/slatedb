@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import pytest
-
 from conftest import new_memory_store, open_db, open_reader
+
 from slatedb.uniffi import (
     Counter,
     DefaultMetricsRecorder,
