@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from conftest import (
     TEST_DB_PATH,
     drain_wal_iterator,
@@ -9,6 +8,7 @@ from conftest import (
     require_wal_row,
     seed_wal_files,
 )
+
 from slatedb.uniffi import Error, RowEntryKind, WalReader
 
 

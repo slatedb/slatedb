@@ -4,8 +4,8 @@ import asyncio
 import time
 
 import pytest
-
 from conftest import new_memory_store, open_db, open_reader, unique_path, wait_until
+
 from slatedb.uniffi import (
     AdminBuilder,
     CheckpointOptions,
@@ -227,7 +227,7 @@ async def test_admin_clone() -> None:
     for i in range(3):
         path = unique_path(f"admin-clone-original-{i}")
         async with open_db(store, path=path) as db:
-            await db.put(f"k{i}".encode("utf-8"), f"v{i}".encode("utf-8"))
+            await db.put(f"k{i}".encode(), f"v{i}".encode())
             await db.flush()
         sources.append(CloneSourceSpec(path=path, checkpoint=None, projection_range=None))
 
@@ -241,7 +241,7 @@ async def test_admin_clone() -> None:
 
     async with open_db(store, path=clone_path) as db:
         for i in range(3):
-            assert await db.get(f"k{i}".encode("utf-8")) == f"v{i}".encode("utf-8")
+            assert await db.get(f"k{i}".encode()) == f"v{i}".encode()
 
 
 @pytest.mark.asyncio

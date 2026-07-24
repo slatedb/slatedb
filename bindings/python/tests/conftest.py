@@ -4,8 +4,9 @@ import asyncio
 import inspect
 import threading
 import uuid
+from collections.abc import Callable
 from contextlib import asynccontextmanager
-from typing import Any, Callable
+from typing import Any
 
 from slatedb.uniffi import (
     DbBuilder,
@@ -23,8 +24,8 @@ from slatedb.uniffi import (
     PrefixExtractor,
     PrefixTarget,
     PutOptions,
-    ReadOptions,
     ReaderOptions,
+    ReadOptions,
     RowEntry,
     RowEntryKind,
     ScanOptions,
@@ -166,7 +167,7 @@ async def wait_until(
             if await _maybe_await(check()):
                 return
             last_error = None
-        except Exception as error:  # pragma: no cover - helper for polling assertions
+        except Exception as error:  # noqa: BLE001  # pragma: no cover - helper for polling assertions
             last_error = error
 
         if asyncio.get_running_loop().time() >= deadline:
