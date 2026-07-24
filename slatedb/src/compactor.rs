@@ -1429,6 +1429,7 @@ pub mod stats {
 mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::future::Future;
+    use std::ops::Range;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
@@ -1437,6 +1438,7 @@ mod tests {
     use object_store::ObjectStore;
     use parking_lot::Mutex;
     use rand::RngCore;
+    use rstest::rstest;
     use slatedb_common::MockSystemClock;
     use ulid::Ulid;
 
@@ -1455,7 +1457,7 @@ mod tests {
     use crate::compactor_state::{SourceId, WorkerSpec};
     use crate::config::{
         CompactionWorkerOptions, FlushOptions, FlushType, MergeOptions, PutOptions, Settings,
-        SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
+        SizeTieredCompactionSchedulerOptions, SstBlockSize, Ttl, WriteOptions,
     };
     use crate::db::Db;
     use crate::db_cache::test_utils::TestCache;
@@ -1713,8 +1715,53 @@ mod tests {
         assert!(expected.is_empty());
     }
 
+    /// An entry expected in the block cache for a compaction output SST.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ExpectedEntry {
+        Index,
+        Filter,
+        Stats,
+        /// The data block at this position in the SST index.
+        DataBlock(usize),
+    }
+
+    fn data_blocks(positions: Range<usize>) -> Vec<ExpectedEntry> {
+        positions.map(ExpectedEntry::DataBlock).collect()
+    }
+
+    #[rstest]
+    #[case::filters_only(
+        BlockCachePolicy::default().with_compaction_output_targets(&[CacheTarget::Filters]),
+        vec![ExpectedEntry::Filter]
+    )]
+    #[case::default_policy(
+        BlockCachePolicy::default(),
+        vec![ExpectedEntry::Index, ExpectedEntry::Filter]
+    )]
+    #[case::cache_everything(
+        BlockCachePolicy::default().with_compaction_output_targets(&[
+            CacheTarget::data::<&[u8], _>(..),
+            CacheTarget::Index,
+            CacheTarget::Filters,
+            CacheTarget::Stats,
+        ]),
+        [
+            vec![ExpectedEntry::Index, ExpectedEntry::Filter, ExpectedEntry::Stats],
+            data_blocks(0..4),
+        ].concat()
+    )]
+    #[case::data_range(
+        BlockCachePolicy::default().with_compaction_output_targets(&[
+            CacheTarget::data(b"b".as_slice()..=b"c".as_slice()),
+            CacheTarget::Index,
+        ]),
+        vec![ExpectedEntry::Index, ExpectedEntry::DataBlock(1), ExpectedEntry::DataBlock(2)]
+    )]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_compactor_applies_output_cache_policy() {
+    async fn test_compactor_applies_output_cache_policy(
+        #[case] policy: BlockCachePolicy,
+        #[case] expected_entries: Vec<ExpectedEntry>,
+    ) {
         let os = Arc::new(InMemory::new());
         let system_clock = Arc::new(MockSystemClock::new());
         let cache = Arc::new(TestCache::new());
@@ -1735,35 +1782,35 @@ mod tests {
 
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
+            // One data block per entry, so a data range selects a subset.
+            .with_sst_block_size(SstBlockSize::Other(1))
             .with_system_clock(system_clock.clone())
             .with_db_cache(cache.clone())
-            .with_block_cache_policy(
-                BlockCachePolicy::default()
-                    .with_flush_targets(&[])
-                    .with_compaction_output_targets(&[CacheTarget::Filters]),
-            )
+            .with_block_cache_policy(policy)
             .build()
             .await
             .unwrap();
 
-        db.put_with_options(
-            b"key",
-            b"value",
-            &PutOptions::default(),
-            &WriteOptions {
-                await_durable: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+        for key in [b"a", b"b", b"c", b"d"] {
+            db.put_with_options(
+                key,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
         db.flush_with_options(FlushOptions {
             flush_type: FlushType::MemTable,
         })
         .await
         .unwrap();
 
-        let db_state = await_compaction(&db, os, Some(system_clock))
+        let db_state = await_compaction(&db, os.clone(), Some(system_clock))
             .await
             .expect("db was not compacted");
 
@@ -1773,16 +1820,37 @@ mod tests {
             .iter()
             .flat_map(|sr| &sr.sst_views)
             .collect();
-        assert!(!output_ssts.is_empty());
+        assert_eq!(output_ssts.len(), 1);
+        let view = output_ssts[0];
+        let info = &view.sst.info;
 
-        let cached_keys = cache.keys();
-        for view in output_ssts {
-            let id = view.sst.id;
-            let keys_for_id: Vec<_> = cached_keys.iter().filter(|k| k.sst_id == id).collect();
-            // Exactly the filter entry: no data, index, or stats entries.
-            assert_eq!(keys_for_id.len(), 1);
-            assert_eq!(keys_for_id[0].block_id, view.sst.info.filter_offset);
-        }
+        let (_, _, table_store) = build_test_stores(os);
+        let index = table_store.read_index(&view.sst, false).await.unwrap();
+        let block_metas = index.borrow().block_meta();
+        assert_eq!(block_metas.len(), 4);
+
+        let mut expected_ids: Vec<u64> = expected_entries
+            .iter()
+            .map(|entry| match entry {
+                ExpectedEntry::Index => info.index_offset,
+                ExpectedEntry::Filter => info.filter_offset,
+                ExpectedEntry::Stats => info.stats_offset,
+                ExpectedEntry::DataBlock(position) => block_metas.get(*position).offset(),
+            })
+            .collect();
+        expected_ids.sort();
+
+        // Entries written by the flush carry the L0 SST's id, so filtering on
+        // the output id leaves only compaction output entries.
+        let mut cached_ids: Vec<u64> = cache
+            .keys()
+            .iter()
+            .filter(|key| key.sst_id == view.sst.id)
+            .map(|key| key.block_id)
+            .collect();
+        cached_ids.sort();
+
+        assert_eq!(cached_ids, expected_ids);
         db.close().await.unwrap();
     }
 

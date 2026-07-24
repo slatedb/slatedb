@@ -426,8 +426,8 @@ impl TableStore {
     /// `sst_table_id` into the block cache.
     ///
     /// Data blocks come from `unconsumed_blocks`, so a caller that already
-    /// streamed the data blocks out (the streaming writer) can only insert
-    /// metadata.
+    /// streamed blocks out (the streaming writer) only has the blocks it has
+    /// not drained yet, and caches the rest itself as it drains them.
     async fn cache_on_sst_write(&self, sst_table_id: SsTableId, encoded_sst: &EncodedSsTable) {
         let Some(cache) = &self.cache else {
             return;
@@ -1245,8 +1245,9 @@ impl EncodedSsTableWriter {
         // Cache inserts happen after writer shutdown so an SST whose upload
         // fails contributes no metadata entries.
         //
-        // All blocks are already processed during the write process so
-        // `cache_on_write` can only cache SST metadata here.
+        // Blocks drained while entries were added are cached by `write_block`,
+        // so the only data block left for `cache_on_sst_write` is the tail
+        // block that `build` finished.
         self.table_store
             .cache_on_sst_write(self.id, &encoded_sst)
             .await;
