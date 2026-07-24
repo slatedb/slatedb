@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import pytest
-
 from conftest import (
+    TEST_DB_PATH,
     ConcatMergeOperator,
     FixedThreeByteSegmentExtractor,
-    TEST_DB_PATH,
     drain_iterator,
     merge_options,
     new_memory_store,
@@ -16,6 +15,7 @@ from conftest import (
     scan_options,
     write_options,
 )
+
 from slatedb.uniffi import (
     CloseReason,
     DbBuilder,
