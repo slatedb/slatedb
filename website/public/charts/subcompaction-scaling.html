@@ -1,0 +1,169 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SlateDB — subcompaction scaling (16 GB compaction, RFC-0028)</title>
+<style>
+  :root{color-scheme:light}
+  :root{
+    --bg:#fcfcfa; --panel:#fff; --ink:#1f242b; --muted:#6b7280;
+    --line:#1f242b; --grid:#e1e3e5; --soft:#9aa1a9;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:transparent;color:var(--ink);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono","Courier New",monospace;
+    line-height:1.55}
+  .wrap{max-width:780px;margin:0 auto;padding:0 20px 20px}
+  p.sub{margin:0 0 4px;color:#3b4047;font-size:13px;max-width:720px;line-height:1.6}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+    font-weight:700;margin:30px 0 0}
+  svg text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .legend{display:flex;flex-wrap:wrap;gap:7px 18px;margin:12px 0 4px;font-size:12.5px;color:var(--ink)}
+  .legend .item{display:flex;align-items:center;gap:7px}
+  .legend svg{flex:none}
+  .chartbox{background:var(--panel);border:1px solid var(--line);padding:12px 14px 8px;margin-top:12px;overflow-x:auto}
+  .chartbox svg{width:100%;height:auto;display:block;overflow:visible;min-width:540px}
+  #tip{position:fixed;pointer-events:none;background:#1f242b;color:#fff;padding:7px 10px;
+    font-size:12px;line-height:1.5;opacity:0;transition:opacity .08s;white-space:nowrap;z-index:9;
+    font-family:ui-monospace,Menlo,monospace}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <h2>Near-linear speedup</h2>
+  <div class="legend" id="legSp"></div>
+  <div class="chartbox"><svg id="sp" viewBox="0 0 780 360"></svg></div>
+
+  <h2>Wall-clock compaction time</h2>
+  <div class="legend" id="legT"></div>
+  <div class="chartbox"><svg id="tm" viewBox="0 0 780 210"></svg></div>
+  <div id="tip"></div>
+</div>
+
+<script>
+// ---- data: RFC-0028 subcompactions, tiled 16GB workload (PR #1829) ---------
+const D = [
+  {sub:1,  ms:157010, sp:1.00, eff:null, rx:114},
+  {sub:4,  ms:37350,  sp:4.21, eff:105,  rx:497},
+  {sub:8,  ms:20490,  sp:7.66, eff:96,   rx:925},
+  {sub:12, ms:13990,  sp:11.2, eff:93,   rx:1383},
+];
+const $=id=>document.getElementById(id);
+const secs = ms => (ms/1000);
+const fmtSec = ms => (secs(ms)>=100 ? secs(ms).toFixed(0) : secs(ms).toFixed(1))+' s';
+
+// ---- tooltip --------------------------------------------------------------
+function bindTip(el, html){
+  el.addEventListener('mousemove',e=>{const t=$('tip');
+    t.innerHTML=html; t.style.opacity=1;
+    const pad=8, tw=t.offsetWidth, th=t.offsetHeight;
+    let left=e.clientX+12;
+    if(left+tw > innerWidth-pad) left=e.clientX-12-tw;
+    left=Math.max(pad, Math.min(left, innerWidth-pad-tw));
+    let top=Math.max(pad, Math.min(e.clientY-12, innerHeight-pad-th));
+    t.style.left=left+'px'; t.style.top=top+'px';});
+  el.addEventListener('mouseleave',()=>$('tip').style.opacity=0);
+}
+const tipFor = d => `<b>${d.sub}-way subcompaction</b><br>`+
+  `${d.sp.toFixed(2).replace(/\.?0+$/,'')}× speedup · ${fmtSec(d.ms)}`+
+  (d.eff!=null?`<br>${d.eff}% efficiency`:'')+`<br>rx ${d.rx} MB/s`;
+
+// ---- panel 1: speedup vs ideal (linear) -----------------------------------
+function drawSpeedup(){
+  const VW=780,VH=360,ML=58,MR=30,MT=26,MB=54,PW=VW-ML-MR,PH=VH-MT-MB;
+  const xMin=1,xMax=12,yMin=1,yMax=12, T=[1,4,8,12];
+  const xS=v=>ML+(v-xMin)/(xMax-xMin)*PW;
+  const yS=v=>MT+PH-(v-yMin)/(yMax-yMin)*PH;
+  let g='';
+  // gridlines at 1,4,8,12 on both axes (they meet the ideal line at each label)
+  T.forEach(t=>{
+    g+=`<line x1="${xS(t)}" y1="${MT}" x2="${xS(t)}" y2="${MT+PH}" stroke="var(--grid)" stroke-dasharray="2 3"/>`;
+    g+=`<line x1="${ML}" y1="${yS(t)}" x2="${ML+PW}" y2="${yS(t)}" stroke="var(--grid)" stroke-dasharray="2 3"/>`;
+    g+=`<text x="${xS(t)}" y="${MT+PH+20}" text-anchor="middle" font-size="11" fill="var(--soft)">${t}</text>`;
+    g+=`<text x="${ML-9}" y="${yS(t)+4}" text-anchor="end" font-size="11" fill="var(--soft)">${t}×</text>`;
+  });
+  // axis titles
+  g+=`<text x="${ML+PW/2}" y="${MT+PH+42}" text-anchor="middle" font-size="12" font-weight="700">subcompactions</text>`;
+  g+=`<text transform="translate(15,${MT+PH/2}) rotate(-90)" text-anchor="middle" font-size="12" font-weight="700">speedup</text>`;
+  // ideal (linear) reference: y = x
+  g+=`<line x1="${xS(xMin)}" y1="${yS(xMin)}" x2="${xS(xMax)}" y2="${yS(xMax)}" stroke="var(--soft)" stroke-width="1.4" stroke-dasharray="5 4"/>`;
+  g+=`<text x="${xS(11.3)}" y="${yS(11.3)-8}" text-anchor="end" font-size="11" fill="var(--soft)">ideal (linear)</text>`;
+  // measured polyline + markers
+  const pts=D.map(d=>[xS(d.sub),yS(d.sp)]);
+  g+=`<polyline fill="none" stroke="var(--line)" stroke-width="2.2" points="${pts.map(p=>p.join(',')).join(' ')}"/>`;
+  D.forEach((d,i)=>{
+    const [x,y]=pts[i];
+    g+=`<circle cx="${x}" cy="${y}" r="4.5" fill="var(--line)"/>`;
+    // efficiency annotation below-right of each measured point (skip sub=1)
+    if(d.eff!=null){
+      const last=i===D.length-1;
+      g+=`<text x="${x+(last?-9:9)}" y="${y+18}" text-anchor="${last?'end':'start'}" font-size="11.5" font-weight="700">${d.eff}%</text>`;
+    }
+    // invisible hit target
+    g+=`<circle class="sppt" data-i="${i}" cx="${x}" cy="${y}" r="11" fill="transparent"/>`;
+  });
+  $('sp').innerHTML=g;
+  document.querySelectorAll('.sppt').forEach(el=>bindTip(el, tipFor(D[+el.dataset.i])));
+}
+
+// ---- panel 2: wall-clock time bars ----------------------------------------
+function drawTime(){
+  const VW=780,VH=210,ML=58,MR=30,MT=22,MB=48,PW=VW-ML-MR,PH=VH-MT-MB;
+  const yMax=160, step=40, nt=yMax/step;
+  const yS=v=>MT+PH-(v/yMax)*PH;
+  const n=D.length, gap=30, barW=(PW-(n-1)*gap)/n;
+  let g='';
+  for(let i=0;i<=nt;i++){const v=i*step,y=yS(v);
+    g+=`<line x1="${ML}" y1="${y}" x2="${ML+PW}" y2="${y}" stroke="var(--grid)" stroke-dasharray="2 3"/>`;
+    g+=`<text x="${ML-9}" y="${y+4}" text-anchor="end" font-size="11" fill="var(--soft)">${v}</text>`;}
+  g+=`<text transform="translate(15,${MT+PH/2}) rotate(-90)" text-anchor="middle" font-size="12" font-weight="700">seconds</text>`;
+  g+=`<text x="${ML+PW/2}" y="${MT+PH+40}" text-anchor="middle" font-size="12" font-weight="700">subcompactions</text>`;
+  let x=ML;
+  D.forEach((d,i)=>{
+    const y1=yS(secs(d.ms)), h=MT+PH-y1;
+    g+=`<rect class="tbar" data-i="${i}" x="${x}" y="${y1.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" fill="var(--line)" stroke="#1f242b"/>`;
+    g+=`<text x="${x+barW/2}" y="${y1-8}" text-anchor="middle" font-size="12.5" font-weight="700">${fmtSec(d.ms)}</text>`;
+    g+=`<text x="${x+barW/2}" y="${MT+PH+18}" text-anchor="middle" font-size="11.5">${d.sub}</text>`;
+    x+=barW+gap;
+  });
+  $('tm').innerHTML=g;
+  document.querySelectorAll('.tbar').forEach(el=>bindTip(el, tipFor(D[+el.dataset.i])));
+}
+
+// ---- legends --------------------------------------------------------------
+$('legSp').innerHTML =
+  `<span class="item"><svg width="22" height="12" viewBox="0 0 22 12" style="vertical-align:-2px"><line x1="1" y1="6" x2="21" y2="6" stroke="#1f242b" stroke-width="2.4"/><circle cx="11" cy="6" r="3.4" fill="#1f242b"/></svg> measured</span>`+
+  `<span class="item"><svg width="22" height="12" viewBox="0 0 22 12" style="vertical-align:-2px"><line x1="1" y1="6" x2="21" y2="6" stroke="#9aa1a9" stroke-width="1.6" stroke-dasharray="5 4"/></svg> ideal (linear)</span>`+
+  `<span class="item" style="color:var(--muted)">labels show parallel efficiency (speedup ÷ subcompactions)</span>`;
+$('legT').innerHTML =
+  `<span class="item" style="color:var(--muted)">the same 16&nbsp;GB compaction, 2&nbsp;m&nbsp;37&nbsp;s → 14&nbsp;s at 12-way</span>`;
+
+drawSpeedup();
+drawTime();
+</script>
+
+<script>
+/* Report content height so the embedding iframe sizes itself. Measure the true
+   rendered bottom of the last .chartbox (an <svg> with viewBox + overflow:visible
+   under-reports via offsetHeight, which clipped the box's bottom border), plus
+   slack for the border and the wrap's bottom padding. */
+(function(){
+  function postHeight(){
+    var b=0;
+    document.querySelectorAll('.chartbox').forEach(function(el){
+      b=Math.max(b, el.getBoundingClientRect().bottom);
+    });
+    if(!b){var w=document.querySelector('.wrap'); b=w?w.getBoundingClientRect().bottom:document.body.scrollHeight;}
+    parent.postMessage({chartHeight:Math.ceil(b)+24},'*');
+  }
+  window.addEventListener('load',function(){requestAnimationFrame(postHeight);});
+  window.addEventListener('resize',postHeight);
+  setTimeout(postHeight,300);
+  if(window.ResizeObserver){new ResizeObserver(postHeight).observe(document.documentElement);}
+})();
+</script>
+
+</body>
+</html>
