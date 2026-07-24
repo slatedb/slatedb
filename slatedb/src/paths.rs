@@ -32,10 +32,7 @@ impl PathResolver {
     /// Creates a resolver for the database rooted at `root_path`, resolving
     /// the external SSTs referenced by `manifest` to their owning database's
     /// path.
-    pub fn new<P: Into<Path>>(
-        root_path: P,
-        manifest: &crate::manifest::VersionedManifest,
-    ) -> Self {
+    pub fn new<P: Into<Path>>(root_path: P, manifest: &crate::manifest::VersionedManifest) -> Self {
         Self::new_with_external_ssts(root_path.into(), manifest.external_ssts())
     }
 

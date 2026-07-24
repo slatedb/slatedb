@@ -1997,7 +1997,8 @@ mod tests {
 
         // Plant the WAL object directly in the object store at the resolved path.
         use object_store::ObjectStoreExt;
-        let wal_path = PathResolver::from_root(path.clone()).sst_path(&SsTableId::Wal(planted_wal_id));
+        let wal_path =
+            PathResolver::from_root(path.clone()).sst_path(&SsTableId::Wal(planted_wal_id));
         object_store.put(&wal_path, wal_bytes.into()).await.unwrap();
 
         planted_wal_id
