@@ -126,6 +126,7 @@ impl WriterFencer {
 
 #[cfg(test)]
 mod tests {
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::compactions_store::CompactionsStore;
     use crate::config::{
         FlushOptions, FlushType, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
@@ -178,6 +179,7 @@ mod tests {
                 path,
                 None,
                 TableStoreKind::Main,
+                BlockCachePolicy::default(),
             ));
             let stored_manifest = StoredManifest::create_new_db(
                 manifest_store.clone(),

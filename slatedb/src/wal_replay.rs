@@ -275,6 +275,7 @@ impl WalReplayIterator {
 #[cfg(test)]
 mod tests {
     use super::{WalReplayIterator, WalReplayOptions};
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_range::BytesRange;
     use crate::db_state::SsTableId;
     use crate::format::sst::SsTableFormat;
@@ -368,7 +369,7 @@ mod tests {
         builder.add(row.clone()).await.unwrap();
         let encoded_sst = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(2), &encoded_sst, false)
+            .write_sst(&SsTableId::Wal(2), &encoded_sst)
             .await
             .unwrap();
 
@@ -500,7 +501,7 @@ mod tests {
             }
             let encoded_sst = builder.build().await.unwrap();
             table_store
-                .write_sst(&SsTableId::Wal(wal_id as u64 + 1), &encoded_sst, false)
+                .write_sst(&SsTableId::Wal(wal_id as u64 + 1), &encoded_sst)
                 .await
                 .unwrap();
         }
@@ -567,7 +568,7 @@ mod tests {
         }
         let encoded_sst = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(1), &encoded_sst, false)
+            .write_sst(&SsTableId::Wal(1), &encoded_sst)
             .await
             .unwrap();
 
@@ -626,7 +627,7 @@ mod tests {
         }
         let encoded_sst = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(1), &encoded_sst, false)
+            .write_sst(&SsTableId::Wal(1), &encoded_sst)
             .await
             .unwrap();
 
@@ -766,6 +767,7 @@ mod tests {
             path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ))
     }
 

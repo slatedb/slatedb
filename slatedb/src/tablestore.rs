@@ -17,14 +17,15 @@ use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 use crate::blob::ReadOnlyBlob;
+use crate::block_cache_policy::{should_cache_data_block, BlockCachePolicy};
+use crate::db_cache::CacheTarget;
 use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
-use crate::db_cache_manager::CacheTarget;
 use crate::db_state::{SsTableHandle, SsTableId, SstType};
 use crate::error::SlateDBError;
 use crate::filter_policy::NamedFilter;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
-use crate::format::sst::{EncodedSsTable, SsTableFormat};
+use crate::format::sst::{EncodedSsTable, EncodedSsTableBlock, SsTableFormat};
 use crate::object_store_tag::ObjectStoreCallTag;
 pub(crate) use crate::object_store_tag::TableStoreKind;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
@@ -40,8 +41,10 @@ pub(crate) struct TableStore {
     path_resolver: PathResolver,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
-    /// In-memory cache for data blocks, indices, and filters
+    /// In-memory cache for data blocks and SST metadata.
     cache: Option<Arc<dyn DbCache>>,
+    /// Selects which components to insert into the cache.
+    block_cache_policy: BlockCachePolicy,
     /// Which component owns this store. Tagged on compacted-SST calls.
     kind: TableStoreKind,
 }
@@ -125,6 +128,7 @@ impl TableStore {
         root_path: P,
         block_cache: Option<Arc<dyn DbCache>>,
         kind: TableStoreKind,
+        block_cache_policy: BlockCachePolicy,
     ) -> Self {
         Self::new_with_fp_registry(
             object_stores,
@@ -133,6 +137,7 @@ impl TableStore {
             Arc::new(FailPointRegistry::new()),
             block_cache,
             kind,
+            block_cache_policy,
         )
     }
 
@@ -143,6 +148,7 @@ impl TableStore {
         fp_registry: Arc<FailPointRegistry>,
         cache: Option<Arc<dyn DbCache>>,
         kind: TableStoreKind,
+        block_cache_policy: BlockCachePolicy,
     ) -> Self {
         Self {
             object_stores,
@@ -150,6 +156,7 @@ impl TableStore {
             path_resolver,
             fp_registry,
             cache,
+            block_cache_policy,
             kind,
         }
     }
@@ -349,7 +356,6 @@ impl TableStore {
         &self,
         id: &SsTableId,
         encoded_sst: &EncodedSsTable,
-        write_cache: bool,
     ) -> Result<SsTableHandle, SlateDBError> {
         fail_point!(
             self.fp_registry.clone(),
@@ -392,35 +398,82 @@ impl TableStore {
             }
         }
 
-        if let Some(ref cache) = self.cache {
-            if write_cache {
-                for block in &encoded_sst.unconsumed_blocks {
-                    cache
-                        .insert(
-                            (*id, block.offset).into(),
-                            CachedEntry::with_block(Arc::clone(&block.block)),
-                        )
-                        .await;
-                }
-                cache
-                    .insert(
-                        (*id, encoded_sst.info.index_offset).into(),
-                        CachedEntry::with_sst_index(Arc::new(encoded_sst.index.clone())),
-                    )
-                    .await;
-            }
-        }
-        self.cache_filters(
-            *id,
-            encoded_sst.info.filter_offset,
-            encoded_sst.filters.clone(),
-        )
-        .await;
+        self.cache_on_sst_write(*id, encoded_sst).await;
         Ok(SsTableHandle::new(
             *id,
             encoded_sst.format_version,
             encoded_sst.info.clone(),
         ))
+    }
+
+    /// Targets a write of the SST inserts into the block cache.
+    fn targets_to_cache(&self, id: &SsTableId) -> &[CacheTarget] {
+        match (id, self.kind) {
+            (SsTableId::Wal(_), _) => &[],
+            (SsTableId::Compacted(_), TableStoreKind::Compactor) => {
+                self.block_cache_policy.compaction_output_targets()
+            }
+            (SsTableId::Compacted(_), TableStoreKind::Main) => {
+                self.block_cache_policy.flush_targets()
+            }
+            // We only cache from the main store (flush) and the compactor
+            // (compaction output) right now.
+            (SsTableId::Compacted(_), _) => &[],
+        }
+    }
+
+    /// Inserts the targets selected by the block cache policy for
+    /// `sst_table_id` into the block cache.
+    ///
+    /// Data blocks come from `unconsumed_blocks`, so a caller that already
+    /// streamed the data blocks out (the streaming writer) can only insert
+    /// metadata.
+    async fn cache_on_sst_write(&self, sst_table_id: SsTableId, encoded_sst: &EncodedSsTable) {
+        let Some(cache) = &self.cache else {
+            return;
+        };
+        let targets = self.targets_to_cache(&sst_table_id);
+        for block in &encoded_sst.unconsumed_blocks {
+            // Blocks without a tracked key span (WAL blocks) are never cached.
+            let Some(key_span) = &block.key_span else {
+                continue;
+            };
+            if !should_cache_data_block(targets, key_span) {
+                continue;
+            }
+            cache
+                .insert(
+                    (sst_table_id, block.offset).into(),
+                    CachedEntry::with_block(Arc::clone(&block.block)),
+                )
+                .await;
+        }
+        if targets.contains(&CacheTarget::Index) {
+            cache
+                .insert(
+                    (sst_table_id, encoded_sst.info.index_offset).into(),
+                    CachedEntry::with_sst_index(Arc::new(encoded_sst.index.clone())),
+                )
+                .await;
+        }
+        if targets.contains(&CacheTarget::Filters) && !encoded_sst.filters.is_empty() {
+            cache
+                .insert(
+                    (sst_table_id, encoded_sst.info.filter_offset).into(),
+                    CachedEntry::with_filters(encoded_sst.filters.clone()),
+                )
+                .await;
+        }
+        if targets.contains(&CacheTarget::Stats) {
+            if let Some(stats) = &encoded_sst.stats {
+                cache
+                    .insert(
+                        (sst_table_id, encoded_sst.info.stats_offset).into(),
+                        CachedEntry::with_sst_stats(Arc::new(stats.clone())),
+                    )
+                    .await;
+            }
+        }
     }
 
     /// Writes a zero-byte WAL object as a fencing marker.
@@ -442,23 +495,12 @@ impl TableStore {
         .await
     }
 
-    async fn cache_filters(&self, sst: SsTableId, id: u64, filters: Arc<[NamedFilter]>) {
-        let Some(ref cache) = self.cache else {
-            return;
-        };
-        if !filters.is_empty() {
-            cache
-                .insert((sst, id).into(), CachedEntry::with_filters(filters))
-                .await;
-        }
-    }
-
     /// Decodes an `EncodedCachedFilter` slice into a fully-decoded
     /// `Arc<[NamedFilter]>` and overwrites the cache entry under `cache_key`
     /// with the decoded form so subsequent hits bypass the decode step.
     /// Entries whose policy name has no match in the configured policies are
     /// dropped.
-    async fn decode_and_refresh(
+    async fn decode_and_refresh_filter(
         &self,
         cache: &Arc<dyn DbCache>,
         cache_key: CachedKey,
@@ -601,7 +643,7 @@ impl TableStore {
             return Ok(Arc::from([]));
         }
         let cache_key: CachedKey = (handle.id, handle.info.filter_offset).into();
-        if let Some(ref cache) = self.cache {
+        if let Some(cache) = self.cache_for_reads() {
             // cache_blocks=true: dedup-aware fetch; concurrent callers collapse onto
             // one loader. cache_blocks=false: read-only lookup that won't pollute the
             // cache on miss. Cache errors fall through to a best-effort direct load;
@@ -627,7 +669,9 @@ impl TableStore {
                 // Encoded form from disk-cache deserialize. Decode and overwrite
                 // the cache entry with the decoded form.
                 if let Some(encoded) = entry.encoded_filters() {
-                    return Ok(self.decode_and_refresh(cache, cache_key, &encoded).await);
+                    return Ok(self
+                        .decode_and_refresh_filter(cache, cache_key, &encoded)
+                        .await);
                 }
             }
         }
@@ -650,7 +694,7 @@ impl TableStore {
             return Ok(None);
         }
         let cache_key = (handle.id, handle.info.stats_offset).into();
-        if let Some(ref cache) = self.cache {
+        if let Some(cache) = self.cache_for_reads() {
             // See `read_filters` for the rationale on the fall-through path.
             let entry = if cache_blocks {
                 cache
@@ -681,7 +725,7 @@ impl TableStore {
         cache_blocks: bool,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         let cache_key = (handle.id, handle.info.index_offset).into();
-        if let Some(ref cache) = self.cache {
+        if let Some(cache) = self.cache_for_reads() {
             // See `read_filters` for the rationale on the fall-through path.
             let entry = if cache_blocks {
                 cache
@@ -846,7 +890,7 @@ impl TableStore {
         // run of uncached blocks. Cache errors fall through to the direct load,
         // which produces the authoritative error if any.
         if cache_blocks && blocks.len() == 1 {
-            if let Some(ref cache) = self.cache {
+            if let Some(cache) = self.cache_for_reads() {
                 let block_num = blocks.start;
                 let offset = index.borrow().block_meta().get(block_num).offset();
                 let cache_key: CachedKey = (handle.id, offset).into();
@@ -868,7 +912,7 @@ impl TableStore {
         let mut uncached_ranges = Vec::new();
 
         // If block cache is available, try to retrieve cached blocks
-        if let Some(ref cache) = self.cache {
+        if let Some(cache) = self.cache_for_reads() {
             let index_borrow = index.borrow();
             // Attempt to get all requested blocks from cache concurrently
             let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
@@ -951,7 +995,7 @@ impl TableStore {
         }
 
         // Cache the newly read blocks if caching is enabled
-        if let Some(ref cache) = self.cache {
+        if let Some(cache) = self.cache_for_reads() {
             if !blocks_to_cache.is_empty() {
                 join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
                     cache.insert((id, offset).into(), CachedEntry::with_block(block))
@@ -1002,6 +1046,20 @@ impl TableStore {
 
     pub(crate) fn cache(&self) -> Option<&Arc<dyn DbCache>> {
         self.cache.as_ref()
+    }
+
+    /// The block cache to probe for read operations, gated based on the table
+    /// store kind.
+    ///
+    /// compactor reads bypass it so compaction input does not pollute the
+    /// cache.
+    // TODO: revisit this when the read side of BlockCachePolicy is implemented.
+    fn cache_for_reads(&self) -> Option<&Arc<dyn DbCache>> {
+        if self.kind == TableStoreKind::Compactor {
+            None
+        } else {
+            self.cache.as_ref()
+        }
     }
 
     /// Best-effort removal of all cache entries associated with the given SST:
@@ -1177,15 +1235,20 @@ impl EncodedSsTableWriter {
     }
 
     pub(crate) async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
-        let mut encoded_sst = self.builder.build().await?;
-        while let Some(block) = encoded_sst.unconsumed_blocks.pop_front() {
+        let encoded_sst = self.builder.build().await?;
+        for block in &encoded_sst.unconsumed_blocks {
             self.writer.write_all(block.encoded_bytes.as_ref()).await?;
         }
-
         self.writer.write_all(encoded_sst.footer.as_ref()).await?;
         self.writer.shutdown().await?;
+
+        // Cache inserts happen after writer shutdown so an SST whose upload
+        // fails contributes no metadata entries.
+        //
+        // All blocks are already processed during the write process so
+        // `cache_on_write` can only cache SST metadata here.
         self.table_store
-            .cache_filters(self.id, encoded_sst.info.filter_offset, encoded_sst.filters)
+            .cache_on_sst_write(self.id, &encoded_sst)
             .await;
         Ok(SsTableHandle::new(
             self.id,
@@ -1196,10 +1259,26 @@ impl EncodedSsTableWriter {
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {
         while let Some(block) = self.builder.next_block() {
-            self.writer.write_all(block.encoded_bytes.as_ref()).await?;
+            self.write_block(block).await?;
             #[cfg(test)]
             {
                 self.blocks_written += 1;
+            }
+        }
+        Ok(())
+    }
+
+    async fn write_block(&mut self, block: EncodedSsTableBlock) -> Result<(), SlateDBError> {
+        self.writer.write_all(block.encoded_bytes.as_ref()).await?;
+        if let (Some(cache), Some(key_span)) = (&self.table_store.cache, &block.key_span) {
+            let targets = self.table_store.targets_to_cache(&self.id);
+            if should_cache_data_block(targets, key_span) {
+                cache
+                    .insert(
+                        (self.id, block.offset).into(),
+                        CachedEntry::with_block(block.block),
+                    )
+                    .await;
             }
         }
         Ok(())
@@ -1237,9 +1316,11 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
 
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::db_cache::test_utils::TestCache;
+    use crate::db_cache::CacheTarget;
     use crate::db_cache::SplitCache;
-    use crate::db_cache::{DbCache, DbCacheWrapper};
+    use crate::db_cache::{CachedKey, DbCache, DbCacheWrapper};
     use crate::error;
     use crate::format::block::Block;
     use crate::format::sst::SsTableFormat;
@@ -1387,6 +1468,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
 
@@ -1461,6 +1543,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let id = SsTableId::Wal(123);
 
@@ -1531,6 +1614,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let wal_id = SsTableId::Wal(1);
 
@@ -1540,7 +1624,7 @@ mod tests {
             .await
             .unwrap();
         let table = sst1.build().await.unwrap();
-        ts.write_sst(&wal_id, &table, false).await.unwrap();
+        ts.write_sst(&wal_id, &table).await.unwrap();
 
         let mut sst2 = ts.table_builder();
         sst2.add(RowEntry::new_value(b"key", b"value", 0))
@@ -1549,7 +1633,7 @@ mod tests {
         let table2 = sst2.build().await.unwrap();
 
         // write another wal sst with the same id.
-        let result = ts.write_sst(&wal_id, &table2, false).await;
+        let result = ts.write_sst(&wal_id, &table2).await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
     }
 
@@ -1562,6 +1646,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         ts.write_wal_fence(1).await.unwrap();
@@ -1579,6 +1664,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         ts.write_wal_fence(1).await.unwrap();
@@ -1595,6 +1681,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         ts.write_wal_fence(1).await.unwrap();
@@ -1604,7 +1691,7 @@ mod tests {
             .await
             .unwrap();
         let table = sst.build().await.unwrap();
-        let result = ts.write_sst(&SsTableId::Wal(1), &table, false).await;
+        let result = ts.write_sst(&SsTableId::Wal(1), &table).await;
         assert!(matches!(result, Err(error::SlateDBError::Fenced)));
     }
 
@@ -1627,6 +1714,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
 
@@ -1644,7 +1732,7 @@ mod tests {
         let sst = builder.build().await.unwrap();
 
         // when:
-        ts.write_sst(&id, &sst, false).await.unwrap();
+        ts.write_sst(&id, &sst).await.unwrap();
 
         // then:
         assert_eq!(os.put_attempts(), 0);
@@ -1671,6 +1759,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let wal_id = SsTableId::Wal(1);
 
@@ -1688,7 +1777,7 @@ mod tests {
         let sst = builder.build().await.unwrap();
 
         // when:
-        let result = ts.write_sst(&wal_id, &sst, false).await;
+        let result = ts.write_sst(&wal_id, &sst).await;
 
         // then:
         assert!(matches!(
@@ -1713,6 +1802,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
 
@@ -1781,6 +1871,7 @@ mod tests {
             Path::from("/root"),
             Some(wrapper.clone()),
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Create and write SST
@@ -1909,6 +2000,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
 
         let mut builder = writer.table_builder();
@@ -1922,7 +2014,7 @@ mod tests {
             .unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = writer
-            .write_sst(&id, &builder.build().await.unwrap(), false)
+            .write_sst(&id, &builder.build().await.unwrap())
             .await
             .unwrap();
 
@@ -1938,6 +2030,7 @@ mod tests {
             Path::from(ROOT),
             Some(cache),
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         assert_eq!(meta_cache.entry_count(), 0);
 
@@ -1969,6 +2062,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
 
         let mut builder = writer.table_builder();
@@ -1982,7 +2076,7 @@ mod tests {
             .unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = writer
-            .write_sst(&id, &builder.build().await.unwrap(), false)
+            .write_sst(&id, &builder.build().await.unwrap())
             .await
             .unwrap();
 
@@ -1998,6 +2092,7 @@ mod tests {
             Path::from(ROOT),
             Some(cache),
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         assert_eq!(meta_cache.entry_count(), 0);
 
@@ -2027,6 +2122,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
 
         let mut builder = writer.table_builder();
@@ -2040,7 +2136,7 @@ mod tests {
             .unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = writer
-            .write_sst(&id, &builder.build().await.unwrap(), false)
+            .write_sst(&id, &builder.build().await.unwrap())
             .await
             .unwrap();
         assert!(handle.info.stats_len > 0);
@@ -2057,6 +2153,7 @@ mod tests {
             Path::from(ROOT),
             Some(cache),
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         assert_eq!(meta_cache.entry_count(), 0);
 
@@ -2101,13 +2198,14 @@ mod tests {
             Path::from("/root"),
             Some(wrapper.clone()),
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst = build_test_sst(&ts.sst_format, 3).await;
         let sst_bytes = sst.remaining_as_bytes();
         let sst_info = sst.info.clone();
 
-        ts.write_sst(&id, &sst, true).await.unwrap();
+        ts.write_sst(&id, &sst).await.unwrap();
 
         let index = ts
             .sst_format
@@ -2147,13 +2245,14 @@ mod tests {
             Path::from("/root"),
             Some(wrapper),
             TableStoreKind::Main,
+            BlockCachePolicy::default().with_flush_targets(&[CacheTarget::Filters]),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let sst = build_test_sst(&ts.sst_format, 3).await;
         let sst_bytes = sst.remaining_as_bytes();
         let sst_info = sst.info.clone();
 
-        ts.write_sst(&id, &sst, false).await.unwrap();
+        ts.write_sst(&id, &sst).await.unwrap();
 
         let index = ts
             .sst_format
@@ -2169,6 +2268,241 @@ mod tests {
                 .unwrap();
             assert!(cached_block.is_none());
         }
+    }
+
+    #[rstest]
+    #[case::filters_only(&[CacheTarget::Filters])]
+    #[case::index_and_filters(&[CacheTarget::Index, CacheTarget::Filters])]
+    #[case::all(&[
+        CacheTarget::data::<&[u8], _>(..),
+        CacheTarget::Filters,
+        CacheTarget::Index,
+        CacheTarget::Stats,
+    ])]
+    #[tokio::test]
+    async fn write_sst_should_cache_only_selected_components(#[case] selected: &[CacheTarget]) {
+        let cache = Arc::new(TestCache::new());
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(Arc::new(InMemory::new()), None),
+            SsTableFormat::default(),
+            Path::from("/root"),
+            Some(cache.clone()),
+            TableStoreKind::Main,
+            BlockCachePolicy::default().with_flush_targets(selected),
+        ));
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let sst = build_test_sst(&ts.sst_format, 3).await;
+        let data_key: CachedKey = (id, sst.unconsumed_blocks[0].offset).into();
+        let index_key: CachedKey = (id, sst.info.index_offset).into();
+        let filter_key: CachedKey = (id, sst.info.filter_offset).into();
+        let stats_key: CachedKey = (id, sst.info.stats_offset).into();
+
+        ts.write_sst(&id, &sst).await.unwrap();
+
+        assert_eq!(
+            cache.get_block(&data_key).await.unwrap().is_some(),
+            selected.iter().any(|c| matches!(c, CacheTarget::Data(_)))
+        );
+        assert_eq!(
+            cache.get_index(&index_key).await.unwrap().is_some(),
+            selected.contains(&CacheTarget::Index)
+        );
+        assert_eq!(
+            cache.get_filter(&filter_key).await.unwrap().is_some(),
+            selected.contains(&CacheTarget::Filters)
+        );
+        assert_eq!(
+            cache.get_stats(&stats_key).await.unwrap().is_some(),
+            selected.contains(&CacheTarget::Stats)
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_writer_should_use_block_cache_but_skip_compactor_reads() {
+        let os = Arc::new(InMemory::new());
+        let cache = Arc::new(TestCache::new());
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            format,
+            Path::from("/root"),
+            Some(cache.clone()),
+            TableStoreKind::Compactor,
+            BlockCachePolicy::default().with_compaction_output_targets(&[
+                CacheTarget::data::<&[u8], _>(..),
+                CacheTarget::Index,
+                CacheTarget::Stats,
+            ]),
+        ));
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let mut writer = ts.table_writer(id);
+        for i in 0..4 {
+            writer
+                .add(RowEntry::new_value(&[b'a' + i; 16], &[i; 16], 0))
+                .await
+                .unwrap();
+        }
+
+        let handle = writer.close().await.unwrap();
+        let index_key: CachedKey = (id, handle.info.index_offset).into();
+        let filter_key: CachedKey = (id, handle.info.filter_offset).into();
+        let stats_key: CachedKey = (id, handle.info.stats_offset).into();
+        let index = cache
+            .get_index(&index_key)
+            .await
+            .unwrap()
+            .unwrap()
+            .sst_index()
+            .unwrap();
+
+        assert!(ts.cache().is_some());
+        assert!(cache.get_filter(&filter_key).await.unwrap().is_none());
+        assert!(cache.get_stats(&stats_key).await.unwrap().is_some());
+        for block_meta in index.borrow().block_meta().iter() {
+            let data_key: CachedKey = (id, block_meta.offset()).into();
+            assert!(cache.get_block(&data_key).await.unwrap().is_some());
+        }
+
+        // Delete the SST from the object store and verify that the cache won't
+        // be used and reading the index will just return an error.
+        os.delete(&ts.path(&id)).await.unwrap();
+        assert!(ts.read_index(&handle, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn write_sst_should_cache_only_blocks_in_data_range() {
+        let cache = Arc::new(TestCache::new());
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(Arc::new(InMemory::new()), None),
+            format,
+            Path::from("/root"),
+            Some(cache.clone()),
+            TableStoreKind::Main,
+            BlockCachePolicy::default().with_flush_targets(&[CacheTarget::data(
+                [b'b'; 16].as_slice()..=[b'c'; 16].as_slice(),
+            )]),
+        ));
+        // single-entry blocks for keys aa.., bb.., cc.., dd..
+        let mut builder = ts.table_builder();
+        for i in 0..4 {
+            builder
+                .add(RowEntry::new_value(&[b'a' + i; 16], &[i; 16], 0))
+                .await
+                .unwrap();
+        }
+        let sst = builder.build().await.unwrap();
+        assert_eq!(sst.unconsumed_blocks.len(), 4);
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+
+        ts.write_sst(&id, &sst).await.unwrap();
+
+        for (block, expected) in sst.unconsumed_blocks.iter().zip([false, true, true, false]) {
+            let data_key: CachedKey = (id, block.offset).into();
+            assert_eq!(
+                cache.get_block(&data_key).await.unwrap().is_some(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_writer_should_cache_only_blocks_in_data_range() {
+        let cache = Arc::new(TestCache::new());
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(Arc::new(InMemory::new()), None),
+            format,
+            Path::from("/root"),
+            Some(cache.clone()),
+            TableStoreKind::Compactor,
+            BlockCachePolicy::default().with_compaction_output_targets(&[
+                CacheTarget::data([b'b'; 16].as_slice()..=[b'c'; 16].as_slice()),
+                CacheTarget::Index,
+            ]),
+        ));
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        // single-entry blocks for keys aa.., bb.., cc.., dd..
+        let mut writer = ts.table_writer(id);
+        for i in 0..4 {
+            writer
+                .add(RowEntry::new_value(&[b'a' + i; 16], &[i; 16], 0))
+                .await
+                .unwrap();
+        }
+
+        let handle = writer.close().await.unwrap();
+
+        let index_key: CachedKey = (id, handle.info.index_offset).into();
+        let index = cache
+            .get_index(&index_key)
+            .await
+            .unwrap()
+            .unwrap()
+            .sst_index()
+            .unwrap();
+        let block_metas = index.borrow().block_meta();
+        assert_eq!(block_metas.len(), 4);
+        for (i, expected) in [false, true, true, false].into_iter().enumerate() {
+            let data_key: CachedKey = (id, block_metas.get(i).offset()).into();
+            assert_eq!(
+                cache.get_block(&data_key).await.unwrap().is_some(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_writer_should_cache_only_index_and_filters_for_compaction_output() {
+        let cache = Arc::new(TestCache::new());
+        // The default policy requests only the index and filter
+        // compaction-output components; stats stay uncached, and data blocks
+        // are streamed out before close so they can never be inserted.
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(Arc::new(InMemory::new()), None),
+            SsTableFormat::default(),
+            Path::from("/root"),
+            Some(cache.clone()),
+            TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
+        ));
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let mut writer = ts.table_writer(id);
+        writer
+            .add(RowEntry::new_value(b"key", b"value", 0))
+            .await
+            .unwrap();
+
+        let handle = writer.close().await.unwrap();
+
+        assert_eq!(cache.entry_count(), 2);
+        assert!(cache
+            .get_index(&(id, handle.info.index_offset).into())
+            .await
+            .unwrap()
+            .is_some());
+        assert!(cache
+            .get_filter(&(id, handle.info.filter_offset).into())
+            .await
+            .unwrap()
+            .is_some());
+        assert!(cache
+            .get_stats(&(id, handle.info.stats_offset).into())
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[allow(dead_code)]
@@ -2208,6 +2542,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Create id1, id2, and i3 as three random UUIDs that have been sorted ascending.
@@ -2278,6 +2613,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let id1 = SsTableId::Wal(1);
@@ -2352,6 +2688,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ))
     }
 
@@ -2410,6 +2747,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Build an SST and compute expected bytes
@@ -2418,7 +2756,7 @@ mod tests {
         let expected_bytes = sst.remaining_as_bytes();
 
         // When writing via TableStore (should retry once)
-        ts.write_sst(&id, &sst, false).await.unwrap();
+        ts.write_sst(&id, &sst).await.unwrap();
 
         // Then: a retry happened
         assert!(flaky.put_attempts() >= 2);
@@ -2448,6 +2786,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let id1 = SsTableId::Compacted(ulid::Ulid::new());
@@ -2493,6 +2832,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let id1 = SsTableId::Wal(123);
@@ -2543,6 +2883,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let path = ts.path(&id);
@@ -2568,6 +2909,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let id = SsTableId::Wal(42);
         let path = ts.path(&id);
@@ -2592,7 +2934,7 @@ mod tests {
             let os = Arc::new(InMemory::new());
             let format = SsTableFormat { block_size, ..SsTableFormat::default() };
             let ts = Arc::new(TableStore::new(ObjectStores::new(os, None),
-                format, Path::from(ROOT), None, TableStoreKind::Main));
+                format, Path::from(ROOT), None, TableStoreKind::Main, BlockCachePolicy::default()));
             if let Some(bytes) = block_size.checked_mul(num_blocks) {
                 assert_eq!(num_blocks, ts.bytes_to_blocks(bytes));
             }
@@ -2629,6 +2971,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = writer.table_builder();
         builder
@@ -2641,7 +2984,7 @@ mod tests {
             .unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = writer
-            .write_sst(&id, &builder.build().await.unwrap(), false)
+            .write_sst(&id, &builder.build().await.unwrap())
             .await
             .unwrap();
 
@@ -2664,6 +3007,7 @@ mod tests {
             Path::from(ROOT),
             Some(cache),
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // when: task A starts reading the index; its loader will pause inside the
@@ -2731,6 +3075,7 @@ mod tests {
             Path::from(ROOT),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = writer.table_builder();
         builder
@@ -2743,7 +3088,7 @@ mod tests {
             .unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = writer
-            .write_sst(&id, &builder.build().await.unwrap(), false)
+            .write_sst(&id, &builder.build().await.unwrap())
             .await
             .unwrap();
 
@@ -2771,6 +3116,7 @@ mod tests {
             Path::from(ROOT),
             Some(cache),
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // when: task A starts a single-block read; its loader will pause inside the
@@ -2833,6 +3179,7 @@ mod tests {
             read_with_validation_retry, ObjectStoreCallTag, TableStoreKind, MAX_VALIDATION_RETRIES,
         };
         use super::{Path, ROOT};
+        use crate::block_cache_policy::BlockCachePolicy;
         use crate::db_state::{SsTableId, SstType};
         use crate::error::{RetryReason, SlateDBError};
         use crate::format::sst::SsTableFormat;
@@ -2859,6 +3206,7 @@ mod tests {
                 Path::from(ROOT),
                 None,
                 kind,
+                BlockCachePolicy::default(),
             ));
             (recording, ts)
         }
@@ -2869,7 +3217,7 @@ mod tests {
             let (recording, ts) = recording_store(TableStoreKind::Reader);
             let encoded = build_test_sst(&format(), 4).await;
             let id = SsTableId::Compacted(ulid::Ulid::new());
-            let handle = ts.write_sst(&id, &encoded, false).await.unwrap();
+            let handle = ts.write_sst(&id, &encoded).await.unwrap();
 
             recording.clear();
             ts.read_index(&handle, false).await.unwrap();
@@ -2899,7 +3247,7 @@ mod tests {
             let (recording, ts) = recording_store(TableStoreKind::Compactor);
             let encoded = build_test_sst(&format(), 1).await;
             let id = SsTableId::Compacted(ulid::Ulid::new());
-            ts.write_sst(&id, &encoded, false).await.unwrap();
+            ts.write_sst(&id, &encoded).await.unwrap();
 
             recording.clear();
             ts.metadata(&id).await.unwrap();
@@ -2922,7 +3270,7 @@ mod tests {
             let (recording, ts) = recording_store(TableStoreKind::Main);
             let encoded = build_test_sst(&format(), 1).await;
             let id = SsTableId::Wal(1);
-            ts.write_sst(&id, &encoded, false).await.unwrap();
+            ts.write_sst(&id, &encoded).await.unwrap();
 
             let kinds = recording.write_kinds();
             let sst_types = recording.write_sst_types();
@@ -3028,7 +3376,7 @@ mod tests {
             let (recording, ts) = recording_store(TableStoreKind::Compactor);
             let encoded = build_test_sst(&format(), 4).await;
             let id = SsTableId::Compacted(ulid::Ulid::new());
-            ts.write_sst(&id, &encoded, false).await.unwrap();
+            ts.write_sst(&id, &encoded).await.unwrap();
 
             let kinds = recording.write_kinds();
             let sst_types = recording.write_sst_types();

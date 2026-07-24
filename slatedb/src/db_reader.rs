@@ -2,7 +2,8 @@ use crate::bytes_range::{ByteRangeBounds, BytesRange};
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
-use crate::db_cache_manager::{self, CacheTarget};
+use crate::db_cache::CacheTarget;
+use crate::db_cache_manager;
 use crate::db_common::extract_segment_prefix;
 use crate::db_state::{collect_touched_segments, SsTableId};
 use crate::db_stats::DbStats;
@@ -1386,6 +1387,7 @@ fn has_not_found_object_store_error(err: &(dyn std::error::Error + 'static)) -> 
 #[cfg(test)]
 mod tests {
     use super::{DbReaderMessage, ManifestPoller, ReaderState};
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::clock::MonotonicClock;
     use crate::config::{
         CheckpointOptions, CheckpointScope, FlushOptions, FlushType, MergeOptions, PutOptions,
@@ -3277,6 +3279,7 @@ mod tests {
                 Arc::clone(&self.fp_registry),
                 None,
                 TableStoreKind::Reader,
+                BlockCachePolicy::default(),
             ))
         }
 

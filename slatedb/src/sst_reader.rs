@@ -52,6 +52,7 @@ use object_store::path::Path;
 use object_store::ObjectStore;
 use ulid::Ulid;
 
+use crate::block_cache_policy::BlockCachePolicy;
 use crate::block_iterator::DataBlockIterator;
 use crate::db_cache::DbCache;
 use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo};
@@ -95,6 +96,7 @@ impl SstReader {
             root_path.into(),
             cache,
             TableStoreKind::Reader,
+            BlockCachePolicy::default(),
         ));
         Self { table_store }
     }

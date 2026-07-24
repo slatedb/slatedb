@@ -269,6 +269,7 @@ impl GcTask for CompactedGcTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::cached_object_store::policy::CachePutConfig;
     use crate::cached_object_store::stats::CachedObjectStoreStats;
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
@@ -300,6 +301,7 @@ mod tests {
             Path::from("/root"),
             None,
             TableStoreKind::GC,
+            BlockCachePolicy::default(),
         ));
 
         // Manifest store and initial manifest
@@ -340,15 +342,15 @@ mod tests {
         let sst_active_recent = build_test_sst(&format, 1).await;
 
         table_store
-            .write_sst(&id_to_delete, &sst_to_delete, false)
+            .write_sst(&id_to_delete, &sst_to_delete)
             .await
             .unwrap();
         table_store
-            .write_sst(&id_within_min_age, &sst_within_min_age, false)
+            .write_sst(&id_within_min_age, &sst_within_min_age)
             .await
             .unwrap();
         let active_handle = table_store
-            .write_sst(&id_active_recent, &sst_active_recent, false)
+            .write_sst(&id_active_recent, &sst_active_recent)
             .await
             .unwrap();
 
@@ -406,6 +408,7 @@ mod tests {
             Path::from("/root"),
             None,
             TableStoreKind::GC,
+            BlockCachePolicy::default(),
         ));
 
         // Manifest store and initial manifest
@@ -446,17 +449,14 @@ mod tests {
         let sst_newer = build_test_sst(&format, 1).await;
 
         table_store
-            .write_sst(&id_to_delete, &sst_to_delete, false)
+            .write_sst(&id_to_delete, &sst_to_delete)
             .await
             .unwrap();
         let manifest_handle = table_store
-            .write_sst(&id_manifest, &sst_manifest, false)
+            .write_sst(&id_manifest, &sst_manifest)
             .await
             .unwrap();
-        table_store
-            .write_sst(&id_newer, &sst_newer, false)
-            .await
-            .unwrap();
+        table_store.write_sst(&id_newer, &sst_newer).await.unwrap();
 
         // Mark id_manifest as the only active SST in the manifest so that
         // most_recent_sst_dt is 3_000ms, which becomes the cutoff.
@@ -514,6 +514,7 @@ mod tests {
             Path::from("/root"),
             None,
             TableStoreKind::GC,
+            BlockCachePolicy::default(),
         ));
 
         // Manifest store with empty DB
@@ -539,15 +540,15 @@ mod tests {
         let sst_barrier = build_test_sst(&format, 1).await;
         let sst_to_newer = build_test_sst(&format, 1).await;
         table_store
-            .write_sst(&id_to_delete, &sst_to_delete, false)
+            .write_sst(&id_to_delete, &sst_to_delete)
             .await
             .unwrap();
         table_store
-            .write_sst(&id_barrier, &sst_barrier, false)
+            .write_sst(&id_barrier, &sst_barrier)
             .await
             .unwrap();
         let active_handle = table_store
-            .write_sst(&id_to_newer, &sst_to_newer, false)
+            .write_sst(&id_to_newer, &sst_to_newer)
             .await
             .unwrap();
 
@@ -618,6 +619,7 @@ mod tests {
             Path::from("/root"),
             None,
             TableStoreKind::GC,
+            BlockCachePolicy::default(),
         ));
 
         // Manifest with an L0 newer than the compaction output.
@@ -645,7 +647,7 @@ mod tests {
         // Newest L0 in the manifest has a later timestamp (9_000ms).
         let l0_id = SsTableId::Compacted(ulid::Ulid::from_parts(9_000, 0));
         let l0_handle = table_store
-            .write_sst(&l0_id, &build_test_sst(&format, 1).await, false)
+            .write_sst(&l0_id, &build_test_sst(&format, 1).await)
             .await
             .unwrap();
         let mut dirty_manifest = stored_manifest.prepare_dirty().unwrap();
@@ -658,11 +660,7 @@ mod tests {
         // output SST (6_000ms), but hasn't updated the manifest yet.
         let compaction_output_id = SsTableId::Compacted(ulid::Ulid::from_parts(6_000, 0));
         table_store
-            .write_sst(
-                &compaction_output_id,
-                &build_test_sst(&format, 1).await,
-                false,
-            )
+            .write_sst(&compaction_output_id, &build_test_sst(&format, 1).await)
             .await
             .unwrap();
 
@@ -881,6 +879,7 @@ mod tests {
             Path::from("/root"),
             None,
             TableStoreKind::GC,
+            BlockCachePolicy::default(),
         ));
         let main_table_store = Arc::new(TableStore::new(
             ObjectStores::new(cached_store.clone(), None),
@@ -888,13 +887,14 @@ mod tests {
             Path::from("/root"),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Written through the Main store so cache_on_flush admits it.
         let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0));
         let sst = build_test_sst(&format, 1).await;
         main_table_store
-            .write_sst(&id_to_delete, &sst, false)
+            .write_sst(&id_to_delete, &sst)
             .await
             .unwrap();
 

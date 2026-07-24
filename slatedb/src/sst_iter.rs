@@ -1060,6 +1060,7 @@ impl RowEntryIterator for SstIterator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::DbCache;
@@ -1099,6 +1100,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let mut builder = table_store.table_builder();
         builder
@@ -1119,7 +1121,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), &encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
@@ -1349,6 +1351,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = writer.table_builder();
         builder
@@ -1363,7 +1366,6 @@ mod tests {
             .write_sst(
                 &SsTableId::Compacted(ulid::Ulid::new()),
                 &builder.build().await.unwrap(),
-                false,
             )
             .await
             .unwrap();
@@ -1381,6 +1383,7 @@ mod tests {
             root_path,
             Some(cache),
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let filter_key = (handle.sst.id, handle.sst.info.filter_offset).into();
@@ -1436,6 +1439,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = writer.table_builder();
         builder
@@ -1450,7 +1454,6 @@ mod tests {
             .write_sst(
                 &SsTableId::Compacted(ulid::Ulid::new()),
                 &builder.build().await.unwrap(),
-                false,
             )
             .await
             .unwrap();
@@ -1468,6 +1471,7 @@ mod tests {
             root_path,
             Some(cache),
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let index_key = (handle.sst.id, handle.sst.info.index_offset).into();
@@ -1523,6 +1527,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ))
     }
 
@@ -1537,7 +1542,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap())
+        SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap())
     }
 
     #[tokio::test]
@@ -1559,6 +1564,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let mut builder = table_store.table_builder();
 
@@ -1576,7 +1582,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), &encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
@@ -1636,6 +1642,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let first_key = [b'a'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'z');
@@ -1687,6 +1694,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -1732,6 +1740,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -1774,6 +1783,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Build SST with specified format (keys 0-99)
@@ -1798,8 +1808,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
+        let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
 
         // Initialize iterator in descending order with full range
         let mut iter = SstIterator::new_borrowed_initialized(
@@ -1851,6 +1860,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -1962,6 +1972,7 @@ mod tests {
             root_path.clone(),
             Some(split_cache.clone()),
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let mut builder = table_store.table_builder();
@@ -1983,7 +1994,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, &encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let sst_iter_options = SstIteratorOptions {
@@ -2062,7 +2073,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap())
+        SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap())
     }
 
     #[tokio::test]
@@ -2080,6 +2091,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let keys_and_values = vec![
@@ -2129,6 +2141,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let keys_and_values = vec![
@@ -2180,6 +2193,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Create keys with shared prefixes to exercise prefix compression
@@ -2199,8 +2213,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
+        let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
 
         // when: iterating over all keys
         let sst_iter_options = SstIteratorOptions {
@@ -2244,6 +2257,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Create keys that will span multiple blocks
@@ -2263,7 +2277,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle = table_store.write_sst(&id, &encoded, false).await.unwrap();
+        let sst_handle = table_store.write_sst(&id, &encoded).await.unwrap();
 
         // Verify we have multiple blocks
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -2313,6 +2327,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let mut builder = table_store
@@ -2331,8 +2346,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
+        let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
 
         // when: searching for a non-existent key (odd number)
         let mut iter = SstIterator::for_key_with_stats_initialized(
@@ -2367,6 +2381,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let mut builder = table_store
@@ -2384,8 +2399,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
+        let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
 
         // when: seeking past the last key
         let iter = SstIterator::new_borrowed_initialized(
@@ -2427,6 +2441,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Build an SST with enough keys to span multiple blocks
@@ -2445,7 +2460,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, &encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -2566,6 +2581,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Build an SST with enough data for multiple blocks
@@ -2583,7 +2599,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, &encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -2636,6 +2652,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let mut writer = table_store.table_writer(SsTableId::Wal(0));
@@ -2733,6 +2750,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Keys spaced by 10: key_000, key_010, key_020, ..., key_190.

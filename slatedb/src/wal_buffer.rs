@@ -513,7 +513,7 @@ impl WalFlushHandler {
         let encoded_sst = sst_builder.build().await?;
         let written_bytes = encoded_sst.remaining_len() as u64;
         self.table_store
-            .write_sst(&SsTableId::Wal(wal_id), &encoded_sst, false)
+            .write_sst(&SsTableId::Wal(wal_id), &encoded_sst)
             .await?;
         self.stats.flush_bytes.increment(written_bytes);
         Ok(())
@@ -672,6 +672,7 @@ pub mod stats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
@@ -899,6 +900,7 @@ mod tests {
             Path::from("/root"),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let test_clock = Arc::new(MockSystemClock::new());
         let system_clock = Arc::new(DefaultSystemClock::new());
@@ -1093,6 +1095,7 @@ mod tests {
             Path::from("/root"),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let system_clock = Arc::new(DefaultSystemClock::new());
         let status_manager = DbStatusManager::new(0);
