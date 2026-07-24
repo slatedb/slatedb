@@ -3278,7 +3278,7 @@ mod tests {
             Arc::new(TableStore::new_with_fp_registry(
                 ObjectStores::new(Arc::clone(&self.object_store), None),
                 SsTableFormat::default(),
-                PathResolver::new(self.path.clone()),
+                PathResolver::from_root(self.path.clone()),
                 Arc::clone(&self.fp_registry),
                 None,
                 TableStoreKind::Reader,

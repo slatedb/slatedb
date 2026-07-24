@@ -488,7 +488,7 @@ mod tests {
             None,
             TableStoreKind::Main,
         );
-        let path_resolver = PathResolver::new(root_path);
+        let path_resolver = PathResolver::from_root(root_path);
 
         // 16-byte keys/values, no timestamps. Keys are spread across the
         // keyspace (bit-reversed counter in the leading bytes) so adjacent keys

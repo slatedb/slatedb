@@ -11267,7 +11267,7 @@ mod tests {
 
             /// The upstream path of a compacted SST id.
             fn compacted_sst_path(&self, id: &SsTableId) -> object_store::path::Path {
-                crate::paths::PathResolver::new(self.db_path.as_str()).sst_path(id)
+                crate::paths::PathResolver::from_root(self.db_path.as_str()).sst_path(id)
             }
 
             fn l0_ids(&self) -> Vec<SsTableId> {

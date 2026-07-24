@@ -129,7 +129,7 @@ impl TableStore {
         Self::new_with_fp_registry(
             object_stores,
             sst_format,
-            PathResolver::new(root_path),
+            PathResolver::from_root(root_path),
             Arc::new(FailPointRegistry::new()),
             block_cache,
             kind,
