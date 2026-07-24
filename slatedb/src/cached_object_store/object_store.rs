@@ -5,6 +5,7 @@ use crate::cached_object_store::policy::{
 use crate::cached_object_store::stats::CachedObjectStoreStats;
 use crate::cached_object_store::storage_fs::FsCacheStorage;
 use crate::cached_object_store::LocalCacheEntry;
+use crate::config::ObjectStoreCacheOptions;
 use crate::object_store_tag::ObjectStoreCallTag;
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
@@ -14,7 +15,7 @@ use object_store::{
     PutResult, RenameOptions,
 };
 use object_store::{ListResult, MultipartUpload, PutOptions, PutPayload};
-use slatedb_common::clock::DefaultSystemClock;
+use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 use slatedb_common::DbRand;
 use std::{ops::Range, sync::Arc};
 
@@ -118,8 +119,63 @@ impl CachedObjectStore {
         }))
     }
 
+    /// Returns a new handle that reads through the new `object_store` on cache
+    /// misses while sharing everything else (all fields other than the
+    /// object_store in the cache are shared by ref-count clones).
+    ///
+    /// This lets a component with its own instrumented store (for example
+    /// the compactor) share the cache while keeping its I/O recorded under
+    /// its own metric labels.
+    pub(crate) fn clone_with_new_object_store(
+        &self,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            object_store,
+            ..self.clone()
+        })
+    }
+
     pub(crate) async fn start_evictor(&self) {
         self.cache_storage.start_evictor().await;
+    }
+
+    /// Build a `CachedObjectStore` from `ObjectStoreCacheOptions`, returning `None`
+    /// if caching is not configured (i.e. `root_folder` is `None`). When `Some` is
+    /// returned the evictor has already been started.
+    pub(crate) async fn from_config(
+        object_store: Arc<dyn ObjectStore>,
+        options: &ObjectStoreCacheOptions,
+        recorder: &MetricsRecorderHelper,
+        clock: Arc<dyn SystemClock>,
+        rand: Arc<DbRand>,
+    ) -> Result<Option<Arc<Self>>, SlateDBError> {
+        let cache_root_folder = match &options.root_folder {
+            None => return Ok(None),
+            Some(f) => f,
+        };
+        let stats = Arc::new(CachedObjectStoreStats::new(recorder));
+        let cache_storage = Arc::new(FsCacheStorage::new(
+            cache_root_folder.clone(),
+            options.max_cache_size_bytes,
+            options.scan_interval,
+            stats.clone(),
+            clock,
+            rand,
+            options.max_open_file_handles,
+        ));
+        let cached = Self::new(
+            object_store,
+            cache_storage,
+            options.part_size_bytes,
+            CachePutConfig {
+                cache_on_flush: options.cache_on_flush,
+                cache_on_compaction: options.cache_on_compaction,
+            },
+            stats,
+        )?;
+        cached.start_evictor().await;
+        Ok(Some(cached))
     }
 
     /// Returns a builder for a `CachedObjectStore` that caches parts of the
@@ -130,13 +186,10 @@ impl CachedObjectStore {
     ) -> CachedObjectStoreBuilder {
         CachedObjectStoreBuilder {
             object_store,
-            root_folder: root_folder.into(),
-            max_cache_size_bytes: Some(16 * 1024 * 1024 * 1024),
-            part_size_bytes: 4 * 1024 * 1024,
-            cache_on_flush: false,
-            cache_on_compaction: false,
-            scan_interval: Some(std::time::Duration::from_secs(3600)),
-            max_open_file_handles: 1000,
+            options: ObjectStoreCacheOptions {
+                root_folder: Some(root_folder.into()),
+                ..ObjectStoreCacheOptions::default()
+            },
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             metric_level: MetricLevel::default(),
         }
@@ -145,7 +198,7 @@ impl CachedObjectStore {
     /// Loads files into the cache up to a maximum number of bytes.
     ///
     /// Fetches each object's raw bytes from the wrapped store and saves them
-    /// as cache parts on disk. can be used to warm up the cache.
+    /// as cache parts on disk. Can be used to warm up the cache.
     ///
     /// The `max_bytes` budget is applied in path order: loading stops at the
     /// first file that does not fit, so order paths by priority.
@@ -680,13 +733,7 @@ impl CachedObjectStore {
 /// Builder for [`CachedObjectStore`]. Created by [`CachedObjectStore::builder`].
 pub struct CachedObjectStoreBuilder {
     object_store: Arc<dyn ObjectStore>,
-    root_folder: std::path::PathBuf,
-    max_cache_size_bytes: Option<usize>,
-    part_size_bytes: usize,
-    cache_on_flush: bool,
-    cache_on_compaction: bool,
-    scan_interval: Option<std::time::Duration>,
-    max_open_file_handles: usize,
+    options: ObjectStoreCacheOptions,
     metrics_recorder: Arc<dyn MetricsRecorder>,
     metric_level: MetricLevel,
 }
@@ -696,7 +743,7 @@ impl CachedObjectStoreBuilder {
     ///
     /// `None` disables eviction and the default is 16gb.
     pub fn with_max_cache_size_bytes(mut self, max_cache_size_bytes: Option<usize>) -> Self {
-        self.max_cache_size_bytes = max_cache_size_bytes;
+        self.options.max_cache_size_bytes = max_cache_size_bytes;
         self
     }
 
@@ -704,7 +751,7 @@ impl CachedObjectStoreBuilder {
     ///
     /// The default is 4mb.
     pub fn with_part_size_bytes(mut self, part_size_bytes: usize) -> Self {
-        self.part_size_bytes = part_size_bytes;
+        self.options.part_size_bytes = part_size_bytes;
         self
     }
 
@@ -713,7 +760,7 @@ impl CachedObjectStoreBuilder {
     ///
     /// The default is false.
     pub fn with_cache_on_flush(mut self, cache_on_flush: bool) -> Self {
-        self.cache_on_flush = cache_on_flush;
+        self.options.cache_on_flush = cache_on_flush;
         self
     }
 
@@ -722,7 +769,7 @@ impl CachedObjectStoreBuilder {
     ///
     /// The default is false.
     pub fn with_cache_on_compaction(mut self, cache_on_compaction: bool) -> Self {
-        self.cache_on_compaction = cache_on_compaction;
+        self.options.cache_on_compaction = cache_on_compaction;
         self
     }
 
@@ -731,7 +778,7 @@ impl CachedObjectStoreBuilder {
     ///
     ///  `None` scans only once on startup and the default is 1 hour.
     pub fn with_scan_interval(mut self, scan_interval: Option<std::time::Duration>) -> Self {
-        self.scan_interval = scan_interval;
+        self.options.scan_interval = scan_interval;
         self
     }
 
@@ -740,7 +787,7 @@ impl CachedObjectStoreBuilder {
     ///
     /// The default is 1000.
     pub fn with_max_open_file_handles(mut self, max_open_file_handles: usize) -> Self {
-        self.max_open_file_handles = max_open_file_handles;
+        self.options.max_open_file_handles = max_open_file_handles;
         self
     }
 
@@ -764,29 +811,16 @@ impl CachedObjectStoreBuilder {
     /// Builds the `CachedObjectStore` and starts its evictor.
     pub async fn build(self) -> Result<Arc<CachedObjectStore>, crate::Error> {
         let recorder = MetricsRecorderHelper::new(self.metrics_recorder, self.metric_level);
-        let stats = Arc::new(CachedObjectStoreStats::new(&recorder));
-        let cache_storage = Arc::new(FsCacheStorage::new(
-            self.root_folder,
-            self.max_cache_size_bytes,
-            self.scan_interval,
-            stats.clone(),
+        let cached = CachedObjectStore::from_config(
+            self.object_store,
+            &self.options,
+            &recorder,
             Arc::new(DefaultSystemClock::new()),
             Arc::new(DbRand::default()),
-            self.max_open_file_handles,
-        ));
-        let cached = CachedObjectStore::new(
-            self.object_store,
-            cache_storage,
-            self.part_size_bytes,
-            CachePutConfig {
-                cache_on_flush: self.cache_on_flush,
-                cache_on_compaction: self.cache_on_compaction,
-            },
-            stats,
         )
+        .await
         .map_err(crate::Error::from)?;
-        cached.start_evictor().await;
-        Ok(cached)
+        Ok(cached.expect("builder always sets root_folder"))
     }
 }
 

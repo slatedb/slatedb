@@ -68,6 +68,12 @@
 //! max_compaction_sources = "8"
 //! include_size_threshold = "4.0"
 //!
+//! [object_store_cache_options]
+//! root_folder = "/tmp/slatedb-cache"
+//! max_cache_size_bytes = 17179869184
+//! part_size_bytes = 4194304
+//! scan_interval = "3600s"
+//!
 //! [garbage_collector_options.manifest_options]
 //! interval = "300s"
 //! min_age = "86400s"
@@ -114,6 +120,12 @@
 //!    }
 //!  },
 //!  "compression_codec": null,
+//!  "object_store_cache_options": {
+//!    "root_folder": "/tmp/slatedb-cache",
+//!    "max_cache_size_bytes": 17179869184,
+//!    "part_size_bytes": 4194304,
+//!    "scan_interval": "3600s"
+//!  },
 //!  "garbage_collector_options": {
 //!    "manifest_options": {
 //!      "interval": "300s",
@@ -160,6 +172,11 @@
 //!     max_compaction_sources: "8"
 //!     include_size_threshold: "4.0"
 //! compression_codec: null
+//! object_store_cache_options:
+//!   root_folder: /tmp/slatedb-cache
+//!   max_cache_size_bytes: 17179869184
+//!   part_size_bytes: 4194304
+//!   scan_interval: '3600s'
 //! garbage_collector_options:
 //!   manifest_options:
 //!     interval: '300s'
@@ -195,6 +212,15 @@ use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
 fn default_boundary_files_enabled() -> bool {
     true
+}
+
+/// Enum representing different levels of cache preloading on startup
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub enum PreloadLevel {
+    /// Preload only L0 SSTs (most recently written files)
+    L0Sst,
+    /// Preload all SSTs (both L0 and compacted levels)
+    AllSst,
 }
 
 /// Enum representing valid SST block sizes
@@ -716,6 +742,16 @@ pub struct Settings {
     /// The compression algorithm to use for SSTables.
     pub compression_codec: Option<CompressionCodec>,
 
+    /// The object store cache options. When `root_folder` is set, the database
+    /// wraps its main object store in a
+    /// [`CachedObjectStore`](crate::cached_object_store::CachedObjectStore)
+    /// built from these options. To construct and share the cache yourself,
+    /// build one with
+    /// [`CachedObjectStore::builder`](crate::cached_object_store::CachedObjectStore::builder)
+    /// and pass it to [`Db::builder`](crate::Db::builder) instead, leaving
+    /// these options unset.
+    pub object_store_cache_options: ObjectStoreCacheOptions,
+
     /// Configuration options for the garbage collector.
     pub garbage_collector_options: Option<GarbageCollectorOptions>,
 
@@ -774,6 +810,10 @@ impl std::fmt::Debug for Settings {
             .field("l0_flush_parallelism", &self.l0_flush_parallelism)
             .field("compactor_options", &self.compactor_options)
             .field("compression_codec", &self.compression_codec)
+            .field(
+                "object_store_cache_options",
+                &self.object_store_cache_options,
+            )
             .field("garbage_collector_options", &self.garbage_collector_options)
             .field("metric_level", &self.metric_level)
             .field("default_ttl", &self.default_ttl);
@@ -1003,6 +1043,7 @@ impl Default for Settings {
             l0_flush_parallelism: 4,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
+            object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             metric_level: MetricLevel::default(),
             default_ttl: None,
@@ -1030,6 +1071,11 @@ pub struct DbReaderOptions {
     /// The max size of a single in-memory table used to buffer WAL entries
     /// Defaults to 64MB
     pub max_memtable_bytes: u64,
+
+    /// Options for the local disk cache. If `root_folder` is set, the reader
+    /// will wrap its object store in a `CachedObjectStore` backed by the
+    /// local filesystem, mirroring the behaviour of `Db`.
+    pub object_store_cache_options: ObjectStoreCacheOptions,
 
     /// When true, skip WAL replay entirely. The reader will only see data that has been
     /// compacted into L0 or lower levels. This is useful for read-heavy workloads that
@@ -1060,6 +1106,7 @@ impl Default for DbReaderOptions {
             manifest_poll_interval: Duration::from_secs(10),
             checkpoint_lifetime: Duration::from_secs(10 * 60),
             max_memtable_bytes: 64 * 1024 * 1024,
+            object_store_cache_options: ObjectStoreCacheOptions::default(),
             skip_wal_replay: false,
             metric_level: None,
             object_store_max_retries: None,
@@ -1571,6 +1618,77 @@ impl Default for GarbageCollectorOptions {
             metric_level: None,
             boundary_files_enabled: true,
             object_store_max_retries: None,
+        }
+    }
+}
+
+/// Options for the object store cache. This cache is not enabled unless an explicit cache
+/// root folder is set. The object store cache will split an object into align-sized parts
+/// in the local, and save them into the local cache storage.
+///
+/// The local cache default uses file system as storage, it can also be extended to use other
+/// like RocksDB, Redis, etc. in the future.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ObjectStoreCacheOptions {
+    /// The root folder where the cache files are stored. If not set, the cache will be
+    /// disabled.
+    pub root_folder: Option<std::path::PathBuf>,
+
+    /// The limit of the cache size in bytes, the default value is 16gb on 64 bit systems and
+    /// 4gb on 32 bit systems.
+    pub max_cache_size_bytes: Option<usize>,
+
+    /// The size of each part file, the part size is expected to be aligned with 1kb,
+    /// its default value is 4mb.
+    pub part_size_bytes: usize,
+
+    /// Whether to cache compacted SSTs produced by memtable flushes to the
+    /// local disk cache, for faster subsequent reads.
+    ///
+    /// Default is false.
+    pub cache_on_flush: bool,
+
+    /// Whether to cache compacted SSTs produced by compaction to the local
+    /// disk cache, for faster subsequent reads.
+    ///
+    /// Default is false.
+    pub cache_on_compaction: bool,
+
+    /// Whether to preload SST files into cache during database startup. When enabled,
+    /// the database will load SST files into the cache up to the cache size limit
+    /// to warm up the cache for faster access. Default is None (no preloading).
+    pub preload_disk_cache_on_startup: Option<PreloadLevel>,
+
+    /// Interval to scan the cache directory to rebuild the in-memory map for evictor.
+    /// The default value is 1 hour. If set to None, the cache directory will be only
+    /// scanned once on start up.
+    #[serde(deserialize_with = "deserialize_option_duration")]
+    #[serde(
+        serialize_with = "serialize_option_duration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub scan_interval: Option<Duration>,
+
+    /// The maximum number of file handles to keep open in the file handle cache.
+    /// When the limit is reached, the least recently used handle is closed.
+    /// Default is 1000.
+    pub max_open_file_handles: usize,
+}
+
+impl Default for ObjectStoreCacheOptions {
+    fn default() -> Self {
+        Self {
+            root_folder: None,
+            #[cfg(target_pointer_width = "32")]
+            max_cache_size_bytes: Some(usize::MAX),
+            #[cfg(not(target_pointer_width = "32"))]
+            max_cache_size_bytes: Some(16 * 1024 * 1024 * 1024),
+            part_size_bytes: 4 * 1024 * 1024,
+            cache_on_flush: false,
+            cache_on_compaction: false,
+            preload_disk_cache_on_startup: None,
+            scan_interval: Some(Duration::from_secs(3600)),
+            max_open_file_handles: 1000,
         }
     }
 }

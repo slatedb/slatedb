@@ -44,6 +44,7 @@ use std::time::Duration;
 use crate::batch::WriteBatch;
 use crate::batch_write::{BatchWriterMessage, WriteBatchRequest, WRITE_BATCH_TASK_NAME};
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
+use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{
     FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, ScanOptions, Settings,
@@ -61,6 +62,7 @@ use crate::mem_table::KVTableMetadata;
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
+use crate::paths::PathResolver;
 use crate::prefix_extractor::PrefixExtractor;
 use crate::reader::{Reader, ScanContext};
 use crate::snapshot_manager::SnapshotManager;
@@ -560,6 +562,23 @@ impl DbInner {
             .report_memtable_segments(collect_touched_segments(&guard.view()));
 
         Ok(())
+    }
+
+    async fn preload_cache(
+        &self,
+        cached_obj_store: &CachedObjectStore,
+        path_resolver: &PathResolver,
+    ) -> Result<(), SlateDBError> {
+        let state = self.state.read().state();
+        let cache_opts = &self.settings.object_store_cache_options;
+        crate::utils::preload_cache_from_manifest(
+            &state.manifest.value.core,
+            cached_obj_store,
+            path_resolver,
+            cache_opts.preload_disk_cache_on_startup,
+            cache_opts.max_cache_size_bytes.unwrap_or(usize::MAX),
+        )
+        .await
     }
 
     /// Returns the latest database status snapshot.
@@ -2108,8 +2127,8 @@ mod tests {
     use crate::config::MetricLevel;
     use crate::config::{
         CheckpointOptions, CompactionWorkerOptions, CompactorOptions,
-        GarbageCollectorDirectoryOptions, GarbageCollectorOptions, PutOptions, ScanOptions,
-        Settings, SstBlockSize, Ttl, WriteOptions,
+        GarbageCollectorDirectoryOptions, GarbageCollectorOptions, ObjectStoreCacheOptions,
+        PutOptions, ScanOptions, Settings, SstBlockSize, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
@@ -6983,6 +7002,7 @@ mod tests {
             max_wal_flushes_before_l0_flush: 4096,
             compactor_options,
             compression_codec: None,
+            object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             metric_level: MetricLevel::default(),
             default_ttl: ttl,

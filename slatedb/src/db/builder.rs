@@ -117,6 +117,7 @@ use tokio::runtime::Handle;
 use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
+use crate::cached_object_store::CachedObjectStore;
 use crate::clone::{SegmentFilterFn, SegmentProjectionFn};
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
@@ -489,6 +490,21 @@ impl<P: Into<Path>> DbBuilder<P> {
             ..SsTableFormat::default()
         };
 
+        // Setup object store with optional caching
+        let cached_object_store = CachedObjectStore::from_config(
+            retrying_main_object_store.clone(),
+            &self.settings.object_store_cache_options,
+            &recorder,
+            system_clock.clone(),
+            rand.clone(),
+        )
+        .await?;
+
+        let maybe_cached_main_object_store: Arc<dyn ObjectStore> = match &cached_object_store {
+            Some(cached_store) => cached_store.clone(),
+            None => retrying_main_object_store.clone(),
+        };
+
         // Setup the manifest store and load latest manifest
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
@@ -528,7 +544,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
-                retrying_main_object_store.clone(),
+                maybe_cached_main_object_store.clone(),
                 retrying_wal_object_store.clone(),
             ),
             sst_format.clone(),
@@ -629,6 +645,33 @@ impl<P: Into<Path>> DbBuilder<P> {
             &tokio_handle,
         )?;
 
+        // Wraps a background component's (compactor, GC) raw main store in
+        // the component's own retry and instrumentation layer, so its I/O is
+        // recorded under its own metric labels. Returns (main, uncached).
+        //
+        // main: when the component runs against the DB's own store (the auto
+        // from settings path, or a caller-supplied builder holding a clone of
+        // the DB's store) and object store caching is configured, the DB's
+        // cache is shared on top of that layer, so cache fills and evictions
+        // stay coherent with the DB's. A different caller-supplied store is
+        // used as given (so a custom compaction reader takes effect instead
+        // of being silently ignored) and stays cacheless.
+        //
+        // uncached: the same wrapped store without the cache, for I/O that
+        // must bypass it.
+        let background_component_stores =
+            |raw_store: Arc<dyn ObjectStore>, component: ObjectStoreComponent| {
+                let retrying =
+                    wrap_object_store(raw_store.clone(), component, ObjectStoreType::Main);
+                let main: Arc<dyn ObjectStore> = match &cached_object_store {
+                    Some(cached) if Arc::ptr_eq(&raw_store, &self.main_object_store) => {
+                        cached.clone_with_new_object_store(retrying.clone())
+                    }
+                    _ => retrying.clone(),
+                };
+                (main, retrying)
+            };
+
         // The compactor reads/writes through the object store held by its
         // builder: the DB's own store on the auto from settings path, or the
         // store the caller passed to their own `CompactorBuilder`.
@@ -654,10 +697,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
             builder = builder.with_fp_registry(self.fp_registry.clone());
 
-            let compactor_main_object_store = wrap_object_store(
+            let (compactor_main_object_store, _) = background_component_stores(
                 builder.main_object_store.clone(),
                 ObjectStoreComponent::Compactor,
-                ObjectStoreType::Main,
             );
             let compactor_table_store = Arc::new(TableStore::new_with_fp_registry(
                 ObjectStores::new(
@@ -693,7 +735,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
         }
 
-        // Same store selection as the compactor above.
+        // Same store selection as the compactor above. Sharing the DB's cache
+        // also means an SST deleted by the GC has its cache entries evicted.
         let gc_builder = self.gc_builder.or_else(|| {
             self.settings
                 .garbage_collector_options
@@ -709,13 +752,12 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .options
                 .metric_level
                 .or(Some(self.settings.metric_level));
-            let gc_object_store = wrap_object_store(
+            let (gc_main_object_store, gc_object_store) = background_component_stores(
                 gc_builder.main_object_store.clone(),
                 ObjectStoreComponent::Gc,
-                ObjectStoreType::Main,
             );
             let gc_table_store = Arc::new(TableStore::new_with_fp_registry(
-                ObjectStores::new(gc_object_store.clone(), retrying_wal_object_store.clone()),
+                ObjectStores::new(gc_main_object_store, retrying_wal_object_store.clone()),
                 sst_format.clone(),
                 path_resolver.clone(),
                 self.fp_registry.clone(),
@@ -753,6 +795,13 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Replay WAL
         inner.replay_wal(replay_range).await?;
+
+        // Preload cache if enabled
+        if let Some(cached_obj_store) = cached_object_store {
+            inner
+                .preload_cache(&cached_obj_store, &path_resolver)
+                .await?;
+        }
 
         // Create and return the Db instance
         Ok(Db {
@@ -1717,7 +1766,20 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
                 )
             });
 
-        let object_store: Arc<dyn ObjectStore> = retrying_object_store.clone();
+        // Setup object store with optional caching
+        let maybe_cached = CachedObjectStore::from_config(
+            retrying_object_store.clone(),
+            &self.options.object_store_cache_options,
+            &recorder,
+            self.system_clock.clone(),
+            self.rand.clone(),
+        )
+        .await?;
+
+        let object_store: Arc<dyn ObjectStore> = match &maybe_cached {
+            Some(cached) => Arc::clone(cached) as Arc<dyn ObjectStore>,
+            None => retrying_object_store.clone(),
+        };
 
         // Validate WAL object store configuration.
         let manifest_store = Arc::new(ManifestStore::new(&path, retrying_object_store));
@@ -1785,6 +1847,10 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         )
         .await
         .map_err(crate::Error::from)?;
+
+        if let Some(cached) = &maybe_cached {
+            reader.preload_cache(cached, path).await?;
+        }
 
         Ok(reader)
     }
@@ -2328,6 +2394,60 @@ mod tests {
         assert!(!cached_db_path.join("compactions").exists());
         assert!(!cached_db_path.join("gc").exists());
 
+        db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn test_settings_configured_object_store_cache() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("test_settings_configured_object_store_cache");
+
+        // Seed an L0 SST without any cache configured.
+        let db = crate::Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings {
+                garbage_collector_options: None,
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .expect("failed to build db");
+        db.put(b"k1", b"v1").await.expect("failed to put");
+        db.flush().await.expect("failed to flush");
+        db.close().await.expect("failed to close db");
+
+        // Reopen with the cache configured through Settings and preload on.
+        let cache_dir = tempfile::Builder::new()
+            .prefix("settings_cache_test_")
+            .tempdir()
+            .expect("failed to create cache dir");
+        let cache_path = cache_dir.path().to_path_buf();
+        let mut settings = Settings {
+            garbage_collector_options: None,
+            ..Settings::default()
+        };
+        settings.object_store_cache_options.root_folder = Some(cache_path.clone());
+        settings.object_store_cache_options.part_size_bytes = 1024;
+        settings.object_store_cache_options.preload_disk_cache_on_startup =
+            Some(crate::config::PreloadLevel::AllSst);
+
+        let db = crate::Db::builder(path.clone(), object_store)
+            .with_settings(settings)
+            .build()
+            .await
+            .expect("failed to build db");
+
+        // The preload populated the cache with the compacted SST's parts.
+        let cached_db_path = cache_path.join(path.as_ref());
+        let cached_compacted = std::fs::read_dir(cached_db_path.join("compacted"))
+            .expect("expected cached compacted dir")
+            .count();
+        assert!(cached_compacted > 0);
+        assert!(!cached_db_path.join("manifest").exists());
+
+        assert_eq!(
+            db.get(b"k1").await.expect("failed to get").as_deref(),
+            Some(b"v1".as_ref())
+        );
         db.close().await.expect("failed to close db");
     }
 }
