@@ -26,6 +26,29 @@ pub(crate) fn extract_segment_prefix(
 }
 
 impl DbInner {
+    /// Freezes the active memtable when its estimated encoded size reaches
+    /// [`Settings::max_unflushed_bytes`](crate::config::Settings::max_unflushed_bytes).
+    ///
+    /// The frozen table is stamped with `replay_after_wal_id` and announced to
+    /// the memtable flusher. The caller must therefore pass the highest WAL ID
+    /// fully represented by the active memtable. This method does nothing when
+    /// the active memtable is below the threshold.
+    ///
+    /// # Arguments
+    ///
+    /// * `replay_after_wal_id` - Durable WAL boundary for the active memtable.
+    pub(crate) fn maybe_freeze_memtable(&self, replay_after_wal_id: u64) {
+        let mut guard = self.state.write();
+        let metadata = guard.memtable().table().metadata();
+        let estimated_bytes = self
+            .table_store
+            .estimate_encoded_size_compacted(metadata.entry_num, metadata.entries_size_in_bytes);
+
+        if estimated_bytes >= self.settings.max_unflushed_bytes {
+            self.freeze_current_memtable_with_state_guard(&mut guard, replay_after_wal_id);
+        }
+    }
+
     pub(crate) fn replay_memtable(
         &self,
         current_memtable_wal_id: u64,
