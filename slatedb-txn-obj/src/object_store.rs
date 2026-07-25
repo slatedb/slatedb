@@ -3,6 +3,7 @@ use crate::{
     BoundaryObject, MonotonicId, ObjectCodec, SequencedStorageProtocol, TransactionalObjectError,
 };
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::StreamExt;
 use log::{debug, error, warn};
 use object_store::path::Path;
@@ -33,6 +34,7 @@ pub struct ObjectStoreSequencedStorageProtocol<T> {
     codec: Box<dyn ObjectCodec<T>>,
     file_suffix: &'static str,
     boundary: Arc<dyn BoundaryObject>,
+    latest: Mutex<Option<(MonotonicId, Bytes)>>,
 }
 
 impl<T> ObjectStoreSequencedStorageProtocol<T> {
@@ -72,6 +74,7 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
             codec,
             file_suffix,
             boundary,
+            latest: Mutex::new(None),
         }
     }
 
@@ -93,6 +96,40 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
                 .map(MonotonicId::new)
                 .map_err(|_| TransactionalObjectError::InvalidObjectState),
             _ => Err(TransactionalObjectError::InvalidObjectState),
+        }
+    }
+
+    fn maybe_cache_latest(&self, id: MonotonicId, bytes: Bytes) {
+        let mut latest = self.latest.lock();
+        if latest
+            .as_ref()
+            .map(|(cached_id, _)| id > *cached_id)
+            .unwrap_or(true)
+        {
+            *latest = Some((id, bytes));
+        }
+    }
+
+    fn invalidate_cached(&self, id: MonotonicId) {
+        let mut latest = self.latest.lock();
+        if matches!(latest.as_ref(), Some((cached_id, _)) if *cached_id == id) {
+            *latest = None;
+        }
+    }
+
+    async fn try_read_bytes_unchecked(
+        &self,
+        id: MonotonicId,
+    ) -> Result<Option<Bytes>, TransactionalObjectError> {
+        let path = self.path_for(id);
+        match self.object_store.get(&path).await {
+            Ok(obj) => obj
+                .bytes()
+                .await
+                .map(Some)
+                .map_err(TransactionalObjectError::from),
+            Err(Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(TransactionalObjectError::from(e)),
         }
     }
 }
@@ -304,7 +341,11 @@ impl BoundaryObject for ObjectStoreBoundaryObject {
 #[async_trait]
 impl<T: Send + Sync> BoundaryObject for ObjectStoreSequencedStorageProtocol<T> {
     async fn check(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
-        self.boundary.check(id).await
+        let result = self.boundary.check(id).await;
+        if matches!(&result, Err(TransactionalObjectError::ObjectVersionExists)) {
+            self.invalidate_cached(id);
+        }
+        result
     }
 
     async fn advance(&self, boundary: MonotonicId) -> Result<(), TransactionalObjectError> {
@@ -323,10 +364,11 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
             .map(|id| id.next())
             .unwrap_or(MonotonicId::initial());
         let path = self.path_for(id);
+        let bytes = self.codec.encode(new_value);
         self.object_store
             .put_opts(
                 &path,
-                PutPayload::from_bytes(self.codec.encode(new_value)),
+                PutPayload::from_bytes(bytes.clone()),
                 PutOptions::from(PutMode::Create),
             )
             .await
@@ -337,29 +379,53 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
                     TransactionalObjectError::from(err)
                 }
             })?;
+        self.maybe_cache_latest(id, bytes);
         Ok(id)
     }
 
     async fn try_read_latest_unchecked(
         &self,
     ) -> Result<Option<(MonotonicId, T)>, TransactionalObjectError> {
+        let cached = self.latest.lock().clone();
+        if let Some((mut id, mut bytes)) = cached {
+            loop {
+                let next_id = id.next();
+                match self.try_read_bytes_unchecked(next_id).await? {
+                    Some(next_bytes) => {
+                        id = next_id;
+                        bytes = next_bytes;
+                        self.maybe_cache_latest(id, bytes.clone());
+                    }
+                    // IDs are consecutive, so a missing successor means the
+                    // cached object is the latest version.
+                    None => {
+                        return self
+                            .codec
+                            .decode(&bytes)
+                            .map(|value| Some((id, value)))
+                            .map_err(CallbackError);
+                    }
+                }
+            }
+        }
+
         loop {
             let files = self.list(Unbounded, Unbounded).await?;
             if let Some(file) = files.last() {
-                let result = self
-                    .try_read_unchecked(file.id)
-                    .await
-                    .map(|opt| opt.map(|v| (file.id, v)));
-                match result {
+                match self.try_read_bytes_unchecked(file.id).await? {
                     // File listed but not found. Probably deleted by GC. Retry list/read.
                     // See https://github.com/slatedb/slatedb/issues/1215 for more details.
-                    Ok(None) => {
+                    None => {
                         warn!(
                             "listed file missing on read, retrying [location={}]",
                             file.metadata.location,
                         );
                     }
-                    _ => return result,
+                    Some(bytes) => {
+                        let value = self.codec.decode(&bytes).map_err(CallbackError)?;
+                        self.maybe_cache_latest(file.id, bytes);
+                        return Ok(Some((file.id, value)));
+                    }
                 }
             } else {
                 // No files found, so return None
@@ -373,16 +439,9 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
         &self,
         id: MonotonicId,
     ) -> Result<Option<T>, TransactionalObjectError> {
-        let path = self.path_for(id);
-        match self.object_store.get(&path).await {
-            Ok(obj) => match obj.bytes().await {
-                Ok(bytes) => self.codec.decode(&bytes).map(Some).map_err(CallbackError),
-                Err(e) => Err(TransactionalObjectError::from(e)),
-            },
-            Err(e) => match e {
-                Error::NotFound { .. } => Ok(None),
-                _ => Err(TransactionalObjectError::from(e)),
-            },
+        match self.try_read_bytes_unchecked(id).await? {
+            Some(bytes) => self.codec.decode(&bytes).map(Some).map_err(CallbackError),
+            None => Ok(None),
         }
     }
 
@@ -421,7 +480,9 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
         self.object_store
             .delete(&path)
             .await
-            .map_err(TransactionalObjectError::from)
+            .map_err(TransactionalObjectError::from)?;
+        self.invalidate_cached(id);
+        Ok(())
     }
 }
 
@@ -574,6 +635,7 @@ mod tests {
         inner: InMemory,
         get_opts_calls: AtomicUsize,
         if_none_match_gets: AtomicUsize,
+        list_calls: AtomicUsize,
         blocking_not_found: StdMutex<Option<BlockingNotFoundGet>>,
     }
 
@@ -583,6 +645,7 @@ mod tests {
                 inner: InMemory::new(),
                 get_opts_calls: AtomicUsize::new(0),
                 if_none_match_gets: AtomicUsize::new(0),
+                list_calls: AtomicUsize::new(0),
                 blocking_not_found: StdMutex::new(None),
             }
         }
@@ -655,6 +718,7 @@ mod tests {
         }
 
         fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.list(prefix)
         }
 
@@ -673,6 +737,30 @@ mod tests {
         ) -> ObjectStoreResult<()> {
             self.inner.copy_opts(from, to, options).await
         }
+    }
+
+    fn new_counting_protocol() -> (
+        Arc<CountingGetStore>,
+        Arc<ObjectStoreSequencedStorageProtocol<TestVal>>,
+    ) {
+        let counting_store = Arc::new(CountingGetStore::new());
+        let object_store: Arc<dyn ObjectStore> = counting_store.clone();
+        let protocol = Arc::new(ObjectStoreSequencedStorageProtocol::new(
+            &Path::from("/root"),
+            object_store,
+            "test",
+            "val",
+            Box::new(TestValCodec),
+        ));
+        (counting_store, protocol)
+    }
+
+    async fn put_test_value(store: &CountingGetStore, id: u64, value: &TestVal) {
+        let path = Path::from(format!("/root/test/{:020}.val", id));
+        store
+            .put(&path, PutPayload::from_bytes(TestValCodec.encode(value)))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -928,6 +1016,94 @@ mod tests {
         assert!(missing.is_none());
     }
 
+    #[tokio::test]
+    async fn test_latest_read_caches_bytes_after_list() {
+        let (object_store, store) = new_counting_protocol();
+        let expected = TestVal {
+            epoch: 1,
+            payload: 10,
+        };
+        put_test_value(&object_store, 1, &expected).await;
+
+        let first = store.try_read_latest_unchecked().await.unwrap().unwrap();
+        assert_eq!((MonotonicId::new(1), expected.clone()), first);
+        assert_eq!(1, object_store.list_calls.load(Ordering::SeqCst));
+
+        let gets = object_store.get_opts_calls.load(Ordering::SeqCst);
+        let second = store.try_read_latest_unchecked().await.unwrap().unwrap();
+        assert_eq!((MonotonicId::new(1), expected), second);
+        assert_eq!(1, object_store.list_calls.load(Ordering::SeqCst));
+        assert_eq!(
+            gets + 1,
+            object_store.get_opts_calls.load(Ordering::SeqCst),
+            "the warm read should only probe id 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_latest_read_linearly_probes_from_cached_id() {
+        let (object_store, store) = new_counting_protocol();
+        let first = TestVal {
+            epoch: 1,
+            payload: 10,
+        };
+        let second = TestVal {
+            epoch: 1,
+            payload: 20,
+        };
+        let third = TestVal {
+            epoch: 1,
+            payload: 30,
+        };
+        put_test_value(&object_store, 1, &first).await;
+        store.try_read_latest_unchecked().await.unwrap().unwrap();
+
+        put_test_value(&object_store, 2, &second).await;
+        put_test_value(&object_store, 3, &third).await;
+
+        let latest = store.try_read_latest_unchecked().await.unwrap().unwrap();
+        assert_eq!((MonotonicId::new(3), third), latest);
+        assert_eq!(1, object_store.list_calls.load(Ordering::SeqCst));
+        assert_eq!(
+            Some(MonotonicId::new(3)),
+            store.latest.lock().as_ref().map(|(id, _)| *id)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_successful_write_populates_latest_cache() {
+        let (object_store, store) = new_counting_protocol();
+        let expected = TestVal {
+            epoch: 1,
+            payload: 10,
+        };
+
+        let id = store.write(None, &expected).await.unwrap();
+        let latest = store.try_read_latest().await.unwrap().unwrap();
+
+        assert_eq!((id, expected), latest);
+        assert_eq!(0, object_store.list_calls.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_boundary_rejection_invalidates_latest_cache() {
+        let (_, store) = new_counting_protocol();
+        let value = TestVal {
+            epoch: 1,
+            payload: 10,
+        };
+        let id = store.write(None, &value).await.unwrap();
+        store.advance(id).await.unwrap();
+
+        let error = store.check(id).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransactionalObjectError::ObjectVersionExists
+        ));
+        assert!(store.latest.lock().is_none());
+    }
+
     /// Validate that try_read_latest retries when a listed file is missing on read.
     #[tokio::test]
     async fn test_try_read_latest_retries_missing_listed_file() {
@@ -961,6 +1137,7 @@ mod tests {
                 flaky_store.clone(),
                 "test",
             )),
+            latest: parking_lot::Mutex::new(None),
         };
 
         let latest = store.try_read_latest().await.unwrap().unwrap();

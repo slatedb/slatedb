@@ -1,0 +1,522 @@
+# Cached Probing for Sequenced Metadata
+
+Table of Contents:
+
+<!-- TOC start (generate with https://bitdowntoc.derlin.ch) -->
+
+- [Summary](#summary)
+- [Motivation](#motivation)
+- [Goals](#goals)
+- [Non-Goals](#non-goals)
+- [Design](#design)
+  - [Latest Object Cache](#latest-object-cache)
+  - [Cold Reads](#cold-reads)
+  - [Warm Reads](#warm-reads)
+  - [Write-Through Updates](#write-through-updates)
+  - [Boundary Checks and Garbage Collection](#boundary-checks-and-garbage-collection)
+  - [Concurrency and Sharing](#concurrency-and-sharing)
+  - [Failure Handling](#failure-handling)
+- [Impact Analysis](#impact-analysis)
+- [Operations](#operations)
+  - [Performance and Cost](#performance-and-cost)
+  - [Observability](#observability)
+  - [Compatibility](#compatibility)
+- [Testing](#testing)
+- [Rollout](#rollout)
+- [Alternatives](#alternatives)
+  - [LIST on Every Latest Read](#list-on-every-latest-read)
+  - [Cache Only the Latest ID](#cache-only-the-latest-id)
+  - [CURRENT Pointer](#current-pointer)
+  - [Authoritative CURRENT Pointer](#authoritative-current-pointer)
+- [Open Questions](#open-questions)
+- [References](#references)
+
+<!-- TOC end -->
+
+Status: Draft
+
+Authors:
+
+* [Chris Riccomini](https://github.com/criccomini)
+
+## Summary
+
+SlateDB finds the latest sequenced metadata object by listing every object in
+the namespace, selecting the highest ID, and reading that object. This RFC
+replaces LIST on the common path with a process-local cache and consecutive GET
+probes.
+
+Each sequenced metadata store caches the highest object ID and its encoded
+bytes. A latest read starts at the next ID and issues GETs until the first 404.
+Since metadata IDs are contiguous, the last successful GET or cached object is
+the latest version. A store with an empty cache uses the existing LIST path to
+establish its starting point.
+
+Successful writes update the same cache. Boundary checks from RFC-0026 remain
+in place and invalidate cached objects rejected by the GC boundary.
+
+## Motivation
+
+SlateDB stores manifests and compaction state as immutable, consecutively
+numbered objects:
+
+```text
+manifest/00000000000000000012.manifest
+manifest/00000000000000000013.manifest
+
+compactions/00000000000000000007.compactions
+compactions/00000000000000000008.compactions
+```
+
+`ObjectStoreSequencedStorageProtocol::try_read_latest` currently performs these
+operations:
+
+1. LIST the namespace.
+2. Sort the returned metadata by object ID.
+3. GET the object with the highest ID.
+4. Check the object ID against the GC boundary.
+
+The LIST cost repeats on refreshes even when no writer has added a new object.
+LIST also returns metadata for the full retained history, although the caller
+needs one object.
+
+Sequenced metadata already supplies a cheaper lookup mechanism. Once a process
+has seen ID `N`, it can GET `N+1`. A 404 means `N` is still latest. If `N+1`
+exists, the process continues with `N+2` until it reaches the first missing ID.
+The protocol's consecutive-ID invariant makes the first 404 a valid stopping
+condition.
+
+## Goals
+
+- Remove LIST from warm latest-version reads.
+- Keep the existing object layout, write protocol, and GC boundary semantics.
+- Avoid rereading an unchanged latest object.
+- Let reads and writes share one monotonic cache.
+- Preserve the existing LIST fallback for cold stores and GC races.
+
+## Non-Goals
+
+- Remove LIST from APIs that enumerate historical versions.
+- Add a durable pointer object or change the metadata commit point.
+- Share cache state across processes.
+- Change manifest or compactions serialization.
+- Replace the GC boundary protocol from RFC-0026.
+
+## Design
+
+### Latest Object Cache
+
+Each `ObjectStoreSequencedStorageProtocol<T>` stores one cache entry:
+
+```rust
+Mutex<Option<(MonotonicId, Bytes)>>
+```
+
+The cache contains encoded bytes rather than `T`. This avoids adding a
+`T: Clone` bound and lets the write path reuse the bytes it already encoded.
+Cloning `Bytes` does not copy the object body.
+
+Cache updates are monotonic. An update replaces the entry only when its ID is
+higher than the cached ID:
+
+```rust
+fn maybe_cache_latest(id, bytes):
+    lock latest
+    if latest is empty or id > latest.id:
+        latest = (id, bytes)
+```
+
+The cache holds one object body per protocol instance. A manifest can be
+several MiB, so this changes the steady-state memory footprint by the size of
+the latest encoded manifest and compactions object for each live store
+instance.
+
+### Cold Reads
+
+A protocol instance starts with an empty cache. Its first latest read keeps the
+existing behavior:
+
+```text
+LIST namespace
+    |
+    +-- empty --------------------> return None
+    |
+    +-- select highest ID N
+            |
+            +-- GET N succeeds ---> cache (N, bytes), return N
+            |
+            +-- GET N is 404 ------> repeat LIST
+```
+
+The LIST retry covers the race where GC deletes the listed object before the
+GET completes. Other object-store errors and codec errors return to the caller.
+
+### Warm Reads
+
+A warm read snapshots the cache, releases the mutex, and starts probing at the
+next ID:
+
+```text
+cached (N, bytes_N)
+    |
+    +-- GET N+1 is 404 -----------> decode bytes_N, return N
+    |
+    +-- GET N+1 succeeds
+            |
+            +-- cache (N+1, bytes_N+1)
+            +-- GET N+2
+                    |
+                    +-- continue until the first 404
+```
+
+The implementation never holds the cache mutex across an object-store request.
+Concurrent readers may issue duplicate probes. They cannot move the cache
+backward.
+
+The first missing successor terminates the probe. It does not trigger LIST.
+The cached bytes let the reader return the latest object without rereading it.
+
+### Write-Through Updates
+
+The write path encodes a new value once:
+
+1. Compute the next consecutive ID.
+2. Encode the value.
+3. PUT the object with create-if-absent.
+4. If the PUT succeeds, cache the ID and encoded bytes when the ID is higher
+   than the current cache entry.
+5. Run the existing boundary check.
+
+The generic checked write still decides whether the caller observes success.
+`write_unchecked` caches the object after its physical PUT because unchecked
+reads expose physically present objects.
+
+A write performed through the same protocol instance moves the read watermark
+without a LIST or a successful GET. The next latest read probes the following
+ID and returns the cached bytes on 404.
+
+### Boundary Checks and Garbage Collection
+
+RFC-0026 remains part of the protocol. The cache does not make deleted IDs safe
+to reuse and does not replace the durable GC boundary.
+
+A cached object can become stale after another process advances the boundary
+and GC deletes an old prefix. Checked latest reads already validate their
+result against the boundary:
+
+1. The probing path returns cached ID `N`.
+2. The boundary rejects `N`.
+3. The protocol invalidates the cache entry for `N`.
+4. The generic latest-read loop retries.
+5. The empty cache sends the retry through LIST.
+
+An object above `N` may appear during the first probe. In that case, probing
+advances the cache and can find an object above the boundary without LIST.
+
+Deleting a cached object through the same protocol invalidates the matching
+entry after the object-store DELETE succeeds. Remote GC remains safe because
+the boundary check catches cached IDs from the deleted prefix.
+
+### Concurrency and Sharing
+
+The cache belongs to `ObjectStoreSequencedStorageProtocol`, not the underlying
+`ObjectStore`. Components share it only when they share the same protocol
+instance, normally through an `Arc<ManifestStore>` or
+`Arc<CompactionsStore>`.
+
+Database components constructed together should reuse those store instances
+where their lifetimes allow it. A separately constructed GC process, admin
+client, or external compactor starts with an empty cache and pays one cold
+LIST. There is no process-wide registry keyed by object-store path.
+
+The cache update rule handles concurrent reads and writes:
+
+- A lower ID never replaces a higher cached ID.
+- Locks cover only cloning or replacing the cache entry.
+- Object bytes are immutable after create-if-absent succeeds.
+- A boundary rejection clears only the matching cached ID. It does not discard
+  a higher entry installed by another operation.
+
+### Failure Handling
+
+The probing path distinguishes a missing successor from other failures:
+
+- 404 for `N+1`: return cached `N`.
+- Successful GET for `N+1`: cache it and continue.
+- Other GET error: return the error.
+- Decode error: return the codec error.
+
+The protocol relies on consecutive physical IDs above the GC boundary. A
+writer must continue to create `current_id + 1`; it cannot skip an occupied or
+failed slot. GC may remove a prefix after advancing the boundary, but it cannot
+create a gap in the live suffix.
+
+## Impact Analysis
+
+SlateDB features and components that this RFC interacts with.
+
+### Core API & Query Semantics
+
+- [ ] Basic KV API (`get`/`put`/`delete`)
+- [ ] Range queries, iterators, seek semantics
+- [ ] Range deletions
+- [ ] Error model, API errors
+
+### Consistency, Isolation, and Multi-Versioning
+
+- [ ] Transactions
+- [ ] Snapshots
+- [ ] Sequence numbers
+
+### Time, Retention, and Derived State
+
+- [ ] Time to live (TTL)
+- [ ] Compaction filters
+- [ ] Merge operator
+- [ ] Change Data Capture (CDC)
+
+### Metadata, Coordination, and Lifecycles
+
+- [x] Manifest format
+- [x] Checkpoints
+- [ ] Clones
+- [x] Garbage collection
+- [ ] Database splitting and merging
+- [x] Multi-writer
+
+The manifest and compactions payload formats do not change. This RFC changes
+how callers locate the latest encoded object.
+
+### Compaction
+
+- [x] Compaction state persistence
+- [ ] Compaction filters
+- [ ] Compaction strategies
+- [ ] Distributed compaction
+- [ ] Compactions format
+
+### Storage Engine Internals
+
+- [ ] Write-ahead log (WAL)
+- [ ] Block cache
+- [x] Object store cache
+- [ ] Indexing (bloom filters, metadata)
+- [ ] SST format or block format
+
+### Ecosystem & Operations
+
+- [ ] CLI tools
+- [ ] Language bindings (Go/Python/etc)
+- [x] Observability (metrics/logging/tracing)
+
+## Operations
+
+### Performance and Cost
+
+The proposal moves object-store work from LIST to GET without adding a write
+request.
+
+| Operation | Existing LIST path | Cached probing |
+|---|---:|---:|
+| Successful write | 1 object PUT + boundary GET | Same |
+| Cold latest read | 1 LIST + object GET + boundary GET | Same |
+| Warm unchanged read | 1 LIST + object GET + boundary GET | 1 missing-successor GET + boundary GET |
+| Warm read `k` versions behind | 1 LIST + object GET + boundary GET | `k` GET hits + 1 GET miss + boundary GET |
+
+Object stores tend to bill LIST with PUT-class requests and GETs at a lower
+request rate. Exact prices depend on the provider and region. Probing should
+cost less when protocol instances live long enough to amortize their cold LIST
+and usually lag by a small number of versions.
+
+A process that falls far behind exchanges one LIST for many GETs. The ratio
+below captures that workload:
+
+```text
+probe_gets / latest_reads
+```
+
+A ratio near `1` means most reads issue one 404 probe and return cached bytes.
+A high ratio means readers often catch up across many external writes. Metrics
+should determine whether a probe limit or a different lookup protocol is
+needed.
+
+The proposal adds one encoded object body per live protocol instance. It does
+not add objects to storage or increase write amplification.
+
+### Observability
+
+Add counters for:
+
+- latest cache hits and cold misses;
+- LIST fallbacks;
+- successful and missing probe GETs;
+- cache advances from reads and writes; and
+- boundary-driven cache invalidations.
+
+Record a histogram of probes per latest read. Existing object-store metrics
+continue to report request latency and failures.
+
+No configuration is required.
+
+### Compatibility
+
+The object layout and payload formats do not change. Old and new SlateDB
+versions can read objects written by either implementation.
+
+Rolling upgrades are safe. Old processes continue to use LIST. New processes
+build their cache from LIST and then probe. Each process retains RFC-0026
+boundary checks, so mixed versions do not change GC fencing.
+
+No public Rust API or language binding changes.
+
+## Testing
+
+- Unit tests:
+  - a cold read uses LIST and caches the returned bytes;
+  - an unchanged warm read probes only the successor;
+  - a lagging reader probes consecutive objects and advances its cache;
+  - a successful write populates the cache;
+  - a boundary rejection invalidates the matching entry;
+  - a listed object deleted before GET causes another LIST.
+- Integration tests:
+  - manifest refresh and write tests;
+  - compactions state refresh and write tests.
+- Fault-injection/chaos tests:
+  - inject GET failures during a probe;
+  - delete a cached prefix after advancing the boundary;
+  - race readers and writers that share a protocol instance.
+- Deterministic simulation tests:
+  - retain existing sequenced metadata and GC coverage.
+- Formal methods verification: none.
+- Performance tests:
+  - measure request counts for warm reads, cold starts, and readers lagging by
+    increasing numbers of versions;
+  - measure the memory retained by cached manifest and compactions bytes.
+
+## Rollout
+
+The change is internal and does not require a feature flag.
+
+1. Add cache and probe request metrics.
+2. Enable probing for manifest and compactions stores.
+3. Compare LIST and GET request counts before and after deployment.
+4. Watch probes-per-read and cache memory by component.
+
+If probing causes unexpected request amplification, disabling the cache and
+returning to the existing LIST path requires no data migration.
+
+## Alternatives
+
+### LIST on Every Latest Read
+
+Keep listing the namespace and reading the highest object on every refresh.
+This has no process-local state and catches up in one LIST plus one GET,
+regardless of lag.
+
+The retained history makes LIST more expensive than the information needed by
+the caller. Repeating it when no version changed also adds avoidable request
+cost and latency.
+
+### Cache Only the Latest ID
+
+Cache `N` and probe `N+1`, but do not retain the bytes for `N`. When `N+1` is
+missing, the reader must either reread `N` or fall back to LIST before it can
+return the object.
+
+Caching bytes removes that extra object-store request and avoids a `T: Clone`
+bound. The memory cost is one encoded metadata object per protocol instance.
+
+### CURRENT Pointer
+
+Store a small mutable `CURRENT` object containing the latest sequence ID.
+Readers GET `CURRENT` and then GET the referenced metadata object. With a local
+bytes cache, an unchanged pointer can return the cached object after one GET.
+
+A pointer can support racing writes without making the pointer the commit
+point. Starting from object `N-1`, a writer races:
+
+1. create object `N` with create-if-absent; and
+2. update `CURRENT` from `N-1` to `N`.
+
+The two operations can complete in either order:
+
+| Result | Recovery |
+|---|---|
+| Both succeed | `N` is current. |
+| Object succeeds, pointer fails | Retry `CURRENT=N`. |
+| Pointer succeeds, object fails | Readers return `N-1`; writers retry object `N`. |
+| Object already exists | Another writer won `N`; refresh and return a write conflict. |
+
+A writer that observes `CURRENT=N` with object `N` missing must retry `N`.
+Advancing to `N+1` would create a gap and make reader fallback ambiguous.
+Once object `N` exists, it remains part of the sequence after `CURRENT`
+advances.
+
+This version of `CURRENT` is an advisory cursor. Object creation still commits
+a version, so RFC-0026 boundary files remain necessary. A stale writer could
+otherwise recreate an ID deleted by GC.
+
+`CURRENT` removes cold LISTs and long probe runs. It also adds a mutable pointer
+update to every write. Its steady-state request profile is:
+
+| Operation | Cached probing | `CURRENT` cursor |
+|---|---:|---:|
+| Successful write | 1 object PUT + boundary GET | 1 object PUT + 1 pointer PUT + boundary GET |
+| Warm unchanged read | 1 successor GET + boundary GET | 1 pointer GET + boundary GET |
+| Cold latest read | 1 LIST + object GET + boundary GET | 1 pointer GET + object GET + boundary GET |
+
+Both designs issue one lookup GET on an unchanged warm read. The pointer pays
+an extra PUT on every write to avoid cold LISTs and catch-up probes. Long-lived
+SlateDB processes with shared store instances should pay less with probing.
+Short-lived readers or processes that lag many versions may favor a pointer.
+A pointer that leads a failed object write adds a 404 GET and a fallback GET
+until some writer fills the reserved ID.
+
+Useful break-even inputs are:
+
+```text
+latest_reads
+cold_list_fallbacks
+probe_gets
+successful_writes
+```
+
+The pointer costs less when the LIST and probe requests it avoids cost more
+than one extra pointer PUT per successful write, including retries during write
+contention.
+
+### Authoritative CURRENT Pointer
+
+`CURRENT` could become the commit point instead of a cursor. A stale writer
+would write a candidate object and then conditionally update `CURRENT`. If the
+conditional update failed, readers would ignore the candidate. This could
+replace the GC boundary because recreating a deleted object would not publish
+it.
+
+That design changes the meaning of physical metadata files. A file could exist
+without ever becoming a committed historical version. A crash after writing
+deterministic object `N+1` but before updating `CURRENT` would also block later
+create-if-absent attempts for `N+1`.
+
+Writers could use unique candidate keys or skip occupied IDs, but both choices
+change the current layout and historical listing semantics. Racing publication
+before the candidate is durable can leave `CURRENT` pointing to a missing
+object. Reader fallback can handle the missing object, but the pointer then
+needs reservation and recovery rules.
+
+Cached probing keeps object creation as the commit point and preserves
+contiguous IDs. Existing tools can continue to treat physical sequenced
+objects as history.
+
+## Open Questions
+
+- Should builders share manifest and compactions store instances across more
+  embedded components to reduce cold LISTs?
+- Does the latest-object cache need a size limit for unusually large metadata
+  objects?
+
+## References
+
+- [RFC-0001: Manifest](0001-manifest.md)
+- [RFC-0026: Garbage Collector Boundary Files for Sequenced Metadata](0026-garbage-collector-boundary.md)
+- [slatedb/slatedb#1215: listed file missing before read](https://github.com/slatedb/slatedb/issues/1215)
