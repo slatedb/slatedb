@@ -330,10 +330,12 @@ impl DbInner {
                     .imm_memtable
                     .iter()
                     .map(|imm| estimate(imm.table().metadata()))
-                    .sum::<usize>();
+                    .fold(0usize, |total, size| total.saturating_add(size));
                 (active_memtable_size_bytes, imm_memtable_size_bytes)
             };
-            let total_mem_size_bytes = active_memtable_size_bytes + imm_memtable_size_bytes;
+            let total_mem_size_bytes = active_memtable_size_bytes
+                .saturating_add(imm_memtable_size_bytes)
+                .saturating_add(wal_status.estimated_bytes);
             self.db_stats
                 .total_mem_size_bytes
                 .set(total_mem_size_bytes as i64);
@@ -350,7 +352,7 @@ impl DbInner {
             if total_mem_size_bytes >= self.settings.max_unflushed_bytes {
                 self.db_stats.backpressure_count.increment(1);
                 warn!(
-                    "unflushed memtable size exceeds max_unflushed_bytes. applying backpressure. [total_mem_size_bytes={}, active_memtable_size_bytes={}, imm_memtable_size_bytes={}, wal_size_bytes={}, max_unflushed_bytes={}]",
+                    "unflushed WAL and memtable size exceeds max_unflushed_bytes. applying backpressure. [total_mem_size_bytes={}, active_memtable_size_bytes={}, imm_memtable_size_bytes={}, wal_size_bytes={}, max_unflushed_bytes={}]",
                     format_bytes_si(total_mem_size_bytes as u64),
                     format_bytes_si(active_memtable_size_bytes as u64),
                     format_bytes_si(imm_memtable_size_bytes as u64),
@@ -363,9 +365,10 @@ impl DbInner {
                     guard.state().imm_memtable.back().cloned()
                 };
 
-                // There is a window of time after mem_size_bytes is larger than max_unflushed_bytes
-                // but before we get the memtable. During that time, if the memtable is fully
-                // flushed out, we should short circuit to avoid blocking indefinitely.
+                // There is a window of time after total_mem_size_bytes is larger than
+                // max_unflushed_bytes but before we get the memtable. During that time, if
+                // the memtable and WAL are fully flushed out, we should short circuit to
+                // avoid blocking indefinitely.
                 if maybe_oldest_unflushed_memtable.is_none() && wal_status.estimated_bytes == 0 {
                     continue;
                 }
@@ -4988,9 +4991,16 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let mut options = test_db_options(0, 1, None);
-        // Must stay above l0_sst_size_bytes (1) but small enough that a single
-        // write exceeds it and triggers backpressure.
-        options.max_unflushed_bytes = 2;
+        let first_entry = RowEntry::new_value(b"key1", b"val1", 1).with_create_ts(0);
+        let sst_format = SsTableFormat {
+            min_filter_keys: options.min_filter_keys,
+            ..SsTableFormat::default()
+        };
+        let first_memtable_bytes =
+            sst_format.estimate_encoded_size_compacted(1, first_entry.estimated_size());
+        // Keep the memtable alone below the limit so this test only applies
+        // backpressure when the WAL estimate is included.
+        options.max_unflushed_bytes = first_memtable_bytes.saturating_add(1);
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let db = Db::builder(path, object_store.clone())
             .with_settings(options)
@@ -5030,7 +5040,41 @@ mod tests {
         .await;
 
         // Verify that there is now 1 WAL entry in memory.
-        assert_eq!(db.inner.wal_observer.status().buffered_wal_entries_count, 1);
+        let wal_status = db.inner.wal_observer.status();
+        assert_eq!(wal_status.buffered_wal_entries_count, 1);
+
+        let (active_memtable_size_bytes, imm_memtable_size_bytes) = {
+            let guard = db.inner.state.read();
+            let estimate = |metadata: KVTableMetadata| {
+                db.inner.table_store.estimate_encoded_size_compacted(
+                    metadata.entry_num,
+                    metadata.entries_size_in_bytes,
+                )
+            };
+            let active_memtable_size_bytes = estimate(guard.memtable().table().metadata());
+            let imm_memtable_size_bytes = guard
+                .state()
+                .imm_memtable
+                .iter()
+                .map(|imm| estimate(imm.table().metadata()))
+                .fold(0usize, |total, size| total.saturating_add(size));
+            (active_memtable_size_bytes, imm_memtable_size_bytes)
+        };
+        let memtable_size_bytes =
+            active_memtable_size_bytes.saturating_add(imm_memtable_size_bytes);
+        let total_mem_size_bytes = memtable_size_bytes.saturating_add(wal_status.estimated_bytes);
+        assert!(
+            memtable_size_bytes < db.inner.settings.max_unflushed_bytes,
+            "test requires memtable bytes ({memtable_size_bytes}) to remain below \
+             max_unflushed_bytes ({})",
+            db.inner.settings.max_unflushed_bytes
+        );
+        assert!(
+            total_mem_size_bytes >= db.inner.settings.max_unflushed_bytes,
+            "test requires memtable plus WAL bytes ({total_mem_size_bytes}) to reach \
+             max_unflushed_bytes ({})",
+            db.inner.settings.max_unflushed_bytes
+        );
 
         // Put another WAL entry, which should trigger backpressure. Do this in a separate
         // task since the put() is blocked until the WAL is flushed, which isn't happening
