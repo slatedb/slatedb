@@ -46,16 +46,17 @@ Authors:
 
 ## Summary
 
-SlateDB finds the latest sequenced metadata object by listing every object in
-the namespace, selecting the highest ID, and reading that object. This RFC
-replaces LIST on the common path with a process-local cache and consecutive GET
-probes.
+SlateDB finds the latest sequenced metadata object (`.manifest` or
+`.compactions`) by listing every object in the metadata directory, selecting
+the highest ID, and reading that object. This RFC replaces LIST on the common
+path with a process-local cache and consecutive GET probes.
 
-Each sequenced metadata store caches the highest object ID and its encoded
-bytes. A latest read starts at the next ID and issues up to four GETs. A 404
-means the last successful GET or cached object is the latest version. Four
-consecutive hits fall back to the existing LIST path. A store with an empty
-cache also uses LIST to establish its starting point.
+Each sequenced metadata store (`ManifestStore` and `CompactionsStore`) caches
+the highest object ID and its encoded bytes. A latest read starts at the next
+ID and issues up to four GETs. A 404 means the last successful GET or cached
+object is the latest version. Four consecutive hits fall back to the existing
+LIST path. A store with an empty cache also uses LIST to establish its starting
+point.
 
 Successful writes update the same cache. Boundary checks from RFC-0026 remain
 in place and invalidate cached objects rejected by the GC boundary.
@@ -85,6 +86,10 @@ The LIST cost repeats on refreshes even when no writer has added a new object.
 LIST also returns metadata for the full retained history, although the caller
 needs one object.
 
+This pattern is expensive and wasteful for idle processes. A database that's
+idle for five minutes incures 560 LIST requests with default configuration.
+This comes out to $24.19 per-month in AWS S3 us-east-1 pricing.
+
 Sequenced metadata already supplies a cheaper lookup mechanism. Once a process
 has seen ID `N`, it can GET `N+1`. A 404 means `N` is still latest. If `N+1`
 exists, the process continues with `N+2`. The protocol's consecutive-ID
@@ -94,11 +99,11 @@ of downloading every intervening object.
 
 ## Goals
 
+- Idle databases should cost less than $5 per month.
+- Protocol should be freiendly to lagging readers.
 - Remove LIST when a warm reader is close to the latest version.
-- Bound catch-up probing before falling back to LIST.
 - Keep the existing object layout, write protocol, and GC boundary semantics.
 - Avoid rereading an unchanged latest object.
-- Let reads and writes share one monotonic cache.
 - Preserve the existing LIST fallback for cold stores, lagging readers, and GC
   races.
 
@@ -122,7 +127,6 @@ Mutex<Option<(MonotonicId, Bytes)>>
 
 The cache contains encoded bytes rather than `T`. This avoids adding a
 `T: Clone` bound and lets the write path reuse the bytes it already encoded.
-Cloning `Bytes` does not copy the object body.
 
 Cache updates are monotonic. An update replaces the entry only when its ID is
 higher than the cached ID:
@@ -225,8 +229,9 @@ An object above `N` may appear during the first probe. In that case, probing
 advances the cache and can find an object above the boundary without LIST.
 
 Deleting a cached object through the same protocol invalidates the matching
-entry after the object-store DELETE succeeds. Remote GC remains safe because
-the boundary check catches cached IDs from the deleted prefix.
+entry after the object-store DELETE succeeds. If another process deletes
+objects covered by a newer GC boundary, checked reads reject and invalidate
+any cached object covered by that boundary before returning it.
 
 ### Concurrency and Sharing
 
@@ -257,11 +262,6 @@ The probing path distinguishes a missing successor from other failures:
 - Four consecutive successful GETs: fall back to LIST.
 - Other GET error: return the error.
 - Decode error: return the codec error.
-
-The protocol relies on consecutive physical IDs above the GC boundary. A
-writer must continue to create `current_id + 1`; it cannot skip an occupied or
-failed slot. GC may remove a prefix after advancing the boundary, but it cannot
-create a gap in the live suffix.
 
 ## Impact Analysis
 
@@ -294,7 +294,7 @@ SlateDB features and components that this RFC interacts with.
 - [ ] Clones
 - [x] Garbage collection
 - [ ] Database splitting and merging
-- [x] Multi-writer
+- [ ] Multi-writer
 
 The manifest and compactions payload formats do not change. This RFC changes
 how callers locate the latest encoded object.
@@ -311,7 +311,7 @@ how callers locate the latest encoded object.
 
 - [ ] Write-ahead log (WAL)
 - [ ] Block cache
-- [x] Object store cache
+- [ ] Object store cache
 - [ ] Indexing (bloom filters, metadata)
 - [ ] SST format or block format
 
@@ -319,7 +319,7 @@ how callers locate the latest encoded object.
 
 - [ ] CLI tools
 - [ ] Language bindings (Go/Python/etc)
-- [x] Observability (metrics/logging/tracing)
+- [ ] Observability (metrics/logging/tracing)
 
 ## Operations
 
@@ -384,40 +384,13 @@ No public Rust API or language binding changes.
 
 ## Testing
 
-- Unit tests:
-  - a cold read uses LIST and caches the returned bytes;
-  - an unchanged warm read probes only the successor;
-  - a lagging reader probes consecutive objects and advances its cache;
-  - four successful probes cause a LIST fallback;
-  - a successful write populates the cache;
-  - a boundary rejection invalidates the matching entry;
-  - a listed object deleted before GET causes another LIST.
-- Integration tests:
-  - manifest refresh and write tests;
-  - compactions state refresh and write tests.
-- Fault-injection/chaos tests:
-  - inject GET failures during a probe;
-  - delete a cached prefix after advancing the boundary;
-  - race readers and writers that share a protocol instance.
-- Deterministic simulation tests:
-  - retain existing sequenced metadata and GC coverage.
-- Formal methods verification: none.
-- Performance tests:
-  - measure request counts for warm reads, cold starts, and readers lagging by
-    increasing numbers of versions;
-  - measure the memory retained by cached manifest and compactions bytes.
+- Unit test to verify reads fall back to LIST after four consecutive GET hits.
+- Run benchmarks to verify an idle SlateDB with default configuration stays
+  below $5 per month in AWS S3 us-east-1 pricing.
 
 ## Rollout
 
 The change is internal and does not require a feature flag.
-
-1. Add cache and probe request metrics.
-2. Enable probing for manifest and compactions stores.
-3. Compare LIST and GET request counts before and after deployment.
-4. Watch probes-per-read and cache memory by component.
-
-If probing causes unexpected request amplification, disabling the cache and
-returning to the existing LIST path requires no data migration.
 
 ## Alternatives
 
@@ -430,15 +403,6 @@ regardless of lag.
 The retained history makes LIST more expensive than the information needed by
 the caller. Repeating it when no version changed also adds avoidable request
 cost and latency.
-
-### Cache Only the Latest ID
-
-Cache `N` and probe `N+1`, but do not retain the bytes for `N`. When `N+1` is
-missing, the reader must either reread `N` or fall back to LIST before it can
-return the object.
-
-Caching bytes removes that extra object-store request and avoids a `T: Clone`
-bound. The memory cost is one encoded metadata object per protocol instance.
 
 ### Unbounded Linear Probing
 
@@ -529,8 +493,8 @@ This version of `CURRENT` is an advisory cursor. Object creation still commits
 a version, so RFC-0026 boundary files remain necessary. A stale writer could
 otherwise recreate an ID deleted by GC.
 
-`CURRENT` removes cold LISTs and the four-probe catch-up fallback. It also adds a
-mutable pointer update to every write. Its steady-state request profile is:
+`CURRENT` removes cold LISTs and the four-probe catch-up fallback. It also adds
+a mutable pointer update to every write. Its steady-state request profile is:
 
 | Operation | Cached probing | `CURRENT` cursor |
 |---|---:|---:|
@@ -583,10 +547,7 @@ objects as history.
 
 ## Open Questions
 
-- Should builders share manifest and compactions store instances across more
-  embedded components to reduce cold LISTs?
-- Does the latest-object cache need a size limit for unusually large metadata
-  objects?
+None.
 
 ## References
 
