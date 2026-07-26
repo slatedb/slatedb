@@ -26,6 +26,11 @@ Table of Contents:
 - [Alternatives](#alternatives)
   - [LIST on Every Latest Read](#list-on-every-latest-read)
   - [Cache Only the Latest ID](#cache-only-the-latest-id)
+  - [Unbounded Linear Probing](#unbounded-linear-probing)
+  - [Exponential and Binary Probing](#exponential-and-binary-probing)
+  - [Parallel Window Probing](#parallel-window-probing)
+  - [HEAD Probing](#head-probing)
+  - [Adaptive Probe Limit](#adaptive-probe-limit)
   - [CURRENT Pointer](#current-pointer)
   - [Authoritative CURRENT Pointer](#authoritative-current-pointer)
 - [Open Questions](#open-questions)
@@ -47,10 +52,10 @@ replaces LIST on the common path with a process-local cache and consecutive GET
 probes.
 
 Each sequenced metadata store caches the highest object ID and its encoded
-bytes. A latest read starts at the next ID and issues GETs until the first 404.
-Since metadata IDs are contiguous, the last successful GET or cached object is
-the latest version. A store with an empty cache uses the existing LIST path to
-establish its starting point.
+bytes. A latest read starts at the next ID and issues up to four GETs. A 404
+means the last successful GET or cached object is the latest version. Four
+consecutive hits fall back to the existing LIST path. A store with an empty
+cache also uses LIST to establish its starting point.
 
 Successful writes update the same cache. Boundary checks from RFC-0026 remain
 in place and invalidate cached objects rejected by the GC boundary.
@@ -82,17 +87,20 @@ needs one object.
 
 Sequenced metadata already supplies a cheaper lookup mechanism. Once a process
 has seen ID `N`, it can GET `N+1`. A 404 means `N` is still latest. If `N+1`
-exists, the process continues with `N+2` until it reaches the first missing ID.
-The protocol's consecutive-ID invariant makes the first 404 a valid stopping
-condition.
+exists, the process continues with `N+2`. The protocol's consecutive-ID
+invariant makes the first 404 a valid stopping condition. Probing stops after
+four successful GETs so a reader that is far behind catches up with LIST instead
+of downloading every intervening object.
 
 ## Goals
 
-- Remove LIST from warm latest-version reads.
+- Remove LIST when a warm reader is close to the latest version.
+- Bound catch-up probing before falling back to LIST.
 - Keep the existing object layout, write protocol, and GC boundary semantics.
 - Avoid rereading an unchanged latest object.
 - Let reads and writes share one monotonic cache.
-- Preserve the existing LIST fallback for cold stores and GC races.
+- Preserve the existing LIST fallback for cold stores, lagging readers, and GC
+  races.
 
 ## Non-Goals
 
@@ -166,7 +174,9 @@ cached (N, bytes_N)
             +-- cache (N+1, bytes_N+1)
             +-- GET N+2
                     |
-                    +-- continue until the first 404
+                    +-- continue until the first 404 or fourth hit
+                            |
+                            +-- fourth hit ---> fall back to LIST
 ```
 
 The implementation never holds the cache mutex across an object-store request.
@@ -175,6 +185,7 @@ backward.
 
 The first missing successor terminates the probe. It does not trigger LIST.
 The cached bytes let the reader return the latest object without rereading it.
+Four consecutive successful probes fall through to the cold LIST path.
 
 ### Write-Through Updates
 
@@ -243,6 +254,7 @@ The probing path distinguishes a missing successor from other failures:
 
 - 404 for `N+1`: return cached `N`.
 - Successful GET for `N+1`: cache it and continue.
+- Four consecutive successful GETs: fall back to LIST.
 - Other GET error: return the error.
 - Decode error: return the codec error.
 
@@ -321,24 +333,23 @@ request.
 | Successful write | 1 object PUT + boundary GET | Same |
 | Cold latest read | 1 LIST + object GET + boundary GET | Same |
 | Warm unchanged read | 1 LIST + object GET + boundary GET | 1 missing-successor GET + boundary GET |
-| Warm read `k` versions behind | 1 LIST + object GET + boundary GET | `k` GET hits + 1 GET miss + boundary GET |
+| Warm read fewer than 4 versions behind | 1 LIST + object GET + boundary GET | `k` GET hits + 1 GET miss + boundary GET |
+| Warm read at least 4 versions behind | 1 LIST + object GET + boundary GET | 4 GET hits + 1 LIST + object GET + boundary GET |
 
 Object stores tend to bill LIST with PUT-class requests and GETs at a lower
 request rate. Exact prices depend on the provider and region. Probing should
 cost less when protocol instances live long enough to amortize their cold LIST
 and usually lag by a small number of versions.
 
-A process that falls far behind exchanges one LIST for many GETs. The ratio
-below captures that workload:
+A process that falls far behind issues at most four probe GETs before using
+LIST. The ratio below captures that workload:
 
 ```text
 probe_gets / latest_reads
 ```
 
 A ratio near `1` means most reads issue one 404 probe and return cached bytes.
-A high ratio means readers often catch up across many external writes. Metrics
-should determine whether a probe limit or a different lookup protocol is
-needed.
+A ratio near `4` means readers often hit the probe limit and fall back to LIST.
 
 The proposal adds one encoded object body per live protocol instance. It does
 not add objects to storage or increase write amplification.
@@ -375,6 +386,7 @@ No public Rust API or language binding changes.
   - a cold read uses LIST and caches the returned bytes;
   - an unchanged warm read probes only the successor;
   - a lagging reader probes consecutive objects and advances its cache;
+  - four successful probes cause a LIST fallback;
   - a successful write populates the cache;
   - a boundary rejection invalidates the matching entry;
   - a listed object deleted before GET causes another LIST.
@@ -426,6 +438,65 @@ return the object.
 Caching bytes removes that extra object-store request and avoids a `T: Clone`
 bound. The memory cost is one encoded metadata object per protocol instance.
 
+### Unbounded Linear Probing
+
+Continue reading `N+1`, `N+2`, and so on until the first 404. A reader that is
+`k` versions behind uses `k+1` GETs and avoids LIST. Each successful GET also
+supplies the bytes needed if that object is latest.
+
+The request count and latency grow linearly with lag. A process resuming after
+a long pause could download hundreds of obsolete objects before returning.
+The four-GET limit gives the common case the same behavior while bounding the
+catch-up cost.
+
+### Exponential and Binary Probing
+
+`TableStore::last_seen_wal_id` uses exponential probing followed by binary
+search to find the latest WAL SST. Starting at `N`, it probes offsets
+`1, 2, 4, 8, ...` in parallel groups of eight until one is missing, then
+binary searches between the highest hit and the first miss. Contiguous IDs make
+the existence test monotonic. A pure binary search would not work because the
+reader has no upper bound before the exponential phase.
+
+This finds a frontier `k` versions away with `O(log k)` existence checks. The
+reader must then GET the latest object because the search only establishes its
+ID. For small `k`, linear GETs use fewer requests and already have the latest
+bytes. Exponential probing is a better fit when large gaps are common enough to
+justify the extra code and concurrent request fan-out.
+
+### Parallel Window Probing
+
+Issue a fixed window of successor reads concurrently. If the window contains a
+404, the object before the first missing ID is latest. If every request
+succeeds, issue another window or fall back to LIST. A window of four can cross
+four versions in one round trip.
+
+Issuing the full window on every read turns an unchanged warm read from one
+request into four. A hybrid can probe `N+1` first and issue a window only after
+that request succeeds, but requests beyond the first missing ID do no useful
+work. This option trades request count for catch-up latency.
+
+### HEAD Probing
+
+Use HEAD requests to locate the frontier, then GET only the latest object.
+This avoids downloading intermediate object bodies when a reader is behind.
+An unchanged reader still needs one missing-successor request and can return
+its cached bytes.
+
+For small gaps, HEAD probing adds a final GET that linear GET probing avoids.
+Many object stores bill HEAD and GET at the same request rate, so this option
+reduces transferred bytes without reducing request charges.
+
+### Adaptive Probe Limit
+
+Change the probe limit based on recent reads. A store could raise the limit
+after repeated LIST fallbacks and lower it after 404s. This may help workloads
+where writers publish bursts that often exceed four versions.
+
+The store would need more cache state and a tuning policy. A fixed limit has a
+predictable request bound and keeps behavior consistent across protocol
+instances.
+
 ### CURRENT Pointer
 
 Store a small mutable `CURRENT` object containing the latest sequence ID.
@@ -456,8 +527,8 @@ This version of `CURRENT` is an advisory cursor. Object creation still commits
 a version, so RFC-0026 boundary files remain necessary. A stale writer could
 otherwise recreate an ID deleted by GC.
 
-`CURRENT` removes cold LISTs and long probe runs. It also adds a mutable pointer
-update to every write. Its steady-state request profile is:
+`CURRENT` removes cold LISTs and the four-probe catch-up fallback. It also adds a
+mutable pointer update to every write. Its steady-state request profile is:
 
 | Operation | Cached probing | `CURRENT` cursor |
 |---|---:|---:|

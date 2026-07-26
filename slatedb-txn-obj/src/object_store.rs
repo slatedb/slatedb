@@ -18,6 +18,8 @@ use std::collections::Bound::Unbounded;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
+const MAX_PROBES: usize = 4;
+
 /// Implements `SequencedStorageProtocol<T>` on object storage.
 ///
 /// ## File layout and naming
@@ -388,7 +390,7 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
     ) -> Result<Option<(MonotonicId, T)>, TransactionalObjectError> {
         let cached = self.latest.lock().clone();
         if let Some((mut id, mut bytes)) = cached {
-            loop {
+            for _ in 0..MAX_PROBES {
                 let next_id = id.next();
                 match self.try_read_bytes_unchecked(next_id).await? {
                     Some(next_bytes) => {
@@ -1067,6 +1069,38 @@ mod tests {
         assert_eq!(
             Some(MonotonicId::new(3)),
             store.latest.lock().as_ref().map(|(id, _)| *id)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_latest_read_falls_back_to_list_after_four_probes() {
+        let (object_store, store) = new_counting_protocol();
+        let first = TestVal {
+            epoch: 1,
+            payload: 1,
+        };
+        put_test_value(&object_store, 1, &first).await;
+        store.try_read_latest_unchecked().await.unwrap().unwrap();
+        assert_eq!(1, object_store.list_calls.load(Ordering::SeqCst));
+
+        for id in 2..=8 {
+            let value = TestVal {
+                epoch: 1,
+                payload: id,
+            };
+            put_test_value(&object_store, id, &value).await;
+        }
+
+        let gets = object_store.get_opts_calls.load(Ordering::SeqCst);
+        let latest = store.try_read_latest_unchecked().await.unwrap().unwrap();
+
+        assert_eq!(MonotonicId::new(8), latest.0);
+        assert_eq!(8, latest.1.payload);
+        assert_eq!(2, object_store.list_calls.load(Ordering::SeqCst));
+        assert_eq!(
+            gets + 5,
+            object_store.get_opts_calls.load(Ordering::SeqCst),
+            "the warm read should issue four probes and GET the object selected by LIST"
         );
     }
 
