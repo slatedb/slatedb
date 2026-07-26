@@ -122,10 +122,8 @@ impl BloomFilter {
     }
 
     fn might_contain(&self, hash: u64) -> bool {
-        // A prefix-only filter built from an SST where the extractor yielded
-        // no prefixes has zero bits (and so do filters like it already
-        // persisted in existing SSTs). Nothing was hashed into it, so nothing
-        // can match; probing would divide by zero in probes_for_key.
+        // A filter built with zero extracted hashes has zero bits: nothing can
+        // match, and probing it would divide by zero in probes_for_key.
         if self.buffer.is_empty() {
             return false;
         }
@@ -450,8 +448,7 @@ mod tests {
         );
     }
 
-    /// Extracts a fixed 4-byte prefix, but only from targets that are at
-    /// least 4 bytes long. Shorter keys have no extractable prefix.
+    /// Extracts a fixed 4-byte prefix; shorter targets yield no prefix.
     struct GatedFixed4;
 
     impl PrefixExtractor for GatedFixed4 {
@@ -470,11 +467,8 @@ mod tests {
 
     #[test]
     fn test_prefix_only_filter_with_no_extracted_prefixes() {
-        // With whole-key filtering off and a gated extractor that yields no
-        // prefix for any stored key, the built filter holds zero hashes and
-        // zero bits. Probing it with a query the extractor accepts must not
-        // panic, and reporting a miss is safe: no key in the SST carries any
-        // extractable prefix, so no key can match the queried one.
+        // Zero extracted prefixes + whole-key filtering off = zero-bit filter.
+        // Probing it must not panic, and a miss is safe: nothing was hashed in.
         let mut builder = BloomFilterBuilder::new(10, false, Some(Arc::new(GatedFixed4)));
         builder.add_key(&Bytes::from_static(b"a"));
         builder.add_key(&Bytes::from_static(b"b"));
@@ -483,5 +477,10 @@ mod tests {
 
         assert!(!filter.might_match(&FilterQuery::prefix(Bytes::from_static(b"aaaa"))));
         assert!(!filter.might_match(&FilterQuery::point(Bytes::from_static(b"aaaa_key"))));
+
+        // Queries the extractor rejects never reach the filter and must keep
+        // reporting "might match", so the stored short keys stay reachable.
+        assert!(filter.might_match(&FilterQuery::prefix(Bytes::from_static(b"a"))));
+        assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"a"))));
     }
 }
