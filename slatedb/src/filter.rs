@@ -483,4 +483,19 @@ mod tests {
         assert!(filter.might_match(&FilterQuery::prefix(Bytes::from_static(b"a"))));
         assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"a"))));
     }
+
+    #[test]
+    fn test_combined_filter_with_no_extracted_prefixes() {
+        // With whole-key filtering on, every key hashes into the filter even
+        // when the extractor yields nothing, so the empty-filter guard never fires.
+        let mut builder = BloomFilterBuilder::new(10, true, Some(Arc::new(GatedFixed4)));
+        builder.add_key(&Bytes::from_static(b"a"));
+        builder.add_key(&Bytes::from_static(b"b"));
+        let filter = builder.build_filter();
+        assert!(!filter.buffer.is_empty());
+
+        // Point lookups take the whole-key path and find the stored keys.
+        assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"a"))));
+        assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"b"))));
+    }
 }
