@@ -122,6 +122,13 @@ impl BloomFilter {
     }
 
     fn might_contain(&self, hash: u64) -> bool {
+        // A prefix-only filter built from an SST where the extractor yielded
+        // no prefixes has zero bits (and so do filters like it already
+        // persisted in existing SSTs). Nothing was hashed into it, so nothing
+        // can match; probing would divide by zero in probes_for_key.
+        if self.buffer.is_empty() {
+            return false;
+        }
         for p in probes_for_key(hash, self.num_probes, self.filter_bits()) {
             if !check_bit(p as usize, &self.buffer) {
                 return false;
@@ -441,5 +448,40 @@ mod tests {
             BloomFilter::estimate_encoded_size(num_keys, bits_per_key),
             expected_size
         );
+    }
+
+    /// Extracts a fixed 4-byte prefix, but only from targets that are at
+    /// least 4 bytes long. Shorter keys have no extractable prefix.
+    struct GatedFixed4;
+
+    impl PrefixExtractor for GatedFixed4 {
+        fn name(&self) -> &str {
+            "gated_fixed_4"
+        }
+
+        fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
+            let bytes = match target {
+                PrefixTarget::Point(k) => k.as_ref(),
+                PrefixTarget::Prefix(p) => p.as_ref(),
+            };
+            (bytes.len() >= 4).then_some(4)
+        }
+    }
+
+    #[test]
+    fn test_prefix_only_filter_with_no_extracted_prefixes() {
+        // With whole-key filtering off and a gated extractor that yields no
+        // prefix for any stored key, the built filter holds zero hashes and
+        // zero bits. Probing it with a query the extractor accepts must not
+        // panic, and reporting a miss is safe: no key in the SST carries any
+        // extractable prefix, so no key can match the queried one.
+        let mut builder = BloomFilterBuilder::new(10, false, Some(Arc::new(GatedFixed4)));
+        builder.add_key(&Bytes::from_static(b"a"));
+        builder.add_key(&Bytes::from_static(b"b"));
+        let filter = builder.build_filter();
+        assert!(filter.buffer.is_empty());
+
+        assert!(!filter.might_match(&FilterQuery::prefix(Bytes::from_static(b"aaaa"))));
+        assert!(!filter.might_match(&FilterQuery::point(Bytes::from_static(b"aaaa_key"))));
     }
 }
