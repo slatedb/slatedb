@@ -409,6 +409,12 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
                     }
                 }
             }
+            debug!(
+                "latest read probe limit reached, falling back to list [directory={}, last_seen_id={}, probes={}]",
+                self.dir_path,
+                id.id(),
+                MAX_PROBES,
+            );
         }
 
         loop {

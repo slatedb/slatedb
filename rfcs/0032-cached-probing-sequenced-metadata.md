@@ -359,10 +359,12 @@ not add objects to storage or increase write amplification.
 Add counters for:
 
 - latest cache hits and cold misses;
-- LIST fallbacks;
 - successful and missing probe GETs;
 - cache advances from reads and writes; and
 - boundary-driven cache invalidations.
+
+Log probe-limit LIST fallbacks at debug level with the object directory, last
+seen ID, and probe count.
 
 Record a histogram of probes per latest read. Existing object-store metrics
 continue to report request latency and failures.
