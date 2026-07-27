@@ -468,6 +468,7 @@ mod tests {
             .as_ref()
             .map(|wb| WriteBatchIterator::new(wb, range.clone(), order, u64::MAX, None, None))
     }
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
     use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
@@ -522,6 +523,7 @@ mod tests {
                 Path::from("/test"),
                 None,
                 TableStoreKind::Main,
+                BlockCachePolicy::default(),
             ));
 
             Self {
@@ -602,7 +604,7 @@ mod tests {
 
             let encoded = builder.build().await?;
             let id = SsTableId::Compacted(Ulid::new());
-            self.table_store.write_sst(&id, &encoded, false).await
+            self.table_store.write_sst(&id, &encoded).await
         }
     }
 

@@ -1109,7 +1109,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let _sst1 = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst, false)
+            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst)
             .await
             .unwrap();
 
@@ -1124,7 +1124,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let sst2 = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst, false)
+            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst)
             .await
             .unwrap();
 
@@ -1162,7 +1162,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let sst = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst, false)
+            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst)
             .await
             .unwrap();
 

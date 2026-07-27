@@ -71,6 +71,7 @@ use std::sync::Arc;
 use object_store::path::Path;
 use object_store::ObjectStore;
 
+use crate::block_cache_policy::BlockCachePolicy;
 use crate::db_state::SsTableId;
 use crate::format::sst::SsTableFormat;
 use crate::iter::{EmptyIterator, RowEntryIterator};
@@ -200,6 +201,7 @@ impl WalReader {
             path.into(),
             None,
             TableStoreKind::Reader,
+            BlockCachePolicy::default(),
         ));
         Self { table_store }
     }
