@@ -935,6 +935,10 @@ impl VersionedManifest {
         &self.manifest.core
     }
 
+    pub(crate) fn external_ssts(&self) -> HashMap<SsTableId, object_store::path::Path> {
+        self.manifest.external_ssts()
+    }
+
     /// The named segments configured in this manifest (RFC-0024), in prefix
     /// order. Empty when no segment extractor is configured. The unsegmented
     /// default tree is accessed via [`Self::l0`] / [`Self::compacted`] /

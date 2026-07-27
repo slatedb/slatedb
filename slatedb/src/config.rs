@@ -742,7 +742,14 @@ pub struct Settings {
     /// The compression algorithm to use for SSTables.
     pub compression_codec: Option<CompressionCodec>,
 
-    /// The object store cache options.
+    /// The object store cache options. When `root_folder` is set, the database
+    /// wraps its main object store in a
+    /// [`CachedObjectStore`](crate::cached_object_store::CachedObjectStore)
+    /// built from these options. To construct and share the cache yourself,
+    /// build one with
+    /// [`CachedObjectStore::builder`](crate::cached_object_store::CachedObjectStore::builder)
+    /// and pass it to [`Db::builder`](crate::Db::builder) instead, leaving
+    /// these options unset.
     pub object_store_cache_options: ObjectStoreCacheOptions,
 
     /// Configuration options for the garbage collector.
@@ -1719,10 +1726,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
-
-    use super::*;
 
     #[test]
     fn test_db_options_load_from_env() {
@@ -1740,7 +1746,6 @@ mod tests {
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
             );
-
             Ok(())
         });
     }
@@ -1810,7 +1815,7 @@ mod tests {
 {
     "flush_interval": "1s",
     "metric_level": "Debug",
-    "object_store_cache_options": {
+     "object_store_cache_options": {
         "root_folder": "/tmp/slatedb-root"
     }
 }

@@ -934,7 +934,7 @@ mod tests {
     #[tokio::test]
     async fn test_collect_garbage_wal_ssts() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         // write a wal sst
         let id1 = SsTableId::Wal(1);
@@ -946,7 +946,7 @@ mod tests {
         // Set the first WAL SST file to be a day old
         let now_minus_24h = set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&SsTableId::Wal(1)),
+            &path_resolver.sst_path(&SsTableId::Wal(1)),
             86400,
         );
 
@@ -993,7 +993,7 @@ mod tests {
     #[tokio::test]
     async fn test_do_not_remove_wals_referenced_by_active_checkpoints() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         let id1 = SsTableId::Wal(1);
         write_sst(table_store.clone(), &id1).await.unwrap();
@@ -1029,7 +1029,7 @@ mod tests {
         for i in 1..=3 {
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&SsTableId::Wal(i)),
+                &path_resolver.sst_path(&SsTableId::Wal(i)),
                 86400,
             );
         }
@@ -1054,7 +1054,7 @@ mod tests {
     #[tokio::test]
     async fn test_collect_garbage_wal_ssts_and_keep_expired_last_compacted() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         // write a wal sst
         let id1 = SsTableId::Wal(1);
@@ -1077,12 +1077,12 @@ mod tests {
         // Set the both WAL SST file to be a day old
         let now_minus_24h_1 = set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&SsTableId::Wal(1)),
+            &path_resolver.sst_path(&SsTableId::Wal(1)),
             86400,
         );
         let now_minus_24h_2 = set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&SsTableId::Wal(2)),
+            &path_resolver.sst_path(&SsTableId::Wal(2)),
             86400,
         );
 
@@ -1130,7 +1130,7 @@ mod tests {
     #[tokio::test]
     async fn test_regular_wal_gc_does_not_delete_wal_fences() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         let fence_id = SsTableId::Wal(1);
         table_store.write_wal_fence(1).await.unwrap();
@@ -1143,7 +1143,7 @@ mod tests {
         for id in [fence_id, regular_wal_id] {
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&id),
+                &path_resolver.sst_path(&id),
                 86400,
             );
         }
@@ -1195,7 +1195,7 @@ mod tests {
     #[tokio::test]
     async fn test_wal_fence_gc_deletes_old_fences() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         let old_fence_id = SsTableId::Wal(1);
         table_store.write_wal_fence(1).await.unwrap();
@@ -1211,7 +1211,7 @@ mod tests {
         for id in [old_fence_id, regular_wal_id, newer_fence_id] {
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&id),
+                &path_resolver.sst_path(&id),
                 86400,
             );
         }
@@ -1273,13 +1273,13 @@ mod tests {
     #[tokio::test]
     async fn test_wal_fence_gc_deletes_single_old_fence() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         let fence_id = SsTableId::Wal(1);
         table_store.write_wal_fence(1).await.unwrap();
         set_modified(
             local_object_store,
-            &path_resolver.table_path(&fence_id),
+            &path_resolver.sst_path(&fence_id),
             86400,
         );
 
@@ -1328,7 +1328,7 @@ mod tests {
     #[tokio::test]
     async fn test_regular_and_wal_fence_gc_run_independently() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         let old_fence_id = SsTableId::Wal(1);
         table_store.write_wal_fence(1).await.unwrap();
@@ -1354,7 +1354,7 @@ mod tests {
         ] {
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&id),
+                &path_resolver.sst_path(&id),
                 86400,
             );
         }
@@ -2163,14 +2163,14 @@ mod tests {
     #[tokio::test]
     async fn test_should_record_gc_wal_deleted_count() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         // given: two WAL SSTs, first one old enough to GC
         let id1 = SsTableId::Wal(1);
         write_sst(table_store.clone(), &id1).await.unwrap();
         let id2 = SsTableId::Wal(2);
         write_sst(table_store.clone(), &id2).await.unwrap();
-        set_modified(local_object_store, &path_resolver.table_path(&id1), 86400);
+        set_modified(local_object_store, &path_resolver.sst_path(&id1), 86400);
 
         let mut state = ManifestCore::new();
         state.replay_after_wal_id = id2.unwrap_wal_id();
@@ -2332,7 +2332,7 @@ mod tests {
     #[tokio::test]
     async fn test_gc_filter_can_reject_all_directory_gc_deletes() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
         let now = DefaultSystemClock::default().now();
         let expired_ms = (now - TimeDelta::seconds(7200)).timestamp_millis() as u64;
         let unexpired_ms = (now - TimeDelta::seconds(1800)).timestamp_millis() as u64;
@@ -2349,12 +2349,12 @@ mod tests {
 
         set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&old_wal_id),
+            &path_resolver.sst_path(&old_wal_id),
             86400,
         );
         set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&old_fence_id),
+            &path_resolver.sst_path(&old_fence_id),
             86400,
         );
 
@@ -2485,7 +2485,7 @@ mod tests {
     #[tokio::test]
     async fn test_gc_filter_allows_subset_and_stats_count_successful_deletes() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         // Create three old WALs below the replay boundary so all would be eligible
         // without a filter. The middle one is the only filter-approved delete.
@@ -2500,7 +2500,7 @@ mod tests {
             write_sst(table_store.clone(), &id).await.unwrap();
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&id),
+                &path_resolver.sst_path(&id),
                 86400,
             );
         }
@@ -2543,7 +2543,7 @@ mod tests {
             &helper,
             Arc::new(DefaultSystemClock::default()),
             Some(Arc::new(LocationGcFilter {
-                allowed_locations: HashSet::from([path_resolver.table_path(&allowed_wal_id)]),
+                allowed_locations: HashSet::from([path_resolver.sst_path(&allowed_wal_id)]),
             })),
         );
 
@@ -2572,7 +2572,7 @@ mod tests {
     #[tokio::test]
     async fn test_dry_run_skips_directory_gc_deletes() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
         let now = DefaultSystemClock::default().now();
         let expired_ms = (now - TimeDelta::seconds(7200)).timestamp_millis() as u64;
         let unexpired_ms = (now - TimeDelta::seconds(1800)).timestamp_millis() as u64;
@@ -2588,12 +2588,12 @@ mod tests {
 
         set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&old_wal_id),
+            &path_resolver.sst_path(&old_wal_id),
             86400,
         );
         set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&old_fence_id),
+            &path_resolver.sst_path(&old_fence_id),
             86400,
         );
 

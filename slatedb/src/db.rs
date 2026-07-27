@@ -11145,12 +11145,16 @@ mod tests {
     mod object_store_cache {
         use super::*;
         use crate::cached_object_store::stats::{PART_ACCESS_COUNT, PART_HIT_COUNT};
+        use crate::cached_object_store::CachedObjectStore;
         use object_store::ObjectStoreExt;
 
         /// Fixture for the object store cache tests.
         struct ObjectStoreCacheTest {
             db: Db,
             upstream: Arc<dyn ObjectStore>,
+            /// The typed handle to the cache passed to the db as its object
+            /// store; `None` when built `without_object_store_cache`.
+            cache: Option<Arc<CachedObjectStore>>,
             cache_root: std::path::PathBuf,
             db_path: String,
             should_compact: Option<Arc<AtomicBool>>,
@@ -11251,15 +11255,30 @@ mod tests {
                     .unwrap();
                 let cache_root = temp_dir.keep();
 
-                let mut opts = test_db_options(0, l0_sst_size_bytes, None);
-                opts.object_store_cache_options.root_folder =
-                    object_store_cache.then(|| cache_root.clone());
-                opts.object_store_cache_options.part_size_bytes = part_size;
-                opts.object_store_cache_options.cache_on_flush = cache_on_flush;
-                opts.object_store_cache_options.cache_on_compaction = cache_on_compaction;
+                let opts = test_db_options(0, l0_sst_size_bytes, None);
+
+                // The cache is user-constructed and passed to the db as the
+                // object store itself.
+                let cache = if object_store_cache {
+                    Some(
+                        CachedObjectStore::builder(cache_root.clone(), upstream.clone())
+                            .with_part_size_bytes(part_size)
+                            .with_cache_on_flush(cache_on_flush)
+                            .with_cache_on_compaction(cache_on_compaction)
+                            .build()
+                            .await
+                            .unwrap(),
+                    )
+                } else {
+                    None
+                };
+                let main_store: Arc<dyn ObjectStore> = match &cache {
+                    Some(cache) => cache.clone(),
+                    None => upstream.clone(),
+                };
 
                 let mut builder =
-                    Db::builder(db_path.as_str(), upstream.clone()).with_settings(opts);
+                    Db::builder(db_path.as_str(), main_store.clone()).with_settings(opts);
                 if let Some(recorder) = metrics_recorder {
                     builder = builder.with_metrics_recorder(recorder);
                 }
@@ -11269,12 +11288,14 @@ mod tests {
                     let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
                         move |_state| flag_clone.swap(false, Ordering::SeqCst),
                     )));
-                    // A different Arc over the same storage; open gates make
-                    // GatedObjectStore a pass-through.
+                    // A custom compactor store bypasses the cache entirely;
+                    // otherwise the compactor shares the db's (possibly
+                    // cached) store. Open gates make GatedObjectStore a
+                    // pass-through.
                     let compactor_store: Arc<dyn ObjectStore> = if custom_compactor_store {
                         Arc::new(GatedObjectStore::new(upstream.clone()))
                     } else {
-                        upstream.clone()
+                        main_store.clone()
                     };
                     // One subcompaction writes one output SST, keeping exact
                     // part counts deterministic.
@@ -11296,6 +11317,7 @@ mod tests {
                 ObjectStoreCacheTest {
                     db,
                     upstream,
+                    cache,
                     cache_root,
                     db_path,
                     should_compact,
@@ -11371,7 +11393,7 @@ mod tests {
 
             /// The upstream path of a compacted SST id.
             fn compacted_sst_path(&self, id: &SsTableId) -> object_store::path::Path {
-                self.sub_path(&format!("compacted/{}.sst", id.unwrap_compacted_id()))
+                crate::paths::PathResolver::from_root(self.db_path.as_str()).sst_path(id)
             }
 
             fn l0_ids(&self) -> Vec<SsTableId> {
@@ -11486,7 +11508,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_db_records_remote_object_store_reads_but_not_cache_hits() {
+        async fn test_db_records_read_calls_into_cached_object_store() {
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let mut opts = test_db_options(0, 1024, None);
             let temp_dir = tempfile::Builder::new()
@@ -11494,15 +11516,18 @@ mod tests {
                 .tempdir()
                 .unwrap();
 
-            opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
-            opts.object_store_cache_options.part_size_bytes = 1024;
             opts.manifest_poll_interval = Duration::from_secs(3600);
             let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
-            let path = "/tmp/test_db_records_remote_object_store_reads_but_not_cache_hits";
+            let path = "/tmp/test_db_records_read_calls_into_cached_object_store";
+            let cached_store = CachedObjectStore::builder(temp_dir.keep(), object_store)
+                .with_part_size_bytes(1024)
+                .build()
+                .await
+                .unwrap();
             // Disable the in-memory block cache so reads reach the object store
             // cache layer (the subject of this test) instead of being served from
             // decoded blocks in memory.
-            let kv_store = Db::builder(path, object_store)
+            let kv_store = Db::builder(path, cached_store)
                 .with_settings(opts)
                 .with_db_cache_disabled()
                 .with_metrics_recorder(metrics_recorder.clone())
@@ -11528,17 +11553,65 @@ mod tests {
             let requests_after_second =
                 lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
 
-            // The cold read misses the object store cache and fetches the SST part
-            // from the remote store; the warm read hits the cache and issues no
-            // remote request.
-            assert_eq!(requests_after_first, requests_before + 1);
+            // The instrumented store sits above the object store cache and counts
+            // logical read calls whether they are served from the cache or the
+            // remote store.
+            // A point get reads the single-part SST in three sub-ranges (index,
+            // filter and block).
+            assert_eq!(requests_after_first, requests_before + 3);
             assert_eq!(got, Some(Bytes::from_static(b"test_value")));
-            assert_eq!(requests_after_second, requests_after_first);
+            assert_eq!(requests_after_second, requests_after_first + 3);
             assert_eq!(
                 lookup_object_store_op_histogram_count(&metrics_recorder, "db", "main", "get"),
-                requests_after_first as u64
+                requests_after_second as u64
             );
             kv_store.close().await.unwrap();
+        }
+
+        /// Warming a disk cache by enumerating SSTs from the manifest,
+        /// resolving their paths with `PathResolver`, and loading their raw
+        /// bytes with `load_files_to_cache`.
+        #[tokio::test]
+        async fn test_preload_disk_cache_from_manifest() {
+            let fixture =
+                ObjectStoreCacheTest::builder("/tmp/test_preload_disk_cache_from_manifest")
+                    .build()
+                    .await;
+
+            // Two flushed L0 SSTs, not admitted on write.
+            for (key, value) in [(b"k1", b"v1"), (b"k2", b"v2")] {
+                fixture.db().put(key, value).await.unwrap();
+                fixture.db().flush().await.unwrap();
+                fixture
+                    .db()
+                    .flush_with_options(FlushOptions {
+                        flush_type: FlushType::MemTable,
+                    })
+                    .await
+                    .unwrap();
+            }
+
+            let ids = fixture.l0_ids();
+            assert_eq!(ids.len(), 2);
+            let paths: Vec<_> = ids
+                .iter()
+                .map(|id| fixture.compacted_sst_path(id))
+                .collect();
+            for path in &paths {
+                fixture.assert_cached(path, 0);
+            }
+
+            let cache = fixture.cache.as_ref().unwrap();
+            cache
+                .load_files_to_cache(paths.clone(), usize::MAX)
+                .await
+                .unwrap();
+
+            // Each small SST fits in a single 1 KiB part.
+            for path in &paths {
+                fixture.assert_cached(path, 1);
+            }
+            fixture.close().await;
         }
 
         /// A flushed L0 SST is a compacted SST written by the main store, so

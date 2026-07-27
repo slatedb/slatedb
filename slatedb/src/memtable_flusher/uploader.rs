@@ -391,7 +391,7 @@ mod tests {
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(Arc::clone(&object_store), None),
             SsTableFormat::default(),
-            PathResolver::new(Path::from(path)),
+            PathResolver::from_root(Path::from(path)),
             fp_registry.clone(),
             cache,
             TableStoreKind::Main,

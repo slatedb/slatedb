@@ -3200,22 +3200,27 @@ mod tests {
         db.flush().await.unwrap();
         db.close().await.unwrap();
 
-        // Open a DbReader with disk caching enabled
+        // Open a DbReader over a user-constructed cached store
         let cache_dir = tempfile::Builder::new()
             .prefix("dbreader_cache_test_")
             .tempdir()
             .unwrap();
         let cache_path = cache_dir.keep();
 
-        let mut reader_opts = DbReaderOptions::default();
-        reader_opts.object_store_cache_options.root_folder = Some(cache_path.clone());
-        reader_opts.object_store_cache_options.part_size_bytes = 1024;
+        let cached_store = crate::cached_object_store::CachedObjectStore::builder(
+            cache_path.clone(),
+            Arc::clone(&object_store),
+        )
+        .with_part_size_bytes(1024)
+        .build()
+        .await
+        .unwrap();
 
         let reader = DbReader::open(
             path.clone(),
-            Arc::clone(&object_store),
+            cached_store,
             DbReaderMode::ManagedCheckpoint,
-            reader_opts,
+            DbReaderOptions::default(),
         )
         .await
         .unwrap();
@@ -3275,7 +3280,7 @@ mod tests {
             Arc::new(TableStore::new_with_fp_registry(
                 ObjectStores::new(Arc::clone(&self.object_store), None),
                 SsTableFormat::default(),
-                PathResolver::new(self.path.clone()),
+                PathResolver::from_root(self.path.clone()),
                 Arc::clone(&self.fp_registry),
                 None,
                 TableStoreKind::Reader,

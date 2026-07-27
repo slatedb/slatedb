@@ -502,7 +502,7 @@ mod tests {
             TableStoreKind::Main,
             BlockCachePolicy::default(),
         );
-        let path_resolver = PathResolver::new(root_path);
+        let path_resolver = PathResolver::from_root(root_path);
 
         // 16-byte keys/values, no timestamps. Keys are spread across the
         // keyspace (bit-reversed counter in the leading bytes) so adjacent keys
@@ -535,7 +535,7 @@ mod tests {
 
         let actual_size = |id: &SsTableId| {
             let object_store = object_store.clone();
-            let path = path_resolver.table_path(id);
+            let path = path_resolver.sst_path(id);
             async move { object_store.head(&path).await.unwrap().size as usize }
         };
 

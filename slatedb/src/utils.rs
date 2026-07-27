@@ -662,7 +662,7 @@ pub(crate) async fn preload_cache_from_manifest(
         Some(PreloadLevel::AllSst) => {
             let all_sst_paths: Vec<object_store::path::Path> = core
                 .all_sst_views()
-                .map(|view| path_resolver.table_path(&view.sst.id))
+                .map(|view| path_resolver.sst_path(&view.sst.id))
                 .collect();
             if !all_sst_paths.is_empty() {
                 if let Err(e) = cached_obj_store
@@ -677,7 +677,7 @@ pub(crate) async fn preload_cache_from_manifest(
             let l0_sst_paths: Vec<object_store::path::Path> = core
                 .trees()
                 .flat_map(|tree| tree.l0.iter())
-                .map(|view| path_resolver.table_path(&view.sst.id))
+                .map(|view| path_resolver.sst_path(&view.sst.id))
                 .collect();
             if !l0_sst_paths.is_empty() {
                 if let Err(e) = cached_obj_store
