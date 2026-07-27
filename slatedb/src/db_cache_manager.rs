@@ -6,46 +6,13 @@ use log::{debug, warn};
 use tokio::sync::OnceCell;
 
 use crate::bytes_range::BytesRange;
+use crate::db_cache::CacheTarget;
 use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::manifest::VersionedManifest;
 use crate::partitioned_keyspace::partitions_covering_range;
 use crate::tablestore::TableStore;
-
-/// Cache content that [`DbCacheManagerOps::warm_sst`](crate::DbCacheManagerOps::warm_sst) should populate.
-#[derive(Clone, Debug)]
-pub enum CacheTarget {
-    /// Warm all filters on the SST, if any exist.
-    Filters,
-    /// Warm the SST index.
-    Index,
-    /// Warm the SST stats block, if one exists.
-    Stats,
-    /// Warm the SST data blocks that overlap the supplied key range.
-    ///
-    /// Also warms the SST index, since block planning depends on it.
-    Data((Bound<Bytes>, Bound<Bytes>)),
-}
-
-impl CacheTarget {
-    /// Convenience constructor for [`CacheTarget::Data`] that accepts any
-    /// [`RangeBounds`], mirroring the `Db::scan` signature. Pass `..` to
-    /// warm all data blocks.
-    pub fn data<K, T>(range: T) -> Self
-    where
-        K: AsRef<[u8]>,
-        T: RangeBounds<K>,
-    {
-        let start = range
-            .start_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        let end = range
-            .end_bound()
-            .map(|b| Bytes::copy_from_slice(b.as_ref()));
-        CacheTarget::Data((start, end))
-    }
-}
 
 pub(crate) async fn warm_sst_impl(
     table_store: &Arc<TableStore>,

@@ -14,6 +14,7 @@ use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use ulid::Ulid;
 
+use crate::block_cache_policy::BlockCachePolicy;
 use crate::bytes_generator::OrderedBytesGenerator;
 use crate::compaction_worker::WorkerMessage;
 use crate::compactor::stats::{CompactionStats, WorkerStats};
@@ -79,6 +80,7 @@ impl CompactionExecuteBench {
             self.path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let num_keys = sst_bytes / (val_bytes + key_bytes);
         let mut key_start = vec![0u8; key_bytes - mem::size_of::<u32>()];
@@ -331,6 +333,7 @@ impl CompactionExecuteBench {
             self.path.clone(),
             None,
             TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
         ));
         let (tx, rx) = async_channel::unbounded();
         let worker_options = CompactionWorkerOptions::default();

@@ -31,6 +31,37 @@ Reads consult the block cache first. On a miss there, SlateDB fetches bytes thro
 
 The defaults reflect the usual access patterns. Point reads default to `cache_blocks = true` because they are more likely to revisit hot data. Scans default to `cache_blocks = false` so a long sequential read does not fill the cache with data blocks that probably will not be reused soon. Scans can still benefit from entries that are already hot. Internal tasks follow the same idea: WAL replay and compaction read SSTs without populating the foreground cache.
 
+Writes fill the block cache as well. [`BlockCachePolicy`](https://docs.rs/slatedb/latest/slatedb/struct.BlockCachePolicy.html) selects which components of an SST are inserted as that SST is written, and you install it with [`DbBuilder::with_block_cache_policy`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_block_cache_policy). The policy applies to the block cache only. Admission into the object-store cache is controlled separately, as described below.
+
+The policy holds one target list per write source. The default inserts data blocks, the index, and the filters after a memtable flush, and inserts only the index and the filters as compaction output is written, so compaction does not evict blocks that reads have made hot. Replace either list with [`BlockCachePolicy::with_flush_targets`](https://docs.rs/slatedb/latest/slatedb/struct.BlockCachePolicy.html#method.with_flush_targets) or [`BlockCachePolicy::with_compaction_output_targets`](https://docs.rs/slatedb/latest/slatedb/struct.BlockCachePolicy.html#method.with_compaction_output_targets). An empty list disables insertion for that source.
+
+Each list holds [`CacheTarget`](https://docs.rs/slatedb/latest/slatedb/db_cache/enum.CacheTarget.html) values:
+
+- `CacheTarget::Filters` inserts the SST filter blocks, if any exist.
+- `CacheTarget::Index` inserts the SST index.
+- `CacheTarget::Stats` inserts the SST stats block, if one exists.
+- `CacheTarget::data(range)` inserts the data blocks whose key span overlaps `range`.
+
+`CacheTarget::data` accepts any key range, so `CacheTarget::data::<&[u8], _>(..)` selects every data block, while `CacheTarget::data(b"user:".as_slice()..b"user;".as_slice())` selects only the blocks covering that key range. This policy caches all four components after a flush and nothing after compaction:
+
+```rust
+use slatedb::{BlockCachePolicy, CacheTarget, Db};
+
+let policy = BlockCachePolicy::default()
+    .with_flush_targets(&[
+        CacheTarget::data::<&[u8], _>(..),
+        CacheTarget::Index,
+        CacheTarget::Filters,
+        CacheTarget::Stats,
+    ])
+    .with_compaction_output_targets(&[]);
+
+let db = Db::builder(path, object_store)
+    .with_block_cache_policy(policy)
+    .build()
+    .await?;
+```
+
 The disk cache stays disabled unless `object_store_cache_options.root_folder` is set. If you want it warm before serving traffic, you can preload it on startup with [`PreloadLevel::L0Sst`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html#variant.L0Sst) or [`PreloadLevel::AllSst`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html#variant.AllSst). SlateDB loads recent SSTs, or all SSTs, into the local cache until the cache size limit is reached.
 
 By default, writes go straight to the upstream object store and do not populate the object-store cache. Each SST write source has its own admission flag: [`cache_on_flush`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.cache_on_flush) stores SSTs written by memtable flushes locally, and [`cache_on_compaction`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.cache_on_compaction) does the same for compaction output. Enabling them can help if readers are likely to touch freshly written SSTs soon afterward. WAL and manifest writes are never cached.

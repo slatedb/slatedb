@@ -117,6 +117,7 @@ use tokio::runtime::Handle;
 use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
+use crate::block_cache_policy::BlockCachePolicy;
 use crate::cached_object_store::CachedObjectStore;
 use crate::clone::{SegmentFilterFn, SegmentProjectionFn};
 #[cfg(feature = "compaction_filters")]
@@ -179,6 +180,7 @@ pub struct DbBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     db_cache: Option<Arc<dyn DbCache>>,
+    block_cache_policy: BlockCachePolicy,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
     compactor_builder: Option<CompactorBuilder<Path>>,
@@ -202,6 +204,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             settings: Settings::default(),
             wal_object_store: None,
             db_cache: default_db_cache(),
+            block_cache_policy: BlockCachePolicy::default(),
             system_clock: None,
             gc_runtime: None,
             compactor_builder: None,
@@ -273,6 +276,13 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Disables the sst block/metadata cache
     pub fn with_db_cache_disabled(mut self) -> Self {
         self.db_cache = None;
+        self
+    }
+
+    /// Sets the policy for inserting flush and compaction output into the
+    /// decoded block cache.
+    pub fn with_block_cache_policy(mut self, policy: BlockCachePolicy) -> Self {
+        self.block_cache_policy = policy;
         self
     }
 
@@ -532,6 +542,13 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
+        let db_cache = self.db_cache.as_ref().map(|cache| {
+            Arc::new(DbCacheWrapper::new(
+                cache.clone(),
+                &recorder,
+                system_clock.clone(),
+            )) as Arc<dyn DbCache>
+        });
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(
                 maybe_cached_main_object_store.clone(),
@@ -540,14 +557,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             sst_format.clone(),
             path_resolver.clone(),
             self.fp_registry.clone(),
-            self.db_cache.as_ref().map(|c| {
-                Arc::new(DbCacheWrapper::new(
-                    c.clone(),
-                    &recorder,
-                    system_clock.clone(),
-                )) as Arc<dyn DbCache>
-            }),
+            db_cache.clone(),
             TableStoreKind::Main,
+            self.block_cache_policy.clone(),
         ));
 
         // Initialize the database
@@ -706,8 +718,9 @@ impl<P: Into<Path>> DbBuilder<P> {
                 sst_format.clone(),
                 path_resolver.clone(),
                 self.fp_registry.clone(),
-                None,
+                db_cache.clone(),
                 TableStoreKind::Compactor,
+                self.block_cache_policy.clone(),
             ));
             let compactor_handlers = builder
                 .build_handler(
@@ -760,6 +773,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 self.fp_registry.clone(),
                 None,
                 TableStoreKind::GC,
+                BlockCachePolicy::default(),
             ));
             let gc = gc_builder
                 .with_system_clock(system_clock.clone())
@@ -1049,6 +1063,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             path,
             None, // no need for cache in GC
             TableStoreKind::GC,
+            BlockCachePolicy::default(),
         ));
         GarbageCollector::new(
             manifest_store,
@@ -1273,6 +1288,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             path,
             None,
             TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
         ));
 
         let scheduler_supplier = self
@@ -1490,6 +1506,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             path,
             None,
             TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
         ));
         let recorder = MetricsRecorderHelper::new(
             self.metrics_recorder,
@@ -1829,6 +1846,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             Arc::new(FailPointRegistry::new()),
             wrapped_cache,
             TableStoreKind::Reader,
+            BlockCachePolicy::default(),
         ));
 
         let reader = DbReader::open_internal(
