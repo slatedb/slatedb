@@ -1726,27 +1726,26 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
 
     #[test]
     fn test_db_options_load_from_env() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("SLATEDB_FLUSH_INTERVAL", "1s");
-            jail.set_env("SLATEDB_COMPACTOR_OPTIONS.MAX_CONCURRENT_COMPACTIONS", "7");
+            jail.set_env(
+                "SLATEDB_OBJECT_STORE_CACHE_OPTIONS.ROOT_FOLDER",
+                "/tmp/slatedb-root",
+            );
 
             let options =
                 Settings::from_env("SLATEDB_").expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
-                7,
-                options
-                    .compactor_options
-                    .expect("compactor options")
-                    .max_concurrent_compactions
+                Some(PathBuf::from("/tmp/slatedb-root")),
+                options.object_store_cache_options.root_folder
             );
-
             Ok(())
         });
     }
@@ -1816,8 +1815,8 @@ mod tests {
 {
     "flush_interval": "1s",
     "metric_level": "Debug",
-    "compactor_options": {
-        "max_concurrent_compactions": 7
+     "object_store_cache_options": {
+        "root_folder": "/tmp/slatedb-root"
     }
 }
 "#,
@@ -1829,11 +1828,8 @@ mod tests {
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(MetricLevel::Debug, options.metric_level);
             assert_eq!(
-                7,
-                options
-                    .compactor_options
-                    .expect("compactor options")
-                    .max_concurrent_compactions
+                Some(PathBuf::from("/tmp/slatedb-root")),
+                options.object_store_cache_options.root_folder
             );
             Ok(())
         });
@@ -1865,8 +1861,8 @@ mod tests {
                 r#"
 flush_interval = "1s"
 metric_level = "Debug"
-[compactor_options]
-max_concurrent_compactions = 7
+[object_store_cache_options]
+root_folder = "/tmp/slatedb-root"
 "#,
             )
             .expect("failed to create db options config file");
@@ -1876,11 +1872,8 @@ max_concurrent_compactions = 7
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(MetricLevel::Debug, options.metric_level);
             assert_eq!(
-                7,
-                options
-                    .compactor_options
-                    .expect("compactor options")
-                    .max_concurrent_compactions
+                Some(PathBuf::from("/tmp/slatedb-root")),
+                options.object_store_cache_options.root_folder
             );
             Ok(())
         });
@@ -1894,8 +1887,8 @@ max_concurrent_compactions = 7
                 r#"
 flush_interval: "1s"
 metric_level: Debug
-compactor_options:
-    max_concurrent_compactions: 7
+object_store_cache_options:
+    root_folder: "/tmp/slatedb-root"
 "#,
             )
             .expect("failed to create db options config file");
@@ -1905,11 +1898,8 @@ compactor_options:
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(MetricLevel::Debug, options.metric_level);
             assert_eq!(
-                7,
-                options
-                    .compactor_options
-                    .expect("compactor options")
-                    .max_concurrent_compactions
+                Some(PathBuf::from("/tmp/slatedb-root")),
+                options.object_store_cache_options.root_folder
             );
             Ok(())
         });
@@ -1923,8 +1913,8 @@ compactor_options:
             jail.create_file(
                 "SlateDb.yaml",
                 r#"
-compactor_options:
-    max_concurrent_compactions: 7
+object_store_cache_options:
+    root_folder: "/tmp/slatedb-root"
 "#,
             )
             .expect("failed to create db options config file");
@@ -1932,11 +1922,8 @@ compactor_options:
             let options = Settings::load().expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(
-                7,
-                options
-                    .compactor_options
-                    .expect("compactor options")
-                    .max_concurrent_compactions
+                Some(PathBuf::from("/tmp/slatedb-root")),
+                options.object_store_cache_options.root_folder
             );
             Ok(())
         });

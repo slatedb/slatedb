@@ -11386,26 +11386,25 @@ mod tests {
         #[tokio::test]
         async fn test_get_with_object_store_cache_metrics() {
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-            let opts = test_db_options(0, 1024, None);
+            let mut opts = test_db_options(0, 1024, None);
             let temp_dir = tempfile::Builder::new()
                 .prefix("objstore_cache_test_")
                 .tempdir()
                 .unwrap();
 
+            opts.object_store_cache_options.root_folder = Some(temp_dir.keep());
+            opts.object_store_cache_options.part_size_bytes = 1024;
             let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
-            let cached_store = CachedObjectStore::builder(temp_dir.keep(), object_store.clone())
-                .with_part_size_bytes(1024)
-                .with_metrics_recorder(metrics_recorder.clone())
-                .build()
-                .await
-                .unwrap();
-            let kv_store = Db::builder("/tmp/test_kv_store_with_cache_metrics", cached_store)
-                .with_settings(opts)
-                .with_db_cache_disabled()
-                .with_metrics_recorder(metrics_recorder.clone())
-                .build()
-                .await
-                .unwrap();
+            let kv_store = Db::builder(
+                "/tmp/test_kv_store_with_cache_metrics",
+                object_store.clone(),
+            )
+            .with_settings(opts)
+            .with_db_cache_disabled()
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
 
             let access_count0 = lookup_metric(&metrics_recorder, PART_ACCESS_COUNT).unwrap();
             let key = b"test_key";
