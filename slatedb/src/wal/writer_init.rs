@@ -12,6 +12,21 @@ use slatedb_common::metrics::MetricsRecorderHelper;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[derive(Clone, Copy)]
+pub(crate) struct WalWriterInitOptions {
+    max_wal_bytes_size: usize,
+    max_flush_interval: Option<Duration>,
+}
+
+impl From<&Settings> for WalWriterInitOptions {
+    fn from(settings: &Settings) -> Self {
+        Self {
+            max_wal_bytes_size: settings.l0_sst_size_bytes,
+            max_flush_interval: settings.flush_interval,
+        }
+    }
+}
+
 pub(crate) struct WalWriterInit {
     closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
     recorder: MetricsRecorderHelper,
@@ -29,7 +44,7 @@ impl WalWriterInit {
         closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         recorder: MetricsRecorderHelper,
         table_store: Arc<TableStore>,
-        settings: &Settings,
+        options: WalWriterInitOptions,
         manifest: &Manifest,
         task_executor: Arc<MessageHandlerExecutor>,
         fp_tx: FailPointTx,
@@ -42,8 +57,8 @@ impl WalWriterInit {
             closed_result_reader,
             recorder,
             table_store,
-            max_wal_bytes_size: settings.l0_sst_size_bytes,
-            max_flush_interval: settings.flush_interval,
+            max_wal_bytes_size: options.max_wal_bytes_size,
+            max_flush_interval: options.max_flush_interval,
             empty_wal_id,
             task_executor,
             fp_tx,

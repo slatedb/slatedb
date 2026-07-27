@@ -308,16 +308,18 @@ impl DbInner {
         if options.await_durable {
             let seq = write_handle.seq;
             let mut status_subscription = self.status_manager.subscribe();
-            let durable = status_subscription.wait_for(|s| s.durable_seq >= seq);
-            let mut error = self.status_manager.result_reader();
-            tokio::select! {
-                result = durable => {
-                    result.map_err(|_| SlateDBError::Closed)?;
-                },
-                result = error.await_value() => {
-                    result?;
-                },
-            };
+            let status = status_subscription
+                .wait_for(|s| s.durable_seq >= seq || s.close_reason.is_some())
+                .await
+                .map_err(|_| SlateDBError::Closed)?;
+            if status.durable_seq < seq {
+                self.check_closed()?;
+                warn!(
+                    "durable seq {} not advanced past write seq {} and db not closed",
+                    status.durable_seq, seq
+                );
+                return Err(SlateDBError::InvalidDBState);
+            }
         }
 
         Ok(write_handle)
@@ -6157,6 +6159,71 @@ mod tests {
         db.close()
             .await
             .expect_err("close should error out due to WAL IO error");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_await_durable_write_returns_error_if_db_closes_before_durable() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut settings = test_db_options(0, 1024, None);
+        settings.flush_interval = None;
+        let db = Arc::new(
+            Db::builder(
+                "/tmp/test_await_durable_write_returns_error_if_db_closes_before_durable",
+                object_store,
+            )
+            .with_settings(settings)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap(),
+        );
+        // pause writes so that we can force the write to fail on the close status before the
+        // final flush causes the write to become durable
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+        let write_db = db.clone();
+        let write_task = tokio::spawn(async move {
+            write_db
+                .put_with_options(
+                    b"foo",
+                    b"bar",
+                    &PutOptions::default(),
+                    &WriteOptions::default(),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if db
+                    .inner
+                    .wal_observer
+                    .status()
+                    .unwrap()
+                    .buffered_wal_entries_count
+                    == 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("write was not buffered");
+        let close_db = db.clone();
+        let close_task = tokio::spawn(async move { close_db.close().await });
+
+        let write_error = tokio::time::timeout(Duration::from_secs(10), write_task)
+            .await
+            .expect("timed out waiting for write")
+            .expect("write task panicked")
+            .expect_err("write unexpectedly reported success");
+
+        assert_eq!(
+            write_error.kind(),
+            crate::ErrorKind::Closed(CloseReason::Clean)
+        );
+        fail_parallel::cfg(fp_registry, "write-wal-sst-io-error", "off").unwrap();
+        let _ = close_task.await.unwrap();
     }
 
     async fn do_test_should_read_compacted_db(mut options: Settings) {

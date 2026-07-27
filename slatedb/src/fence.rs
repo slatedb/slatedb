@@ -3,7 +3,7 @@ use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, StoredManifest};
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCellReader;
-use crate::wal::writer_init::WalWriterInit;
+use crate::wal::writer_init::{WalWriterInit, WalWriterInitOptions};
 use crate::wal::{WalWriter, WriterInit};
 use crate::Settings;
 use fail_parallel::{fail_point_send, FailPointTx};
@@ -17,7 +17,7 @@ use std::time::Duration;
 pub(crate) struct WriterFencer {
     closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
     recorder: MetricsRecorderHelper,
-    settings: Settings,
+    wal_writer_init_options: WalWriterInitOptions,
     table_store: Arc<TableStore>,
     manifest_update_timeout: Duration,
     system_clock: Arc<dyn SystemClock>,
@@ -65,7 +65,7 @@ impl WriterFencer {
             closed_result_reader,
             recorder,
             table_store,
-            settings: settings.clone(),
+            wal_writer_init_options: settings.into(),
             manifest_update_timeout: settings.manifest_update_timeout,
             system_clock,
             task_executor,
@@ -90,7 +90,7 @@ impl WriterFencer {
             self.closed_result_reader.clone(),
             self.recorder.clone(),
             self.table_store.clone(),
-            &self.settings,
+            self.wal_writer_init_options,
             stored_manifest.manifest(),
             self.task_executor.clone(),
             self.fp_tx.clone(),
