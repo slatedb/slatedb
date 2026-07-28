@@ -1784,12 +1784,14 @@ mod tests {
         options.flush_interval = None;
         // Ensure that filter is built.
         options.min_filter_keys = 1;
-        options
+        let compactor_options = options
             .compactor_options
             .as_mut()
-            .expect("compactor options must be set")
-            .scheduler_options = SizeTieredCompactionSchedulerOptions {
-            min_compaction_sources: 2,
+            .expect("compactor options must be set");
+        compactor_options.enable_trivial_move = false;
+        compactor_options.scheduler_options = SizeTieredCompactionSchedulerOptions {
+            // Compact even a single L0 so one flush is enough to trigger.
+            min_compaction_sources: 1,
             ..Default::default()
         }
         .into();
@@ -1805,28 +1807,24 @@ mod tests {
             .await
             .unwrap();
 
-        // Two overlapping L0s force executor compaction instead of a trivial
-        // move, which is what this output-cache-policy test needs to exercise.
-        for value in [b"old".as_slice(), b"value".as_slice()] {
-            for key in [b"a", b"b", b"c", b"d"] {
-                db.put_with_options(
-                    key,
-                    value,
-                    &PutOptions::default(),
-                    &WriteOptions {
-                        await_durable: false,
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-            }
-            db.flush_with_options(FlushOptions {
-                flush_type: FlushType::MemTable,
-            })
+        for key in [b"a", b"b", b"c", b"d"] {
+            db.put_with_options(
+                key,
+                b"value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                    ..Default::default()
+                },
+            )
             .await
             .unwrap();
         }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
 
         let db_state = await_compaction(&db, os.clone(), Some(system_clock))
             .await
@@ -3576,12 +3574,12 @@ mod tests {
         }
         .into();
         let mut options = db_options(Some(compactor_options()));
-        options.flush_interval = None;
-        options
+        let compactor_options = options
             .compactor_options
             .as_mut()
-            .expect("compactor options missing")
-            .scheduler_options = scheduler_options;
+            .expect("compactor options missing");
+        compactor_options.enable_trivial_move = false;
+        compactor_options.scheduler_options = scheduler_options;
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(insert_clock.clone())
@@ -3643,27 +3641,14 @@ mod tests {
         )
         .await
         .unwrap();
-        // Overwrite key 2 in the second L0 so this retention test exercises
-        // executor compaction rather than a trivial move.
-        db.put_with_options(
-            &[2; 16],
-            value,
-            &PutOptions {
-                ttl: Ttl::ExpireAt(i64::MAX),
-            },
-            &WriteOptions {
-                await_durable: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
 
         db.flush_with_options(flush_opts.clone()).await.unwrap();
 
         // when: await_compaction advances clock by 60s per iteration,
         // so compaction_start_ts will be well past expire_at=10
-        let db_state = await_compaction(&db, os.clone(), Some(insert_clock)).await;
+        let db_state =
+            await_compaction_matching(&db, os.clone(), Some(insert_clock), has_single_output_sst)
+                .await;
 
         // then: key 1 should be expired (expire_at=10 < compaction_time),
         //       key 2 should survive (expire_at=i64::MAX), key 3 has no expiry
@@ -3686,8 +3671,8 @@ mod tests {
         assert_iterator(
             &mut iter,
             vec![
-                RowEntry::new_value(&[2; 16], value, 4)
-                    .with_create_ts(10)
+                RowEntry::new_value(&[2; 16], value, 2)
+                    .with_create_ts(5)
                     .with_expire_ts(i64::MAX),
                 RowEntry::new_value(&[3; 16], value, 3).with_create_ts(10),
             ],
@@ -4845,18 +4830,18 @@ mod tests {
             self.manifest.refresh().await.unwrap().core.clone()
         }
 
-        async fn write_l0(&mut self) {
-            let mut rng = rng::new_test_rng(None);
-            let mut k = vec![0u8; self.options.l0_sst_size_bytes];
-            rng.fill_bytes(&mut k);
-            self.write_l0_with_key(&k).await;
+        fn disable_trivial_moves(&mut self) {
+            Arc::make_mut(&mut self.handler.options).enable_trivial_move = false;
         }
 
-        async fn write_l0_with_key(&mut self, key: &[u8]) {
+        async fn write_l0(&mut self) {
+            let mut rng = rng::new_test_rng(None);
             let manifest = self.manifest.refresh().await.unwrap();
             let l0s = manifest.core.tree.l0.len();
             // TODO: add an explicit flush_memtable fn to db and use that instead
-            self.db.put(key, &[b'x'; 10]).await.unwrap();
+            let mut k = vec![0u8; self.options.l0_sst_size_bytes];
+            rng.fill_bytes(&mut k);
+            self.db.put(&k, &[b'x'; 10]).await.unwrap();
             self.db.flush().await.unwrap();
             loop {
                 let manifest = self.manifest.refresh().await.unwrap().clone();
@@ -4967,14 +4952,18 @@ mod tests {
     async fn test_should_record_last_compaction_ts() {
         // given:
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.disable_trivial_moves();
         fixture.write_l0().await;
         let compaction = fixture.build_l0_compaction().await;
         fixture.scheduler.inject_compaction(compaction.clone());
+        fixture.handler.handle_ticker().await.unwrap();
+        fixture.simulate_worker_completes().await;
+
         let starting_last_ts =
             slatedb_common::metrics::lookup_metric(&fixture.test_recorder, LAST_COMPACTION_TS_SEC)
                 .expect("metric not found");
 
-        // when: the coordinator completes the trivial move
+        // when: coordinator commits the Compacted entry
         fixture.handler.handle_ticker().await.unwrap();
 
         // then:
@@ -5035,11 +5024,12 @@ mod tests {
     async fn test_should_persist_compactions_on_start_and_finish() {
         // given:
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.disable_trivial_moves();
         fixture.write_l0().await;
         let compaction = fixture.build_l0_compaction().await;
         fixture.scheduler.inject_compaction(compaction.clone());
 
-        // when: schedule and trivially complete the compaction
+        // when: schedule compaction → Scheduled persisted
         fixture.handler.handle_ticker().await.unwrap();
 
         let stored_compactions = fixture
@@ -5060,15 +5050,18 @@ mod tests {
             .next()
             .expect("compaction should be persisted")
             .id();
-        let state_compaction = fixture
+        let state_id = fixture
             .handler
             .state()
-            .compactions()
-            .value
-            .get(&scheduled_id)
+            .active_compactions()
+            .next()
             .expect("state missing compaction")
-            .clone();
-        assert_eq!(state_compaction.status(), CompactionStatus::Completed);
+            .id();
+        assert_eq!(scheduled_id, state_id);
+
+        // worker executes, writes Compacted; coordinator commits on next tick
+        fixture.simulate_worker_completes().await;
+        fixture.handler.handle_ticker().await.unwrap();
 
         // then: finished compaction is retained (one entry for GC)
         let stored_compactions = fixture
@@ -5124,21 +5117,10 @@ mod tests {
     #[tokio::test]
     async fn test_maybe_validate_submitted_compactions_promotes_to_scheduled() {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
-        let l0 = bounded_sst_view(1, b"a", b"m");
-        let sr_view = bounded_sst_view(2, b"m", b"z");
-        let core = &mut fixture
-            .handler
-            .state_writer
-            .state
-            .manifest_mut_for_test()
-            .value
-            .core;
-        Arc::make_mut(&mut core.tree).l0 = VecDeque::from([l0.clone()]);
-        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
-            id: 1,
-            sst_views: vec![sr_view],
-        }];
-        let spec = CompactionSpec::new(vec![SourceId::SstView(l0.id), SourceId::SortedRun(1)], 2);
+        fixture.disable_trivial_moves();
+        fixture.write_l0().await;
+        fixture.handler.state_writer.refresh().await.unwrap();
+        let spec = fixture.build_l0_compaction().await;
         let compaction_id = Ulid::new();
         fixture
             .handler
@@ -5406,8 +5388,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_ticker_completes_preexisting_submitted_trivial_move() {
-        let compactor_options = Arc::new(compactor_options());
+    async fn test_handle_ticker_starts_preexisting_submitted_compaction() {
+        let mut compactor_options = compactor_options();
+        compactor_options.enable_trivial_move = false;
+        let compactor_options = Arc::new(compactor_options);
         let options = db_options(None);
 
         let os = Arc::new(InMemory::new());
@@ -5481,8 +5465,7 @@ mod tests {
 
         handler.handle_ticker().await.unwrap();
 
-        // A single input SST is non-overlapping, so the coordinator completes
-        // the pre-existing submission without handing it to a worker.
+        // The pre-existing Submitted compaction should be promoted to Scheduled.
         let stored = compactions_store
             .read_latest_compactions()
             .await
@@ -5493,10 +5476,8 @@ mod tests {
                 .get(&compaction_id)
                 .expect("missing stored compaction")
                 .status(),
-            CompactionStatus::Completed
+            CompactionStatus::Scheduled
         );
-        assert!(handler.state().db_state().tree.l0.is_empty());
-        assert_eq!(handler.state().db_state().tree.compacted.len(), 1);
     }
 
     #[tokio::test]
@@ -5558,21 +5539,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_not_schedule_conflicting_compaction() {
-        // given: one compaction already reserves the destination
+        // given: first ticker schedules a compaction (Scheduled in local state)
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
-        let compaction = CompactionSpec::new(vec![SourceId::SortedRun(1)], 2);
-        fixture
-            .handler
-            .state_mut()
-            .add_compaction(
-                Compaction::new(Ulid::new(), compaction.clone())
-                    .with_status(CompactionStatus::Scheduled),
-            )
-            .unwrap();
+        fixture.disable_trivial_moves();
+        fixture.write_l0().await;
+        let compaction = fixture.build_l0_compaction().await;
+        fixture.scheduler.inject_compaction(compaction.clone());
+        fixture.handler.handle_ticker().await.unwrap();
+        assert_eq!(fixture.get_scheduled_compactions().await.len(), 1);
+        fixture.write_l0().await;
         fixture.scheduler.inject_compaction(compaction.clone());
 
-        // when: scheduling the same spec again hits the destination guard
-        fixture.handler.maybe_schedule_compactions().await.unwrap();
+        // when: second ticker with same spec — add_compaction rejects duplicate destination
+        fixture.handler.handle_ticker().await.unwrap();
 
         // then: still only one active compaction (no duplicate added)
         assert_eq!(1, fixture.handler.state().active_compactions().count());
@@ -5906,6 +5885,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_compaction_rejects_parallel_l0() {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.disable_trivial_moves();
         // write two L0s so we can build two disjoint L0 compactions
         fixture.write_l0().await;
         fixture.write_l0().await;
@@ -5917,15 +5897,9 @@ mod tests {
         // Build first L0 compaction from the oldest L0
         let first_l0 =
             CompactionSpec::new(vec![SourceId::SstView(state.tree.l0.back().unwrap().id)], 0);
-        // Seed the first claim directly. Running the normal submitted path
-        // would trivially move this single-SST compaction.
-        fixture
-            .handler
-            .state_mut()
-            .add_compaction(
-                Compaction::new(Ulid::new(), first_l0).with_status(CompactionStatus::Scheduled),
-            )
-            .unwrap();
+        // Inject and schedule it so it becomes active
+        fixture.scheduler.inject_compaction(first_l0.clone());
+        fixture.handler.handle_ticker().await.unwrap();
 
         // Build second L0 compaction from the newest L0 (disjoint sources)
         let second_l0 = CompactionSpec::new(
