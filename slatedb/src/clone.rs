@@ -1356,6 +1356,124 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn should_project_wal_contents_in_clone() {
+        // Data that only lives in the parent's WAL at the checkpoint is copied
+        // to the clone verbatim and replayed on first open, so the projection
+        // range must apply to replayed WAL entries just as it does to L0 data.
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent_wal_projection");
+        let clone_path = Path::from("/tmp/test_clone_wal_projection");
+
+        let parent_db = Db::builder(parent_path.clone(), object_store.clone())
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+        let write_options = WriteOptions {
+            await_durable: false,
+            ..Default::default()
+        };
+        let put_options = PutOptions::default();
+
+        // Keys inside and outside the projection range [aaa, bbb), flushed
+        // through to L0 ...
+        parent_db
+            .put_with_options(b"aaa-l0", b"v1", &put_options, &write_options)
+            .await
+            .unwrap();
+        parent_db
+            .put_with_options(b"zzz-l0", b"v2", &put_options, &write_options)
+            .await
+            .unwrap();
+        parent_db.flush().await.unwrap();
+        parent_db
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+
+        // ... and the same shape of data made durable only in the WAL.
+        parent_db
+            .put_with_options(b"aaa-wal", b"v3", &put_options, &write_options)
+            .await
+            .unwrap();
+        parent_db
+            .put_with_options(b"zzz-wal", b"v4", &put_options, &write_options)
+            .await
+            .unwrap();
+        parent_db.flush().await.unwrap();
+
+        let manifest = parent_db.manifest();
+        assert!(
+            !manifest.manifest.core.tree.l0.is_empty(),
+            "expected parent state to include L0 data"
+        );
+        assert!(
+            manifest.manifest.core.replay_after_wal_id + 1 < manifest.manifest.core.next_wal_sst_id,
+            "expected parent state to retain WAL-only SSTs"
+        );
+
+        // Block L0 uploads so the WAL-only data stays in the WAL.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            "return",
+        )
+        .unwrap();
+        // expect to fail since l0 upload is blocked
+        assert!(parent_db.close().await.is_err());
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
+
+        // Clone with a projection that keeps only keys in [aaa, bbb).
+        let range = (
+            Bound::Included(Bytes::from_static(b"aaa")),
+            Bound::Excluded(Bytes::from_static(b"bbb")),
+        );
+        crate::clone::create_clone(
+            vec![CloneSourceSpec::new(parent_path.clone())],
+            clone_path.clone(),
+            ObjectStores::new(object_store.clone(), Some(object_store.clone())),
+            Arc::new(FailPointRegistry::new()),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            Some(range),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let clone_db = Db::open(clone_path.clone(), object_store.clone())
+            .await
+            .unwrap();
+
+        // L0 data respects the projection.
+        assert_eq!(
+            clone_db.get(b"aaa-l0").await.unwrap(),
+            Some(Bytes::from_static(b"v1"))
+        );
+        assert_eq!(
+            clone_db.get(b"zzz-l0").await.unwrap(),
+            None,
+            "L0 entry outside the projection range must not be visible in the clone"
+        );
+
+        // Data replayed from the copied WAL SSTs must respect it too.
+        assert_eq!(
+            clone_db.get(b"aaa-wal").await.unwrap(),
+            Some(Bytes::from_static(b"v3"))
+        );
+        assert_eq!(
+            clone_db.get(b"zzz-wal").await.unwrap(),
+            None,
+            "WAL entry outside the projection range must not be visible in the clone"
+        );
+        clone_db.close().await.unwrap();
+    }
+
     fn segmented_table() -> BTreeMap<Bytes, Bytes> {
         BTreeMap::from([
             (Bytes::from_static(b"aaa-001"), Bytes::from_static(b"v1")),
