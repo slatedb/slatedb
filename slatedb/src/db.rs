@@ -5231,8 +5231,6 @@ mod tests {
         db.put_with_options(b"key1", &large_value, &PutOptions::default(), &write_opts)
             .await
             .unwrap();
-        // The frozen memtable is what parks the waiter below; without it
-        // maybe_apply_backpressure spins instead of blocking.
         assert!(!db.inner.state.read().state().imm_memtable.is_empty());
 
         // Start backpressure on a cloned inner handle. This parks the task on
