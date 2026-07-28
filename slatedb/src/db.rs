@@ -11576,6 +11576,26 @@ mod tests {
                 self.db.manifest().l0().iter().map(|v| v.sst.id).collect()
             }
 
+            /// Writes two L0s whose key spans overlap without overwriting a
+            /// key, forcing tests that exercise executor behavior past the
+            /// trivial-move path.
+            async fn write_overlapping_l0s(&self) {
+                for keys in [
+                    [b"key0000".as_slice(), b"key0002".as_slice()],
+                    [b"key0001".as_slice(), b"key0003".as_slice()],
+                ] {
+                    for key in keys {
+                        self.db.put(key, &[b'v'; 64]).await.unwrap();
+                    }
+                    self.db
+                        .flush_with_options(FlushOptions {
+                            flush_type: FlushType::MemTable,
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+
             /// Triggers one on-demand compaction and waits for a sorted run to
             /// land in the manifest. Requires `on_demand_compactor`.
             async fn compact_and_wait(&self) {
@@ -11883,16 +11903,7 @@ mod tests {
                 .build()
                 .await;
 
-            for i in 0..2u32 {
-                let key = format!("key{:04}", i);
-                t.db().put(key.as_bytes(), &[b'v'; 64]).await.unwrap();
-                t.db()
-                    .flush_with_options(FlushOptions {
-                        flush_type: FlushType::MemTable,
-                    })
-                    .await
-                    .unwrap();
-            }
+            t.write_overlapping_l0s().await;
             let l0_ids = t.l0_ids();
             assert_eq!(l0_ids.len(), 2);
 
@@ -11933,7 +11944,10 @@ mod tests {
             // Two ~10 MiB L0s; the ~20 MiB output crosses the multipart threshold.
             for sst in 0..2u32 {
                 for i in 0..10u32 {
-                    let key = format!("k{:04}", sst * 10 + i);
+                    // Even keys in one L0 and odd keys in the other make the
+                    // physical key spans overlap while preserving 20 unique
+                    // output rows.
+                    let key = format!("k{:04}", i * 2 + sst);
                     t.db()
                         .put(key.as_bytes(), &vec![i as u8; MIB])
                         .await
@@ -11975,16 +11989,7 @@ mod tests {
             .build()
             .await;
 
-            for i in 0..2u32 {
-                let key = format!("key{:04}", i);
-                t.db().put(key.as_bytes(), &[b'v'; 64]).await.unwrap();
-                t.db()
-                    .flush_with_options(FlushOptions {
-                        flush_type: FlushType::MemTable,
-                    })
-                    .await
-                    .unwrap();
-            }
+            t.write_overlapping_l0s().await;
             let l0_ids = t.l0_ids();
             assert_eq!(l0_ids.len(), 2);
 
@@ -12020,16 +12025,7 @@ mod tests {
                 }
                 let t = builder.build().await;
 
-                for i in 0..2u32 {
-                    let key = format!("key{:04}", i);
-                    t.db().put(key.as_bytes(), &[b'v'; 64]).await.unwrap();
-                    t.db()
-                        .flush_with_options(FlushOptions {
-                            flush_type: FlushType::MemTable,
-                        })
-                        .await
-                        .unwrap();
-                }
+                t.write_overlapping_l0s().await;
                 t.compact_and_wait().await;
 
                 let gets =
