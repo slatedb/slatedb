@@ -1003,15 +1003,14 @@ mod tests {
     async fn test_size_based_flush_triggering() {
         let (mut wal_buffer, _, _, _) = setup_wal_buffer_with_flush_interval(Duration::MAX).await;
 
-        // Append entries until we exceed the size threshold
-        let mut seq = 1;
-        while wal_buffer.status().unwrap().estimated_bytes < wal_buffer.max_wal_bytes_size {
-            let entry = make_entry(&format!("key{}", seq), &format!("value{}", seq), seq, None);
-            wal_buffer.append(&[entry]).await.unwrap();
-            seq += 1;
-        }
-        let mut reader = wal_buffer.maybe_trigger_flush().unwrap();
-        reader.await_value().await.unwrap();
+        // Watch the current WAL before the oversized append triggers its flush.
+        let mut durable_watcher = wal_buffer.maybe_trigger_flush().unwrap();
+        let value = "v".repeat(wal_buffer.max_wal_bytes_size);
+        wal_buffer
+            .append(&[make_entry("key", &value, 1, None)])
+            .await
+            .unwrap();
+        durable_watcher.await_value().await.unwrap();
 
         assert_eq!(wal_buffer.status().unwrap().last_flushed_wal_id, 1);
     }
