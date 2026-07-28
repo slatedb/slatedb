@@ -72,7 +72,6 @@ use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
 use crate::types::KeyValue;
 use crate::utils::{format_bytes_si, SafeSender, WatchableOnceCellReader};
-use crate::wal_buffer::{WalEvent, WalObserver, WalStatus, WAL_BUFFER_TASK_NAME};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbWriteOps};
 use slatedb_common::clock::SystemClock;
@@ -81,6 +80,7 @@ use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
 
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
+use crate::wal::{WalEvent, WalObserver, WalStatus};
 pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
 
@@ -115,7 +115,7 @@ pub(crate) struct DbInner {
     /// [`txn_manager`] tracks all the live transactions and related metadata.
     pub(crate) txn_manager: Arc<TransactionManager>,
     pub(crate) snapshot_manager: Arc<SnapshotManager>,
-    pub(crate) status_manager: DbStatusManager,
+    pub(crate) status_manager: Arc<DbStatusManager>,
     /// Segment extractor (RFC-0024). When `Some`, the writer routes every
     /// key through this extractor and groups flush output into per-segment
     /// L0 SSTs. When `None`, the database is the singleton `prefix=""`
@@ -132,11 +132,11 @@ impl DbInner {
         manifest: DirtyObject<Manifest>,
         memtable_flusher: Arc<MemtableFlusher>,
         write_notifier: SafeSender<BatchWriterMessage>,
-        wal_observer: WalObserver,
+        wal_observer: Box<dyn WalObserver>,
         recorder: MetricsRecorderHelper,
         fp_registry: Arc<FailPointRegistry>,
         merge_operator: Option<crate::merge_operator::MergeOperatorType>,
-        status_manager: DbStatusManager,
+        status_manager: Arc<DbStatusManager>,
         segment_extractor: Option<Arc<dyn PrefixExtractor>>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
@@ -180,7 +180,7 @@ impl DbInner {
             wal_observer,
             oracle.clone(),
             state.clone(),
-            status_manager.result_reader(),
+            status_manager.clone(),
         );
 
         let db_inner = Self {
@@ -270,7 +270,7 @@ impl DbInner {
     }
 
     #[allow(unused_variables)]
-    fn wal_enabled_in_options(settings: &Settings) -> bool {
+    pub(crate) fn wal_enabled_in_options(settings: &Settings) -> bool {
         #[cfg(feature = "wal_disable")]
         return settings.wal_enabled;
         #[cfg(not(feature = "wal_disable"))]
@@ -303,10 +303,23 @@ impl DbInner {
 
         // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
 
-        let (write_handle, mut durable_watcher) = rx.await??;
+        let write_handle = rx.await??;
 
         if options.await_durable {
-            durable_watcher.await_value().await?;
+            let seq = write_handle.seq;
+            let mut status_subscription = self.status_manager.subscribe();
+            let status = status_subscription
+                .wait_for(|s| s.durable_seq >= seq || s.close_reason.is_some())
+                .await
+                .map_err(|_| SlateDBError::Closed)?;
+            if status.durable_seq < seq {
+                self.check_closed()?;
+                warn!(
+                    "durable seq {} not advanced past write seq {} and db not closed",
+                    status.durable_seq, seq
+                );
+                return Err(SlateDBError::InvalidDBState);
+            }
         }
 
         Ok(write_handle)
@@ -316,7 +329,7 @@ impl DbInner {
     pub(crate) async fn maybe_apply_backpressure(&self) -> Result<(), SlateDBError> {
         loop {
             self.check_closed()?;
-            let wal_status = self.wal_observer.status();
+            let wal_status = self.wal_observer.status()?;
             let (active_memtable_size_bytes, imm_memtable_size_bytes) = {
                 let guard = self.state.read();
                 let estimate = |metadata: KVTableMetadata| {
@@ -761,10 +774,6 @@ impl Db {
             .await
         {
             warn!("failed to shutdown writer task [error={:?}]", e);
-        }
-
-        if let Err(e) = self.task_executor.shutdown_task(WAL_BUFFER_TASK_NAME).await {
-            warn!("failed to shutdown wal writer task [error={:?}]", e);
         }
 
         if let Err(e) = self.inner.table_store.close_cache().await {
@@ -2067,55 +2076,70 @@ impl WriteHandle {
 /// via a [`tokio::sync::watch`] channel.
 #[derive(Clone)]
 pub(crate) struct DbWalObserver {
-    status_rx: tokio::sync::watch::Receiver<WalStatus>,
+    status_rx: tokio::sync::watch::Receiver<Result<WalStatus, WalStatus>>,
     closed_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
-    wrapped: WalObserver,
+    wrapped: Arc<dyn WalObserver>,
 }
 
 impl DbWalObserver {
     fn new(
-        wrapped: WalObserver,
+        wrapped: Box<dyn WalObserver>,
         oracle: Arc<DbOracle>,
         db_state: Arc<RwLock<DbState>>,
-        closed_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
+        closed_writer: Arc<dyn ClosedResultWriter>,
     ) -> Self {
         let (status_tx, status_rx) = tokio::sync::watch::channel(wrapped.status());
+        let closed_reader = closed_writer.result_reader();
         wrapped
             .subscribe(Arc::new(move |event| {
-                let WalEvent::WalFlushed(status) = event;
-                if let Some(seq) = status.last_flushed_seq {
-                    oracle.advance_durable_seq(seq);
-                }
-                let mut guard = db_state.write();
-                guard.set_next_wal_id(status.last_flushed_wal_id + 1);
-                drop(guard);
+                let status: Result<WalStatus, WalStatus> = match event {
+                    WalEvent::WalFlushed(status) => {
+                        if let Some(seq) = status.last_flushed_seq {
+                            oracle.advance_durable_seq(seq);
+                        }
+                        let mut guard = db_state.write();
+                        guard.set_next_wal_id(status.last_flushed_wal_id + 1);
+                        drop(guard);
+                        Ok(status)
+                    }
+                    WalEvent::WalClosed(status) => {
+                        closed_writer.write_result(Err(status.clone().into()));
+                        Err(status)
+                    }
+                };
                 let _ = status_tx.send(status);
             }))
             .expect("failed to subscribe to wal");
         Self {
             status_rx,
             closed_reader,
-            wrapped,
+            wrapped: wrapped.into(),
         }
     }
 
-    pub(crate) fn status(&self) -> WalStatus {
+    pub(crate) fn status(&self) -> Result<WalStatus, WalStatus> {
         self.wrapped.status()
     }
 
     async fn wait_on_condition(
         &self,
-        predicate: impl FnMut(&WalStatus) -> bool,
+        mut predicate: impl FnMut(&WalStatus) -> bool,
     ) -> Result<(), SlateDBError> {
         let mut status_rx = self.status_rx.clone();
-        let result = status_rx.wait_for(predicate).await.map(|_| ());
-        match result {
-            Ok(_) => Ok(()),
-            Err(_) => {
-                debug!("wal listener tx dropped - wait on db close");
-                self.closed_reader.clone().await_value().await
-            }
-        }
+        let result = status_rx
+            .wait_for(|s| match s {
+                Err(_) => true,
+                Ok(s) => predicate(s),
+            })
+            .await;
+        let Ok(result) = result else {
+            drop(result);
+            debug!("wal listener tx dropped - wait on db close");
+            return self.closed_reader.clone().await_value().await;
+        };
+        let result = result.clone();
+        result?;
+        Ok(())
     }
 
     /// Waits until the wal a given wal id is released by the wal writer
@@ -2160,6 +2184,7 @@ mod tests {
         OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
     };
     use crate::types::RowEntry;
+    use crate::wal::WalError;
     use crate::wal_reader::WalReader;
     use crate::{proptest_util, test_utils, CloseReason, CompactorBuilder, KeyValue};
     use async_trait::async_trait;
@@ -3091,11 +3116,27 @@ mod tests {
             .unwrap();
 
         // a sanity check: the wal contains the most recent write
-        assert_ne!(kv_store.inner.wal_observer.status().estimated_bytes, 0);
+        assert_ne!(
+            kv_store
+                .inner
+                .wal_observer
+                .status()
+                .unwrap()
+                .estimated_bytes,
+            0
+        );
 
         // and a flush() should clear it
         kv_store.flush().await.unwrap();
-        assert_eq!(kv_store.inner.wal_observer.status().estimated_bytes, 0);
+        assert_eq!(
+            kv_store
+                .inner
+                .wal_observer
+                .status()
+                .unwrap()
+                .estimated_bytes,
+            0
+        );
     }
 
     #[tokio::test]
@@ -3133,6 +3174,7 @@ mod tests {
                 .inner
                 .wal_observer
                 .status()
+                .unwrap()
                 .buffered_wal_entries_count,
             1
         );
@@ -3153,6 +3195,7 @@ mod tests {
                 .inner
                 .wal_observer
                 .status()
+                .unwrap_err()
                 .buffered_wal_entries_count,
             0
         );
@@ -3196,20 +3239,24 @@ mod tests {
             .await
             .unwrap();
 
-        db.put_with_options(
-            b"test_key",
-            b"test_value",
-            &PutOptions::default(),
-            &WriteOptions {
-                await_durable: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+        let put_seq = db
+            .put_with_options(
+                b"test_key",
+                b"test_value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .seq;
 
         // Sanity check: WAL has buffered entries before close.
-        assert_eq!(db.inner.wal_observer.status().buffered_wal_entries_count, 1);
+        let wal_status = db.inner.wal_observer.status().unwrap();
+        assert_eq!(wal_status.buffered_wal_entries_count, 1);
+        assert!(wal_status.last_flushed_seq.unwrap_or(0) < put_seq);
         assert_eq!(
             lookup_metric(
                 &metrics_recorder,
@@ -3227,7 +3274,9 @@ mod tests {
         // close() should succeed but not flush when failed.
         db.close().await.unwrap();
 
-        assert_eq!(db.inner.wal_observer.status().buffered_wal_entries_count, 1);
+        let wal_status = db.inner.wal_observer.status().unwrap_err();
+        assert!(matches!(wal_status.closed_reason, Some(WalError::Fenced)));
+        assert!(wal_status.last_flushed_seq.unwrap_or(0) < put_seq);
         assert_eq!(
             lookup_metric(
                 &metrics_recorder,
@@ -3256,19 +3305,23 @@ mod tests {
             .await
             .unwrap();
 
-        db.put_with_options(
-            b"test_key",
-            b"test_value",
-            &PutOptions::default(),
-            &WriteOptions {
-                await_durable: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+        let put_seq = db
+            .put_with_options(
+                b"test_key",
+                b"test_value",
+                &PutOptions::default(),
+                &WriteOptions {
+                    await_durable: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .seq;
 
-        assert_eq!(db.inner.wal_observer.status().buffered_wal_entries_count, 1);
+        let wal_status = db.inner.wal_observer.status().unwrap();
+        assert_eq!(wal_status.buffered_wal_entries_count, 1);
+        assert!(wal_status.last_flushed_seq.unwrap_or(0) < put_seq);
         assert_eq!(
             lookup_metric(
                 &metrics_recorder,
@@ -3280,7 +3333,9 @@ mod tests {
 
         db.close().await.unwrap();
 
-        assert_eq!(db.inner.wal_observer.status().buffered_wal_entries_count, 0);
+        let wal_status = db.inner.wal_observer.status().unwrap_err();
+        assert!(matches!(wal_status.closed_reason, Some(WalError::Closed)));
+        assert_eq!(wal_status.last_flushed_seq, Some(put_seq));
         assert_eq!(
             lookup_metric(
                 &metrics_recorder,
@@ -3487,6 +3542,14 @@ mod tests {
             .build()
             .await
             .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            db.task_executor
+                .join_task(crate::wal_buffer::WAL_BUFFER_TASK_NAME),
+        )
+        .await
+        .expect("native WAL task should not run when the WAL is disabled")
+        .unwrap();
         let put_options = PutOptions::default();
         let write_options = WriteOptions {
             await_durable: false,
@@ -4318,7 +4381,12 @@ mod tests {
         }
 
         // Verify WALs flushes.
-        let wal_id = kv_store.inner.wal_observer.status().last_flushed_wal_id;
+        let wal_id = kv_store
+            .inner
+            .wal_observer
+            .status()
+            .unwrap()
+            .last_flushed_wal_id;
         assert_eq!(wal_id, MAX_WAL_FLUSHES_BEFORE_L0_FLUSH); // account for the empty WAL written for fencing
 
         // Verify no memtable was frozen or L0 flush happened.
@@ -4482,7 +4550,12 @@ mod tests {
 
         // Verify that the WAL was also flushed since we guarantee
         // memtable data is persisted in the WAL prior to L0 flush.
-        let recent_flushed_wal_id = kv_store.inner.wal_observer.status().last_flushed_wal_id;
+        let recent_flushed_wal_id = kv_store
+            .inner
+            .wal_observer
+            .status()
+            .unwrap()
+            .last_flushed_wal_id;
         assert_eq!(recent_flushed_wal_id, 2);
 
         // Verify that the data is still accessible after flush
@@ -4551,6 +4624,7 @@ mod tests {
                 .inner
                 .wal_observer
                 .status()
+                .unwrap()
                 .buffered_wal_entries_count,
             1
         );
@@ -4567,6 +4641,7 @@ mod tests {
                 .inner
                 .wal_observer
                 .status()
+                .unwrap()
                 .buffered_wal_entries_count,
             0
         );
@@ -4889,7 +4964,12 @@ mod tests {
             .unwrap();
 
         // Get initial WAL ID to verify flush occurred
-        let initial_wal_id = kv_store.inner.wal_observer.status().last_flushed_wal_id;
+        let initial_wal_id = kv_store
+            .inner
+            .wal_observer
+            .status()
+            .unwrap()
+            .last_flushed_wal_id;
 
         // Flush WAL using flush_with_options - this should succeed without error
         let flush_result = kv_store
@@ -4910,7 +4990,12 @@ mod tests {
 
         // Verify that the WAL buffer is in a consistent state after flush
         // The recent_flushed_wal_id should be at least as high as before
-        let final_wal_id = kv_store.inner.wal_observer.status().last_flushed_wal_id;
+        let final_wal_id = kv_store
+            .inner
+            .wal_observer
+            .status()
+            .unwrap()
+            .last_flushed_wal_id;
         assert!(
             final_wal_id >= initial_wal_id,
             "WAL ID should not decrease after flush"
@@ -5040,12 +5125,12 @@ mod tests {
         // Wait for put to end up in the WAL buffer
         let this_wal_buffer = db.inner.wal_observer.clone();
         wait_for(Box::new(move || {
-            this_wal_buffer.status().buffered_wal_entries_count > 0
+            this_wal_buffer.status().unwrap().buffered_wal_entries_count > 0
         }))
         .await;
 
         // Verify that there is now 1 WAL entry in memory.
-        let wal_status = db.inner.wal_observer.status();
+        let wal_status = db.inner.wal_observer.status().unwrap();
         assert_eq!(wal_status.buffered_wal_entries_count, 1);
 
         let (active_memtable_size_bytes, imm_memtable_size_bytes) = {
@@ -5146,6 +5231,14 @@ mod tests {
         db.put_with_options(b"key1", &large_value, &PutOptions::default(), &write_opts)
             .await
             .unwrap();
+        assert_eq!(
+            db.inner
+                .wal_observer
+                .status()
+                .unwrap()
+                .buffered_wal_entries_count,
+            1
+        );
 
         // Start backpressure on a cloned inner handle. This parks the task on
         // the same wait path used by writers before they enqueue a batch.
@@ -5906,7 +5999,10 @@ mod tests {
         let value1 = [b'b'; 96];
         let result = db.put(&key1, &value1).await;
         assert!(result.is_ok(), "Failed to write key1");
-        assert_eq!(db.inner.wal_observer.status().last_flushed_wal_id, 2);
+        assert_eq!(
+            db.inner.wal_observer.status().unwrap().last_flushed_wal_id,
+            2
+        );
 
         // Let background flush attempts fail while WAL durability preserves recovery.
         // expect to fail as l0 upload is blocked
@@ -6063,6 +6159,71 @@ mod tests {
         db.close()
             .await
             .expect_err("close should error out due to WAL IO error");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_await_durable_write_returns_error_if_db_closes_before_durable() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut settings = test_db_options(0, 1024, None);
+        settings.flush_interval = None;
+        let db = Arc::new(
+            Db::builder(
+                "/tmp/test_await_durable_write_returns_error_if_db_closes_before_durable",
+                object_store,
+            )
+            .with_settings(settings)
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap(),
+        );
+        // pause writes so that we can force the write to fail on the close status before the
+        // final flush causes the write to become durable
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
+        let write_db = db.clone();
+        let write_task = tokio::spawn(async move {
+            write_db
+                .put_with_options(
+                    b"foo",
+                    b"bar",
+                    &PutOptions::default(),
+                    &WriteOptions::default(),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if db
+                    .inner
+                    .wal_observer
+                    .status()
+                    .unwrap()
+                    .buffered_wal_entries_count
+                    == 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("write was not buffered");
+        let close_db = db.clone();
+        let close_task = tokio::spawn(async move { close_db.close().await });
+
+        let write_error = tokio::time::timeout(Duration::from_secs(10), write_task)
+            .await
+            .expect("timed out waiting for write")
+            .expect("write task panicked")
+            .expect_err("write unexpectedly reported success");
+
+        assert_eq!(
+            write_error.kind(),
+            crate::ErrorKind::Closed(CloseReason::Clean)
+        );
+        fail_parallel::cfg(fp_registry, "write-wal-sst-io-error", "off").unwrap();
+        let _ = close_task.await.unwrap();
     }
 
     async fn do_test_should_read_compacted_db(mut options: Settings) {
@@ -9895,11 +10056,21 @@ mod tests {
                 .await
                 .unwrap();
             if i == 0 {
-                first_l0_flushed_wal_id = source.inner.wal_observer.status().last_flushed_wal_id;
+                first_l0_flushed_wal_id = source
+                    .inner
+                    .wal_observer
+                    .status()
+                    .unwrap()
+                    .last_flushed_wal_id;
             }
             l0_flushed_seq = write.seqnum();
         }
-        let l0_flushed_boundary_wal_id = source.inner.wal_observer.status().last_flushed_wal_id;
+        let l0_flushed_boundary_wal_id = source
+            .inner
+            .wal_observer
+            .status()
+            .unwrap()
+            .last_flushed_wal_id;
         assert!(l0_flushed_boundary_wal_id > first_l0_flushed_wal_id);
 
         // Write several smaller records, each flushed into a separate WAL. On
@@ -9923,7 +10094,12 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let final_source_wal_id = source.inner.wal_observer.status().last_flushed_wal_id;
+        let final_source_wal_id = source
+            .inner
+            .wal_observer
+            .status()
+            .unwrap()
+            .last_flushed_wal_id;
         assert!(final_source_wal_id >= l0_flushed_boundary_wal_id + 2);
 
         // Recover with a much smaller replay target so WAL replay splits into

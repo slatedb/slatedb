@@ -95,6 +95,7 @@ pub mod object_store_tag;
 pub mod prefix_extractor;
 pub mod seq_tracker;
 pub mod size_tiered_compaction;
+pub mod wal;
 
 mod batch;
 #[cfg(feature = "bench-internal")]
@@ -173,7 +174,6 @@ mod types;
 mod utils;
 
 mod fence;
-mod wal;
 mod wal_buffer;
 mod wal_reader;
 mod wal_replay;

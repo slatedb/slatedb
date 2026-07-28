@@ -167,17 +167,20 @@ pub struct WalFileRange(pub Bound<u64>, pub Bound<u64>);
 
 /// Defines the types of errors that can be returned by WAL implementations.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum WalError {
     /// The WAL writer was fenced
     Fenced,
-    /// IO error writing/reading the WAL
-    IoError(Arc<std::io::Error>),
-    /// Fatal error indicating that the WAL is in some unexpected/unrecoverable state.
-    InternalError(Arc<dyn Error + Sync + Send + 'static>),
     /// A WalIterator observed that the tail of the WAL was truncated while iterating.
     WalTruncated,
     /// Operation against wal after it was closed
     Closed,
+    /// WAL is unavailable, e.g. due to an I/O error or error in the backing storage system
+    Unavailable(Arc<dyn Error + Sync + Send + 'static>),
+    /// WAL implementation detected invalid data/corruption
+    DataError(Arc<dyn Error + Sync + Send + 'static>),
+    /// Fatal error indicating that the WAL is in some unexpected/unrecoverable state.
+    InternalError(Arc<dyn Error + Sync + Send + 'static>),
 }
 
 /// The writer's manifest after fencing. [`crate::Db`] creates this after fencing the manifest
@@ -299,9 +302,8 @@ pub trait WalObserver: Send + Sync + 'static {
     /// Returns the current [`WalStatus`].
     fn status(&self) -> Result<WalStatus, WalStatus>;
 
-    /// Adds a listener that subscribes to event callbacks. On success, returns an initial 
-    /// [`WalStatus`]. The listener receives all updates after this initial status.
-    fn subscribe(&self, listener: WalStatusListener) -> Result<WalStatus, WalError>;
+    /// Adds a listener that subscribes to event callbacks.
+    fn subscribe(&self, listener: WalStatusListener) -> Result<(), WalError>;
 }
 
 /// A future that yields the result of flushing the WAL. Returned by [`WalWriter::flush`]
@@ -371,12 +373,12 @@ pub trait WalIterator: Send + 'static {
 #[async_trait]
 pub trait WalReader {
     /// Returns the name of the WAL implementation
-    fn name(&self) -> String,
+    fn name(&self) -> String;
     
     /// Returns an iterator over the specified range of WAL File IDs. The start of the range must
     /// not be `Unbounded`. If the end of the range is `Unbounded` then the returned iterator
     /// continues returning writes as new writes are appended to the WAL. Otherwise, it returns
-    /// `None` upon reaching the end of he range.
+    /// `None` upon reaching the end of the range.
     async fn iterator(
         &self,
         wal_file_id_range: WalFileRange,
