@@ -221,7 +221,9 @@ pub trait WalWriter: Send {
     fn observer(&self) -> Box<dyn WalObserver>;
 
     /// Returns the current `WalStatus`. If the [`WalWriter`] has failed, then returns Err with the
-    /// final [`WalStatus`] and the reason for the failure in [`WalStatus::closed_reason`]
+    /// final [`WalStatus`] and the reason for the failure in [`WalStatus::closed_reason`]. This
+    /// allows callers to observe the final status after the [`WalWriter`] has shut down, e.g. to
+    /// read the last flushed wal file or sequence number.
     fn status(&self) -> Result<WalStatus, WalStatus>;
 
     /// Close the `WalWriter` and release resources
