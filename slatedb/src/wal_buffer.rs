@@ -701,7 +701,6 @@ mod tests {
     use slatedb_common::metrics::{
         lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
-    use slatedb_common::MockSystemClock;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -879,7 +878,7 @@ mod tests {
     async fn setup_wal_buffer() -> (
         WalBufferManager,
         Arc<TableStore>,
-        Arc<MockSystemClock>,
+        Arc<DbStatusManager>,
         Arc<DefaultMetricsRecorder>,
     ) {
         setup_wal_buffer_with_flush_interval(Duration::from_millis(10)).await
@@ -890,7 +889,7 @@ mod tests {
     ) -> (
         WalBufferManager,
         Arc<TableStore>,
-        Arc<MockSystemClock>,
+        Arc<DbStatusManager>,
         Arc<DefaultMetricsRecorder>,
     ) {
         setup_wal_buffer_with_args(flush_interval, Arc::new(|_status| {})).await
@@ -902,7 +901,7 @@ mod tests {
     ) -> (
         WalBufferManager,
         Arc<TableStore>,
-        Arc<MockSystemClock>,
+        Arc<DbStatusManager>,
         Arc<DefaultMetricsRecorder>,
     ) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -914,7 +913,6 @@ mod tests {
             TableStoreKind::Main,
             BlockCachePolicy::default(),
         ));
-        let test_clock = Arc::new(MockSystemClock::new());
         let system_clock = Arc::new(DefaultSystemClock::new());
         let status_manager = Arc::new(DbStatusManager::new(0));
         let oracle = Arc::new(DbOracle::new(0, 0, 0, status_manager.clone()));
@@ -948,7 +946,7 @@ mod tests {
         task_executor
             .monitor_on(&Handle::current())
             .expect("failed to monitor executor");
-        (wal_buffer, table_store, test_clock, recorder)
+        (wal_buffer, table_store, status_manager, recorder)
     }
 
     #[tokio::test]
@@ -1001,17 +999,20 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_size_based_flush_triggering() {
-        let (mut wal_buffer, _, _, _) = setup_wal_buffer_with_flush_interval(Duration::MAX).await;
-
-        // Append entries until we exceed the size threshold
-        let mut seq = 1;
-        while wal_buffer.status().unwrap().estimated_bytes < wal_buffer.max_wal_bytes_size {
-            let entry = make_entry(&format!("key{}", seq), &format!("value{}", seq), seq, None);
-            wal_buffer.append(&[entry]).await.unwrap();
-            seq += 1;
-        }
-        let mut reader = wal_buffer.maybe_trigger_flush().unwrap();
-        reader.await_value().await.unwrap();
+        // Append an oversized entry to trigger a flush, then wait until its sequence is durable.
+        let (mut wal_buffer, _, status_manager, _) =
+            setup_wal_buffer_with_flush_interval(Duration::MAX).await;
+        let seq = 1;
+        let value = "v".repeat(wal_buffer.max_wal_bytes_size);
+        wal_buffer
+            .append(&[make_entry("key", &value, seq, None)])
+            .await
+            .unwrap();
+        status_manager
+            .subscribe()
+            .wait_for(|status| status.durable_seq >= seq)
+            .await
+            .unwrap();
 
         assert_eq!(wal_buffer.status().unwrap().last_flushed_wal_id, 1);
     }
