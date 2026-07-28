@@ -218,8 +218,8 @@ pub(crate) enum SlateDBError {
     #[error("clone source paths must be unique, found duplicate: `{0}`")]
     DuplicatedCloneSourcePath(Path),
 
-    #[error("Manifest union of sources with WAL is not supported, source with WAL: `{paths:?}`")]
-    InvalidUnionSourceWithWal { paths: Vec<Path> },
+    #[error("Projection and/or union with WAL is not supported, sources with WAL: `{paths:?}`")]
+    InvalidCloneSourceWithWal { paths: Vec<Path> },
 
     #[error("Source manifest set must not be empty")]
     InvalidUnionSetEmpty(),
@@ -675,7 +675,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::SeekKeyLessThanLastReturnedKey => Error::invalid(msg),
             SlateDBError::IdenticalClonePaths { .. } => Error::invalid(msg),
             SlateDBError::DuplicatedCloneSourcePath(_) => Error::invalid(msg),
-            SlateDBError::InvalidUnionSourceWithWal { .. } => Error::invalid(msg),
+            SlateDBError::InvalidCloneSourceWithWal { .. } => Error::invalid(msg),
             SlateDBError::InvalidUnionSetEmpty() => Error::invalid(msg),
             SlateDBError::InvalidUnion(_) => Error::invalid(msg),
             SlateDBError::InvalidProjection { .. } => Error::invalid(msg),
