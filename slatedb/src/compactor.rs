@@ -1443,6 +1443,7 @@ mod tests {
     use ulid::Ulid;
 
     use super::*;
+    use crate::batch::WriteBatch;
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::compaction_worker::WorkerMessage;
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
@@ -1791,19 +1792,21 @@ mod tests {
             .await
             .unwrap();
 
+        // Keep all entries in one memtable so the explicit flush produces one
+        // L0 SST regardless of the configured memtable size threshold.
+        let mut batch = WriteBatch::new();
         for key in [b"a", b"b", b"c", b"d"] {
-            db.put_with_options(
-                key,
-                b"value",
-                &PutOptions::default(),
-                &WriteOptions {
-                    await_durable: false,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
+            batch.put(key, b"value");
         }
+        db.write_with_options(
+            batch,
+            &WriteOptions {
+                await_durable: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         db.flush_with_options(FlushOptions {
             flush_type: FlushType::MemTable,
         })
