@@ -5231,14 +5231,9 @@ mod tests {
         db.put_with_options(b"key1", &large_value, &PutOptions::default(), &write_opts)
             .await
             .unwrap();
-        assert_eq!(
-            db.inner
-                .wal_observer
-                .status()
-                .unwrap()
-                .buffered_wal_entries_count,
-            1
-        );
+        // The frozen memtable is what parks the waiter below; without it
+        // maybe_apply_backpressure spins instead of blocking.
+        assert!(!db.inner.state.read().state().imm_memtable.is_empty());
 
         // Start backpressure on a cloned inner handle. This parks the task on
         // the same wait path used by writers before they enqueue a batch.
@@ -5246,7 +5241,7 @@ mod tests {
         let mut backpressure_task =
             tokio::spawn(async move { inner.maybe_apply_backpressure().await });
 
-        // Wait until the task has observed the buffered WAL bytes and incremented
+        // Wait until the task has observed the unflushed memtable and incremented
         // the backpressure counter, proving it is inside the wait path.
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
