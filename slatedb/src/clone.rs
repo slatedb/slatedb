@@ -1185,7 +1185,6 @@ mod tests {
             .await
             .unwrap();
         let write_options = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
         let put_options = PutOptions::default();
@@ -1276,7 +1275,6 @@ mod tests {
             .await
             .unwrap();
         let write_options = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
         let put_options = PutOptions::default();
@@ -1388,7 +1386,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        // await_durable would deadlock under wal_enabled=false because the
+        // Do not await the returned handle here: with wal_enabled=false, the
         // memtable flush is gated on the explicit call below.
         test_utils::seed_database(&db, table, false).await.unwrap();
         db.flush_with_options(FlushOptions {

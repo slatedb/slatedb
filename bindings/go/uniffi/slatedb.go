@@ -11023,14 +11023,14 @@ func (_ FfiDestroyerWriteHandle) Destroy(value WriteHandle) {
 	value.Destroy()
 }
 
-// Options that control durability behavior for writes and commits.
+// Options that control writes and commits.
 type WriteOptions struct {
-	// Whether the call waits for the write to become durable before returning.
-	AwaitDurable bool
+	// Optional caller-supplied sequence number. Zero uses SlateDB's sequence oracle.
+	Seqnum uint64
 }
 
 func (r *WriteOptions) Destroy() {
-	FfiDestroyerBool{}.Destroy(r.AwaitDurable)
+	FfiDestroyerUint64{}.Destroy(r.Seqnum)
 }
 
 type FfiConverterWriteOptions struct{}
@@ -11043,7 +11043,7 @@ func (c FfiConverterWriteOptions) Lift(rb RustBufferI) WriteOptions {
 
 func (c FfiConverterWriteOptions) Read(reader io.Reader) WriteOptions {
 	return WriteOptions{
-		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
 	}
 }
 
@@ -11056,7 +11056,7 @@ func (c FfiConverterWriteOptions) LowerExternal(value WriteOptions) ExternalCRus
 }
 
 func (c FfiConverterWriteOptions) Write(writer io.Writer, value WriteOptions) {
-	FfiConverterBoolINSTANCE.Write(writer, value.AwaitDurable)
+	FfiConverterUint64INSTANCE.Write(writer, value.Seqnum)
 }
 
 type FfiDestroyerWriteOptions struct{}

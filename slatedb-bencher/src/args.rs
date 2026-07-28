@@ -144,13 +144,6 @@ pub(crate) struct BenchmarkDbArgs {
     )]
     pub(crate) key_len: usize,
 
-    #[arg(
-        long,
-        help = "Whether to await durable writes.",
-        default_value_t = false
-    )]
-    pub(crate) await_durable: bool,
-
     #[arg(long, help = "The number of read/write to spawn.", default_value_t = 4)]
     pub(crate) concurrency: u32,
 
@@ -418,13 +411,6 @@ pub(crate) struct BenchmarkTransactionArgs {
         default_value = "snapshot"
     )]
     pub(crate) isolation_level: IsolationLevel,
-
-    #[arg(
-        long,
-        help = "Whether to await durable writes.",
-        default_value_t = false
-    )]
-    pub(crate) await_durable: bool,
 }
 
 impl KeyGeneratorSupplier for BenchmarkTransactionArgs {

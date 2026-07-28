@@ -1656,7 +1656,6 @@ mod tests {
                 &v,
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -1669,7 +1668,6 @@ mod tests {
                 &v,
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -1797,7 +1795,6 @@ mod tests {
                 b"value",
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -2294,8 +2291,8 @@ mod tests {
 
         let (manifest_store, _, table_store) = build_test_stores(os.clone());
 
-        // put key 'a' into L1 (and key 'b' so that when we delete 'a' the SST is non-empty)
-        // since these are both await_durable=true, we're guaranteed to have one L0 SST for each.
+        // Put key 'a' into L1 (and key 'b' so that when we delete 'a' the SST is non-empty).
+        // The explicit flush below makes both writes durable.
         db.put(&[b'a'; 16], &[b'a'; 32]).await.unwrap();
         db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
         db.flush().await.unwrap();
@@ -2309,7 +2306,6 @@ mod tests {
         db.delete_with_options(
             &[b'a'; 16],
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2423,7 +2419,6 @@ mod tests {
         db.delete_with_options(
             &[b'a'; 16],
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2516,7 +2511,6 @@ mod tests {
             b"a",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2527,7 +2521,6 @@ mod tests {
             b"b",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2538,7 +2531,6 @@ mod tests {
             &vec![b'p'; 128],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2551,7 +2543,6 @@ mod tests {
             b"c",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2562,7 +2553,6 @@ mod tests {
             b"x",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2573,7 +2563,6 @@ mod tests {
             &vec![b'p'; 128],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2658,7 +2647,6 @@ mod tests {
             b"a",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2675,7 +2663,6 @@ mod tests {
             b"b",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2728,7 +2715,6 @@ mod tests {
             b"a",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2739,7 +2725,6 @@ mod tests {
             b"b",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2750,7 +2735,6 @@ mod tests {
             &vec![b'p'; 128],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2771,7 +2755,6 @@ mod tests {
             b"c",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2782,7 +2765,6 @@ mod tests {
             b"d",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2793,7 +2775,6 @@ mod tests {
             &vec![b'p'; 128],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2869,7 +2850,6 @@ mod tests {
             b"x",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2880,7 +2860,6 @@ mod tests {
             &vec![b'p'; 128],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2893,7 +2872,6 @@ mod tests {
             b"y",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2904,7 +2882,6 @@ mod tests {
             b"z",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2915,7 +2892,6 @@ mod tests {
             &vec![b'p'; 128],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -2991,7 +2967,6 @@ mod tests {
             b"1",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3002,7 +2977,6 @@ mod tests {
             &vec![b'p'; 128],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3015,7 +2989,6 @@ mod tests {
             b"2",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3026,7 +2999,6 @@ mod tests {
             &vec![b'p'; 128],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3039,7 +3011,6 @@ mod tests {
             b"3",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3050,7 +3021,6 @@ mod tests {
             &vec![b'p'; 128],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3136,10 +3106,12 @@ mod tests {
                 ttl: Ttl::ExpireAfter(10),
             },
             &WriteOptions {
-                await_durable: true,
                 ..Default::default()
             },
         )
+        .await
+        .unwrap()
+        .await_durable()
         .await
         .unwrap();
 
@@ -3150,10 +3122,12 @@ mod tests {
             &[b'b'; 32],
             &crate::config::MergeOptions { ttl: Ttl::NoExpiry },
             &WriteOptions {
-                await_durable: true,
                 ..Default::default()
             },
         )
+        .await
+        .unwrap()
+        .await_durable()
         .await
         .unwrap();
 
@@ -3219,7 +3193,6 @@ mod tests {
             b"a",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3230,7 +3203,6 @@ mod tests {
             b"b",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3241,7 +3213,6 @@ mod tests {
             &vec![b'p'; 128],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3255,7 +3226,6 @@ mod tests {
             b"new_value",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3266,7 +3236,6 @@ mod tests {
             &vec![b'p'; 128],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3328,7 +3297,6 @@ mod tests {
                 ttl: Ttl::ExpireAfter(100),
             },
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3339,7 +3307,6 @@ mod tests {
             &vec![b'p'; 128],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3354,7 +3321,6 @@ mod tests {
                 ttl: Ttl::ExpireAfter(200),
             },
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3365,7 +3331,6 @@ mod tests {
             &vec![b'p'; 128],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3469,7 +3434,6 @@ mod tests {
                 ttl: Ttl::ExpireAt(1000),
             },
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3485,7 +3449,6 @@ mod tests {
                 ttl: Ttl::ExpireAt(1000),
             },
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3586,7 +3549,6 @@ mod tests {
                 ttl: Ttl::ExpireAt(10),
             },
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3602,7 +3564,6 @@ mod tests {
                 ttl: Ttl::ExpireAt(i64::MAX),
             },
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3618,7 +3579,6 @@ mod tests {
             value,
             &PutOptions { ttl: Ttl::NoExpiry },
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3702,7 +3662,6 @@ mod tests {
                 ttl: Ttl::ExpireAfter(10),
             },
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3716,7 +3675,6 @@ mod tests {
             value,
             &PutOptions { ttl: Ttl::Default },
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3732,7 +3690,6 @@ mod tests {
             value,
             &PutOptions { ttl: Ttl::NoExpiry },
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3749,7 +3706,6 @@ mod tests {
                 ttl: Ttl::ExpireAfter(80),
             },
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -6019,7 +5975,6 @@ mod tests {
             value,
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )

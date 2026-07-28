@@ -597,7 +597,7 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	}
 
 	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlDefault{}}
-	writeOptions := slatedb.WriteOptions{AwaitDurable: true}
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
 
 	firstWrite, err := handle.db.Put([]byte("alpha"), []byte("one"))
 	if err != nil {
@@ -877,7 +877,7 @@ func TestDbBatchWriteAndConsumption(t *testing.T) {
 		t.Fatalf("WriteBatch.PutWithOptions(): %v", err)
 	}
 
-	if _, err := handle.db.WriteWithOptions(secondBatch, slatedb.WriteOptions{AwaitDurable: true}); err != nil {
+	if _, err := handle.db.WriteWithOptions(secondBatch, slatedb.WriteOptions{Seqnum: 0}); err != nil {
 		t.Fatalf("WriteWithOptions(): %v", err)
 	}
 
@@ -941,7 +941,7 @@ func TestDbMerge(t *testing.T) {
 		[]byte("merge"),
 		[]byte(":two"),
 		slatedb.MergeOptions{Ttl: slatedb.TtlDefault{}},
-		slatedb.WriteOptions{AwaitDurable: true},
+		slatedb.WriteOptions{Seqnum: 0},
 	); err != nil {
 		t.Fatalf("MergeWithOptions(): %v", err)
 	}
@@ -3073,10 +3073,13 @@ func TestDbTtl(t *testing.T) {
 	key, value := []byte("alpha"), []byte("one")
 
 	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlExpireAt{Field0: 1}}
-	writeOptions := slatedb.WriteOptions{AwaitDurable: true}
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
 	_, err := handle.db.PutWithOptions(key, value, putOptions, writeOptions)
 	if err != nil {
 		t.Fatalf("Put(alpha): %v", err)
+	}
+	if err := handle.db.Flush(); err != nil {
+		t.Fatalf("Flush(): %v", err)
 	}
 
 	readerHandle := openTestReader(t, store, nil)

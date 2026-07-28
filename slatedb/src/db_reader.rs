@@ -1437,7 +1437,12 @@ mod tests {
         let key = b"test_key";
         let value = b"test_value";
 
-        db.put(key, value).await.unwrap();
+        db.put(key, value)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
         db.flush().await.unwrap();
 
         let reader = DbReader::open(
@@ -1564,7 +1569,6 @@ mod tests {
             .await
             .unwrap();
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
         db.put_with_options(b"abc-1", b"v1", &PutOptions::default(), &write_opts)
@@ -1658,7 +1662,6 @@ mod tests {
             .await
             .unwrap();
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
         db.put_with_options(b"abc-1", b"v1", &PutOptions::default(), &write_opts)
@@ -2218,7 +2221,12 @@ mod tests {
             .unwrap();
         let key = b"test_key";
         let value = b"test_value";
-        db.put(key, value).await.unwrap();
+        db.put(key, value)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
         db.flush().await.unwrap();
 
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -3329,7 +3337,6 @@ mod tests {
             b"a",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3340,7 +3347,6 @@ mod tests {
             b"b",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3383,7 +3389,6 @@ mod tests {
             b"c",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3394,7 +3399,6 @@ mod tests {
             b"d",
             &MergeOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )

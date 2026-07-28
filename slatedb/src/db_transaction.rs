@@ -540,7 +540,7 @@ impl DbTransaction {
     /// Commit the transaction with custom write options.
     ///
     /// This method behaves the same as [`DbTransaction::commit`], but allows callers
-    /// to specify custom [`WriteOptions`], such as `await_durable`.
+    /// to specify custom [`WriteOptions`].
     ///
     /// ## Arguments
     /// - `options`: the write options to use for the commit
@@ -1174,14 +1174,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_txn_commit_await_durable_false() {
+    async fn test_txn_commit_returns_before_durable() {
         use crate::config::{DurabilityLevel::*, ReadOptions, WriteOptions};
         use fail_parallel::FailPointRegistry;
 
         // Setup database with failpoints to pause durable writes
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let db = crate::Db::builder("/tmp/test_txn_commit_await_durable_false", object_store)
+        let db = crate::Db::builder("/tmp/test_txn_commit_returns_before_durable", object_store)
             .with_fp_registry(fp_registry.clone())
             .build()
             .await
@@ -1194,13 +1194,10 @@ mod tests {
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
         txn.put(b"k", b"v").unwrap();
 
-        // Commit without waiting for durability
-        txn.commit_with_options(&WriteOptions {
-            await_durable: false,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+        // Commits return without waiting for durability.
+        txn.commit_with_options(&WriteOptions::default())
+            .await
+            .unwrap();
 
         // Memory (in-memory) read should see the value
         let val = db
@@ -2124,7 +2121,6 @@ mod tests {
         txn.put(b"key1", b"value1").unwrap();
         let handle = txn
             .commit_with_options(&WriteOptions {
-                await_durable: false,
                 ..Default::default()
             })
             .await
@@ -2142,7 +2138,6 @@ mod tests {
         txn.put_with_options(b"key2", b"value2", &put_opts).unwrap();
         let handle = txn
             .commit_with_options(&WriteOptions {
-                await_durable: false,
                 ..Default::default()
             })
             .await
@@ -2157,7 +2152,6 @@ mod tests {
         txn.delete(b"key1").unwrap();
         let handle = txn
             .commit_with_options(&WriteOptions {
-                await_durable: false,
                 ..Default::default()
             })
             .await
@@ -2177,7 +2171,6 @@ mod tests {
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let result = txn
             .commit_with_options(&WriteOptions {
-                await_durable: false,
                 ..Default::default()
             })
             .await

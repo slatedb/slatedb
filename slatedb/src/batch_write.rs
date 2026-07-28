@@ -29,15 +29,14 @@ use async_trait::async_trait;
 use fail_parallel::fail_point;
 use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
-use log::warn;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::instrument;
 
 use std::collections::BTreeSet;
 
 use crate::config::WriteOptions;
 use crate::db_state::DbState;
+use crate::db_status::ClosedResultWriter;
 use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandler;
 use crate::mem_table::KVTable;
@@ -47,7 +46,6 @@ use crate::wal::{FlushResultFuture, WalWriter};
 use crate::{batch::WriteBatch, db::DbInner, db::WriteHandle, error::SlateDBError};
 use bytes::Bytes;
 use parking_lot::RwLockWriteGuard;
-use slatedb_common::clock::SystemClock;
 use tokio::sync::oneshot;
 
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
@@ -102,7 +100,6 @@ impl std::fmt::Debug for BatchWriterMessage {
 
 pub(crate) struct WriteBatchEventHandler {
     db_inner: Arc<DbInner>,
-    is_first_write: bool,
     wal_writer: Option<Box<dyn WalWriter>>,
 }
 
@@ -110,7 +107,6 @@ impl WriteBatchEventHandler {
     pub(crate) fn new(db_inner: Arc<DbInner>, wal_writer: Option<Box<dyn WalWriter>>) -> Self {
         Self {
             db_inner,
-            is_first_write: true,
             wal_writer,
         }
     }
@@ -128,15 +124,8 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
             }) => {
                 let result = self
                     .db_inner
-                    .write_batch(
-                        batch,
-                        &options,
-                        txn.as_ref(),
-                        self.wal_writer.as_mut(),
-                        self.is_first_write,
-                    )
+                    .write_batch(batch, &options, txn.as_ref(), self.wal_writer.as_mut())
                     .await;
-                self.is_first_write = false;
                 match result {
                     Ok(write_result) => {
                         let _ = done.send(write_result);
@@ -207,7 +196,6 @@ impl DbInner {
         options: &WriteOptions,
         txn: Option<&DbTransaction>,
         wal_writer: Option<&mut Box<dyn WalWriter>>,
-        is_first_write: bool,
     ) -> Result<WriteBatchResult, SlateDBError> {
         let _options = options;
         #[cfg(not(dst))]
@@ -278,17 +266,7 @@ impl DbInner {
             self.write_entries_to_memtable(entries, touched_segments);
         } else {
             assert!(!self.wal_enabled);
-            // if WAL is disabled, we just write the entries to memtable.
-            let watcher = self.write_entries_to_memtable(entries, touched_segments);
-            // if this is the first write and the WAL is disabled, make sure users are flushing
-            // their memtables in a timely manner.
-            if is_first_write && options.await_durable {
-                let this_watcher = watcher.clone();
-                let this_clock = self.system_clock.clone();
-                tokio::spawn(async move {
-                    monitor_first_write(this_watcher, this_clock).await;
-                });
-            }
+            self.write_entries_to_memtable(entries, touched_segments);
         };
         // increment memtable_write_bytes by the size of the keys and values inserted into the memtable
         // after merge operators and overwrites are collapsed
@@ -328,7 +306,12 @@ impl DbInner {
         // maybe freeze the memtable.
         self.maybe_freeze_current_memtable()?;
 
-        let write_handle = WriteHandle::new(commit_seq, now);
+        let write_handle = WriteHandle::new_with_status(
+            commit_seq,
+            now,
+            self.status_manager.subscribe(),
+            self.status_manager.result_reader(),
+        );
 
         Ok(Ok(write_handle))
     }
@@ -521,21 +504,6 @@ fn check_segment_prefix_antichain(
     Ok(())
 }
 
-async fn monitor_first_write(
-    mut watcher: WatchableOnceCellReader<Result<(), SlateDBError>>,
-    system_clock: Arc<dyn SystemClock>,
-) {
-    tokio::select! {
-        _ = watcher.await_value() => {}
-        _ = system_clock.sleep(Duration::from_secs(5)) => {
-            warn!("First write not durable after 5 seconds and WAL is disabled. \
-            SlateDB does not automatically flush memtables until `l0_sst_size_bytes` \
-            is reached. If writer is single threaded or has low throughput, the \
-            applications must call `flush` to ensure durability in a timely manner.");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,31 +582,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_is_first_write_set_false_after_first_write() {
-        let object_store = Arc::new(InMemory::new());
-        let db = Db::open(
-            "/tmp/test_is_first_write_set_false_after_first_write",
-            object_store,
-        )
-        .await
-        .unwrap();
-
-        let wal_writer = Box::new(FakeWalWriter::new(0));
-        let mut handler = WriteBatchEventHandler::new(db.inner.clone(), Some(wal_writer));
-        assert!(handler.is_first_write);
-
-        let mut batch = WriteBatch::new();
-        batch.put(b"key", b"value");
-
-        let (msg, done_rx) = test_message(batch, WriteOptions::default());
-        handler.handle(msg).await.unwrap();
-
-        let result = done_rx.await.unwrap();
-        assert!(result.is_ok());
-        assert!(!handler.is_first_write);
-    }
-
-    #[tokio::test]
     async fn test_append_error_notifies_caller_and_fails_handler() {
         let object_store = Arc::new(InMemory::new());
         let db = Db::open(
@@ -709,8 +652,9 @@ mod tests {
         let (msg, done_rx) = test_message(
             batch,
             WriteOptions {
+                #[cfg(dst)]
+                now: 0,
                 seqnum: 42,
-                ..Default::default()
             },
         );
         handler.handle(msg).await.unwrap();
@@ -753,8 +697,9 @@ mod tests {
         let (msg, done_rx) = test_message(
             batch,
             WriteOptions {
+                #[cfg(dst)]
+                now: 0,
                 seqnum: 1,
-                ..Default::default()
             },
         );
         handler.handle(msg).await.unwrap();

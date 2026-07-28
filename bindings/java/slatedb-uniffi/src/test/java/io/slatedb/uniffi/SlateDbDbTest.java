@@ -94,7 +94,7 @@ class SlateDbDbTest {
 
             ReadOptions readOptions = TestSupport.readOptions();
             PutOptions putOptions = new PutOptions(new Ttl.Default());
-            WriteOptions writeOptions = new WriteOptions(true);
+            WriteOptions writeOptions = new WriteOptions(0L);
 
             WriteHandle firstWrite = TestSupport.await(db.put(TestSupport.bytes("alpha"), TestSupport.bytes("one")));
             assertNotNull(firstWrite);
@@ -265,7 +265,7 @@ class SlateDbDbTest {
                         TestSupport.bytes("value-2"),
                         new PutOptions(new Ttl.Default()));
 
-                TestSupport.await(db.writeWithOptions(secondBatch, new WriteOptions(true)));
+                TestSupport.await(db.writeWithOptions(secondBatch, new WriteOptions(0L)));
             }
 
             assertArrayEquals(
@@ -303,7 +303,7 @@ class SlateDbDbTest {
                             TestSupport.bytes("merge"),
                             TestSupport.bytes(":two"),
                             new MergeOptions(new Ttl.Default()),
-                            new WriteOptions(true)));
+                            new WriteOptions(0L)));
             assertArrayEquals(
                     TestSupport.bytes("base:one:two"),
                     TestSupport.await(db.get(TestSupport.bytes("merge"))));
