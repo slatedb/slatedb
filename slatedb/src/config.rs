@@ -59,6 +59,7 @@
 //! [compactor_options]
 //! poll_interval = "5s"
 //! max_concurrent_compactions = 4
+//! enable_trivial_move = true
 //!
 //! [compactor_options.worker]
 //! max_sst_size = 1073741824
@@ -110,6 +111,7 @@
 //!  "compactor_options": {
 //!    "poll_interval": "5s",
 //!    "max_concurrent_compactions": 4,
+//!    "enable_trivial_move": true,
 //!    "worker": {
 //!      "max_sst_size": 1073741824
 //!    },
@@ -165,6 +167,7 @@
 //! compactor_options:
 //!   poll_interval: '5s'
 //!   max_concurrent_compactions: 4
+//!   enable_trivial_move: true
 //!   worker:
 //!     max_sst_size: 1073741824
 //!   scheduler_options:
@@ -210,7 +213,7 @@ use crate::error::SlateDBError;
 
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
-fn default_boundary_files_enabled() -> bool {
+fn default_true() -> bool {
     true
 }
 
@@ -1167,6 +1170,12 @@ pub struct CompactorOptions {
     /// The maximum number of concurrent compactions to execute at once
     pub max_concurrent_compactions: usize,
 
+    /// Whether the coordinator may complete compactions with non-overlapping
+    /// input SSTs by moving them directly into the destination sorted run,
+    /// without dispatching a worker job. Defaults to true.
+    #[serde(default = "default_true")]
+    pub enable_trivial_move: bool,
+
     /// Scheduler-specific options expressed as string key/value pairs.
     #[serde(default)]
     pub scheduler_options: HashMap<String, String>,
@@ -1219,6 +1228,7 @@ impl Default for CompactorOptions {
             poll_interval: Duration::from_secs(5),
             manifest_update_timeout: Duration::from_secs(300),
             max_concurrent_compactions: 4,
+            enable_trivial_move: true,
             scheduler_options: HashMap::new(),
             worker: Some(CompactionWorkerOptions::default()),
             metric_level: None,
@@ -1239,6 +1249,7 @@ impl std::fmt::Debug for CompactorOptions {
                 "max_concurrent_compactions",
                 &self.max_concurrent_compactions,
             )
+            .field("enable_trivial_move", &self.enable_trivial_move)
             .field("scheduler_options", &self.scheduler_options)
             .field("worker", &self.worker)
             .field("metric_level", &self.metric_level)
@@ -1509,7 +1520,7 @@ pub struct GarbageCollectorOptions {
     /// deleted metadata ID and incorrectly report its stale update as successful. Set `min_age`
     /// longer than the maximum lifetime of a stale process, and use the same setting for every
     /// garbage collector operating on the database.
-    #[serde(default = "default_boundary_files_enabled")]
+    #[serde(default = "default_true")]
     pub boundary_files_enabled: bool,
 
     /// Controls wrapper-level retries for this garbage collector's object-store
@@ -1786,6 +1797,16 @@ mod tests {
     fn test_db_options_default_metric_level() {
         let options = Settings::default();
         assert_eq!(MetricLevel::default(), options.metric_level);
+    }
+
+    #[test]
+    fn test_compactor_trivial_move_is_enabled_by_default_when_omitted() {
+        let mut value = serde_json::to_value(CompactorOptions::default()).unwrap();
+        value.as_object_mut().unwrap().remove("enable_trivial_move");
+
+        let options: CompactorOptions = serde_json::from_value(value).unwrap();
+
+        assert!(options.enable_trivial_move);
     }
 
     #[test]

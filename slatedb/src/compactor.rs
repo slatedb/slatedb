@@ -1217,11 +1217,16 @@ impl CompactorEventHandler {
 
             // Coordinator-local compactions never enter Scheduled because no
             // worker runs them. Everything else becomes ready to claim.
+            let trivial_move_output = self
+                .options
+                .enable_trivial_move
+                .then(|| compaction.trivial_move_output(self.state().db_state()))
+                .flatten();
+
             if compaction.spec().is_drain() {
                 self.state_mut().finish_drain_compaction(compaction.id());
                 manifest_changed = true;
-            } else if let Some(output_sr) = compaction.trivial_move_output(self.state().db_state())
-            {
+            } else if let Some(output_sr) = trivial_move_output {
                 info!("trivially moving compaction [spec={}]", compaction.spec());
                 self.state_mut()
                     .finish_compaction(compaction.id(), output_sr);
@@ -5238,6 +5243,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_maybe_validate_submitted_compactions_schedules_when_trivial_move_disabled() {
+        let options = Arc::new(CompactorOptions {
+            enable_trivial_move: false,
+            ..compactor_options()
+        });
+        let mut fixture = CompactorEventHandlerTestFixture::new_with_clock(
+            Arc::new(DefaultSystemClock::new()),
+            options,
+        )
+        .await;
+        let l0 = bounded_sst_view(2, b"m", b"n");
+        let sr_first = bounded_sst_view(1, b"a", b"b");
+        let sr_last = bounded_sst_view(3, b"z", b"z");
+        let core = &mut fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core;
+        Arc::make_mut(&mut core.tree).l0 = VecDeque::from([l0.clone()]);
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
+            id: 1,
+            sst_views: vec![sr_first, sr_last],
+        }];
+        let compaction_id = Ulid::new();
+        fixture
+            .handler
+            .state_mut()
+            .add_compaction(Compaction::new(
+                compaction_id,
+                CompactionSpec::new(vec![SourceId::SstView(l0.id), SourceId::SortedRun(1)], 2),
+            ))
+            .unwrap();
+
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
+
+        let state = fixture.handler.state();
+        assert_eq!(
+            state
+                .compactions()
+                .value
+                .get(&compaction_id)
+                .unwrap()
+                .status(),
+            CompactionStatus::Scheduled
+        );
+        assert_eq!(state.db_state().tree.l0.len(), 1);
+        assert_eq!(state.db_state().tree.compacted[0].id, 1);
+    }
+
+    #[tokio::test]
     async fn test_maybe_validate_submitted_compactions_marks_invalid_failed() {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
         let compaction_id = Ulid::new();
@@ -5566,11 +5627,12 @@ mod tests {
         let mut options = db_options(Some(compactor_options()));
         options.l0_sst_size_bytes = 128;
         options.compression_codec = Some(CompressionCodec::Zstd);
-        options
+        let compactor_options = options
             .compactor_options
             .as_mut()
-            .expect("compactor options missing")
-            .scheduler_options = scheduler_options;
+            .expect("compactor options missing");
+        compactor_options.scheduler_options = scheduler_options;
+        compactor_options.enable_trivial_move = false;
 
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let db = Db::builder(PATH, os.clone())
