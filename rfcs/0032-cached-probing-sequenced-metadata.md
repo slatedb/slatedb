@@ -100,7 +100,7 @@ of downloading every intervening object.
 ## Goals
 
 - Idle databases should cost less than $5 per month.
-- Protocol should be freiendly to lagging readers.
+- Protocol should be friendly to lagging readers.
 - Remove LIST when a warm reader is close to the latest version.
 - Keep the existing object layout, write protocol, and GC boundary semantics.
 - Avoid rereading an unchanged latest object.
