@@ -519,6 +519,35 @@ impl Compaction {
             .collect()
     }
 
+    /// Builds the output run when all input SST views have disjoint effective
+    /// key ranges. Reusing the views avoids reading or rewriting SST data.
+    pub(crate) fn trivial_move_output(&self, db_state: &ManifestCore) -> Option<SortedRun> {
+        let destination = self.spec.destination()?;
+        let mut sst_views = self.get_l0_sst_views(db_state);
+        sst_views.extend(
+            self.get_sorted_runs(db_state)
+                .into_iter()
+                .flat_map(|sr| sr.sst_views),
+        );
+        sst_views.sort_by(|left, right| {
+            left.compacted_effective_range()
+                .comparable_start_bound()
+                .cmp(&right.compacted_effective_range().comparable_start_bound())
+        });
+
+        (!sst_views.is_empty()
+            && sst_views.windows(2).all(|pair| {
+                pair[0]
+                    .compacted_effective_range()
+                    .intersect(pair[1].compacted_effective_range())
+                    .is_none()
+            }))
+        .then_some(SortedRun {
+            id: destination,
+            sst_views,
+        })
+    }
+
     /// The stable id (ULID) used to track this compaction across messages and attempts.
     pub fn id(&self) -> Ulid {
         self.id
@@ -1242,6 +1271,7 @@ mod tests {
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::{LsmTreeState, Segment};
+    use crate::test_utils::bounded_sst_view;
     use crate::utils::IdGenerator;
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -1271,6 +1301,69 @@ mod tests {
             CompactionSpec::new(vec![SourceId::SortedRun(1)], 1),
         )
         .with_ctx(Some(CompactionContext::new(subcompactions, Some(0))))
+    }
+
+    #[test]
+    fn test_trivial_move_output_builds_sorted_run_from_disjoint_inputs() {
+        let l0 = bounded_sst_view(2, b"m", b"n");
+        let sr_first = bounded_sst_view(1, b"a", b"b");
+        let sr_last = bounded_sst_view(3, b"z", b"z");
+        let mut db_state = ManifestCore::new();
+        Arc::make_mut(&mut db_state.tree).l0 = VecDeque::from([l0.clone()]);
+        Arc::make_mut(&mut db_state.tree).compacted = vec![SortedRun {
+            id: 1,
+            sst_views: vec![sr_first.clone(), sr_last.clone()],
+        }];
+        let compaction = Compaction::new(
+            Ulid::new(),
+            CompactionSpec::new(vec![SstView(l0.id), SourceId::SortedRun(1)], 2),
+        );
+
+        let output = compaction
+            .trivial_move_output(&db_state)
+            .expect("disjoint inputs should be a trivial move");
+
+        assert_eq!(output.id, 2);
+        assert_eq!(
+            output
+                .sst_views
+                .iter()
+                .map(|view| view.id)
+                .collect::<Vec<_>>(),
+            vec![sr_first.id, l0.id, sr_last.id]
+        );
+    }
+
+    #[test]
+    fn test_trivial_move_output_rejects_overlapping_inputs() {
+        let l0 = bounded_sst_view(1, b"a", b"m");
+        let sr_view = bounded_sst_view(2, b"m", b"z");
+        let mut db_state = ManifestCore::new();
+        Arc::make_mut(&mut db_state.tree).l0 = VecDeque::from([l0.clone()]);
+        Arc::make_mut(&mut db_state.tree).compacted = vec![SortedRun {
+            id: 1,
+            sst_views: vec![sr_view],
+        }];
+        let compaction = Compaction::new(
+            Ulid::new(),
+            CompactionSpec::new(vec![SstView(l0.id), SourceId::SortedRun(1)], 2),
+        );
+
+        assert!(compaction.trivial_move_output(&db_state).is_none());
+    }
+
+    #[test]
+    fn test_trivial_move_output_rejects_drain() {
+        let db_state = ManifestCore::new();
+        let compaction = Compaction::new(
+            Ulid::new(),
+            CompactionSpec::drain_segment(
+                Bytes::from_static(b"segment/"),
+                vec![SourceId::SortedRun(1)],
+            ),
+        );
+
+        assert!(compaction.trivial_move_output(&db_state).is_none());
     }
 
     fn set_test_subcompactions(compaction: &mut Compaction, subcompactions: Vec<Subcompaction>) {

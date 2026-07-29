@@ -2,9 +2,10 @@ use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{CompactionSpec, SourceId};
 use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, PutOptions, WriteOptions};
-use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView, SstType};
+use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType};
 use crate::error::{RetryReason, SlateDBError};
 use crate::format::row::SstRowCodecV0;
+use crate::format::sst::SST_FORMAT_VERSION_LATEST;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::object_store_tag::ObjectStoreCallTag;
 use crate::tablestore::{TableStore, TableStoreKind};
@@ -34,6 +35,18 @@ use tokio::sync::Notify;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 use ulid::Ulid;
+
+pub(crate) fn bounded_sst_view(id: u64, first: &'static [u8], last: &'static [u8]) -> SsTableView {
+    SsTableView::identity(SsTableHandle::new(
+        SsTableId::Compacted(Ulid::from_parts(id, 0)),
+        SST_FORMAT_VERSION_LATEST,
+        SsTableInfo {
+            first_entry: Some(Bytes::from_static(first)),
+            last_entry: Some(Bytes::from_static(last)),
+            ..SsTableInfo::default()
+        },
+    ))
+}
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: RowEntryIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
