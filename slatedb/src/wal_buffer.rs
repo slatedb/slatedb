@@ -152,7 +152,6 @@ impl WalBufferManager {
         })
     }
 
-    //TODO: do we still need durable watchers here?
     /// Check if we need to flush the wal with considering max_wal_size. the checking over `max_wal_size`
     /// is not very strict, we have to ensure a write batch into a single WAL file.
     ///
@@ -486,17 +485,11 @@ impl WalFlushHandler {
                 inner.compute_status(&self.table_store)
             };
 
-            // we notify the listener first since that updates the oracle, and then notify
-            // the table waiters. blocked writes wait on the table, so we have to update the oracle
-            // first to preserve read-your-writes. This does mean that there is a small window
-            // after notifying flushed before the wal memory is actually released.
-            // TODO: once we change writes to block on the durable seq num from the oracle we
-            //       can simplify this and fully drop the wal before notifying listeners
-            self.notify_listener(wal::WalEvent::WalFlushed(status));
             if Arc::strong_count(&wal) > 1 {
                 warn!("outstanding references to wal id {} after flushing", wal_id);
             }
             drop(wal);
+            self.notify_listener(wal::WalEvent::WalFlushed(status));
         }
 
         Ok(())
