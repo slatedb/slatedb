@@ -462,7 +462,7 @@ pub(crate) async fn build_sorted_runs(
         }
         sorted_runs.push(SortedRun {
             id: sr_id as u32,
-            sst_views: sr_ssts,
+            sst_views: sr_ssts.into(),
         });
     }
 

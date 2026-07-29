@@ -279,7 +279,7 @@ impl FlatBufferManifestCodec {
             }
             compacted.push(db_state::SortedRun {
                 id: manifest_sr.id(),
-                sst_views: ssts,
+                sst_views: ssts.into(),
             })
         }
         let checkpoints: Vec<checkpoint::Checkpoint> = manifest
@@ -477,10 +477,10 @@ impl FlatBufferManifestCodec {
                         .ssts()
                         .iter()
                         .map(|view| Self::decode_compacted_sst_view(&view, sst_lookup))
-                        .collect::<Result<_, _>>()?;
+                        .collect::<Result<Vec<_>, _>>()?;
                     Ok(db_state::SortedRun {
                         id: sr.id(),
-                        sst_views: ssts,
+                        sst_views: ssts.into(),
                     })
                 },
             )
@@ -1681,7 +1681,8 @@ mod tests {
                 sst_views: vec![
                     new_sst_handle(b"a", None),
                     new_sst_handle(b"d", Some(BytesRange::from_ref("e".."f"))),
-                ],
+                ]
+                .into(),
             },
             SortedRun {
                 id: 0,
@@ -1689,7 +1690,8 @@ mod tests {
                     new_sst_handle(b"a", None),
                     new_sst_handle(b"c", Some(BytesRange::from_ref("c"..))),
                     new_sst_handle(b"d", Some(BytesRange::from_ref("e".."f"))),
-                ],
+                ]
+                .into(),
             },
         ];
 
@@ -1928,7 +1930,7 @@ mod tests {
                     l0: VecDeque::new(),
                     compacted: vec![SortedRun {
                         id: 0,
-                        sst_views: vec![new_sst_view(), new_sst_view()],
+                        sst_views: vec![new_sst_view(), new_sst_view()].into(),
                     }],
                 }),
             },
@@ -1940,7 +1942,7 @@ mod tests {
                     l0: VecDeque::from(vec![new_sst_view(), new_sst_view()]),
                     compacted: vec![SortedRun {
                         id: 1,
-                        sst_views: vec![new_sst_view()],
+                        sst_views: vec![new_sst_view()].into(),
                     }],
                 }),
             },
@@ -2332,7 +2334,8 @@ mod tests {
                     first_entry: Some(Bytes::from_static(b"srkey")),
                     ..Default::default()
                 },
-            ))],
+            ))]
+            .into(),
         }];
         let codec = FlatBufferManifestCodec {};
 
@@ -2779,14 +2782,16 @@ mod tests {
                 sst_views: vec![
                     new_view(b"e", None),
                     new_view(b"f", Some(BytesRange::from_ref("g".."h"))),
-                ],
+                ]
+                .into(),
             },
             SortedRun {
                 id: 2,
                 sst_views: vec![
                     new_view(b"i", None),
                     new_view(b"j", Some(BytesRange::from_ref("k"..))),
-                ],
+                ]
+                .into(),
             },
         ];
         Arc::make_mut(&mut manifest.core.tree).last_compacted_l0_sst_view_id =
@@ -2857,7 +2862,8 @@ mod tests {
                     first_entry: Some(Bytes::from_static(b"srkey")),
                     ..Default::default()
                 },
-            ))],
+            ))]
+            .into(),
         }];
         manifest.writer_epoch = 5;
         manifest.compactor_epoch = 3;

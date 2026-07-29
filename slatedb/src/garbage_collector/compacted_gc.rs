@@ -743,7 +743,7 @@ mod tests {
                     l0: VecDeque::from(vec![segment_l0.clone()]),
                     compacted: vec![SortedRun {
                         id: 0,
-                        sst_views: vec![segment_sr.clone()],
+                        sst_views: vec![segment_sr.clone()].into(),
                     }],
                 }),
             }],

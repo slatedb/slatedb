@@ -307,7 +307,7 @@ impl CompactionExecuteBench {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
             compaction_id: job.id(),
             destination: 0,
-            l0_sst_views: vec![],
+            l0_sst_views: vec![].into(),
             sorted_runs: srs,
             compaction_clock_tick: state.last_l0_clock_tick,
             is_dest_last_run,

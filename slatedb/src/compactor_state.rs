@@ -526,8 +526,8 @@ impl Compaction {
         let mut sst_views = self.get_l0_sst_views(db_state);
         sst_views.extend(
             self.get_sorted_runs(db_state)
-                .into_iter()
-                .flat_map(|sr| sr.sst_views),
+                .iter()
+                .flat_map(|sr| sr.sst_views.iter().cloned()),
         );
         sst_views.sort_by(|left, right| {
             left.compacted_effective_range()
@@ -544,7 +544,7 @@ impl Compaction {
             }))
         .then_some(SortedRun {
             id: destination,
-            sst_views,
+            sst_views: sst_views.into(),
         })
     }
 
@@ -1312,7 +1312,7 @@ mod tests {
         Arc::make_mut(&mut db_state.tree).l0 = VecDeque::from([l0.clone()]);
         Arc::make_mut(&mut db_state.tree).compacted = vec![SortedRun {
             id: 1,
-            sst_views: vec![sr_first.clone(), sr_last.clone()],
+            sst_views: vec![sr_first.clone(), sr_last.clone()].into(),
         }];
         let compaction = Compaction::new(
             Ulid::new(),
@@ -1342,7 +1342,7 @@ mod tests {
         Arc::make_mut(&mut db_state.tree).l0 = VecDeque::from([l0.clone()]);
         Arc::make_mut(&mut db_state.tree).compacted = vec![SortedRun {
             id: 1,
-            sst_views: vec![sr_view],
+            sst_views: vec![sr_view].into(),
         }];
         let compaction = Compaction::new(
             Ulid::new(),
@@ -1853,7 +1853,7 @@ mod tests {
             compaction_id,
             SortedRun {
                 id: 0,
-                sst_views: vec![original_l0s.back().unwrap().clone()],
+                sst_views: vec![original_l0s.back().unwrap().clone()].into(),
             },
         );
         // open a new db and write another l0
@@ -1920,7 +1920,7 @@ mod tests {
             compaction_id,
             SortedRun {
                 id: 0,
-                sst_views: original_l0s.clone().into(),
+                sst_views: original_l0s.iter().cloned().collect(),
             },
         );
         assert_eq!(state.db_state().tree.l0.len(), 0);
@@ -2252,11 +2252,11 @@ mod tests {
         let prefix = Bytes::from_static(b"hour=12/");
         let sr5 = SortedRun {
             id: 5,
-            sst_views: Vec::new(),
+            sst_views: Vec::new().into(),
         };
         let sr3 = SortedRun {
             id: 3,
-            sst_views: Vec::new(),
+            sst_views: Vec::new().into(),
         };
         let segment = Segment {
             prefix: prefix.clone(),
@@ -2285,7 +2285,7 @@ mod tests {
         // Finish the compaction with a fresh output SR.
         let output = SortedRun {
             id: 7,
-            sst_views: Vec::new(),
+            sst_views: Vec::new().into(),
         };
         state.finish_compaction(compaction_id, output);
 
@@ -2319,7 +2319,7 @@ mod tests {
                 l0: VecDeque::new(),
                 compacted: vec![SortedRun {
                     id: 7,
-                    sst_views: Vec::new(),
+                    sst_views: Vec::new().into(),
                 }],
             }),
         }];
@@ -2335,7 +2335,7 @@ mod tests {
 
         let output = SortedRun {
             id: 7,
-            sst_views: Vec::new(),
+            sst_views: Vec::new().into(),
         };
         state.finish_compaction(compaction_id, output);
 
@@ -2360,7 +2360,7 @@ mod tests {
         // submissions. Root tree gets SR(99); segment "seg/" gets SR(100).
         Arc::make_mut(&mut state.manifest.value.core.tree).compacted = vec![SortedRun {
             id: 99,
-            sst_views: Vec::new(),
+            sst_views: Vec::new().into(),
         }];
         let prefix = Bytes::from_static(b"seg/");
         state.manifest.value.core.segments = vec![Segment {
@@ -2371,7 +2371,7 @@ mod tests {
                 l0: VecDeque::new(),
                 compacted: vec![SortedRun {
                     id: 100,
-                    sst_views: Vec::new(),
+                    sst_views: Vec::new().into(),
                 }],
             }),
         }];
@@ -2403,7 +2403,7 @@ mod tests {
         // for the first submission; the spec rewrites that SR (destination=7).
         Arc::make_mut(&mut state.manifest.value.core.tree).compacted = vec![SortedRun {
             id: 7,
-            sst_views: Vec::new(),
+            sst_views: Vec::new().into(),
         }];
 
         let first_id = rand.rng().gen_ulid(system_clock.as_ref());
@@ -2561,7 +2561,7 @@ mod tests {
         let l0_older = drain_test_view(1);
         let sr = SortedRun {
             id: 5,
-            sst_views: Vec::new(),
+            sst_views: Vec::new().into(),
         };
         let prefix = Bytes::from_static(b"hour=10/");
         state.manifest.value.core.segments = vec![Segment {

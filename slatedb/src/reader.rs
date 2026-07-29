@@ -577,11 +577,13 @@ mod tests {
             // Find or create the sorted run
             let tree = Arc::make_mut(&mut self.core.tree);
             if let Some(sr) = tree.compacted.iter_mut().find(|sr| sr.id == sr_id) {
-                sr.sst_views.push(SsTableView::identity(sst_handle));
+                let mut views = sr.sst_views.to_vec();
+                views.push(SsTableView::identity(sst_handle));
+                sr.sst_views = views.into();
             } else {
                 let new_sr = SortedRun {
                     id: sr_id,
-                    sst_views: vec![SsTableView::identity(sst_handle)],
+                    sst_views: vec![SsTableView::identity(sst_handle)].into(),
                 };
                 tree.compacted.push(new_sr);
             }

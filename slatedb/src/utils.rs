@@ -1334,12 +1334,13 @@ mod tests {
                 make_sst_view("a", 10),
                 make_sst_view("k", 20), // k < m < z, so only "a" counts
                 make_sst_view("z", 30),
-            ],
+            ]
+            .into(),
         };
         let run2 = SortedRun {
             id: 2,
             // f < m < ..., so only "b" counts
-            sst_views: vec![make_sst_view("b", 40), make_sst_view("f", 50)],
+            sst_views: vec![make_sst_view("b", 40), make_sst_view("f", 50)].into(),
         };
 
         let key = Bytes::from("m");

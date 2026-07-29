@@ -1749,7 +1749,7 @@ mod tests {
                     .unwrap();
 
                 let mut expected_entries = Vec::new();
-                for view in &full_run.sst_views {
+                for view in full_run.sst_views.iter() {
                     let mut iter = SstIterator::new(
                         SstView::Owned(
                             Box::new(SsTableView::identity(view.sst.clone())),
@@ -1801,7 +1801,7 @@ mod tests {
                         .unwrap();
 
                     let mut resumed_entries = Vec::new();
-                    for view in &resumed_run.sst_views {
+                    for view in resumed_run.sst_views.iter() {
                         let mut iter = SstIterator::new(
                             SstView::Owned(
                                 Box::new(SsTableView::identity(view.sst.clone())),
@@ -1828,7 +1828,7 @@ mod tests {
     /// runs can be compared for byte-identical merged output.
     async fn read_run_entries(table_store: &Arc<TableStore>, run: &SortedRun) -> Vec<RowEntry> {
         let mut entries = Vec::new();
-        for sst in &run.sst_views {
+        for sst in run.sst_views.iter() {
             let mut iter = SstIterator::new(
                 SstView::Borrowed(sst, BytesRange::from(..)),
                 table_store.clone(),
@@ -2748,7 +2748,7 @@ mod tests {
         );
         // ... and the merged output preserves every key in ascending order.
         let mut read_back = Vec::new();
-        for view in result_ssts {
+        for view in result_ssts.iter() {
             let mut iter = SstIterator::new(
                 SstView::Owned(
                     Box::new(SsTableView::identity(view.sst.clone())),

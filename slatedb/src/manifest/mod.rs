@@ -1151,11 +1151,11 @@ impl Manifest {
         let l0: VecDeque<SsTableView> = Self::filter_view_handles(&tree.l0, true, range).into();
         let mut sorted_runs_filtered = vec![];
         for sr in &tree.compacted {
-            let sst_views = Self::filter_view_handles(&sr.sst_views, false, range);
+            let sst_views = Self::filter_view_handles(sr.sst_views.iter(), false, range);
             if !sst_views.is_empty() {
                 sorted_runs_filtered.push(SortedRun {
                     id: sr.id,
-                    sst_views,
+                    sst_views: sst_views.into(),
                 });
             }
         }
@@ -2086,7 +2086,7 @@ mod tests {
                 l0: writer_l0.clone(),
                 compacted: vec![],
             };
-            let compactor_compacted = vec![SortedRun { id: 42, sst_views: vec![] }];
+            let compactor_compacted = vec![SortedRun { id: 42, sst_views: vec![].into() }];
             let compactor = LsmTreeState {
                 last_compacted_l0_sst_view_id: last_view,
                 last_compacted_l0_sst_id: last_sst,
@@ -2473,7 +2473,7 @@ mod tests {
                         0,
                         SortedRun {
                             id: self.next_sr_id,
-                            sst_views: sr_views,
+                            sst_views: sr_views.into(),
                         },
                     );
                 }
@@ -2574,7 +2574,7 @@ mod tests {
                 }
                 for seg in &self.store {
                     for sr in &seg.tree.compacted {
-                        for view in &sr.sst_views {
+                        for view in sr.sst_views.iter() {
                             assert!(
                                 self.flushed_l0s.contains(&view.id),
                                 "SR {} references L0 {} that was never flushed",
@@ -2661,7 +2661,7 @@ mod tests {
                 for seg in &self.store {
                     let l0_ids: BTreeSet<Ulid> = seg.tree.l0.iter().map(|v| v.id).collect();
                     for sr in &seg.tree.compacted {
-                        for view in &sr.sst_views {
+                        for view in sr.sst_views.iter() {
                             assert!(
                                 !l0_ids.contains(&view.id),
                                 "L0 {} appears in both l0 list and SR {} of segment {:?}",
@@ -3174,7 +3174,7 @@ mod tests {
             .push_back(create_sst_view(live_l0, b"a"));
         Arc::make_mut(&mut core.tree).compacted.push(SortedRun {
             id: 0,
-            sst_views: vec![create_sst_view(live_compacted, b"b")],
+            sst_views: vec![create_sst_view(live_compacted, b"b")].into(),
         });
 
         let mut manifest = Manifest::initial(core);
@@ -3231,7 +3231,7 @@ mod tests {
                 l0: VecDeque::from(vec![create_sst_view(segment_l0, b"seg/a")]),
                 compacted: vec![SortedRun {
                     id: 0,
-                    sst_views: vec![create_sst_view(segment_compacted, b"seg/b")],
+                    sst_views: vec![create_sst_view(segment_compacted, b"seg/b")].into(),
                 }],
             }),
         }];
@@ -3289,7 +3289,8 @@ mod tests {
                     },
                 ),
                 Some(visible_range),
-            )],
+            )]
+            .into(),
         });
         Manifest::initial(core)
     }
@@ -3988,7 +3989,8 @@ mod tests {
                             },
                         ),
                         Some(visible_range),
-                    )],
+                    )]
+                    .into(),
                 }],
             }),
         }];
@@ -4049,7 +4051,7 @@ mod tests {
         fn make_sr(id: u32) -> SortedRun {
             SortedRun {
                 id, // intentionally collides across trees pre-renumber
-                sst_views: vec![],
+                sst_views: vec![].into(),
             }
         }
 
@@ -4265,7 +4267,8 @@ mod tests {
                                 },
                             ),
                             Some(range),
-                        )],
+                        )]
+                        .into(),
                     }],
                 }),
             }
@@ -4706,7 +4709,8 @@ mod tests {
                                 },
                             ),
                             Some(BytesRange::from_ref("a".."m")),
-                        )],
+                        )]
+                        .into(),
                     }],
                 }),
             },
@@ -4729,7 +4733,8 @@ mod tests {
                                 },
                             ),
                             Some(BytesRange::from_ref("n".."z")),
-                        )],
+                        )]
+                        .into(),
                     }],
                 }),
             },
@@ -4779,7 +4784,8 @@ mod tests {
             sst_views: vec![
                 make(sst1, b"a", b"c", BytesRange::from_ref("a".."d")),
                 make(sst2, b"m", b"p", BytesRange::from_ref("m".."q")),
-            ],
+            ]
+            .into(),
         });
         Manifest::initial(core)
     }

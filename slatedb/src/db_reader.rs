@@ -3159,7 +3159,7 @@ mod tests {
                 l0: VecDeque::from(vec![view(1)]),
                 compacted: vec![SortedRun {
                     id: 0,
-                    sst_views: vec![view(4)],
+                    sst_views: vec![view(4)].into(),
                 }],
             },
         )];

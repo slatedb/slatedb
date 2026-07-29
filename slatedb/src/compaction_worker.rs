@@ -1116,7 +1116,7 @@ mod tests {
         );
         let sorted_run = SortedRun {
             id: 0,
-            sst_views: vec![SsTableView::identity(output_handle.clone())],
+            sst_views: vec![SsTableView::identity(output_handle.clone())].into(),
         };
 
         fx.handler

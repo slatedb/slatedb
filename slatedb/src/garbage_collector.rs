@@ -1455,7 +1455,8 @@ mod tests {
             sst_views: vec![
                 SsTableView::identity(active_sst_handle.clone()),
                 SsTableView::identity(active_expired_sst_handle.clone()),
-            ],
+            ]
+            .into(),
         });
         StoredManifest::create_new_db(
             manifest_store.clone(),
@@ -1571,11 +1572,11 @@ mod tests {
             ));
         Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
             id: 1,
-            sst_views: vec![SsTableView::identity(active_sst_handle.clone())],
+            sst_views: vec![SsTableView::identity(active_sst_handle.clone())].into(),
         });
         Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
             id: 2,
-            sst_views: vec![SsTableView::identity(active_checkpoint_sst_handle.clone())],
+            sst_views: vec![SsTableView::identity(active_checkpoint_sst_handle.clone())].into(),
         });
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
@@ -1756,7 +1757,7 @@ mod tests {
             }
 
             for sr in &manifest.core.tree.compacted {
-                for view in &sr.sst_views {
+                for view in sr.sst_views.iter() {
                     assert!(compacted_ssts.contains(&view.sst.id));
                 }
             }
@@ -2223,7 +2224,7 @@ mod tests {
             .push_back(SsTableView::identity(active_l0_handle));
         Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
             id: 1,
-            sst_views: vec![SsTableView::identity(active_handle)],
+            sst_views: vec![SsTableView::identity(active_handle)].into(),
         });
         // inactive_expired_handle is NOT in manifest -> eligible for GC
         StoredManifest::create_new_db(
