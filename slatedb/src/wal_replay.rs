@@ -14,6 +14,7 @@ use log::error;
 use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::Arc;
+use object_store::path::Path;
 use tokio::task;
 use tokio::task::JoinHandle;
 
@@ -204,15 +205,17 @@ impl WalReplayIterator {
 
 struct WalRowsCollector {
     wal_id: u64,
+    path: Path,
     iter: Box<dyn RowEntryIterator + 'static>,
     rows: Vec<RowEntry>,
     drained: bool,
 }
 
 impl WalRowsCollector {
-    fn new(wal_id: u64, iter: Box<dyn RowEntryIterator + 'static>) -> Self {
+    fn new(wal_id: u64, path: Path, iter: Box<dyn RowEntryIterator + 'static>) -> Self {
         Self {
             wal_id,
+            path,
             iter,
             rows: vec![],
             drained: false,
@@ -227,7 +230,7 @@ impl WalRowsCollector {
                     self.drained = true;
                     break Ok(());
                 }
-                Err(err) if err.has_object_store_not_found() => {
+                Err(err) if err.has_object_store_not_found(self.path.clone()) => {
                     break Err(WalError::WalTruncated(self.wal_id));
                 }
                 Err(err) => {
@@ -349,6 +352,7 @@ impl WalIterator {
             wal_id: u64,
             sst_iter_options: SstIteratorOptions,
             table_store: Arc<TableStore>,
+            path: Path,
         ) -> Result<WalRowsCollector, SlateDBError> {
             let sst = match table_store.open_sst(&SsTableId::Wal(wal_id)).await {
                 Ok(sst) => sst,
@@ -357,6 +361,7 @@ impl WalIterator {
                     // so the last replayed WAL ID still advances past the marker.
                     return Ok(WalRowsCollector::new(
                         wal_id,
+                        path,
                         Box::new(EmptyIterator::new()),
                     ));
                 }
@@ -379,7 +384,7 @@ impl WalIterator {
                 );
                 return Err(SlateDBError::InvalidDBState);
             };
-            Ok(WalRowsCollector::new(wal_id, Box::new(iter)))
+            Ok(WalRowsCollector::new(wal_id, path, Box::new(iter)))
         }
 
         async fn open_file_iter(
@@ -387,9 +392,10 @@ impl WalIterator {
             sst_iter_options: SstIteratorOptions,
             table_store: Arc<TableStore>,
         ) -> Result<WalRowsCollector, WalError> {
-            match try_open_file_iter(wal_id, sst_iter_options, table_store).await {
+            let path = table_store.path(&SsTableId::Wal(wal_id));
+            match try_open_file_iter(wal_id, sst_iter_options, table_store, path.clone()).await {
                 Ok(iter) => Ok(iter),
-                Err(err) if err.has_object_store_not_found() => Err(WalError::WalTruncated(wal_id)),
+                Err(err) if err.has_object_store_not_found(path) => Err(WalError::WalTruncated(wal_id)),
                 Err(err) => Err(err.into()),
             }
         }

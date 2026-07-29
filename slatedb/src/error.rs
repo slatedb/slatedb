@@ -320,19 +320,22 @@ impl SlateDBError {
         }
     }
 
-    /// Returns true if this error or any of its sources is an object-store NotFound.
-    pub(crate) fn has_object_store_not_found(&self) -> bool {
-        fn is_object_store_not_found(err: &(dyn std::error::Error + 'static)) -> bool {
-            err.downcast_ref::<object_store::Error>()
-                .is_some_and(|err| matches!(err, object_store::Error::NotFound { .. }))
-                || err
-                    .downcast_ref::<Arc<object_store::Error>>()
-                    .is_some_and(|err| matches!(err.as_ref(), object_store::Error::NotFound { .. }))
+    /// Returns true if this error or any of its sources is an object-store NotFound for the
+    /// specified path
+    pub(crate) fn has_object_store_not_found(&self, path: Path) -> bool {
+        fn is_object_store_not_found(err: &(dyn std::error::Error + 'static), path: Path) -> bool {
+            if let Some(err) = err.downcast_ref::<object_store::Error>() {
+                return matches!(err, object_store::Error::NotFound { path: nf_path, .. } if path == Path::from(nf_path.as_str()));
+            }
+            if let Some(err) = err.downcast_ref::<Arc<object_store::Error>>() {
+                return matches!(err.as_ref(), object_store::Error::NotFound { path: nf_path, .. } if path == Path::from(nf_path.as_str()));
+            }
+            false
         }
 
         let mut current: Option<&(dyn std::error::Error + 'static)> = Some(self);
         while let Some(err) = current {
-            if is_object_store_not_found(err) {
+            if is_object_store_not_found(err, path.clone()) {
                 return true;
             }
             current = err.source();
@@ -770,7 +773,17 @@ mod tests {
             source: Box::new(std::io::Error::other("not found")),
         });
 
-        assert!(err.has_object_store_not_found());
+        assert!(err.has_object_store_not_found(Path::from("test/path")));
+    }
+
+    #[test]
+    fn has_object_store_not_found_checks_path() {
+        let err = SlateDBError::from(object_store::Error::NotFound {
+            path: "test/path".to_string(),
+            source: Box::new(std::io::Error::other("not found")),
+        });
+
+        assert!(!err.has_object_store_not_found(Path::from("test/path_other")));
     }
 
     #[test]
