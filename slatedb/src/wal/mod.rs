@@ -41,7 +41,7 @@ pub enum WalError {
     /// The WAL writer was fenced
     Fenced,
     /// A WalIterator observed that the tail of the WAL was truncated while iterating.
-    WalTruncated,
+    WalTruncated(u64),
     /// Operation against wal after it was closed
     Closed,
     /// WAL is unavailable, e.g. due to an I/O error or error in the backing storage system
@@ -56,7 +56,7 @@ impl Display for WalError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             WalError::Fenced => write!(f, "WAL writer was fenced"),
-            WalError::WalTruncated => write!(f, "WAL was truncated"),
+            WalError::WalTruncated(wal_id) => write!(f, "WAL was truncated at file {}", *wal_id),
             WalError::Closed => write!(f, "WAL is closed"),
             WalError::Unavailable(source) => write!(f, "WAL is unavailable: {source}"),
             WalError::DataError(source) => write!(f, "WAL data error: {source}"),
@@ -300,7 +300,7 @@ impl From<WalError> for SlateDBError {
     fn from(value: WalError) -> Self {
         match value {
             WalError::Fenced => SlateDBError::Fenced,
-            WalError::WalTruncated => SlateDBError::WalTruncated,
+            WalError::WalTruncated(wal_id) => SlateDBError::WalTruncated(wal_id),
             WalError::Closed => SlateDBError::Closed,
             WalError::Unavailable(err) => SlateDBError::WalUnavailable(err),
             WalError::DataError(err) => SlateDBError::WalDataError(err),
@@ -322,7 +322,7 @@ mod tests {
         };
 
         assert_eq!(WalError::Fenced.to_string(), "WAL writer was fenced");
-        assert_eq!(WalError::WalTruncated.to_string(), "WAL was truncated");
+        assert_eq!(WalError::WalTruncated(123).to_string(), "WAL was truncated at file 123");
         assert_eq!(WalError::Closed.to_string(), "WAL is closed");
         assert_eq!(
             WalError::Unavailable(source()).to_string(),

@@ -511,12 +511,12 @@ impl DbInner {
                 // indicate that a newer writer has advanced `replay_after_wal_id` and
                 // the GC has removed this WAL entry. Check the latest manifest's
                 // writer_epoch to see if this client is fenced.
-                Err(SlateDBError::WalTruncated) => {
+                Err(SlateDBError::WalTruncated(wal_id)) => {
                     self.memtable_flusher.refresh_manifest().await?;
                     if self.state.read().state().manifest.value.writer_epoch > writer_epoch {
                         return Err(SlateDBError::Fenced);
                     }
-                    return Err(SlateDBError::WalTruncated);
+                    return Err(SlateDBError::WalTruncated(wal_id));
                 }
                 Err(err) => return Err(err),
             };

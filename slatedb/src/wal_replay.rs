@@ -76,7 +76,7 @@ pub(crate) struct WalReplayIterator {
 }
 
 impl WalReplayIterator {
-    pub(crate) async fn range(
+    pub(crate) fn range(
         wal_id_range: Range<u64>,
         db_state: &ManifestCore,
         iterator_options: WalIteratorOptions,
@@ -84,7 +84,7 @@ impl WalReplayIterator {
         table_store: Arc<TableStore>,
     ) -> Result<Self, SlateDBError> {
         let wal_iter =
-            WalIterator::range(wal_id_range, iterator_options, Arc::clone(&table_store)).await?;
+            WalIterator::range(wal_id_range, iterator_options, Arc::clone(&table_store))?;
         Self::for_wal_iterator(Box::new(wal_iter), db_state, replay_options, table_store)
     }
 
@@ -231,7 +231,7 @@ pub(crate) struct WalIterator {
 }
 
 impl WalIterator {
-    pub(crate) async fn range(
+    pub(crate) fn range(
         wal_id_range: Range<u64>,
         options: WalIteratorOptions,
         table_store: Arc<TableStore>,
@@ -309,7 +309,7 @@ impl WalIterator {
         ) -> Result<WalFileIter, WalError> {
             match try_open_file_iter(wal_id, sst_iter_options, table_store).await {
                 Ok(iter) => Ok(iter),
-                Err(err) if err.has_object_store_not_found() => Err(WalError::WalTruncated),
+                Err(err) if err.has_object_store_not_found() => Err(WalError::WalTruncated(wal_id)),
                 Err(err) => Err(err.into()),
             }
         }
@@ -326,10 +326,14 @@ impl WalIterator {
     /// Await the next preloaded WAL file and return an iterator over its rows.
     /// Returns `None` when there are no more files to read.
     async fn take_next_file(&mut self) -> Result<Option<WalFileIter>, WalError> {
-        let Some(join_handle) = self.next_files.pop_front() else {
+        // await a mutable ref to the task so that next remains cancel-safe
+        // see https://docs.rs/tokio/latest/tokio/task/struct.JoinHandle.html#cancel-safety
+        let Some(join_handle) = self.next_files.front_mut() else {
             return Ok(None);
         };
-        match join_handle.await {
+        let result = join_handle.await;
+        self.next_files.pop_front();
+        match result {
             Ok(result) => result.map(Some),
             Err(join_err) => {
                 let task_name = format!("wal_replay[{:?}]", self.wal_id_range);
@@ -342,20 +346,20 @@ impl WalIterator {
                 } else {
                     format!("wal_replay task cancelled. [task_name={}]", task_name)
                 };
+                error!("{}", msg);
                 let error = Arc::from(Box::<dyn std::error::Error + Send + Sync>::from(msg));
                 Err(WalError::InternalError(error))
             }
         }
     }
 
-    async fn terminate(
+    fn terminate(
         &mut self,
         result: Result<Option<WalRows>, WalError>,
     ) -> Result<Option<WalRows>, WalError> {
         self.terminal_result = Some(result.clone());
         for task in self.next_files.drain(..) {
             task.abort();
-            let _ = task.await;
         }
         result
     }
@@ -378,10 +382,10 @@ impl WalIteratorTrait for WalIterator {
         let mut file_iter = match self.take_next_file().await {
             Ok(Some(file_iter)) => file_iter,
             Ok(None) => {
-                return self.terminate(Ok(None)).await;
+                return self.terminate(Ok(None));
             }
             Err(err) => {
-                return self.terminate(Err(err)).await;
+                return self.terminate(Err(err));
             }
         };
 
@@ -393,10 +397,10 @@ impl WalIteratorTrait for WalIterator {
                 Ok(Some(row)) => rows.push(row),
                 Ok(None) => break,
                 Err(err) if err.has_object_store_not_found() => {
-                    return self.terminate(Err(WalError::WalTruncated)).await;
+                    return self.terminate(Err(WalError::WalTruncated(file_iter.wal_id)));
                 }
                 Err(err) => {
-                    return self.terminate(Err(err.into())).await;
+                    return self.terminate(Err(err.into()));
                 }
             }
         }
@@ -415,7 +419,7 @@ impl WalIteratorTrait for WalIterator {
                     );
                     error!("{}", &msg);
                     let error = Arc::from(Box::<dyn std::error::Error + Send + Sync>::from(msg));
-                    return self.terminate(Err(WalError::InternalError(error))).await;
+                    return self.terminate(Err(WalError::InternalError(error)));
                 }
             }
             let max_seq = rows
@@ -490,7 +494,6 @@ mod tests {
                 options,
                 table_store,
             )
-            .await
         }
     }
 
@@ -505,12 +508,12 @@ mod tests {
                     rows: vec![first_row],
                     last_consumed_wal_file_id: 1,
                 })),
-                Err(WalError::WalTruncated),
+                Err(WalError::WalTruncated(2)),
                 // A terminal error must prevent the replay iterator from resuming
                 // the underlying iterator on later calls.
                 Ok(Some(WalRows {
                     rows: vec![later_row],
-                    last_consumed_wal_file_id: 2,
+                    last_consumed_wal_file_id: 3,
                 })),
             ]),
         };
@@ -532,11 +535,11 @@ mod tests {
 
         assert!(matches!(
             replay_iter.next().await,
-            Err(SlateDBError::WalTruncated)
+            Err(SlateDBError::WalTruncated(2))
         ));
         assert!(matches!(
             replay_iter.next().await,
-            Err(SlateDBError::WalTruncated)
+            Err(SlateDBError::WalTruncated(2))
         ));
     }
 
@@ -574,11 +577,10 @@ mod tests {
             WalIteratorOptions::default(),
             Arc::clone(&table_store),
         )
-        .await
         .unwrap();
 
-        assert!(matches!(wal_iter.next().await, Err(WalError::WalTruncated)));
-        assert!(matches!(wal_iter.next().await, Err(WalError::WalTruncated)));
+        assert!(matches!(wal_iter.next().await, Err(WalError::WalTruncated(1))));
+        assert!(matches!(wal_iter.next().await, Err(WalError::WalTruncated(1))));
     }
 
     #[tokio::test]
@@ -589,7 +591,6 @@ mod tests {
             WalIteratorOptions::default(),
             Arc::clone(&table_store),
         )
-        .await
         .unwrap();
 
         assert!(wal_iter.next().await.unwrap().is_none());
@@ -1033,7 +1034,6 @@ mod tests {
             WalIteratorOptions::default(),
             Arc::clone(&table_store),
         )
-        .await
         .unwrap();
 
         let mut returned_rows = BTreeMap::new();

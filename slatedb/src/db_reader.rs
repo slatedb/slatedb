@@ -627,13 +627,12 @@ impl DbReaderInner {
             iterator_options,
             replay_options,
             Arc::clone(&table_store),
-        )
-        .await?;
+        )?;
 
         while let Some(replayed_table) = match replay_iter.next().await {
             Ok(Some(replayed_table)) => Some(replayed_table),
             Ok(None) => None,
-            Err(SlateDBError::WalTruncated) => None,
+            Err(SlateDBError::WalTruncated(_)) => None,
             Err(err) => return Err(err),
         } {
             // `last_wal_id` is a conservative watermark: a table that ends mid-file

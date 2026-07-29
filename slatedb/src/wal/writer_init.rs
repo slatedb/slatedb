@@ -128,8 +128,7 @@ impl wal::WriterInit for WalWriterInit {
                         },
                     },
                     self.table_store.clone(),
-                )
-                .await?;
+                )?;
                 let wal_writer = WalBufferManager::start_new(
                     self.closed_result_reader.clone(),
                     &self.recorder,

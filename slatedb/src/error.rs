@@ -77,8 +77,8 @@ pub(crate) enum SlateDBError {
     #[error("wal store reconfiguration unsupported")]
     WalStoreReconfigurationError,
 
-    #[error("wal truncated")]
-    WalTruncated,
+    #[error("wal truncated at wal file `{0}`")]
+    WalTruncated(u64),
 
     #[error("wal unavailable")]
     WalUnavailable(Arc<dyn std::error::Error + Sync + Send + 'static>),
@@ -727,7 +727,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::CloneExternalDbMissing => Error::data(msg),
             SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::data(msg),
             SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::data(msg),
-            SlateDBError::WalTruncated => Error::data(msg),
+            SlateDBError::WalTruncated(_) => Error::data(msg),
             SlateDBError::WalDataError(src) => Error::data(msg).with_source(Box::new(src)),
 
             // Internal errors
