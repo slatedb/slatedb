@@ -413,7 +413,9 @@ class SlateDbDbTest {
             Error.Closed error =
                     TestSupport.awaitFailure(
                             Error.Closed.class,
-                            primaryDb.put(TestSupport.bytes("stale"), TestSupport.bytes("value")));
+                            primaryDb
+                                    .put(TestSupport.bytes("stale"), TestSupport.bytes("value"))
+                                    .thenCompose(ignored -> primaryDb.flush()));
             primary.markClosed();
 
             assertEquals(CloseReason.FENCED, error.reason());

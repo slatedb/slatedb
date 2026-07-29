@@ -423,7 +423,10 @@ test("db writer fencing reports closed reason", async (t) => {
   );
 
   const error = await expectClosed(
-    () => primary.put(bytes("stale"), bytes("value")),
+    async () => {
+      await primary.put(bytes("stale"), bytes("value"));
+      await primary.flush();
+    },
     { reason: CloseReason.Fenced },
   );
   assert.match(error.message, /detected newer DB client/);

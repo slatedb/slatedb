@@ -1125,17 +1125,20 @@ func TestDbInvalidInputsAndErrorMapping(t *testing.T) {
 		}
 
 		_, err := primary.db.Put([]byte("stale"), []byte("value"))
+		if err == nil {
+			err = primary.db.Flush()
+		}
 		if !errors.Is(err, slatedb.ErrErrorClosed) {
-			t.Fatalf("primary Put() after fencing: got %v, want closed error", err)
+			t.Fatalf("primary write durability after fencing: got %v, want closed error", err)
 		}
 		primary.open = false
 
 		var closedErr *slatedb.ErrorClosed
 		if !errors.As(err, &closedErr) {
-			t.Fatalf("primary Put() after fencing: expected *ErrorClosed, got %T", err)
+			t.Fatalf("primary write durability after fencing: expected *ErrorClosed, got %T", err)
 		}
 		if closedErr.Reason != slatedb.CloseReasonFenced {
-			t.Fatalf("primary Put() after fencing: got close reason %v, want %v", closedErr.Reason, slatedb.CloseReasonFenced)
+			t.Fatalf("primary write durability after fencing: got close reason %v, want %v", closedErr.Reason, slatedb.CloseReasonFenced)
 		}
 	})
 }

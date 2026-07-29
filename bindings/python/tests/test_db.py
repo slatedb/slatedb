@@ -386,6 +386,7 @@ async def test_db_writer_fencing_reports_closed_reason() -> None:
 
     with pytest.raises(Error.Closed) as exc:
         await primary.put(b"stale", b"value")
+        await primary.flush()
     assert exc.value.reason == CloseReason.FENCED
     assert "detected newer DB client" in exc.value.message
 
