@@ -3137,12 +3137,15 @@ const batchSeedTtlTicks = 3_600_000
 func seedBatchRows(t *testing.T, db *slatedb.Db) {
 	t.Helper()
 
-	writeOptions := slatedb.WriteOptions{AwaitDurable: true}
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
 	for _, row := range batchSeedRows {
 		putOptions := slatedb.PutOptions{Ttl: row.ttl}
 		if _, err := db.PutWithOptions([]byte(row.key), []byte(row.value), putOptions, writeOptions); err != nil {
 			t.Fatalf("PutWithOptions(%q): %v", row.key, err)
 		}
+	}
+	if err := db.Flush(); err != nil {
+		t.Fatalf("Flush(): %v", err)
 	}
 }
 
@@ -3393,7 +3396,7 @@ func openBenchDB(b *testing.B) *slatedb.Db {
 		db.Destroy()
 	})
 
-	writeOptions := slatedb.WriteOptions{AwaitDurable: false}
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
 	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlDefault{}}
 	for i := 0; i < benchScanRows; i++ {
 		key := []byte(fmt.Sprintf("bench:%06d", i))
