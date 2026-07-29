@@ -376,7 +376,7 @@ impl WalBufferManagerInner {
         self.last_flushed_wal_id = flushed_wal_id;
         if let Some(seq) = flushed_wal.last_seq() {
             if let Some(last_flushed_seq) = self.last_flushed_seq {
-                assert!(seq >= last_flushed_seq);
+                assert!(seq > last_flushed_seq);
             }
             self.last_flushed_seq = Some(seq);
         }

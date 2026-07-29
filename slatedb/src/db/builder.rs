@@ -617,7 +617,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         );
         let WriterFenceResult {
             manifest,
-            replay_range,
+            replay_iterator,
             mut wal_writer,
         } = fencer.fence(stored_manifest).await?;
         let (wal_writer, wal_observer) = if DbInner::wal_enabled_in_options(&self.settings) {
@@ -818,7 +818,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         task_executor.monitor_on(&tokio_handle)?;
 
         // Replay WAL
-        inner.replay_wal(replay_range).await?;
+        inner.replay_wal(replay_iterator).await?;
 
         // Preload cache if enabled
         if let Some(cached_obj_store) = cached_object_store {

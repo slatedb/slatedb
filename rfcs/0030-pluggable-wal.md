@@ -347,14 +347,8 @@ pub struct WalRows {
     /// The rows read from the WAL File. All the rows with a given sequence number must be present
     /// in th same [`WalRows`].
     pub rows: Vec<RowEntry>,
-    /// The id of the last WAL File containing rows from `rows`. There may still be rows with higher
-    /// sequence numbers in the WAL File with this id.
-    pub last_wal_file_id: u64,
-    /// True when this batch is the last one in its WAL file. This is an
-    /// optimization, so its harmless to always set to false. Callers can already infer that a
-    /// file is fully applied when they see a batch from a later file, but this flag lets them
-    /// advance their WAL watermark over the current file without waiting for the next one.
-    pub last_in_file: bool,
+    /// The id of the last WAL File for which all rows have been consumed by the iterator.
+    pub last_consumed_wal_file_id: u64,
 }
 
 /// An iterator over rows in some range of the WAL
@@ -714,8 +708,8 @@ implementation is correct. Some important test cases we'll cover (non-exhaustive
 - `WalWriter` emits events when rows are durably stored.
 - `WalIterator` always iterates over writes in sequence order
 - `WalIterator` always returns full write batches in `WalRows`
-- `WalIterator` tracks the WAL file id in `WalRows` correctly (TODO: this probably needs some 
-  test interfaces in the reader for listing/reading wal files)
+- `WalIterator` tracks the last consumed WAL file id in `WalRows` correctly (TODO: this probably
+  needs some test interfaces in the reader for listing/reading wal files)
 
 **Performance**
 

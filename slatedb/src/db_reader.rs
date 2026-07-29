@@ -23,7 +23,7 @@ use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
 use crate::utils::IdGenerator;
-use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
+use crate::wal_replay::{WalIteratorOptions, WalReplayIterator, WalReplayOptions};
 use crate::{Checkpoint, DbIterator};
 use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps};
 use async_trait::async_trait;
@@ -611,10 +611,12 @@ impl DbReaderInner {
             core.next_wal_sst_id
         };
 
-        let replay_options = WalReplayOptions {
+        let iterator_options = WalIteratorOptions {
             sst_batch_size: 4,
-            max_memtable_bytes: reader_options.max_memtable_bytes as usize,
             sst_iter_options,
+        };
+        let replay_options = WalReplayOptions {
+            max_memtable_bytes: reader_options.max_memtable_bytes as usize,
             // Skip entries that we already have in `imm_memtable` (that might be above last_l0_seq).
             min_seq: Some(last_committed_seq),
         };
@@ -622,18 +624,21 @@ impl DbReaderInner {
         let mut replay_iter = WalReplayIterator::range(
             (replay_after_wal_id + 1)..wal_id_end,
             core,
+            iterator_options,
             replay_options,
             Arc::clone(&table_store),
-        )
-        .await?;
+        )?;
 
         while let Some(replayed_table) = match replay_iter.next().await {
             Ok(Some(replayed_table)) => Some(replayed_table),
             Ok(None) => None,
-            Err(err) if has_not_found_object_store_error(&err) => None,
+            Err(SlateDBError::WalTruncated(_)) => None,
             Err(err) => return Err(err),
         } {
-            assert!(replayed_table.last_wal_id > replay_after_wal_id);
+            // `last_wal_id` is a conservative watermark: a table that ends mid-file
+            // is tagged with the last fully replayed WAL ID, which may equal the
+            // watermark of the previous table.
+            assert!(replayed_table.last_wal_id >= replay_after_wal_id);
             replay_after_wal_id = replayed_table.last_wal_id;
             if !replayed_table.table.is_empty() && replayed_table.last_seq > last_committed_seq {
                 let first_seq = replayed_table
@@ -1364,24 +1369,6 @@ impl DbCacheManagerOps for DbReader {
         self.inner.check_closed()?;
         db_cache_manager::evict_cached_sst_impl(&self.inner.table_store, sst_id).await
     }
-}
-
-/// Checks if the error or any of its sources is an `object_store::Error::NotFound` error.
-fn has_not_found_object_store_error(err: &(dyn std::error::Error + 'static)) -> bool {
-    let mut current = Some(err);
-    while let Some(current_err) = current {
-        if current_err
-            .downcast_ref::<object_store::Error>()
-            .is_some_and(|err| matches!(err, object_store::Error::NotFound { .. }))
-            || current_err
-                .downcast_ref::<Arc<object_store::Error>>()
-                .is_some_and(|err| matches!(err.as_ref(), object_store::Error::NotFound { .. }))
-        {
-            return true;
-        }
-        current = current_err.source();
-    }
-    false
 }
 
 #[cfg(test)]
@@ -2289,26 +2276,6 @@ mod tests {
         .await;
     }
 
-    #[test]
-    fn has_not_found_object_store_error_should_walk_nested_error_sources() {
-        let err = crate::Error::from(SlateDBError::from(object_store::Error::NotFound {
-            path: "missing-wal".to_string(),
-            source: Box::new(std::io::Error::other("missing")),
-        }));
-
-        assert!(super::has_not_found_object_store_error(&err));
-    }
-
-    #[test]
-    fn has_not_found_object_store_error_should_ignore_non_not_found_errors() {
-        let err = SlateDBError::from(object_store::Error::NotImplemented {
-            operation: "test".to_string(),
-            implementer: "test".to_string(),
-        });
-
-        assert!(!super::has_not_found_object_store_error(&err));
-    }
-
     #[tokio::test]
     async fn replay_wal_into_should_treat_missing_wal_sst_as_end_of_iteration() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -2339,9 +2306,12 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(last_wal_id, 0);
-        assert_eq!(last_committed_seq, 0);
-        assert!(into_tables.is_empty());
+        // WAL 2 is missing and ends the iteration, but the rows already replayed
+        // from WAL 1 must still be returned.
+        assert_eq!(last_wal_id, 1);
+        assert_eq!(last_committed_seq, 1);
+        assert_eq!(into_tables.len(), 1);
+        assert_eq!(into_tables.front().unwrap().recent_flushed_wal_id(), 1);
     }
 
     #[tokio::test]

@@ -1,10 +1,13 @@
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
+use crate::iter::IterationOrder;
 use crate::manifest::Manifest;
+use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCellReader;
 use crate::wal::{WalError, WriterInitResult, WriterManifest};
 use crate::wal_buffer::WalBufferManager;
+use crate::wal_replay::{WalIterator, WalIteratorOptions};
 use crate::{wal, Settings};
 use async_trait::async_trait;
 use fail_parallel::{fail_point_send, FailPointTx};
@@ -109,6 +112,23 @@ impl wal::WriterInit for WalWriterInit {
                 // older writers would have failed with a stale epoch
                 let replay_after_wal_id = manifest.core().replay_after_wal_id;
                 assert!(empty_wal_id > replay_after_wal_id);
+                let replay_iterator = WalIterator::range(
+                    replay_after_wal_id + 1..empty_wal_id + 1,
+                    WalIteratorOptions {
+                        sst_batch_size: 4,
+                        sst_iter_options: SstIteratorOptions {
+                            max_fetch_tasks: 1,
+                            blocks_to_fetch: 256,
+                            cache_blocks: false,
+                            cache_metadata: false,
+                            eager_spawn: true,
+                            order: IterationOrder::Ascending,
+                            prefix: None,
+                            filter_context: None,
+                        },
+                    },
+                    self.table_store.clone(),
+                )?;
                 let wal_writer = WalBufferManager::start_new(
                     self.closed_result_reader.clone(),
                     &self.recorder,
@@ -120,7 +140,7 @@ impl wal::WriterInit for WalWriterInit {
                 )
                 .await?;
                 let result = WriterInitResult {
-                    replay_range: (replay_after_wal_id + 1..empty_wal_id + 1).into(),
+                    replay_iterator: Box::new(replay_iterator),
                     wal_writer: Box::new(wal_writer),
                 };
                 return Ok(result);
