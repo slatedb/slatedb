@@ -7193,7 +7193,7 @@ mod tests {
         min_filter_keys: u32,
         l0_sst_size_bytes: usize,
         compactor_options: Option<CompactorOptions>,
-        ttl: Option<u64>,
+        default_ttl_millis: Option<u64>,
     ) -> Settings {
         Settings {
             flush_interval: Some(Duration::from_millis(100)),
@@ -7213,7 +7213,7 @@ mod tests {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             metric_level: MetricLevel::default(),
-            default_ttl: ttl,
+            default_ttl_millis,
             object_store_max_retries: None,
             block_format: None,
         }
@@ -8144,7 +8144,7 @@ mod tests {
         // Put with options (TTL)
         clock.set(200);
         let put_opts = PutOptions {
-            ttl: Ttl::ExpireAfter(1000),
+            ttl: Ttl::ExpireAfterMillis(1000),
         };
         let handle = db
             .put_with_options(
@@ -9426,7 +9426,7 @@ mod tests {
             key,
             value,
             &PutOptions {
-                ttl: Ttl::ExpireAfter(50),
+                ttl: Ttl::ExpireAfterMillis(50),
             },
             &WriteOptions {
                 await_durable: false,
@@ -9459,7 +9459,7 @@ mod tests {
             .unwrap();
 
         let put_opts = PutOptions {
-            ttl: Ttl::ExpireAfter(50),
+            ttl: Ttl::ExpireAfterMillis(50),
         };
         let write_opts = WriteOptions {
             await_durable: false,
@@ -9529,13 +9529,13 @@ mod tests {
             .await
             .unwrap();
 
-        // when: write with ExpireAt at different clock times
+        // when: write with ExpireAtMillis at different clock times
         clock.set(100);
         db.put_with_options(
             b"key1",
             b"value1",
             &PutOptions {
-                ttl: Ttl::ExpireAt(500),
+                ttl: Ttl::ExpireAtMillis(500),
             },
             &WriteOptions {
                 await_durable: false,
@@ -9550,7 +9550,7 @@ mod tests {
             b"key2",
             b"value2",
             &PutOptions {
-                ttl: Ttl::ExpireAt(500),
+                ttl: Ttl::ExpireAtMillis(500),
             },
             &WriteOptions {
                 await_durable: false,
@@ -9719,14 +9719,14 @@ mod tests {
             b"key1",
             b"a",
             &MergeOptions {
-                ttl: Ttl::ExpireAfter(3600),
+                ttl: Ttl::ExpireAfterMillis(3600),
             },
         );
         batch.merge_with_options(
             b"key1",
             b"b",
             &MergeOptions {
-                ttl: Ttl::ExpireAfter(7200),
+                ttl: Ttl::ExpireAfterMillis(7200),
             },
         );
 

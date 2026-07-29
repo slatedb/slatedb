@@ -2050,7 +2050,7 @@ mod tests {
             b"counter",
             1u64.to_le_bytes(),
             &MergeOptions {
-                ttl: crate::config::Ttl::ExpireAfter(3600),
+                ttl: crate::config::Ttl::ExpireAfterMillis(3600),
             },
         )
         .unwrap();
@@ -2058,7 +2058,7 @@ mod tests {
             b"counter",
             2u64.to_le_bytes(),
             &MergeOptions {
-                ttl: crate::config::Ttl::ExpireAfter(7200),
+                ttl: crate::config::Ttl::ExpireAfterMillis(7200),
             },
         )
         .unwrap();
@@ -2098,7 +2098,7 @@ mod tests {
             object_store_cache_options: crate::config::ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             metric_level: MetricLevel::default(),
-            default_ttl: None,
+            default_ttl_millis: None,
             object_store_max_retries: None,
             block_format: None,
         }
@@ -2137,7 +2137,7 @@ mod tests {
         clock.set(200);
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let put_opts = PutOptions {
-            ttl: crate::config::Ttl::ExpireAfter(1000),
+            ttl: crate::config::Ttl::ExpireAfterMillis(1000),
         };
         txn.put_with_options(b"key2", b"value2", &put_opts).unwrap();
         let handle = txn

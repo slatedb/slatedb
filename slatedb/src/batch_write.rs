@@ -246,7 +246,7 @@ impl DbInner {
             .extract_entries(
                 commit_seq,
                 now,
-                self.settings.default_ttl,
+                self.settings.default_ttl_millis,
                 self.flush_merge_operator.clone(),
                 self.segment_extractor.as_deref(),
             )

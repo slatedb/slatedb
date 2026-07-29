@@ -309,7 +309,7 @@ impl WriteBatch {
         &self,
         seq: u64,
         now: i64,
-        default_ttl: Option<u64>,
+        default_ttl_millis: Option<u64>,
         merger: Option<MergeOperatorType>,
         extractor: Option<&dyn PrefixExtractor>,
     ) -> Result<(Vec<RowEntry>, BTreeSet<Bytes>, u64), SlateDBError> {
@@ -320,7 +320,7 @@ impl WriteBatch {
             IterationOrder::Ascending,
             seq,
             Some(now),
-            default_ttl,
+            default_ttl_millis,
         ));
         if self.has_merge_ops() {
             if let Some(ref merge_operator) = merger {
@@ -379,12 +379,12 @@ pub mod benches {
         batch: &WriteBatch,
         seq: u64,
         now: i64,
-        default_ttl: Option<u64>,
+        default_ttl_millis: Option<u64>,
         merger: Option<Arc<dyn MergeOperator + Send + Sync>>,
         extractor: Option<&dyn PrefixExtractor>,
     ) -> Result<(Vec<RowEntry>, BTreeSet<Bytes>, u64), Error> {
         batch
-            .extract_entries(seq, now, default_ttl, merger, extractor)
+            .extract_entries(seq, now, default_ttl_millis, merger, extractor)
             .await
             .map_err(Into::into)
     }
@@ -410,11 +410,11 @@ impl WriteBatchIterator {
         op: &WriteOp,
         seq: u64,
         now: Option<i64>,
-        default_ttl: Option<u64>,
+        default_ttl_millis: Option<u64>,
     ) -> RowEntry {
         let expire_ts = match (op, now) {
-            (WriteOp::Put(_, opts), Some(now)) => opts.expire_ts_from(default_ttl, now),
-            (WriteOp::Merge(_, opts), Some(now)) => opts.expire_ts_from(default_ttl, now),
+            (WriteOp::Put(_, opts), Some(now)) => opts.expire_ts_from(default_ttl_millis, now),
+            (WriteOp::Merge(_, opts), Some(now)) => opts.expire_ts_from(default_ttl_millis, now),
             _ => None,
         };
         op.to_row_entry(key, seq, now, expire_ts)
@@ -426,21 +426,21 @@ impl WriteBatchIterator {
         ordering: IterationOrder,
         seq: u64,
         now: Option<i64>,
-        default_ttl: Option<u64>,
+        default_ttl_millis: Option<u64>,
     ) -> Self {
         let entries: Vec<RowEntry> = match ordering {
             IterationOrder::Ascending => batch
                 .ops
                 .range(range)
                 .flat_map(|(key, ops)| ops.iter().rev().map(move |op| (key, op)))
-                .map(|(key, op)| Self::write_op_to_row_entry(key, op, seq, now, default_ttl))
+                .map(|(key, op)| Self::write_op_to_row_entry(key, op, seq, now, default_ttl_millis))
                 .collect(),
             IterationOrder::Descending => batch
                 .ops
                 .range(range)
                 .rev()
                 .flat_map(|(key, ops)| ops.iter().rev().map(move |op| (key, op)))
-                .map(|(key, op)| Self::write_op_to_row_entry(key, op, seq, now, default_ttl))
+                .map(|(key, op)| Self::write_op_to_row_entry(key, op, seq, now, default_ttl_millis))
                 .collect(),
         };
 
@@ -853,7 +853,7 @@ mod tests {
         // Given: an empty WriteBatch and custom merge options
         let mut batch = WriteBatch::new();
         let merge_options = MergeOptions {
-            ttl: Ttl::ExpireAfter(3600), // 1 hour
+            ttl: Ttl::ExpireAfterMillis(3_600_000), // 1 hour
         };
 
         // When: adding a merge operation with custom options
@@ -865,7 +865,7 @@ mod tests {
         match op {
             WriteOp::Merge(value, options) => {
                 assert_eq!(value.as_ref(), b"value1");
-                assert_eq!(options.ttl, Ttl::ExpireAfter(3600));
+                assert_eq!(options.ttl, Ttl::ExpireAfterMillis(3_600_000));
             }
             _ => panic!("Expected Merge operation"),
         }
@@ -1422,14 +1422,14 @@ mod tests {
             b"key1",
             b"a",
             &MergeOptions {
-                ttl: Ttl::ExpireAfter(3600),
+                ttl: Ttl::ExpireAfterMillis(3600),
             },
         );
         batch.merge_with_options(
             b"key1",
             b"b",
             &MergeOptions {
-                ttl: Ttl::ExpireAt(4600),
+                ttl: Ttl::ExpireAtMillis(4600),
             },
         );
 
@@ -1456,14 +1456,14 @@ mod tests {
             b"key1",
             b"a",
             &MergeOptions {
-                ttl: Ttl::ExpireAfter(3600),
+                ttl: Ttl::ExpireAfterMillis(3600),
             },
         );
         batch.merge_with_options(
             b"key1",
             b"b",
             &MergeOptions {
-                ttl: Ttl::ExpireAfter(7200),
+                ttl: Ttl::ExpireAfterMillis(7200),
             },
         );
 
@@ -1495,14 +1495,14 @@ mod tests {
             b"key1",
             b"a",
             &MergeOptions {
-                ttl: Ttl::ExpireAfter(3600),
+                ttl: Ttl::ExpireAfterMillis(3600),
             },
         );
         batch.merge_with_options(
             b"key2",
             b"b",
             &MergeOptions {
-                ttl: Ttl::ExpireAfter(7200),
+                ttl: Ttl::ExpireAfterMillis(7200),
             },
         );
 
@@ -1528,7 +1528,7 @@ mod tests {
             b"key1",
             b"a",
             &MergeOptions {
-                ttl: Ttl::ExpireAfter(7200),
+                ttl: Ttl::ExpireAfterMillis(7200),
             },
         );
 
@@ -1550,7 +1550,7 @@ mod tests {
             b"key1",
             b"a",
             &MergeOptions {
-                ttl: Ttl::ExpireAfter(7200),
+                ttl: Ttl::ExpireAfterMillis(7200),
             },
         );
 
