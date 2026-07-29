@@ -1172,7 +1172,11 @@ pub struct CompactorOptions {
 
     /// Whether the coordinator may complete compactions with non-overlapping
     /// input SSTs by moving them directly into the destination sorted run,
-    /// without dispatching a worker job. Defaults to true.
+    /// without dispatching a worker job. Because a trivial move does not rewrite
+    /// rows, it does not remove tombstones, apply compaction filters, or process
+    /// merges during that compaction. It also preserves the input SST sizes,
+    /// which can increase manifest size and read amplification compared with
+    /// rewriting inputs into larger output SSTs. Defaults to true.
     #[serde(default = "default_true")]
     pub enable_trivial_move: bool,
 
