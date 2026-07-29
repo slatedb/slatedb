@@ -322,7 +322,10 @@ mod tests {
         };
 
         assert_eq!(WalError::Fenced.to_string(), "WAL writer was fenced");
-        assert_eq!(WalError::WalTruncated(123).to_string(), "WAL was truncated at file 123");
+        assert_eq!(
+            WalError::WalTruncated(123).to_string(),
+            "WAL was truncated at file 123"
+        );
         assert_eq!(WalError::Closed.to_string(), "WAL is closed");
         assert_eq!(
             WalError::Unavailable(source()).to_string(),
