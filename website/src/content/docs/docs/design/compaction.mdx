@@ -37,8 +37,8 @@ existing SSTs in the destination sorted run. The coordinator completes this
 without dispatching the job to an executor or reading and rewriting SST data. This reduces
 compaction I/O while still producing a sorted run of non-overlapping SSTs.
 
-Trivial moves are enabled by default. Set `CompactorOptions::enable_trivial_move` to `false`
-to force eligible compactions through the executor.
+Trivial moves are disabled by default. Set `CompactorOptions::enable_trivial_move` to `true`
+to enable them.
 
 To split data with different read/write profiles into independent LSM trees — each with its own
 compaction policy — and to retire whole key ranges cheaply, see

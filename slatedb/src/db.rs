@@ -11476,7 +11476,6 @@ mod tests {
                     // One subcompaction writes one output SST, keeping exact
                     // part counts deterministic.
                     let mut compactor_options = fast_compactor_options();
-                    compactor_options.enable_trivial_move = false;
                     if let Some(worker) = compactor_options.worker.as_mut() {
                         worker.max_subcompactions = 1;
                     }

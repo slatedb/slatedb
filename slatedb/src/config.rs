@@ -59,7 +59,7 @@
 //! [compactor_options]
 //! poll_interval = "5s"
 //! max_concurrent_compactions = 4
-//! enable_trivial_move = true
+//! enable_trivial_move = false
 //!
 //! [compactor_options.worker]
 //! max_sst_size = 1073741824
@@ -111,7 +111,7 @@
 //!  "compactor_options": {
 //!    "poll_interval": "5s",
 //!    "max_concurrent_compactions": 4,
-//!    "enable_trivial_move": true,
+//!    "enable_trivial_move": false,
 //!    "worker": {
 //!      "max_sst_size": 1073741824
 //!    },
@@ -167,7 +167,7 @@
 //! compactor_options:
 //!   poll_interval: '5s'
 //!   max_concurrent_compactions: 4
-//!   enable_trivial_move: true
+//!   enable_trivial_move: false
 //!   worker:
 //!     max_sst_size: 1073741824
 //!   scheduler_options:
@@ -1176,8 +1176,8 @@ pub struct CompactorOptions {
     /// rows, it does not remove tombstones, apply compaction filters, or process
     /// merges during that compaction. It also preserves the input SST sizes,
     /// which can increase manifest size and read amplification compared with
-    /// rewriting inputs into larger output SSTs. Defaults to true.
-    #[serde(default = "default_true")]
+    /// rewriting inputs into larger output SSTs. Defaults to false.
+    #[serde(default)]
     pub enable_trivial_move: bool,
 
     /// Scheduler-specific options expressed as string key/value pairs.
@@ -1232,7 +1232,7 @@ impl Default for CompactorOptions {
             poll_interval: Duration::from_secs(5),
             manifest_update_timeout: Duration::from_secs(300),
             max_concurrent_compactions: 4,
-            enable_trivial_move: true,
+            enable_trivial_move: false,
             scheduler_options: HashMap::new(),
             worker: Some(CompactionWorkerOptions::default()),
             metric_level: None,
@@ -1801,16 +1801,6 @@ mod tests {
     fn test_db_options_default_metric_level() {
         let options = Settings::default();
         assert_eq!(MetricLevel::default(), options.metric_level);
-    }
-
-    #[test]
-    fn test_compactor_trivial_move_is_enabled_by_default_when_omitted() {
-        let mut value = serde_json::to_value(CompactorOptions::default()).unwrap();
-        value.as_object_mut().unwrap().remove("enable_trivial_move");
-
-        let options: CompactorOptions = serde_json::from_value(value).unwrap();
-
-        assert!(options.enable_trivial_move);
     }
 
     #[test]

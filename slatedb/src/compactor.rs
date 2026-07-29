@@ -1784,12 +1784,11 @@ mod tests {
         options.flush_interval = None;
         // Ensure that filter is built.
         options.min_filter_keys = 1;
-        let compactor_options = options
+        options
             .compactor_options
             .as_mut()
-            .expect("compactor options must be set");
-        compactor_options.enable_trivial_move = false;
-        compactor_options.scheduler_options = SizeTieredCompactionSchedulerOptions {
+            .expect("compactor options must be set")
+            .scheduler_options = SizeTieredCompactionSchedulerOptions {
             // Compact even a single L0 so one flush is enough to trigger.
             min_compaction_sources: 1,
             ..Default::default()
@@ -3574,12 +3573,11 @@ mod tests {
         }
         .into();
         let mut options = db_options(Some(compactor_options()));
-        let compactor_options = options
+        options
             .compactor_options
             .as_mut()
-            .expect("compactor options missing");
-        compactor_options.enable_trivial_move = false;
-        compactor_options.scheduler_options = scheduler_options;
+            .expect("compactor options missing")
+            .scheduler_options = scheduler_options;
         let db = Db::builder(PATH, os.clone())
             .with_settings(options)
             .with_system_clock(insert_clock.clone())
@@ -4830,10 +4828,6 @@ mod tests {
             self.manifest.refresh().await.unwrap().core.clone()
         }
 
-        fn disable_trivial_moves(&mut self) {
-            Arc::make_mut(&mut self.handler.options).enable_trivial_move = false;
-        }
-
         async fn write_l0(&mut self) {
             let mut rng = rng::new_test_rng(None);
             let manifest = self.manifest.refresh().await.unwrap();
@@ -4952,7 +4946,6 @@ mod tests {
     async fn test_should_record_last_compaction_ts() {
         // given:
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
-        fixture.disable_trivial_moves();
         fixture.write_l0().await;
         let compaction = fixture.build_l0_compaction().await;
         fixture.scheduler.inject_compaction(compaction.clone());
@@ -5024,7 +5017,6 @@ mod tests {
     async fn test_should_persist_compactions_on_start_and_finish() {
         // given:
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
-        fixture.disable_trivial_moves();
         fixture.write_l0().await;
         let compaction = fixture.build_l0_compaction().await;
         fixture.scheduler.inject_compaction(compaction.clone());
@@ -5117,7 +5109,6 @@ mod tests {
     #[tokio::test]
     async fn test_maybe_validate_submitted_compactions_promotes_to_scheduled() {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
-        fixture.disable_trivial_moves();
         fixture.write_l0().await;
         fixture.handler.state_writer.refresh().await.unwrap();
         let spec = fixture.build_l0_compaction().await;
@@ -5162,7 +5153,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_maybe_validate_submitted_compactions_completes_trivial_move() {
-        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let options = Arc::new(CompactorOptions {
+            enable_trivial_move: true,
+            ..compactor_options()
+        });
+        let mut fixture = CompactorEventHandlerTestFixture::new_with_clock(
+            Arc::new(DefaultSystemClock::new()),
+            options,
+        )
+        .await;
         let l0 = bounded_sst_view(2, b"m", b"n");
         let sr_first = bounded_sst_view(1, b"a", b"b");
         let sr_last = bounded_sst_view(3, b"z", b"z");
@@ -5389,9 +5388,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_ticker_starts_preexisting_submitted_compaction() {
-        let mut compactor_options = compactor_options();
-        compactor_options.enable_trivial_move = false;
-        let compactor_options = Arc::new(compactor_options);
+        let compactor_options = Arc::new(compactor_options());
         let options = db_options(None);
 
         let os = Arc::new(InMemory::new());
@@ -5541,7 +5538,6 @@ mod tests {
     async fn test_should_not_schedule_conflicting_compaction() {
         // given: first ticker schedules a compaction (Scheduled in local state)
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
-        fixture.disable_trivial_moves();
         fixture.write_l0().await;
         let compaction = fixture.build_l0_compaction().await;
         fixture.scheduler.inject_compaction(compaction.clone());
@@ -5606,12 +5602,11 @@ mod tests {
         let mut options = db_options(Some(compactor_options()));
         options.l0_sst_size_bytes = 128;
         options.compression_codec = Some(CompressionCodec::Zstd);
-        let compactor_options = options
+        options
             .compactor_options
             .as_mut()
-            .expect("compactor options missing");
-        compactor_options.scheduler_options = scheduler_options;
-        compactor_options.enable_trivial_move = false;
+            .expect("compactor options missing")
+            .scheduler_options = scheduler_options;
 
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let db = Db::builder(PATH, os.clone())
@@ -5885,7 +5880,6 @@ mod tests {
     #[tokio::test]
     async fn test_validate_compaction_rejects_parallel_l0() {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
-        fixture.disable_trivial_moves();
         // write two L0s so we can build two disjoint L0 compactions
         fixture.write_l0().await;
         fixture.write_l0().await;
