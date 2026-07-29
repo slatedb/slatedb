@@ -10,7 +10,7 @@ use crate::error::SlateDBError;
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::utils::SafeSender;
-use crate::utils::{format_bytes_si, WatchableOnceCell, WatchableOnceCellReader};
+use crate::utils::{format_bytes_si, WatchableOnceCellReader};
 use crate::wal;
 use crate::wal::{FlushResultFuture, WalError, WalEvent, WalStatus, WalWriter};
 use crate::wal_buffer_stats::WalBufferStats;
@@ -92,8 +92,6 @@ struct WalBufferManagerInner {
 struct WalBuffer {
     /// queue for the entries
     entries: VecDeque<RowEntry>,
-    /// watcher to await durability
-    durable: WatchableOnceCell<Result<(), SlateDBError>>,
     /// the sequence number of the most recent addition to this WAL buffer
     last_seq: u64,
     /// size of the entries that has been added to the WAL buffer in bytes
@@ -159,15 +157,13 @@ impl WalBufferManager {
     /// is not very strict, we have to ensure a write batch into a single WAL file.
     ///
     /// It's the caller's duty to call `maybe_trigger_flush` after calling `append`.
-    fn maybe_trigger_flush(
-        &self,
-    ) -> Result<WatchableOnceCellReader<Result<(), SlateDBError>>, WalError> {
-        let (durable_watcher, need_flush, flush_epoch) = {
+    fn maybe_trigger_flush(&self) -> Result<(), WalError> {
+        let (need_flush, flush_epoch) = {
             let inner = self.inner.read();
             // checks the size of the current wal
             let (need_flush, flush_epoch) =
                 inner.needs_flush(&self.table_store, self.max_wal_bytes_size);
-            (inner.current_wal.durable_watcher(), need_flush, flush_epoch)
+            (need_flush, flush_epoch)
         };
         if need_flush {
             // Only send a flush request if one hasn't already been sent for this epoch.
@@ -187,7 +183,7 @@ impl WalBufferManager {
         self.stats
             .estimated_bytes
             .set(status.estimated_bytes as i64);
-        Ok(durable_watcher)
+        Ok(())
     }
 
     /// Send a flush request to the background flush worker.
@@ -243,7 +239,7 @@ impl WalWriter for WalBufferManager {
         };
         self.inner
             .write()
-            .drain_on_close(WalError::Closed, &self.table_store);
+            .mark_closed(WalError::Closed, &self.table_store);
         Ok(())
     }
 }
@@ -334,17 +330,11 @@ impl WalBufferManagerInner {
         }
     }
 
-    fn drain_on_close(
-        &mut self,
-        reason: WalError,
-        table_store: &TableStore,
-    ) -> (WalStatus, Vec<(u64, Arc<WalBuffer>)>) {
+    fn mark_closed(&mut self, reason: WalError, table_store: &TableStore) -> WalStatus {
         self.flush_task_exited_reason = Some(reason);
         self.freeze_current_wal();
-        let unflushed_wals = self.flushing_wals();
         self.immutable_wals.clear();
-        let status = self.compute_status(table_store);
-        (status, unflushed_wals)
+        self.compute_status(table_store)
     }
 
     fn freeze_current_wal(&mut self) {
@@ -388,7 +378,6 @@ impl WalBuffer {
     fn new() -> Self {
         Self {
             entries: VecDeque::new(),
-            durable: WatchableOnceCell::new(),
             last_seq: 0,
             entries_size: 0,
         }
@@ -403,22 +392,6 @@ impl WalBuffer {
     /// Returns an iterator to iterate over the entries.
     fn iter(&self) -> WalBufferIterator {
         WalBufferIterator::new(self)
-    }
-
-    /// Returns a watcher that can be used to await durability.
-    fn durable_watcher(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
-        self.durable.reader()
-    }
-
-    /// Awaits until the WAL is durable (flushed to storage).
-    #[cfg(test)]
-    async fn await_durable(&self) -> Result<(), SlateDBError> {
-        self.durable.reader().await_value().await
-    }
-
-    /// Notifies that the WAL has been made durable (or failed).
-    fn notify_durable(&self, result: Result<(), SlateDBError>) {
-        self.durable.write(result);
     }
 
     /// Returns true if the buffer is empty.
@@ -520,7 +493,6 @@ impl WalFlushHandler {
             // TODO: once we change writes to block on the durable seq num from the oracle we
             //       can simplify this and fully drop the wal before notifying listeners
             self.notify_listener(wal::WalEvent::WalFlushed(status));
-            wal.notify_durable(result.clone());
             if Arc::strong_count(&wal) > 1 {
                 warn!("outstanding references to wal id {} after flushing", wal_id);
             }
@@ -598,10 +570,10 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
             .map(WalError::from)
             .unwrap_or(WalError::Closed);
 
-        let (final_status, unflushed) = self
+        let final_status = self
             .inner
             .write()
-            .drain_on_close(error.clone(), &self.table_store);
+            .mark_closed(error.clone(), &self.table_store);
         self.notify_listener(WalEvent::WalClosed(final_status.clone()));
 
         // drain remaining messages
@@ -616,13 +588,6 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
                     (*listener)(WalEvent::WalClosed(final_status.clone()))
                 }
             }
-        }
-
-        // notify all the flushing wals to be finished with fatal error or shutdown
-        // error. we need ensure all the wal tables finally get notified. freeze current
-        // WAL to notify writers in the subsequent flushing_wals loop.
-        for (_, wal) in unflushed {
-            wal.notify_durable(Err(result.clone().err().unwrap_or(SlateDBError::Closed)));
         }
         Ok(())
     }
@@ -760,52 +725,6 @@ mod tests {
         assert_eq!(buffer.len(), 4);
         assert_eq!(buffer.size(), size1 + size2 + size3 + size4);
         assert_eq!(buffer.last_seq(), Some(40));
-    }
-
-    #[tokio::test]
-    async fn test_notify_durable_success() {
-        let mut buffer = WalBuffer::new();
-        buffer.append(make_entry("key", "value", 1, None));
-
-        buffer.notify_durable(Ok(()));
-
-        let result = buffer.await_durable().await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_notify_durable_error() {
-        let mut buffer = WalBuffer::new();
-        buffer.append(make_entry("key", "value", 1, None));
-
-        buffer.notify_durable(Err(SlateDBError::Closed));
-
-        let result = buffer.await_durable().await;
-        assert!(matches!(result, Err(SlateDBError::Closed)));
-    }
-
-    #[tokio::test]
-    async fn test_durable_watcher_returns_reader() {
-        let mut buffer = WalBuffer::new();
-        buffer.append(make_entry("key", "value", 1, None));
-
-        let mut reader = buffer.durable_watcher();
-        buffer.notify_durable(Ok(()));
-
-        let result = reader.await_value().await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_notify_durable_only_sets_once() {
-        let mut buffer = WalBuffer::new();
-        buffer.append(make_entry("key", "value", 1, None));
-
-        buffer.notify_durable(Ok(()));
-        buffer.notify_durable(Err(SlateDBError::Closed));
-
-        let result = buffer.await_durable().await;
-        assert!(result.is_ok());
     }
 
     #[test]
