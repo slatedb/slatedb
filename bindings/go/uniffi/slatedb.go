@@ -1400,6 +1400,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbiterator_next_batch()
+		})
+		if checksum != 61234 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbiterator_next_batch: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbiterator_seek()
 		})
 		if checksum != 61052 {
@@ -4578,6 +4587,16 @@ func (_ FfiDestroyerDbCache) Destroy(value *DbCache) {
 type DbIteratorInterface interface {
 	// Returns the next key/value pair from the iterator.
 	Next() (*KeyValue, error)
+	// Returns up to `max` key/value pairs from the iterator in one call.
+	//
+	// Locks the iterator once and pulls rows until it yields `max` items or the
+	// iterator is exhausted. A returned vector shorter than `max` (including an
+	// empty vector) means the iterator is exhausted. `max == 0` returns an empty
+	// vector without advancing.
+	//
+	// This exists so that callers crossing a foreign-function boundary can drain
+	// a scan with one call per batch instead of one call per row.
+	NextBatch(max uint32) ([]KeyValue, error)
 	// Seeks the iterator to the first entry at or after `key`.
 	Seek(key []byte) error
 }
@@ -4606,6 +4625,50 @@ func (_self *DbIterator) Next() (*KeyValue, error) {
 		},
 		C.uniffi_slatedb_uniffi_fn_method_dbiterator_next(
 			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Returns up to `max` key/value pairs from the iterator in one call.
+//
+// Locks the iterator once and pulls rows until it yields `max` items or the
+// iterator is exhausted. A returned vector shorter than `max` (including an
+// empty vector) means the iterator is exhausted. `max == 0` returns an empty
+// vector without advancing.
+//
+// This exists so that callers crossing a foreign-function boundary can drain
+// a scan with one call per batch instead of one call per row.
+func (_self *DbIterator) NextBatch(max uint32) ([]KeyValue, error) {
+	_pointer := _self.ffiObject.incrementPointer("*DbIterator")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) []KeyValue {
+			return FfiConverterSequenceKeyValueINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_dbiterator_next_batch(
+			_pointer, FfiConverterUint32INSTANCE.Lower(max)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
@@ -14003,6 +14066,53 @@ type FfiDestroyerSequenceExternalDb struct{}
 func (FfiDestroyerSequenceExternalDb) Destroy(sequence []ExternalDb) {
 	for _, value := range sequence {
 		FfiDestroyerExternalDb{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceKeyValue struct{}
+
+var FfiConverterSequenceKeyValueINSTANCE = FfiConverterSequenceKeyValue{}
+
+func (c FfiConverterSequenceKeyValue) Lift(rb RustBufferI) []KeyValue {
+	return LiftFromRustBuffer[[]KeyValue](c, rb)
+}
+
+func (c FfiConverterSequenceKeyValue) Read(reader io.Reader) []KeyValue {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]KeyValue, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterKeyValueINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceKeyValue) Lower(value []KeyValue) C.RustBuffer {
+	return LowerIntoRustBuffer[[]KeyValue](c, value)
+}
+
+func (c FfiConverterSequenceKeyValue) LowerExternal(value []KeyValue) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]KeyValue](c, value))
+}
+
+func (c FfiConverterSequenceKeyValue) Write(writer io.Writer, value []KeyValue) {
+	if len(value) > math.MaxInt32 {
+		panic("[]KeyValue is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterKeyValueINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceKeyValue struct{}
+
+func (FfiDestroyerSequenceKeyValue) Destroy(sequence []KeyValue) {
+	for _, value := range sequence {
+		FfiDestroyerKeyValue{}.Destroy(value)
 	}
 }
 

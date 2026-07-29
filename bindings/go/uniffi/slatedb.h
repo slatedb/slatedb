@@ -1349,6 +1349,11 @@ void uniffi_slatedb_uniffi_fn_free_dbiterator(uint64_t handle, RustCallStatus *o
 uint64_t uniffi_slatedb_uniffi_fn_method_dbiterator_next(uint64_t ptr
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_NEXT_BATCH
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_NEXT_BATCH
+uint64_t uniffi_slatedb_uniffi_fn_method_dbiterator_next_batch(uint64_t ptr, uint32_t max
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_SEEK
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_SEEK
 uint64_t uniffi_slatedb_uniffi_fn_method_dbiterator_seek(uint64_t ptr, RustBuffer key
@@ -2688,6 +2693,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_prefixextractor_prefix_len(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_NEXT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_NEXT
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbiterator_next(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_NEXT_BATCH
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_NEXT_BATCH
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbiterator_next_batch(void
     
 );
 #endif
