@@ -1176,13 +1176,13 @@ impl CompactorEventHandler {
     }
 
     /// Validates every `Submitted` compaction against the current manifest and
-    /// promotes the valid tiered specs to `Scheduled` — the coordinator's
-    /// "ready for a worker to claim" state. Drain specs short-circuit the
-    /// executor and are applied directly to the in-memory manifest (→
+    /// promotes valid tiered specs to `Scheduled` — the coordinator's "ready
+    /// for a worker to claim" state. Drain specs and trivial moves short-circuit
+    /// the executor and are applied directly to the in-memory manifest (→
     /// `Completed`). Invalid specs are marked `Failed`. State changes are
     /// persisted before any worker (including the local executor) can act on
-    /// them: when any submission was a drain the manifest and `.compactions`
-    /// are written together, otherwise `.compactions` alone.
+    /// them: when a submission changed the manifest, the manifest and
+    /// `.compactions` are written together, otherwise `.compactions` alone.
     ///
     /// Workers exclusively claim `Scheduled` entries; they never act on
     /// `Submitted`. Routing validation through this single chokepoint keeps
@@ -1200,7 +1200,7 @@ impl CompactorEventHandler {
             return Ok(());
         }
 
-        let any_drain = submitted_compactions.iter().any(|c| c.spec().is_drain());
+        let mut manifest_changed = false;
 
         for compaction in &submitted_compactions {
             // Validate the candidate compaction; mark as failed if invalid.
@@ -1215,12 +1215,22 @@ impl CompactorEventHandler {
                 continue;
             }
 
-            // Drain specs apply the watermark advance and SR removal directly,
-            // marking the compaction Completed. They never enter Scheduled
-            // because no worker runs them. Tiered specs become Scheduled so a
-            // worker can claim them.
+            // Coordinator-local compactions never enter Scheduled because no
+            // worker runs them. Everything else becomes ready to claim.
+            let trivial_move_output = self
+                .options
+                .enable_trivial_move
+                .then(|| compaction.trivial_move_output(self.state().db_state()))
+                .flatten();
+
             if compaction.spec().is_drain() {
                 self.state_mut().finish_drain_compaction(compaction.id());
+                manifest_changed = true;
+            } else if let Some(output_sr) = trivial_move_output {
+                info!("trivially moving compaction [spec={}]", compaction.spec());
+                self.state_mut()
+                    .finish_compaction(compaction.id(), output_sr);
+                manifest_changed = true;
             } else {
                 self.state_mut().update_compaction(&compaction.id(), |c| {
                     c.clear_ctx();
@@ -1229,8 +1239,11 @@ impl CompactorEventHandler {
             }
         }
 
-        if any_drain {
+        if manifest_changed {
             self.state_writer.write_state_safely().await?;
+            self.stats
+                .last_compaction_ts
+                .set(self.system_clock.now().timestamp());
         } else {
             self.state_writer.write_compactions_safely().await?;
         }
@@ -1474,7 +1487,9 @@ mod tests {
     use crate::proptest_util::rng;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
-    use crate::test_utils::{assert_iterator, FixedThreeBytePrefixExtractor, GatedObjectStore};
+    use crate::test_utils::{
+        assert_iterator, bounded_sst_view, FixedThreeBytePrefixExtractor, GatedObjectStore,
+    };
     use crate::types::KeyValue;
     use crate::types::RowEntry;
     use bytes::Bytes;
@@ -5137,6 +5152,134 @@ mod tests {
                 .status(),
             CompactionStatus::Scheduled
         );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_validate_submitted_compactions_completes_trivial_move() {
+        let options = Arc::new(CompactorOptions {
+            enable_trivial_move: true,
+            ..compactor_options()
+        });
+        let mut fixture = CompactorEventHandlerTestFixture::new_with_clock(
+            Arc::new(DefaultSystemClock::new()),
+            options,
+        )
+        .await;
+        let l0 = bounded_sst_view(2, b"m", b"n");
+        let sr_first = bounded_sst_view(1, b"a", b"b");
+        let sr_last = bounded_sst_view(3, b"z", b"z");
+        let core = &mut fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core;
+        Arc::make_mut(&mut core.tree).l0 = VecDeque::from([l0.clone()]);
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
+            id: 1,
+            sst_views: vec![sr_first.clone(), sr_last.clone()],
+        }];
+
+        let compaction_id = Ulid::new();
+        fixture
+            .handler
+            .state_mut()
+            .add_compaction(Compaction::new(
+                compaction_id,
+                CompactionSpec::new(vec![SourceId::SstView(l0.id), SourceId::SortedRun(1)], 2),
+            ))
+            .expect("failed to add compaction");
+
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
+
+        let state = fixture.handler.state();
+        assert_eq!(
+            state
+                .compactions()
+                .value
+                .get(&compaction_id)
+                .expect("missing compaction")
+                .status(),
+            CompactionStatus::Completed
+        );
+        assert!(state.db_state().tree.l0.is_empty());
+        assert_eq!(state.db_state().tree.compacted.len(), 1);
+        let output = &state.db_state().tree.compacted[0];
+        assert_eq!(output.id, 2);
+        assert_eq!(
+            output
+                .sst_views
+                .iter()
+                .map(|view| view.id)
+                .collect::<Vec<_>>(),
+            vec![sr_first.id, l0.id, sr_last.id]
+        );
+
+        let expected_output = output.clone();
+        let stored_manifest = fixture.latest_db_state().await;
+        assert!(stored_manifest.tree.l0.is_empty());
+        assert_eq!(stored_manifest.tree.compacted[0], expected_output);
+    }
+
+    #[tokio::test]
+    async fn test_maybe_validate_submitted_compactions_schedules_when_trivial_move_disabled() {
+        let options = Arc::new(CompactorOptions {
+            enable_trivial_move: false,
+            ..compactor_options()
+        });
+        let mut fixture = CompactorEventHandlerTestFixture::new_with_clock(
+            Arc::new(DefaultSystemClock::new()),
+            options,
+        )
+        .await;
+        let l0 = bounded_sst_view(2, b"m", b"n");
+        let sr_first = bounded_sst_view(1, b"a", b"b");
+        let sr_last = bounded_sst_view(3, b"z", b"z");
+        let core = &mut fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core;
+        Arc::make_mut(&mut core.tree).l0 = VecDeque::from([l0.clone()]);
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
+            id: 1,
+            sst_views: vec![sr_first, sr_last],
+        }];
+        let compaction_id = Ulid::new();
+        fixture
+            .handler
+            .state_mut()
+            .add_compaction(Compaction::new(
+                compaction_id,
+                CompactionSpec::new(vec![SourceId::SstView(l0.id), SourceId::SortedRun(1)], 2),
+            ))
+            .unwrap();
+
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
+
+        let state = fixture.handler.state();
+        assert_eq!(
+            state
+                .compactions()
+                .value
+                .get(&compaction_id)
+                .unwrap()
+                .status(),
+            CompactionStatus::Scheduled
+        );
+        assert_eq!(state.db_state().tree.l0.len(), 1);
+        assert_eq!(state.db_state().tree.compacted[0].id, 1);
     }
 
     #[tokio::test]
