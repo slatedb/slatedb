@@ -152,15 +152,11 @@ async fn create_clone_manifest<R: RangeBounds<Bytes> + Clone>(
                     || source_specs.iter().any(|s| s.projection_range.is_some());
 
                 let manifest: Manifest = match &sources[..] {
-                    // for a single source without a projection there is no need to call
-                    // validate_no_data_wal() because the WAL is copied by the caller
-                    // (create_clone)
                     [single_source] => {
-                        // A projection narrows only the manifest's tree state. WAL SSTs
-                        // are copied to the clone verbatim and replayed in full on first
-                        // open, so entries outside the projected range would leak into
-                        // the clone. Reject projected clones while the source still has
-                        // non-fence WALs to copy.
+                        // WAL SSTs are copied to the clone verbatim and replayed in full
+                        // when the clone is opened, so entries outside the projected
+                        // range would leak into the clone. So we reject projections if
+                        // there are non-fence WALs to copy.
                         if projection_requested {
                             validate_no_data_wal(&sources, &wal_object_store).await?;
                         }
