@@ -604,8 +604,9 @@ pub trait BoundaryObject: Send + Sync {
 /// latest-version reads retry [`SequencedStorageProtocol::try_read_latest_unchecked`] until the
 /// returned ID is above the durable boundary; and [`SequencedStorageProtocol::delete`] only deletes
 /// versions at or below the boundary. Methods with `_unchecked` in their names, along with
-/// [`SequencedStorageProtocol::list`], expose physically present versions without boundary
-/// filtering.
+/// [`SequencedStorageProtocol::list`], do not filter against the durable boundary.
+/// [`SequencedStorageProtocol::try_read_latest_unchecked`] may return a process-local cached version
+/// after another process has deleted it from storage.
 #[async_trait]
 pub trait SequencedStorageProtocol<T: Send + Sync>:
     TransactionalStorageProtocol<T, MonotonicId> + BoundaryObject
@@ -621,6 +622,9 @@ pub trait SequencedStorageProtocol<T: Send + Sync>:
     ) -> Result<MonotonicId, TransactionalObjectError>;
 
     /// Read the latest version without checking it against the durable boundary.
+    ///
+    /// Implementations may serve a process-local cached version that is no longer physically
+    /// present in storage.
     ///
     /// Implementations provide this storage primitive and should rely on the generic
     /// [`TransactionalStorageProtocol::try_read_latest`] implementation for normal checked reads.
