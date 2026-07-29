@@ -29,6 +29,17 @@ sorted run. It implements the [`CompactionExecutor`] trait. Currently, the only 
 is the [`TokioCompactionExecutor`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/compactor_executor.rs),
 which runs compaction on a local tokio runtime.
 
+## Trivial moves
+
+When every input SST has a non-overlapping effective key range, the compactor can reuse the
+existing SSTs in the destination sorted run. The coordinator completes this
+[trivial move](https://github.com/facebook/rocksdb/wiki/Compaction-Trivial-Move) itself,
+without dispatching the job to an executor or reading and rewriting SST data. This reduces
+compaction I/O while still producing a sorted run of non-overlapping SSTs.
+
+Trivial moves are disabled by default. Set `CompactorOptions::enable_trivial_move` to `true`
+to enable them.
+
 To split data with different read/write profiles into independent LSM trees — each with its own
 compaction policy — and to retire whole key ranges cheaply, see
 [Segmented Compaction](/docs/design/segmented-compaction).
