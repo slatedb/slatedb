@@ -5935,11 +5935,21 @@ mod tests {
         // write a few keys that will result in memtable flushes
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
-        db.put(key1, value1).await.unwrap();
+        db.put(key1, value1)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
         next_wal_id += 1;
         let key2 = [b'c'; 32];
         let value2 = [b'd'; 96];
-        db.put(key2, value2).await.unwrap();
+        db.put(key2, value2)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
         next_wal_id += 1;
 
         let reader = Db::builder(path, object_store.clone())
