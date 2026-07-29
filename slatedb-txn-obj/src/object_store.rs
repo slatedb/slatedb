@@ -119,6 +119,13 @@ impl<T> ObjectStoreSequencedStorageProtocol<T> {
         }
     }
 
+    fn invalidate_cached_through(&self, boundary: MonotonicId) {
+        let mut latest = self.latest.lock();
+        if matches!(latest.as_ref(), Some((cached_id, _)) if *cached_id <= boundary) {
+            *latest = None;
+        }
+    }
+
     async fn try_read_bytes_unchecked(
         &self,
         id: MonotonicId,
@@ -351,7 +358,9 @@ impl<T: Send + Sync> BoundaryObject for ObjectStoreSequencedStorageProtocol<T> {
     }
 
     async fn advance(&self, boundary: MonotonicId) -> Result<(), TransactionalObjectError> {
-        self.boundary.advance(boundary).await
+        self.boundary.advance(boundary).await?;
+        self.invalidate_cached_through(boundary);
+        Ok(())
     }
 }
 
@@ -1141,6 +1150,40 @@ mod tests {
             error,
             TransactionalObjectError::ObjectVersionExists
         ));
+        assert!(store.latest.lock().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_boundary_advance_invalidates_cached_entries_through_boundary() {
+        let (_, store) = new_counting_protocol();
+        let first_id = store
+            .write(
+                None,
+                &TestVal {
+                    epoch: 1,
+                    payload: 10,
+                },
+            )
+            .await
+            .unwrap();
+        let second_id = store
+            .write(
+                Some(first_id),
+                &TestVal {
+                    epoch: 1,
+                    payload: 20,
+                },
+            )
+            .await
+            .unwrap();
+
+        store.advance(first_id).await.unwrap();
+        assert_eq!(
+            Some(second_id),
+            store.latest.lock().as_ref().map(|(id, _)| *id)
+        );
+
+        store.advance(second_id).await.unwrap();
         assert!(store.latest.lock().is_none());
     }
 
