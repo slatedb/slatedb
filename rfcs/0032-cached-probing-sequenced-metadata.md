@@ -87,7 +87,7 @@ LIST also returns metadata for the full retained history, although the caller
 needs one object.
 
 This pattern is expensive and wasteful for idle processes. A database that's
-idle for five minutes incures 560 LIST requests with default configuration.
+idle for five minutes incurs 560 LIST requests with default configuration.
 This comes out to $24.19 per-month in AWS S3 us-east-1 pricing.
 
 Sequenced metadata already supplies a cheaper lookup mechanism. Once a process

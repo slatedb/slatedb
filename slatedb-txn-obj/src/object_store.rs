@@ -428,8 +428,14 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
 
         loop {
             let files = self.list(Unbounded, Unbounded).await?;
+            let cached = self.latest.lock().clone();
             if let Some(file) = files.last() {
-                match self.try_read_bytes_unchecked(file.id).await? {
+                // Reuse cached bytes when LIST selects the cached ID instead of issuing another GET.
+                let bytes = match cached {
+                    Some((cached_id, bytes)) if cached_id == file.id => Some(bytes),
+                    _ => self.try_read_bytes_unchecked(file.id).await?,
+                };
+                match bytes {
                     // File listed but not found. Probably deleted by GC. Retry list/read.
                     // See https://github.com/slatedb/slatedb/issues/1215 for more details.
                     None => {
@@ -445,7 +451,10 @@ impl<T: Send + Sync> SequencedStorageProtocol<T> for ObjectStoreSequencedStorage
                     }
                 }
             } else {
-                // No files found, so return None
+                // Clear the observed entry so a later read cannot resurrect it after an empty LIST.
+                if let Some((cached_id, _)) = cached {
+                    self.invalidate_cached(cached_id);
+                }
                 break;
             }
         }
@@ -525,7 +534,7 @@ mod tests {
     };
     use std::collections::Bound::{Excluded, Included, Unbounded};
     use std::fmt;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::Notify;
 
@@ -653,6 +662,7 @@ mod tests {
         get_opts_calls: AtomicUsize,
         if_none_match_gets: AtomicUsize,
         list_calls: AtomicUsize,
+        list_empty: AtomicBool,
         blocking_not_found: StdMutex<Option<BlockingNotFoundGet>>,
     }
 
@@ -663,6 +673,7 @@ mod tests {
                 get_opts_calls: AtomicUsize::new(0),
                 if_none_match_gets: AtomicUsize::new(0),
                 list_calls: AtomicUsize::new(0),
+                list_empty: AtomicBool::new(false),
                 blocking_not_found: StdMutex::new(None),
             }
         }
@@ -736,6 +747,9 @@ mod tests {
 
         fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
             self.list_calls.fetch_add(1, Ordering::SeqCst);
+            if self.list_empty.load(Ordering::SeqCst) {
+                return stream::empty().boxed();
+            }
             self.inner.list(prefix)
         }
 
@@ -1117,6 +1131,62 @@ mod tests {
             object_store.get_opts_calls.load(Ordering::SeqCst),
             "the warm read should issue four probes and GET the object selected by LIST"
         );
+    }
+
+    #[tokio::test]
+    async fn test_latest_read_reuses_cached_bytes_after_four_probes() {
+        let (object_store, store) = new_counting_protocol();
+        let first = TestVal {
+            epoch: 1,
+            payload: 1,
+        };
+        put_test_value(&object_store, 1, &first).await;
+        store.try_read_latest_unchecked().await.unwrap().unwrap();
+
+        for id in 2..=5 {
+            let value = TestVal {
+                epoch: 1,
+                payload: id,
+            };
+            put_test_value(&object_store, id, &value).await;
+        }
+
+        let gets = object_store.get_opts_calls.load(Ordering::SeqCst);
+        let latest = store.try_read_latest_unchecked().await.unwrap().unwrap();
+
+        assert_eq!(MonotonicId::new(5), latest.0);
+        assert_eq!(5, latest.1.payload);
+        assert_eq!(2, object_store.list_calls.load(Ordering::SeqCst));
+        assert_eq!(
+            gets + 4,
+            object_store.get_opts_calls.load(Ordering::SeqCst),
+            "the LIST fallback should reuse the bytes from the fourth probe"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_latest_read_invalidates_cache_when_list_is_empty() {
+        let (object_store, store) = new_counting_protocol();
+        let first = TestVal {
+            epoch: 1,
+            payload: 1,
+        };
+        put_test_value(&object_store, 1, &first).await;
+        store.try_read_latest_unchecked().await.unwrap().unwrap();
+
+        for id in 2..=5 {
+            let value = TestVal {
+                epoch: 1,
+                payload: id,
+            };
+            put_test_value(&object_store, id, &value).await;
+        }
+        object_store.list_empty.store(true, Ordering::SeqCst);
+
+        let latest = store.try_read_latest_unchecked().await.unwrap();
+
+        assert!(latest.is_none());
+        assert!(store.latest.lock().is_none());
     }
 
     #[tokio::test]
