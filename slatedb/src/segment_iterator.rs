@@ -40,9 +40,6 @@ pub(crate) struct SegmentScanContext {
 /// the per-segment merge can preserve key-by-key ordering across both
 /// tiers. Point lookups skip this entirely and build their own flat
 /// chain via [`crate::db_iter::GetIterator::from_lsm_tree`].
-///
-/// Descending scans over sorted runs are broken until
-/// [`SortedRunIterator`] supports descending iteration.
 struct RangeTreeIterators {
     l0: VecDeque<Box<dyn RowEntryIterator>>,
     sr: VecDeque<Box<dyn RowEntryIterator>>,
