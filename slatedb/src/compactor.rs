@@ -882,14 +882,13 @@ impl CompactorEventHandler {
                         .spec()
                         .destination()
                         .expect("Compacted tiered compaction must have a destination SR id");
-                    let output_sr = SortedRun {
-                        id: destination,
-                        sst_views: compaction
+                    let output_sr = SortedRun::new(
+                        destination,
+                        compaction
                             .output_ssts()
                             .iter()
-                            .map(|sst| SsTableView::identity(sst.clone()))
-                            .collect(),
-                    };
+                            .map(|sst| SsTableView::identity(sst.clone())),
+                    );
                     self.state_mut().finish_compaction(id, output_sr);
                     manifest_changed = true;
                     self.stats
@@ -1707,7 +1706,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         for run in db_state.tree.compacted.iter() {
-            for sst in run.sst_views.iter() {
+            for sst in run.sst_views() {
                 let mut iter = SstIterator::new_borrowed_initialized(
                     ..,
                     sst,
@@ -1836,7 +1835,7 @@ mod tests {
             .tree
             .compacted
             .iter()
-            .flat_map(|sr| sr.sst_views.iter())
+            .flat_map(|sr| sr.sst_views().iter())
             .collect();
         assert_eq!(output_ssts.len(), 1);
         let view = output_ssts[0];
@@ -2364,7 +2363,7 @@ mod tests {
         .unwrap();
         assert_eq!(db_state.tree.compacted.len(), 1);
 
-        let compacted = &db_state.tree.compacted.first().unwrap().sst_views;
+        let compacted = db_state.tree.compacted.first().unwrap().sst_views();
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -2464,7 +2463,7 @@ mod tests {
         .unwrap();
         assert_eq!(db_state.tree.compacted.len(), 1);
 
-        let compacted = &db_state.tree.compacted.first().unwrap().sst_views;
+        let compacted = db_state.tree.compacted.first().unwrap().sst_views();
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -2605,7 +2604,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.tree.compacted.len(), 1);
-        let compacted = &db_state.tree.compacted.first().unwrap().sst_views;
+        let compacted = db_state.tree.compacted.first().unwrap().sst_views();
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -2825,7 +2824,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.tree.compacted.len(), 1);
-        let compacted = &db_state.tree.compacted.first().unwrap().sst_views;
+        let compacted = db_state.tree.compacted.first().unwrap().sst_views();
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -2947,7 +2946,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.tree.compacted.len(), 1);
-        let compacted = &db_state.tree.compacted.first().unwrap().sst_views;
+        let compacted = db_state.tree.compacted.first().unwrap().sst_views();
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -3082,7 +3081,7 @@ mod tests {
         // then:
         let db_state = db_state.expect("db was not compacted");
         assert_eq!(db_state.tree.compacted.len(), 1);
-        let compacted = &db_state.tree.compacted.first().unwrap().sst_views;
+        let compacted = db_state.tree.compacted.first().unwrap().sst_views();
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -3182,7 +3181,7 @@ mod tests {
         assert_eq!(db_state.last_l0_clock_tick, 20);
 
         // then: the compacted SST should only contain the non-expired merge
-        let compacted = &db_state.tree.compacted.first().unwrap().sst_views;
+        let compacted = db_state.tree.compacted.first().unwrap().sst_views();
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -3408,7 +3407,7 @@ mod tests {
         );
 
         // The compacted sorted run should contain both merge operations separately
-        let compacted = &db_state.tree.compacted.first().unwrap().sst_views;
+        let compacted = db_state.tree.compacted.first().unwrap().sst_views();
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -3525,7 +3524,7 @@ mod tests {
             "compaction should have occurred"
         );
 
-        let compacted = &db_state.tree.compacted.first().unwrap().sst_views;
+        let compacted = db_state.tree.compacted.first().unwrap().sst_views();
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
 
@@ -3656,7 +3655,7 @@ mod tests {
         let db_state = db_state.expect("db was not compacted");
         assert!(db_state.tree.last_compacted_l0_sst_view_id.is_some());
         assert_eq!(db_state.tree.compacted.len(), 1);
-        let compacted = &db_state.tree.compacted.first().unwrap().sst_views;
+        let compacted = db_state.tree.compacted.first().unwrap().sst_views();
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
         let mut iter = SstIterator::new_borrowed_initialized(
@@ -3786,7 +3785,7 @@ mod tests {
         assert!(db_state.tree.last_compacted_l0_sst_view_id.is_some());
         assert_eq!(db_state.tree.compacted.len(), 1);
         assert_eq!(db_state.last_l0_clock_tick, 70);
-        let compacted = &db_state.tree.compacted.first().unwrap().sst_views;
+        let compacted = db_state.tree.compacted.first().unwrap().sst_views();
         assert_eq!(compacted.len(), 1);
         let handle = compacted.first().unwrap();
         let mut iter = SstIterator::new_borrowed_initialized(
@@ -3894,10 +3893,7 @@ mod tests {
                 ..SsTableInfo::default()
             },
         ));
-        let segment_sr = SortedRun {
-            id: 7,
-            sst_views: vec![segment_sr_view.clone()].into(),
-        };
+        let segment_sr = SortedRun::new(7, [segment_sr_view.clone()]);
 
         let mut core = ManifestCore::new();
         core.segments = vec![Segment {
@@ -4178,24 +4174,22 @@ mod tests {
         Arc::make_mut(&mut dirty.value.core.tree).l0 =
             VecDeque::from(vec![l0_view_newest, l0_view_oldest]);
         Arc::make_mut(&mut dirty.value.core.tree).compacted = vec![
-            SortedRun {
-                id: 2,
-                sst_views: vec![SsTableView::identity(SsTableHandle::new(
+            SortedRun::new(
+                2,
+                [SsTableView::identity(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                ))]
-                .into(),
-            },
-            SortedRun {
-                id: 1,
-                sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                ))],
+            ),
+            SortedRun::new(
+                1,
+                [SsTableView::identity(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::new()),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                ))]
-                .into(),
-            },
+                ))],
+            ),
         ];
         stored_manifest.update(dirty).await.unwrap();
 
@@ -4283,24 +4277,22 @@ mod tests {
         ));
         Arc::make_mut(&mut core.tree).l0 = VecDeque::from(vec![l0_view_first, l0_view_second]);
         Arc::make_mut(&mut core.tree).compacted = vec![
-            SortedRun {
-                id: 5,
-                sst_views: vec![SsTableView::identity(SsTableHandle::new(
+            SortedRun::new(
+                5,
+                [SsTableView::identity(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(10, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
-                ))]
-                .into(),
-            },
-            SortedRun {
-                id: 2,
-                sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                ))],
+            ),
+            SortedRun::new(
+                2,
+                [SsTableView::identity(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(11, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info,
-                ))]
-                .into(),
-            },
+                ))],
+            ),
         ];
         let state = CompactorStateView {
             compactions: None,
@@ -4382,24 +4374,22 @@ mod tests {
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
                 compacted: vec![
-                    SortedRun {
-                        id: 7,
-                        sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                    SortedRun::new(
+                        7,
+                        [SsTableView::identity(SsTableHandle::new(
                             SsTableId::Compacted(Ulid::from_parts(70, 0)),
                             SST_FORMAT_VERSION_LATEST,
                             sr_info.clone(),
-                        ))]
-                        .into(),
-                    },
-                    SortedRun {
-                        id: 3,
-                        sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                        ))],
+                    ),
+                    SortedRun::new(
+                        3,
+                        [SsTableView::identity(SsTableHandle::new(
                             SsTableId::Compacted(Ulid::from_parts(30, 0)),
                             SST_FORMAT_VERSION_LATEST,
                             sr_info,
-                        ))]
-                        .into(),
-                    },
+                        ))],
+                    ),
                 ],
             }),
         }];
@@ -4439,15 +4429,14 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"r")),
             ..SsTableInfo::default()
         };
-        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
-            id: 9,
-            sst_views: vec![SsTableView::identity(SsTableHandle::new(
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun::new(
+            9,
+            [SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(90, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 sr_info,
-            ))]
-            .into(),
-        }];
+            ))],
+        )];
         let state = CompactorStateView {
             compactions: None,
             manifest: VersionedManifest::from_manifest(0, Manifest::initial(core)),
@@ -4476,15 +4465,14 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"a")),
             ..SsTableInfo::default()
         };
-        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
-            id: 4,
-            sst_views: vec![SsTableView::identity(SsTableHandle::new(
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun::new(
+            4,
+            [SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(40, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 sr_info,
-            ))]
-            .into(),
-        }];
+            ))],
+        )];
         let state = CompactorStateView {
             compactions: None,
             manifest: VersionedManifest::from_manifest(0, Manifest::initial(core)),
@@ -4516,24 +4504,22 @@ mod tests {
             ..SsTableInfo::default()
         };
         Arc::make_mut(&mut core.tree).compacted = vec![
-            SortedRun {
-                id: 8,
-                sst_views: vec![SsTableView::identity(SsTableHandle::new(
+            SortedRun::new(
+                8,
+                [SsTableView::identity(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(80, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     info.clone(),
-                ))]
-                .into(),
-            },
-            SortedRun {
-                id: 4,
-                sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                ))],
+            ),
+            SortedRun::new(
+                4,
+                [SsTableView::identity(SsTableHandle::new(
                     SsTableId::Compacted(Ulid::from_parts(40, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     info.clone(),
-                ))]
-                .into(),
-            },
+                ))],
+            ),
         ];
         core.segment_extractor_name = Some("test".into());
         core.segments = vec![
@@ -4543,15 +4529,14 @@ mod tests {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
-                    compacted: vec![SortedRun {
-                        id: 3,
-                        sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                    compacted: vec![SortedRun::new(
+                        3,
+                        [SsTableView::identity(SsTableHandle::new(
                             SsTableId::Compacted(Ulid::from_parts(30, 0)),
                             SST_FORMAT_VERSION_LATEST,
                             info.clone(),
-                        ))]
-                        .into(),
-                    }],
+                        ))],
+                    )],
                 }),
             },
             Segment {
@@ -4561,24 +4546,22 @@ mod tests {
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
                     compacted: vec![
-                        SortedRun {
-                            id: 9,
-                            sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                        SortedRun::new(
+                            9,
+                            [SsTableView::identity(SsTableHandle::new(
                                 SsTableId::Compacted(Ulid::from_parts(90, 0)),
                                 SST_FORMAT_VERSION_LATEST,
                                 info.clone(),
-                            ))]
-                            .into(),
-                        },
-                        SortedRun {
-                            id: 6,
-                            sst_views: vec![SsTableView::identity(SsTableHandle::new(
+                            ))],
+                        ),
+                        SortedRun::new(
+                            6,
+                            [SsTableView::identity(SsTableHandle::new(
                                 SsTableId::Compacted(Ulid::from_parts(60, 0)),
                                 SST_FORMAT_VERSION_LATEST,
                                 info,
-                            ))]
-                            .into(),
-                        },
+                            ))],
+                        ),
                     ],
                 }),
             },
@@ -4622,15 +4605,14 @@ mod tests {
             first_entry: Some(Bytes::from_static(b"x")),
             ..SsTableInfo::default()
         };
-        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
-            id: 5,
-            sst_views: vec![SsTableView::identity(SsTableHandle::new(
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun::new(
+            5,
+            [SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(Ulid::from_parts(50, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 info.clone(),
-            ))]
-            .into(),
-        }];
+            ))],
+        )];
         core.segment_extractor_name = Some("test".into());
         core.segments = vec![
             // L0-only: still skipped because L0 SSTs are ineligible inputs.
@@ -4946,7 +4928,9 @@ mod tests {
                     let completed = compaction
                         .clone()
                         .with_status(CompactionStatus::Compacted)
-                        .with_output_ssts(result.sst_views.iter().map(|v| v.sst.clone()).collect())
+                        .with_output_ssts(
+                            result.sst_views().iter().map(|v| v.sst.clone()).collect(),
+                        )
                         .with_ctx(None);
                     dirty.value.insert(completed);
                     match stored.update(dirty).await {
@@ -5015,7 +4999,7 @@ mod tests {
             .compacted
             .first()
             .unwrap()
-            .sst_views
+            .sst_views()
             .iter()
             .map(|view| view.sst.id.unwrap_compacted_id())
             .collect();
@@ -5190,10 +5174,8 @@ mod tests {
             .value
             .core;
         Arc::make_mut(&mut core.tree).l0 = VecDeque::from([l0.clone()]);
-        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
-            id: 1,
-            sst_views: vec![sr_first.clone(), sr_last.clone()].into(),
-        }];
+        Arc::make_mut(&mut core.tree).compacted =
+            vec![SortedRun::new(1, [sr_first.clone(), sr_last.clone()])];
 
         let compaction_id = Ulid::new();
         fixture
@@ -5227,7 +5209,7 @@ mod tests {
         assert_eq!(output.id, 2);
         assert_eq!(
             output
-                .sst_views
+                .sst_views()
                 .iter()
                 .map(|view| view.id)
                 .collect::<Vec<_>>(),
@@ -5262,10 +5244,7 @@ mod tests {
             .value
             .core;
         Arc::make_mut(&mut core.tree).l0 = VecDeque::from([l0.clone()]);
-        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
-            id: 1,
-            sst_views: vec![sr_first, sr_last].into(),
-        }];
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun::new(1, [sr_first, sr_last])];
         let compaction_id = Ulid::new();
         fixture
             .handler
@@ -5754,10 +5733,7 @@ mod tests {
         // Root tree holds SR(7) — the global max. The segment-targeted spec
         // below proposes dst=3, which is above the segment's local max (0)
         // but below the global max.
-        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
-            id: 7,
-            sst_views: Vec::new().into(),
-        }];
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun::new(7, [])];
         core.segments = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
@@ -5799,10 +5775,7 @@ mod tests {
             .manifest_mut_for_test()
             .value
             .core;
-        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
-            id: 7,
-            sst_views: Vec::new().into(),
-        }];
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun::new(7, [])];
         core.segments = vec![Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
@@ -5852,10 +5825,7 @@ mod tests {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![make_view(l0_view)]),
-                compacted: vec![SortedRun {
-                    id: 7,
-                    sst_views: Vec::new().into(),
-                }],
+                compacted: vec![SortedRun::new(7, [])],
             }),
         }];
 
@@ -6039,10 +6009,7 @@ mod tests {
             .manifest_mut_for_test()
             .value
             .core;
-        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
-            id: 99,
-            sst_views: Vec::new().into(),
-        }];
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun::new(99, [])];
         let prefix = Bytes::from_static(b"seg/");
         core.segments = vec![Segment {
             prefix: prefix.clone(),
@@ -6082,10 +6049,7 @@ mod tests {
             .core;
         // Place SR(7) in the root tree. The segment-targeted spec below uses 7 as
         // its destination but does not list it among its sources.
-        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun {
-            id: 7,
-            sst_views: Vec::new().into(),
-        }];
+        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun::new(7, [])];
         // Seed SR(99) into the segment so the source-existence check passes and
         // destination-overwrite is the rejection reason.
         let prefix = Bytes::from_static(b"seg/");
@@ -6095,10 +6059,7 @@ mod tests {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
-                compacted: vec![SortedRun {
-                    id: 99,
-                    sst_views: Vec::new().into(),
-                }],
+                compacted: vec![SortedRun::new(99, [])],
             }),
         }];
 
@@ -6295,7 +6256,7 @@ mod tests {
                 .tree
                 .compacted
                 .first()
-                .is_some_and(|sr| sr.sst_views.len() == 1)
+                .is_some_and(|sr| sr.sst_views().len() == 1)
     }
 
     /// If a clock is provided, it will be advanced the clock by 60 seconds on each iteration to
@@ -6476,7 +6437,10 @@ mod tests {
             sr.is_some(),
             "output SR {destination} not found in manifest"
         );
-        assert_eq!(sr.unwrap().sst_views.first().unwrap().sst.id, output_sst.id);
+        assert_eq!(
+            sr.unwrap().sst_views().first().unwrap().sst.id,
+            output_sst.id
+        );
 
         // given: a Compacted SR0→SR1 compaction to validate the SR source path removed when not in L0
         let sr1_output_sst = fake_output_sst();
@@ -6508,7 +6472,7 @@ mod tests {
         let sr1 = core2.tree.compacted.iter().find(|sr| sr.id == 1);
         assert!(sr1.is_some(), "SR 1 should exist");
         assert_eq!(
-            sr1.unwrap().sst_views.first().unwrap().sst.id,
+            sr1.unwrap().sst_views().first().unwrap().sst.id,
             sr1_output_sst.id
         );
         let stored2 = fixture

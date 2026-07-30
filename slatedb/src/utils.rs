@@ -390,7 +390,7 @@ pub(crate) fn sign_extend(val: u32, bits: u8) -> i32 {
 /// Returns:
 /// - The effective max parallelism.
 pub(crate) fn compute_max_parallel(l0_count: usize, srs: &[SortedRun], cap: usize) -> usize {
-    let total_ssts = l0_count + srs.iter().map(|sr| sr.sst_views.len()).sum::<usize>();
+    let total_ssts = l0_count + srs.iter().map(|sr| sr.sst_views().len()).sum::<usize>();
     total_ssts.min(cap).max(1)
 }
 
@@ -416,7 +416,7 @@ pub(crate) fn estimate_bytes_before_key(sorted_runs: &[SortedRun], key: &Bytes) 
                 return 0;
             };
             sorted_run
-                .sst_views
+                .sst_views()
                 .iter()
                 .take(idx)
                 .map(|sst| sst.estimate_size())
@@ -1328,20 +1328,19 @@ mod tests {
 
     #[test]
     fn test_estimate_bytes_before_key() {
-        let run1 = SortedRun {
-            id: 1,
-            sst_views: vec![
+        let run1 = SortedRun::new(
+            1,
+            [
                 make_sst_view("a", 10),
                 make_sst_view("k", 20), // k < m < z, so only "a" counts
                 make_sst_view("z", 30),
-            ]
-            .into(),
-        };
-        let run2 = SortedRun {
-            id: 2,
+            ],
+        );
+        let run2 = SortedRun::new(
+            2,
             // f < m < ..., so only "b" counts
-            sst_views: vec![make_sst_view("b", 40), make_sst_view("f", 50)].into(),
-        };
+            [make_sst_view("b", 40), make_sst_view("f", 50)],
+        );
 
         let key = Bytes::from("m");
         let total = estimate_bytes_before_key(&[run1, run2], &key);

@@ -496,10 +496,23 @@ pub struct SortedRun {
     /// Held behind an `Arc` so cloning a `SortedRun` (e.g. per read in the
     /// scan path) is a single refcount bump rather than a deep clone of every
     /// view's `Bytes` handles.
-    pub sst_views: Arc<[SsTableView]>,
+    sst_views: Arc<[SsTableView]>,
 }
 
 impl SortedRun {
+    /// Create a sorted run from an ordered collection of SSTable views.
+    pub fn new(id: u32, sst_views: impl IntoIterator<Item = SsTableView>) -> Self {
+        Self {
+            id,
+            sst_views: sst_views.into_iter().collect(),
+        }
+    }
+
+    /// Return the ordered SSTable views in this sorted run.
+    pub fn sst_views(&self) -> &[SsTableView] {
+        &self.sst_views
+    }
+
     /// Estimate the total size of all SSTables in this sorted run.
     pub fn estimate_size(&self) -> u64 {
         self.sst_views.iter().map(|sst| sst.estimate_size()).sum()
@@ -1145,6 +1158,14 @@ mod tests {
             let sorted_first_keys: BTreeSet<Bytes> = table_first_keys.into_iter().collect();
             let sorted_run = create_sorted_run(0, &sorted_first_keys);
             let covering_tables = sorted_run.tables_covering_range(range.clone());
+            let borrowed_ids: Vec<_> = covering_tables.iter().map(|view| view.id).collect();
+            let owned_ids: Vec<_> = sorted_run
+                .clone()
+                .into_tables_covering_range(&range)
+                .iter()
+                .map(|view| view.id)
+                .collect();
+            assert_eq!(owned_ids, borrowed_ids);
             let first_key = sorted_first_keys.first().unwrap().clone();
 
             let range_start_key = test_utils::bound_as_option(range.start_bound())
@@ -1179,16 +1200,15 @@ mod tests {
 
     #[test]
     fn test_sorted_run_collect_tables_for_point_key() {
-        let sorted_run = SortedRun {
-            id: 0,
-            sst_views: vec![
+        let sorted_run = SortedRun::new(
+            0,
+            [
                 create_compacted_sst_view_with_bounds(b"a", Some(b"k")),
                 create_compacted_sst_view_with_bounds(b"k", Some(b"k")),
                 create_compacted_sst_view_with_bounds(b"k", Some(b"m")),
                 create_compacted_sst_view_with_bounds(b"z", Some(b"z")),
-            ]
-            .into(),
-        };
+            ],
+        );
 
         let covering_tables = sorted_run.tables_covering_point_key(b"k");
         assert_eq!(covering_tables.len(), 3);
@@ -1208,15 +1228,21 @@ mod tests {
         assert!(sorted_run.tables_covering_point_key(b"0").is_empty());
     }
 
+    #[test]
+    fn test_sorted_run_clone_shares_sst_views() {
+        let sorted_run = SortedRun::new(0, [create_compacted_sst_view(Some(Bytes::from("a")))]);
+        let cloned = sorted_run.clone();
+
+        assert!(Arc::ptr_eq(&sorted_run.sst_views, &cloned.sst_views));
+        assert_eq!(sorted_run.sst_views(), cloned.sst_views());
+    }
+
     fn create_sorted_run(id: u32, first_keys: &BTreeSet<Bytes>) -> SortedRun {
         let mut ssts = Vec::new();
         for first_key in first_keys {
             ssts.push(create_compacted_sst_view(Some(first_key.clone())));
         }
-        SortedRun {
-            id,
-            sst_views: ssts.into(),
-        }
+        SortedRun::new(id, ssts)
     }
 
     fn create_compacted_sst_view(first_entry: Option<Bytes>) -> SsTableView {

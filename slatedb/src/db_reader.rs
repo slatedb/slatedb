@@ -3157,10 +3157,7 @@ mod tests {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![view(1)]),
-                compacted: vec![SortedRun {
-                    id: 0,
-                    sst_views: vec![view(4)].into(),
-                }],
+                compacted: vec![SortedRun::new(0, [view(4)])],
             },
         )];
         assert!(

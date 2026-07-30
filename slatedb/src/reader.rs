@@ -574,19 +574,11 @@ mod tests {
             }
             let sst_handle = self.build_sst(entries).await?;
 
-            // Find or create the sorted run
-            let tree = Arc::make_mut(&mut self.core.tree);
-            if let Some(sr) = tree.compacted.iter_mut().find(|sr| sr.id == sr_id) {
-                let mut views = sr.sst_views.to_vec();
-                views.push(SsTableView::identity(sst_handle));
-                sr.sst_views = views.into();
-            } else {
-                let new_sr = SortedRun {
-                    id: sr_id,
-                    sst_views: vec![SsTableView::identity(sst_handle)].into(),
-                };
-                tree.compacted.push(new_sr);
-            }
+            // The fixture groups all entries for a run into one SST before
+            // calling this helper, so each run is constructed exactly once.
+            Arc::make_mut(&mut self.core.tree)
+                .compacted
+                .push(SortedRun::new(sr_id, [SsTableView::identity(sst_handle)]));
             Ok(())
         }
 

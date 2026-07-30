@@ -460,10 +460,7 @@ pub(crate) async fn build_sorted_runs(
             let ssts = write_ssts(table_store, entries, max_sst_size).await;
             sr_ssts.extend(ssts.into_iter().map(SsTableView::identity));
         }
-        sorted_runs.push(SortedRun {
-            id: sr_id as u32,
-            sst_views: sr_ssts.into(),
-        });
+        sorted_runs.push(SortedRun::new(sr_id as u32, sr_ssts));
     }
 
     sorted_runs
