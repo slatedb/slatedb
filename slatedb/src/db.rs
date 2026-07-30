@@ -2063,15 +2063,13 @@ impl WriteHandle {
             return Ok(());
         }
 
-        match self.close_result.read() {
-            Some(Ok(())) => Err(SlateDBError::Closed.into()),
-            Some(Err(error)) => Err(error.into()),
-            None => Err(crate::Error::closed(
-                format!("database closed before write {} became durable", self.seq),
-                status
-                    .close_reason
-                    .expect("durability wait stopped without durability or a close reason"),
-            )),
+        match self
+            .close_result
+            .read()
+            .expect("database closed without recording a close result")
+        {
+            Ok(()) => Err(SlateDBError::Closed.into()),
+            Err(error) => Err(error.into()),
         }
     }
 }
