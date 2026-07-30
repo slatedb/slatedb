@@ -316,8 +316,6 @@ pub struct WriteOptions {
 impl From<WriteOptions> for slatedb::config::WriteOptions {
     fn from(value: WriteOptions) -> Self {
         slatedb::config::WriteOptions {
-            #[cfg(dst)]
-            now: 0,
             seqnum: value.seqnum,
         }
     }
