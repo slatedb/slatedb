@@ -146,6 +146,10 @@ name = "scan_prefix_bench"
 harness = false
 
 [[bench]]
+name = "scan_prefix_large_sorted_run_bench"
+harness = false
+
+[[bench]]
 name = "block_iterator_v2"
 harness = false
 required-features = ["bench-internal"]
