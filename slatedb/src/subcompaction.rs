@@ -121,7 +121,7 @@ pub(crate) async fn plan_subcompaction_ranges(
         .chain(
             sorted_runs
                 .iter()
-                .flat_map(|sr| sr.sst_views.iter().cloned()),
+                .flat_map(|sr| sr.sst_views().iter().cloned()),
         )
         .collect();
 

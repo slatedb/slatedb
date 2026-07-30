@@ -74,7 +74,7 @@ impl LsmTreeState {
             + self
                 .compacted
                 .iter()
-                .map(|sr| sr.sst_views.len())
+                .map(|sr| sr.sst_views().len())
                 .sum::<usize>()
     }
 
@@ -554,7 +554,7 @@ impl ManifestCore {
         self.trees().flat_map(|tree| {
             tree.l0
                 .iter()
-                .chain(tree.compacted.iter().flat_map(|sr| sr.sst_views.iter()))
+                .chain(tree.compacted.iter().flat_map(|sr| sr.sst_views().iter()))
         })
     }
 
@@ -1151,12 +1151,9 @@ impl Manifest {
         let l0: VecDeque<SsTableView> = Self::filter_view_handles(&tree.l0, true, range).into();
         let mut sorted_runs_filtered = vec![];
         for sr in &tree.compacted {
-            let sst_views = Self::filter_view_handles(&sr.sst_views, false, range);
+            let sst_views = Self::filter_view_handles(sr.sst_views().iter(), false, range);
             if !sst_views.is_empty() {
-                sorted_runs_filtered.push(SortedRun {
-                    id: sr.id,
-                    sst_views,
-                });
+                sorted_runs_filtered.push(SortedRun::new(sr.id, sst_views));
             }
         }
         tree.l0 = l0;
@@ -2086,7 +2083,7 @@ mod tests {
                 l0: writer_l0.clone(),
                 compacted: vec![],
             };
-            let compactor_compacted = vec![SortedRun { id: 42, sst_views: vec![] }];
+            let compactor_compacted = vec![SortedRun::new(42, [])];
             let compactor = LsmTreeState {
                 last_compacted_l0_sst_view_id: last_view,
                 last_compacted_l0_sst_id: last_sst,
@@ -2469,13 +2466,8 @@ mod tests {
                     }
                     tree.last_compacted_l0_sst_view_id = Some(newest);
                     self.next_sr_id += 1;
-                    tree.compacted.insert(
-                        0,
-                        SortedRun {
-                            id: self.next_sr_id,
-                            sst_views: sr_views,
-                        },
-                    );
+                    tree.compacted
+                        .insert(0, SortedRun::new(self.next_sr_id, sr_views));
                 }
             }
 
@@ -2574,7 +2566,7 @@ mod tests {
                 }
                 for seg in &self.store {
                     for sr in &seg.tree.compacted {
-                        for view in &sr.sst_views {
+                        for view in sr.sst_views() {
                             assert!(
                                 self.flushed_l0s.contains(&view.id),
                                 "SR {} references L0 {} that was never flushed",
@@ -2661,7 +2653,7 @@ mod tests {
                 for seg in &self.store {
                     let l0_ids: BTreeSet<Ulid> = seg.tree.l0.iter().map(|v| v.id).collect();
                     for sr in &seg.tree.compacted {
-                        for view in &sr.sst_views {
+                        for view in sr.sst_views() {
                             assert!(
                                 !l0_ids.contains(&view.id),
                                 "L0 {} appears in both l0 list and SR {} of segment {:?}",
@@ -2978,28 +2970,25 @@ mod tests {
                 ));
         }
         for (idx, sorted_run) in manifest.sorted_runs.iter().enumerate() {
-            Arc::make_mut(&mut core.tree).compacted.push(SortedRun {
-                id: idx as u32,
-                sst_views: sorted_run
-                    .iter()
-                    .map(|entry| {
-                        let sst_id = sst_id_fn(entry.sst_alias);
-                        let view_id = sst_id.unwrap_compacted_id();
-                        SsTableView::new_projected(
-                            view_id,
-                            SsTableHandle::new(
-                                sst_id,
-                                SST_FORMAT_VERSION_LATEST,
-                                SsTableInfo {
-                                    first_entry: Some(entry.first_entry.clone()),
-                                    ..SsTableInfo::default()
-                                },
-                            ),
-                            entry.visible_range.clone(),
-                        )
-                    })
-                    .collect(),
-            });
+            Arc::make_mut(&mut core.tree).compacted.push(SortedRun::new(
+                idx as u32,
+                sorted_run.iter().map(|entry| {
+                    let sst_id = sst_id_fn(entry.sst_alias);
+                    let view_id = sst_id.unwrap_compacted_id();
+                    SsTableView::new_projected(
+                        view_id,
+                        SsTableHandle::new(
+                            sst_id,
+                            SST_FORMAT_VERSION_LATEST,
+                            SsTableInfo {
+                                first_entry: Some(entry.first_entry.clone()),
+                                ..SsTableInfo::default()
+                            },
+                        ),
+                        entry.visible_range.clone(),
+                    )
+                }),
+            ));
         }
         Manifest::initial(core)
     }
@@ -3172,10 +3161,9 @@ mod tests {
         Arc::make_mut(&mut core.tree)
             .l0
             .push_back(create_sst_view(live_l0, b"a"));
-        Arc::make_mut(&mut core.tree).compacted.push(SortedRun {
-            id: 0,
-            sst_views: vec![create_sst_view(live_compacted, b"b")],
-        });
+        Arc::make_mut(&mut core.tree)
+            .compacted
+            .push(SortedRun::new(0, [create_sst_view(live_compacted, b"b")]));
 
         let mut manifest = Manifest::initial(core);
         manifest.external_dbs = vec![
@@ -3229,10 +3217,10 @@ mod tests {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![create_sst_view(segment_l0, b"seg/a")]),
-                compacted: vec![SortedRun {
-                    id: 0,
-                    sst_views: vec![create_sst_view(segment_compacted, b"seg/b")],
-                }],
+                compacted: vec![SortedRun::new(
+                    0,
+                    [create_sst_view(segment_compacted, b"seg/b")],
+                )],
             }),
         }];
 
@@ -3276,9 +3264,9 @@ mod tests {
         visible_range: BytesRange,
     ) -> Manifest {
         let mut core = ManifestCore::new();
-        Arc::make_mut(&mut core.tree).compacted.push(SortedRun {
-            id: 0,
-            sst_views: vec![SsTableView::new_projected(
+        Arc::make_mut(&mut core.tree).compacted.push(SortedRun::new(
+            0,
+            [SsTableView::new_projected(
                 sst_id.unwrap_compacted_id(),
                 SsTableHandle::new(
                     sst_id,
@@ -3290,7 +3278,7 @@ mod tests {
                 ),
                 Some(visible_range),
             )],
-        });
+        ));
         Manifest::initial(core)
     }
 
@@ -3975,9 +3963,9 @@ mod tests {
                     ),
                     Some(visible_range.clone()),
                 )]),
-                compacted: vec![SortedRun {
-                    id: 0, // gets renumbered globally by the union
-                    sst_views: vec![SsTableView::new_projected(
+                compacted: vec![SortedRun::new(
+                    0, // gets renumbered globally by the union
+                    [SsTableView::new_projected(
                         sr_sst.unwrap_compacted_id(),
                         SsTableHandle::new(
                             sr_sst,
@@ -3989,7 +3977,7 @@ mod tests {
                         ),
                         Some(visible_range),
                     )],
-                }],
+                )],
             }),
         }];
         (Manifest::initial(core), l0_sst, sr_sst)
@@ -4047,10 +4035,7 @@ mod tests {
         // entry has the highest id (matching the descending-id-by-list-
         // position convention).
         fn make_sr(id: u32) -> SortedRun {
-            SortedRun {
-                id, // intentionally collides across trees pre-renumber
-                sst_views: vec![],
-            }
+            SortedRun::new(id, []) // intentionally collides across trees pre-renumber
         }
 
         let mut core = ManifestCore::new();
@@ -4252,9 +4237,9 @@ mod tests {
                         ),
                         Some(range.clone()),
                     )]),
-                    compacted: vec![SortedRun {
-                        id: 0,
-                        sst_views: vec![SsTableView::new_projected(
+                    compacted: vec![SortedRun::new(
+                        0,
+                        [SsTableView::new_projected(
                             sr_id.unwrap_compacted_id(),
                             SsTableHandle::new(
                                 sr_id,
@@ -4266,7 +4251,7 @@ mod tests {
                             ),
                             Some(range),
                         )],
-                    }],
+                    )],
                 }),
             }
         }
@@ -4693,9 +4678,9 @@ mod tests {
                         ),
                         Some(BytesRange::from_ref("a".."d")),
                     )]),
-                    compacted: vec![SortedRun {
-                        id: 0,
-                        sst_views: vec![SsTableView::new_projected(
+                    compacted: vec![SortedRun::new(
+                        0,
+                        [SsTableView::new_projected(
                             sr_a.unwrap_compacted_id(),
                             SsTableHandle::new(
                                 sr_a,
@@ -4707,7 +4692,7 @@ mod tests {
                             ),
                             Some(BytesRange::from_ref("a".."m")),
                         )],
-                    }],
+                    )],
                 }),
             },
             Segment {
@@ -4716,9 +4701,9 @@ mod tests {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
-                    compacted: vec![SortedRun {
-                        id: 1,
-                        sst_views: vec![SsTableView::new_projected(
+                    compacted: vec![SortedRun::new(
+                        1,
+                        [SsTableView::new_projected(
                             sr_b.unwrap_compacted_id(),
                             SsTableHandle::new(
                                 sr_b,
@@ -4730,7 +4715,7 @@ mod tests {
                             ),
                             Some(BytesRange::from_ref("n".."z")),
                         )],
-                    }],
+                    )],
                 }),
             },
         ];
@@ -4774,13 +4759,13 @@ mod tests {
             )
         };
         let mut core = ManifestCore::new();
-        Arc::make_mut(&mut core.tree).compacted.push(SortedRun {
-            id: 0,
-            sst_views: vec![
+        Arc::make_mut(&mut core.tree).compacted.push(SortedRun::new(
+            0,
+            [
                 make(sst1, b"a", b"c", BytesRange::from_ref("a".."d")),
                 make(sst2, b"m", b"p", BytesRange::from_ref("m".."q")),
             ],
-        });
+        ));
         Manifest::initial(core)
     }
 
@@ -4814,7 +4799,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(projected.core.tree.compacted.len(), 1);
-        assert_eq!(projected.core.tree.compacted[0].sst_views.len(), 1);
+        assert_eq!(projected.core.tree.compacted[0].sst_views().len(), 1);
     }
 
     #[test]

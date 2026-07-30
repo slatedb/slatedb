@@ -686,7 +686,7 @@ impl ManifestWriterHandler {
             let all_views = tree
                 .l0
                 .iter()
-                .chain(tree.compacted.iter().flat_map(|run| run.sst_views.iter()));
+                .chain(tree.compacted.iter().flat_map(|run| run.sst_views().iter()));
             for view in all_views {
                 sst_views += 1;
                 // Dedupe by physical SST id: a range clone/rescale can project one SST into

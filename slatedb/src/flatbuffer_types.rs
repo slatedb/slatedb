@@ -277,10 +277,7 @@ impl FlatBufferManifestCodec {
                     manifest_sst.visible_range().map(Self::decode_bytes_range),
                 ));
             }
-            compacted.push(db_state::SortedRun {
-                id: manifest_sr.id(),
-                sst_views: ssts,
-            })
+            compacted.push(db_state::SortedRun::new(manifest_sr.id(), ssts))
         }
         let checkpoints: Vec<checkpoint::Checkpoint> = manifest
             .checkpoints()
@@ -477,11 +474,8 @@ impl FlatBufferManifestCodec {
                         .ssts()
                         .iter()
                         .map(|view| Self::decode_compacted_sst_view(&view, sst_lookup))
-                        .collect::<Result<_, _>>()?;
-                    Ok(db_state::SortedRun {
-                        id: sr.id(),
-                        sst_views: ssts,
-                    })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(db_state::SortedRun::new(sr.id(), ssts))
                 },
             )
             .collect()
@@ -955,7 +949,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         &mut self,
         sorted_run: &db_state::SortedRun,
     ) -> WIPOffset<SortedRunV2<'b>> {
-        let ssts = self.add_compacted_sst_views(sorted_run.sst_views.iter());
+        let ssts = self.add_compacted_sst_views(sorted_run.sst_views().iter());
         SortedRunV2::create(
             &mut self.builder,
             &SortedRunV2Args {
@@ -1022,7 +1016,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         sorted_run: &db_state::SortedRun,
     ) -> WIPOffset<FbSortedRunV1<'b>> {
         let ssts: Vec<WIPOffset<CompactedSsTable>> = sorted_run
-            .sst_views
+            .sst_views()
             .iter()
             .map(|view| self.add_compacted_sst_from_view(view))
             .collect();
@@ -1290,7 +1284,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 }
             }
             for sr in tree.compacted.iter() {
-                for view in sr.sst_views.iter() {
+                for view in sr.sst_views() {
                     if let SsTableId::Compacted(ulid) = view.sst.id {
                         unique_ssts.entry(ulid).or_insert(&view.sst);
                     }
@@ -1676,21 +1670,21 @@ mod tests {
             new_sst_handle(b"a", Some(BytesRange::from_ref("c"..="d"))),
         ]);
         Arc::make_mut(&mut manifest.core.tree).compacted = vec![
-            SortedRun {
-                id: 0,
-                sst_views: vec![
+            SortedRun::new(
+                0,
+                [
                     new_sst_handle(b"a", None),
                     new_sst_handle(b"d", Some(BytesRange::from_ref("e".."f"))),
                 ],
-            },
-            SortedRun {
-                id: 0,
-                sst_views: vec![
+            ),
+            SortedRun::new(
+                0,
+                [
                     new_sst_handle(b"a", None),
                     new_sst_handle(b"c", Some(BytesRange::from_ref("c"..))),
                     new_sst_handle(b"d", Some(BytesRange::from_ref("e".."f"))),
                 ],
-            },
+            ),
         ];
 
         let codec = FlatBufferManifestCodec {};
@@ -1726,11 +1720,11 @@ mod tests {
         let root = Arc::make_mut(&mut manifest.core.tree);
         root.l0 = (0..16).map(new_sst_view).collect();
         root.compacted = (0..4)
-            .map(|run| SortedRun {
-                id: run as u32,
-                sst_views: (0..8)
-                    .map(|offset| new_sst_view(100 + run * 8 + offset))
-                    .collect(),
+            .map(|run| {
+                SortedRun::new(
+                    run as u32,
+                    (0..8).map(|offset| new_sst_view(100 + run * 8 + offset)),
+                )
             })
             .collect();
         manifest.core.segment_extractor_name = Some("test".to_string());
@@ -1740,12 +1734,10 @@ mod tests {
                     l0: (0..4)
                         .map(|offset| new_sst_view(1_000 + segment * 16 + offset))
                         .collect(),
-                    compacted: vec![SortedRun {
-                        id: 100 + segment as u32,
-                        sst_views: (0..4)
-                            .map(|offset| new_sst_view(2_000 + segment * 16 + offset))
-                            .collect(),
-                    }],
+                    compacted: vec![SortedRun::new(
+                        100 + segment as u32,
+                        (0..4).map(|offset| new_sst_view(2_000 + segment * 16 + offset)),
+                    )],
                     ..Default::default()
                 };
                 Segment {
@@ -1926,10 +1918,7 @@ mod tests {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::new(),
-                    compacted: vec![SortedRun {
-                        id: 0,
-                        sst_views: vec![new_sst_view(), new_sst_view()],
-                    }],
+                    compacted: vec![SortedRun::new(0, [new_sst_view(), new_sst_view()])],
                 }),
             },
             Segment {
@@ -1938,10 +1927,7 @@ mod tests {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![new_sst_view(), new_sst_view()]),
-                    compacted: vec![SortedRun {
-                        id: 1,
-                        sst_views: vec![new_sst_view()],
-                    }],
+                    compacted: vec![SortedRun::new(1, [new_sst_view()])],
                 }),
             },
         ];
@@ -2323,9 +2309,9 @@ mod tests {
                     ..Default::default()
                 },
             ))]);
-        Arc::make_mut(&mut manifest.core.tree).compacted = vec![SortedRun {
-            id: 1,
-            sst_views: vec![SsTableView::identity(SsTableHandle::new(
+        Arc::make_mut(&mut manifest.core.tree).compacted = vec![SortedRun::new(
+            1,
+            [SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(ulid::Ulid::new()),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
@@ -2333,7 +2319,7 @@ mod tests {
                     ..Default::default()
                 },
             ))],
-        }];
+        )];
         let codec = FlatBufferManifestCodec {};
 
         // when:
@@ -2346,7 +2332,7 @@ mod tests {
             SST_FORMAT_VERSION_LATEST
         );
         assert_eq!(
-            decoded.core.tree.compacted[0].sst_views[0]
+            decoded.core.tree.compacted[0].sst_views()[0]
                 .sst
                 .format_version,
             SST_FORMAT_VERSION_LATEST
@@ -2452,7 +2438,7 @@ mod tests {
             super::ORIGINAL_SST_FORMAT_VERSION
         );
         assert_eq!(
-            decoded.core.tree.compacted[0].sst_views[0]
+            decoded.core.tree.compacted[0].sst_views()[0]
                 .sst
                 .format_version,
             super::ORIGINAL_SST_FORMAT_VERSION
@@ -2774,20 +2760,20 @@ mod tests {
             new_view(b"b", Some(BytesRange::from_ref("c"..="d"))),
         ]);
         Arc::make_mut(&mut manifest.core.tree).compacted = vec![
-            SortedRun {
-                id: 1,
-                sst_views: vec![
+            SortedRun::new(
+                1,
+                [
                     new_view(b"e", None),
                     new_view(b"f", Some(BytesRange::from_ref("g".."h"))),
                 ],
-            },
-            SortedRun {
-                id: 2,
-                sst_views: vec![
+            ),
+            SortedRun::new(
+                2,
+                [
                     new_view(b"i", None),
                     new_view(b"j", Some(BytesRange::from_ref("k"..))),
                 ],
-            },
+            ),
         ];
         Arc::make_mut(&mut manifest.core.tree).last_compacted_l0_sst_view_id =
             Some(manifest.core.tree.l0[0].id);
@@ -2848,9 +2834,9 @@ mod tests {
                     ..Default::default()
                 },
             ))]);
-        Arc::make_mut(&mut manifest.core.tree).compacted = vec![SortedRun {
-            id: 1,
-            sst_views: vec![SsTableView::identity(SsTableHandle::new(
+        Arc::make_mut(&mut manifest.core.tree).compacted = vec![SortedRun::new(
+            1,
+            [SsTableView::identity(SsTableHandle::new(
                 SsTableId::Compacted(ulid::Ulid::new()),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
@@ -2858,7 +2844,7 @@ mod tests {
                     ..Default::default()
                 },
             ))],
-        }];
+        )];
         manifest.writer_epoch = 5;
         manifest.compactor_epoch = 3;
 

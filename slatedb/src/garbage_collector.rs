@@ -1449,14 +1449,16 @@ mod tests {
             .l0
             .push_back(SsTableView::identity(active_expired_l0_sst_handle.clone()));
         // Dont' push inactive_expired_l0_sst_handle
-        Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
-            id: 1,
-            // Don't add inactive_expired_sst_handle
-            sst_views: vec![
-                SsTableView::identity(active_sst_handle.clone()),
-                SsTableView::identity(active_expired_sst_handle.clone()),
-            ],
-        });
+        Arc::make_mut(&mut state.tree)
+            .compacted
+            .push(SortedRun::new(
+                1,
+                // Don't add inactive_expired_sst_handle
+                [
+                    SsTableView::identity(active_sst_handle.clone()),
+                    SsTableView::identity(active_expired_sst_handle.clone()),
+                ],
+            ));
         StoredManifest::create_new_db(
             manifest_store.clone(),
             state.clone(),
@@ -1488,7 +1490,7 @@ mod tests {
         assert_eq!(current_manifest.manifest.core.tree.compacted.len(), 1);
         assert_eq!(
             current_manifest.manifest.core.tree.compacted[0]
-                .sst_views
+                .sst_views()
                 .len(),
             2
         );
@@ -1525,7 +1527,7 @@ mod tests {
         assert_eq!(current_manifest.manifest.core.tree.compacted.len(), 1);
         assert_eq!(
             current_manifest.manifest.core.tree.compacted[0]
-                .sst_views
+                .sst_views()
                 .len(),
             2
         );
@@ -1569,14 +1571,18 @@ mod tests {
             .push_back(SsTableView::identity(
                 active_checkpoint_l0_sst_handle.clone(),
             ));
-        Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
-            id: 1,
-            sst_views: vec![SsTableView::identity(active_sst_handle.clone())],
-        });
-        Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
-            id: 2,
-            sst_views: vec![SsTableView::identity(active_checkpoint_sst_handle.clone())],
-        });
+        Arc::make_mut(&mut state.tree)
+            .compacted
+            .push(SortedRun::new(
+                1,
+                [SsTableView::identity(active_sst_handle.clone())],
+            ));
+        Arc::make_mut(&mut state.tree)
+            .compacted
+            .push(SortedRun::new(
+                2,
+                [SsTableView::identity(active_checkpoint_sst_handle.clone())],
+            ));
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
             state.clone(),
@@ -1756,7 +1762,7 @@ mod tests {
             }
 
             for sr in &manifest.core.tree.compacted {
-                for view in &sr.sst_views {
+                for view in sr.sst_views() {
                     assert!(compacted_ssts.contains(&view.sst.id));
                 }
             }
@@ -2221,10 +2227,9 @@ mod tests {
         Arc::make_mut(&mut state.tree)
             .l0
             .push_back(SsTableView::identity(active_l0_handle));
-        Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
-            id: 1,
-            sst_views: vec![SsTableView::identity(active_handle)],
-        });
+        Arc::make_mut(&mut state.tree)
+            .compacted
+            .push(SortedRun::new(1, [SsTableView::identity(active_handle)]));
         // inactive_expired_handle is NOT in manifest -> eligible for GC
         StoredManifest::create_new_db(
             manifest_store.clone(),

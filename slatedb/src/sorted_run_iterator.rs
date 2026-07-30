@@ -300,10 +300,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
         let handle = table_store.write_sst(&id, &encoded).await.unwrap();
-        let sr = SortedRun {
-            id: 0,
-            sst_views: vec![SsTableView::identity(handle)],
-        };
+        let sr = SortedRun::new(0, [SsTableView::identity(handle)]);
 
         let mut iter = SortedRunIterator::new_owned_initialized(
             ..,
@@ -363,13 +360,13 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id2 = SsTableId::Compacted(ulid::Ulid::new());
         let handle2 = table_store.write_sst(&id2, &encoded).await.unwrap();
-        let sr = SortedRun {
-            id: 0,
-            sst_views: vec![
+        let sr = SortedRun::new(
+            0,
+            [
                 SsTableView::identity(handle1),
                 SsTableView::identity(handle2),
             ],
-        };
+        );
 
         let mut iter = SortedRunIterator::new_owned_initialized(
             ..,
@@ -435,9 +432,9 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let id2 = SsTableId::Compacted(ulid::Ulid::new());
         let handle2 = table_store.write_sst(&id2, &encoded).await.unwrap();
-        let sr = SortedRun {
-            id: 0,
-            sst_views: vec![
+        let sr = SortedRun::new(
+            0,
+            [
                 SsTableView::new_projected(
                     ulid::Ulid::new(),
                     handle1,
@@ -449,7 +446,7 @@ mod tests {
                     Some(BytesRange::from_ref("key5".."key7")),
                 ),
             ],
-        };
+        );
 
         // when: iterating the full range, then: only visible keys appear
         let mut iter = SortedRunIterator::new_borrowed_initialized(
@@ -679,10 +676,7 @@ mod tests {
             ssts.push(SsTableView::identity(handle));
         }
 
-        SortedRun {
-            id: 0,
-            sst_views: ssts,
-        }
+        SortedRun::new(0, ssts)
     }
 
     async fn build_sr_with_ssts(
@@ -703,10 +697,7 @@ mod tests {
             let sst = writer.close().await.unwrap();
             ssts.push(SsTableView::identity(sst));
         }
-        SortedRun {
-            id: 0,
-            sst_views: ssts,
-        }
+        SortedRun::new(0, ssts)
     }
 
     mod mixed_version_tests {
@@ -782,15 +773,15 @@ mod tests {
             )
             .await;
 
-            let sorted_run = SortedRun {
-                id: 0,
-                sst_views: vec![
+            let sorted_run = SortedRun::new(
+                0,
+                [
                     SsTableView::identity(sst1_v1),
                     SsTableView::identity(sst2_v2),
                     SsTableView::identity(sst3_v1),
                     SsTableView::identity(sst4_v2),
                 ],
-            };
+            );
 
             // when: iterating over the sorted run
             let mut iter = SortedRunIterator::new_owned_initialized(
@@ -855,15 +846,15 @@ mod tests {
             )
             .await;
 
-            let sorted_run = SortedRun {
-                id: 0,
-                sst_views: vec![
+            let sorted_run = SortedRun::new(
+                0,
+                [
                     SsTableView::identity(sst1_v1),
                     SsTableView::identity(sst2_v2),
                     SsTableView::identity(sst3_v1),
                     SsTableView::identity(sst4_v2),
                 ],
-            };
+            );
 
             let mut iter = SortedRunIterator::new_owned_initialized(
                 ..,

@@ -9310,7 +9310,7 @@ mod tests {
                         .tree
                         .compacted
                         .first()
-                        .is_some_and(|sr| sr.sst_views.len() > 1)
+                        .is_some_and(|sr| sr.sst_views().len() > 1)
                     {
                         break;
                     }
@@ -9466,7 +9466,7 @@ mod tests {
                         .tree
                         .compacted
                         .first()
-                        .is_some_and(|sr| sr.sst_views.len() > 1)
+                        .is_some_and(|sr| sr.sst_views().len() > 1)
                     {
                         break;
                     }
@@ -11663,7 +11663,7 @@ mod tests {
                     .manifest()
                     .compacted()
                     .iter()
-                    .flat_map(|sr| sr.sst_views.iter())
+                    .flat_map(|sr| sr.sst_views().iter())
                     .map(|v| v.sst.id)
                     .filter(|id| !l0_ids.contains(id))
                     .collect()

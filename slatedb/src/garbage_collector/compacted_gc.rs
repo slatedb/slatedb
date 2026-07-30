@@ -149,7 +149,7 @@ fn collect_active_ssts<'a>(manifests: impl Iterator<Item = &'a Manifest>) -> Has
                 active.insert(view.sst.id);
             }
             for sr in tree.compacted.iter() {
-                for view in sr.sst_views.iter() {
+                for view in sr.sst_views() {
                     active.insert(view.sst.id);
                 }
             }
@@ -741,10 +741,7 @@ mod tests {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![segment_l0.clone()]),
-                    compacted: vec![SortedRun {
-                        id: 0,
-                        sst_views: vec![segment_sr.clone()],
-                    }],
+                    compacted: vec![SortedRun::new(0, [segment_sr.clone()])],
                 }),
             }],
         );

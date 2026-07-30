@@ -814,7 +814,7 @@ impl From<&CoreSortedRun> for SortedRun {
     fn from(value: &CoreSortedRun) -> Self {
         Self {
             id: value.id,
-            sst_views: value.sst_views.iter().map(SsTableView::from).collect(),
+            sst_views: value.sst_views().iter().map(SsTableView::from).collect(),
             estimated_size_bytes: value.estimate_size(),
         }
     }
