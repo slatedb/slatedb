@@ -2902,7 +2902,7 @@ mod tests {
             b"px:b",
             b"vb_dirty",
             &PutOptions::default(),
-            &WriteOptions { seqnum: 0 },
+            &WriteOptions::default(),
         )
         .await
         .unwrap();
