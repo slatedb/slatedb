@@ -77,6 +77,18 @@ pub(crate) enum SlateDBError {
     #[error("wal store reconfiguration unsupported")]
     WalStoreReconfigurationError,
 
+    #[error("wal truncated at wal file `{0}`")]
+    WalTruncated(u64),
+
+    #[error("wal unavailable")]
+    WalUnavailable(Arc<dyn std::error::Error + Sync + Send + 'static>),
+
+    #[error("wal internal error")]
+    WalInternalError(Arc<dyn std::error::Error + Sync + Send + 'static>),
+
+    #[error("wal data error")]
+    WalDataError(Arc<dyn std::error::Error + Sync + Send + 'static>),
+
     #[error("invalid compaction")]
     InvalidCompaction,
 
@@ -206,8 +218,8 @@ pub(crate) enum SlateDBError {
     #[error("clone source paths must be unique, found duplicate: `{0}`")]
     DuplicatedCloneSourcePath(Path),
 
-    #[error("Manifest union of sources with WAL is not supported, source with WAL: `{paths:?}`")]
-    InvalidUnionSourceWithWal { paths: Vec<Path> },
+    #[error("Projection and/or union with WAL is not supported, sources with WAL: `{paths:?}`")]
+    InvalidCloneSourceWithWal { paths: Vec<Path> },
 
     #[error("Source manifest set must not be empty")]
     InvalidUnionSetEmpty(),
@@ -500,12 +512,18 @@ impl std::fmt::Display for ErrorKind {
 /// Why a recoverable SST read is being reissued (the reason it failed validation
 /// the first time).
 ///
-/// Carried on the reissued read's tag so a caching wrapper can try a different
-/// strategy on the retry.
+/// Carried on the reissued read's
+/// [`ObjectStoreCallTag`](crate::object_store_tag::ObjectStoreCallTag) so a
+/// caching wrapper can drop its local copy and refetch instead of serving the
+/// same bytes again.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RetryReason {
+pub enum RetryReason {
+    /// The read bytes failed a checksum validation.
     CrcMismatch,
+    /// The read bytes could not be decoded as a block.
     BlockDecodeError,
+    /// The read bytes could not be decompressed.
     #[cfg(any(
         feature = "snappy",
         feature = "zlib",
@@ -634,6 +652,7 @@ impl From<SlateDBError> for Error {
             #[cfg(feature = "foyer")]
             SlateDBError::FoyerError(err) => Error::unavailable(msg).with_source(Box::new(err)),
             SlateDBError::TransactionalObjectTimeout { .. } => Error::unavailable(msg),
+            SlateDBError::WalUnavailable(src) => Error::unavailable(msg).with_source(Box::new(src)),
 
             // Invalid errors
             SlateDBError::InvalidCachePartSize => Error::invalid(msg),
@@ -656,7 +675,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::SeekKeyLessThanLastReturnedKey => Error::invalid(msg),
             SlateDBError::IdenticalClonePaths { .. } => Error::invalid(msg),
             SlateDBError::DuplicatedCloneSourcePath(_) => Error::invalid(msg),
-            SlateDBError::InvalidUnionSourceWithWal { .. } => Error::invalid(msg),
+            SlateDBError::InvalidCloneSourceWithWal { .. } => Error::invalid(msg),
             SlateDBError::InvalidUnionSetEmpty() => Error::invalid(msg),
             SlateDBError::InvalidUnion(_) => Error::invalid(msg),
             SlateDBError::InvalidProjection { .. } => Error::invalid(msg),
@@ -708,6 +727,8 @@ impl From<SlateDBError> for Error {
             SlateDBError::CloneExternalDbMissing => Error::data(msg),
             SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::data(msg),
             SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::data(msg),
+            SlateDBError::WalTruncated(_) => Error::data(msg),
+            SlateDBError::WalDataError(src) => Error::data(msg).with_source(Box::new(src)),
 
             // Internal errors
             SlateDBError::CompactorExecutorFailed => Error::internal(msg),
@@ -722,6 +743,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::TransactionalObjectError(err) => {
                 Error::internal(msg).with_source(Box::new(err))
             }
+            SlateDBError::WalInternalError(src) => Error::internal(msg).with_source(Box::new(src)),
         }
     }
 }

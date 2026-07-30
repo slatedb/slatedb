@@ -1408,7 +1408,6 @@ mod tests {
             ..Settings::default()
         };
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
 

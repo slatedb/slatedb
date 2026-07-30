@@ -59,6 +59,7 @@
 //! [compactor_options]
 //! poll_interval = "5s"
 //! max_concurrent_compactions = 4
+//! enable_trivial_move = false
 //!
 //! [compactor_options.worker]
 //! max_sst_size = 1073741824
@@ -110,6 +111,7 @@
 //!  "compactor_options": {
 //!    "poll_interval": "5s",
 //!    "max_concurrent_compactions": 4,
+//!    "enable_trivial_move": false,
 //!    "worker": {
 //!      "max_sst_size": 1073741824
 //!    },
@@ -165,6 +167,7 @@
 //! compactor_options:
 //!   poll_interval: '5s'
 //!   max_concurrent_compactions: 4
+//!   enable_trivial_move: false
 //!   worker:
 //!     max_sst_size: 1073741824
 //!   scheduler_options:
@@ -210,7 +213,7 @@ use crate::error::SlateDBError;
 
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
 
-fn default_boundary_files_enabled() -> bool {
+fn default_true() -> bool {
     true
 }
 
@@ -460,11 +463,8 @@ impl Default for FlushOptions {
 
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct WriteOptions {
-    /// Whether `put` calls should block until the write has been durably committed
-    /// to the DB.
-    pub await_durable: bool,
     #[cfg(dst)]
     /// Force the current timestamp for DST operations. See #719 for details.
     pub now: i64,
@@ -473,18 +473,6 @@ pub struct WriteOptions {
     /// The value must be strictly greater than the current maximum sequence number
     /// or the write will fail with an `InvalidSequenceNumber` error.
     pub seqnum: u64,
-}
-
-impl Default for WriteOptions {
-    /// Create a new `WriteOptions`` with `await_durable` set to `true`.
-    fn default() -> Self {
-        Self {
-            await_durable: true,
-            #[cfg(dst)]
-            now: 0,
-            seqnum: 0,
-        }
-    }
 }
 
 /// Configuration for client put operations. `PutOptions` is supplied for each
@@ -500,25 +488,29 @@ pub struct PutOptions {
 }
 
 impl PutOptions {
-    pub(crate) fn expire_ts_from(&self, default: Option<u64>, now: i64) -> Option<i64> {
+    pub(crate) fn expire_ts_from(
+        &self,
+        default_ttl_millis: Option<u64>,
+        now_millis: i64,
+    ) -> Option<i64> {
         match self.ttl {
-            Ttl::Default => match default {
+            Ttl::Default => match default_ttl_millis {
                 None => None,
-                Some(default_ttl) => Self::checked_expire_ts(now, default_ttl),
+                Some(default_ttl_millis) => Self::checked_expire_ts(now_millis, default_ttl_millis),
             },
             Ttl::NoExpiry => None,
-            Ttl::ExpireAfter(ttl) => Self::checked_expire_ts(now, ttl),
-            Ttl::ExpireAt(ts) => Some(ts),
+            Ttl::ExpireAfterMillis(ttl_millis) => Self::checked_expire_ts(now_millis, ttl_millis),
+            Ttl::ExpireAtMillis(timestamp_millis) => Some(timestamp_millis),
         }
     }
 
-    fn checked_expire_ts(now: i64, ttl: u64) -> Option<i64> {
+    fn checked_expire_ts(now_millis: i64, ttl_millis: u64) -> Option<i64> {
         // for overflow, we will just assume no TTL
-        if ttl > i64::MAX as u64 {
+        if ttl_millis > i64::MAX as u64 {
             return None;
         };
-        let expire_ts = now + (ttl as i64);
-        if expire_ts < now {
+        let expire_ts = now_millis + (ttl_millis as i64);
+        if expire_ts < now_millis {
             return None;
         };
 
@@ -538,25 +530,29 @@ pub struct MergeOptions {
 
 impl MergeOptions {
     // TODO(agavra): deduplicate this with PutOptions::expire_ts_from
-    pub(crate) fn expire_ts_from(&self, default: Option<u64>, now: i64) -> Option<i64> {
+    pub(crate) fn expire_ts_from(
+        &self,
+        default_ttl_millis: Option<u64>,
+        now_millis: i64,
+    ) -> Option<i64> {
         match self.ttl {
-            Ttl::Default => match default {
+            Ttl::Default => match default_ttl_millis {
                 None => None,
-                Some(default_ttl) => Self::checked_expire_ts(now, default_ttl),
+                Some(default_ttl_millis) => Self::checked_expire_ts(now_millis, default_ttl_millis),
             },
             Ttl::NoExpiry => None,
-            Ttl::ExpireAfter(ttl) => Self::checked_expire_ts(now, ttl),
-            Ttl::ExpireAt(ts) => Some(ts),
+            Ttl::ExpireAfterMillis(ttl_millis) => Self::checked_expire_ts(now_millis, ttl_millis),
+            Ttl::ExpireAtMillis(timestamp_millis) => Some(timestamp_millis),
         }
     }
 
-    fn checked_expire_ts(now: i64, ttl: u64) -> Option<i64> {
+    fn checked_expire_ts(now_millis: i64, ttl_millis: u64) -> Option<i64> {
         // for overflow, we will just assume no TTL
-        if ttl > i64::MAX as u64 {
+        if ttl_millis > i64::MAX as u64 {
             return None;
         };
-        let expire_ts = now + (ttl as i64);
-        if expire_ts < now {
+        let expire_ts = now_millis + (ttl_millis as i64);
+        if expire_ts < now_millis {
             return None;
         };
 
@@ -564,14 +560,25 @@ impl MergeOptions {
     }
 }
 
+/// Time-to-live policy applied to an inserted value or merge operand.
+///
+/// TTL durations are expressed in milliseconds. Absolute expiration timestamps are
+/// expressed as milliseconds since the Unix epoch.
+///
+/// Expiration is applied during compaction and is therefore best effort; an expired
+/// value may remain visible until compaction processes it.
 #[non_exhaustive]
 #[derive(Clone, Default, PartialEq, Debug)]
 pub enum Ttl {
+    /// Use [`Settings::default_ttl_millis`].
     #[default]
     Default,
+    /// Store the value without an expiration.
     NoExpiry,
-    ExpireAfter(u64),
-    ExpireAt(i64),
+    /// Expire the value after the specified number of milliseconds.
+    ExpireAfterMillis(u64),
+    /// Expire the value at the specified Unix timestamp in milliseconds.
+    ExpireAtMillis(i64),
 }
 
 /// Defines the scope targeted by a given checkpoint. If set to All, then the checkpoint will
@@ -742,7 +749,14 @@ pub struct Settings {
     /// The compression algorithm to use for SSTables.
     pub compression_codec: Option<CompressionCodec>,
 
-    /// The object store cache options.
+    /// The object store cache options. When `root_folder` is set, the database
+    /// wraps its main object store in a
+    /// [`CachedObjectStore`](crate::cached_object_store::CachedObjectStore)
+    /// built from these options. To construct and share the cache yourself,
+    /// build one with
+    /// [`CachedObjectStore::builder`](crate::cached_object_store::CachedObjectStore::builder)
+    /// and pass it to [`Db::builder`](crate::Db::builder) instead, leaving
+    /// these options unset.
     pub object_store_cache_options: ObjectStoreCacheOptions,
 
     /// Configuration options for the garbage collector.
@@ -755,11 +769,12 @@ pub struct Settings {
     #[serde(default)]
     pub metric_level: MetricLevel,
 
-    /// The default time-to-live (TTL) for insertions (note that re-inserting a key
-    /// with any value will update the TTL to use the default_ttl)
+    /// The default time-to-live (TTL), in milliseconds, for insertions (note that
+    /// re-inserting a key with any value will update the TTL to use
+    /// `default_ttl_millis`).
     ///
     /// Default: no TTL (insertions will remain until deleted)
-    pub default_ttl: Option<u64>,
+    pub default_ttl_millis: Option<u64>,
 
     /// Maximum number of wrapper-level retries for a single object-store
     /// operation, on top of the `object_store` client's own HTTP retries.
@@ -809,7 +824,7 @@ impl std::fmt::Debug for Settings {
             )
             .field("garbage_collector_options", &self.garbage_collector_options)
             .field("metric_level", &self.metric_level)
-            .field("default_ttl", &self.default_ttl);
+            .field("default_ttl_millis", &self.default_ttl_millis);
         data.finish()
     }
 }
@@ -1039,7 +1054,7 @@ impl Default for Settings {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             metric_level: MetricLevel::default(),
-            default_ttl: None,
+            default_ttl_millis: None,
             object_store_max_retries: None,
             #[cfg(test)]
             block_format: None,
@@ -1160,6 +1175,16 @@ pub struct CompactorOptions {
     /// The maximum number of concurrent compactions to execute at once
     pub max_concurrent_compactions: usize,
 
+    /// Whether the coordinator may complete compactions with non-overlapping
+    /// input SSTs by moving them directly into the destination sorted run,
+    /// without dispatching a worker job. Because a trivial move does not rewrite
+    /// rows, it does not remove tombstones, apply compaction filters, or process
+    /// merges during that compaction. It also preserves the input SST sizes,
+    /// which can increase manifest size and read amplification compared with
+    /// rewriting inputs into larger output SSTs. Defaults to false.
+    #[serde(default)]
+    pub enable_trivial_move: bool,
+
     /// Scheduler-specific options expressed as string key/value pairs.
     #[serde(default)]
     pub scheduler_options: HashMap<String, String>,
@@ -1212,6 +1237,7 @@ impl Default for CompactorOptions {
             poll_interval: Duration::from_secs(5),
             manifest_update_timeout: Duration::from_secs(300),
             max_concurrent_compactions: 4,
+            enable_trivial_move: false,
             scheduler_options: HashMap::new(),
             worker: Some(CompactionWorkerOptions::default()),
             metric_level: None,
@@ -1232,6 +1258,7 @@ impl std::fmt::Debug for CompactorOptions {
                 "max_concurrent_compactions",
                 &self.max_concurrent_compactions,
             )
+            .field("enable_trivial_move", &self.enable_trivial_move)
             .field("scheduler_options", &self.scheduler_options)
             .field("worker", &self.worker)
             .field("metric_level", &self.metric_level)
@@ -1502,7 +1529,7 @@ pub struct GarbageCollectorOptions {
     /// deleted metadata ID and incorrectly report its stale update as successful. Set `min_age`
     /// longer than the maximum lifetime of a stale process, and use the same setting for every
     /// garbage collector operating on the database.
-    #[serde(default = "default_boundary_files_enabled")]
+    #[serde(default = "default_true")]
     pub boundary_files_enabled: bool,
 
     /// Controls wrapper-level retries for this garbage collector's object-store
@@ -1719,10 +1746,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
-
-    use super::*;
 
     #[test]
     fn test_db_options_load_from_env() {
@@ -1740,7 +1766,6 @@ mod tests {
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
             );
-
             Ok(())
         });
     }
@@ -1810,7 +1835,7 @@ mod tests {
 {
     "flush_interval": "1s",
     "metric_level": "Debug",
-    "object_store_cache_options": {
+     "object_store_cache_options": {
         "root_folder": "/tmp/slatedb-root"
     }
 }
@@ -1971,7 +1996,7 @@ object_store_cache_options:
     fn should_return_exact_timestamp_for_put_expire_at() {
         // given
         let opts = PutOptions {
-            ttl: Ttl::ExpireAt(12345),
+            ttl: Ttl::ExpireAtMillis(12345),
         };
 
         // when
@@ -1985,7 +2010,7 @@ object_store_cache_options:
     fn should_ignore_default_ttl_for_put_expire_at() {
         // given
         let opts = PutOptions {
-            ttl: Ttl::ExpireAt(12345),
+            ttl: Ttl::ExpireAtMillis(12345),
         };
 
         // when
@@ -1999,7 +2024,7 @@ object_store_cache_options:
     fn should_allow_past_timestamp_for_put_expire_at() {
         // given
         let opts = PutOptions {
-            ttl: Ttl::ExpireAt(50),
+            ttl: Ttl::ExpireAtMillis(50),
         };
 
         // when
@@ -2013,7 +2038,7 @@ object_store_cache_options:
     fn should_return_exact_timestamp_for_merge_expire_at() {
         // given
         let opts = MergeOptions {
-            ttl: Ttl::ExpireAt(12345),
+            ttl: Ttl::ExpireAtMillis(12345),
         };
 
         // when
@@ -2025,9 +2050,9 @@ object_store_cache_options:
 
     #[test]
     fn should_return_deterministic_expire_ts_for_expire_at() {
-        // given: same ExpireAt value used at different times
+        // given: same ExpireAtMillis value used at different times
         let opts = PutOptions {
-            ttl: Ttl::ExpireAt(99999),
+            ttl: Ttl::ExpireAtMillis(99999),
         };
 
         // when

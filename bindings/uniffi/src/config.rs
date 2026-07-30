@@ -102,10 +102,10 @@ pub enum Ttl {
     Default,
     /// Store the value without expiration.
     NoExpiry,
-    /// Expire the value after the given number of clock ticks.
-    ExpireAfterTicks(u64),
-    /// Expire the value at the given absolute timestamp (clock ticks).
-    ExpireAt(i64),
+    /// Expire the value after the given number of milliseconds.
+    ExpireAfterMillis(u64),
+    /// Expire the value at the given Unix timestamp in milliseconds.
+    ExpireAtMillis(i64),
 }
 
 impl From<Ttl> for slatedb::config::Ttl {
@@ -113,8 +113,8 @@ impl From<Ttl> for slatedb::config::Ttl {
         match value {
             Ttl::Default => Self::Default,
             Ttl::NoExpiry => Self::NoExpiry,
-            Ttl::ExpireAfterTicks(ttl) => Self::ExpireAfter(ttl),
-            Ttl::ExpireAt(ts) => Self::ExpireAt(ts),
+            Ttl::ExpireAfterMillis(ttl_millis) => Self::ExpireAfterMillis(ttl_millis),
+            Ttl::ExpireAtMillis(timestamp_millis) => Self::ExpireAtMillis(timestamp_millis),
         }
     }
 }
@@ -305,26 +305,18 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
     }
 }
 
-/// Options that control durability behavior for writes and commits.
-#[derive(Clone, Debug, uniffi::Record)]
+/// Options that control writes and commits.
+#[derive(Clone, Debug, Default, uniffi::Record)]
 pub struct WriteOptions {
-    /// Whether the call waits for the write to become durable before returning.
-    pub await_durable: bool,
-}
-
-impl Default for WriteOptions {
-    fn default() -> Self {
-        Self {
-            await_durable: true,
-        }
-    }
+    /// Optional caller-supplied sequence number. Zero uses SlateDB's sequence oracle.
+    #[uniffi(default = 0)]
+    pub seqnum: u64,
 }
 
 impl From<WriteOptions> for slatedb::config::WriteOptions {
     fn from(value: WriteOptions) -> Self {
         slatedb::config::WriteOptions {
-            await_durable: value.await_durable,
-            ..Default::default()
+            seqnum: value.seqnum,
         }
     }
 }

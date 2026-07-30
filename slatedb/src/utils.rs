@@ -662,7 +662,7 @@ pub(crate) async fn preload_cache_from_manifest(
         Some(PreloadLevel::AllSst) => {
             let all_sst_paths: Vec<object_store::path::Path> = core
                 .all_sst_views()
-                .map(|view| path_resolver.table_path(&view.sst.id))
+                .map(|view| path_resolver.sst_path(&view.sst.id))
                 .collect();
             if !all_sst_paths.is_empty() {
                 if let Err(e) = cached_obj_store
@@ -677,7 +677,7 @@ pub(crate) async fn preload_cache_from_manifest(
             let l0_sst_paths: Vec<object_store::path::Path> = core
                 .trees()
                 .flat_map(|tree| tree.l0.iter())
-                .map(|view| path_resolver.table_path(&view.sst.id))
+                .map(|view| path_resolver.sst_path(&view.sst.id))
                 .collect();
             if !l0_sst_paths.is_empty() {
                 if let Err(e) = cached_obj_store
@@ -1109,7 +1109,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let _sst1 = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst, false)
+            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst)
             .await
             .unwrap();
 
@@ -1124,7 +1124,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let sst2 = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst, false)
+            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst)
             .await
             .unwrap();
 
@@ -1162,7 +1162,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let sst = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst, false)
+            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst)
             .await
             .unwrap();
 

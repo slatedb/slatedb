@@ -136,10 +136,7 @@ fn recency_scan_options() -> ScanOptions {
 }
 
 async fn populate(db: &Db) {
-    let write_opts = WriteOptions {
-        await_durable: false,
-        seqnum: 0,
-    };
+    let write_opts = WriteOptions::default();
     let put_opts = PutOptions::default();
     let mut next_version = [0u64; NUM_PREFIXES];
     for round in 0..NUM_FLUSHES {

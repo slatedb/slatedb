@@ -243,7 +243,7 @@ impl UploadHandler {
     ) -> Result<SegmentedSstHandle, SlateDBError> {
         let written_bytes = sst.encoded.remaining_len() as u64;
         loop {
-            match self.db.upload_sst(&sst_id, &sst.encoded, true).await {
+            match self.db.upload_sst(&sst_id, &sst.encoded).await {
                 Ok(sst_handle) => {
                     self.db.db_stats.l0_flush_bytes.increment(written_bytes);
                     return Ok(SegmentedSstHandle {
@@ -298,8 +298,12 @@ impl MessageHandler<UploadJob> for UploadHandler {
 #[cfg(test)]
 mod tests {
     use super::{TrackerMessage, UploadJob, Uploader};
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::config::Settings;
     use crate::db::DbInner;
+    use crate::db_cache::test_utils::TestCache;
+    use crate::db_cache::CacheTarget;
+    use crate::db_cache::{CachedKey, DbCache};
     use crate::db_state::{SsTableId, SsTableView};
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
@@ -314,14 +318,16 @@ mod tests {
     use crate::test_utils::FixedThreeBytePrefixExtractor;
     use crate::types::{RowEntry, ValueDeletable};
     use crate::utils::WatchableOnceCell;
-    use crate::wal_buffer::WalBufferManager;
+
+    use crate::wal::test_utils::FakeWalWriter;
+    use crate::wal::WalWriter;
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-    use slatedb_common::metrics::{DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper};
+    use slatedb_common::metrics::MetricsRecorderHelper;
     use slatedb_common::DbRand;
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -351,6 +357,23 @@ mod tests {
         fp_registry: Arc<FailPointRegistry>,
         segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     ) -> Arc<DbInner> {
+        setup_db_with_cache_policy(
+            path,
+            fp_registry,
+            segment_extractor,
+            None,
+            BlockCachePolicy::default(),
+        )
+        .await
+    }
+
+    async fn setup_db_with_cache_policy(
+        path: &str,
+        fp_registry: Arc<FailPointRegistry>,
+        segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+        cache: Option<Arc<dyn DbCache>>,
+        block_cache_policy: BlockCachePolicy,
+    ) -> Arc<DbInner> {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let settings = Settings::default();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
@@ -370,24 +393,16 @@ mod tests {
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(Arc::clone(&object_store), None),
             SsTableFormat::default(),
-            PathResolver::new(Path::from(path)),
+            PathResolver::from_root(Path::from(path)),
             fp_registry.clone(),
-            None,
+            cache,
             TableStoreKind::Main,
+            block_cache_policy,
         ));
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =
             crate::utils::SafeSender::unbounded_channel(status_manager.result_reader());
-        let recorder = Arc::new(DefaultMetricsRecorder::new());
-        let helper = MetricsRecorderHelper::new(recorder, MetricLevel::Info);
-        let wal_buffer = Arc::new(WalBufferManager::new(
-            status_manager.clone(),
-            &helper,
-            0,
-            table_store.clone(),
-            1024,
-            None,
-        ));
+        let wal_writer = Box::new(FakeWalWriter::new(0));
         Arc::new(
             DbInner::new(
                 settings,
@@ -399,11 +414,11 @@ mod tests {
                     &status_manager,
                 )),
                 write_tx,
-                wal_buffer.observer(),
+                wal_writer.observer(),
                 db_metrics,
                 fp_registry,
                 None,
-                status_manager,
+                Arc::new(status_manager),
                 segment_extractor,
             )
             .await
@@ -568,6 +583,36 @@ mod tests {
             SsTableId::Compacted(expected_id)
         );
 
+        test.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_apply_flush_cache_policy() {
+        let cache = Arc::new(TestCache::new());
+        let db = setup_db_with_cache_policy(
+            "/tmp/test_parallel_l0_flush_cache_policy",
+            Arc::new(FailPointRegistry::new()),
+            None,
+            Some(cache.clone()),
+            BlockCachePolicy::default().with_flush_targets(&[CacheTarget::Filters]),
+        )
+        .await;
+        let job = next_upload_job(&db, b"key", b"value", 1);
+        let test = start_test_uploader(&db);
+
+        test.submit(job).unwrap();
+        let msg = timeout(Duration::from_secs(5), test.tracker_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let TrackerMessage::UploadComplete(event) = msg else {
+            panic!("expected UploadComplete");
+        };
+        let handle = &event.segments[0].sst_handle;
+        let filter_key: CachedKey = (handle.id, handle.info.filter_offset).into();
+
+        assert!(cache.get_filter(&filter_key).await.unwrap().is_some());
+        assert_eq!(cache.entry_count(), 1);
         test.shutdown().await;
     }
 

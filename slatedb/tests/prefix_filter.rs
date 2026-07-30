@@ -1,6 +1,6 @@
 //! Integration tests for the prefix bloom filter.
 //!
-//! Three test modules:
+//! Four test modules:
 //!   * [`composite_filters`]: integration tests that configure two filter
 //!     policies on a single DB (one full-key, one conditional prefix) and
 //!     verify reads work after closing/reopening with policies in a different
@@ -8,6 +8,9 @@
 //!   * [`subrange`]: integration tests for `scan_prefix` restricted to a
 //!     subrange, asserting both correct results and actual SST pruning via
 //!     the filter-negative counter.
+//!   * [`empty_prefix_filter`]: regression tests for #1966 — a persisted
+//!     zero-bit prefix filter must report a miss instead of panicking, on
+//!     fresh and reopened DBs.
 //!   * [`prop_test`]: a property test asserting that `scan_prefix` (with and
 //!     without a subrange) returns the same results with and without a prefix
 //!     bloom filter configured. The filter must never introduce false
@@ -116,10 +119,7 @@ mod composite_filters {
 
     async fn write_sample_data(db: &Db) {
         let put = PutOptions::default();
-        let write = WriteOptions {
-            await_durable: false,
-            seqnum: 0,
-        };
+        let write = WriteOptions::default();
         // Write each batch in its own SST so multiple SSTs participate in the
         // read path and the filter has something to actually skip.
         for batch in [SAMPLE_USERS, SAMPLE_NON_USERS] {
@@ -296,10 +296,7 @@ mod subrange {
             .expect("failed to build db");
 
         let put = PutOptions::default();
-        let write = WriteOptions {
-            await_durable: false,
-            seqnum: 0,
-        };
+        let write = WriteOptions::default();
         let ssts: &[&[&[u8]]] = &[
             &[b"aaa1", b"ccc1"], // sandwich
             &[b"bbb1", b"bbb2", b"bbb3", b"bbb4"],
@@ -381,6 +378,138 @@ mod subrange {
     }
 }
 
+mod empty_prefix_filter {
+    use std::sync::Arc;
+
+    use slatedb::config::{FlushOptions, FlushType, PutOptions, Settings, WriteOptions};
+    use slatedb::db_stats::{
+        FILTER_KIND_LABEL, FILTER_KIND_POINT, FILTER_KIND_PREFIX, SST_FILTER_NEGATIVE_COUNT,
+    };
+    use slatedb::object_store::memory::InMemory;
+    use slatedb::object_store::ObjectStore;
+    use slatedb::{BloomFilterPolicy, Db, PrefixExtractor, PrefixTarget};
+    use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue};
+
+    const PREFIX_LEN: usize = 4;
+
+    /// Extracts a 4-byte prefix only from inputs of at least 4 bytes, so an
+    /// SST holding only shorter keys builds a zero-bit prefix filter.
+    struct GatedPrefixExtractor;
+
+    impl PrefixExtractor for GatedPrefixExtractor {
+        fn name(&self) -> &str {
+            "gated4"
+        }
+
+        fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
+            let input = match target {
+                PrefixTarget::Point(k) => k.as_ref(),
+                PrefixTarget::Prefix(p) => p.as_ref(),
+            };
+            (input.len() >= PREFIX_LEN).then_some(PREFIX_LEN)
+        }
+    }
+
+    fn filter_negatives(recorder: &DefaultMetricsRecorder, kind: &'static str) -> u64 {
+        recorder
+            .snapshot()
+            .by_name_and_labels(SST_FILTER_NEGATIVE_COUNT, &[(FILTER_KIND_LABEL, kind)])
+            .map(|m| match m.value {
+                MetricValue::Counter(v) => v,
+                ref other => panic!("expected counter, got {:?}", other),
+            })
+            .unwrap_or(0)
+    }
+
+    async fn open_db(store: Arc<dyn ObjectStore>, recorder: Arc<DefaultMetricsRecorder>) -> Db {
+        Db::builder("/test/empty_prefix_filter", store)
+            .with_settings(Settings {
+                min_filter_keys: 0,
+                compactor_options: None,
+                ..Settings::default()
+            })
+            .with_filter_policies(vec![Arc::new(
+                BloomFilterPolicy::new(10)
+                    .with_whole_key_filtering(false)
+                    .with_prefix_extractor(Arc::new(GatedPrefixExtractor)),
+            )])
+            .with_metrics_recorder(recorder)
+            .build()
+            .await
+            .expect("failed to build db")
+    }
+
+    async fn collect_keys(mut iter: slatedb::DbIterator) -> Vec<Vec<u8>> {
+        let mut keys = Vec::new();
+        while let Some(kv) = iter.next().await.expect("iterator next failed") {
+            keys.push(kv.key.to_vec());
+        }
+        keys
+    }
+
+    async fn assert_empty_filter_reads(db: &Db, recorder: &DefaultMetricsRecorder) {
+        // Extractor-rejected queries bypass the filter; short keys stay reachable.
+        for key in [b"a".as_slice(), b"b".as_slice()] {
+            let got = db.get(key).await.expect("get failed");
+            assert!(got.is_some(), "expected key {:?} to be present", key);
+        }
+        let iter = db.scan_prefix(b"a", ..).await.expect("scan_prefix failed");
+        assert_eq!(collect_keys(iter).await, vec![b"a".to_vec()]);
+
+        // Extractor-accepted queries probe the zero-bit filter: before the
+        // fix this panicked with a division by zero; now the SST is skipped.
+        let negatives_before = filter_negatives(recorder, FILTER_KIND_PREFIX);
+        let iter = db
+            .scan_prefix(b"aaaa", ..)
+            .await
+            .expect("scan_prefix failed");
+        assert!(collect_keys(iter).await.is_empty());
+        assert_eq!(
+            filter_negatives(recorder, FILTER_KIND_PREFIX) - negatives_before,
+            1,
+            "expected the SST to be skipped on the empty prefix filter"
+        );
+
+        let negatives_before = filter_negatives(recorder, FILTER_KIND_POINT);
+        let got = db.get(b"aaaa").await.expect("get failed");
+        assert!(got.is_none());
+        assert_eq!(
+            filter_negatives(recorder, FILTER_KIND_POINT) - negatives_before,
+            1,
+            "expected the SST to be skipped on the empty prefix filter"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_filter_reports_miss_after_write_and_reopen() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = open_db(store.clone(), recorder.clone()).await;
+
+        let put = PutOptions::default();
+        let write = WriteOptions::default();
+        for key in [b"a".as_slice(), b"b".as_slice()] {
+            db.put_with_options(key, b"v", &put, &write)
+                .await
+                .expect("put failed");
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .expect("memtable flush failed");
+
+        assert_empty_filter_reads(&db, &recorder).await;
+        db.close().await.expect("close failed");
+
+        // Reopen so the zero-bit filter is decoded from the persisted SST.
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = open_db(store, recorder.clone()).await;
+        assert_empty_filter_reads(&db, &recorder).await;
+        db.close().await.expect("close failed");
+    }
+}
+
 mod prop_test {
     use std::sync::Arc;
 
@@ -445,10 +574,7 @@ mod prop_test {
 
     async fn write_keys(db: &Db, keys: &[Vec<u8>]) {
         let put_opts = PutOptions::default();
-        let write_opts = WriteOptions {
-            await_durable: false,
-            seqnum: 0,
-        };
+        let write_opts = WriteOptions::default();
         for (i, key) in keys.iter().enumerate() {
             let value = format!("v{}", i).into_bytes();
             db.put_with_options(key, &value, &put_opts, &write_opts)

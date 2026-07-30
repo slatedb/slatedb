@@ -1,0 +1,437 @@
+---
+title: The Past, Present, and Future of Compaction in SlateDB
+pubDate: 2026-07-13
+author: Ryan Dielhenn, Almog Gavra
+canonicalUrl: https://ryandielhenn.github.io/blog/distributed-compaction/
+---
+
+import ChartEmbed from '../../components/ChartEmbed.astro';
+
+[SlateDB](https://slatedb.io) is an embedded key-value store built on object
+storage. 
+
+SlateDB uses a Log-Structured Merge Tree, or LSM for short, to batch writes to
+object storage. Incoming writes land in an in-memory buffer called the
+memtable. Once the memtable fills up, it is flushed to an immutable file stored
+in object storage called a Sorted String Table (SST). 
+
+LSM trees are structured in multiple levels, and the first time an SST lands
+in object store it is put in the first level known as L0.  From there, SlateDB
+uses a process called compaction, where SSTs are grouped and merged together as
+each tier fills up. 
+
+LSM trees let you tune the tradeoffs between read, write, and space
+amplification. I recommend reading [this
+blog](https://www.bitsxpages.com/p/understanding-lsm-trees-via-read) by Almog
+Gavra if you want to know more about these tradeoffs.
+
+The following is what you would see if you listed the contents of an object
+storage bucket path used by SlateDB:
+
+```text
+manifest/
+  00000000001.manifest  # This is a snapshot of the database state:
+  00000000002.manifest  # SST lists, watermarks, epochs, external dbs, checkpoints etc.
+  00000000003.manifest
+  ...
+compactions/
+  00000000001.compactions # Jobs scheduled for compaction by the
+  00000000002.compactions # compaction coordinator.
+  00000000003.compactions
+  ...
+compacted/
+  <ULID1>.sst # This is compacted data
+  <ULID2>.sst # L0 ssts also happen to live here which have not been compacted yet
+  <ULID3>.sst
+  ...
+wal/ # This is the write ahead log. Writes land here first so that they can be replayed in a failure scenario.
+  00000000001.sst
+  00000000002.sst
+  00000000003.sst
+gc/
+  manifest.boundary # Garbage collector deletes .manifest versions at or below this Boundary
+  compactions.boundary # Garbage collector deletes .compactions files at or below this Boundary
+```
+
+All of this is hidden from the user under simple put/get/scan APIs.
+
+## Compaction
+
+Compaction is a critical background process of the LSM tree that takes Sorted
+String Tables (SST for short) and merges them to produce an output SST with
+non-repeating keys. 
+
+This process does a few things. When multiple SSTs share keys, merging them
+removes duplicate entries and cleans up tombstones left behind by deletes,
+reducing space amplification. It also reduces the number of SSTs that need to
+be read to find a key by improving the locality of sorted data into longer
+runs:
+
+```ascii-art
+┌SST A · newest────────────┐   ┌SST B─────────────────────┐   ┌SST C · oldest────────────┐
+│orders:1042 @14  shipped  │   │orders:1042 @8   packed   │   │orders:1042 @3   placed   │
+│orders:1058 @13  paid     │   │orders:1058 @7   pending  │   │orders:1023 @2   paid     │
+│orders:1023 @12  ⌫ deleted│   │orders:1023 @6   shipped  │   │users:42    @1   a@old.co │
+│users:42    @11  a@new.co │   │users:91    @5   plan:pro │   │users:91    @0   plan:free│
+└──────────────────────────┘   └──────────────────────────┘   └──────────────────────────┘
+
+             │                              │                              │
+             └──────────────────────────────┼──────────────────────────────┘
+                                            ▼
+                      ┌k-way merge · min-heap────────────────────┐
+                      │pop smallest (key, -LSN) across streams   │
+                      └──────────────────────────────────────────┘
+                                            ▼
+                 ┌per-key winner · highest LSN wins───────────────────┐
+                 │orders:1042    keep @14 shipped   · drop @8, @3     │
+                 │orders:1023    ⌫ tombstone @12    · drop @6, @2     │
+                 │users:42       keep @11 a@new.co  · drop @1         │
+                 │orders:1058    keep @13 paid      · drop @7         │
+                 │users:91       keep @5  plan:pro  · drop @0         │
+                 └────────────────────────────────────────────────────┘
+                                            ▼
+                 ┌output SST · one current row per key────────────────┐
+                 │orders:1042 → shipped        users:42 → a@new.co    │
+                 │orders:1058 → paid           users:91 → plan:pro    │
+                 │orders:1023 → ⌫ dropped (tombstone removed)         │
+                 └────────────────────────────────────────────────────┘
+```
+
+<p class="fig-caption">The LSM compaction merge step: a k-way merge keeps each
+key's highest-LSN version and drops the rest. Rows are written <code>key @LSN →
+value</code>; ⌫ marks a tombstone (a deleted key).</p>
+
+## Distributed Compaction
+
+A single compactor is a bottleneck: if it cannot keep pace with write
+throughput, the whole system degrades in two stages: 
+
+1. as uncompacted SSTs pile up in L0, more files need to be scanned to
+   find a key, increasing read latency. 
+2. once the L0 file count reaches `l0_max_ssts`, the flusher stops writing
+   immutable memtables to L0. Those memtables accumulate in memory until
+   `max_unflushed_bytes` is exceeded, at which point SlateDB applies
+   backpressure that stalls writes from being durably written to object
+   storage. 
+
+A lagging compactor therefore degrades read latency first, then write throughput.
+
+In 0.14.1 we introduced distributed compaction, which mitigates this
+issue by allowing SlateDB to leverage multiple concurrent workers
+to run compactions.
+
+```ascii-art
+            Single compactor             │             Distributed workers
+  ┌write path · flushes fast─────────┐   │     ┌write path · flushes fast─────────┐
+  └──────────────────────────────────┘   │     └──────────────────────────────────┘
+                    ▼                    │                       ▼
+  ┌L0 SST count rising───────────────┐   │     ┌compaction keeps up───────────────┐
+  │█ █ █ █ █ █ █ █ █ █ █ █           │   │     │█ █ █ ░ ░ ░ ░ ░ ░ ░ ░ ░           │
+  │read latency degrades             │   │     │drained as fast as it fills       │
+  └──────────────────────────────────┘   │     └──────────────────────────────────┘
+                    ▼                    │                       ▼
+  ┌flusher stops at l0_max_ssts──────┐   │     ┌.compactions · job queue──────────┐
+  │immutable memtables pile in RAM   │   │     └──────────────────────────────────┘
+  └──────────────────────────────────┘   │          ┌────────────┬────────────┐
+                    ▼                    │          ▼            ▼            ▼
+  ┌max_unflushed_bytes exceeded──────┐   │    ┌worker 1──┐ ┌worker 2──┐ ┌worker N──┐
+  │back-pressure stalls writes       │   │    │job a, b  │ │job c, d  │ │job e, f  │
+  └──────────────────────────────────┘   │    └──────────┘ └──────────┘ └──────────┘
+                    ▼                    │          │            │            │
+  ┌1 compactor draining──────────────┐   │          └────────────┼────────────┘
+  │capped by one node's CPU + net    │   │                       ▼ merged SSTs
+  └──────────────────────────────────┘   │     ┌sorted runs───────────────────────┐
+                                         │     │█ █ █ █ █ █ █ █                   │
+A lagging compactor degrades the         │     └──────────────────────────────────┘
+whole system: reads slow first,          │
+then writes stall.                       │   Add workers to raise the ceiling;
+                                         │   the single-writer manifest
+                                         │   invariant is preserved.
+```
+
+<p class="fig-caption">How distributing compaction across stateless workers relieves the single-compactor bottleneck.</p>
+
+Distributed compaction works by designating a single coordinator for compactions
+that handles scheduling. This coordinator writes the results of scheduling into
+a shared [transactional
+object](https://github.com/slatedb/slatedb/blob/main/slatedb-txn-obj/README.md)
+on object storage called the `.compactions` file, and workers poll this file to
+claim compactions, updating that file when they have made progress on executing
+a transaction.
+
+To understand its effect on scaling we ran a benchmark that clears out a backlog
+of independent per-segment ~2GB compactions while varying the number of
+workers, each pinned to a single vCPU. Since the jobs are independent and each
+runs on its own worker, throughput scales near-linearly all the way to six
+workers: 5.2× the single-worker rate while holding above 85% parallel
+efficiency.
+
+<ChartEmbed
+	src="/charts/distributed-compaction-scaling.html"
+	title="Distributed compaction throughput scaling with worker count"
+	minHeight={470}
+/>
+
+In addition to allowing for improved compaction throughput, distributed compaction
+enables some nice quality of life operational improvements:
+
+1. You can migrate from running compaction embedded on the writer to running it
+   standalone (with one or more workers) without fencing the active writer.
+2. You can start/stop compactor workers without worrying about fencing at all.
+3. You can run compactors on a compute framework like kubernetes without
+   installing a separate controller.
+
+The full design of distributed compactions is in
+[RFC-0025](/rfcs/0025-distributed-compaction) and is well worth a read. 
+
+## Future benefits and work
+
+The performance and operational improvements of distributed compaction are
+just the start.  The door is wide open for future enhancements that take
+advantage of these stateless compaction workers. Below are just a few examples
+of extensions made possible by the stateless workers added in RFC-0025.
+
+### Concurrent L0 Compactions
+
+Ideally we want to parallelize compaction work, but it helps to separate two
+axes of parallelism that are easy to conflate.
+
+The first axis is running *independent* compactions at the same time. There are
+two different types of independent compactions:
+
+1. Disjoint sorted run compactions. These are compactions that target already
+   compacted data from different levels of the tree (e.g. `L0→SR1` and
+   `[SR2,SR3]→SR4`).
+2. Compactions from different segments.
+   [RFC-0024](/rfcs/0024-segment-oriented-compaction)
+   introduced segmented compaction which allows SlateDB to maintain multiple
+   LSM trees that share a single WAL/memtable. Compactions that target
+   different segments are independent, even targeting L0.
+
+Distributed compaction is what lets you execute these across more than one
+machine: a single embedded worker is capped by one machine's CPU and I/O, and
+`max_concurrent_compactions` only stretches that one machine so far.  Spreading
+independent jobs across a pool of workers is the bottleneck relief this post is
+about.
+
+The second axis is parallelizing L0 compactions within the same segment, and
+here it's worth not overselling: distributed compaction does **not** unlock it
+on its own. 
+
+`last_compacted_l0_sst_view_id` is a single cursor over a segment's L0 list,
+and "already compacted" means "at or below the cursor." A single monotonic
+boundary can't represent two disjoint, in-flight L0 consumptions at once, so L0
+compaction within a tree is serialized whether that tree is served by one
+embedded worker or a fleet of remote ones. RFC-24 calls this out directly:
+
+> Parallel L0 compaction within a single segment is a separate concern tied to
+> the watermark's single-cursor design and is not addressed here.
+
+```ascii-art
+segment L0 list · oldest ──────────────────▶ newest
+┌────┐  ┌────┐  ┌────┐  ┌────┐  ┌────┐  ┌────┐
+│ L1 │  │ L2 │  │ L3 │  │ L4 │  │ L5 │  │ L6 │
+└────┘  └────┘  └────┘  └────┘  └────┘  └────┘
+               ▲
+         cursor = last_compacted_l0_sst_view_id
+         (at/below = consumed · above = live)
+
+┌Job A · consume {L3, L4}────┐      ┌Job B · consume {L5, L6}────┐
+│still running …             │      │finishes first              │
+└────────────────────────────┘      └────────────────────────────┘
+
+One monotonic cursor can't hold two in-flight consumptions: B commits,
+the cursor jumps past L6, and L3/L4 are GC'd while A is still running.
+```
+
+<p class="fig-caption">A single monotonic cursor can't represent two disjoint, in-flight L0 consumptions in the same segment.</p>
+
+That note is just as true after RFC-25. Moving work onto stateless workers
+changes where a compaction runs, not whether one L0 compaction can be split
+in two.
+
+Closing that gap takes one of two things (or both), and neither is distributed
+compaction:
+
+#### Improvement 1: Subcompactions
+
+Subcompactions ([RFC-0028](/rfcs/0028-subcompactions)).
+Rather than splitting the L0 list across multiple compactions (which the
+watermark forbids), a subcompaction keeps it as one logical compaction and
+splits the *key range* into sub-ranges that run in parallel.  The parent
+commits a single manifest update that advances the watermark exactly once over
+the whole consumed set, so the single-cursor invariant is never violated which
+sidesteps the problem instead of fighting it. 
+
+Subcompactions parallelize across cores on one worker, which composes
+cleanly with distributed compaction parallelizing across workers; allowing
+separate workers to claim subcompactions of the same parent compaction is
+explicitly labeled as future work in RFC-0028 and out of scope. 
+
+```ascii-art
+┌one logical compaction · live set {L3 … L6}─┐
+│┌────┐ ┌────┐ ┌────┐ ┌────┐                 │
+││ L3 │ │ L4 │ │ L5 │ │ L6 │                 │
+│└────┘ └────┘ └────┘ └────┘                 │
+└────────────────────────────────────────────┘
+              split by key range
+           ▼                       ▼
+┌sub-range A · core 1┐  ┌sub-range B · core 2┐
+│keys (−∞, k)        │  │keys [k, +∞)        │
+│output SST(s)       │  │output SST(s)       │
+└────────────────────┘  └────────────────────┘
+           │                       │
+           └───────────┬───────────┘
+                       ▼
+┌single manifest commit──────────────────────┐
+│advance cursor once: before L3 → after L6   │
+└────────────────────────────────────────────┘
+```
+
+<p class="fig-caption">Parallelism from splitting one compaction by key range; the cursor still advances exactly once per parent compaction.</p>
+
+In practice, splitting a single 16 GB compaction into key-range subcompactions
+scales almost linearly. The results below are from a benchmark running a 12-way 
+split ~11× faster than the baseline no-subcompactions run, collapsing a 2m37s
+compaction to ~14s while holding above 90% parallel efficiency.
+
+<ChartEmbed
+	src="/charts/subcompaction-scaling.html"
+	title="Subcompaction scaling: near-linear speedup and wall-clock compaction time"
+	minHeight={820}
+/>
+
+<p class="fig-caption">Benchmark evidence for subcompactions (RFC-0028): measured speedup tracks the ideal-linear reference, holding above 90% efficiency through a 12-way split.</p>
+
+#### Improvement 2: Reworking the L0 Watermark
+
+Reworking the watermark to track a *set* of consumed L0 SSTs instead of a
+single cursor. This is the more invasive change, but it's what would let two L0
+parent compactions in the same segment advance independently.
+
+```ascii-art
+segment L0 list · oldest ──────────────────▶ newest
+track a SET of consumed SSTs   ( ● consumed   ○ live )
+┌────┐  ┌────┐  ┌────┐  ┌────┐  ┌────┐  ┌────┐
+│L1 ●│  │L2 ●│  │L3 ○│  │L4 ○│  │L5 ○│  │L6 ○│
+└────┘  └────┘  └────┘  └────┘  └────┘  └────┘
+                  ▲       ▲       ▲       ▲
+                  └───┬───┘       └───┬───┘
+                    Job A           Job B
+                   {L3,L4}         {L5,L6}
+                 independent     independent
+
+A set-valued watermark lets two L0 compactions in the same segment
+advance independently so neither GC's the other's live inputs.
+```
+
+<p class="fig-caption">Track a set of compacted SSTs instead of one boundary, so two L0 compactions in the same segment advance independently.</p>
+
+To summarize, distributed compaction removes the restriction that compaction
+runs on a single node, subcompactions remove the restriction that a single
+compaction runs on a single CPU, and the watermark design (still to be 
+implemented as of July 2026) will allow us to run concurrent L0 compactions
+within a single segment.
+
+### Priority Based Compaction Routing
+
+Once compactions are jobs claimed by stateless workers rather than steps run
+inline by one process, the coordinator is free to decide *which* job goes
+*where*. 
+
+Compactions could be routed to specific workers, or pools of them,
+based on priority: an L0 compaction on a segment approaching `l0_max_ssts` is
+far more urgent than a routine sorted-run merge, because the former is what
+stands between the database and write-stalling backpressure. High-priority jobs
+could be steered to a dedicated set of low-latency workers while bulk
+sorted-run merges run on cheaper, best-effort capacity. 
+
+This will turn the worker pool into a scheduling surface where compaction
+resources follow the work that is most likely to degrade read and write
+latency.
+
+```ascii-art
+┌.compactions · job queue with priority hints────────┐
+│L0 drain · hot            large-tier merge · heavy  │
+└────────────────────────────────────────────────────┘
+             │                           │
+┌router · reads priority, dispatches to matching pool┐
+└────────────────────────────────────────────────────┘
+             ▼                           ▼
+┌hot pool────────────────┐  ┌heavy pool──────────────┐
+│L0 drains · latency     │  │big merges · thruput    │
+│████  ████  ████  ████  │  │██████████  ██████████  │
+└────────────────────────┘  └────────────────────────┘
+```
+
+<p class="fig-caption">Priority hints let the coordinator route hot L0 drains and heavy sorted-run merges to matching worker pools.</p>
+
+### Shared Worker Pools
+
+Because the workers are stateless, nothing about a compaction job ties it to a
+single database instance. 
+
+A shared worker pool serving many instances would significantly reduce the
+I/O-bound threads each instance has to reserve for itself, and let instances
+trade compaction resources as needed e.g. an idle database contributes its
+share of the pool to a neighbor that is busy ingesting. Without it, capacity is
+sized per database for that database's worst case. This is true of an embedded
+compactor and equally of a remote fleet dedicated to one instance, unless you
+build per-DB autoscaling. 
+
+Pooling that capacity absorbs those bursts and raises overall utilization,
+while priority-based routing decides how the shared pool is divided when
+several instances contend for it at once.
+
+```ascii-art
+               Per-DB workers                  │                  Shared workers
+┌DB α────────┐ ┌DB β────────┐ ┌DB γ────────┐   │   ┌DB α────────┐ ┌DB β────────┐ ┌DB γ────────┐
+│    idle    │ │    hot     │ │    idle    │   │   │    idle    │ │    hot     │ │    idle    │
+└────────────┘ └────────────┘ └────────────┘   │   └────────────┘ └────────────┘ └────────────┘
+       ▼              ▼              ▼         │          ▼              ▼              ▼
+┌pool α──────┐ ┌pool β──────┐ ┌pool γ──────┐   │   ┌.compactions┐ ┌.compactions┐ ┌.compactions┐
+│   ░ ░ ░    │ │   █ █ █    │ │   ░ ░ ░    │   │   │ α (empty)  │ │ β (6 jobs) │ │ γ (1 job)  │
+└────────────┘ └────────────┘ └────────────┘   │   └────────────┘ └────────────┘ └────────────┘
+                                               │          └──────────────┼──────────────┘
+each DB reserves its own threads;              │                         ▼
+α and γ sit idle while β is saturated.         │   ┌shared worker pool────────────────────────┐
+                                               │   │polls every DB's .compactions             │
+resources are locked per database —            │   │                                          │
+β backs up but can't borrow α or γ.            │   │        ┌───┬───┬───┬───┬───┬───┐         │
+                                               │   │        │ β │ β │ β │ β │ γ │ ░ │         │
+you provision (and pay for) peak × N.          │   │        └───┴───┴───┴───┴───┴───┘         │
+                                               │   │                                          │
+                                               │   │box = worker · β/γ = its DB · ░ = idle    │
+                                               │   └──────────────────────────────────────────┘
+                                               │
+                                               │   capacity follows demand:
+                                               │   β gets 4 · γ gets 1 · α gets 0 · 1 spare.
+                                               │
+                                               │   pay for aggregate peak, not N × peak —
+                                               │   the spare flows wherever it is needed.
+```
+
+<p class="fig-caption">A shared worker pool serving multiple SlateDB instances: capacity follows demand instead of being pinned per database.</p>
+
+## Conclusion
+
+Distributed compaction (RFC-0025) removes the single-*process* ceiling on
+compaction and lays down a stateless-worker foundation: jobs are claimed and
+executed by workers that hold no durable state of their own. 
+
+On its own that relieves the single-compactor bottleneck that degrades read
+latency and then write throughput while improving the operational quality of
+life of compaction in SlateDB. 
+
+Just as importantly, the stateless-worker model is what makes the future work
+above tractable. Reworking the watermark design, adding priority-based routing
+and shared worker pool support are natural extensions now that a compaction is
+just a job that any worker can claim.
+
+:::note[attribution]
+This post was originally published on Ryan Dielhenn's blog at
+[ryandielhenn.github.io](https://ryandielhenn.github.io/blog/distributed-compaction/),
+and reproduced here with permission. This version has modified some text and added
+additional benchmarking results.
+:::
+
