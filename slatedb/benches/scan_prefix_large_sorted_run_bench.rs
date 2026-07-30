@@ -19,8 +19,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use object_store::memory::InMemory;
 use pprof::criterion::{Output, PProfProfiler};
 use slatedb::config::{
-    CompactorOptions, DurabilityLevel, FlushOptions, FlushType, PutOptions, ScanOptions, Settings,
-    WriteOptions,
+    CompactorOptions, DurabilityLevel, FlushOptions, FlushType, ScanOptions, Settings,
 };
 use slatedb::Db;
 use slatedb_common::clock::{DefaultSystemClock, SystemClock};
@@ -111,16 +110,9 @@ fn scan_options() -> ScanOptions {
 }
 
 async fn populate(db: &Db) {
-    let write_opts = WriteOptions {
-        await_durable: false,
-        ..WriteOptions::default()
-    };
-    let put_opts = PutOptions::default();
     for idx in 0..NUM_SSTS {
         let key = make_key(idx);
-        db.put_with_options(&key, &key, &put_opts, &write_opts)
-            .await
-            .expect("put failed");
+        db.put(&key, &key).await.expect("put failed");
         db.flush_with_options(FlushOptions {
             flush_type: FlushType::MemTable,
         })
