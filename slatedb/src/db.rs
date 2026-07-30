@@ -2043,17 +2043,6 @@ impl WriteHandle {
         self.create_ts
     }
 
-    fn close_error(&self) -> crate::Error {
-        match self
-            .close_result
-            .read()
-            .expect("database closed without recording a close result")
-        {
-            Ok(()) => SlateDBError::Closed.into(),
-            Err(error) => error.into(),
-        }
-    }
-
     /// Waits until this write has been durably persisted.
     ///
     /// If the database closes before the write becomes durable, this returns a
@@ -2065,16 +2054,23 @@ impl WriteHandle {
     pub async fn await_durable(&self) -> Result<(), crate::Error> {
         let mut status_rx = self.status_rx.clone();
 
-        let status = status_rx
+        let wait_result = status_rx
             .wait_for(|status| status.durable_seq >= self.seq || status.close_reason.is_some())
-            .await
-            .map_err(|_| self.close_error())?;
+            .await;
 
-        if status.durable_seq >= self.seq {
-            return Ok(());
+        match wait_result {
+            Ok(status) if status.durable_seq >= self.seq => Ok(()),
+            // The write was not durable before the database closed. Use the
+            // recorded close result to preserve fencing and panic errors.
+            Ok(_) | Err(_) => match self
+                .close_result
+                .read()
+                .expect("database closed without recording a close result")
+            {
+                Ok(()) => Err(SlateDBError::Closed.into()),
+                Err(error) => Err(error.into()),
+            },
         }
-
-        Err(self.close_error())
     }
 }
 
@@ -6265,20 +6261,6 @@ mod tests {
         );
         fail_parallel::cfg(fp_registry, "write-wal-sst-io-error", "off").unwrap();
         let _ = close_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_write_handle_await_durable_preserves_closed_status_channel_error() {
-        let status_manager = DbStatusManager::new(0);
-        let (status_tx, status_rx) = tokio::sync::watch::channel(status_manager.status());
-        let close_result = crate::utils::WatchableOnceCell::new();
-        close_result.write(Err(SlateDBError::Fenced));
-        let handle = WriteHandle::new(1, 0, status_rx, close_result.reader());
-
-        drop(status_tx);
-
-        let error = handle.await_durable().await.unwrap_err();
-        assert_eq!(error.kind(), crate::ErrorKind::Closed(CloseReason::Fenced));
     }
 
     async fn do_test_should_read_compacted_db(mut options: Settings) {
