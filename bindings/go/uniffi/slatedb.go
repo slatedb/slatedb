@@ -1573,7 +1573,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_settings_set()
 		})
-		if checksum != 34344 {
+		if checksum != 16989 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_settings_set: UniFFI API checksum mismatch")
 		}
@@ -7999,8 +7999,8 @@ type SettingsInterface interface {
 	// Examples:
 	//
 	// - `set("flush_interval", "\"250ms\"")`
-	// - `set("default_ttl", "42")`
-	// - `set("default_ttl", "null")`
+	// - `set("default_ttl_millis", "42")`
+	// - `set("default_ttl_millis", "null")`
 	// - `set("compactor_options.max_sst_size", "33554432")`
 	// - `set("object_store_cache_options.root_folder", "\"/tmp/slatedb-cache\"")`
 	Set(key string, valueJson string) error
@@ -8104,8 +8104,8 @@ func SettingsLoad() (*Settings, error) {
 // Examples:
 //
 // - `set("flush_interval", "\"250ms\"")`
-// - `set("default_ttl", "42")`
-// - `set("default_ttl", "null")`
+// - `set("default_ttl_millis", "42")`
+// - `set("default_ttl_millis", "null")`
 // - `set("compactor_options.max_sst_size", "33554432")`
 // - `set("object_store_cache_options.root_folder", "\"/tmp/slatedb-cache\"")`
 func (_self *Settings) Set(key string, valueJson string) error {
@@ -12714,21 +12714,21 @@ type TtlNoExpiry struct {
 func (e TtlNoExpiry) Destroy() {
 }
 
-// Expire the value after the given number of clock ticks.
-type TtlExpireAfterTicks struct {
+// Expire the value after the given number of milliseconds.
+type TtlExpireAfterMillis struct {
 	Field0 uint64
 }
 
-func (e TtlExpireAfterTicks) Destroy() {
+func (e TtlExpireAfterMillis) Destroy() {
 	FfiDestroyerUint64{}.Destroy(e.Field0)
 }
 
-// Expire the value at the given absolute timestamp (clock ticks).
-type TtlExpireAt struct {
+// Expire the value at the given Unix timestamp in milliseconds.
+type TtlExpireAtMillis struct {
 	Field0 int64
 }
 
-func (e TtlExpireAt) Destroy() {
+func (e TtlExpireAtMillis) Destroy() {
 	FfiDestroyerInt64{}.Destroy(e.Field0)
 }
 
@@ -12755,11 +12755,11 @@ func (FfiConverterTtl) Read(reader io.Reader) Ttl {
 	case 2:
 		return TtlNoExpiry{}
 	case 3:
-		return TtlExpireAfterTicks{
+		return TtlExpireAfterMillis{
 			FfiConverterUint64INSTANCE.Read(reader),
 		}
 	case 4:
-		return TtlExpireAt{
+		return TtlExpireAtMillis{
 			FfiConverterInt64INSTANCE.Read(reader),
 		}
 	default:
@@ -12773,10 +12773,10 @@ func (FfiConverterTtl) Write(writer io.Writer, value Ttl) {
 		writeInt32(writer, 1)
 	case TtlNoExpiry:
 		writeInt32(writer, 2)
-	case TtlExpireAfterTicks:
+	case TtlExpireAfterMillis:
 		writeInt32(writer, 3)
 		FfiConverterUint64INSTANCE.Write(writer, variant_value.Field0)
-	case TtlExpireAt:
+	case TtlExpireAtMillis:
 		writeInt32(writer, 4)
 		FfiConverterInt64INSTANCE.Write(writer, variant_value.Field0)
 	default:
