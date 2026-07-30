@@ -1383,10 +1383,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let write_options = WriteOptions {
-            await_durable: false,
-            ..Default::default()
-        };
+        let write_options = WriteOptions::default();
         let put_options = PutOptions::default();
 
         // Keys inside and outside the projection range [aaa, bbb), flushed

@@ -7149,14 +7149,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_write_option_defaults() {
-        // This is a regression test for a bug where the defaults for WriteOptions were not being
-        // set correctly due to visibility issues.
-        let write_options = WriteOptions::default();
-        assert_eq!(write_options.seqnum, 0);
-    }
-
     #[tokio::test]
     #[cfg(feature = "zstd")]
     async fn test_compression_overflow_bug() {
