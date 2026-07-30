@@ -173,7 +173,7 @@ pub struct WalStatus {
 #[derive(Debug, Clone)]
 pub enum WalEvent {
     /// Emitted when a WAL file is durably flushed to storage. On receipt of this event, SlateDB
-    /// notifies write tasks blocked on [`crate::config::WriteOptions::await_durable`]
+    /// advances the durable sequence number and notifies durability waiters.
     WalFlushed(WalStatus),
     /// Emitted when the WAL has closed with the final wal status containing the closed reason
     WalClosed(WalStatus),

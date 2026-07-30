@@ -162,7 +162,6 @@ impl Actor for WorkloadActor {
     async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
         let put_options = PutOptions::default();
         let write_options = WriteOptions {
-            await_durable: false,
             ..WriteOptions::default()
         };
         let key_prefix = self

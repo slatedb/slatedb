@@ -463,11 +463,8 @@ impl Default for FlushOptions {
 
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct WriteOptions {
-    /// Whether `put` calls should block until the write has been durably committed
-    /// to the DB.
-    pub await_durable: bool,
     #[cfg(dst)]
     /// Force the current timestamp for DST operations. See #719 for details.
     pub now: i64,
@@ -476,18 +473,6 @@ pub struct WriteOptions {
     /// The value must be strictly greater than the current maximum sequence number
     /// or the write will fail with an `InvalidSequenceNumber` error.
     pub seqnum: u64,
-}
-
-impl Default for WriteOptions {
-    /// Create a new `WriteOptions`` with `await_durable` set to `true`.
-    fn default() -> Self {
-        Self {
-            await_durable: true,
-            #[cfg(dst)]
-            now: 0,
-            seqnum: 0,
-        }
-    }
 }
 
 /// Configuration for client put operations. `PutOptions` is supplied for each

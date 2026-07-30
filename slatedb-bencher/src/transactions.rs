@@ -48,6 +48,7 @@ pub struct TransactionBench {
     key_gen_supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>>,
     val_len: usize,
     write_options: WriteOptions,
+    await_durable: bool,
     concurrency: u32,
     duration: Option<Duration>,
     transaction_size: u32,
@@ -63,6 +64,7 @@ impl TransactionBench {
         key_gen_supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>>,
         val_len: usize,
         write_options: WriteOptions,
+        await_durable: bool,
         concurrency: u32,
         duration: Option<Duration>,
         transaction_size: u32,
@@ -75,6 +77,7 @@ impl TransactionBench {
             key_gen_supplier,
             val_len,
             write_options,
+            await_durable,
             concurrency,
             duration,
             transaction_size,
@@ -98,6 +101,7 @@ impl TransactionBench {
                 (*self.key_gen_supplier)(),
                 self.val_len,
                 self.write_options.clone(),
+                self.await_durable,
                 self.duration,
                 self.transaction_size,
                 self.abort_percentage,
@@ -119,6 +123,7 @@ struct TransactionTask {
     key_generator: Box<dyn KeyGenerator>,
     val_len: usize,
     write_options: WriteOptions,
+    await_durable: bool,
     duration: Option<Duration>,
     transaction_size: u32,
     abort_percentage: u32,
@@ -134,6 +139,7 @@ impl TransactionTask {
         key_generator: Box<dyn KeyGenerator>,
         val_len: usize,
         write_options: WriteOptions,
+        await_durable: bool,
         duration: Option<Duration>,
         transaction_size: u32,
         abort_percentage: u32,
@@ -146,6 +152,7 @@ impl TransactionTask {
             key_generator,
             val_len,
             write_options,
+            await_durable,
             duration,
             transaction_size,
             abort_percentage,
@@ -231,8 +238,14 @@ impl TransactionTask {
             batch.put(key, value);
         }
 
-        match self.db.write_with_options(batch, &self.write_options).await {
-            Ok(_) => Ok(ops as u64),
+        let result = self.db.write_with_options(batch, &self.write_options).await;
+        let result = match result {
+            Ok(handle) if self.await_durable => handle.await_durable().await,
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => Ok(ops as u64),
             Err(e) => {
                 warn!("write batch failed [error={}]", e);
                 Err(e)
@@ -271,8 +284,14 @@ impl TransactionTask {
             return TransactionResult::Aborted;
         }
 
-        match txn.commit_with_options(&self.write_options).await {
-            Ok(_) => TransactionResult::Committed(ops as u64),
+        let result = txn.commit_with_options(&self.write_options).await;
+        let result = match result {
+            Ok(Some(handle)) if self.await_durable => handle.await_durable().await,
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => TransactionResult::Committed(ops as u64),
             Err(e) => {
                 warn!("transaction commit failed (conflict) [error={}]", e);
                 TransactionResult::Conflict

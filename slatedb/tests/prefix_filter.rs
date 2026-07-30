@@ -119,10 +119,7 @@ mod composite_filters {
 
     async fn write_sample_data(db: &Db) {
         let put = PutOptions::default();
-        let write = WriteOptions {
-            await_durable: false,
-            seqnum: 0,
-        };
+        let write = WriteOptions::default();
         // Write each batch in its own SST so multiple SSTs participate in the
         // read path and the filter has something to actually skip.
         for batch in [SAMPLE_USERS, SAMPLE_NON_USERS] {
@@ -299,10 +296,7 @@ mod subrange {
             .expect("failed to build db");
 
         let put = PutOptions::default();
-        let write = WriteOptions {
-            await_durable: false,
-            seqnum: 0,
-        };
+        let write = WriteOptions::default();
         let ssts: &[&[&[u8]]] = &[
             &[b"aaa1", b"ccc1"], // sandwich
             &[b"bbb1", b"bbb2", b"bbb3", b"bbb4"],
@@ -493,10 +487,7 @@ mod empty_prefix_filter {
         let db = open_db(store.clone(), recorder.clone()).await;
 
         let put = PutOptions::default();
-        let write = WriteOptions {
-            await_durable: false,
-            seqnum: 0,
-        };
+        let write = WriteOptions::default();
         for key in [b"a".as_slice(), b"b".as_slice()] {
             db.put_with_options(key, b"v", &put, &write)
                 .await
@@ -583,10 +574,7 @@ mod prop_test {
 
     async fn write_keys(db: &Db, keys: &[Vec<u8>]) {
         let put_opts = PutOptions::default();
-        let write_opts = WriteOptions {
-            await_durable: false,
-            seqnum: 0,
-        };
+        let write_opts = WriteOptions::default();
         for (i, key) in keys.iter().enumerate() {
             let value = format!("v{}", i).into_bytes();
             db.put_with_options(key, &value, &put_opts, &write_opts)

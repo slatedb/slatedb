@@ -306,7 +306,10 @@ mod tests {
         async fn put(&mut self, db: &Db, v: u32, expect_fenced: bool) {
             let k = Bytes::from(format!("k{}", v));
             let v = Bytes::from(format!("v{}", v));
-            let result = db.put(k.as_ref(), v.as_ref()).await;
+            let result = match db.put(k.as_ref(), v.as_ref()).await {
+                Ok(handle) => handle.await_durable().await,
+                Err(error) => Err(error),
+            };
             if expect_fenced {
                 assert_eq!(
                     result.unwrap_err().kind(),
@@ -593,7 +596,10 @@ mod tests {
 
         // verify that fenced db is fenced (new write fails)
         use crate::error::{CloseReason, ErrorKind};
-        let err = db.put(b"k4", b"v4").await.unwrap_err();
+        let err = match db.put(b"k4", b"v4").await {
+            Ok(handle) => handle.await_durable().await.unwrap_err(),
+            Err(error) => error,
+        };
         assert!(
             matches!(err.kind(), ErrorKind::Closed(CloseReason::Fenced)),
             "expected Fenced, got {err}"

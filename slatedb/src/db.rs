@@ -23,6 +23,8 @@
 pub use crate::db_status::{DbStatus, SegmentPrefix};
 
 use crate::db_cache::CacheTarget;
+use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -75,7 +77,7 @@ use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
 
-use crate::db_status::{ClosedResultWriter, DbStatusManager};
+use crate::db_status::{ClosedResultWriter, DbStatusManager, DurabilityWaiter};
 use crate::wal::{WalEvent, WalIterator, WalObserver, WalStatus};
 pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
@@ -297,28 +299,7 @@ impl DbInner {
         self.maybe_apply_backpressure().await?;
         self.write_notifier.send(batch_msg)?;
 
-        // TODO: this can be modified as awaiting the last_durable_seq watermark & fatal error.
-
-        let write_handle = rx.await??;
-
-        if options.await_durable {
-            let seq = write_handle.seq;
-            let mut status_subscription = self.status_manager.subscribe();
-            let status = status_subscription
-                .wait_for(|s| s.durable_seq >= seq || s.close_reason.is_some())
-                .await
-                .map_err(|_| SlateDBError::Closed)?;
-            if status.durable_seq < seq {
-                self.check_closed()?;
-                warn!(
-                    "durable seq {} not advanced past write seq {} and db not closed",
-                    status.durable_seq, seq
-                );
-                return Err(SlateDBError::InvalidDBState);
-            }
-        }
-
-        Ok(write_handle)
+        rx.await?
     }
 
     #[inline]
@@ -1341,7 +1322,13 @@ impl Db {
             .map_err(Into::into)
     }
 
-    /// Write a value into the database with default `WriteOptions`.
+    /// Write a value into the database with default `PutOptions` and
+    /// `WriteOptions`.
+    ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the write to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// write, or [`Db::flush`] to flush all pending writes.
     ///
     /// ## Arguments
     /// - `key`: the key to write
@@ -1376,6 +1363,11 @@ impl Db {
     }
 
     /// Write a value into the database with custom `PutOptions` and `WriteOptions`.
+    ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the write to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// write, or [`Db::flush`] to flush all pending writes.
     ///
     /// ## Arguments
     /// - `key`: the key to write
@@ -1422,6 +1414,10 @@ impl Db {
     /// this form when the caller already holds the data as [`Bytes`] (e.g.
     /// from a prior read, a zero-copy buffer pool, or a client that produces
     /// [`Bytes`] directly).
+    ///
+    /// This method does not wait for durability. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// write, or [`Db::flush`] to flush all pending writes.
     pub async fn put_bytes(&self, key: Bytes, value: Bytes) -> Result<WriteHandle, crate::Error> {
         self.put_bytes_with_options(key, value, &PutOptions::default(), &WriteOptions::default())
             .await
@@ -1430,6 +1426,10 @@ impl Db {
     /// Write a value into the database using owned [`Bytes`] with custom
     /// `PutOptions` and `WriteOptions`. See [`Db::put_bytes`] for why this
     /// form exists.
+    ///
+    /// This method does not wait for durability. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// write, or [`Db::flush`] to flush all pending writes.
     pub async fn put_bytes_with_options(
         &self,
         key: Bytes,
@@ -1443,6 +1443,11 @@ impl Db {
     }
 
     /// Delete a key from the database with default `WriteOptions`.
+    ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the delete to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// delete, or [`Db::flush`] to flush all pending writes.
     ///
     /// ## Arguments
     /// - `key`: the key to delete
@@ -1472,6 +1477,11 @@ impl Db {
     }
 
     /// Delete a key from the database with custom `WriteOptions`.
+    ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the delete to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// delete, or [`Db::flush`] to flush all pending writes.
     ///
     /// ## Arguments
     /// - `key`: the key to delete
@@ -1506,6 +1516,11 @@ impl Db {
     }
 
     /// Merge a value into the database with default `MergeOptions` and `WriteOptions`.
+    ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the merge to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// merge, or [`Db::flush`] to flush all pending writes.
     ///
     /// Merge operations allow applications to bypass the traditional read/modify/write cycle
     /// by expressing partial updates using an associative operator. The merge operator must
@@ -1562,6 +1577,11 @@ impl Db {
     }
 
     /// Merge a value into the database with custom `MergeOptions` and `WriteOptions`.
+    ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the merge to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// merge, or [`Db::flush`] to flush all pending writes.
     ///
     /// Merge operations allow applications to bypass the traditional read/modify/write cycle
     /// by expressing partial updates using an associative operator. The merge operator must
@@ -1634,6 +1654,11 @@ impl Db {
     /// block other gets and writes until the batch is written to the WAL (or memtable if
     /// WAL is disabled).
     ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the batch to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// batch, or [`Db::flush`] to flush all pending writes.
+    ///
     /// ## Arguments
     /// - `batch`: the batch of put/delete operations to write
     ///
@@ -1669,6 +1694,11 @@ impl Db {
     /// Write a batch of put/delete operations atomically to the database. Batch writes
     /// block other gets and writes until the batch is written to the WAL (or memtable if
     /// WAL is disabled).
+    ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the batch to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// batch, or [`Db::flush`] to flush all pending writes.
     ///
     /// ## Arguments
     /// - `batch`: the batch of put/delete operations to write
@@ -1709,8 +1739,8 @@ impl Db {
             .map_err(Into::into)
     }
 
-    /// Flush in-memory writes to disk. This function blocks until the in-memory
-    /// data has been durably written to object storage.
+    /// Flush in-memory writes to object storage. This function blocks until
+    /// the in-memory data has been durably written.
     ///
     /// If WAL is enabled, this method is equivalent to:
     /// `flush_with_options(FlushOptions { flush_type: FlushType::Wal })`
@@ -2030,16 +2060,58 @@ impl DbCacheManagerOps for Db {
 }
 
 /// Handle returned from write operations, containing metadata about the write.
+///
+/// Write operations return this handle without waiting for durability. Call
+/// [`WriteHandle::await_durable`] to wait until this write is durable in object
+/// storage.
+///
 /// This structure is designed to be extensible for future enhancements.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WriteHandle {
     pub(crate) seq: u64,
     pub(crate) create_ts: i64,
+    durability_waiter: DurabilityWaiter,
+}
+
+impl fmt::Debug for WriteHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WriteHandle")
+            .field("seq", &self.seq)
+            .field("create_ts", &self.create_ts)
+            .finish_non_exhaustive()
+    }
 }
 
 impl WriteHandle {
-    pub fn new(seq: u64, create_ts: i64) -> Self {
-        Self { seq, create_ts }
+    /// Creates a write handle that uses `durability_waiter` to determine when
+    /// the write is durable.
+    ///
+    /// This constructor is intended for custom [`DbWriteOps`] implementations
+    /// and test doubles whose writes are not immediately durable.
+    pub fn new<F, Fut>(seq: u64, create_ts: i64, durability_waiter: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), crate::Error>> + Send + 'static,
+    {
+        let durability_waiter: DurabilityWaiter = Arc::new(move |_| Box::pin(durability_waiter()));
+
+        Self {
+            seq,
+            create_ts,
+            durability_waiter,
+        }
+    }
+
+    pub(crate) fn new_with_waiter(
+        seq: u64,
+        create_ts: i64,
+        durability_waiter: DurabilityWaiter,
+    ) -> Self {
+        Self {
+            seq,
+            create_ts,
+            durability_waiter,
+        }
     }
 
     /// Returns the sequence number assigned to this write operation.
@@ -2050,6 +2122,18 @@ impl WriteHandle {
     /// Returns the creation timestamp assigned to this write operation.
     pub fn create_ts(&self) -> i64 {
         self.create_ts
+    }
+
+    /// Waits until this write has been durably persisted.
+    ///
+    /// If the database closes before the write becomes durable, this returns a
+    /// closed error carrying the database's [`CloseReason`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a closed error if the database closes first.
+    pub async fn await_durable(&self) -> Result<(), crate::Error> {
+        (self.durability_waiter)(self.seq).await
     }
 }
 
@@ -2860,10 +2944,7 @@ mod tests {
             b"px:b",
             b"vb_dirty",
             &PutOptions::default(),
-            &WriteOptions {
-                await_durable: false,
-                seqnum: 0,
-            },
+            &WriteOptions::default(),
         )
         .await
         .unwrap();
@@ -3040,7 +3121,6 @@ mod tests {
                                 &value,
                                 &PutOptions::default(),
                                 &WriteOptions {
-                                    await_durable: false,
                                     ..Default::default()
                                 },
                             )
@@ -3090,7 +3170,6 @@ mod tests {
                 value,
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -3143,7 +3222,6 @@ mod tests {
                 b"test_value",
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -3227,7 +3305,6 @@ mod tests {
                 b"test_value",
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -3293,7 +3370,6 @@ mod tests {
                 b"test_value",
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -3351,7 +3427,6 @@ mod tests {
             b"test_value",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3486,7 +3561,6 @@ mod tests {
             b"world",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -3534,7 +3608,6 @@ mod tests {
         .unwrap();
         let put_options = PutOptions::default();
         let write_options = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
         let get_memory_options = ReadOptions::new().with_durability_filter(Memory);
@@ -3594,7 +3667,6 @@ mod tests {
                     ttl: Default::default(),
                 },
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -3690,7 +3762,7 @@ mod tests {
     async fn build_database_from_table(
         table: &BTreeMap<Bytes, Bytes>,
         db_options: Settings,
-        await_durable: bool,
+        wait_for_durability: bool,
     ) -> Db {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let db = Db::builder("/tmp/test_kv_store", object_store)
@@ -3701,7 +3773,7 @@ mod tests {
 
         test_utils::seed_database(&db, table, false).await.unwrap();
 
-        if await_durable {
+        if wait_for_durability {
             db.flush().await.unwrap();
         }
 
@@ -4132,7 +4204,6 @@ mod tests {
         db.delete_with_options(
             &[b'b'; 4],
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -4184,7 +4255,6 @@ mod tests {
                 .await
                 .unwrap();
         let write_options = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
 
@@ -4204,7 +4274,6 @@ mod tests {
         // the memtable will not be flushed to l0, and the test will hang
         // at this put_with_options call.
         let write_options = WriteOptions {
-            await_durable: true,
             ..Default::default()
         };
         clock.set(10);
@@ -4214,6 +4283,9 @@ mod tests {
             &PutOptions::default(),
             &write_options,
         )
+        .await
+        .unwrap()
+        .await_durable()
         .await
         .unwrap();
 
@@ -4280,10 +4352,22 @@ mod tests {
         for i in 0..3 {
             let key = [b'a' + i; 16];
             let value = [b'b' + i; 50];
-            kv_store.put(&key, &value).await.unwrap();
+            kv_store
+                .put(&key, &value)
+                .await
+                .unwrap()
+                .await_durable()
+                .await
+                .unwrap();
             let key = [b'j' + i; 16];
             let value = [b'k' + i; 50];
-            kv_store.put(&key, &value).await.unwrap();
+            kv_store
+                .put(&key, &value)
+                .await
+                .unwrap()
+                .await_durable()
+                .await
+                .unwrap();
             let db_state = wait_for_manifest_condition(
                 &mut stored_manifest,
                 |s| s.replay_after_wal_id > last_wal_id,
@@ -4348,7 +4432,6 @@ mod tests {
                 .unwrap();
 
         let write_options: WriteOptions = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
         let put_options = PutOptions::default();
@@ -4477,7 +4560,6 @@ mod tests {
                 value1,
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -4492,7 +4574,6 @@ mod tests {
                 value2,
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -4594,7 +4675,6 @@ mod tests {
                 value,
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -4679,7 +4759,6 @@ mod tests {
                 .await
                 .unwrap();
         let write_options = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
         let put_options = PutOptions::default();
@@ -4792,7 +4871,6 @@ mod tests {
         .unwrap();
 
         let write_options = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
 
@@ -4923,7 +5001,6 @@ mod tests {
                 value1,
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -4938,7 +5015,6 @@ mod tests {
                 value2,
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -5012,7 +5088,6 @@ mod tests {
                 value1,
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -5083,7 +5158,6 @@ mod tests {
             .unwrap();
         let metrics_recorder_clone = metrics_recorder.clone();
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
 
@@ -5205,7 +5279,6 @@ mod tests {
         .await
         .unwrap();
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
 
@@ -5359,7 +5432,6 @@ mod tests {
 
         // do all flushes manually
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
 
@@ -5467,7 +5539,6 @@ mod tests {
             b"val1",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -5478,7 +5549,6 @@ mod tests {
             b"val2",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -5489,7 +5559,6 @@ mod tests {
             b"val3",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -5623,7 +5692,6 @@ mod tests {
                 "bar".as_bytes(),
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -5669,6 +5737,9 @@ mod tests {
         kv_store
             .put("foo".as_bytes(), "bar".as_bytes())
             .await
+            .unwrap()
+            .await_durable()
+            .await
             .unwrap();
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
         kv_store
@@ -5677,7 +5748,6 @@ mod tests {
                 "bla".as_bytes(),
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -5720,13 +5790,15 @@ mod tests {
         kv_store
             .put("foo".as_bytes(), "bar".as_bytes())
             .await
+            .unwrap()
+            .await_durable()
+            .await
             .unwrap();
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
         kv_store
             .delete_with_options(
                 "foo".as_bytes(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -5778,6 +5850,9 @@ mod tests {
         kv_store
             .put("key3".as_bytes(), "committed3".as_bytes())
             .await
+            .unwrap()
+            .await_durable()
+            .await
             .unwrap();
 
         // Pause WAL writes to prevent new writes from being committed
@@ -5790,7 +5865,6 @@ mod tests {
                 "uncommitted2".as_bytes(),
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -5802,7 +5876,6 @@ mod tests {
                 "uncommitted4".as_bytes(),
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -5886,11 +5959,21 @@ mod tests {
         // write a few keys that will result in memtable flushes
         let key1 = [b'a'; 32];
         let value1 = [b'b'; 96];
-        db.put(key1, value1).await.unwrap();
+        db.put(key1, value1)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
         next_wal_id += 1;
         let key2 = [b'c'; 32];
         let value2 = [b'd'; 96];
-        db.put(key2, value2).await.unwrap();
+        db.put(key2, value2)
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
         next_wal_id += 1;
 
         let reader = Db::builder(path, object_store.clone())
@@ -5974,6 +6057,7 @@ mod tests {
         let value1 = [b'b'; 96];
         let result = db.put(&key1, &value1).await;
         assert!(result.is_ok(), "Failed to write key1");
+        result.unwrap().await_durable().await.unwrap();
         assert_eq!(
             db.inner.wal_observer.status().unwrap().last_flushed_wal_id,
             2
@@ -6043,7 +6127,13 @@ mod tests {
         );
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
-        let result = db.put(b"foo", b"bar").await.unwrap_err();
+        let result = db
+            .put(b"foo", b"bar")
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap_err();
         assert!(result.to_string().contains("background task panicked"));
     }
 
@@ -6061,12 +6151,23 @@ mod tests {
                 .unwrap(),
         );
         // Trigger a WAL write and block until durable so WAL is written
-        db.put(b"foo", b"bar").await.unwrap();
+        db.put(b"foo", b"bar")
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
 
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "panic").unwrap();
 
         // Trigger a WAL write, which should not advance the manifest WAL ID
-        let result = db.put(b"foo", b"bar").await.unwrap_err();
+        let result = db
+            .put(b"foo", b"bar")
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap_err();
         assert_eq!(result.kind(), crate::ErrorKind::Closed(CloseReason::Panic));
         assert!(result
             .to_string()
@@ -6123,7 +6224,6 @@ mod tests {
             b"bar",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -6136,15 +6236,56 @@ mod tests {
             .expect_err("close should error out due to WAL IO error");
     }
 
+    #[tokio::test]
+    async fn test_constructed_write_handle_uses_durability_waiter() {
+        let waiter_called = Arc::new(AtomicBool::new(false));
+        let waiter_called_clone = waiter_called.clone();
+        let handle = WriteHandle::new(1, 0, move || {
+            let waiter_called = waiter_called_clone.clone();
+            async move {
+                waiter_called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        });
+
+        handle.await_durable().await.unwrap();
+
+        assert!(waiter_called.load(Ordering::SeqCst));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_await_durable_write_returns_error_if_db_closes_before_durable() {
+    async fn test_write_handle_await_durable_waits_for_flush() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut settings = test_db_options(0, 1024, None);
+        settings.flush_interval = None;
+        let db = Db::builder(
+            "/tmp/test_write_handle_await_durable_waits_for_flush",
+            object_store,
+        )
+        .with_settings(settings)
+        .build()
+        .await
+        .unwrap();
+
+        let handle = db.put(b"foo", b"bar").await.unwrap();
+        let durability_wait = tokio::spawn(async move { handle.await_durable().await });
+        tokio::task::yield_now().await;
+        assert!(!durability_wait.is_finished());
+
+        db.flush().await.unwrap();
+        durability_wait.await.unwrap().unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_write_handle_await_durable_returns_error_if_db_closes_first() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut settings = test_db_options(0, 1024, None);
         settings.flush_interval = None;
         let db = Arc::new(
             Db::builder(
-                "/tmp/test_await_durable_write_returns_error_if_db_closes_before_durable",
+                "/tmp/test_write_handle_await_durable_returns_error_if_db_closes_first",
                 object_store,
             )
             .with_settings(settings)
@@ -6158,14 +6299,15 @@ mod tests {
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
         let write_db = db.clone();
         let write_task = tokio::spawn(async move {
-            write_db
+            let handle = write_db
                 .put_with_options(
                     b"foo",
                     b"bar",
                     &PutOptions::default(),
                     &WriteOptions::default(),
                 )
-                .await
+                .await?;
+            handle.await_durable().await
         });
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -6237,8 +6379,7 @@ mod tests {
             |s| {
                 // compact after writing values. include in loop since the on demand scheduler
                 // only runs once per `should_compact`, and memtables might still be getting
-                // flushed (await_durable in the put()'s above only wait for the writes to hit
-                // the WAL before returning).
+                // flushed (the put() calls above return before the writes become durable).
                 should_compact_l0.store(true, Ordering::SeqCst);
                 s.tree.last_compacted_l0_sst_view_id.is_some() && s.tree.l0.is_empty()
             },
@@ -6263,8 +6404,7 @@ mod tests {
             |s| {
                 // compact after writing values. include in loop since the on demand scheduler
                 // only runs once per `should_compact`, and memtables might still be getting
-                // flushed (await_durable in the put()'s above only wait for the writes to hit
-                // the WAL before returning).
+                // flushed (the put() calls above return before the writes become durable).
                 should_compact_l0.store(true, Ordering::SeqCst);
                 s.tree.last_compacted_l0_sst_view_id.is_some() && s.tree.l0.is_empty()
             },
@@ -6377,16 +6517,11 @@ mod tests {
         let path = "/tmp/test_kv_store";
 
         async fn do_put(db: &Db, key: &[u8], val: &[u8]) -> Result<WriteHandle, crate::Error> {
-            db.put_with_options(
-                key,
-                val,
-                &PutOptions::default(),
-                &WriteOptions {
-                    await_durable: true,
-                    ..Default::default()
-                },
-            )
-            .await
+            let handle = db
+                .put_with_options(key, val, &PutOptions::default(), &WriteOptions::default())
+                .await?;
+            handle.await_durable().await?;
+            Ok(handle)
         }
 
         // open db1 and assert that it can write.
@@ -6503,13 +6638,12 @@ mod tests {
                 b"w1",
                 b"value",
                 &PutOptions::default(),
-                &WriteOptions {
-                    await_durable: true,
-                    ..Default::default()
-                },
+                &WriteOptions::default(),
             )
             .await;
-        assert!(result.is_err());
+        if let Ok(handle) = result {
+            assert!(handle.await_durable().await.is_err());
+        }
     }
 
     async fn wait_for_wal_sst_count(table_store: &TableStore, min_count: usize, context: &str) {
@@ -6687,7 +6821,6 @@ mod tests {
             b"1",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -6703,7 +6836,7 @@ mod tests {
                 b"1",
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false, ..Default::default()
+                    ..Default::default()
                 },
             )
             .await
@@ -6735,7 +6868,6 @@ mod tests {
             b"1",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -6756,7 +6888,7 @@ mod tests {
                 b"1",
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false, ..Default::default()
+                    ..Default::default()
                 },
             )
             .await
@@ -6837,7 +6969,6 @@ mod tests {
             &[b'j'; 8],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -6849,7 +6980,6 @@ mod tests {
             &[b'k'; 8],
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -7078,14 +7208,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_write_option_defaults() {
-        // This is a regression test for a bug where the defaults for WriteOptions were not being
-        // set correctly due to visibility issues.
-        let write_options = WriteOptions::default();
-        assert!(write_options.await_durable);
-    }
-
     #[tokio::test]
     #[cfg(feature = "zstd")]
     async fn test_compression_overflow_bug() {
@@ -7110,7 +7232,6 @@ mod tests {
             let value = format!("{}{}", "v".repeat(i), i);
             let put_option = PutOptions::default();
             let write_option = WriteOptions {
-                await_durable: false,
                 ..Default::default()
             };
             db.put_with_options(key.as_bytes(), value.clone(), &put_option, &write_option)
@@ -7713,7 +7834,6 @@ mod tests {
 
         // do a write and flush memtable only (not wal)
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
         db.put_with_options(&b"foo", &b"bar", &PutOptions::default(), &write_opts)
@@ -7944,7 +8064,6 @@ mod tests {
             b"value1",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -8114,7 +8233,6 @@ mod tests {
                 value,
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -8134,7 +8252,6 @@ mod tests {
                 b"value2",
                 &put_opts,
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -8149,7 +8266,6 @@ mod tests {
             .delete_with_options(
                 b"key1",
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -8167,7 +8283,6 @@ mod tests {
             .write_with_options(
                 batch,
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -8198,7 +8313,6 @@ mod tests {
             .write_with_options(
                 batch,
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -8216,7 +8330,6 @@ mod tests {
             .write_with_options(
                 batch,
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -8233,7 +8346,6 @@ mod tests {
             .write_with_options(
                 batch,
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -8257,7 +8369,6 @@ mod tests {
             .write_with_options(
                 WriteBatch::new(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
                 None,
@@ -8634,7 +8745,6 @@ mod tests {
         .await
         .unwrap();
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
 
@@ -9036,7 +9146,6 @@ mod tests {
             b"value1",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -9047,7 +9156,6 @@ mod tests {
             b"value2",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -9137,7 +9245,6 @@ mod tests {
             b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -9153,7 +9260,6 @@ mod tests {
                 val.as_bytes(),
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -9293,7 +9399,6 @@ mod tests {
             b"base",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -9311,7 +9416,6 @@ mod tests {
                 operand,
                 &MergeOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -9411,7 +9515,6 @@ mod tests {
                 ttl: Ttl::ExpireAfterMillis(50),
             },
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -9444,7 +9547,6 @@ mod tests {
             ttl: Ttl::ExpireAfterMillis(50),
         };
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
 
@@ -9520,7 +9622,6 @@ mod tests {
                 ttl: Ttl::ExpireAtMillis(500),
             },
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -9535,7 +9636,6 @@ mod tests {
                 ttl: Ttl::ExpireAtMillis(500),
             },
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -9660,7 +9760,6 @@ mod tests {
         db.write_with_options(
             batch,
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -9746,7 +9845,6 @@ mod tests {
 
         // when: two writes (the second triggers maybe_apply_backpressure for the first's bytes)
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
         db.put_with_options(b"k1", b"v1", &PutOptions::default(), &write_opts)
@@ -9787,7 +9885,6 @@ mod tests {
             b"v1",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -9799,7 +9896,6 @@ mod tests {
             b"v2",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -9839,7 +9935,6 @@ mod tests {
             b"v1",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -10005,7 +10100,6 @@ mod tests {
             .unwrap();
 
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
 
@@ -10165,7 +10259,6 @@ mod tests {
                 &value,
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -10204,7 +10297,6 @@ mod tests {
                 b"value",
                 &PutOptions::default(),
                 &WriteOptions {
-                    await_durable: false,
                     ..Default::default()
                 },
             )
@@ -10232,7 +10324,6 @@ mod tests {
             .await
             .unwrap();
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
         for (key, value) in [
@@ -10304,7 +10395,6 @@ mod tests {
             .await
             .unwrap();
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
         source
@@ -10353,7 +10443,6 @@ mod tests {
         let mut rx = db.subscribe();
         assert!(rx.borrow_and_update().list_segments().is_empty());
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
 
@@ -10410,7 +10499,6 @@ mod tests {
             b"v1",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -10478,7 +10566,6 @@ mod tests {
             b"v1",
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -10788,7 +10875,6 @@ mod tests {
             .await
             .unwrap();
         let write_opts = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
         for (k, v) in [(b"aaa-1".as_slice(), b"v1"), (b"bbb-1".as_slice(), b"v2")] {

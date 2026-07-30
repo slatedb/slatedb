@@ -7,9 +7,10 @@ use crate::db_snapshot::DbSnapshot;
 use crate::db_transaction::DbTransaction;
 use crate::error::Error;
 use crate::iterator::DbIterator;
-use crate::types::{CacheTarget, DbStatus, KeyRange, KeyValue, SsTableId, WriteHandle};
+use crate::types::{CacheTarget, DbStatus, KeyRange, KeyValue, SsTableId};
 use crate::validation::{validate_key, validate_key_value};
 use crate::write_batch::WriteBatch;
+use crate::write_handle::WriteHandle;
 use slatedb::DbCacheManagerOps;
 
 /// A writable SlateDB handle.
@@ -135,9 +136,11 @@ impl Db {
     ///
     /// Keys must be non-empty and at most `u16::MAX` bytes. Values must be at
     /// most `u32::MAX` bytes.
-    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<WriteHandle, Error> {
+    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<Arc<WriteHandle>, Error> {
         validate_key_value(&key, &value)?;
-        Ok(self.inner.put(key, value).await?.into())
+        Ok(Arc::new(WriteHandle::new(
+            self.inner.put(key, value).await?,
+        )))
     }
 
     /// Inserts or overwrites a value using custom put and write options.
@@ -147,21 +150,21 @@ impl Db {
         value: Vec<u8>,
         put_options: PutOptions,
         write_options: WriteOptions,
-    ) -> Result<WriteHandle, Error> {
+    ) -> Result<Arc<WriteHandle>, Error> {
         validate_key_value(&key, &value)?;
         let put_options = put_options.into();
         let write_options = write_options.into();
-        Ok(self
-            .inner
-            .put_with_options(key, value, &put_options, &write_options)
-            .await?
-            .into())
+        Ok(Arc::new(WriteHandle::new(
+            self.inner
+                .put_with_options(key, value, &put_options, &write_options)
+                .await?,
+        )))
     }
 
     /// Deletes `key` and returns metadata for the write.
-    pub async fn delete(&self, key: Vec<u8>) -> Result<WriteHandle, Error> {
+    pub async fn delete(&self, key: Vec<u8>) -> Result<Arc<WriteHandle>, Error> {
         validate_key(&key)?;
-        Ok(self.inner.delete(key).await?.into())
+        Ok(Arc::new(WriteHandle::new(self.inner.delete(key).await?)))
     }
 
     /// Deletes `key` using custom write options.
@@ -169,16 +172,20 @@ impl Db {
         &self,
         key: Vec<u8>,
         options: WriteOptions,
-    ) -> Result<WriteHandle, Error> {
+    ) -> Result<Arc<WriteHandle>, Error> {
         validate_key(&key)?;
         let options = options.into();
-        Ok(self.inner.delete_with_options(key, &options).await?.into())
+        Ok(Arc::new(WriteHandle::new(
+            self.inner.delete_with_options(key, &options).await?,
+        )))
     }
 
     /// Appends a merge operand for `key` and returns metadata for the write.
-    pub async fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<WriteHandle, Error> {
+    pub async fn merge(&self, key: Vec<u8>, operand: Vec<u8>) -> Result<Arc<WriteHandle>, Error> {
         validate_key_value(&key, &operand)?;
-        Ok(self.inner.merge(key, operand).await?.into())
+        Ok(Arc::new(WriteHandle::new(
+            self.inner.merge(key, operand).await?,
+        )))
     }
 
     /// Appends a merge operand using custom merge and write options.
@@ -188,23 +195,23 @@ impl Db {
         operand: Vec<u8>,
         merge_options: MergeOptions,
         write_options: WriteOptions,
-    ) -> Result<WriteHandle, Error> {
+    ) -> Result<Arc<WriteHandle>, Error> {
         validate_key_value(&key, &operand)?;
         let merge_options = merge_options.into();
         let write_options = write_options.into();
-        Ok(self
-            .inner
-            .merge_with_options(key, operand, &merge_options, &write_options)
-            .await?
-            .into())
+        Ok(Arc::new(WriteHandle::new(
+            self.inner
+                .merge_with_options(key, operand, &merge_options, &write_options)
+                .await?,
+        )))
     }
 
     /// Applies all operations in `batch` atomically.
     ///
     /// The provided batch is consumed and cannot be reused afterwards.
-    pub async fn write(&self, batch: Arc<WriteBatch>) -> Result<WriteHandle, Error> {
+    pub async fn write(&self, batch: Arc<WriteBatch>) -> Result<Arc<WriteHandle>, Error> {
         let batch = batch.take_for_write()?;
-        Ok(self.inner.write(batch).await?.into())
+        Ok(Arc::new(WriteHandle::new(self.inner.write(batch).await?)))
     }
 
     /// Applies all operations in `batch` atomically using custom write options.
@@ -214,10 +221,12 @@ impl Db {
         &self,
         batch: Arc<WriteBatch>,
         options: WriteOptions,
-    ) -> Result<WriteHandle, Error> {
+    ) -> Result<Arc<WriteHandle>, Error> {
         let batch = batch.take_for_write()?;
         let options = options.into();
-        Ok(self.inner.write_with_options(batch, &options).await?.into())
+        Ok(Arc::new(WriteHandle::new(
+            self.inner.write_with_options(batch, &options).await?,
+        )))
     }
 
     /// Flushes the default storage layer.
