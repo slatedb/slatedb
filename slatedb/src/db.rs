@@ -23,8 +23,6 @@
 pub use crate::db_status::{DbStatus, SegmentPrefix};
 
 use crate::db_cache::CacheTarget;
-use crate::db_cache_manager;
-use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -37,7 +35,7 @@ use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
-use crate::CloseReason;
+use crate::{db_cache_manager, CloseReason};
 use log::{debug, info, trace, warn};
 use parking_lot::RwLock;
 use std::time::Duration;
@@ -57,7 +55,6 @@ use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{collect_touched_segments, DbState, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::iter::IterationOrder;
 use crate::manifest::{Manifest, VersionedManifest};
 use crate::mem_table::KVTableMetadata;
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
@@ -67,7 +64,6 @@ use crate::paths::PathResolver;
 use crate::prefix_extractor::PrefixExtractor;
 use crate::reader::{Reader, ScanContext};
 use crate::snapshot_manager::SnapshotManager;
-use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
 use crate::types::KeyValue;
@@ -80,7 +76,7 @@ use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
 
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
-use crate::wal::{WalEvent, WalObserver, WalStatus};
+use crate::wal::{WalEvent, WalIterator, WalObserver, WalStatus};
 pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
 
@@ -456,7 +452,7 @@ impl DbInner {
         }
     }
 
-    async fn replay_wal(&self, wal_id_range: Range<u64>) -> Result<(), SlateDBError> {
+    async fn replay_wal(&self, wal_iterator: Box<dyn WalIterator>) -> Result<(), SlateDBError> {
         let mut current_memtable_wal_id = self
             .state
             .read()
@@ -473,32 +469,18 @@ impl DbInner {
             |_| -> Result<(), SlateDBError> { Ok(()) }
         );
 
-        let sst_iter_options = SstIteratorOptions {
-            max_fetch_tasks: 1,
-            blocks_to_fetch: 256,
-            cache_blocks: false,
-            cache_metadata: false,
-            eager_spawn: true,
-            order: IterationOrder::Ascending,
-            prefix: None,
-            filter_context: None,
-        };
-
         let replay_options = WalReplayOptions {
-            sst_batch_size: 4,
             max_memtable_bytes: self.settings.l0_sst_size_bytes,
-            sst_iter_options,
-            min_seq: None,
+            ..Default::default()
         };
 
         let db_state = self.state.read().state().core().clone();
-        let mut replay_iter = WalReplayIterator::range(
-            wal_id_range,
+        let mut replay_iter = WalReplayIterator::for_wal_iterator(
+            wal_iterator,
             &db_state,
             replay_options,
             Arc::clone(&self.table_store),
-        )
-        .await?;
+        )?;
 
         loop {
             let replayed_table = match replay_iter.next().await {
@@ -508,12 +490,12 @@ impl DbInner {
                 // indicate that a newer writer has advanced `replay_after_wal_id` and
                 // the GC has removed this WAL entry. Check the latest manifest's
                 // writer_epoch to see if this client is fenced.
-                Err(err) if err.has_object_store_not_found() => {
+                Err(SlateDBError::WalTruncated(wal_id)) => {
                     self.memtable_flusher.refresh_manifest().await?;
                     if self.state.read().state().manifest.value.writer_epoch > writer_epoch {
                         return Err(SlateDBError::Fenced);
                     }
-                    return Err(err);
+                    return Err(SlateDBError::WalTruncated(wal_id));
                 }
                 Err(err) => return Err(err),
             };
@@ -2209,7 +2191,7 @@ mod tests {
         REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT,
         REQUEST_DURATION_SECONDS as OBJECT_STORE_REQUEST_DURATION_SECONDS,
     };
-    use crate::iter::RowEntryIterator;
+    use crate::iter::{IterationOrder, RowEntryIterator};
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::{ManifestCore, VersionedManifest};
     use crate::merge_operator::{
@@ -7263,7 +7245,7 @@ mod tests {
         min_filter_keys: u32,
         l0_sst_size_bytes: usize,
         compactor_options: Option<CompactorOptions>,
-        ttl: Option<u64>,
+        default_ttl_millis: Option<u64>,
     ) -> Settings {
         Settings {
             flush_interval: Some(Duration::from_millis(100)),
@@ -7283,7 +7265,7 @@ mod tests {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             metric_level: MetricLevel::default(),
-            default_ttl: ttl,
+            default_ttl_millis,
             object_store_max_retries: None,
             block_format: None,
         }
@@ -8211,7 +8193,7 @@ mod tests {
         // Put with options (TTL)
         clock.set(200);
         let put_opts = PutOptions {
-            ttl: Ttl::ExpireAfter(1000),
+            ttl: Ttl::ExpireAfterMillis(1000),
         };
         let handle = db
             .put_with_options(
@@ -9479,7 +9461,7 @@ mod tests {
             key,
             value,
             &PutOptions {
-                ttl: Ttl::ExpireAfter(50),
+                ttl: Ttl::ExpireAfterMillis(50),
             },
             &WriteOptions {
                 ..Default::default()
@@ -9511,7 +9493,7 @@ mod tests {
             .unwrap();
 
         let put_opts = PutOptions {
-            ttl: Ttl::ExpireAfter(50),
+            ttl: Ttl::ExpireAfterMillis(50),
         };
         let write_opts = WriteOptions {
             ..Default::default()
@@ -9580,13 +9562,13 @@ mod tests {
             .await
             .unwrap();
 
-        // when: write with ExpireAt at different clock times
+        // when: write with ExpireAtMillis at different clock times
         clock.set(100);
         db.put_with_options(
             b"key1",
             b"value1",
             &PutOptions {
-                ttl: Ttl::ExpireAt(500),
+                ttl: Ttl::ExpireAtMillis(500),
             },
             &WriteOptions {
                 ..Default::default()
@@ -9600,7 +9582,7 @@ mod tests {
             b"key2",
             b"value2",
             &PutOptions {
-                ttl: Ttl::ExpireAt(500),
+                ttl: Ttl::ExpireAtMillis(500),
             },
             &WriteOptions {
                 ..Default::default()
@@ -9767,14 +9749,14 @@ mod tests {
             b"key1",
             b"a",
             &MergeOptions {
-                ttl: Ttl::ExpireAfter(3600),
+                ttl: Ttl::ExpireAfterMillis(3600),
             },
         );
         batch.merge_with_options(
             b"key1",
             b"b",
             &MergeOptions {
-                ttl: Ttl::ExpireAfter(7200),
+                ttl: Ttl::ExpireAfterMillis(7200),
             },
         );
 

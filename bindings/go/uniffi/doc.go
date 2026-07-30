@@ -107,7 +107,7 @@
 // [Db.Write] or [Db.WriteWithOptions]. Batches are single-use once submitted.
 //
 // TTL behavior is configured with [Ttl] implementations such as [TtlDefault],
-// [TtlNoExpiry], and [TtlExpireAfterTicks].
+// [TtlNoExpiry], and [TtlExpireAfterMillis].
 //
 // # Transactions
 //

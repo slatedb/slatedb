@@ -3075,7 +3075,7 @@ func TestDbTtl(t *testing.T) {
 
 	key, value := []byte("alpha"), []byte("one")
 
-	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlExpireAt{Field0: 1}}
+	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlExpireAtMillis{Field0: 1}}
 	writeOptions := slatedb.WriteOptions{Seqnum: 0}
 	_, err := handle.db.PutWithOptions(key, value, putOptions, writeOptions)
 	if err != nil {
@@ -3123,16 +3123,16 @@ type batchSeedRow struct {
 // needs one extra call returning an empty slice to detect exhaustion.
 var batchSeedRows = []batchSeedRow{
 	{key: "batch:01", value: "one", ttl: slatedb.TtlNoExpiry{}},
-	{key: "batch:02", value: "two", ttl: slatedb.TtlExpireAfterTicks{Field0: batchSeedTtlTicks}},
+	{key: "batch:02", value: "two", ttl: slatedb.TtlExpireAfterMillis{Field0: batchSeedTtlMillis}},
 	{key: "batch:03", value: "three", ttl: slatedb.TtlNoExpiry{}},
-	{key: "batch:04", value: "four", ttl: slatedb.TtlExpireAfterTicks{Field0: batchSeedTtlTicks}},
+	{key: "batch:04", value: "four", ttl: slatedb.TtlExpireAfterMillis{Field0: batchSeedTtlMillis}},
 	{key: "batch:05", value: "five", ttl: slatedb.TtlNoExpiry{}},
-	{key: "batch:06", value: "six", ttl: slatedb.TtlExpireAfterTicks{Field0: batchSeedTtlTicks}},
+	{key: "batch:06", value: "six", ttl: slatedb.TtlExpireAfterMillis{Field0: batchSeedTtlMillis}},
 }
 
-// batchSeedTtlTicks is far enough in the future that TTL'd seed rows never
+// batchSeedTtlMillis is far enough in the future that TTL'd seed rows never
 // expire mid-test, while still producing a non-nil ExpireTs.
-const batchSeedTtlTicks = 3_600_000
+const batchSeedTtlMillis = 3_600_000
 
 func seedBatchRows(t *testing.T, db *slatedb.Db) {
 	t.Helper()
