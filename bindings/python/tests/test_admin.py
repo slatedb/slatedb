@@ -73,7 +73,7 @@ async def test_admin_manifest_read_list_and_state_view() -> None:
         latest = await admin.read_manifest(None)
         assert latest is not None
         assert latest.id >= 3
-        assert latest.last_l0_seq >= second_write.seqnum
+        assert latest.last_l0_seq >= second_write.seqnum()
 
         first = await admin.read_manifest(1)
         assert first is not None
@@ -95,7 +95,7 @@ async def test_admin_manifest_read_list_and_state_view() -> None:
 
         state_view = await admin.read_compactor_state_view()
         assert state_view.manifest.id == latest.id
-        assert first_write.seqnum > 0
+        assert first_write.seqnum() > 0
 
 
 @pytest.mark.asyncio
@@ -200,7 +200,7 @@ async def test_admin_sequence_lookups_use_persisted_tracker() -> None:
         third_write = await db.put(b"k3", b"v3")
         await db.flush_with_options(FlushOptions(flush_type=FlushType.MEM_TABLE))
 
-        first_timestamp = await admin.get_timestamp_for_sequence(first_write.seqnum, True)
+        first_timestamp = await admin.get_timestamp_for_sequence(first_write.seqnum(), True)
         assert first_timestamp is not None
 
         after_last_timestamp = await admin.get_timestamp_for_sequence(MAX_U64, True)
@@ -212,7 +212,7 @@ async def test_admin_sequence_lookups_use_persisted_tracker() -> None:
         seq_after_last = await admin.get_sequence_for_timestamp(int(time.time()) + 86_400, False)
         assert seq_after_last is not None
         assert seq_after_last > 0
-        assert third_write.seqnum > first_write.seqnum
+        assert third_write.seqnum() > first_write.seqnum()
 
         with pytest.raises(Error.Invalid) as invalid_timestamp:
             await admin.get_sequence_for_timestamp(MAX_I64, False)
