@@ -21,6 +21,11 @@ use crate::{DbReadOps, DbTransactionOps};
 /// configurable isolation levels. This is the main interface for transactional
 /// operations in SlateDB.
 ///
+/// Committing a non-empty transaction returns a [`WriteHandle`] without
+/// waiting for durability. Call [`WriteHandle::await_durable`] on that handle
+/// to wait for that commit, or call [`crate::Db::flush`] to flush all pending
+/// writes.
+///
 /// # Examples
 ///
 /// Basic transaction usage:
@@ -516,10 +521,16 @@ impl DbTransaction {
 
     /// Commit the transaction by applying all buffered operations to the database.
     ///
-    /// This method finalizes the transaction by writing all pending puts, deletes, and other
-    /// operations from the write batch to persistent storage. The actual conflict detection
-    /// (including read-write and write-write conflicts) is deferred to the task that processes
-    /// the WriteBatch, which ensures the atomicity of transactions.
+    /// This method finalizes the transaction by writing all pending puts,
+    /// deletes, and other operations from the write batch to the in-memory WAL
+    /// and MemTable. The actual conflict detection (including read-write and
+    /// write-write conflicts) is deferred to the task that processes the
+    /// WriteBatch, which ensures the atomicity of transactions.
+    ///
+    /// A successful commit does not wait for durability in object storage.
+    /// Call [`WriteHandle::await_durable`] on the returned handle when the
+    /// result is `Some`, or call [`crate::Db::flush`] to flush all pending
+    /// writes.
     ///
     /// If the transaction's write batch is empty, this operation is a no-op and returns `Ok(())`
     /// immediately without any database interaction. Since it's impossible to have read-write
@@ -541,6 +552,11 @@ impl DbTransaction {
     ///
     /// This method behaves the same as [`DbTransaction::commit`], but allows callers
     /// to specify custom [`WriteOptions`].
+    ///
+    /// A successful commit does not wait for durability in object storage.
+    /// Call [`WriteHandle::await_durable`] on the returned handle when the
+    /// result is `Some`, or call [`crate::Db::flush`] to flush all pending
+    /// writes.
     ///
     /// ## Arguments
     /// - `options`: the write options to use for the commit

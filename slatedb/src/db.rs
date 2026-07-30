@@ -1322,7 +1322,13 @@ impl Db {
             .map_err(Into::into)
     }
 
-    /// Write a value into the database with default `WriteOptions`.
+    /// Write a value into the database with default `PutOptions` and
+    /// `WriteOptions`.
+    ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the write to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// write, or [`Db::flush`] to flush all pending writes.
     ///
     /// ## Arguments
     /// - `key`: the key to write
@@ -1357,6 +1363,11 @@ impl Db {
     }
 
     /// Write a value into the database with custom `PutOptions` and `WriteOptions`.
+    ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the write to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// write, or [`Db::flush`] to flush all pending writes.
     ///
     /// ## Arguments
     /// - `key`: the key to write
@@ -1403,6 +1414,10 @@ impl Db {
     /// this form when the caller already holds the data as [`Bytes`] (e.g.
     /// from a prior read, a zero-copy buffer pool, or a client that produces
     /// [`Bytes`] directly).
+    ///
+    /// This method does not wait for durability. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// write, or [`Db::flush`] to flush all pending writes.
     pub async fn put_bytes(&self, key: Bytes, value: Bytes) -> Result<WriteHandle, crate::Error> {
         self.put_bytes_with_options(key, value, &PutOptions::default(), &WriteOptions::default())
             .await
@@ -1411,6 +1426,10 @@ impl Db {
     /// Write a value into the database using owned [`Bytes`] with custom
     /// `PutOptions` and `WriteOptions`. See [`Db::put_bytes`] for why this
     /// form exists.
+    ///
+    /// This method does not wait for durability. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// write, or [`Db::flush`] to flush all pending writes.
     pub async fn put_bytes_with_options(
         &self,
         key: Bytes,
@@ -1424,6 +1443,11 @@ impl Db {
     }
 
     /// Delete a key from the database with default `WriteOptions`.
+    ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the delete to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// delete, or [`Db::flush`] to flush all pending writes.
     ///
     /// ## Arguments
     /// - `key`: the key to delete
@@ -1453,6 +1477,11 @@ impl Db {
     }
 
     /// Delete a key from the database with custom `WriteOptions`.
+    ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the delete to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// delete, or [`Db::flush`] to flush all pending writes.
     ///
     /// ## Arguments
     /// - `key`: the key to delete
@@ -1487,6 +1516,11 @@ impl Db {
     }
 
     /// Merge a value into the database with default `MergeOptions` and `WriteOptions`.
+    ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the merge to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// merge, or [`Db::flush`] to flush all pending writes.
     ///
     /// Merge operations allow applications to bypass the traditional read/modify/write cycle
     /// by expressing partial updates using an associative operator. The merge operator must
@@ -1543,6 +1577,11 @@ impl Db {
     }
 
     /// Merge a value into the database with custom `MergeOptions` and `WriteOptions`.
+    ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the merge to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// merge, or [`Db::flush`] to flush all pending writes.
     ///
     /// Merge operations allow applications to bypass the traditional read/modify/write cycle
     /// by expressing partial updates using an associative operator. The merge operator must
@@ -1615,6 +1654,11 @@ impl Db {
     /// block other gets and writes until the batch is written to the WAL (or memtable if
     /// WAL is disabled).
     ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the batch to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// batch, or [`Db::flush`] to flush all pending writes.
+    ///
     /// ## Arguments
     /// - `batch`: the batch of put/delete operations to write
     ///
@@ -1650,6 +1694,11 @@ impl Db {
     /// Write a batch of put/delete operations atomically to the database. Batch writes
     /// block other gets and writes until the batch is written to the WAL (or memtable if
     /// WAL is disabled).
+    ///
+    /// This method returns after updating the in-memory WAL and MemTable. It
+    /// does not wait for the batch to become durable in object storage. Call
+    /// [`WriteHandle::await_durable`] on the returned handle to wait for this
+    /// batch, or [`Db::flush`] to flush all pending writes.
     ///
     /// ## Arguments
     /// - `batch`: the batch of put/delete operations to write
@@ -1690,8 +1739,8 @@ impl Db {
             .map_err(Into::into)
     }
 
-    /// Flush in-memory writes to disk. This function blocks until the in-memory
-    /// data has been durably written to object storage.
+    /// Flush in-memory writes to object storage. This function blocks until
+    /// the in-memory data has been durably written.
     ///
     /// If WAL is enabled, this method is equivalent to:
     /// `flush_with_options(FlushOptions { flush_type: FlushType::Wal })`
@@ -2011,6 +2060,11 @@ impl DbCacheManagerOps for Db {
 }
 
 /// Handle returned from write operations, containing metadata about the write.
+///
+/// Write operations return this handle without waiting for durability. Call
+/// [`WriteHandle::await_durable`] to wait until this write is durable in object
+/// storage.
+///
 /// This structure is designed to be extensible for future enhancements.
 #[derive(Clone)]
 pub struct WriteHandle {
