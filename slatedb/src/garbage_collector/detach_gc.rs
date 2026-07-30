@@ -130,7 +130,7 @@ impl DetachGcTask {
 }
 
 impl GcTask for DetachGcTask {
-    async fn collect(&self, _utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+    async fn collect(&self, _utc_now: DateTime<Utc>) -> Result<usize, SlateDBError> {
         let mut stored_manifest =
             StoredManifest::load(self.manifest_store.clone(), self.system_clock.clone()).await?;
         let manifest_id = stored_manifest.id();
@@ -140,7 +140,7 @@ impl GcTask for DetachGcTask {
             .find_detachable(manifest_id, &manifest_snapshot)
             .await?;
         if detachable.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         let mut detached_final_ids: HashSet<Uuid> = HashSet::new();
@@ -166,7 +166,7 @@ impl GcTask for DetachGcTask {
         }
 
         if detached_final_ids.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         let detached_count = detached_final_ids.len() as u64;
@@ -198,7 +198,7 @@ impl GcTask for DetachGcTask {
             self.stats.gc_detach_count.increment(1);
         }
 
-        Ok(())
+        Ok(detached_count as usize)
     }
 
     fn resource(&self) -> &str {

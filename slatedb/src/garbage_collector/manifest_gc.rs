@@ -81,7 +81,7 @@ impl ManifestGcTask {
 impl GcTask for ManifestGcTask {
     /// Collect garbage from the manifest store. This will delete any manifests
     /// that are older than the minimum age specified in the options.
-    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<usize, SlateDBError> {
         let min_age = self.manifest_min_age();
         let mut manifest_metadata_list = self.manifest_store.list_manifests(..).await?;
 
@@ -126,6 +126,7 @@ impl GcTask for ManifestGcTask {
         }
         let manifests_to_delete =
             retain_allowed_by_gc_filter(&self.gc_filter, manifests_to_delete).await;
+        let found = manifests_to_delete.len();
         let manifest_ids_to_delete = manifests_to_delete
             .into_iter()
             .map(|manifest_metadata| manifest_metadata.id)
@@ -133,7 +134,7 @@ impl GcTask for ManifestGcTask {
 
         self.maybe_delete_manifests(manifest_ids_to_delete).await;
 
-        Ok(())
+        Ok(found)
     }
 
     fn resource(&self) -> &str {
@@ -196,6 +197,7 @@ mod tests {
                 min_age: Duration::from_secs(1),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             },
             None,
             true,
@@ -251,6 +253,7 @@ mod tests {
             manifest_store.clone(),
             Arc::new(GcStats::new(&recorder)),
             GarbageCollectorDirectoryOptions {
+                max_interval: None,
                 min_age: Duration::from_secs(1),
                 interval: None,
                 dry_run: false,
@@ -309,6 +312,7 @@ mod tests {
                 min_age: Duration::from_secs(1),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             },
             Some(Arc::new(DenyAllGcFilter) as Arc<dyn GcFilter>),
             true,

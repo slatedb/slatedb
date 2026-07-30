@@ -139,7 +139,7 @@ impl GcTask for WalGcTask {
     ///  - not referenced by an active checkpoint
     ///  - older than the minimum age specified in the options
     ///  - older than the last compacted WAL SST.
-    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<usize, SlateDBError> {
         let latest_manifest = self.manifest_store.read_latest_manifest().await?;
         let active_manifests = self
             .manifest_store
@@ -174,9 +174,10 @@ impl GcTask for WalGcTask {
             .map(|wal_sst| wal_sst.id)
             .collect::<Vec<_>>();
 
+        let found = sst_ids_to_delete.len();
         self.maybe_delete_wal_ssts(sst_ids_to_delete).await;
 
-        Ok(())
+        Ok(found)
     }
 
     fn resource(&self) -> &str {

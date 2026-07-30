@@ -265,6 +265,7 @@ mod tests {
                     min_age: Duration::ZERO,
                     interval: None,
                     dry_run: false,
+                    max_interval: None,
                 }),
                 wal_fence_options: None,
                 compacted_options: None,

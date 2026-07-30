@@ -1574,6 +1574,7 @@ impl Default for GarbageCollectorDirectoryOptions {
             interval: Some(DEFAULT_INTERVAL),
             min_age: DEFAULT_MIN_AGE,
             dry_run: false,
+            max_interval: None,
         }
     }
 }
@@ -1599,6 +1600,18 @@ pub struct GarbageCollectorDirectoryOptions {
     /// If true, log files that would be deleted without deleting them.
     #[serde(default)]
     pub dry_run: bool,
+
+    /// Adaptive cadence ceiling. When set, a sweep that finds NOTHING to
+    /// collect doubles the effective interval (starting from `interval`)
+    /// up to this ceiling; any sweep that finds work snaps back to
+    /// `interval`. Object-store LIST + manifest traffic on quiet
+    /// directories drops by the ratio ceiling/interval, while busy
+    /// directories keep the base cadence. None (the default) disables
+    /// backoff — exactly the previous fixed-interval behavior.
+    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_option_duration")]
+    #[serde(serialize_with = "serialize_option_duration")]
+    pub max_interval: Option<Duration>,
 }
 
 /// Schedule options for a GC task that has no file-age threshold.

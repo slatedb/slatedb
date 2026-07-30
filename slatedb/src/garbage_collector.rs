@@ -63,7 +63,22 @@ pub(crate) const GC_DELETE_CONCURRENCY: usize = 8;
 
 trait GcTask {
     fn resource(&self) -> &str;
-    async fn collect(&self, now: DateTime<Utc>) -> Result<(), SlateDBError>;
+    /// Returns how many objects/actions the sweep found (candidates in
+    /// dry-run mode) — the adaptive-cadence signal: 0 means the sweep
+    /// was pure overhead and the caller may back off.
+    async fn collect(&self, now: DateTime<Utc>) -> Result<usize, SlateDBError>;
+}
+
+/// Effective delay before the next productive sweep: base doubled per
+/// consecutive empty sweep, capped at `max`. Pure so the policy is unit
+/// testable independent of tickers and clocks.
+fn next_gc_delay(
+    base: std::time::Duration,
+    max: std::time::Duration,
+    empty_streak: u32,
+) -> std::time::Duration {
+    let factor = 1u32.checked_shl(empty_streak.min(16)).unwrap_or(u32::MAX);
+    base.saturating_mul(factor).min(max.max(base))
 }
 
 #[derive(Debug)]
@@ -99,6 +114,11 @@ pub struct GarbageCollector {
     stats: Arc<GcStats>,
     system_clock: Arc<dyn SystemClock>,
     task_executor: Arc<MessageHandlerExecutor>,
+    /// Adaptive-cadence state per resource: (consecutive empty sweeps,
+    /// next tick time that is allowed to do real work). Ticks arriving
+    /// before `next_allowed` return without any I/O. Only consulted for
+    /// directories whose options set `max_interval`.
+    backoff: std::collections::HashMap<&'static str, (u32, DateTime<Utc>)>,
     manifest_gc_task: Option<ManifestGcTask>,
     wal_gc_task: Option<WalGcTask>,
     wal_fence_gc_task: Option<WalGcTask>,
@@ -153,49 +173,125 @@ impl MessageHandler<GcMessage> for GarbageCollector {
     }
 
     async fn handle(&mut self, message: GcMessage) -> Result<(), SlateDBError> {
-        match message {
+        // Adaptive cadence: when the directory's options set
+        // `max_interval`, an empty sweep doubles the effective interval
+        // (base, 2x, 4x, ... capped) and any productive sweep snaps back
+        // to base. The ticker keeps firing at the base interval; early
+        // ticks return here before ANY store I/O — including the
+        // per-tick expired-checkpoint manifest load.
+        let (resource, base, max) = match &message {
+            GcMessage::Manifest => {
+                let o = self.options.manifest_options.unwrap_or_default();
+                (
+                    "manifest",
+                    o.interval.unwrap_or(DEFAULT_INTERVAL),
+                    o.max_interval,
+                )
+            }
+            GcMessage::Wal => {
+                let o = self.options.wal_options.unwrap_or_default();
+                (
+                    "wal",
+                    o.interval.unwrap_or(DEFAULT_INTERVAL),
+                    o.max_interval,
+                )
+            }
+            GcMessage::WalFence => {
+                let o = self.options.wal_fence_options.unwrap_or_default();
+                (
+                    "wal_fence",
+                    o.interval.unwrap_or(DEFAULT_INTERVAL),
+                    o.max_interval,
+                )
+            }
+            GcMessage::Compacted => {
+                let o = self.options.compacted_options.unwrap_or_default();
+                (
+                    "compacted",
+                    o.interval.unwrap_or(DEFAULT_INTERVAL),
+                    o.max_interval,
+                )
+            }
+            GcMessage::Compactions => {
+                let o = self.options.compactions_options.unwrap_or_default();
+                (
+                    "compactions",
+                    o.interval.unwrap_or(DEFAULT_INTERVAL),
+                    o.max_interval,
+                )
+            }
+            GcMessage::Detach => {
+                let o = self.options.detach_options.unwrap_or_default();
+                ("detach", o.interval.unwrap_or(DEFAULT_INTERVAL), None)
+            }
+        };
+        if max.is_some() {
+            if let Some((_, next_allowed)) = self.backoff.get(resource) {
+                if self.system_clock.now() < *next_allowed {
+                    return Ok(());
+                }
+            }
+        }
+        let work = match message {
             GcMessage::Manifest => {
                 let task = self
                     .manifest_gc_task
                     .as_ref()
                     .expect("got manifest tick with unconfigured manifest task");
-                self.run_gc_task(task).await;
+                self.run_gc_task(task).await
             }
             GcMessage::Wal => {
                 let task = self
                     .wal_gc_task
                     .as_ref()
                     .expect("got wal tick with unconfigured wal task");
-                self.run_gc_task(task).await;
+                self.run_gc_task(task).await
             }
             GcMessage::WalFence => {
                 let task = self
                     .wal_fence_gc_task
                     .as_ref()
                     .expect("got wal fence tick with unconfigured wal fence task");
-                self.run_gc_task(task).await;
+                self.run_gc_task(task).await
             }
             GcMessage::Compacted => {
                 let task = self
                     .compacted_gc_task
                     .as_ref()
                     .expect("got compacted tick with unconfigured compacted task");
-                self.run_gc_task(task).await;
+                self.run_gc_task(task).await
             }
             GcMessage::Compactions => {
                 let task = self
                     .compactions_gc_task
                     .as_ref()
                     .expect("got compactions tick with unconfigured compactions task");
-                self.run_gc_task(task).await;
+                self.run_gc_task(task).await
             }
             GcMessage::Detach => {
                 let task = self
                     .detach_gc_task
                     .as_ref()
                     .expect("got detach tick with unconfigured detach task");
-                self.run_gc_task(task).await;
+                self.run_gc_task(task).await
             }
+        };
+        if let Some(max) = max {
+            let streak = match work {
+                // Errors never back off: retry at the base cadence.
+                None => 0,
+                Some(0) => self.backoff.get(resource).map(|(n, _)| n + 1).unwrap_or(1),
+                Some(_) => 0,
+            };
+            let delay = next_gc_delay(base, max, streak);
+            self.backoff.insert(
+                resource,
+                (
+                    streak,
+                    self.system_clock.now()
+                        + chrono::Duration::from_std(delay).expect("gc delay overflows"),
+                ),
+            );
         }
         Ok(())
     }
@@ -305,6 +401,7 @@ impl GarbageCollector {
             stats,
             system_clock,
             task_executor,
+            backoff: std::collections::HashMap::new(),
             manifest_gc_task,
             wal_gc_task,
             wal_fence_gc_task,
@@ -366,58 +463,75 @@ impl GarbageCollector {
     /// - Detach clone from parent garbage
     pub async fn run_gc_once(&self) {
         if let Some(task) = &self.manifest_gc_task {
-            self.run_gc_task(task).await;
+            let _ = self.run_gc_task(task).await;
         }
         if let Some(task) = &self.wal_gc_task {
-            self.run_gc_task(task).await;
+            let _ = self.run_gc_task(task).await;
         }
         if let Some(task) = &self.wal_fence_gc_task {
-            self.run_gc_task(task).await;
+            let _ = self.run_gc_task(task).await;
         }
         if let Some(task) = &self.compacted_gc_task {
-            self.run_gc_task(task).await;
+            let _ = self.run_gc_task(task).await;
         }
         if let Some(task) = &self.compactions_gc_task {
-            self.run_gc_task(task).await;
+            let _ = self.run_gc_task(task).await;
         }
         if let Some(task) = &self.detach_gc_task {
-            self.run_gc_task(task).await;
+            let _ = self.run_gc_task(task).await;
         }
 
         self.stats.gc_count.increment(1);
     }
 
+    /// Returns Some(work found) on success, None when any step errored
+    /// (errors never feed the adaptive backoff — retry at base cadence).
     #[instrument(level = "debug", skip_all, fields(resource = task.resource()))]
-    async fn run_gc_task<T: GcTask + std::fmt::Debug>(&self, task: &T) {
-        if let Err(e) = self.remove_expired_checkpoints().await {
-            error!(
-                "error removing expired checkpoints [resource={}, error={:?}]",
-                task.resource(),
-                e,
-            );
-        } else if let Err(e) = task.collect(self.system_clock.now()).await {
-            error!(
-                "error collecting garbage [resource={}, error={:?}]",
-                task.resource(),
-                e,
-            );
+    async fn run_gc_task<T: GcTask + std::fmt::Debug>(&self, task: &T) -> Option<usize> {
+        let expired = match self.remove_expired_checkpoints().await {
+            Ok(n) => n,
+            Err(e) => {
+                error!(
+                    "error removing expired checkpoints [resource={}, error={:?}]",
+                    task.resource(),
+                    e,
+                );
+                return None;
+            }
+        };
+        match task.collect(self.system_clock.now()).await {
+            Ok(found) => Some(expired + found),
+            Err(e) => {
+                error!(
+                    "error collecting garbage [resource={}, error={:?}]",
+                    task.resource(),
+                    e,
+                );
+                None
+            }
         }
     }
 
-    async fn remove_expired_checkpoints(&self) -> Result<(), SlateDBError> {
+    async fn remove_expired_checkpoints(&self) -> Result<usize, SlateDBError> {
         let mut stored_manifest =
             StoredManifest::load(Arc::clone(&self.manifest_store), self.system_clock.clone())
                 .await?;
 
+        let removed = std::sync::atomic::AtomicUsize::new(0);
         stored_manifest
-            .maybe_apply_update(|manifest| self.filter_expired_checkpoints(manifest))
-            .await
+            .maybe_apply_update(|manifest| {
+                let (dirty, n) = self.filter_expired_checkpoints(manifest)?;
+                removed.store(n, std::sync::atomic::Ordering::Relaxed);
+                Ok(dirty)
+            })
+            .await?;
+        Ok(removed.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     fn filter_expired_checkpoints(
         &self,
         manifest: &SimpleTransactionalObject<Manifest>,
-    ) -> Result<Option<DirtyObject<Manifest>>, SlateDBError> {
+    ) -> Result<(Option<DirtyObject<Manifest>>, usize), SlateDBError> {
         let utc_now: DateTime<Utc> = self.system_clock.now();
         let mut dirty = manifest.prepare_dirty()?;
         let retained_checkpoints: Vec<Checkpoint> = dirty
@@ -432,13 +546,14 @@ impl GarbageCollector {
             .cloned()
             .collect();
 
-        let maybe_dirty = if dirty.value.core.checkpoints.len() != retained_checkpoints.len() {
+        let removed = dirty.value.core.checkpoints.len() - retained_checkpoints.len();
+        let maybe_dirty = if removed > 0 {
             dirty.value.core.checkpoints = retained_checkpoints;
             Some(dirty)
         } else {
             None
         };
-        Ok(maybe_dirty)
+        Ok((maybe_dirty, removed))
     }
 }
 
@@ -1164,6 +1279,7 @@ mod tests {
                 min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             wal_fence_options: None,
             compacted_options: None,
@@ -1233,6 +1349,7 @@ mod tests {
                 min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             compacted_options: None,
             compactions_options: None,
@@ -1300,6 +1417,7 @@ mod tests {
                 min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             compacted_options: None,
             compactions_options: None,
@@ -1375,11 +1493,13 @@ mod tests {
                 min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             wal_fence_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             compacted_options: None,
             compactions_options: None,
@@ -1823,22 +1943,26 @@ mod tests {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             wal_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             wal_fence_options: None,
             compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             compactions_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             detach_options: None,
             metric_level: None,
@@ -1900,22 +2024,26 @@ mod tests {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             wal_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             wal_fence_options: None,
             compacted_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             compactions_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             detach_options: None,
             metric_level: None,
@@ -1977,17 +2105,20 @@ mod tests {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             wal_fence_options: None,
             compacted_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             compactions_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: std::time::Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             detach_options: None,
             metric_level: None,
@@ -2028,17 +2159,20 @@ mod tests {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(11)),
                 dry_run: false,
+                max_interval: None,
             }),
             wal_fence_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(13)),
                 dry_run: false,
+                max_interval: None,
             }),
             compacted_options: None,
             compactions_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(17)),
                 dry_run: false,
+                max_interval: None,
             }),
             detach_options: None,
             metric_level: None,
@@ -2078,22 +2212,26 @@ mod tests {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
                 dry_run: false,
+                max_interval: None,
             }),
             wal_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
                 dry_run: false,
+                max_interval: None,
             }),
             wal_fence_options: None,
             compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
                 dry_run: false,
+                max_interval: None,
             }),
             compactions_options: Some(crate::config::GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
                 dry_run: false,
+                max_interval: None,
             }),
             detach_options: None,
             metric_level: None,
@@ -2420,6 +2558,7 @@ mod tests {
             min_age: Duration::from_secs(3600),
             interval: None,
             dry_run: false,
+            max_interval: None,
         };
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(options),
@@ -2523,6 +2662,7 @@ mod tests {
                 min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             }),
             wal_fence_options: None,
             compacted_options: None,
@@ -2655,6 +2795,7 @@ mod tests {
             min_age: Duration::from_secs(3600),
             interval: None,
             dry_run: true,
+            max_interval: None,
         };
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(dry_run_options),
@@ -2708,5 +2849,23 @@ mod tests {
             compactions_store.list_compactions(..).await.unwrap().len(),
             compaction_ids.len()
         );
+    }
+}
+#[cfg(test)]
+mod adaptive_cadence_tests {
+    use super::next_gc_delay;
+    use std::time::Duration;
+
+    #[test]
+    fn empty_sweeps_double_toward_the_cap_and_work_resets() {
+        let base = Duration::from_secs(30);
+        let max = Duration::from_secs(600);
+        assert_eq!(next_gc_delay(base, max, 0), base);
+        assert_eq!(next_gc_delay(base, max, 1), Duration::from_secs(60));
+        assert_eq!(next_gc_delay(base, max, 3), Duration::from_secs(240));
+        assert_eq!(next_gc_delay(base, max, 5), max, "capped");
+        assert_eq!(next_gc_delay(base, max, 60), max, "shift overflow capped");
+        // A misconfigured max below base must never go under base.
+        assert_eq!(next_gc_delay(base, Duration::from_secs(1), 4), base);
     }
 }

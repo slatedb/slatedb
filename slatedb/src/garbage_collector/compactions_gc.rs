@@ -109,7 +109,7 @@ impl GcTask for CompactionsGcTask {
     /// Collect garbage from the compactions store. This will delete any compactions files
     /// that are older than the minimum age specified in the options, excluding the latest
     /// compactions file.
-    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<usize, SlateDBError> {
         let min_age = self.compactions_min_age();
         let mut compactions_metadata_list = self.compactions_store.list_compactions(..).await?;
 
@@ -137,6 +137,7 @@ impl GcTask for CompactionsGcTask {
         }
         let compactions_to_delete =
             retain_allowed_by_gc_filter(&self.gc_filter, compactions_to_delete).await;
+        let found = compactions_to_delete.len();
         let compactions_ids_to_delete = compactions_to_delete
             .into_iter()
             .map(|compactions_metadata| compactions_metadata.id)
@@ -145,7 +146,7 @@ impl GcTask for CompactionsGcTask {
         self.maybe_delete_compactions(compactions_ids_to_delete)
             .await;
 
-        Ok(())
+        Ok(found)
     }
 
     fn resource(&self) -> &str {
@@ -201,6 +202,7 @@ mod tests {
                 min_age: Duration::from_secs(1),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             },
             None,
             true,
@@ -253,6 +255,7 @@ mod tests {
             compactions_store.clone(),
             Arc::new(GcStats::new(&recorder)),
             GarbageCollectorDirectoryOptions {
+                max_interval: None,
                 min_age: Duration::from_secs(1),
                 interval: None,
                 dry_run: false,
@@ -309,6 +312,7 @@ mod tests {
                 min_age: Duration::from_secs(1),
                 interval: None,
                 dry_run: false,
+                max_interval: None,
             },
             Some(Arc::new(DenyAllGcFilter) as Arc<dyn GcFilter>),
             true,
