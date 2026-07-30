@@ -94,10 +94,11 @@ class SlateDbDbTest {
 
             ReadOptions readOptions = TestSupport.readOptions();
             PutOptions putOptions = new PutOptions(new Ttl.Default());
-            WriteOptions writeOptions = new WriteOptions(true);
+            WriteOptions writeOptions = new WriteOptions(0L);
 
             WriteHandle firstWrite = TestSupport.await(db.put(TestSupport.bytes("alpha"), TestSupport.bytes("one")));
             assertNotNull(firstWrite);
+            TestSupport.await(firstWrite.awaitDurable());
             assertTrue(firstWrite.seqnum() > 0);
             assertTrue(firstWrite.createTs() > 0);
 
@@ -126,6 +127,7 @@ class SlateDbDbTest {
                                     putOptions,
                                     writeOptions));
             assertNotNull(secondWrite);
+            TestSupport.await(secondWrite.awaitDurable());
             assertTrue(secondWrite.seqnum() > firstWrite.seqnum());
             assertTrue(secondWrite.createTs() > 0);
 
@@ -265,7 +267,10 @@ class SlateDbDbTest {
                         TestSupport.bytes("value-2"),
                         new PutOptions(new Ttl.Default()));
 
-                TestSupport.await(db.writeWithOptions(secondBatch, new WriteOptions(true)));
+                try (WriteHandle writeHandle =
+                        TestSupport.await(db.writeWithOptions(secondBatch, new WriteOptions(0L)))) {
+                    TestSupport.await(writeHandle.awaitDurable());
+                }
             }
 
             assertArrayEquals(
@@ -298,12 +303,15 @@ class SlateDbDbTest {
             TestSupport.await(db.merge(TestSupport.bytes("merge"), TestSupport.bytes(":one")));
             assertArrayEquals(TestSupport.bytes("base:one"), TestSupport.await(db.get(TestSupport.bytes("merge"))));
 
-            TestSupport.await(
-                    db.mergeWithOptions(
-                            TestSupport.bytes("merge"),
-                            TestSupport.bytes(":two"),
-                            new MergeOptions(new Ttl.Default()),
-                            new WriteOptions(true)));
+            try (WriteHandle writeHandle =
+                    TestSupport.await(
+                            db.mergeWithOptions(
+                                    TestSupport.bytes("merge"),
+                                    TestSupport.bytes(":two"),
+                                    new MergeOptions(new Ttl.Default()),
+                                    new WriteOptions(0L)))) {
+                TestSupport.await(writeHandle.awaitDurable());
+            }
             assertArrayEquals(
                     TestSupport.bytes("base:one:two"),
                     TestSupport.await(db.get(TestSupport.bytes("merge"))));
@@ -413,7 +421,15 @@ class SlateDbDbTest {
             Error.Closed error =
                     TestSupport.awaitFailure(
                             Error.Closed.class,
-                            primaryDb.put(TestSupport.bytes("stale"), TestSupport.bytes("value")));
+                            primaryDb
+                                    .put(TestSupport.bytes("stale"), TestSupport.bytes("value"))
+                                    .thenCompose(
+                                            writeHandle ->
+                                                    writeHandle
+                                                            .awaitDurable()
+                                                            .whenComplete(
+                                                                    (ignored, failure) ->
+                                                                            writeHandle.close())));
             primary.markClosed();
 
             assertEquals(CloseReason.FENCED, error.reason());

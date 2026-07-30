@@ -100,14 +100,14 @@
 // [Db.Delete], and [Db.Merge], plus batch and durability controls through
 // [PutOptions], [MergeOptions], [WriteOptions], and [FlushOptions].
 //
-// [WriteHandle] reports metadata assigned to a successful write, including the
-// sequence number and creation timestamp.
+// [WriteHandle] reports metadata assigned to a successful write and exposes
+// [WriteHandle.AwaitDurable] for waiting until that specific write is durable.
 //
 // [WriteBatch] collects multiple mutations and applies them atomically through
 // [Db.Write] or [Db.WriteWithOptions]. Batches are single-use once submitted.
 //
 // TTL behavior is configured with [Ttl] implementations such as [TtlDefault],
-// [TtlNoExpiry], and [TtlExpireAfterTicks].
+// [TtlNoExpiry], and [TtlExpireAfterMillis].
 //
 // # Transactions
 //

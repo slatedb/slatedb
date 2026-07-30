@@ -158,6 +158,22 @@ func uint64Ptr(v uint64) *uint64 {
 	return &v
 }
 
+func trackWriteHandle(t *testing.T, handle *slatedb.WriteHandle) *slatedb.WriteHandle {
+	t.Helper()
+	if handle == nil {
+		t.Fatal("got nil write handle")
+	}
+	t.Cleanup(handle.Destroy)
+	return handle
+}
+
+func awaitDurable(t *testing.T, handle *slatedb.WriteHandle) {
+	t.Helper()
+	if err := handle.AwaitDurable(); err != nil {
+		t.Fatalf("WriteHandle.AwaitDurable(): %v", err)
+	}
+}
+
 func drainIterator(t *testing.T, iter *slatedb.DbIterator) []slatedb.KeyValue {
 	t.Helper()
 
@@ -597,16 +613,17 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	}
 
 	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlDefault{}}
-	writeOptions := slatedb.WriteOptions{AwaitDurable: true}
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
 
 	firstWrite, err := handle.db.Put([]byte("alpha"), []byte("one"))
 	if err != nil {
 		t.Fatalf("Put(alpha): %v", err)
 	}
-	if firstWrite.Seqnum == 0 {
+	firstWrite = trackWriteHandle(t, firstWrite)
+	if firstWrite.Seqnum() == 0 {
 		t.Fatalf("Put(alpha): Seqnum = 0")
 	}
-	if firstWrite.CreateTs == 0 {
+	if firstWrite.CreateTs() == 0 {
 		t.Fatalf("Put(alpha): CreateTs = 0")
 	}
 
@@ -639,11 +656,11 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	if !bytes.Equal(metadata.Value, []byte("one")) {
 		t.Fatalf("GetKeyValue(alpha): value = %q, want %q", metadata.Value, "one")
 	}
-	if metadata.Seq != firstWrite.Seqnum {
-		t.Fatalf("GetKeyValue(alpha): seq = %d, want %d", metadata.Seq, firstWrite.Seqnum)
+	if metadata.Seq != firstWrite.Seqnum() {
+		t.Fatalf("GetKeyValue(alpha): seq = %d, want %d", metadata.Seq, firstWrite.Seqnum())
 	}
-	if metadata.CreateTs != firstWrite.CreateTs {
-		t.Fatalf("GetKeyValue(alpha): create ts = %d, want %d", metadata.CreateTs, firstWrite.CreateTs)
+	if metadata.CreateTs != firstWrite.CreateTs() {
+		t.Fatalf("GetKeyValue(alpha): create ts = %d, want %d", metadata.CreateTs, firstWrite.CreateTs())
 	}
 
 	metadata, err = handle.db.GetKeyValueWithOptions([]byte("alpha"), readOptions)
@@ -658,10 +675,12 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PutWithOptions(beta): %v", err)
 	}
-	if secondWrite.Seqnum <= firstWrite.Seqnum {
-		t.Fatalf("PutWithOptions(beta): seq = %d, want > %d", secondWrite.Seqnum, firstWrite.Seqnum)
+	secondWrite = trackWriteHandle(t, secondWrite)
+	awaitDurable(t, secondWrite)
+	if secondWrite.Seqnum() <= firstWrite.Seqnum() {
+		t.Fatalf("PutWithOptions(beta): seq = %d, want > %d", secondWrite.Seqnum(), firstWrite.Seqnum())
 	}
-	if secondWrite.CreateTs == 0 {
+	if secondWrite.CreateTs() == 0 {
 		t.Fatalf("PutWithOptions(beta): CreateTs = 0")
 	}
 
@@ -696,8 +715,9 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Delete(alpha): %v", err)
 	}
-	if deleteWrite.Seqnum <= secondWrite.Seqnum {
-		t.Fatalf("Delete(alpha): seq = %d, want > %d", deleteWrite.Seqnum, secondWrite.Seqnum)
+	deleteWrite = trackWriteHandle(t, deleteWrite)
+	if deleteWrite.Seqnum() <= secondWrite.Seqnum() {
+		t.Fatalf("Delete(alpha): seq = %d, want > %d", deleteWrite.Seqnum(), secondWrite.Seqnum())
 	}
 
 	value, err = handle.db.Get([]byte("alpha"))
@@ -712,8 +732,9 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteWithOptions(beta): %v", err)
 	}
-	if deleteWrite.Seqnum <= secondWrite.Seqnum {
-		t.Fatalf("DeleteWithOptions(beta): seq = %d, want > %d", deleteWrite.Seqnum, secondWrite.Seqnum)
+	deleteWrite = trackWriteHandle(t, deleteWrite)
+	if deleteWrite.Seqnum() <= secondWrite.Seqnum() {
+		t.Fatalf("DeleteWithOptions(beta): seq = %d, want > %d", deleteWrite.Seqnum(), secondWrite.Seqnum())
 	}
 
 	value, err = handle.db.Get([]byte("beta"))
@@ -846,7 +867,8 @@ func TestDbBatchWriteAndConsumption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Write(): %v", err)
 	}
-	if batchWrite.Seqnum == 0 {
+	batchWrite = trackWriteHandle(t, batchWrite)
+	if batchWrite.Seqnum() == 0 {
 		t.Fatalf("Write(): Seqnum = 0")
 	}
 
@@ -877,9 +899,12 @@ func TestDbBatchWriteAndConsumption(t *testing.T) {
 		t.Fatalf("WriteBatch.PutWithOptions(): %v", err)
 	}
 
-	if _, err := handle.db.WriteWithOptions(secondBatch, slatedb.WriteOptions{AwaitDurable: true}); err != nil {
+	secondBatchWrite, err := handle.db.WriteWithOptions(secondBatch, slatedb.WriteOptions{Seqnum: 0})
+	if err != nil {
 		t.Fatalf("WriteWithOptions(): %v", err)
 	}
+	secondBatchWrite = trackWriteHandle(t, secondBatchWrite)
+	awaitDurable(t, secondBatchWrite)
 
 	value, err = handle.db.Get([]byte("batch-put-2"))
 	if err != nil {
@@ -937,14 +962,17 @@ func TestDbMerge(t *testing.T) {
 		t.Fatalf("Get(merge) after Merge(): got %v, want %q", value, "base:one")
 	}
 
-	if _, err := handle.db.MergeWithOptions(
+	mergeWrite, err := handle.db.MergeWithOptions(
 		[]byte("merge"),
 		[]byte(":two"),
 		slatedb.MergeOptions{Ttl: slatedb.TtlDefault{}},
-		slatedb.WriteOptions{AwaitDurable: true},
-	); err != nil {
+		slatedb.WriteOptions{Seqnum: 0},
+	)
+	if err != nil {
 		t.Fatalf("MergeWithOptions(): %v", err)
 	}
+	mergeWrite = trackWriteHandle(t, mergeWrite)
+	awaitDurable(t, mergeWrite)
 
 	value, err = handle.db.Get([]byte("merge"))
 	if err != nil {
@@ -1024,11 +1052,15 @@ func TestDbTransactions(t *testing.T) {
 		t.Fatalf("db.Get(txn-key) before commit: got %q, want nil", *liveValue)
 	}
 
-	commitHandle, err := tx.Commit()
+	optionalCommitHandle, err := tx.Commit()
 	if err != nil {
 		t.Fatalf("tx.Commit(): %v", err)
 	}
-	if commitHandle == nil || commitHandle.Seqnum == 0 {
+	if optionalCommitHandle == nil {
+		t.Fatal("tx.Commit(): got nil write handle")
+	}
+	commitHandle := trackWriteHandle(t, *optionalCommitHandle)
+	if commitHandle.Seqnum() == 0 {
 		t.Fatalf("tx.Commit(): got %v, want non-nil write handle", commitHandle)
 	}
 
@@ -1124,18 +1156,22 @@ func TestDbInvalidInputsAndErrorMapping(t *testing.T) {
 			t.Fatalf("secondary Put(): %v", err)
 		}
 
-		_, err := primary.db.Put([]byte("stale"), []byte("value"))
+		write, err := primary.db.Put([]byte("stale"), []byte("value"))
+		if err == nil {
+			write = trackWriteHandle(t, write)
+			err = write.AwaitDurable()
+		}
 		if !errors.Is(err, slatedb.ErrErrorClosed) {
-			t.Fatalf("primary Put() after fencing: got %v, want closed error", err)
+			t.Fatalf("primary write durability after fencing: got %v, want closed error", err)
 		}
 		primary.open = false
 
 		var closedErr *slatedb.ErrorClosed
 		if !errors.As(err, &closedErr) {
-			t.Fatalf("primary Put() after fencing: expected *ErrorClosed, got %T", err)
+			t.Fatalf("primary write durability after fencing: expected *ErrorClosed, got %T", err)
 		}
 		if closedErr.Reason != slatedb.CloseReasonFenced {
-			t.Fatalf("primary Put() after fencing: got close reason %v, want %v", closedErr.Reason, slatedb.CloseReasonFenced)
+			t.Fatalf("primary write durability after fencing: got close reason %v, want %v", closedErr.Reason, slatedb.CloseReasonFenced)
 		}
 	})
 }
@@ -3072,12 +3108,14 @@ func TestDbTtl(t *testing.T) {
 
 	key, value := []byte("alpha"), []byte("one")
 
-	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlExpireAt{Field0: 1}}
-	writeOptions := slatedb.WriteOptions{AwaitDurable: true}
-	_, err := handle.db.PutWithOptions(key, value, putOptions, writeOptions)
+	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlExpireAtMillis{Field0: 1}}
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
+	write, err := handle.db.PutWithOptions(key, value, putOptions, writeOptions)
 	if err != nil {
 		t.Fatalf("Put(alpha): %v", err)
 	}
+	write = trackWriteHandle(t, write)
+	awaitDurable(t, write)
 
 	readerHandle := openTestReader(t, store, nil)
 
@@ -3117,26 +3155,29 @@ type batchSeedRow struct {
 // needs one extra call returning an empty slice to detect exhaustion.
 var batchSeedRows = []batchSeedRow{
 	{key: "batch:01", value: "one", ttl: slatedb.TtlNoExpiry{}},
-	{key: "batch:02", value: "two", ttl: slatedb.TtlExpireAfterTicks{Field0: batchSeedTtlTicks}},
+	{key: "batch:02", value: "two", ttl: slatedb.TtlExpireAfterMillis{Field0: batchSeedTtlMillis}},
 	{key: "batch:03", value: "three", ttl: slatedb.TtlNoExpiry{}},
-	{key: "batch:04", value: "four", ttl: slatedb.TtlExpireAfterTicks{Field0: batchSeedTtlTicks}},
+	{key: "batch:04", value: "four", ttl: slatedb.TtlExpireAfterMillis{Field0: batchSeedTtlMillis}},
 	{key: "batch:05", value: "five", ttl: slatedb.TtlNoExpiry{}},
-	{key: "batch:06", value: "six", ttl: slatedb.TtlExpireAfterTicks{Field0: batchSeedTtlTicks}},
+	{key: "batch:06", value: "six", ttl: slatedb.TtlExpireAfterMillis{Field0: batchSeedTtlMillis}},
 }
 
-// batchSeedTtlTicks is far enough in the future that TTL'd seed rows never
+// batchSeedTtlMillis is far enough in the future that TTL'd seed rows never
 // expire mid-test, while still producing a non-nil ExpireTs.
-const batchSeedTtlTicks = 3_600_000
+const batchSeedTtlMillis = 3_600_000
 
 func seedBatchRows(t *testing.T, db *slatedb.Db) {
 	t.Helper()
 
-	writeOptions := slatedb.WriteOptions{AwaitDurable: true}
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
 	for _, row := range batchSeedRows {
 		putOptions := slatedb.PutOptions{Ttl: row.ttl}
-		if _, err := db.PutWithOptions([]byte(row.key), []byte(row.value), putOptions, writeOptions); err != nil {
+		write, err := db.PutWithOptions([]byte(row.key), []byte(row.value), putOptions, writeOptions)
+		if err != nil {
 			t.Fatalf("PutWithOptions(%q): %v", row.key, err)
 		}
+		write = trackWriteHandle(t, write)
+		awaitDurable(t, write)
 	}
 }
 
@@ -3387,7 +3428,7 @@ func openBenchDB(b *testing.B) *slatedb.Db {
 		db.Destroy()
 	})
 
-	writeOptions := slatedb.WriteOptions{AwaitDurable: false}
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
 	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlDefault{}}
 	for i := 0; i < benchScanRows; i++ {
 		key := []byte(fmt.Sprintf("bench:%06d", i))

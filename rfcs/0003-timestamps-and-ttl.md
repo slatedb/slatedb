@@ -93,11 +93,11 @@ tick and sleeping briefly if clock skew is detected.
 pub struct DbOptions {
     // ...
 
-    /// The default time-to-live (TTL) for insertions (note that re-inserting a key
-    /// with any value will update the TTL to use the default_ttl)
+    /// The default time-to-live (TTL), in milliseconds, for insertions (note that
+    /// re-inserting a key with any value will update the TTL to use default_ttl_millis)
     ///
     /// Default: no TTL (insertions will remain until deleted)
-    default_ttl: Option<u64>
+    default_ttl_millis: Option<u64>
 }
 ```
 
@@ -126,7 +126,7 @@ pub enum Ttl {
     /// No expiration for this entry
     NoExpiry,
     /// Expire after the specified duration (in milliseconds)
-    ExpireAfter(u64),
+    ExpireAfterMillis(u64),
 }
 
 pub struct PutOptions {
@@ -367,4 +367,4 @@ the original `seq0` insert as it logically happened "after" `seq1`.
   for testing or non-standard time sources.
 - Updated `DbOptions` to remove the `clock` configuration option
 - Updated `WriteOptions` to `PutOptions` with a `Ttl` enum that supports `Default`, `NoExpiry`,
-  and `ExpireAfter(u64)` variants
+  and `ExpireAfterMillis(u64)` variants

@@ -2,7 +2,7 @@
 title: Writes
 ---
 
-Writes are moved to a background task as quickly as possible to prevent blocking the client. By default, `put()`, `write()`, and `delete()` use `WriteOptions::default()`, so calls wait for the write to become durable before returning. If you want lower latency and can tolerate losing in-flight data, set `await_durable` to `false`. You can also call `flush()` explicitly. The synchronous flow is as follows:
+Writes are moved to a background task as quickly as possible to prevent blocking the client. `put()`, `write()`, and `delete()` return a `WriteHandle` after the write reaches the in-memory WAL and MemTable. Call `handle.await_durable().await` to wait for that write to reach object storage, or call `flush()` explicitly. The synchronous flow is as follows:
 
 1. A `put()`, `write()`, or `delete()` call is made on the client.
 2. The key/value pair is written to the mutable, in-memory WAL table.
@@ -10,8 +10,8 @@ Writes are moved to a background task as quickly as possible to prevent blocking
 
 The following asynchronous flows occur:
 
-- The WAL flusher periodically checks if the WAL table is full. If it is, it freezes the mutable WAL table and triggers an asynchronous write to object storage. A notification is then sent to clients that wrote with `await_durable` set to `true`.
-- The MemTable flusher periodically checks if the MemTable is full. If it is, it freezes the mutable MemTable and triggers an asynchronous write to object storage. A notification is then sent to clients that wrote with `await_durable` set to `true` and `wal_enabled` set to `false`.
+- The WAL flusher periodically checks if the WAL table is full. If it is, it freezes the mutable WAL table and triggers an asynchronous write to object storage. Durability waiters are notified when the durable sequence number advances.
+- The MemTable flusher periodically checks if the MemTable is full. If it is, it freezes the mutable MemTable and triggers an asynchronous write to object storage. With the WAL disabled, this advances the durable sequence number and notifies durability waiters.
 
 Below is a diagram illustrating the high-level flow of a write in SlateDB:
 
@@ -72,4 +72,4 @@ To avoid this, funnel all writes that use `seqnum` through a single ordering age
 - **Non-contiguous seqnums.** Auto-assigned seqnums are not guaranteed to be strictly contiguous either (the memtable flusher tolerates gaps), so user-supplied jumps are consistent with existing behavior. Anything that relies on dense seqnums — don't.
 - **Recovery.** On restart, SlateDB recovers the max seqnum from the manifest and any unflushed WAL. If you continue assigning seqnums from your external log, make sure the next value is above whatever SlateDB recovered, or your first post-restart write will be rejected.
 - **Transactions.** Conflict detection still works on user-supplied seqnums — the read/write set is tracked against the snapshot's seqnum and the commit seqnum, regardless of who picked them. Just keep the monotonic-increase invariant.
-- **`await_durable`.** `seqnum` is independent of the `await_durable` flag; both can be set on the same `WriteOptions`. The oracle is advanced as soon as the batch is processed by the write loop, before durability is confirmed. The seqno the oracle tracks is still bumped, so if the write fails the seqno is still consumed.
+- **Durability.** The oracle is advanced as soon as the batch is processed by the write loop, before durability is confirmed. The seqno is still consumed if a later durability wait fails. Use the returned `WriteHandle::await_durable()` when confirmation is required.

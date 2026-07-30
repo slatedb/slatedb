@@ -59,7 +59,7 @@ SlateDB also offers some unique features like the ability to create snapshot clo
 
 Any in-flight data that hasn't yet been flushed to object storage will be lost.
 
-To prevent data loss, SlateDB's `put()` API will block until the data has been flushed to object storage. Client processes can block until their data has been durably written. Blocking can be disabled with [`WriteOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.WriteOptions.html) for clients that don't need this durability guarantee.
+SlateDB's write APIs return after updating the in-memory WAL and MemTable. Call `handle.await_durable().await` on the returned [`WriteHandle`](https://docs.rs/slatedb/latest/slatedb/struct.WriteHandle.html) to wait for one write to reach object storage, or call `db.flush().await` to flush all pending writes.
 
 ## Does SlateDB support column families?
 

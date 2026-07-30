@@ -77,8 +77,8 @@ pub(crate) enum SlateDBError {
     #[error("wal store reconfiguration unsupported")]
     WalStoreReconfigurationError,
 
-    #[error("wal truncated")]
-    WalTruncated,
+    #[error("wal truncated at wal file `{0}`")]
+    WalTruncated(u64),
 
     #[error("wal unavailable")]
     WalUnavailable(Arc<dyn std::error::Error + Sync + Send + 'static>),
@@ -218,8 +218,8 @@ pub(crate) enum SlateDBError {
     #[error("clone source paths must be unique, found duplicate: `{0}`")]
     DuplicatedCloneSourcePath(Path),
 
-    #[error("Manifest union of sources with WAL is not supported, source with WAL: `{paths:?}`")]
-    InvalidUnionSourceWithWal { paths: Vec<Path> },
+    #[error("Projection and/or union with WAL is not supported, sources with WAL: `{paths:?}`")]
+    InvalidCloneSourceWithWal { paths: Vec<Path> },
 
     #[error("Source manifest set must not be empty")]
     InvalidUnionSetEmpty(),
@@ -675,7 +675,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::SeekKeyLessThanLastReturnedKey => Error::invalid(msg),
             SlateDBError::IdenticalClonePaths { .. } => Error::invalid(msg),
             SlateDBError::DuplicatedCloneSourcePath(_) => Error::invalid(msg),
-            SlateDBError::InvalidUnionSourceWithWal { .. } => Error::invalid(msg),
+            SlateDBError::InvalidCloneSourceWithWal { .. } => Error::invalid(msg),
             SlateDBError::InvalidUnionSetEmpty() => Error::invalid(msg),
             SlateDBError::InvalidUnion(_) => Error::invalid(msg),
             SlateDBError::InvalidProjection { .. } => Error::invalid(msg),
@@ -727,6 +727,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::CloneExternalDbMissing => Error::data(msg),
             SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::data(msg),
             SlateDBError::CloneIncorrectFinalCheckpoint { .. } => Error::data(msg),
+            SlateDBError::WalTruncated(_) => Error::data(msg),
             SlateDBError::WalDataError(src) => Error::data(msg).with_source(Box::new(src)),
 
             // Internal errors
@@ -742,7 +743,6 @@ impl From<SlateDBError> for Error {
             SlateDBError::TransactionalObjectError(err) => {
                 Error::internal(msg).with_source(Box::new(err))
             }
-            SlateDBError::WalTruncated => Error::internal(msg),
             SlateDBError::WalInternalError(src) => Error::internal(msg).with_source(Box::new(src)),
         }
     }

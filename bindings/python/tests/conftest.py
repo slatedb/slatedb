@@ -77,7 +77,7 @@ def reader_options(skip_wal_replay: bool) -> ReaderOptions:
 
 
 def write_options() -> WriteOptions:
-    return WriteOptions(await_durable=True)
+    return WriteOptions()
 
 
 def put_options() -> PutOptions:
