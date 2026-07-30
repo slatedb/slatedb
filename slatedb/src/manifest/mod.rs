@@ -1546,10 +1546,6 @@ impl Manifest {
             .collect()
     }
 
-    pub(crate) fn has_wal_sst_reference(&self, wal_sst_id: u64) -> bool {
-        wal_sst_id > self.core.replay_after_wal_id && wal_sst_id < self.core.next_wal_sst_id
-    }
-
     /// Shrinks each `ExternalDb.sst_ids` to only IDs still referenced by this manifest's
     /// L0 and compacted sorted runs. `ExternalDb` entries are retained even when their
     /// `sst_ids` becomes empty — detaching a clone from its parent is done by the GC,

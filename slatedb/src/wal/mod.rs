@@ -8,6 +8,7 @@ use std::fmt::{Display, Formatter};
 use std::ops::{Bound, Range};
 use std::sync::Arc;
 
+pub(crate) mod gc;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub(crate) mod wal_disabled;
@@ -15,6 +16,7 @@ pub(crate) mod wal_sst_builder;
 pub(crate) mod writer_init;
 
 /// A range of WAL File IDs
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WalFileRange(pub Bound<u64>, pub Bound<u64>);
 
 impl From<Range<u64>> for WalFileRange {
@@ -264,6 +266,15 @@ pub trait WalReader {
         &self,
         wal_file_id_range: WalFileRange,
     ) -> Result<Box<dyn WalIterator>, WalError>;
+}
+
+/// API for plugging into WAL GC
+#[async_trait]
+pub trait WalGC: Send + Sync + 'static {
+    /// Hook for garbage collecting the WAL. Takes a list of ranges of WAL Files that are currently
+    /// referenced by some active Manifest. The implementation may delete any WAL File that is not
+    /// included in the ranges in this list.
+    async fn collect(&self, referenced_ranges: Vec<WalFileRange>) -> Result<(), WalError>;
 }
 
 impl From<WalStatus> for WalError {
