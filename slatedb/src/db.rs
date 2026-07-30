@@ -23,6 +23,8 @@
 pub use crate::db_status::{DbStatus, SegmentPrefix};
 
 use crate::db_cache::CacheTarget;
+use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -75,7 +77,7 @@ use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
 
-use crate::db_status::{ClosedResultWriter, DbStatusManager};
+use crate::db_status::{ClosedResultWriter, DbStatusManager, DurabilityWaiter};
 use crate::wal::{WalEvent, WalIterator, WalObserver, WalStatus};
 pub use builder::DbBuilder;
 pub use builder::DbReaderBuilder;
@@ -2010,26 +2012,51 @@ impl DbCacheManagerOps for Db {
 
 /// Handle returned from write operations, containing metadata about the write.
 /// This structure is designed to be extensible for future enhancements.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WriteHandle {
     pub(crate) seq: u64,
     pub(crate) create_ts: i64,
-    status_rx: tokio::sync::watch::Receiver<DbStatus>,
-    close_result: WatchableOnceCellReader<Result<(), SlateDBError>>,
+    durability_waiter: DurabilityWaiter,
+}
+
+impl fmt::Debug for WriteHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WriteHandle")
+            .field("seq", &self.seq)
+            .field("create_ts", &self.create_ts)
+            .finish_non_exhaustive()
+    }
 }
 
 impl WriteHandle {
-    pub(crate) fn new(
+    /// Creates a write handle that uses `durability_waiter` to determine when
+    /// the write is durable.
+    ///
+    /// This constructor is intended for custom [`DbWriteOps`] implementations
+    /// and test doubles whose writes are not immediately durable.
+    pub fn new<F, Fut>(seq: u64, create_ts: i64, durability_waiter: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), crate::Error>> + Send + 'static,
+    {
+        let durability_waiter: DurabilityWaiter = Arc::new(move |_| Box::pin(durability_waiter()));
+
+        Self {
+            seq,
+            create_ts,
+            durability_waiter,
+        }
+    }
+
+    pub(crate) fn new_with_waiter(
         seq: u64,
         create_ts: i64,
-        status_rx: tokio::sync::watch::Receiver<DbStatus>,
-        close_result: WatchableOnceCellReader<Result<(), SlateDBError>>,
+        durability_waiter: DurabilityWaiter,
     ) -> Self {
         Self {
             seq,
             create_ts,
-            status_rx,
-            close_result,
+            durability_waiter,
         }
     }
 
@@ -2052,25 +2079,7 @@ impl WriteHandle {
     ///
     /// Returns a closed error if the database closes first.
     pub async fn await_durable(&self) -> Result<(), crate::Error> {
-        let mut status_rx = self.status_rx.clone();
-
-        let wait_result = status_rx
-            .wait_for(|status| status.durable_seq >= self.seq || status.close_reason.is_some())
-            .await;
-
-        match wait_result {
-            Ok(status) if status.durable_seq >= self.seq => Ok(()),
-            // The write was not durable before the database closed. Use the
-            // recorded close result to preserve fencing and panic errors.
-            Ok(_) | Err(_) => match self
-                .close_result
-                .read()
-                .expect("database closed without recording a close result")
-            {
-                Ok(()) => Err(SlateDBError::Closed.into()),
-                Err(error) => Err(error.into()),
-            },
-        }
+        (self.durability_waiter)(self.seq).await
     }
 }
 
@@ -6171,6 +6180,23 @@ mod tests {
         db.close()
             .await
             .expect_err("close should error out due to WAL IO error");
+    }
+
+    #[tokio::test]
+    async fn test_constructed_write_handle_uses_durability_waiter() {
+        let waiter_called = Arc::new(AtomicBool::new(false));
+        let waiter_called_clone = waiter_called.clone();
+        let handle = WriteHandle::new(1, 0, move || {
+            let waiter_called = waiter_called_clone.clone();
+            async move {
+                waiter_called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        });
+
+        handle.await_durable().await.unwrap();
+
+        assert!(waiter_called.load(Ordering::SeqCst));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

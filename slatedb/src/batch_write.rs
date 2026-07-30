@@ -36,7 +36,6 @@ use std::collections::BTreeSet;
 
 use crate::config::WriteOptions;
 use crate::db_state::DbState;
-use crate::db_status::ClosedResultWriter;
 use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandler;
 use crate::mem_table::KVTable;
@@ -306,12 +305,8 @@ impl DbInner {
         // maybe freeze the memtable.
         self.maybe_freeze_current_memtable()?;
 
-        let write_handle = WriteHandle::new(
-            commit_seq,
-            now,
-            self.status_manager.subscribe(),
-            self.status_manager.result_reader(),
-        );
+        let write_handle =
+            WriteHandle::new_with_waiter(commit_seq, now, self.status_manager.durability_waiter());
 
         Ok(Ok(write_handle))
     }
