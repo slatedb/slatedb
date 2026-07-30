@@ -2014,26 +2014,12 @@ impl DbCacheManagerOps for Db {
 pub struct WriteHandle {
     pub(crate) seq: u64,
     pub(crate) create_ts: i64,
-    status_rx: Option<tokio::sync::watch::Receiver<DbStatus>>,
-    close_result: Option<WatchableOnceCellReader<Result<(), SlateDBError>>>,
+    status_rx: tokio::sync::watch::Receiver<DbStatus>,
+    close_result: WatchableOnceCellReader<Result<(), SlateDBError>>,
 }
 
 impl WriteHandle {
-    /// Creates a metadata-only write handle.
-    ///
-    /// Handles returned by [`Db`] write operations also carry a database status
-    /// subscription and support [`WriteHandle::await_durable`]. A handle created
-    /// directly with this constructor does not.
-    pub fn new(seq: u64, create_ts: i64) -> Self {
-        Self {
-            seq,
-            create_ts,
-            status_rx: None,
-            close_result: None,
-        }
-    }
-
-    pub(crate) fn new_with_status(
+    pub(crate) fn new(
         seq: u64,
         create_ts: i64,
         status_rx: tokio::sync::watch::Receiver<DbStatus>,
@@ -2042,8 +2028,8 @@ impl WriteHandle {
         Self {
             seq,
             create_ts,
-            status_rx: Some(status_rx),
-            close_result: Some(close_result),
+            status_rx,
+            close_result,
         }
     }
 
@@ -2064,14 +2050,9 @@ impl WriteHandle {
     ///
     /// # Errors
     ///
-    /// Returns an invalid error for a metadata-only handle created with
-    /// [`WriteHandle::new`], or a closed error if the database closes first.
+    /// Returns a closed error if the database closes first.
     pub async fn await_durable(&self) -> Result<(), crate::Error> {
-        let Some(mut status_rx) = self.status_rx.clone() else {
-            return Err(crate::Error::invalid(
-                "cannot await durability on a metadata-only WriteHandle".to_string(),
-            ));
-        };
+        let mut status_rx = self.status_rx.clone();
 
         let status = status_rx
             .wait_for(|status| status.durable_seq >= self.seq || status.close_reason.is_some())
@@ -2082,7 +2063,7 @@ impl WriteHandle {
             return Ok(());
         }
 
-        match self.close_result.as_ref().and_then(|reader| reader.read()) {
+        match self.close_result.read() {
             Some(Ok(())) => Err(SlateDBError::Closed.into()),
             Some(Err(error)) => Err(error.into()),
             None => Err(crate::Error::closed(

@@ -306,7 +306,7 @@ impl DbInner {
         // maybe freeze the memtable.
         self.maybe_freeze_current_memtable()?;
 
-        let write_handle = WriteHandle::new_with_status(
+        let write_handle = WriteHandle::new(
             commit_seq,
             now,
             self.status_manager.subscribe(),
