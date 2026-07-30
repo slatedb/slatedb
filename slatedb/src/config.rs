@@ -1551,7 +1551,7 @@ impl GarbageCollectorOptions {
 
 /// Default options for the garbage collector for a directory.
 ///
-/// By default, the garbage collector will run every minute and deletes files
+/// By default, the garbage collector will run every 10 minutes and deletes files
 /// that are at least 5 minutes old.
 impl Default for GarbageCollectorDirectoryOptions {
     fn default() -> Self {
