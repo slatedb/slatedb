@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use rand::Rng;
 use slatedb::config::{
-    CompactionWorkerOptions, CompactorOptions, CompressionCodec, DbReaderOptions,
+    CompactionWorkerOptions, CompactorOptions, CompressionCodec, DbReaderOptions, DurabilityLevel,
     GarbageCollectorDirectoryOptions, GarbageCollectorOptions, GarbageCollectorScheduleOptions,
-    SizeTieredCompactionSchedulerOptions,
+    ScanOptions, SizeTieredCompactionSchedulerOptions,
 };
-use slatedb::{DbRand, Settings};
+use slatedb::{DbRand, IterationOrder, Settings};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
@@ -86,6 +86,24 @@ pub fn build_reader_options(rand: &DbRand) -> DbReaderOptions {
         max_memtable_bytes,
         ..DbReaderOptions::default()
     }
+}
+
+/// Builds randomized deterministic scan options for DST scenarios.
+pub fn build_scan_options(rand: &DbRand, read_durability: DurabilityLevel) -> ScanOptions {
+    let mut rng = rand.rng();
+    let read_ahead_options = [1, 4 * 1024, 64 * 1024, MIB_1];
+    let order = if rng.random_bool(0.5) {
+        IterationOrder::Ascending
+    } else {
+        IterationOrder::Descending
+    };
+
+    ScanOptions::new()
+        .with_durability_filter(read_durability)
+        .with_read_ahead_bytes(read_ahead_options[rng.random_range(0..read_ahead_options.len())])
+        .with_cache_blocks(rng.random_bool(0.5))
+        .with_max_fetch_tasks(rng.random_range(1..=4))
+        .with_order(order)
 }
 
 /// Builds randomized deterministic compactor options for DST scenarios.
