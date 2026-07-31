@@ -322,10 +322,6 @@ impl EncodedSsTableBuilder {
         self.blocks.push_back(block);
         self.first_key = None;
 
-        // Block encoding (compression/block transformer) is CPU-heavy.
-        // Give runtime a chance to run other tasks after each block.
-        tokio::task::yield_now().await;
-
         Ok(Some(block_size))
     }
 
