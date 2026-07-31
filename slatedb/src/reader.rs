@@ -246,7 +246,7 @@ impl Reader {
         )
         .await?;
 
-        iterator
+        let result = iterator
             .next_entry()
             .await?
             .map(|entry| {
@@ -256,7 +256,11 @@ impl Reader {
                     Ok(KeyValue::from(entry))
                 }
             })
-            .transpose()
+            .transpose();
+
+        tokio::task::coop::consume_budget().await;
+
+        result
     }
 
     /// Create an iterator over a key range.
