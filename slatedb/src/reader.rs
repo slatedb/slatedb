@@ -258,8 +258,6 @@ impl Reader {
             })
             .transpose();
 
-        tokio::task::coop::consume_budget().await;
-
         result
     }
 

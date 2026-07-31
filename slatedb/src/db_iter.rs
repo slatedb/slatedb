@@ -284,7 +284,9 @@ impl DbIterator {
             Err(error)
         } else {
             let result = loop {
-                match self.iter.next().await {
+                let next = self.iter.next().await;
+                tokio::task::coop::consume_budget().await;
+                match next {
                     Ok(Some(entry)) => match entry.value {
                         ValueDeletable::Tombstone => continue,
                         _ => break Ok(Some(entry)),
