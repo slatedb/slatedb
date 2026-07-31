@@ -858,6 +858,9 @@ impl TokioCompactionExecutorInner {
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
                 progress(total_bytes, &output_ssts);
             }
+
+            // Keep cached compaction work cooperative.
+            tokio::task::coop::consume_budget().await;
         }
 
         // Drain the in-flight close, then flush the final partial SST. Order

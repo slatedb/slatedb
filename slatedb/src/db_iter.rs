@@ -284,7 +284,10 @@ impl DbIterator {
             Err(error)
         } else {
             let result = loop {
-                match self.iter.next().await {
+                let next = self.iter.next().await;
+                // Keep cached iteration cooperative.
+                tokio::task::coop::consume_budget().await;
+                match next {
                     Ok(Some(entry)) => match entry.value {
                         ValueDeletable::Tombstone => continue,
                         _ => break Ok(Some(entry)),
@@ -422,7 +425,10 @@ impl DbRecencyIterator {
                 self.current_initialized = true;
             }
 
-            match iter.next().await {
+            let next = iter.next().await;
+            // Keep cached iteration cooperative.
+            tokio::task::coop::consume_budget().await;
+            match next {
                 Ok(Some(entry)) => return Ok(Some(entry)),
                 Ok(None) => {
                     self.iters.pop_front();

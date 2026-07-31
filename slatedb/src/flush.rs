@@ -37,6 +37,8 @@ impl DbInner {
         while let Some(entry) = iter.next().await? {
             sst_builder.add(entry).await?;
             any = true;
+            // Keep cached flush work cooperative.
+            tokio::task::coop::consume_budget().await;
         }
         if !any {
             return Ok(None);
@@ -131,6 +133,8 @@ impl DbInner {
             }
             current_builder.add(entry).await?;
             current_has_entry = true;
+            // Keep cached flush work cooperative.
+            tokio::task::coop::consume_budget().await;
         }
         if current_has_entry {
             out.push(EncodedSegmentSst {

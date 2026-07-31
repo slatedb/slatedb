@@ -212,6 +212,8 @@ impl RowEntryIterator for MemTableIterator {
             let front = self.borrow_item().clone();
             if front.is_some_and(|record| record.key < next_key) {
                 self.next_sync();
+                // Keep in-memory seeking cooperative.
+                tokio::task::coop::consume_budget().await;
             } else {
                 return Ok(());
             }
