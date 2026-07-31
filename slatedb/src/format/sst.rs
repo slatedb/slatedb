@@ -536,7 +536,11 @@ pub(crate) async fn compress_and_transform(
 ) -> Result<usize, SlateDBError> {
     let compressed = match compression_codec {
         None => data,
-        Some(c) => compress(data, c)?,
+        Some(c) => {
+            let compressed = compress(data, c)?;
+            tokio::task::coop::consume_budget().await;
+            compressed
+        }
     };
     let transformed = transform(compressed, block_transformer).await?;
     let checksum = crc32fast::hash(&transformed);
@@ -600,10 +604,14 @@ pub(crate) async fn transform(
     block_transformer: Option<&Arc<dyn BlockTransformer>>,
 ) -> Result<Bytes, SlateDBError> {
     let transformed = match block_transformer {
-        Some(t) => t
-            .encode(data)
-            .await
-            .map_err(|_| SlateDBError::BlockTransformError)?,
+        Some(t) => {
+            let transformed = t
+                .encode(data)
+                .await
+                .map_err(|_| SlateDBError::BlockTransformError)?;
+            tokio::task::coop::consume_budget().await;
+            transformed
+        }
         None => data,
     };
     Ok(transformed)
