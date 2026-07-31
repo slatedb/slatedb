@@ -161,6 +161,7 @@ See who's using SlateDB.
 - [Massive](https://massive.com)
 - [Merklemap](https://merklemap.com)
 - [OpenData](https://www.opendata.dev)
+- [Prisma](https://www.prisma.io)
 - [Responsive](https://responsive.dev)
 - [s2-lite](https://github.com/s2-streamstore/s2)
 - [SQLync](https://sqlync.com)

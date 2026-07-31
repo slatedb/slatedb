@@ -48,8 +48,8 @@ use crate::bytes_range::{ByteRangeBounds, BytesRange};
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{
-    FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, ScanOptions, Settings,
-    WriteOptions,
+    CloseOptions, FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, ScanOptions,
+    Settings, WriteOptions,
 };
 use crate::db_common::extract_segment_prefix;
 use crate::db_iter::{DbIterator, DbRecencyIterator};
@@ -681,6 +681,15 @@ impl Db {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
+        self.close_with_options(CloseOptions::default()).await
+    }
+
+    /// Close the database with custom options.
+    ///
+    /// Setting [`CloseOptions::flush_memtables`] to `false` skips the final
+    /// active memtable flush. Memtables already being flushed are allowed to
+    /// finish, and writes that are not durable may be lost.
+    pub async fn close_with_options(&self, options: CloseOptions) -> Result<(), crate::Error> {
         let should_flush = match self.status().close_reason {
             // If already closed, don't close again.
             Some(CloseReason::Clean) => return Err(SlateDBError::Closed.into()),
@@ -689,8 +698,9 @@ impl Db {
             // run when in a failed state (vs. a clean closure, which will return
             // Error::Closed(CloseReason::Clean) on subsequent calls).
             Some(_) => false,
-            // Flush outstanding writes if the database is still open.
-            None => true,
+            // Flush outstanding writes if the database is still open and the
+            // caller requested a final memtable flush.
+            None => options.flush_memtables,
         };
 
         // Mark the database as closed before flushing.
@@ -2222,7 +2232,7 @@ mod tests {
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::MetricLevel;
     use crate::config::{
-        CheckpointOptions, CompactionWorkerOptions, CompactorOptions,
+        CheckpointOptions, CloseOptions, CompactionWorkerOptions, CompactorOptions,
         GarbageCollectorDirectoryOptions, GarbageCollectorOptions, ObjectStoreCacheOptions,
         PutOptions, ScanOptions, Settings, SstBlockSize, Ttl, WriteOptions,
     };
@@ -3466,6 +3476,99 @@ mod tests {
             lookup_metric(&metrics_recorder, crate::db_stats::L0_FLUSH_BYTES).unwrap() > 0,
             "expected L0 flush during close"
         );
+    }
+
+    #[tokio::test]
+    async fn test_close_with_options_default_flushes_final_memtable() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut settings = test_db_options(0, 1024, None);
+        settings.flush_interval = None;
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(
+            "/tmp/test_close_with_options_default_flushes_final_memtable",
+            object_store,
+        )
+        .with_settings(settings)
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        db.put(b"test_key", b"test_value").await.unwrap();
+
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::L0_FLUSH_BYTES).unwrap_or(0),
+            0
+        );
+
+        db.close_with_options(CloseOptions::default())
+            .await
+            .unwrap();
+
+        assert!(
+            lookup_metric(&metrics_recorder, crate::db_stats::L0_FLUSH_BYTES).unwrap() > 0,
+            "expected L0 flush during close with default options"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_close_with_options_skips_final_flush() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut settings = test_db_options(0, 1024, None);
+        settings.flush_interval = None;
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(
+            "/tmp/test_close_with_options_skips_final_flush",
+            object_store,
+        )
+        .with_settings(settings)
+        .with_metrics_recorder(metrics_recorder.clone())
+        .build()
+        .await
+        .unwrap();
+
+        db.put(b"test_key", b"test_value").await.unwrap();
+
+        db.close_with_options(CloseOptions::default().with_flush_memtables(false))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::db_stats::L0_FLUSH_BYTES).unwrap_or(0),
+            0
+        );
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn test_close_without_flush_fails_pending_durability_wait() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut settings = test_db_options(0, 1024, None);
+        settings.flush_interval = None;
+        settings.wal_enabled = false;
+        let db = Db::builder(
+            "/tmp/test_close_without_flush_fails_pending_durability_wait",
+            object_store,
+        )
+        .with_settings(settings)
+        .build()
+        .await
+        .unwrap();
+
+        let handle = db.put(b"key", b"value").await.unwrap();
+
+        db.close_with_options(CloseOptions::default().with_flush_memtables(false))
+            .await
+            .unwrap();
+
+        let error = tokio::time::timeout(Duration::from_secs(5), handle.await_durable())
+            .await
+            .expect("durability wait remained blocked after close")
+            .expect_err("discarded write should not become durable");
+        assert!(matches!(
+            error.kind(),
+            crate::ErrorKind::Closed(CloseReason::Clean)
+        ));
     }
 
     #[tokio::test]

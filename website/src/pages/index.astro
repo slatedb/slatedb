@@ -104,6 +104,7 @@ const jsonLd = {
 // The "used by" companies — even row, all logos rendered at the same height.
 const usedBy = [
     { name: 'Dropbox',    href: 'https://www.dropbox.com/',     logo: '/img/logos/dropbox.svg',    scale: 1.2 },
+    { name: 'Prisma',     href: 'https://www.prisma.io/',       logo: '/img/logos/prisma.svg' },
     { name: 'HelixDB',    href: 'https://www.helix-db.com/',      logo: '/img/logos/helixdb.png',    scale: 0.8 },
     { name: 'TensorLake', href: 'https://www.tensorlake.ai/',   logo: '/img/logos/tensorlake.svg', scale: 1.2 },
     { name: 'S2',         href: 'https://s2.dev/',                logo: '/img/logos/s2.svg' },
@@ -923,6 +924,19 @@ const osLinks = [
     .usedby-logo:hover img {
         opacity: 0.95;
         filter: grayscale(0%);
+    }
+
+    @media (max-width: 640px) {
+        .usedby-row {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            column-gap: 0.75rem;
+        }
+        .usedby-logo {
+            flex: 0 0 calc((100% - 1.5rem) / 3);
+            width: calc((100% - 1.5rem) / 3);
+        }
     }
 
     /* ---------- Editorial prose ---------- */
