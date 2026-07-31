@@ -246,7 +246,7 @@ impl Reader {
         )
         .await?;
 
-        let result = iterator
+        iterator
             .next_entry()
             .await?
             .map(|entry| {
@@ -256,9 +256,7 @@ impl Reader {
                     Ok(KeyValue::from(entry))
                 }
             })
-            .transpose();
-
-        result
+            .transpose()
     }
 
     /// Create an iterator over a key range.
