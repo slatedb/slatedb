@@ -2299,6 +2299,35 @@ mod tests {
             })
     }
 
+    fn lookup_object_store_api_request_count(
+        recorder: &DefaultMetricsRecorder,
+        component: &'static str,
+        store_type: &'static str,
+        op: &'static str,
+        api: &'static str,
+    ) -> i64 {
+        lookup_metric_with_labels(
+            recorder,
+            OBJECT_STORE_REQUEST_COUNT,
+            &object_store_labels(component, store_type, op, api),
+        )
+        .unwrap_or(0)
+    }
+
+    fn lookup_object_store_api_histogram_count(
+        recorder: &DefaultMetricsRecorder,
+        component: &'static str,
+        store_type: &'static str,
+        op: &'static str,
+        api: &'static str,
+    ) -> u64 {
+        lookup_object_store_histogram_count(
+            recorder,
+            &object_store_labels(component, store_type, op, api),
+        )
+        .unwrap_or(0)
+    }
+
     fn lookup_object_store_op_request_count(
         recorder: &DefaultMetricsRecorder,
         component: &'static str,
@@ -2319,12 +2348,7 @@ mod tests {
 
         apis.iter()
             .map(|api| {
-                lookup_metric_with_labels(
-                    recorder,
-                    OBJECT_STORE_REQUEST_COUNT,
-                    &object_store_labels(component, store_type, op, api),
-                )
-                .unwrap_or(0)
+                lookup_object_store_api_request_count(recorder, component, store_type, op, api)
             })
             .sum()
     }
@@ -2349,11 +2373,7 @@ mod tests {
 
         apis.iter()
             .map(|api| {
-                lookup_object_store_histogram_count(
-                    recorder,
-                    &object_store_labels(component, store_type, op, api),
-                )
-                .unwrap_or(0)
+                lookup_object_store_api_histogram_count(recorder, component, store_type, op, api)
             })
             .sum()
     }
@@ -11781,26 +11801,56 @@ mod tests {
                 .await
                 .unwrap();
 
-            let requests_before =
-                lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+            let requests_before = lookup_object_store_api_request_count(
+                &metrics_recorder,
+                "db",
+                "main",
+                "get",
+                "get_range",
+            );
+            let histograms_before = lookup_object_store_api_histogram_count(
+                &metrics_recorder,
+                "db",
+                "main",
+                "get",
+                "get_range",
+            );
             let _val = kv_store.get(b"test_key").await.unwrap();
-            let requests_after_first =
-                lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+            let requests_after_first = lookup_object_store_api_request_count(
+                &metrics_recorder,
+                "db",
+                "main",
+                "get",
+                "get_range",
+            );
             let got = kv_store.get(b"test_key").await.unwrap();
-            let requests_after_second =
-                lookup_object_store_op_request_count(&metrics_recorder, "db", "main", "get");
+            let requests_after_second = lookup_object_store_api_request_count(
+                &metrics_recorder,
+                "db",
+                "main",
+                "get",
+                "get_range",
+            );
+            let histograms_after_second = lookup_object_store_api_histogram_count(
+                &metrics_recorder,
+                "db",
+                "main",
+                "get",
+                "get_range",
+            );
 
             // The instrumented store sits above the object store cache and counts
             // logical read calls whether they are served from the cache or the
-            // remote store.
+            // remote store. Restrict the assertion to range reads so background
+            // manifest polling, which uses plain get calls, cannot affect it.
             // A point get reads the single-part SST in three sub-ranges (index,
             // filter and block).
             assert_eq!(requests_after_first, requests_before + 3);
             assert_eq!(got, Some(Bytes::from_static(b"test_value")));
             assert_eq!(requests_after_second, requests_after_first + 3);
             assert_eq!(
-                lookup_object_store_op_histogram_count(&metrics_recorder, "db", "main", "get"),
-                requests_after_second as u64
+                histograms_after_second - histograms_before,
+                (requests_after_second - requests_before) as u64
             );
             kv_store.close().await.unwrap();
         }
