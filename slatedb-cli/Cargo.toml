@@ -14,7 +14,15 @@ clap = { workspace = true, features = ["derive"] }
 humantime = { workspace = true }
 object_store = { workspace = true }
 serde_json = { workspace = true }
-slatedb = { workspace = true }
+slatedb = { workspace = true, features = [
+    "aws",
+    "azure",
+    "gcp",
+    "snappy",
+    "zlib",
+    "lz4",
+    "zstd",
+] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-util = { workspace = true, default-features = false, features = ["rt"] }
 tracing = { workspace = true, features = ["log"] }

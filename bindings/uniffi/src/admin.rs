@@ -1,15 +1,15 @@
-use std::ops::Bound;
-use std::sync::Arc;
-
-use chrono::{DateTime, Utc};
-use ulid::Ulid;
-
 use crate::builder::CloneBuilder;
+use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::error::{Error, SlateDbError};
 use crate::types::{
-    Checkpoint, CloneSourceSpec, Compaction, CompactorStateView, VersionedCompactions,
-    VersionedManifest,
+    try_checkpoint_id_from_str, Checkpoint, CheckpointCreateResult, CloneSourceSpec, Compaction,
+    CompactionSpec, CompactorStateView, VersionedCompactions, VersionedManifest,
 };
+use chrono::{DateTime, Utc};
+use std::ops::Bound;
+use std::sync::Arc;
+use std::time::Duration;
+use ulid::Ulid;
 
 fn into_u64_bounds(
     from: Option<u64>,
@@ -76,6 +76,16 @@ impl Admin {
         Ok((&view).into())
     }
 
+    /// Generate a compaction from a spec and submit it.
+    ///
+    /// ## Returns
+    /// - `Ok(Compaction)`: The submitted compaction.
+    /// - `Err`: If there was an error during submission or reading the submitted compaction.
+    pub async fn submit_compaction(&self, spec: CompactionSpec) -> Result<Compaction, Error> {
+        let compaction = self.inner.submit_compaction((&spec).try_into()?).await?;
+        Ok(Compaction::from(&compaction))
+    }
+
     /// Lists compactions files inside the half-open ID range `[from, to)`.
     pub async fn list_compactions(
         &self,
@@ -94,6 +104,17 @@ impl Admin {
     ) -> Result<Vec<Checkpoint>, Error> {
         let checkpoints = self.inner.list_checkpoints(name_filter.as_deref()).await?;
         Ok(checkpoints.iter().map(Checkpoint::from).collect())
+    }
+
+    /// Runs the garbage collector once with the provided options.
+    ///
+    /// When `options` is `None`, SlateDB's default garbage collector options are used.
+    pub async fn run_gc_once(&self, options: Option<GarbageCollectorOptions>) -> Result<(), Error> {
+        let options = options.map_or_else(
+            slatedb::config::GarbageCollectorOptions::default,
+            Into::into,
+        );
+        self.inner.run_gc_once(options).await.map_err(Into::into)
     }
 
     /// Looks up a timestamp for the provided sequence number.
@@ -116,6 +137,42 @@ impl Admin {
             .ok_or(SlateDbError::InvalidTimestampSeconds { timestamp_secs })?;
         self.inner
             .get_sequence_for_timestamp(timestamp, round_up)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Creates a checkpoint of the db stored in the object store at the specified path using the
+    /// provided options.
+    pub async fn create_detached_checkpoint(
+        &self,
+        options: &CheckpointOptions,
+    ) -> Result<CheckpointCreateResult, Error> {
+        Ok(CheckpointCreateResult::from(
+            self.inner
+                .create_detached_checkpoint(&slatedb::config::CheckpointOptions::try_from(options)?)
+                .await?,
+        ))
+    }
+
+    /// Refresh the lifetime of an existing checkpoint.
+    pub async fn refresh_checkpoint(
+        &self,
+        id: String,
+        lifetime_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.inner
+            .refresh_checkpoint(
+                try_checkpoint_id_from_str(&id)?,
+                lifetime_ms.map(Duration::from_millis),
+            )
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Deletes the checkpoint with the specified id.
+    pub async fn delete_checkpoint(&self, id: String) -> Result<(), crate::Error> {
+        self.inner
+            .delete_checkpoint(try_checkpoint_id_from_str(&id)?)
             .await
             .map_err(Into::into)
     }

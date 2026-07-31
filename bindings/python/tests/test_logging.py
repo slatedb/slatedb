@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import pytest
-
 from conftest import LogCollector, new_memory_store, open_db, unique_path, wait_until
+
 from slatedb.uniffi import Error, LogLevel, init_logging
 
 

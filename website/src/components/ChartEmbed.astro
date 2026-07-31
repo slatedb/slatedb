@@ -1,0 +1,56 @@
+---
+/**
+ * Embeds a self-contained interactive chart (an HTML page under /public/charts)
+ * in a sandboxed iframe. The chart page posts its content height back via
+ * postMessage; the script below resizes the iframe to match, so there is no
+ * inner scrollbar and the figure flows inline like an image.
+ */
+interface Props {
+	/** Path under the site root, e.g. "/charts/db-bench.html". */
+	src: string;
+	/** Accessible title for the iframe. */
+	title: string;
+	/** Initial height (px) before the chart reports its real size. */
+	minHeight?: number;
+}
+
+const { src, title, minHeight = 460 } = Astro.props;
+---
+
+<iframe
+	class="chart-embed"
+	data-chart-embed
+	src={src}
+	title={title}
+	loading="lazy"
+	scrolling="no"
+	style={`height:${minHeight}px`}
+></iframe>
+
+<style>
+	.chart-embed {
+		width: 100%;
+		border: 0;
+		display: block;
+		/* auto inline margins center the figure within the prose column (it's
+		   capped narrower than the card via .post-body > iframe in the post page). */
+		margin: 2rem auto;
+		overflow: hidden;
+		background: transparent;
+	}
+</style>
+
+<script>
+	// One listener handles every chart iframe on the page; match the reporting
+	// frame by its contentWindow so heights land on the right iframe.
+	window.addEventListener('message', (e) => {
+		const data = e.data;
+		if (!data || typeof data.chartHeight !== 'number') return;
+		const frames = document.querySelectorAll<HTMLIFrameElement>('iframe[data-chart-embed]');
+		for (const frame of frames) {
+			if (frame.contentWindow === e.source) {
+				frame.style.height = data.chartHeight + 'px';
+			}
+		}
+	});
+</script>

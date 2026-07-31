@@ -4,6 +4,7 @@
 // LLM crawlers that honor content alternates will pick this up automatically.
 
 import Default from '@astrojs/starlight/components/Head.astro';
+import Analytics from './Analytics.astro';
 
 // Derive the .md URL from the current pathname. Pages live at e.g.
 //   /docs/get-started/quickstart/    -> mirror at /docs/get-started/quickstart.md
@@ -14,6 +15,7 @@ const mdHref = isDocsRoute ? `${pathname}.md` : null;
 ---
 
 <Default />
+<Analytics />
 {
     mdHref && (
         <link rel="alternate" type="text/markdown" href={mdHref} title="Markdown source" />

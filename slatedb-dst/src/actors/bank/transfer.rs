@@ -40,7 +40,6 @@ impl TransferActor {
 impl Actor for TransferActor {
     async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
         let write_options = WriteOptions {
-            await_durable: false,
             ..WriteOptions::default()
         };
         let from_rand = ctx.rand().rng().next_u64();

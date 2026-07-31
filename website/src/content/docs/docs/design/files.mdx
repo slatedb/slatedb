@@ -70,3 +70,9 @@ The `gc` directory contains boundary files used for garbage collection coordinat
 Each boundary file stores a single unsigned 64-bit integer representing an inclusive high-watermark. A boundary value `B` means that object IDs `<= B` are eligible for deletion. Before the garbage collector deletes old sequenced metadata files, it advances the namespace boundary. After a writer creates a sequenced metadata file, it checks the boundary before returning success. If the created ID is at or behind the boundary, the write is treated as failed.
 
 Boundary files use conditional updates (ETag-based) to ensure monotonic advancement and prevent concurrent GC processes from interfering with each other. They provide a persistent marker that allows garbage collectors to safely delete objects below the boundary without risking deletion of still-referenced data.
+
+Garbage collectors advance boundary files by default. This can be disabled through
+`GarbageCollectorOptions`; eligible metadata is still deleted, but the durable boundary is not
+advanced. Metadata writers always check any existing boundary. All garbage collectors for a
+database must use a compatible policy, and the metadata `min_age` settings must be long enough to
+outlive stale processes when boundary advancement is disabled.

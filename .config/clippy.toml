@@ -43,6 +43,7 @@ disallowed-types = [
     { path = "std::time::Instant", reason = "Use tokio::time::Instant instead" },
     { path = "std::time::SystemTime", reason = "Use slatedb_common::clock::SystemClock instead" },
     { path = "std::thread::Builder", reason = "Use tokio::task::Builder instead" },
+    { path = "object_store::prefix::PrefixStore", reason = "Use SlateDB's explicit builder path handling instead" },
 ]
 disallowed-methods = [
     # Safety checks to keep SlateDB safe for deterministic simulation testing (DST)

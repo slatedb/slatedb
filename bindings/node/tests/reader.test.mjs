@@ -8,6 +8,7 @@ import {
   DbReaderBuilder,
   ErrorData,
   FlushType,
+  ReaderMode,
   SsTableId,
   WriteBatch,
 } from "../index.js";
@@ -320,13 +321,13 @@ test("reader builder validation and errors", async (t) => {
 
   const invalidBuilder = cleanup.track(new DbReaderBuilder(TEST_DB_PATH, store), { shutdown: false });
   const invalidCheckpointError = await expectInvalid(
-    () => invalidBuilder.with_checkpoint_id("not-a-uuid"),
+    () => invalidBuilder.with_reader_mode(ReaderMode.Checkpoint("not-a-uuid")),
   );
   assert.match(invalidCheckpointError.message, /^invalid checkpoint_id UUID:/);
 
   const missingCheckpointId = "ffffffff-ffff-ffff-ffff-ffffffffffff";
   const missingBuilder = cleanup.track(new DbReaderBuilder(TEST_DB_PATH, store), { shutdown: false });
-  missingBuilder.with_checkpoint_id(missingCheckpointId);
+  missingBuilder.with_reader_mode(ReaderMode.Checkpoint(missingCheckpointId));
   const missingCheckpointError = await expectError(
     () => missingBuilder.build(),
     ErrorData,

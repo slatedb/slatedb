@@ -1,0 +1,226 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SlateDB vs. Replicated RocksDB — Cost Scaling & Breakdown</title>
+<style>
+  :root{color-scheme:light}
+  :root{--bg:#fcfcfa;--panel:#fff;--ink:#1f242b;--muted:#6b7280;--line:#1f242b;--grid:#e1e3e5;}
+  *{box-sizing:border-box}
+  body{margin:0;background:transparent;color:var(--ink);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono","Courier New",monospace;line-height:1.55}
+  img{max-width:100%}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 20px 20px}
+  h1{font-size:21px;margin:0 0 8px;letter-spacing:-0.01em}
+  p.sub{margin:0;color:#3b4047;font-size:13.5px;max-width:860px}
+  .panels{display:flex;gap:16px;flex-wrap:nowrap;margin-top:0}
+  .panel{flex:1 1 0;min-width:0;background:var(--panel);border:1px solid var(--line);padding:12px 14px 10px;overflow-x:auto}
+  .panel h3{margin:0 0 8px;font-size:13px}
+  .panel svg{width:100%;height:auto;display:block;overflow:visible;min-width:300px}
+  svg text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin:0 0 8px;font-size:12px;color:var(--ink)}
+  .legend .item{display:flex;align-items:center;gap:6px}
+  .legend svg{flex:none;width:auto;min-width:0}
+  #tip{position:fixed;pointer-events:none;background:#1f242b;color:#fff;padding:7px 10px;
+    font-size:12px;line-height:1.5;opacity:0;transition:opacity .08s;white-space:nowrap;z-index:9;
+    font-family:ui-monospace,Menlo,monospace}
+  /* Stack the two panels vertically once they're too narrow to sit side by side. */
+  @media (max-width:760px){
+    .panels{flex-direction:column;flex-wrap:wrap}
+    /* flex-basis:0 zeroes each panel's height in a column; size to content. */
+    .panel{flex:0 0 auto}
+    .panel svg{min-width:0}
+  }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <pattern id="p_diag" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+    <rect width="6" height="6" fill="#fff"/><line x1="0" y1="0" x2="0" y2="6" stroke="#1f242b" stroke-width="1.5"/></pattern>
+  <pattern id="p_hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+    <rect width="8" height="8" fill="#fff"/><line x1="0" y1="0" x2="0" y2="8" stroke="#1f242b" stroke-width="0.8"/></pattern>
+  <pattern id="p_cross" width="5.5" height="5.5" patternUnits="userSpaceOnUse">
+    <rect width="5.5" height="5.5" fill="#fff"/><path d="M0,0 V5.5 M0,0 H5.5" stroke="#1f242b" stroke-width="0.8"/></pattern>
+  <pattern id="p_dots" width="5" height="5" patternUnits="userSpaceOnUse">
+    <rect width="5" height="5" fill="#fff"/><circle cx="2.5" cy="2.5" r="1.05" fill="#1f242b"/></pattern>
+</defs></svg>
+
+<div class="wrap">
+  <div class="panels">
+    <div class="panel">
+      <h3>Monthly cost vs. dataset size</h3>
+      <div class="legend" id="legL"></div>
+      <svg id="line" viewBox="0 0 470 360"></svg>
+    </div>
+    <div class="panel">
+      <h3>Component breakdown &middot; 2 TB</h3>
+      <div class="legend" id="legB"></div>
+      <svg id="bars" viewBox="0 0 430 360"></svg>
+    </div>
+  </div>
+  <div id="tip"></div>
+</div>
+
+<script>
+const P={s3:0.023,put1k:0.005,get1k:0.0004,az:0.02};
+const HRS=730;
+const I4I=[  // discrete i4i tiers: monthly $ + local NVMe GB
+  {mo:0.1716*HRS,nvme:468},{mo:0.3432*HRS,nvme:937},{mo:0.6864*HRS,nvme:1875},
+  {mo:1.3728*HRS,nvme:3750},{mo:2.7456*HRS,nvme:7500},{mo:5.4912*HRS,nvme:15000},
+  {mo:10.9824*HRS,nvme:30000}
+];
+const FLOOR=2;  // i4i.2xlarge index — serving compute floor
+function pick(need){let i=I4I.findIndex(x=>x.nvme>=need);if(i<0)i=I4I.length-1;return I4I[Math.max(i,FLOOR)];}
+const wmult=2,rmult=6,block=8,wa=10,samp=1.3,rampR=1.5,smallFrac=0.3,compRate=0.02;
+
+function comps(kind,D){
+  const w=wmult*D, s3s=samp*D*P.s3, put=w*(1+wa)*1024/8/1000*P.put1k,
+        get=h=>rmult*D*1048576/block*(1-h/100)/1000*P.get1k, comp=compRate*D;
+  if(kind==='rocks'){const inst=pick(rampR*D).mo;   // instance already sized for 1.5× (data + headroom)
+    return {node:inst, stby:2*inst, comp:0, xfer:w*P.az*2, s3:0};}
+  if(kind==='large') return {node:pick(1.0*D).mo,       stby:0, comp:comp, xfer:0, s3:s3s+put+get(99)};
+  return                     {node:pick(smallFrac*D).mo, stby:0, comp:comp, xfer:0, s3:s3s+put+get(95)};
+}
+
+const $=id=>document.getElementById(id);
+const usd=v=>'$'+Math.round(v).toLocaleString('en-US');
+function gb(g){g=Math.round(g);return g>=1000?(g/1000).toLocaleString('en-US',{maximumFractionDigits:g%1000?1:0})+' TB':g+' GB';}
+function niceNum(x){const e=Math.pow(10,Math.floor(Math.log10(x)));const f=x/e;
+  for(const c of [1,1.5,2,2.5,3,4,5,7.5,10]) if(f<=c+1e-9) return c*e; return 10*e;}
+function swatch(t){const W=18,H=12,bg=c=>`<rect x="0.5" y="0.5" width="${W-1}" height="${H-1}" fill="${c}"/>`,
+  box=`<rect x="0.5" y="0.5" width="${W-1}" height="${H-1}" fill="none" stroke="#1f242b"/>`;
+  let i=bg('#fff');
+  if(t==='solid')i=bg('#1f242b');else if(t==='grey')i=bg('#c4c9ce');
+  else if(t==='diag')i+=[-9,-4,1,6,11,16].map(o=>`<line x1="${o}" y1="${H}" x2="${o+H}" y2="0" stroke="#1f242b" stroke-width="1.3"/>`).join('');
+  else if(t==='hatch')i+=[-9,-3,3,9,15].map(o=>`<line x1="${o}" y1="${H}" x2="${o+H}" y2="0" stroke="#1f242b" stroke-width="0.8"/>`).join('');
+  else if(t==='dots')i+=[[3,3],[9,3],[15,3],[6,9],[12,9]].map(p=>`<circle cx="${p[0]}" cy="${p[1]}" r="1.1" fill="#1f242b"/>`).join('');
+  else if(t==='cross')i+=[4,9,14].map(x=>`<line x1="${x}" y1="0" x2="${x}" y2="${H}" stroke="#1f242b" stroke-width="0.7"/>`).join('')+[3,7,11].map(y=>`<line x1="0" y1="${y}" x2="${W}" y2="${y}" stroke="#1f242b" stroke-width="0.7"/>`).join('');
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="overflow:hidden;vertical-align:-2px">${i}${box}</svg>`;}
+function lineSwatch(dash){return `<svg width="22" height="12" viewBox="0 0 22 12" style="overflow:visible;vertical-align:-2px"><line x1="1" y1="6" x2="21" y2="6" stroke="#1f242b" stroke-width="2.4"${dash?' stroke-dasharray="4 3"':''}/></svg>`;}
+
+const tip=$('tip');
+function showTip(e,html){tip.innerHTML=html;tip.style.opacity=1;
+  // Measure the real tooltip box and keep it inside the iframe; flip it to the
+  // left of the cursor when it would otherwise run off the right edge.
+  const pad=8, tw=tip.offsetWidth, th=tip.offsetHeight;
+  let left=e.clientX+12;
+  if(left+tw>innerWidth-pad) left=e.clientX-12-tw;
+  left=Math.max(pad, Math.min(left, innerWidth-pad-tw));
+  let top=Math.max(pad, Math.min(e.clientY-10, innerHeight-pad-th));
+  tip.style.left=left+'px';tip.style.top=top+'px';}
+function hideTip(){tip.style.opacity=0;}
+
+/* ---------- LINE CHART ---------- */
+const L0=2,L1=4;
+const LX={VW:470,VH:360,ML:58,MR:16,MT:22,MB:50};
+LX.PW=LX.VW-LX.ML-LX.MR; LX.PH=LX.VH-LX.MT-LX.MB;
+const tot=o=>o.node+o.stby+o.comp+o.xfer+o.s3;
+const xS=D=>LX.ML+(Math.log10(D)-L0)/(L1-L0)*LX.PW;
+const xInv=px=>Math.pow(10,L0+(px-LX.ML)/LX.PW*(L1-L0));
+let SAMP=[];
+function drawLine(){
+  SAMP=[];for(let i=0;i<=60;i++){const D=Math.pow(10,L0+(i/60)*(L1-L0));
+    SAMP.push({D,rocks:tot(comps('rocks',D)),large:tot(comps('large',D)),small:tot(comps('small',D))});}
+  const mx=Math.max(...SAMP.map(s=>s.rocks)),step=niceNum(mx*1.06/4),
+        yMax=Math.ceil(mx*1.06/step)*step,nt=Math.round(yMax/step);
+  const yS=v=>LX.MT+LX.PH-(v/yMax)*LX.PH;
+  let g='';
+  for(let i=0;i<=nt;i++){const v=i*step,y=yS(v);
+    g+=`<line x1="${LX.ML}" y1="${y}" x2="${LX.ML+LX.PW}" y2="${y}" stroke="var(--grid)" stroke-dasharray="2 3"/>`;
+    g+=`<text x="${LX.ML-8}" y="${y+4}" text-anchor="end" font-size="10.5" fill="#9aa1a9">${usd(v)}</text>`;}
+  [100,200,500,1000,2000,5000,10000].forEach(t=>{const x=xS(t),major=[100,1000,10000].includes(t);
+    g+=`<line x1="${x}" y1="${LX.MT}" x2="${x}" y2="${LX.MT+LX.PH}" stroke="${major?'#d3d6d9':'#eef0f2'}" stroke-dasharray="2 3"/>`;
+    if(major)g+=`<text x="${x}" y="${LX.MT+LX.PH+18}" text-anchor="middle" font-size="10.5" fill="#6b7280">${gb(t)}</text>`;});
+  g+=`<text x="${LX.ML+LX.PW/2}" y="${LX.VH-6}" text-anchor="middle" font-size="11" font-weight="700" fill="#1f242b">dataset size (log)</text>`;
+  let up='',dn='';
+  SAMP.forEach(s=>up+=`${xS(s.D).toFixed(1)},${yS(Math.max(s.small,s.large)).toFixed(1)} `);
+  for(let i=SAMP.length-1;i>=0;i--){const s=SAMP[i];dn+=`${xS(s.D).toFixed(1)},${yS(Math.min(s.small,s.large)).toFixed(1)} `;}
+  g+=`<polygon points="${up}${dn}" fill="url(#p_hatch)" stroke="none"/>`;
+  const path=k=>SAMP.map((s,i)=>(i?'L':'M')+xS(s.D).toFixed(1)+' '+yS(s[k]).toFixed(1)).join(' ');
+  g+=`<path d="${path('large')}" fill="none" stroke="#1f242b" stroke-width="1.1"/>`;
+  g+=`<path d="${path('small')}" fill="none" stroke="#1f242b" stroke-width="1.1" stroke-dasharray="4 3"/>`;
+  g+=`<path d="${path('rocks')}" fill="none" stroke="#1f242b" stroke-width="2.6"/>`;
+  const last=SAMP[SAMP.length-1];
+  g+=`<text x="${xS(last.D)-4}" y="${yS(last.rocks)-7}" text-anchor="end" font-size="11" font-weight="700" fill="#1f242b">RocksDB ×3</text>`;
+  g+=`<text x="${xS(last.D)-4}" y="${yS(last.large)-6}" text-anchor="end" font-size="10.5" fill="#1f242b">SlateDB band</text>`;
+  g+=`<rect x="${LX.ML}" y="${LX.MT}" width="${LX.PW}" height="${LX.PH}" fill="transparent"/>`;
+  g+=`<g id="lhov" style="display:none"><line stroke="#9aa1a9" stroke-dasharray="3 3"/><circle r="3.6" fill="#1f242b"/><circle r="3.3" fill="#fff" stroke="#1f242b"/><circle r="3.3" fill="#fff" stroke="#1f242b"/></g>`;
+  $('line').innerHTML=g; $('line').__y=yS;
+}
+function lineHover(e){const svg=$('line'),r=svg.getBoundingClientRect(),vx=(e.clientX-r.left)/r.width*LX.VW;
+  if(vx<LX.ML||vx>LX.ML+LX.PW){hideTip();$('lhov').style.display='none';return;}
+  const D=xInv(vx);let s=SAMP[0],bd=9e9;for(const p of SAMP){const d=Math.abs(Math.log10(p.D)-Math.log10(D));if(d<bd){bd=d;s=p;}}
+  const yS=svg.__y,x=xS(s.D),hov=$('lhov');hov.style.display='';
+  const ln=hov.querySelector('line');ln.setAttribute('x1',x);ln.setAttribute('x2',x);ln.setAttribute('y1',LX.MT);ln.setAttribute('y2',LX.MT+LX.PH);
+  const c=hov.querySelectorAll('circle');c[0].setAttribute('cx',x);c[0].setAttribute('cy',yS(s.rocks));
+  c[1].setAttribute('cx',x);c[1].setAttribute('cy',yS(s.large));c[2].setAttribute('cx',x);c[2].setAttribute('cy',yS(s.small));
+  showTip(e,`<b>${gb(s.D)}</b><br>RocksDB ×3: <b>${usd(s.rocks)}</b><br>SlateDB large: <b>${usd(s.large)}</b><br>SlateDB small: <b>${usd(s.small)}</b><br>→ ${(s.rocks/Math.min(s.small,s.large)).toFixed(1)}× cheaper`);}
+$('line').addEventListener('mousemove',lineHover);$('line').addEventListener('mouseleave',()=>{hideTip();$('lhov').style.display='none';});
+
+/* ---------- BAR CHART (2 TB) ---------- */
+const Dbar=2000;
+const BC=[
+  {key:'node',label:'Serving / primary node (compute + NVMe)',short:'Serving node',tex:'solid'},
+  {key:'stby',label:'Replica standbys (compute + NVMe)',       short:'Standbys',     tex:'grey'},
+  {key:'comp',label:'Compaction (offloaded, spot)',            short:'Compaction',   tex:'diag'},
+  {key:'xfer',label:'Cross-AZ transfer',                       short:'Cross-AZ',     tex:'dots'},
+  {key:'s3',  label:'S3 (storage + requests)',                 short:'S3',           tex:'cross'},
+];
+const fillFor=t=>t==='solid'?'#1f242b':t==='grey'?'#c4c9ce':t==='empty'?'#fff':'url(#p_'+t+')';
+const BARS=[
+  {name:'RocksDB',sub:'3 copies',   v:comps('rocks',Dbar)},
+  {name:'SlateDB',sub:'small cache',v:comps('small',Dbar)},
+  {name:'SlateDB',sub:'large cache',v:comps('large',Dbar)},
+];
+let SEG=[];
+function drawBars(){
+  const VW=430,VH=360,ML=58,MR=14,MT=40,MB=50,PW=VW-ML-MR,PH=VH-MT-MB;
+  const totals=BARS.map(b=>tot(b.v)),mx=Math.max(...totals),step=niceNum(mx*1.08/4),
+        yMax=Math.ceil(mx*1.08/step)*step,nt=Math.round(yMax/step);
+  const yS=v=>MT+PH-(v/yMax)*PH;
+  const nb=BARS.length,barW=76,gap=40,startX=ML+(PW-(nb*barW+(nb-1)*gap))/2,xo=BARS.map((_,i)=>i*(barW+gap));
+  let g='';SEG=[];
+  for(let i=0;i<=nt;i++){const v=i*step,y=yS(v);
+    g+=`<line x1="${ML}" y1="${y}" x2="${ML+PW}" y2="${y}" stroke="var(--grid)" stroke-dasharray="2 3"/>`;
+    g+=`<text x="${ML-8}" y="${y+4}" text-anchor="end" font-size="10.5" fill="#9aa1a9">${usd(v)}</text>`;}
+  g+=`<text transform="translate(16,${MT+PH/2}) rotate(-90)" text-anchor="middle" font-size="11" font-weight="700" fill="#1f242b">USD / month</text>`;
+  BARS.forEach((b,i)=>{const x=startX+xo[i],t=totals[i];let acc=0;
+    BC.forEach(c=>{const val=b.v[c.key];if(val<=0)return;const y1=yS(acc+val),h=yS(acc)-y1;acc+=val;
+      SEG.push({label:c.label,val,who:`${b.name} · ${b.sub}`});
+      g+=`<rect class="seg" data-i="${SEG.length-1}" x="${x}" y="${y1.toFixed(1)}" width="${barW}" height="${Math.max(h,0).toFixed(1)}" fill="${fillFor(c.tex)}" stroke="#1f242b" stroke-width="1"/>`;});
+    g+=`<text x="${x+barW/2}" y="${yS(t)-8}" text-anchor="middle" font-size="13" font-weight="700" fill="#1f242b">${usd(t)}</text>`;
+    if(b.name==='SlateDB')g+=`<text x="${x+barW/2}" y="${yS(t)-23}" text-anchor="middle" font-size="9.5" font-weight="700" fill="#1f242b">${(totals[0]/t).toFixed(1)}x cheaper</text>`;
+    g+=`<text x="${x+barW/2}" y="${MT+PH+17}" text-anchor="middle" font-size="12" font-weight="700" fill="#1f242b">${b.name}</text>`;
+    g+=`<text x="${x+barW/2}" y="${MT+PH+31}" text-anchor="middle" font-size="10.5" fill="#3b4047">${b.sub}</text>`;});
+  $('bars').innerHTML=g;
+}
+
+/* ---------- legends + init ---------- */
+$('legL').innerHTML=`<span class="item">${lineSwatch(false)} RocksDB · 3 copies</span>`+
+  `<span class="item">${swatch('hatch')} SlateDB band (cache 30%–100%)</span>`;
+$('legB').innerHTML=BC.map(c=>`<span class="item">${swatch(c.tex)} ${c.label}</span>`).join('');
+drawLine();drawBars();
+document.querySelectorAll('.seg').forEach(el=>{
+  el.addEventListener('mousemove',e=>{const s=SEG[+el.dataset.i];showTip(e,`<b>${s.who}</b><br>${s.label}: <b>${usd(s.val)}</b>`);});
+  el.addEventListener('mouseleave',hideTip);});
+</script>
+
+<script>
+/* report content height to the embedding page so the iframe can size itself */
+(function(){
+  var wrap=document.querySelector('.wrap');
+  function postHeight(){
+    var h=Math.ceil((wrap?wrap.offsetHeight:document.body.scrollHeight));
+    parent.postMessage({chartHeight:h},'*');
+  }
+  window.addEventListener('load',postHeight);
+  window.addEventListener('resize',postHeight);
+  setTimeout(postHeight,250);
+  if(window.ResizeObserver&&wrap){new ResizeObserver(postHeight).observe(wrap);}
+})();
+</script>
+
+</body>
+</html>

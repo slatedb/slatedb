@@ -8,14 +8,38 @@ import { fileURLToPath } from 'node:url';
 import { generateRfcWrappers } from './scripts/generate-rfcs.js';
 import { generateMdMirrors } from './scripts/generate-md-mirrors.js';
 import mermaid from 'astro-mermaid';
+import remarkDirective from 'remark-directive';
+import remarkAdmonitions from './src/plugins/remark-admonitions.mjs';
 
 const site = 'https://slatedb.io';
 const ogUrl = new URL('/img/slatedb-opengraph.jpg', site).href;
 const ogImageAlt = 'SlateDB - An embedded database built on object storage';
 
+// Project summary for llms.txt. Kept aligned with the framing in
+// public/index.md and the "Introducing SlateDB" blog post so agents that
+// cross-check sources see one consistent description.
+const projectDescription =
+	'SlateDB is an open-source (Apache-2.0) embedded key-value database, implemented as an LSM tree, that depends on object storage alone for durability (Amazon S3, Google Cloud Storage, Azure Blob Storage, MinIO, and Cloudflare R2). Built in async Rust with bindings for Rust, Go, Java, Node, and Python, it is the object-native successor to RocksDB — bringing object storage\'s economics, ~11 nines of durability, and managed replication to online, low-latency workloads.';
+
 // https://astro.build/config
 export default defineConfig({
 	site,
+	// Applies to plain Astro markdown/MDX (e.g. the blog). Starlight docs use
+	// Expressive Code instead, so this only affects our bespoke pages.
+	markdown: {
+		shikiConfig: {
+			theme: 'github-light',
+			// `ascii-art` isn't a real grammar; treat it as plain text so Shiki
+			// doesn't error. Astro keeps `data-language="ascii-art"` on the
+			// rendered <pre>, which the blog styles as tightly-spaced ASCII art
+			// (box-drawing characters that connect vertically).
+			langAlias: { 'ascii-art': 'text' },
+		},
+		// `:::note` admonitions for the blog. remark-directive parses the syntax;
+		// remarkAdmonitions transforms it (and self-scopes to blog files so it
+		// doesn't touch Starlight docs' own native asides).
+		remarkPlugins: [remarkDirective, remarkAdmonitions],
+	},
 	integrations: [
 		mermaid(),
 		starlight({
@@ -98,8 +122,57 @@ export default defineConfig({
 				},
 			],
 			plugins: [
-				starlightLinksValidator(),
-				starlightLlmsTxt(),
+				// The blog lives in custom (non-Starlight) Astro pages, which the
+				// link validator can't resolve — exclude them so links from docs
+				// or RFCs into /blog/* aren't reported as invalid.
+				starlightLinksValidator({ exclude: ['/blog', '/blog/', '/blog/**'] }),
+				starlightLlmsTxt({
+				projectName: 'SlateDB',
+				description: projectDescription,
+				details: [
+					'## When to use SlateDB',
+					'',
+					'SlateDB is a library, not a standalone server or a hosted service. It ships as an embedded engine with no HTTP server; you link it into your own Rust, Go, Java, Node, or Python application and it communicates directly with the object store you configure. There is no network API, no cluster to run, and no local disk of record (a local disk is optional and used only as cache).',
+					'',
+					'Use it as:',
+					'',
+					'- The storage core inside any data system (database, cache, stream processor, or workflow engine) you are building.',
+					'- A cheap, elastic, object-native replacement for local-disk LSM engines like RocksDB, WiredTiger, or Pebble.',
+					'- Durable state for stateless or serverless compute where attaching and replicating local disks is impractical.',
+					'- Single-writer, multi-reader deployments that scale reads independently of writes over a shared bucket.',
+					'',
+					'## Key features',
+					'',
+					'- Object-store native: durability comes from object storage alone; no disk of record and no replication for you to manage.',
+					'- Transactions and snapshot isolation.',
+					'- Single-writer, multi-reader deployments.',
+					'- Checkpoints and forks: O(1) branching by marking a manifest as retained.',
+					'- Rescaling via views: split a database by key range as an O(1) manifest view instead of copying data.',
+					'- Pluggable, distributed compaction that can run on separate machines.',
+					'',
+					'## Trade-offs',
+					'',
+					'- Object storage request latencies are an order of magnitude higher than local systems (~50-100ms per request); SlateDB batches writes and caches reads to amortize this, but it does not match a local NVMe engine on raw latency.',
+					'- It is a key-value / LSM engine, not a SQL database — there is no query planner, no SQL, and no relational schema.',
+				].join('\n'),
+				optionalLinks: [
+					{
+						label: 'GitHub repository',
+						url: 'https://github.com/slatedb/slatedb',
+						description: 'Source code, issues, and releases',
+					},
+					{
+						label: 'Rust API docs (docs.rs)',
+						url: 'https://docs.rs/slatedb',
+						description: 'Generated API reference for the Rust crate',
+					},
+					{
+						label: 'Discord community',
+						url: 'https://discord.gg/mHYmGy5MgA',
+						description: 'Questions, discussion, and support',
+					},
+				],
+			}),
 			],
 			sidebar: [
 				{
@@ -150,6 +223,10 @@ export default defineConfig({
 						{
 							label: 'Compaction',
 							link: '/docs/design/compaction/',
+						},
+						{
+							label: 'Segmented Compaction',
+							link: '/docs/design/segmented-compaction/',
 						},
 						{
 							label: 'Merge Operators',
@@ -266,6 +343,10 @@ export default defineConfig({
 						{
 							label: 'Standalone Compactor',
 							link: '/docs/tutorials/standalone-compactor/',
+						},
+						{
+							label: 'Standalone Garbage Collector',
+							link: '/docs/tutorials/standalone-garbage-collector/',
 						}
 					]
 				},

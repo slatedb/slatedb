@@ -122,9 +122,16 @@ If the process exits without calling `close()` (`SIGKILL`, panic, or dropping th
 without closing), the in-memory tier is lost. Only entries that Foyer wrote to disk during
 normal operation survive.
 
+A cache passed to `with_db_cache()` is owned by you, not by SlateDB: `Db::close()` and
+`DbReader::close()` will *not* close it. This makes it safe to share one cache across
+multiple databases — closing one database no longer shuts down the disk engine for the
+others. It also means the shutdown flush is your responsibility: call `DbCache::close()`
+on the cache yourself, after closing every `Db` and `DbReader` that uses it.
+
 :::caution
-Always call `Db::close()` or `DbReader::close()` before shutdown. Dropping without
-closing races with tokio runtime teardown and will lose in-memory cached entries.
+Always call `Db::close()` / `DbReader::close()` before shutdown, and then close the cache
+you passed in with `DbCache::close()`. Dropping without closing races with tokio runtime
+teardown and will lose in-memory cached entries.
 :::
 
 ## Monitoring

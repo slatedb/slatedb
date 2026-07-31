@@ -266,7 +266,9 @@ class SlateDbReaderTest {
             TestSupport.await(dbHandle.db().put(TestSupport.bytes("seed"), TestSupport.bytes("value")));
             TestSupport.await(dbHandle.db().flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
 
-            TestSupport.expectFailure(Error.Invalid.class, () -> builder.withCheckpointId("not-a-uuid"));
+            TestSupport.expectFailure(
+                    Error.Invalid.class,
+                    () -> builder.withReaderMode(new ReaderMode.Checkpoint("not-a-uuid")));
         }
     }
 
@@ -278,7 +280,7 @@ class SlateDbReaderTest {
             TestSupport.await(dbHandle.db().put(TestSupport.bytes("seed"), TestSupport.bytes("value")));
             TestSupport.await(dbHandle.db().flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
 
-            builder.withCheckpointId("ffffffff-ffff-ffff-ffff-ffffffffffff");
+            builder.withReaderMode(new ReaderMode.Checkpoint("ffffffff-ffff-ffff-ffff-ffffffffffff"));
             TestSupport.awaitFailure(Error.Data.class, builder.build());
         }
     }

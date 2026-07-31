@@ -9,14 +9,39 @@ use ulid::Ulid;
 const WAL_PATH: &str = "wal";
 const COMPACTED_PATH: &str = "compacted";
 
+/// Resolves the object store paths of a SlateDB database's files from the
+/// database's root path.
+///
+/// Useful outside the database handle, for example to map the SST ids in a
+/// [`VersionedManifest`](crate::VersionedManifest) to paths in Object Store
+///
+/// Can be used when preloading `CachedObjectStore`, or for administrative
+/// tooling that inspects a database's objects directly.
+///
+/// Constructed from a manifest via [`Self::new`]. The manifest is required
+/// because it can reference SSTs owned by another database (external SSTs,
+/// from cloning), which live outside this database's root path and cannot be
+/// resolved from the root path alone.
 #[derive(Clone, Debug)]
-pub(crate) struct PathResolver {
+pub struct PathResolver {
     root_path: Path,
     external_ssts: HashMap<SsTableId, Path>,
 }
 
 impl PathResolver {
-    pub(crate) fn new<P: Into<Path>>(root_path: P) -> Self {
+    /// Creates a resolver for the database rooted at `root_path`, resolving
+    /// the external SSTs referenced by `manifest` to their owning database's
+    /// path.
+    pub fn new<P: Into<Path>>(root_path: P, manifest: &crate::manifest::VersionedManifest) -> Self {
+        Self::new_with_external_ssts(root_path.into(), manifest.external_ssts())
+    }
+
+    /// Creates a resolver for the database rooted at `root_path`.
+    ///
+    /// Internal only: without a manifest, external SSTs resolve to wrong
+    /// paths under `root_path`, so callers must only use this where external
+    /// SSTs cannot appear (for example WAL paths).
+    pub(crate) fn from_root<P: Into<Path>>(root_path: P) -> Self {
         Self {
             root_path: root_path.into(),
             external_ssts: HashMap::new(),
@@ -66,7 +91,8 @@ impl PathResolver {
         }
     }
 
-    pub(crate) fn table_path(&self, table_id: &SsTableId) -> Path {
+    /// Returns the path of the SST with the given id.
+    pub fn sst_path(&self, table_id: &SsTableId) -> Path {
         let root_path = match self.external_ssts.get(table_id) {
             Some(external_path) => external_path,
             None => &self.root_path,
@@ -99,9 +125,9 @@ mod tests {
         fn should_serialize_and_deserialize_wal_paths(
             wal_id in any::<u64>(),
         ) {
-            let path_resolver = PathResolver::new(Path::from(ROOT));
+            let path_resolver = PathResolver::from_root(Path::from(ROOT));
             let table_id = SsTableId::Wal(wal_id);
-            let path = path_resolver.table_path(&table_id);
+            let path = path_resolver.sst_path(&table_id);
             let parsed_table_id = path_resolver.parse_table_id(&path).unwrap();
             assert_eq!(Some(table_id), parsed_table_id);
         }
@@ -110,9 +136,9 @@ mod tests {
         fn should_serialize_and_deserialize_compacted_paths(
             compacted_id in any::<u128>(),
         ) {
-            let path_resolver = PathResolver::new(Path::from(ROOT));
+            let path_resolver = PathResolver::from_root(Path::from(ROOT));
             let table_id = SsTableId::Compacted(Ulid::from(compacted_id));
-            let path = path_resolver.table_path(&table_id);
+            let path = path_resolver.sst_path(&table_id);
             let parsed_table_id = path_resolver.parse_table_id(&path).unwrap();
             assert_eq!(Some(table_id), parsed_table_id);
         }
@@ -120,7 +146,7 @@ mod tests {
 
     #[test]
     fn test_parse_id() {
-        let path_resolver = PathResolver::new(Path::from(ROOT));
+        let path_resolver = PathResolver::from_root(Path::from(ROOT));
         let path = Path::from("/root/wal/00000000000000000003.sst");
         let id = path_resolver.parse_table_id(&path).unwrap();
         assert_eq!(id, Some(SsTableId::Wal(3)));

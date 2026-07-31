@@ -13,6 +13,7 @@ mod deterministic_local_filesystem;
 pub mod failing_object_store;
 mod harness;
 mod prefix_extractor;
+mod rescaling;
 mod scenarios;
 pub mod utils;
 
@@ -23,4 +24,5 @@ pub use self::failing_object_store::{
 };
 pub use self::harness::*;
 pub use self::prefix_extractor::FirstDelimiterPrefixExtractor;
+pub use self::rescaling::RescalingScenario;
 pub use self::scenarios::DeterministicScenario;

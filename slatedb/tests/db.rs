@@ -57,7 +57,6 @@ async fn test_replay_wal_then_write() {
             value.as_bytes(),
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )
@@ -90,7 +89,6 @@ async fn test_replay_wal_then_write() {
         b"new_value",
         &PutOptions::default(),
         &WriteOptions {
-            await_durable: false,
             ..Default::default()
         },
     )
@@ -186,8 +184,8 @@ async fn test_concurrent_writers_and_readers() {
             flush_interval: Some(Duration::from_millis(100)),
             manifest_poll_interval: Duration::from_millis(100),
             manifest_update_timeout: Duration::from_secs(300),
-            // Allow 16KB of unflushed data
-            max_unflushed_bytes: 16 * 1024,
+            // Allow 32KB of unflushed data (must exceed l0_sst_size_bytes)
+            max_unflushed_bytes: 8 * 4096,
             min_filter_keys: 0,
             // Allow up to four 4096-byte blocks per-SST
             l0_sst_size_bytes: 4 * 4096,
@@ -244,7 +242,6 @@ async fn test_concurrent_writers_and_readers() {
                         i.to_be_bytes().as_ref(),
                         &PutOptions::default(),
                         &WriteOptions {
-                            await_durable: false,
                             ..Default::default()
                         },
                     )

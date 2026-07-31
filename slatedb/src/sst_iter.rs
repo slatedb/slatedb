@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use log::error;
 use slatedb_common::metrics::CounterFn;
 use std::cmp::min;
 use std::collections::VecDeque;
@@ -10,7 +11,7 @@ use tokio::task::JoinHandle;
 
 use crate::block_iterator::DataBlockIterator;
 use crate::bytes_range::BytesRange;
-use crate::db_state::SsTableView;
+use crate::db_state::{SsTableId, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::filter_policy::{FilterContext, FilterQuery, NamedFilter};
@@ -22,6 +23,7 @@ use crate::{
     partitioned_keyspace,
     tablestore::TableStore,
     types::RowEntry,
+    utils::panic_string,
 };
 
 enum FetchTask {
@@ -443,6 +445,7 @@ impl<'a> InternalSstIterator<'a> {
             return Ok(None);
         }
         let sst_version = self.view.table_as_ref().sst.format_version;
+        let sst_id = self.view.table_as_ref().sst.id;
         loop {
             if spawn_fetches {
                 self.spawn_fetches();
@@ -450,7 +453,9 @@ impl<'a> InternalSstIterator<'a> {
             if let Some(fetch_task) = self.fetch_tasks.front_mut() {
                 match fetch_task {
                     FetchTask::InFlight(jh) => {
-                        let blocks = jh.await.expect("join task failed")?;
+                        let blocks = jh
+                            .await
+                            .map_err(|join_err| block_fetch_join_error(join_err, sst_id))??;
                         *fetch_task = FetchTask::Finished(blocks);
                     }
                     FetchTask::Finished(blocks) => {
@@ -1057,9 +1062,30 @@ impl RowEntryIterator for SstIterator<'_> {
     }
 }
 
+/// Converts a failed join on a block fetch task into an error.
+///
+/// A fetch task is cancelled when the runtime it was spawned on shuts down,
+/// so the iterator reports the cancellation to its caller instead of panicking
+/// the task that is awaiting the fetch.
+fn block_fetch_join_error(join_err: tokio::task::JoinError, sst_id: SsTableId) -> SlateDBError {
+    let task_name = format!("sst_block_fetch[{:?}]", sst_id);
+    match join_err.try_into_panic() {
+        Ok(panic_err) => {
+            error!(
+                "sst block fetch task panicked unexpectedly. [task_name={}, panic={}]",
+                task_name,
+                panic_string(&panic_err),
+            );
+            SlateDBError::BackgroundTaskPanic(task_name)
+        }
+        Err(_) => SlateDBError::BackgroundTaskCancelled(task_name),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::DbCache;
@@ -1099,6 +1125,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let mut builder = table_store.table_builder();
         builder
@@ -1119,7 +1146,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), &encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
@@ -1349,6 +1376,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = writer.table_builder();
         builder
@@ -1363,7 +1391,6 @@ mod tests {
             .write_sst(
                 &SsTableId::Compacted(ulid::Ulid::new()),
                 &builder.build().await.unwrap(),
-                false,
             )
             .await
             .unwrap();
@@ -1381,6 +1408,7 @@ mod tests {
             root_path,
             Some(cache),
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let filter_key = (handle.sst.id, handle.sst.info.filter_offset).into();
@@ -1436,6 +1464,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         );
         let mut builder = writer.table_builder();
         builder
@@ -1450,7 +1479,6 @@ mod tests {
             .write_sst(
                 &SsTableId::Compacted(ulid::Ulid::new()),
                 &builder.build().await.unwrap(),
-                false,
             )
             .await
             .unwrap();
@@ -1468,6 +1496,7 @@ mod tests {
             root_path,
             Some(cache),
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let index_key = (handle.sst.id, handle.sst.info.index_offset).into();
@@ -1523,6 +1552,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ))
     }
 
@@ -1537,7 +1567,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap())
+        SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap())
     }
 
     #[tokio::test]
@@ -1559,6 +1589,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let mut builder = table_store.table_builder();
 
@@ -1576,7 +1607,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), &encoded, false)
+            .write_sst(&SsTableId::Wal(0), &encoded)
             .await
             .unwrap();
         let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
@@ -1636,6 +1667,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let first_key = [b'a'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'z');
@@ -1687,6 +1719,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -1732,6 +1765,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -1774,6 +1808,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Build SST with specified format (keys 0-99)
@@ -1798,8 +1833,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
+        let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
 
         // Initialize iterator in descending order with full range
         let mut iter = SstIterator::new_borrowed_initialized(
@@ -1851,6 +1885,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let first_key = [b'b'; 16];
         let key_gen = OrderedBytesGenerator::new_with_byte_range(&first_key, b'a', b'y');
@@ -1962,6 +1997,7 @@ mod tests {
             root_path.clone(),
             Some(split_cache.clone()),
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let mut builder = table_store.table_builder();
@@ -1983,7 +2019,7 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, &encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let sst_iter_options = SstIteratorOptions {
@@ -2062,7 +2098,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap())
+        SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap())
     }
 
     #[tokio::test]
@@ -2080,6 +2116,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let keys_and_values = vec![
@@ -2129,6 +2166,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let keys_and_values = vec![
@@ -2180,6 +2218,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Create keys with shared prefixes to exercise prefix compression
@@ -2199,8 +2238,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
+        let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
 
         // when: iterating over all keys
         let sst_iter_options = SstIteratorOptions {
@@ -2244,6 +2282,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Create keys that will span multiple blocks
@@ -2263,7 +2302,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle = table_store.write_sst(&id, &encoded, false).await.unwrap();
+        let sst_handle = table_store.write_sst(&id, &encoded).await.unwrap();
 
         // Verify we have multiple blocks
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -2313,6 +2352,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let mut builder = table_store
@@ -2331,8 +2371,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
+        let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
 
         // when: searching for a non-existent key (odd number)
         let mut iter = SstIterator::for_key_with_stats_initialized(
@@ -2367,6 +2406,7 @@ mod tests {
             root_path,
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let mut builder = table_store
@@ -2384,8 +2424,7 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle =
-            SsTableView::identity(table_store.write_sst(&id, &encoded, false).await.unwrap());
+        let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
 
         // when: seeking past the last key
         let iter = SstIterator::new_borrowed_initialized(
@@ -2427,6 +2466,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Build an SST with enough keys to span multiple blocks
@@ -2445,7 +2485,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, &encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -2566,6 +2606,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Build an SST with enough data for multiple blocks
@@ -2583,7 +2624,7 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, &encoded, false).await.unwrap();
+        table_store.write_sst(&id, &encoded).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
@@ -2636,6 +2677,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         let mut writer = table_store.table_writer(SsTableId::Wal(0));
@@ -2733,6 +2775,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
 
         // Keys spaced by 10: key_000, key_010, key_020, ..., key_190.
@@ -2787,5 +2830,48 @@ mod tests {
         let entry = iter.next().await.unwrap().expect("should find key_040");
         let kv: KeyValue = entry.into();
         assert_eq!(kv.key.as_ref(), b"key_040");
+    }
+
+    #[tokio::test]
+    async fn test_next_iter_prefetch_task_cancelled() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            SsTableFormat::default(),
+            Path::from(""),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let sst = build_single_block_sst(&table_store, &[b"key1", b"key2"]).await;
+
+        // A runtime that is shut down before anything is spawned on it.
+        // `shutdown_background` rather than a plain drop, which would itself
+        // panic inside an async context.
+        let dead = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let dead_handle = dead.handle().clone();
+        dead.shutdown_background();
+
+        // Initialization walks `advance_block` -> `next_iter(true)` ->
+        // `spawn_fetches`, so the first fetch is spawned onto - and cancelled
+        // by - the dead runtime while its context is entered.
+        let result = {
+            let _guard = dead_handle.enter();
+            SstIterator::new_owned_initialized(
+                ..,
+                sst,
+                table_store.clone(),
+                SstIteratorOptions::default(),
+            )
+            .await
+        };
+
+        let Err(err) = result else {
+            panic!("a cancelled prefetch task must be reported as an error");
+        };
+        assert!(matches!(err, SlateDBError::BackgroundTaskCancelled(_)));
     }
 }

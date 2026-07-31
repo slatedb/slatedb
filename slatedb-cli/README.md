@@ -119,7 +119,7 @@ Options:
 - `--value <auto|hex|utf8|len|none>`: How values are rendered. `none` prints keys only. Default `auto`.
 - `--max-keys <N>`: Stop after emitting `N` entries.
 - `--count`: Print only `<N> entries, <B> bytes` instead of the entries themselves. When combined with `--max-keys`, only the entries up to the cap are counted.
-- `--checkpoint <UUID>`: Scan an existing checkpoint for a point-in-time scan that needs only read access to the store. Without it, the reader writes a transient checkpoint, so it needs write access to the store.
+- `--checkpoint <UUID>`: Scan an existing checkpoint for a point-in-time view protected from garbage collection. Without it, the reader follows the latest manifest without writing a checkpoint, so concurrent garbage collection may delete objects referenced by the scan.
 
 Encoding rules:
 - `--key`/`--value` control both how the bound arguments are parsed and how keys/values are rendered. In `hex`, bound arguments are hex digits with an optional `0x` prefix. In `utf8`, they are taken literally. In `auto`, a bound is hex-decoded when it starts with `0x`/`0X` and taken literally otherwise.

@@ -8,13 +8,16 @@ use slatedb::compactor::{
 };
 use slatedb::config::CompressionCodec as CoreCompressionCodec;
 use slatedb::manifest::{
-    ExternalDb as CoreExternalDb, SortedRun as CoreSortedRun, SsTableHandle as CoreSsTableHandle,
-    SsTableId as CoreSsTableId, SsTableInfo as CoreSsTableInfo, SsTableView as CoreSsTableView,
-    VersionedManifest as CoreVersionedManifest,
+    ExternalDb as CoreExternalDb, Segment as CoreSegment, SortedRun as CoreSortedRun,
+    SsTableHandle as CoreSsTableHandle, SsTableId as CoreSsTableId, SsTableInfo as CoreSsTableInfo,
+    SsTableView as CoreSsTableView, VersionedManifest as CoreVersionedManifest,
 };
 use slatedb::CacheTarget as CoreCacheTarget;
 use slatedb::ValueDeletable;
-use slatedb::{Checkpoint as CoreCheckpoint, VersionedCompactions as CoreVersionedCompactions};
+use slatedb::{
+    Checkpoint as CoreCheckpoint, CheckpointCreateResult as CoreCheckpointCreateResult,
+    VersionedCompactions as CoreVersionedCompactions,
+};
 use slatedb_common::object_metadata::IdentifiedObjectMetadata as CoreIdentifiedObjectMetadata;
 use ulid::Ulid;
 
@@ -102,24 +105,6 @@ impl KeyRange {
                 None => Bound::Unbounded,
             },
         )
-    }
-}
-
-/// Metadata returned by a successful write.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct WriteHandle {
-    /// Sequence number assigned to the write.
-    pub seqnum: u64,
-    /// Creation timestamp assigned to the write.
-    pub create_ts: i64,
-}
-
-impl From<slatedb::WriteHandle> for WriteHandle {
-    fn from(value: slatedb::WriteHandle) -> Self {
-        Self {
-            seqnum: value.seqnum(),
-            create_ts: value.create_ts(),
-        }
     }
 }
 
@@ -273,10 +258,12 @@ pub struct VersionedManifest {
     pub last_compacted_l0_sst_view_id: Option<String>,
     /// Last compacted L0 SST ID, if any.
     pub last_compacted_l0_sst_id: Option<String>,
-    /// Current L0 SST views.
+    /// Current L0 SST views (root `prefix=""` tree).
     pub l0: Vec<SsTableView>,
-    /// Current compacted sorted runs.
+    /// Current compacted sorted runs (root `prefix=""` tree).
     pub compacted: Vec<SortedRun>,
+    /// Per-segment LSM state for named (non-empty-prefix) segments.
+    pub segments: Vec<Segment>,
     /// Next WAL SST ID to assign.
     pub next_wal_sst_id: u64,
     /// WAL replay watermark.
@@ -307,6 +294,7 @@ impl From<&CoreVersionedManifest> for VersionedManifest {
             last_compacted_l0_sst_id: value.last_compacted_l0_sst_id().map(|id| id.to_string()),
             l0: value.l0().iter().map(SsTableView::from).collect(),
             compacted: value.compacted().iter().map(SortedRun::from).collect(),
+            segments: value.segments().iter().map(Segment::from).collect(),
             next_wal_sst_id: value.next_wal_sst_id(),
             replay_after_wal_id: value.replay_after_wal_id(),
             last_l0_clock_tick: value.last_l0_clock_tick(),
@@ -314,6 +302,33 @@ impl From<&CoreVersionedManifest> for VersionedManifest {
             recent_snapshot_min_seq: value.recent_snapshot_min_seq(),
             checkpoints: value.checkpoints().iter().map(Checkpoint::from).collect(),
             wal_object_store_uri: value.wal_object_store_uri().map(str::to_owned),
+        }
+    }
+}
+
+/// Per-segment LSM state (RFC-0024). Each named segment carries its own L0
+/// SSTs and sorted runs, compacted and retired independently of the root tree.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Segment {
+    /// Segment prefix.
+    pub prefix: Vec<u8>,
+    /// Last compacted L0 SST view ID for this segment, if any.
+    pub last_compacted_l0_sst_view_id: Option<String>,
+    /// Current L0 SST views in this segment.
+    pub l0: Vec<SsTableView>,
+    /// Current compacted sorted runs in this segment.
+    pub compacted: Vec<SortedRun>,
+}
+
+impl From<&CoreSegment> for Segment {
+    fn from(value: &CoreSegment) -> Self {
+        Self {
+            prefix: value.prefix().to_vec(),
+            last_compacted_l0_sst_view_id: value
+                .last_compacted_l0_sst_view_id()
+                .map(|id| id.to_string()),
+            l0: value.l0().iter().map(SsTableView::from).collect(),
+            compacted: value.compacted().iter().map(SortedRun::from).collect(),
         }
     }
 }
@@ -432,29 +447,80 @@ impl From<&CoreSourceId> for SourceId {
     }
 }
 
-/// Immutable compaction specification.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct CompactionSpec {
-    /// Ordered compaction sources.
-    pub sources: Vec<SourceId>,
-    /// Destination sorted run ID. `None` for drain-segment specs, which
-    /// produce no new sorted run.
-    pub destination: Option<u32>,
-    /// Whether any input source is an L0 SST view.
-    pub has_l0_sources: bool,
-    /// Whether any input source is a sorted run.
-    pub has_sr_sources: bool,
+impl TryFrom<&SourceId> for CoreSourceId {
+    type Error = Error;
+
+    fn try_from(value: &SourceId) -> Result<Self, Self::Error> {
+        Ok(match value {
+            SourceId::SortedRun(id) => CoreSourceId::SortedRun(*id),
+            SourceId::SstView(id) => CoreSourceId::SstView(
+                Ulid::from_string(id)
+                    .map_err(|source| SlateDbError::InvalidSsTableId { source })?,
+            ),
+        })
+    }
+}
+
+/// Immutable compaction specification. Mirrors the core `CompactionSpec`:
+/// either a tiered merge into a destination sorted run, or a segment drain.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum CompactionSpec {
+    /// Tiered merge: read `sources` and write a single output sorted run with
+    /// id `destination`. An empty `segment` targets the root (`prefix=""`) tree.
+    Tiered {
+        segment: Vec<u8>,
+        sources: Vec<SourceId>,
+        destination: u32,
+    },
+    /// Segment drain (retention): retire `segment` by detaching the listed
+    /// `sources` (its L0 SSTs and sorted runs). Produces no new sorted run.
+    DrainSegment {
+        segment: Vec<u8>,
+        sources: Vec<SourceId>,
+    },
 }
 
 impl From<&CoreCompactionSpec> for CompactionSpec {
     fn from(value: &CoreCompactionSpec) -> Self {
-        Self {
-            sources: value.sources().iter().map(SourceId::from).collect(),
-            destination: value.destination(),
-            has_l0_sources: value.has_l0_sources(),
-            has_sr_sources: value.has_sr_sources(),
+        let segment = value.segment().to_vec();
+        let sources = value.sources().iter().map(SourceId::from).collect();
+        match value.destination() {
+            Some(destination) => CompactionSpec::Tiered {
+                segment,
+                sources,
+                destination,
+            },
+            None => CompactionSpec::DrainSegment { segment, sources },
         }
     }
+}
+
+impl TryFrom<&CompactionSpec> for CoreCompactionSpec {
+    type Error = Error;
+
+    fn try_from(value: &CompactionSpec) -> Result<Self, Self::Error> {
+        match value {
+            CompactionSpec::Tiered {
+                segment,
+                sources,
+                destination,
+            } => Ok(CoreCompactionSpec::for_segment(
+                Bytes::from(segment.clone()),
+                try_convert_sources(sources)?,
+                *destination,
+            )),
+            CompactionSpec::DrainSegment { segment, sources } => {
+                Ok(CoreCompactionSpec::drain_segment(
+                    Bytes::from(segment.clone()),
+                    try_convert_sources(sources)?,
+                ))
+            }
+        }
+    }
+}
+
+fn try_convert_sources(sources: &[SourceId]) -> Result<Vec<CoreSourceId>, Error> {
+    sources.iter().map(CoreSourceId::try_from).collect()
 }
 
 /// Canonical compaction record.
@@ -748,7 +814,7 @@ impl From<&CoreSortedRun> for SortedRun {
     fn from(value: &CoreSortedRun) -> Self {
         Self {
             id: value.id,
-            sst_views: value.sst_views.iter().map(SsTableView::from).collect(),
+            sst_views: value.sst_views().iter().map(SsTableView::from).collect(),
             estimated_size_bytes: value.estimate_size(),
         }
     }
@@ -768,6 +834,11 @@ fn filter_format_from_debug(value: &impl std::fmt::Debug) -> FilterFormat {
         "Composite" => FilterFormat::Composite,
         other => unreachable!("unexpected FilterFormat variant: {other}"),
     }
+}
+
+pub(crate) fn try_checkpoint_id_from_str(value: &str) -> Result<Uuid, Error> {
+    Uuid::parse_str(value)
+        .map_err(|err| Error::from(SlateDbError::InvalidCheckpointId { source: err }))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -798,5 +869,22 @@ impl TryInto<slatedb::CloneSourceSpec> for CloneSourceSpec {
                 .map(|key_range| key_range.into_range_bounds())
                 .transpose()?,
         })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct CheckpointCreateResult {
+    /// The id of the created checkpoint.
+    pub id: String,
+    /// The manifest id referenced by the created checkpoint.
+    pub manifest_id: u64,
+}
+
+impl From<CoreCheckpointCreateResult> for CheckpointCreateResult {
+    fn from(value: CoreCheckpointCreateResult) -> Self {
+        Self {
+            id: value.id.to_string(),
+            manifest_id: value.manifest_id,
+        }
     }
 }

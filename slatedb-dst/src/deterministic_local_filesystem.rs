@@ -18,9 +18,9 @@ use futures::stream::{self, BoxStream};
 use futures::{StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::{
-    Attributes, CopyMode, CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult,
-    MultipartUpload, ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions, PutPayload,
-    PutResult, RenameOptions, RenameTargetMode, UploadPart,
+    Attributes, CopyMode, CopyOptions, Extensions, GetOptions, GetResult, GetResultPayload,
+    ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMode, PutMultipartOptions, PutOptions,
+    PutPayload, PutResult, RenameOptions, RenameTargetMode, UploadPart,
 };
 use parking_lot::{Mutex, RwLock};
 use tokio::task::yield_now;
@@ -418,6 +418,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         Ok(PutResult {
             e_tag: Some(metadata.e_tag),
             version: None,
+            extensions: Extensions::new(),
         })
     }
 
@@ -457,6 +458,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
                 attributes: self.attribute_state.get(location),
                 range: 0..0,
                 meta,
+                extensions: Extensions::new(),
             });
         }
 
@@ -477,6 +479,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
             attributes: self.attribute_state.get(location),
             range,
             meta,
+            extensions: Extensions::new(),
         })
     }
 
@@ -570,6 +573,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         Ok(ListResult {
             common_prefixes: common_prefixes.into_iter().collect(),
             objects,
+            extensions: Extensions::new(),
         })
     }
 
@@ -831,6 +835,7 @@ impl MultipartUpload for LocalUpload {
         Ok(PutResult {
             e_tag: Some(metadata.e_tag),
             version: None,
+            extensions: Extensions::new(),
         })
     }
 

@@ -1,0 +1,51 @@
+name: Hourly DST
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-simulation-test:
+    name: deterministic-simulation-test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: bank
+            test-filter: test_dst_bank_with_toxics
+          - name: determinism
+            test-filter: test_dst_is_deterministic
+          - name: rescaling
+            test-filter: test_dst_rescaling_preserves_data
+          - name: segments
+            test-filter: test_dst_segments_is_deterministic
+    # Hard backstop for the whole job. The "Run DST Tests" step below sets a
+    # shorter timeout so an overrun is reported as a step *failure* (which sends
+    # a notification) rather than a job-level cancellation (which does not).
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.98
+      - name: Install gdb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdb
+      - name: Run DST Tests
+        # Time out the run itself, below the job-level timeout above. A step
+        # timeout marks the step (and job) as failed, so the usual GitHub
+        # failure notification fires. A job-level timeout would instead cancel
+        # the run, and GitHub does not notify on cancellations.
+        timeout-minutes: 60
+        run: cargo nextest run -p slatedb-dst --all-features --cargo-profile dst --profile dst-nightly --no-capture ${{ matrix.test-filter }}
+        env:
+          RUSTFLAGS: "--cfg dst --cfg tokio_unstable --cfg slow"
+          RUST_LOG: "info"
+          RUST_BACKTRACE: "1"
+          SLATEDB_DST_ROOT: "./"

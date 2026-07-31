@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use rand::Rng;
 use slatedb::config::{
-    CompactionWorkerOptions, CompactorOptions, CompressionCodec, DbReaderOptions,
+    CompactionWorkerOptions, CompactorOptions, CompressionCodec, DbReaderOptions, DurabilityLevel,
     GarbageCollectorDirectoryOptions, GarbageCollectorOptions, GarbageCollectorScheduleOptions,
-    SizeTieredCompactionSchedulerOptions,
+    ScanOptions, SizeTieredCompactionSchedulerOptions,
 };
-use slatedb::{DbRand, Settings};
+use slatedb::{DbRand, IterationOrder, Settings};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
@@ -43,7 +43,8 @@ pub async fn build_settings(rand: &DbRand) -> Settings {
     let l0_sst_size_bytes = rng.random_range(MIB_1..MIB_500);
     let l0_max_ssts = rng.random_range(4..8);
     let l0_max_ssts_per_key = l0_max_ssts;
-    let max_unflushed_bytes = rng.random_range(MIB_1..GIB_2);
+    // Keep `max_unflushed_bytes` strictly greater than `l0_sst_size_bytes`.
+    let max_unflushed_bytes = rng.random_range((l0_sst_size_bytes + 1)..GIB_2);
     let compression_codec_idx = rng.random_range(0..COMPRESSION_CODECS.len());
     let compression_codec =
         if let Some(compression_codec) = COMPRESSION_CODECS[compression_codec_idx] {
@@ -88,6 +89,22 @@ pub fn build_reader_options(rand: &DbRand) -> DbReaderOptions {
     }
 }
 
+/// Builds randomized deterministic scan options for DST scenarios.
+pub fn build_scan_options(rand: &DbRand, read_durability: DurabilityLevel) -> ScanOptions {
+    let mut rng = rand.rng();
+    let read_ahead_options = [1, 4 * 1024, 64 * 1024, MIB_1];
+    // Descending sorted-run iteration is currently broken.
+    // See https://github.com/slatedb/slatedb/pull/1995.
+    let order = IterationOrder::Ascending;
+
+    ScanOptions::new()
+        .with_durability_filter(read_durability)
+        .with_read_ahead_bytes(read_ahead_options[rng.random_range(0..read_ahead_options.len())])
+        .with_cache_blocks(rng.random_bool(0.5))
+        .with_max_fetch_tasks(rng.random_range(1..=4))
+        .with_order(order)
+}
+
 /// Builds randomized deterministic compactor options for DST scenarios.
 pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
     let min_compaction_sources = rng.random_range(2..=4);
@@ -98,8 +115,8 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
     // produce `timeout < interval`, which reclaims healthy jobs and livelocks compaction.
     let compactions_poll_interval =
         rng.random_range(Duration::from_millis(1)..Duration::from_secs(5));
-    let heartbeat_min_interval = rng.random_range(Duration::from_millis(1)..Duration::from_secs(5));
-    let max_worker_heartbeat = heartbeat_min_interval.max(compactions_poll_interval);
+    let heartbeat_interval = rng.random_range(Duration::from_millis(1)..Duration::from_secs(5));
+    let max_worker_heartbeat = heartbeat_interval.max(compactions_poll_interval);
     let worker_heartbeat_timeout = max_worker_heartbeat * rng.random_range(3..=10);
 
     CompactorOptions {
@@ -107,6 +124,7 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
         manifest_update_timeout: rng
             .random_range(Duration::from_millis(100)..Duration::from_secs(60)),
         max_concurrent_compactions: rng.random_range(1..=4),
+        enable_trivial_move: rng.random_bool(0.5),
         scheduler_options: SizeTieredCompactionSchedulerOptions {
             min_compaction_sources,
             max_compaction_sources,
@@ -116,7 +134,7 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
         worker: Some(CompactionWorkerOptions {
             max_concurrent_compactions: rng.random_range(1..=4),
             compactions_poll_interval,
-            heartbeat_min_interval,
+            heartbeat_interval,
             max_sst_size: rng.random_range(KIB_8..GIB_2),
             max_fetch_tasks: rng.random_range(1..=8),
             bytes_to_fetch: rng.random_range(KIB_8..=(8 * MIB_1)),
@@ -126,6 +144,7 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
         commit_compacted_interval: rng
             .random_range(Duration::from_millis(1)..Duration::from_secs(5)),
         worker_heartbeat_timeout,
+        object_store_max_retries: None,
     }
 }
 
@@ -157,6 +176,8 @@ pub fn build_settings_gc(rng: &mut impl Rng) -> GarbageCollectorOptions {
             interval: Some(rng.random_range(Duration::from_millis(1)..Duration::from_secs(600))),
         }),
         metric_level: None,
+        boundary_files_enabled: true,
+        object_store_max_retries: None,
     }
 }
 
@@ -281,6 +302,51 @@ pub fn build_toxic(rand: &DbRand, root_path: &str, index: usize) -> Toxic {
         operations,
         path_prefix,
     }
+}
+
+/// Environment variable holding a comma-separated list of `u64` seeds that
+/// overrides random seed generation for DST tests.
+pub const DST_SEEDS_ENV: &str = "SLATEDB_DST_SEEDS";
+
+/// Returns the seeds a DST test should run.
+///
+/// When [`DST_SEEDS_ENV`] is set, parses it as a comma-separated list of
+/// `u64` seeds so a failed run can be reproduced with the seeds it logged.
+/// Otherwise returns `default_count` random seeds.
+pub fn dst_seeds(default_count: usize) -> std::io::Result<Vec<u64>> {
+    match std::env::var(DST_SEEDS_ENV) {
+        Ok(raw) => parse_seeds(&raw),
+        Err(std::env::VarError::NotPresent) => {
+            Ok((0..default_count).map(|_| rand::random::<u64>()).collect())
+        }
+        Err(err) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid {DST_SEEDS_ENV}: {err}"),
+        )),
+    }
+}
+
+fn parse_seeds(raw: &str) -> std::io::Result<Vec<u64>> {
+    let seeds = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value.parse::<u64>().map_err(|err| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid seed {value:?} in {DST_SEEDS_ENV}: {err}"),
+                )
+            })
+        })
+        .collect::<std::io::Result<Vec<u64>>>()?;
+    if seeds.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{DST_SEEDS_ENV} must contain at least one seed"),
+        ));
+    }
+    Ok(seeds)
 }
 
 // A flag so we only initialize logging once.

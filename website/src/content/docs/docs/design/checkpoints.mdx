@@ -31,7 +31,13 @@ A new checkpoint can also be created from an existing checkpoint through [`Check
 
 ## Readers and Background Tasks
 
-[`DbReader`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html) uses checkpoints to separate reader lifetime from writer lifetime. If you open a reader without a checkpoint ID, the reader creates its own checkpoint, refreshes it, and replaces it as the manifest advances. If you open a reader with an explicit checkpoint ID, the reader stays on that fixed view and does not follow newer manifests or newer WAL data. [`DbReaderOptions::checkpoint_lifetime`](https://docs.rs/slatedb/latest/slatedb/config/struct.DbReaderOptions.html#structfield.checkpoint_lifetime) controls how long a reader-managed checkpoint lives before it must be refreshed.
+[`DbReader`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html) uses checkpoints to separate reader lifetime from writer lifetime. You choose how the reader tracks database state by passing a [`DbReaderMode`](https://docs.rs/slatedb/latest/slatedb/enum.DbReaderMode.html):
+
+- `ManagedCheckpoint` (default): The reader creates and maintains checkpoints while following the latest database state.
+- `Checkpoint(id)`: The reader remains pinned to the database state referenced by the supplied checkpoint. It does not follow newer manifests or newer WAL data.
+- `FollowLatest`: The reader follows the latest manifest without creating a checkpoint. This mode performs no object-store writes and provides no protection from garbage collection. Reads may fail if referenced objects are deleted. This mode is useful for read-only access to databases not being actively written to, for mirrored databases where manifest changes might not be allowed, or for readers willing to handle missing objects gracefully.
+
+[`DbReaderOptions::checkpoint_lifetime`](https://docs.rs/slatedb/latest/slatedb/config/struct.DbReaderOptions.html#structfield.checkpoint_lifetime) controls how long a `ManagedCheckpoint` reader's checkpoint lives before it must be refreshed.
 
 SlateDB also uses short-lived internal checkpoints during some background transitions. For example, the compactor writes a temporary checkpoint before publishing a manifest that drops obsolete SST references. That keeps recently replaced SSTs readable until GC can safely remove them.
 

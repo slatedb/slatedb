@@ -49,3 +49,42 @@ The compactor expects the database to already exist (a manifest must be present)
 :::
 
 See [Run a Standalone Compactor](/docs/tutorials/standalone-compactor/) for how to disable the embedded compactor in your database clients.
+
+## Run the standalone garbage collector
+
+Run garbage collection as a standalone process (instead of inside your `Db` clients).
+
+For a single foreground pass over one file type, use `run-garbage-collection`:
+
+```bash
+slatedb --env-file .env --path <db-path> run-garbage-collection \
+  --resource compacted \
+  --min-age 5m
+```
+
+Valid resources are `manifest`, `wal`, `wal-fence`, `compacted`, and `compactions`.
+
+To run garbage collection on a schedule in a standalone process, pass one or more schedules:
+
+```bash
+slatedb --env-file .env --path <db-path> schedule-garbage-collection \
+  --manifest min_age=5m,period=1m \
+  --wal min_age=5m,period=1m \
+  --compacted min_age=5m,period=1m \
+  --compactions min_age=5m,period=1m
+```
+
+The scheduled process runs until interrupted (Ctrl-C), then shuts down gracefully.
+
+Pass `--disable-boundary-files` to `run-garbage-collection` or
+`schedule-garbage-collection` to delete eligible manifest and compactions metadata without
+advancing boundary files. Use the same setting for every garbage collector operating on the
+database.
+
+:::note
+
+The garbage collector expects the database to already exist (a manifest must be present). If you're creating a new database, open it once before starting the garbage collector.
+
+:::
+
+See [Run a Standalone Garbage Collector](/docs/tutorials/standalone-garbage-collector/) for how to disable the embedded garbage collector in your database clients.

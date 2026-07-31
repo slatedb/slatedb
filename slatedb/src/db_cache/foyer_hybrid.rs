@@ -73,6 +73,7 @@
 use crate::{
     db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache},
     error::SlateDBError,
+    utils::format_bytes_si,
 };
 use async_trait::async_trait;
 use log::info;
@@ -133,8 +134,8 @@ impl DbCache for FoyerHybridCache {
         let memory_bytes = self.inner.memory().usage();
         info!(
             "foyer hybrid cache: closing \
-             (flushing {:.2} MB from memory to disk)",
-            memory_bytes as f64 / (1024.0 * 1024.0)
+             (flushing {} from memory to disk)",
+            format_bytes_si(memory_bytes as u64)
         );
         let result = self
             .inner

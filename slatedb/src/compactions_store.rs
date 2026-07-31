@@ -501,6 +501,7 @@ mod tests {
             flaky.clone(),
             Arc::new(DbRand::default()),
             Arc::new(DefaultSystemClock::new()),
+            None,
         ));
         let store = Arc::new(CompactionsStore::new(&Path::from(ROOT), retrying.clone()));
 

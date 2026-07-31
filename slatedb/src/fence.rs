@@ -1,186 +1,134 @@
+use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, StoredManifest};
 use crate::tablestore::TableStore;
+use crate::utils::WatchableOnceCellReader;
+use crate::wal::writer_init::{WalWriterInit, WalWriterInitOptions};
+use crate::wal::{WalIterator, WalWriter, WriterInit};
 use crate::Settings;
-#[cfg(test)]
-use fail_parallel::fail_point;
-use fail_parallel::FailPointRegistry;
+use fail_parallel::{fail_point_send, FailPointTx};
+use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::SystemClock;
-use std::collections::HashSet;
-use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) struct WriterFencer {
+    closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
+    recorder: MetricsRecorderHelper,
+    wal_writer_init_options: WalWriterInitOptions,
     table_store: Arc<TableStore>,
     manifest_update_timeout: Duration,
     system_clock: Arc<dyn SystemClock>,
+    task_executor: Arc<MessageHandlerExecutor>,
     #[cfg_attr(not(test), allow(dead_code))]
-    fp_ctl: Arc<FailPointCtl>,
+    fp_tx: FailPointTx,
 }
 
 pub(crate) struct WriterFenceResult {
     pub(crate) manifest: FenceableManifest,
-    pub(crate) replay_range: Range<u64>,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-struct FailPointCtl {
-    fp_registry: Arc<FailPointRegistry>,
-    event_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    event_toggles: Mutex<HashSet<String>>,
-}
-
-impl FailPointCtl {
-    fn new(
-        fp_registry: Arc<FailPointRegistry>,
-        event_tx: tokio::sync::mpsc::UnboundedSender<String>,
-    ) -> Self {
-        Self {
-            fp_registry,
-            event_tx,
-            event_toggles: Mutex::new(HashSet::new()),
-        }
-    }
-
-    #[cfg(test)]
-    fn enable_fp(&self, event: impl ToString) {
-        self.event_toggles.lock().unwrap().insert(event.to_string());
-    }
+    pub(crate) replay_iterator: Box<dyn WalIterator>,
+    pub(crate) wal_writer: Box<dyn WalWriter>,
 }
 
 impl WriterFencer {
     pub(crate) fn new(
+        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
+        recorder: MetricsRecorderHelper,
         table_store: Arc<TableStore>,
         settings: &Settings,
         system_clock: Arc<dyn SystemClock>,
+        task_executor: Arc<MessageHandlerExecutor>,
     ) -> Self {
-        let (event_tx, _) = tokio::sync::mpsc::unbounded_channel();
-        Self::new_with_fp_ctl(
+        Self::new_with_fp_handle(
+            closed_result_reader,
+            recorder,
             table_store,
             settings,
             system_clock,
-            Arc::new(FailPointCtl::new(
-                Arc::new(FailPointRegistry::new()),
-                event_tx,
-            )),
+            task_executor,
+            FailPointTx::dummy(),
         )
     }
 
-    fn new_with_fp_ctl(
+    fn new_with_fp_handle(
+        closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
+        recorder: MetricsRecorderHelper,
         table_store: Arc<TableStore>,
         settings: &Settings,
         system_clock: Arc<dyn SystemClock>,
-        fp_ctl: Arc<FailPointCtl>,
+        task_executor: Arc<MessageHandlerExecutor>,
+        fp_tx: FailPointTx,
     ) -> Self {
         Self {
+            closed_result_reader,
+            recorder,
             table_store,
+            wal_writer_init_options: settings.into(),
             manifest_update_timeout: settings.manifest_update_timeout,
             system_clock,
-            fp_ctl,
+            task_executor,
+            fp_tx,
         }
     }
 
-    #[cfg(test)]
-    fn fp_notify(&self, event: impl ToString) {
-        let event = event.to_string();
-        let _ = self.fp_ctl.event_tx.send(event.clone());
-        let event_toggle = HashSet::clone(&*self.fp_ctl.event_toggles.lock().unwrap());
-        fail_point!(
-            Arc::clone(&self.fp_ctl.fp_registry),
-            "fence_event",
-            event_toggle.contains(&event),
-            |_| {}
-        );
+    fn fail_point_send(&self, _name: impl ToString) {
+        fail_point_send!(self.fp_tx, _name, |_| {});
     }
-
-    #[cfg(not(test))]
-    fn fp_notify(&self, _event: impl ToString) {}
 
     /// Fences all writers with an older epoch than the provided `stored_manifest` by (1) writing
     /// a new `FenceableManifest` with a bumped epoch, and (2) writing an empty WAL file that acts
     /// as a barrier. Any parallel old writers will fail with `SlateDBError::Fenced` when trying
-    /// to "re-write" this file. Returns a `WriterFence` with the `FenceableManifest` and range
-    /// that must be replayed to recover up to the current epoch
+    /// to "re-write" this file. Returns a `WriterFence` with the `FenceableManifest` and iterator
+    /// that must be replayed to recover up to the current epoch.
     pub(crate) async fn fence(
         self,
         stored_manifest: StoredManifest,
     ) -> Result<WriterFenceResult, SlateDBError> {
-        let mut empty_wal_id = self
-            .table_store
-            .next_wal_sst_id(stored_manifest.manifest().core.replay_after_wal_id)
-            .await?;
-        self.fp_notify("LoadEmptyWalId");
+        let wal_writer_init = WalWriterInit::load(
+            self.closed_result_reader.clone(),
+            self.recorder.clone(),
+            self.table_store.clone(),
+            self.wal_writer_init_options,
+            stored_manifest.manifest(),
+            self.task_executor.clone(),
+            self.fp_tx.clone(),
+        )
+        .await?;
 
-        let mut manifest = FenceableManifest::init_writer(
+        let manifest = FenceableManifest::init_writer(
             stored_manifest,
             self.manifest_update_timeout,
             self.system_clock.clone(),
         )
         .await?;
-        self.fp_notify("FenceManifest");
+        self.fail_point_send("FenceManifest");
 
-        let mut manifest_dirty = manifest.prepare_dirty()?;
-        // verify that the empty_wal_id we computed is still valid. Its possible that between
-        // computing empty_wal_id and fencing the manifest, the fenced writer advanced the gc
-        // boundary (replay_after_wal_id)
-        if empty_wal_id <= manifest_dirty.value.core.replay_after_wal_id {
-            // the wal gc boundary advanced because the old writer finished a flush - recompute
-            // the next wal id
-            empty_wal_id = self
-                .table_store
-                .next_wal_sst_id(manifest_dirty.value.core.replay_after_wal_id)
-                .await?;
-            manifest.refresh().await?;
-            manifest_dirty = manifest.prepare_dirty()?;
-            self.fp_notify("ReloadEmptyWalId");
-            // at this point we still hold the epoch, so it should not be possible for the barrier
-            // to have advanced past the computed empty_wal_id
-            assert!(empty_wal_id > manifest_dirty.value.core.replay_after_wal_id);
-        }
+        let mut manifest = manifest.into();
+        let result = wal_writer_init.fence_and_init(&mut manifest).await?;
+        let mut manifest: FenceableManifest = manifest.into();
 
-        let mut attempt = 0;
-        loop {
-            attempt += 1;
-            let wrote_fence = match self.table_store.write_wal_fence(empty_wal_id).await {
-                Ok(()) => true,
-                Err(SlateDBError::Fenced) => false,
-                Err(err) => return Err(err),
-            };
-            self.fp_notify(format!("{}:{}", "WriteWalFence", attempt));
+        // Refresh validates that we own the latest epoch still.
+        manifest.refresh().await?;
+        fail_point_send!(self.fp_tx, "FinalRefreshManifest");
 
-            // Refresh validates that we own the latest epoch still.
-            manifest.refresh().await?;
-            let dirty_manifest = manifest.prepare_dirty()?;
-            let replay_after_wal_id = dirty_manifest.value.core.replay_after_wal_id;
-            self.fp_notify(format!("{}:{}", "RefreshManifest", attempt));
-
-            if wrote_fence {
-                // this writer is the only writer that could have written replay_after_wal_id,
-                // so it should not be possible for it to have advanced past the fencing wal.
-                // older writers would have failed with a stale epoch
-                assert!(empty_wal_id > replay_after_wal_id);
-                return Ok(WriterFenceResult {
-                    manifest,
-                    replay_range: replay_after_wal_id + 1..empty_wal_id + 1,
-                });
-            } else {
-                // The old writer managed to write a WAL before we could write the fencing wal.
-                // Try the next wal ID
-                empty_wal_id += 1;
-            }
-        }
+        Ok(WriterFenceResult {
+            manifest,
+            wal_writer: result.wal_writer,
+            replay_iterator: result.replay_iterator,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::compactions_store::CompactionsStore;
     use crate::config::{
         FlushOptions, FlushType, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
     };
+    use crate::dispatcher::MessageHandlerExecutor;
     use crate::error::SlateDBError;
-    use crate::fence::{FailPointCtl, WriterFencer};
+    use crate::fence::WriterFencer;
     use crate::format::sst::SsTableFormat;
     use crate::garbage_collector::GarbageCollector;
     use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -188,14 +136,18 @@ mod tests {
     use crate::memtable_flusher::MANIFEST_REFRESH_COUNT;
     use crate::object_stores::ObjectStores;
     use crate::tablestore::{TableStore, TableStoreKind};
+    use crate::utils::WatchableOnceCell;
     use crate::{CloseReason, Db, ErrorKind, Settings};
     use bytes::Bytes;
+    use fail_parallel::fail_point_channel;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
     use rstest::rstest;
-    use slatedb_common::metrics::{lookup_metric, DefaultMetricsRecorder, MetricsRecorderHelper};
+    use slatedb_common::metrics::{
+        lookup_metric, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
+    };
     use slatedb_common::{DefaultSystemClock, SystemClock};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -207,7 +159,6 @@ mod tests {
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
         fp_registry: Arc<FailPointRegistry>,
-        fp_ctl: Arc<FailPointCtl>,
         event_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
         fencer: Option<WriterFencer>,
         stored_manifest: Option<StoredManifest>,
@@ -227,6 +178,7 @@ mod tests {
                 path,
                 None,
                 TableStoreKind::Main,
+                BlockCachePolicy::default(),
             ));
             let stored_manifest = StoredManifest::create_new_db(
                 manifest_store.clone(),
@@ -236,13 +188,24 @@ mod tests {
             .await
             .unwrap();
             let fp_registry = Arc::new(FailPointRegistry::new());
-            let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-            let fp_ctl = Arc::new(FailPointCtl::new(fp_registry.clone(), event_tx));
-            let fencer = WriterFencer::new_with_fp_ctl(
+            let (fp_tx, event_rx) = fail_point_channel(fp_registry.clone());
+            let cell = Arc::new(WatchableOnceCell::new());
+            let recorder = MetricsRecorderHelper::new(
+                Arc::new(DefaultMetricsRecorder::new()),
+                MetricLevel::Info,
+            );
+            let task_executor = Arc::new(MessageHandlerExecutor::new(
+                cell.clone(),
+                system_clock.clone(),
+            ));
+            let fencer = WriterFencer::new_with_fp_handle(
+                cell.reader(),
+                recorder,
                 table_store.clone(),
                 &settings,
                 system_clock.clone(),
-                fp_ctl.clone(),
+                task_executor.clone(),
+                fp_tx,
             );
             Self {
                 object_store,
@@ -250,7 +213,6 @@ mod tests {
                 manifest_store,
                 table_store,
                 fp_registry,
-                fp_ctl,
                 event_rx,
                 fencer: Some(fencer),
                 stored_manifest: Some(stored_manifest),
@@ -309,6 +271,8 @@ mod tests {
                 compactions_options: None,
                 detach_options: None,
                 metric_level: None,
+                boundary_files_enabled: true,
+                object_store_max_retries: None,
             };
             let gc = GarbageCollector::new(
                 self.manifest_store.clone(),
@@ -342,7 +306,10 @@ mod tests {
         async fn put(&mut self, db: &Db, v: u32, expect_fenced: bool) {
             let k = Bytes::from(format!("k{}", v));
             let v = Bytes::from(format!("v{}", v));
-            let result = db.put(k.as_ref(), v.as_ref()).await;
+            let result = match db.put(k.as_ref(), v.as_ref()).await {
+                Ok(handle) => handle.await_durable().await,
+                Err(error) => Err(error),
+            };
             if expect_fenced {
                 assert_eq!(
                     result.unwrap_err().kind(),
@@ -469,9 +436,8 @@ mod tests {
         // initialize a fencer. configure it to pause at LoadEmptyWalId (so the
         // fenced writer can race ahead) and at the case's event (so a new
         // writer can claim the epoch out from under the fencer).
-        h.fp_ctl.enable_fp("LoadEmptyWalId");
-        h.fp_ctl.enable_fp(case.pause_event);
-        fail_parallel::cfg(h.fp_registry.clone(), "fence_event", "pause").unwrap();
+        fail_parallel::cfg(h.fp_registry.clone(), "LoadEmptyWalId", "pause").unwrap();
+        fail_parallel::cfg(h.fp_registry.clone(), case.pause_event, "pause").unwrap();
 
         let fencer = h.fencer.take().unwrap();
         let stored_manifest = h.stored_manifest.take().unwrap();
@@ -481,7 +447,7 @@ mod tests {
 
         // after LoadEmptyWalId pause, have the fenced db write some wals and flush and gc.
         // This advances replay_after_wal_id past the fencer's stale empty_wal_id, so the
-        // recompute branch (and ReloadEmptyWalId fp_notify) fires when the fencer resumes.
+        // recompute branch (and ReloadEmptyWalId fail_point_send) fires when the fencer resumes.
         h.put(&db, 1, false).await;
         h.put(&db, 2, false).await;
         db.flush_with_options(FlushOptions {
@@ -502,7 +468,8 @@ mod tests {
         // resume the fencer. re-issuing "pause" wakes the current pause and
         // keeps the action set to "pause" so the next toggled event also
         // pauses.
-        fail_parallel::cfg(h.fp_registry.clone(), "fence_event", "pause").unwrap();
+        fail_parallel::cfg(h.fp_registry.clone(), "LoadEmptyWalId", "pause").unwrap();
+        fail_parallel::cfg(h.fp_registry.clone(), case.pause_event, "pause").unwrap();
 
         // wait for the case's pause event. fp_notify sends an event for every
         // failpoint regardless of whether it pauses, so drain intermediate
@@ -539,7 +506,8 @@ mod tests {
         }
 
         // resume the fencer
-        fail_parallel::cfg(h.fp_registry.clone(), "fence_event", "off").unwrap();
+        fail_parallel::cfg(h.fp_registry.clone(), "LoadEmptyWalId", "off").unwrap();
+        fail_parallel::cfg(h.fp_registry.clone(), case.pause_event, "off").unwrap();
 
         // validate that its fenced — the fencer's manifest.refresh sees the new db's
         // bumped epoch and returns Fenced.
@@ -570,8 +538,7 @@ mod tests {
         h.put(&db, 0, false).await;
 
         // configure the fencer to pause
-        h.fp_ctl.enable_fp(case.event);
-        fail_parallel::cfg(h.fp_registry.clone(), "fence_event", "pause").unwrap();
+        fail_parallel::cfg(h.fp_registry.clone(), case.event, "pause").unwrap();
 
         // spawn WriterFencer on another task
         let fencer = h.fencer.take().unwrap();
@@ -611,16 +578,28 @@ mod tests {
         }
 
         // unpause WriterFencer
-        fail_parallel::cfg(h.fp_registry.clone(), "fence_event", "off").unwrap();
+        fail_parallel::cfg(h.fp_registry.clone(), case.event, "off").unwrap();
         // verify it returns successfully
-        let result = jh.await.unwrap().unwrap();
+        let mut result = jh.await.unwrap().unwrap();
         // The fencer's stale empty_wal_id was retried above the fenced writer's possibly
         // advanced replay_after_wal_id.
-        assert_eq!(result.replay_range.start, replay_after_wal_id + 1);
+        let first_replayed_wal = result
+            .replay_iterator
+            .next()
+            .await
+            .unwrap()
+            .expect("expected the replay iterator to contain the fencing WAL");
+        assert_eq!(
+            first_replayed_wal.last_consumed_wal_file_id,
+            replay_after_wal_id + 1
+        );
 
         // verify that fenced db is fenced (new write fails)
         use crate::error::{CloseReason, ErrorKind};
-        let err = db.put(b"k4", b"v4").await.unwrap_err();
+        let err = match db.put(b"k4", b"v4").await {
+            Ok(handle) => handle.await_durable().await.unwrap_err(),
+            Err(error) => error,
+        };
         assert!(
             matches!(err.kind(), ErrorKind::Closed(CloseReason::Fenced)),
             "expected Fenced, got {err}"

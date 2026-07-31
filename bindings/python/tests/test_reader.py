@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import pytest
-
 from conftest import (
-    ConcatMergeOperator,
     TEST_DB_PATH,
+    ConcatMergeOperator,
     drain_iterator,
     new_memory_store,
     open_db,
@@ -15,6 +14,7 @@ from conftest import (
     scan_options,
     wait_until,
 )
+
 from slatedb.uniffi import (
     CloseReason,
     DbReaderBuilder,
@@ -22,6 +22,7 @@ from slatedb.uniffi import (
     FlushOptions,
     FlushType,
     KeyRange,
+    ReaderMode,
 )
 
 
@@ -197,18 +198,17 @@ async def test_reader_refresh_polling_updates_visible_state() -> None:
 async def test_reader_default_mode_replays_new_wal_data() -> None:
     store = new_memory_store()
 
-    async with open_db(store) as db:
-        async with open_reader(
-            store,
-            configure=lambda builder: builder.with_options(reader_options(False)),
-        ) as reader:
-            await db.put(b"wal-key", b"wal-value")
-            await db.flush_with_options(FlushOptions(flush_type=FlushType.WAL))
+    async with open_db(store) as db, open_reader(
+        store,
+        configure=lambda builder: builder.with_options(reader_options(False)),
+    ) as reader:
+        await db.put(b"wal-key", b"wal-value")
+        await db.flush_with_options(FlushOptions(flush_type=FlushType.WAL))
 
-            async def has_wal_value() -> bool:
-                return await reader.get(b"wal-key") == b"wal-value"
+        async def has_wal_value() -> bool:
+            return await reader.get(b"wal-key") == b"wal-value"
 
-            await wait_until(has_wal_value)
+        await wait_until(has_wal_value)
 
 
 @pytest.mark.asyncio
@@ -267,11 +267,13 @@ async def test_reader_builder_validation_and_errors() -> None:
 
         invalid_builder = DbReaderBuilder(TEST_DB_PATH, store)
         with pytest.raises(Error.Invalid) as exc:
-            invalid_builder.with_checkpoint_id("not-a-uuid")
+            invalid_builder.with_reader_mode(ReaderMode.CHECKPOINT("not-a-uuid"))
         assert exc.value.message.startswith("invalid checkpoint_id UUID:")
 
         missing_builder = DbReaderBuilder(TEST_DB_PATH, store)
-        missing_builder.with_checkpoint_id("ffffffff-ffff-ffff-ffff-ffffffffffff")
+        missing_builder.with_reader_mode(
+            ReaderMode.CHECKPOINT("ffffffff-ffff-ffff-ffff-ffffffffffff")
+        )
         with pytest.raises(Error.Data) as exc:
             await missing_builder.build()
         assert "checkpoint missing" in exc.value.message

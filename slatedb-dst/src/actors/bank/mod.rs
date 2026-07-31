@@ -86,7 +86,6 @@ pub async fn initialize_accounts(db: &Db, options: &BankOptions) -> Result<(), E
             &starting_balance,
             &PutOptions::default(),
             &WriteOptions {
-                await_durable: false,
                 ..Default::default()
             },
         )

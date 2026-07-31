@@ -87,9 +87,9 @@
 // insertion, and scan fetch parallelism.
 //
 // For long-lived read-only access, open a [DbReader] with
-// [NewDbReaderBuilder]. A reader can be pinned to an existing checkpoint with
-// [DbReaderBuilder.WithCheckpointId], configured with [ReaderOptions], and
-// given a [MergeOperator] for merge-aware reads.
+// [NewDbReaderBuilder]. A reader's state selection can be configured with
+// [DbReaderBuilder.WithReaderMode] and [ReaderMode]. It can also be configured
+// with [ReaderOptions] and given a [MergeOperator] for merge-aware reads.
 //
 // [Db.Snapshot] creates a consistent read-only [DbSnapshot] from a writable
 // database handle.
@@ -100,14 +100,14 @@
 // [Db.Delete], and [Db.Merge], plus batch and durability controls through
 // [PutOptions], [MergeOptions], [WriteOptions], and [FlushOptions].
 //
-// [WriteHandle] reports metadata assigned to a successful write, including the
-// sequence number and creation timestamp.
+// [WriteHandle] reports metadata assigned to a successful write and exposes
+// [WriteHandle.AwaitDurable] for waiting until that specific write is durable.
 //
 // [WriteBatch] collects multiple mutations and applies them atomically through
 // [Db.Write] or [Db.WriteWithOptions]. Batches are single-use once submitted.
 //
 // TTL behavior is configured with [Ttl] implementations such as [TtlDefault],
-// [TtlNoExpiry], and [TtlExpireAfterTicks].
+// [TtlNoExpiry], and [TtlExpireAfterMillis].
 //
 // # Transactions
 //

@@ -1,7 +1,7 @@
 use bytes::Bytes;
 
 /// Extractor for a prefix from a byte string, used to build and probe
-/// prefix-based bloom filters.
+/// prefix-based bloom filters and segmented compaction.
 ///
 /// This trait is specific to `BloomFilterPolicy` — it is not part of the core
 /// `FilterPolicy`/`FilterBuilder`/`Filter` traits. Custom filter policies that

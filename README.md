@@ -16,7 +16,7 @@
 
 To mitigate high write API costs (PUTs), SlateDB batches writes. Rather than writing every `put()` call to object storage, MemTables are flushed periodically to object storage as a string-sorted table (SST). The flush interval is configurable.
 
-`put()` returns a `Future` that resolves when the data is durably persisted. Clients that prefer lower latency at the cost of durability can instead use `put_with_options` with `await_durable` set to `false`.
+Write operations return a `WriteHandle` after updating the in-memory WAL and MemTable. Call `handle.await_durable().await` to wait for one write to become durable, or call `db.flush().await` to flush all pending writes.
 
 To mitigate read latency and read API costs (GETs), SlateDB will use standard LSM-tree caching techniques: in-memory block caches, compression, bloom filters, and local SST disk caches.
 
@@ -138,8 +138,7 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 - [x] Clones ([#49](https://github.com/slatedb/slatedb/issues/49))
 - [ ] Range deletions ([#577](https://github.com/slatedb/slatedb/issues/577))
 - [x] Change data capture (CDC) ([#249](https://github.com/slatedb/slatedb/issues/249))
-- [ ] Database splitting
-- [ ] Database merging
+- [x] Database split/merge ([RFC](https://github.com/slatedb/slatedb/blob/main/rfcs/0004-checkpoints.md#manifest-projection-and-union))
 
 ## Projects
 
@@ -162,6 +161,7 @@ See who's using SlateDB.
 - [Massive](https://massive.com)
 - [Merklemap](https://merklemap.com)
 - [OpenData](https://www.opendata.dev)
+- [Prisma](https://www.prisma.io)
 - [Responsive](https://responsive.dev)
 - [s2-lite](https://github.com/s2-streamstore/s2)
 - [SQLync](https://sqlync.com)

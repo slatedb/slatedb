@@ -45,8 +45,9 @@ jobs:
           AR_aarch64_unknown_linux_gnu: aarch64-unknown-linux-gnu-ar
           RANLIB_aarch64_unknown_linux_gnu: aarch64-unknown-linux-gnu-ranlib
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-unknown-linux-gnu-gcc
-          # ensure the ARM assembler defines __ARM_ARCH
-          CFLAGS_aarch64_unknown_linux_gnu: "-march=armv8-a -D__ARM_ARCH=8"
+          # ensure the ARM assembler defines __ARM_ARCH; manylinux2014's
+          # aarch64 sysroot is missing the Linux UAPI AT_HWCAP2 definition.
+          CFLAGS_aarch64_unknown_linux_gnu: "-march=armv8-a -D__ARM_ARCH=8 -DAT_HWCAP2=26"
         with:
           working-directory: ./bindings/python
           target: ${{ matrix.platform.target }}

@@ -2,11 +2,13 @@ use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{CompactionSpec, SourceId};
 use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, PutOptions, WriteOptions};
-use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView, SstType};
+use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType};
 use crate::error::{RetryReason, SlateDBError};
 use crate::format::row::SstRowCodecV0;
+use crate::format::sst::SST_FORMAT_VERSION_LATEST;
 use crate::iter::{IterationOrder, RowEntryIterator};
-use crate::tablestore::{ObjectStoreCallTag, TableStore, TableStoreKind};
+use crate::object_store_tag::ObjectStoreCallTag;
+use crate::tablestore::{TableStore, TableStoreKind};
 use crate::types::{KeyValue, RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -14,8 +16,8 @@ use futures::stream::BoxStream;
 use futures::{stream, StreamExt};
 use object_store::path::Path;
 use object_store::{
-    CopyOptions, GetOptions, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutOptions as OS_PutOptions, PutPayload, PutResult,
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions as OS_PutOptions, PutPayload, PutResult, RenameOptions,
 };
 use rand::{Rng, RngCore};
 use std::cmp::Ordering as CmpOrdering;
@@ -33,6 +35,18 @@ use tokio::sync::Notify;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 use ulid::Ulid;
+
+pub(crate) fn bounded_sst_view(id: u64, first: &'static [u8], last: &'static [u8]) -> SsTableView {
+    SsTableView::identity(SsTableHandle::new(
+        SsTableId::Compacted(Ulid::from_parts(id, 0)),
+        SST_FORMAT_VERSION_LATEST,
+        SsTableInfo {
+            first_entry: Some(Bytes::from_static(first)),
+            last_entry: Some(Bytes::from_static(last)),
+            ..SsTableInfo::default()
+        },
+    ))
+}
 
 /// Asserts that the iterator returns the exact set of expected values in correct order.
 pub(crate) async fn assert_iterator<T: RowEntryIterator>(iterator: &mut T, entries: Vec<RowEntry>) {
@@ -121,6 +135,105 @@ pub(crate) fn gen_rand_bytes(n: usize) -> Bytes {
     let mut rng = rand::rng();
     let random_bytes: Vec<u8> = (0..n).map(|_| rng.random::<u8>()).collect();
     Bytes::from(random_bytes)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ExtensionMarker;
+
+#[derive(Clone)]
+pub(crate) struct ExtensionObjectStore {
+    inner: Arc<dyn ObjectStore>,
+}
+
+impl ExtensionObjectStore {
+    pub(crate) fn new(inner: Arc<dyn ObjectStore>) -> Self {
+        Self { inner }
+    }
+}
+
+impl fmt::Debug for ExtensionObjectStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ExtensionObjectStore({})", self.inner)
+    }
+}
+
+impl fmt::Display for ExtensionObjectStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ExtensionObjectStore({})", self.inner)
+    }
+}
+
+#[async_trait]
+impl ObjectStore for ExtensionObjectStore {
+    async fn get_opts(
+        &self,
+        location: &Path,
+        options: GetOptions,
+    ) -> object_store::Result<GetResult> {
+        let mut result = self.inner.get_opts(location, options).await?;
+        result.extensions.insert(ExtensionMarker);
+        Ok(result)
+    }
+
+    async fn put_opts(
+        &self,
+        location: &Path,
+        payload: PutPayload,
+        opts: OS_PutOptions,
+    ) -> object_store::Result<PutResult> {
+        let mut result = self.inner.put_opts(location, payload, opts).await?;
+        result.extensions.insert(ExtensionMarker);
+        Ok(result)
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &Path,
+        opts: PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    fn list_with_offset(
+        &self,
+        prefix: Option<&Path>,
+        offset: &Path,
+    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+        self.inner.list_with_offset(prefix, offset)
+    }
+
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
+    }
+
+    async fn rename_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: RenameOptions,
+    ) -> object_store::Result<()> {
+        self.inner.rename_opts(from, to, options).await
+    }
 }
 
 // it seems that insta still does not allow to customize the snapshot path in insta.yaml,
@@ -254,17 +367,23 @@ where
 pub(crate) async fn seed_database(
     db: &Db,
     table: &BTreeMap<Bytes, Bytes>,
-    await_durable: bool,
+    wait_for_durability: bool,
 ) -> Result<(), crate::Error> {
     let put_options = PutOptions::default();
-    let write_options = WriteOptions {
-        await_durable,
-        ..Default::default()
-    };
+    let write_options = WriteOptions::default();
+    let mut last_handle = None;
 
     for (key, value) in table.iter() {
-        db.put_with_options(key, value, &put_options, &write_options)
-            .await?;
+        last_handle = Some(
+            db.put_with_options(key, value, &put_options, &write_options)
+                .await?,
+        );
+    }
+
+    if wait_for_durability {
+        if let Some(handle) = last_handle {
+            handle.await_durable().await?;
+        }
     }
 
     Ok(())
@@ -347,10 +466,7 @@ pub(crate) async fn build_sorted_runs(
             let ssts = write_ssts(table_store, entries, max_sst_size).await;
             sr_ssts.extend(ssts.into_iter().map(SsTableView::identity));
         }
-        sorted_runs.push(SortedRun {
-            id: sr_id as u32,
-            sst_views: sr_ssts,
-        });
+        sorted_runs.push(SortedRun::new(sr_id as u32, sr_ssts));
     }
 
     sorted_runs
@@ -669,6 +785,7 @@ impl ObjectStore for FlakyObjectStore {
                 let meta = result.meta.clone();
                 let range = result.range.clone();
                 let attributes = result.attributes.clone();
+                let extensions = result.extensions.clone();
                 let body = result.bytes().await?;
                 let truncated = body.slice(..truncate_bytes.min(body.len()));
                 return Ok(object_store::GetResult {
@@ -678,6 +795,7 @@ impl ObjectStore for FlakyObjectStore {
                     meta,
                     range,
                     attributes,
+                    extensions,
                 });
             }
         }
@@ -837,6 +955,9 @@ impl ObjectStore for FlakyObjectStore {
 /// [`set_error`](Self::set_error) before releasing to inject a specific error.
 pub(crate) struct Gate {
     open: std::sync::atomic::AtomicBool,
+    /// Callers waiting at a closed gate may pass by consuming one permit
+    /// (see [`admit`](Self::admit)).
+    permits: AtomicUsize,
     arrival_count: AtomicUsize,
     /// If `Some`, callers receive the produced error after the gate opens.
     error_fn: std::sync::Mutex<Option<Box<dyn Fn() -> object_store::Error + Send + Sync>>>,
@@ -856,6 +977,7 @@ impl Default for Gate {
     fn default() -> Self {
         Self {
             open: std::sync::atomic::AtomicBool::new(true),
+            permits: AtomicUsize::new(0),
             arrival_count: AtomicUsize::new(0),
             error_fn: std::sync::Mutex::new(None),
         }
@@ -880,6 +1002,14 @@ impl Gate {
     /// Open the gate, allowing all blocked (and future) callers to proceed.
     pub(crate) fn release(&self) {
         self.open.store(true, Ordering::Release);
+    }
+
+    /// Let exactly `n` callers through a closed gate. Blocked (and future)
+    /// callers each consume one permit to pass; once the permits are used the
+    /// gate blocks again. Permits are ignored while the gate is open.
+    #[allow(dead_code)]
+    pub(crate) fn admit(&self, n: usize) {
+        self.permits.fetch_add(n, Ordering::AcqRel);
     }
 
     /// Set an error factory. After the gate opens, callers will receive the
@@ -908,14 +1038,36 @@ impl Gate {
         self.arrival_count.load(Ordering::Acquire)
     }
 
-    /// Block at this gate until released. Returns the configured error (if any)
-    /// or `Ok(())` to let the caller proceed to the inner store.
+    /// Block at this gate until released or admitted. Returns the configured
+    /// error (if any) or `Ok(())` to let the caller proceed to the inner store.
     async fn wait(&self) -> object_store::Result<()> {
         // Signal arrival.
         self.arrival_count.fetch_add(1, Ordering::AcqRel);
 
-        // Spin-yield until the gate is opened.
-        while !self.open.load(Ordering::Acquire) {
+        // Spin-yield until the gate is opened or a permit is available.
+        loop {
+            if self.open.load(Ordering::Acquire) {
+                break;
+            }
+            let mut permits = self.permits.load(Ordering::Acquire);
+            let mut admitted = false;
+            while permits > 0 {
+                match self.permits.compare_exchange(
+                    permits,
+                    permits - 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        admitted = true;
+                        break;
+                    }
+                    Err(current) => permits = current,
+                }
+            }
+            if admitted {
+                break;
+            }
             tokio::task::yield_now().await;
         }
 

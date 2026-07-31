@@ -1,4 +1,4 @@
-//! RFC-0025 "GC cutoff rule enforcement" invariants for the `.manifest` object.
+//! RFC-0026 "GC cutoff rule enforcement" invariants for the `.manifest` object.
 //!
 //! Each invariant is a plain [`Invariant<Manifest>`] predicate attached once to
 //! the [`StoredManifest`](super::store::StoredManifest)'s transactional object, so
@@ -84,7 +84,7 @@ pub(crate) fn l0_ulid_cutoff(
     Ok(())
 }
 
-/// The invariants enforced on every `.manifest` update (RFC-0025 GC cutoff
+/// The invariants enforced on every `.manifest` update (RFC-0026 GC cutoff
 /// rules). Will be attached once at [`StoredManifest`](super::store::StoredManifest)
 /// construction via `with_invariants` in the follow-up wiring PR.
 #[allow(dead_code)]

@@ -37,6 +37,8 @@ impl DbInner {
         while let Some(entry) = iter.next().await? {
             sst_builder.add(entry).await?;
             any = true;
+            // Keep cached flush work cooperative.
+            tokio::task::coop::consume_budget().await;
         }
         if !any {
             return Ok(None);
@@ -131,6 +133,8 @@ impl DbInner {
             }
             current_builder.add(entry).await?;
             current_has_entry = true;
+            // Keep cached flush work cooperative.
+            tokio::task::coop::consume_budget().await;
         }
         if current_has_entry {
             out.push(EncodedSegmentSst {
@@ -146,18 +150,9 @@ impl DbInner {
     pub(crate) async fn upload_sst(
         &self,
         id: &db_state::SsTableId,
-        imm_table: Arc<KVTable>,
         encoded_sst: &EncodedSsTable,
-        write_cache: bool,
     ) -> Result<SsTableHandle, SlateDBError> {
-        let handle = self
-            .table_store
-            .write_sst(id, encoded_sst, write_cache)
-            .await?;
-
-        self.mono_clock
-            .fetch_max_last_durable_tick(imm_table.last_tick());
-
+        let handle = self.table_store.write_sst(id, encoded_sst).await?;
         Ok(handle)
     }
 
@@ -171,7 +166,6 @@ impl DbInner {
     pub(crate) async fn flush_l0_for_test(
         &self,
         imm_table: Arc<KVTable>,
-        write_cache: bool,
     ) -> Result<Vec<SsTableHandle>, SlateDBError> {
         use crate::utils::IdGenerator;
         // Tests that construct an `imm_table` outside the write path
@@ -183,9 +177,7 @@ impl DbInner {
             let id = db_state::SsTableId::Compacted(
                 self.rand.rng().gen_ulid(self.system_clock.as_ref()),
             );
-            let handle = self
-                .upload_sst(&id, imm_table.clone(), &sst.encoded, write_cache)
-                .await?;
+            let handle = self.upload_sst(&id, &sst.encoded).await?;
             handles.push(handle);
         }
         Ok(handles)
@@ -504,7 +496,7 @@ mod tests {
         // When
         let handles = db
             .inner
-            .flush_l0_for_test(table.table().clone(), false)
+            .flush_l0_for_test(table.table().clone())
             .await
             .unwrap();
 
@@ -549,7 +541,7 @@ mod tests {
         );
 
         db.inner
-            .flush_l0_for_test(table.table().clone(), false)
+            .flush_l0_for_test(table.table().clone())
             .await
             .unwrap();
 
@@ -578,7 +570,7 @@ mod tests {
 
         // When
         db.inner
-            .flush_l0_for_test(table.table().clone(), false)
+            .flush_l0_for_test(table.table().clone())
             .await
             .map_or_else(
                 |err| match err {
@@ -601,7 +593,7 @@ mod tests {
 
         // When
         db.inner
-            .flush_l0_for_test(table.table().clone(), false)
+            .flush_l0_for_test(table.table().clone())
             .await
             .unwrap();
     }
@@ -696,7 +688,7 @@ mod tests {
 
         let handles = db
             .inner
-            .flush_l0_for_test(table.table().clone(), false)
+            .flush_l0_for_test(table.table().clone())
             .await
             .unwrap();
         let sst_handle = handles.into_iter().next().expect("expected single SST");
@@ -845,11 +837,7 @@ mod tests {
         ];
         for (sst, entries) in ssts.into_iter().zip(expected.into_iter()) {
             let id = SsTableId::Compacted(Ulid::new());
-            let handle = db
-                .inner
-                .upload_sst(&id, table.table().clone(), &sst.encoded, false)
-                .await
-                .unwrap();
+            let handle = db.inner.upload_sst(&id, &sst.encoded).await.unwrap();
             verify_sst(&db, &handle, &entries).await;
         }
         db.close().await.unwrap();

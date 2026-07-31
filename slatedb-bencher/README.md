@@ -78,7 +78,7 @@ The script also has a `SLATEDB_BENCH_CLEAN` environment variable which can be se
 
 ### `nightly.yaml`
 
-`benchmark-db.sh` is also used in `.github/workflows/nightly.yaml` to benchmark the nightly build and generate plots for the [SlateDB website](https://slatedb.io/performance/benchmarks/main/). The tests are run using [WarpBuild](https://warpbuild.com) and the results are uploaded using [github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark). The job will also fail if the results are not within 200% of the previous results.
+`benchmark-db.sh` is also used in `.github/workflows/nightly.yaml` to benchmark the nightly build. The tests are run using [WarpBuild](https://warpbuild.com), and each run appends to mermaid `xyChart` files that are posted to the workflow's GitHub Actions job summary.
 
 ## `compaction` Subcommand
 

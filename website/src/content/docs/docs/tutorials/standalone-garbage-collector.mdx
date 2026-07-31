@@ -1,0 +1,71 @@
+---
+title: Run a Standalone Garbage Collector
+description: Learn how to run garbage collection as a separate process from your database clients
+---
+
+import { Code } from '@astrojs/starlight/components';
+import standaloneGarbageCollector from '/../examples/src/standalone_garbage_collector.rs?raw';
+
+By default, SlateDB starts a background garbage collector inside each `Db` instance.
+You can also run garbage collection as a separate service:
+
+1. Keep your existing `Db` clients running.
+2. Start one or more standalone garbage collectors against the same database path.
+
+All processes must use the same `ObjectStore` and database path (the path is the prefix inside your object store).
+
+Unlike the compactor coordinator, the garbage collector does not require fencing or leader election. Multiple garbage collectors may run in parallel, including the embedded collectors inside writer processes.
+
+If you want a standalone process to own all garbage collection work, set `Settings::garbage_collector_options` to `None` in your `Db` clients.
+
+## Run from the CLI
+
+For a single foreground pass over one file type, use `run-garbage-collection`:
+
+```bash
+slatedb --env-file .env --path <db-path> run-garbage-collection \
+  --resource compacted \
+  --min-age 5m
+```
+
+Valid resources are `manifest`, `wal`, `wal-fence`, `compacted`, and `compactions`.
+
+To run garbage collection on a schedule in a standalone process, pass one or more schedules:
+
+```bash
+slatedb --env-file .env --path <db-path> schedule-garbage-collection \
+  --manifest min_age=5m,period=1m \
+  --wal min_age=5m,period=1m \
+  --compacted min_age=5m,period=1m \
+  --compactions min_age=5m,period=1m
+```
+
+The scheduled process runs until interrupted (Ctrl-C), then shuts down gracefully.
+
+The command above does not collect WAL fence objects. Enable `--wal-fence` only when `min_age` is longer than any writer can run. Default garbage collection keeps WAL fence deletion in dry-run mode because deleting fences too early can allow stale WAL writes to succeed.
+
+## Embed the garbage collector
+
+You can also embed the garbage collector in your own process using `GarbageCollectorBuilder` and call `run`:
+
+<Code code={standaloneGarbageCollector} lang="rust" title="main.rs" />
+
+With `GarbageCollectorOptions::default()`, garbage collection runs every 60 seconds and uses a 5 minute minimum age for managed directories. WAL fence deletion stays in dry-run mode by default.
+
+To delete manifest and compactions metadata without advancing boundary files, set
+`GarbageCollectorOptions::boundary_files_enabled` to `false` on every garbage collector for the
+database. Metadata readers and writers continue to honor any existing boundary. Without boundary
+advancement, a SlateDB client or compactor can begin updating a manifest or compactions file, stop
+making progress (for example, because its process or host is suspended), then resume after
+`min_age`. It can then recreate a deleted metadata ID and incorrectly report its stale update as
+successful. Set the manifest and compactions `min_age` values longer than the maximum lifetime of a
+stale process before using this mode.
+
+:::note
+
+The standalone garbage collector expects the database to already exist (a manifest must be present).
+If you're creating a new database, open it once with your client process before starting the garbage collector.
+
+Garbage collection deletes only files that meet the configured `min_age` and are no longer referenced by the latest database state or active checkpoints.
+
+:::

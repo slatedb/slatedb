@@ -274,6 +274,14 @@ impl CompactionStatus {
         )
     }
 
+    /// Returns whether this compaction still consumes scheduler capacity.
+    pub(crate) fn counts_against_max_concurrent(self) -> bool {
+        matches!(
+            self,
+            CompactionStatus::Submitted | CompactionStatus::Scheduled | CompactionStatus::Running
+        )
+    }
+
     fn finished(self) -> bool {
         matches!(self, CompactionStatus::Completed | CompactionStatus::Failed)
     }
@@ -281,7 +289,7 @@ impl CompactionStatus {
     /// State transitions made by CompactionWorker that should be accepted into local state
     /// during [`CompactorState::merge_remote_compactions`]
     ///
-    /// For known compactions (Occupied), accept these remote transitions:
+    /// For known active compactions (Occupied), accept these remote transitions:
     ///   - `Compacted`: the worker's signal that execution finished; the
     ///     coordinator must commit the output SSTs to the manifest.
     ///   - `Scheduled → Running`: a worker has claimed the job; adopt the
@@ -297,15 +305,21 @@ impl CompactionStatus {
     ///   - `Running -> Running`: should accept heartbeat updates when heartbeats
     ///     land for a job that is already in local state
     ///
+    /// Terminal local states are not overwritten by a remote `Compacted` entry.
+    /// The coordinator writes the manifest before `.compactions`, so local
+    /// `Completed`/`Failed` can be ahead of a stale persisted `Compacted` result.
+    ///
     /// All other remote updates are ignored.
     fn should_adopt_state_transition(&self, updated_status: CompactionStatus) -> bool {
         match self {
+            Self::Submitted => matches!(updated_status, Self::Compacted),
             Self::Scheduled => matches!(updated_status, Self::Running | Self::Compacted),
             Self::Running => matches!(
                 updated_status,
                 Self::Scheduled | Self::Running | Self::Compacted
             ),
-            _ => matches!(updated_status, Self::Compacted),
+            Self::Compacted => matches!(updated_status, Self::Compacted),
+            Self::Completed | Self::Failed => false,
         }
     }
 }
@@ -335,6 +349,77 @@ impl WorkerSpec {
     }
 }
 
+static EMPTY_SUBCOMPACTIONS: Vec<Subcompaction> = Vec::new();
+
+#[derive(Clone, PartialEq, Debug, Serialize)]
+pub struct CompactionContext {
+    /// Subcompactions partitioning this compaction into non-overlapping key
+    /// ranges (RFC-0028). The produced output SSTs are recorded per range
+    /// here; On completion the aggregate is recorded in [`Compaction::output_ssts`]. A
+    /// compaction that runs as a single merge has one range spanning the full
+    /// keyspace. Empty only before any progress has been recorded.
+    subcompactions: Vec<Subcompaction>,
+
+    retention_min_seq: Option<u64>,
+}
+
+impl CompactionContext {
+    pub(crate) fn new(subcompactions: Vec<Subcompaction>, retention_min_seq: Option<u64>) -> Self {
+        Self {
+            subcompactions,
+            retention_min_seq,
+        }
+    }
+
+    pub(crate) fn set_output_ssts(
+        &mut self,
+        subcompaction: usize,
+        output_ssts: Vec<SsTableHandle>,
+    ) {
+        self.subcompactions
+            .get_mut(subcompaction)
+            .expect("subcompaction index out of bounds")
+            .set_output_ssts(output_ssts);
+    }
+
+    /// Returns the subcompactions of this compaction, if any.
+    pub fn subcompactions(&self) -> &Vec<Subcompaction> {
+        &self.subcompactions
+    }
+
+    pub(crate) fn retention_min_seq(&self) -> Option<u64> {
+        self.retention_min_seq
+    }
+
+    pub(crate) fn validate_update(&self, updated: &Self) {
+        assert_eq!(
+            self.retention_min_seq, updated.retention_min_seq,
+            "compaction retention_min_seq must not change once set"
+        );
+        assert_eq!(
+            self.subcompactions.len(),
+            updated.subcompactions.len(),
+            "subcompaction plan must not change once set"
+        );
+        for (prev, next) in self
+            .subcompactions
+            .iter()
+            .zip(updated.subcompactions.iter())
+        {
+            assert_eq!(
+                prev.range(),
+                next.range(),
+                "subcompaction ranges are immutable once set"
+            );
+            assert!(
+                next.output_ssts()
+                    .starts_with(prev.output_ssts().as_slice()),
+                "new subcompaction output SSTs must always extend previous output SSTs"
+            );
+        }
+    }
+}
+
 /// Canonical, internal record of a compaction.
 ///
 /// A compaction is the unit tracked by the compactor: it has a stable `id` (ULID) and a `spec`
@@ -351,15 +436,12 @@ pub struct Compaction {
     ///
     /// This is tracked only in memory at the moment.
     status: CompactionStatus,
+    /// The output of compaction. Only valid in Compacted state
+    output_ssts: Vec<SsTableHandle>,
     /// The worker that has claimed this compaction. `None` means the
     /// compaction is unclaimed (only valid when `status == Submitted`).
     worker: Option<WorkerSpec>,
-    /// Subcompactions partitioning this compaction into non-overlapping key
-    /// ranges (RFC-0028). The produced output SSTs are recorded per range
-    /// here; the aggregate is exposed via [`Compaction::output_ssts`]. A
-    /// compaction that runs as a single merge has one range spanning the full
-    /// keyspace. Empty only before any progress has been recorded.
-    subcompactions: Vec<Subcompaction>,
+    ctx: Option<CompactionContext>,
 }
 
 impl Compaction {
@@ -370,12 +452,13 @@ impl Compaction {
             bytes_processed: 0,
             status: CompactionStatus::Submitted,
             worker: None,
-            subcompactions: Vec::new(),
+            output_ssts: vec![],
+            ctx: None,
         }
     }
 
     pub(crate) fn with_status(mut self, status: CompactionStatus) -> Self {
-        self.status = status;
+        self.set_status(status);
         self
     }
 
@@ -384,8 +467,13 @@ impl Compaction {
         self
     }
 
-    pub(crate) fn with_subcompactions(mut self, subcompactions: Vec<Subcompaction>) -> Self {
-        self.subcompactions = subcompactions;
+    pub(crate) fn with_ctx(mut self, ctx: Option<CompactionContext>) -> Self {
+        self.ctx = ctx;
+        self
+    }
+
+    pub(crate) fn with_output_ssts(mut self, output_ssts: Vec<SsTableHandle>) -> Self {
+        self.output_ssts = output_ssts;
         self
     }
 
@@ -431,6 +519,32 @@ impl Compaction {
             .collect()
     }
 
+    /// Builds the output run when all input SST views have disjoint effective
+    /// key ranges. Reusing the views avoids reading or rewriting SST data.
+    pub(crate) fn trivial_move_output(&self, db_state: &ManifestCore) -> Option<SortedRun> {
+        let destination = self.spec.destination()?;
+        let mut sst_views = self.get_l0_sst_views(db_state);
+        sst_views.extend(
+            self.get_sorted_runs(db_state)
+                .iter()
+                .flat_map(|sr| sr.sst_views().iter().cloned()),
+        );
+        sst_views.sort_by(|left, right| {
+            left.compacted_effective_range()
+                .comparable_start_bound()
+                .cmp(&right.compacted_effective_range().comparable_start_bound())
+        });
+
+        (!sst_views.is_empty()
+            && sst_views.windows(2).all(|pair| {
+                pair[0]
+                    .compacted_effective_range()
+                    .intersect(pair[1].compacted_effective_range())
+                    .is_none()
+            }))
+        .then_some(SortedRun::new(destination, sst_views))
+    }
+
     /// The stable id (ULID) used to track this compaction across messages and attempts.
     pub fn id(&self) -> Ulid {
         self.id
@@ -459,51 +573,45 @@ impl Compaction {
         self.status
     }
 
-    /// Returns all output SSTs produced by this compaction, aggregated across
-    /// its subcompactions in range (ascending key) order. Subcompaction ranges
-    /// partition the keyspace and are stored in order, so the concatenation is
-    /// the destination sorted run's SSTs in key order.
+    /// Returns all output SSTs produced by this compaction.
     pub fn output_ssts(&self) -> Vec<SsTableHandle> {
-        self.subcompactions
-            .iter()
-            .flat_map(|s| s.output_ssts().iter().cloned())
-            .collect()
+        self.output_ssts.clone()
     }
 
-    /// Sets the subcompactions for this compaction. The plan (number of
-    /// subcompactions and their ranges) is immutable once set; updates may
-    /// only extend per-range output SSTs.
-    pub(crate) fn set_subcompactions(&mut self, subcompactions: Vec<Subcompaction>) {
-        if !self.subcompactions.is_empty() {
-            assert_eq!(
-                self.subcompactions.len(),
-                subcompactions.len(),
-                "subcompaction plan must not change once set"
-            );
-            for (prev, next) in self.subcompactions.iter().zip(subcompactions.iter()) {
-                assert_eq!(
-                    prev.range(),
-                    next.range(),
-                    "subcompaction ranges are immutable once set"
-                );
-                assert!(
-                    next.output_ssts()
-                        .starts_with(prev.output_ssts().as_slice()),
-                    "new subcompaction output SSTs must always extend previous output SSTs"
-                );
+    /// Returns the job context required to resume a compaction job
+    pub fn ctx(&self) -> Option<&CompactionContext> {
+        self.ctx.as_ref()
+    }
+
+    pub(crate) fn set_ctx(&mut self, updated: Option<CompactionContext>) {
+        match (&self.ctx, updated) {
+            (_, None) => self.ctx = None,
+            (Some(existing), Some(updated)) => {
+                existing.validate_update(&updated);
+                self.ctx = Some(updated);
             }
+            (None, Some(updated)) => self.ctx = Some(updated),
         }
-        self.subcompactions = subcompactions;
+    }
+
+    pub(crate) fn clear_ctx(&mut self) {
+        self.set_ctx(None);
     }
 
     /// Returns the subcompactions of this compaction, if any.
     pub fn subcompactions(&self) -> &Vec<Subcompaction> {
-        &self.subcompactions
+        self.ctx
+            .as_ref()
+            .map(CompactionContext::subcompactions)
+            .unwrap_or(&EMPTY_SUBCOMPACTIONS)
     }
 
     /// Sets the current status of this compaction.
     pub(crate) fn set_status(&mut self, status: CompactionStatus) {
         self.status = status;
+        if status == CompactionStatus::Failed {
+            self.clear_ctx();
+        }
     }
 
     /// Sets the current worker of this compaction.
@@ -529,11 +637,12 @@ impl Display for Compaction {
             let human_bytes_processed = crate::utils::format_bytes_si(self.bytes_processed);
             write!(f, " ({} processed)", human_bytes_processed)?;
         }
-        if !self.subcompactions.is_empty() {
+        // TODO: fix me by implementing Display for CompactionJob
+        if !self.subcompactions().is_empty() {
             // Subcompactions carry no status, so report how many ranges have
             // produced output so far rather than a completion count.
             let with_output = self
-                .subcompactions
+                .subcompactions()
                 .iter()
                 .filter(|s| !s.output_ssts().is_empty())
                 .count();
@@ -541,7 +650,7 @@ impl Display for Compaction {
                 f,
                 " [{}/{} subcompactions with output]",
                 with_output,
-                self.subcompactions.len()
+                self.subcompactions().len()
             )?;
         }
         Ok(())
@@ -806,25 +915,33 @@ impl CompactorState {
             merged.insert(compaction.id(), compaction.clone());
         }
 
-        // For compactions not in local state (Vacant), only accept `Submitted`. This
-        // is the only state the coordinator hasn't authored yet (external submissions,
-        // admin tools, reloaded `.compactions`). All later states (`Scheduled`,
-        // `Running`, `Compacted`, `Completed`, `Failed`) are downstream of the
-        // coordinator having seen the entry as `Submitted` and promoted it to
-        // `Scheduled`, so a Vacant entry in any of those states is anomalous and
-        // logged.
+        // For compactions not in local state (Vacant), accept new submissions,
+        // worker-completed results, and retained terminal entries. On a write
+        // conflict, the retry path reloads and merges the persisted `.compactions`
+        // object before writing again. At that point, local state may already have
+        // committed or pruned an entry while persisted state still contains an older
+        // Compacted/Completed/Failed view. Insert those entries, let the commit path
+        // resolve stale Compacted entries via `validate_compaction`, and let the compactions
+        // write path resolve stale terminal entries via `retain_active_and_last_finished`.
+        //
+        // Scheduled/Running are different: they carry no finished output and require prior
+        // coordinator ownership, so seeing them absent from local state remains anomalous.
         for compaction in remote_compactions.value.iter() {
             match merged.entry(compaction.id()) {
-                Entry::Vacant(v) => {
-                    if !matches!(compaction.status(), CompactionStatus::Submitted) {
+                Entry::Vacant(v) => match compaction.status() {
+                    CompactionStatus::Submitted
+                    | CompactionStatus::Compacted
+                    | CompactionStatus::Completed
+                    | CompactionStatus::Failed => {
+                        v.insert(compaction.clone());
+                    }
+                    CompactionStatus::Scheduled | CompactionStatus::Running => {
                         error!(
-                            "skipping remote compaction with unexpected (non-Submitted) status [compaction={:?}]",
+                            "skipping remote active compaction absent from local state [compaction={:?}]",
                             compaction,
                         );
-                        continue;
                     }
-                    v.insert(compaction.clone());
-                }
+                },
                 Entry::Occupied(mut o) => {
                     if o.get()
                         .status
@@ -879,6 +996,7 @@ impl CompactorState {
             sequence_tracker: remote_manifest.value.core.sequence_tracker,
         };
         remote_manifest.value.core = merged;
+        remote_manifest.value.prune_external_sst_ids();
         self.manifest = remote_manifest;
     }
 
@@ -1150,6 +1268,7 @@ mod tests {
     use crate::manifest::store::test_utils::new_dirty_manifest;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::{LsmTreeState, Segment};
+    use crate::test_utils::bounded_sst_view;
     use crate::utils::IdGenerator;
     use bytes::Bytes;
     use object_store::memory::InMemory;
@@ -1178,7 +1297,69 @@ mod tests {
             Ulid::new(),
             CompactionSpec::new(vec![SourceId::SortedRun(1)], 1),
         )
-        .with_subcompactions(subcompactions)
+        .with_ctx(Some(CompactionContext::new(subcompactions, Some(0))))
+    }
+
+    #[test]
+    fn test_trivial_move_output_builds_sorted_run_from_disjoint_inputs() {
+        let l0 = bounded_sst_view(2, b"m", b"n");
+        let sr_first = bounded_sst_view(1, b"a", b"b");
+        let sr_last = bounded_sst_view(3, b"z", b"z");
+        let mut db_state = ManifestCore::new();
+        Arc::make_mut(&mut db_state.tree).l0 = VecDeque::from([l0.clone()]);
+        Arc::make_mut(&mut db_state.tree).compacted =
+            vec![SortedRun::new(1, [sr_first.clone(), sr_last.clone()])];
+        let compaction = Compaction::new(
+            Ulid::new(),
+            CompactionSpec::new(vec![SstView(l0.id), SourceId::SortedRun(1)], 2),
+        );
+
+        let output = compaction
+            .trivial_move_output(&db_state)
+            .expect("disjoint inputs should be a trivial move");
+
+        assert_eq!(output.id, 2);
+        assert_eq!(
+            output
+                .sst_views()
+                .iter()
+                .map(|view| view.id)
+                .collect::<Vec<_>>(),
+            vec![sr_first.id, l0.id, sr_last.id]
+        );
+    }
+
+    #[test]
+    fn test_trivial_move_output_rejects_overlapping_inputs() {
+        let l0 = bounded_sst_view(1, b"a", b"m");
+        let sr_view = bounded_sst_view(2, b"m", b"z");
+        let mut db_state = ManifestCore::new();
+        Arc::make_mut(&mut db_state.tree).l0 = VecDeque::from([l0.clone()]);
+        Arc::make_mut(&mut db_state.tree).compacted = vec![SortedRun::new(1, [sr_view])];
+        let compaction = Compaction::new(
+            Ulid::new(),
+            CompactionSpec::new(vec![SstView(l0.id), SourceId::SortedRun(1)], 2),
+        );
+
+        assert!(compaction.trivial_move_output(&db_state).is_none());
+    }
+
+    #[test]
+    fn test_trivial_move_output_rejects_drain() {
+        let db_state = ManifestCore::new();
+        let compaction = Compaction::new(
+            Ulid::new(),
+            CompactionSpec::drain_segment(
+                Bytes::from_static(b"segment/"),
+                vec![SourceId::SortedRun(1)],
+            ),
+        );
+
+        assert!(compaction.trivial_move_output(&db_state).is_none());
+    }
+
+    fn set_test_subcompactions(compaction: &mut Compaction, subcompactions: Vec<Subcompaction>) {
+        compaction.set_ctx(Some(CompactionContext::new(subcompactions, Some(0))));
     }
 
     #[test]
@@ -1192,9 +1373,12 @@ mod tests {
             ]);
 
         // when: the plan is set again with the output SST list extended
-        compaction.set_subcompactions(vec![
-            Subcompaction::new(range).with_output_ssts(vec![sst, test_subcompaction_sst(b"m")])
-        ]);
+        set_test_subcompactions(
+            &mut compaction,
+            vec![
+                Subcompaction::new(range).with_output_ssts(vec![sst, test_subcompaction_sst(b"m")])
+            ],
+        );
 
         // then: the extended output SSTs are accepted
         assert_eq!(compaction.subcompactions()[0].output_ssts().len(), 2);
@@ -1208,10 +1392,13 @@ mod tests {
             test_compaction_with_subcompactions(vec![Subcompaction::new(BytesRange::unbounded())]);
 
         // when/then: setting a plan with a different number of ranges panics
-        compaction.set_subcompactions(vec![
-            Subcompaction::new(BytesRange::from_slice(..b"m".as_slice())),
-            Subcompaction::new(BytesRange::from_slice(b"m".as_slice()..)),
-        ]);
+        set_test_subcompactions(
+            &mut compaction,
+            vec![
+                Subcompaction::new(BytesRange::from_slice(..b"m".as_slice())),
+                Subcompaction::new(BytesRange::from_slice(b"m".as_slice()..)),
+            ],
+        );
     }
 
     #[test]
@@ -1223,9 +1410,12 @@ mod tests {
         )]);
 
         // when/then: setting a plan whose range differs panics
-        compaction.set_subcompactions(vec![Subcompaction::new(BytesRange::from_slice(
-            ..b"z".as_slice(),
-        ))]);
+        set_test_subcompactions(
+            &mut compaction,
+            vec![Subcompaction::new(BytesRange::from_slice(
+                ..b"z".as_slice(),
+            ))],
+        );
     }
 
     #[test]
@@ -1238,9 +1428,10 @@ mod tests {
                 .with_output_ssts(vec![test_subcompaction_sst(b"a")])]);
 
         // when/then: replacing (rather than extending) the output SSTs panics
-        compaction.set_subcompactions(vec![
-            Subcompaction::new(range).with_output_ssts(vec![test_subcompaction_sst(b"b")])
-        ]);
+        set_test_subcompactions(
+            &mut compaction,
+            vec![Subcompaction::new(range).with_output_ssts(vec![test_subcompaction_sst(b"b")])],
+        );
     }
 
     #[test]
@@ -1268,14 +1459,25 @@ mod tests {
     }
 
     #[test]
-    fn test_compaction_status_active_and_finished() {
+    fn test_compaction_status_classifications() {
         assert!(CompactionStatus::Submitted.active());
+        assert!(CompactionStatus::Scheduled.active());
         assert!(CompactionStatus::Running.active());
+        assert!(CompactionStatus::Compacted.active());
         assert!(!CompactionStatus::Completed.active());
         assert!(!CompactionStatus::Failed.active());
 
+        assert!(CompactionStatus::Submitted.counts_against_max_concurrent());
+        assert!(CompactionStatus::Scheduled.counts_against_max_concurrent());
+        assert!(CompactionStatus::Running.counts_against_max_concurrent());
+        assert!(!CompactionStatus::Compacted.counts_against_max_concurrent());
+        assert!(!CompactionStatus::Completed.counts_against_max_concurrent());
+        assert!(!CompactionStatus::Failed.counts_against_max_concurrent());
+
         assert!(!CompactionStatus::Submitted.finished());
+        assert!(!CompactionStatus::Scheduled.finished());
         assert!(!CompactionStatus::Running.finished());
+        assert!(!CompactionStatus::Compacted.finished());
         assert!(CompactionStatus::Completed.finished());
         assert!(CompactionStatus::Failed.finished());
     }
@@ -1454,11 +1656,7 @@ mod tests {
             .expect("failed to add compaction");
 
         // when:
-        let compacted_ssts = before_compaction.tree.l0.iter().cloned().collect();
-        let sr = SortedRun {
-            id: 0,
-            sst_views: compacted_ssts,
-        };
+        let sr = SortedRun::new(0, before_compaction.tree.l0.iter().cloned());
         state.finish_compaction(compaction_id, sr.clone());
 
         // then:
@@ -1469,14 +1667,14 @@ mod tests {
         assert_eq!(state.db_state().tree.l0.len(), 0);
         assert_eq!(state.db_state().tree.compacted.len(), 1);
         assert_eq!(state.db_state().tree.compacted.first().unwrap().id, sr.id);
-        let expected_ids: Vec<SsTableId> = sr.sst_views.iter().map(|h| h.sst.id).collect();
+        let expected_ids: Vec<SsTableId> = sr.sst_views().iter().map(|h| h.sst.id).collect();
         let found_ids: Vec<SsTableId> = state
             .db_state()
             .tree
             .compacted
             .first()
             .unwrap()
-            .sst_views
+            .sst_views()
             .iter()
             .map(|h| h.sst.id)
             .collect();
@@ -1518,10 +1716,7 @@ mod tests {
             .add_compaction(Compaction::new(compaction_id, spec))
             .expect("failed to add compaction");
 
-        let sr = SortedRun {
-            id: 0,
-            sst_views: before_compaction.tree.l0.iter().cloned().collect(),
-        };
+        let sr = SortedRun::new(0, before_compaction.tree.l0.iter().cloned());
         state.finish_compaction(compaction_id, sr);
 
         let external_dbs = &state.manifest().value.external_dbs;
@@ -1552,11 +1747,7 @@ mod tests {
             .expect("failed to add compaction");
 
         // when:
-        let compacted_ssts = before_compaction.tree.l0.iter().cloned().collect();
-        let sr = SortedRun {
-            id: 0,
-            sst_views: compacted_ssts,
-        };
+        let sr = SortedRun::new(0, before_compaction.tree.l0.iter().cloned());
         state.finish_compaction(compaction_id, sr);
 
         // then:
@@ -1602,6 +1793,31 @@ mod tests {
     }
 
     #[test]
+    fn test_merge_remote_manifest_reestablishes_external_sst_invariant() {
+        let manifest = new_dirty_manifest();
+        let compactions = new_dirty_compactions(manifest.value.compactor_epoch);
+        let mut state = CompactorState::new(manifest, compactions);
+        let stale_id = SsTableId::Compacted(Ulid::new());
+        let mut remote = new_dirty_manifest();
+        remote.value.external_dbs = vec![crate::manifest::ExternalDb {
+            path: "/parent/db".to_string(),
+            source_checkpoint_id: uuid::Uuid::new_v4(),
+            final_checkpoint_id: Some(uuid::Uuid::new_v4()),
+            sst_ids: vec![stale_id],
+        }];
+
+        state.merge_remote_manifest(remote);
+
+        let external = &state.manifest().value.external_dbs;
+        assert_eq!(external.len(), 1, "detach metadata must be retained");
+        assert!(
+            external[0].sst_ids.is_empty(),
+            "IDs absent from the merged tree must not be resurrected"
+        );
+        assert!(external[0].final_checkpoint_id.is_some());
+    }
+
+    #[test]
     fn test_should_merge_db_state_correctly() {
         // given:
         let rt = build_runtime();
@@ -1616,10 +1832,7 @@ mod tests {
             .expect("failed to add compaction");
         state.finish_compaction(
             compaction_id,
-            SortedRun {
-                id: 0,
-                sst_views: vec![original_l0s.back().unwrap().clone()],
-            },
+            SortedRun::new(0, [original_l0s.back().unwrap().clone()]),
         );
         // open a new db and write another l0
         let db = build_db(os.clone(), rt.handle());
@@ -1683,10 +1896,7 @@ mod tests {
             .expect("failed to add compaction");
         state.finish_compaction(
             compaction_id,
-            SortedRun {
-                id: 0,
-                sst_views: original_l0s.clone().into(),
-            },
+            SortedRun::new(0, original_l0s.iter().cloned()),
         );
         assert_eq!(state.db_state().tree.l0.len(), 0);
         // open a new db and write another l0
@@ -1977,7 +2187,7 @@ mod tests {
     fn sorted_run_to_description(sr: &SortedRun) -> SortedRunDescription {
         SortedRunDescription {
             id: sr.id,
-            ssts: sr.sst_views.iter().map(|h| h.sst.id).collect(),
+            ssts: sr.sst_views().iter().map(|h| h.sst.id).collect(),
         }
     }
 
@@ -2015,14 +2225,8 @@ mod tests {
         // Add a named segment with two compacted SRs (ids 5 and 3, list-position
         // ordered newest-first as per ManifestCore conventions).
         let prefix = Bytes::from_static(b"hour=12/");
-        let sr5 = SortedRun {
-            id: 5,
-            sst_views: Vec::new(),
-        };
-        let sr3 = SortedRun {
-            id: 3,
-            sst_views: Vec::new(),
-        };
+        let sr5 = SortedRun::new(5, []);
+        let sr3 = SortedRun::new(3, []);
         let segment = Segment {
             prefix: prefix.clone(),
             tree: Arc::new(LsmTreeState {
@@ -2048,10 +2252,7 @@ mod tests {
             .expect("failed to add compaction");
 
         // Finish the compaction with a fresh output SR.
-        let output = SortedRun {
-            id: 7,
-            sst_views: Vec::new(),
-        };
+        let output = SortedRun::new(7, []);
         state.finish_compaction(compaction_id, output);
 
         // The segment's compacted list now holds only the new SR(7).
@@ -2082,10 +2283,7 @@ mod tests {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
-                compacted: vec![SortedRun {
-                    id: 7,
-                    sst_views: Vec::new(),
-                }],
+                compacted: vec![SortedRun::new(7, [])],
             }),
         }];
 
@@ -2098,10 +2296,7 @@ mod tests {
         // Segment dropped after submission, before finish.
         state.manifest.value.core.segments = Vec::new();
 
-        let output = SortedRun {
-            id: 7,
-            sst_views: Vec::new(),
-        };
+        let output = SortedRun::new(7, []);
         state.finish_compaction(compaction_id, output);
 
         let compaction = state
@@ -2123,10 +2318,7 @@ mod tests {
 
         // Seed real sources so the source-isolation check passes for both
         // submissions. Root tree gets SR(99); segment "seg/" gets SR(100).
-        Arc::make_mut(&mut state.manifest.value.core.tree).compacted = vec![SortedRun {
-            id: 99,
-            sst_views: Vec::new(),
-        }];
+        Arc::make_mut(&mut state.manifest.value.core.tree).compacted = vec![SortedRun::new(99, [])];
         let prefix = Bytes::from_static(b"seg/");
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),
@@ -2134,10 +2326,7 @@ mod tests {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::new(),
-                compacted: vec![SortedRun {
-                    id: 100,
-                    sst_views: Vec::new(),
-                }],
+                compacted: vec![SortedRun::new(100, [])],
             }),
         }];
 
@@ -2166,10 +2355,7 @@ mod tests {
 
         // Seed SR(7) in the root tree so the source-isolation check passes
         // for the first submission; the spec rewrites that SR (destination=7).
-        Arc::make_mut(&mut state.manifest.value.core.tree).compacted = vec![SortedRun {
-            id: 7,
-            sst_views: Vec::new(),
-        }];
+        Arc::make_mut(&mut state.manifest.value.core.tree).compacted = vec![SortedRun::new(7, [])];
 
         let first_id = rand.rng().gen_ulid(system_clock.as_ref());
         let first = CompactionSpec::new(vec![SourceId::SortedRun(7)], 7);
@@ -2324,10 +2510,7 @@ mod tests {
         // Two L0s (newest first) and one SR in the segment.
         let l0_newer = drain_test_view(2);
         let l0_older = drain_test_view(1);
-        let sr = SortedRun {
-            id: 5,
-            sst_views: Vec::new(),
-        };
+        let sr = SortedRun::new(5, []);
         let prefix = Bytes::from_static(b"hour=10/");
         state.manifest.value.core.segments = vec![Segment {
             prefix: prefix.clone(),

@@ -383,6 +383,9 @@ Other helpers expose the pieces separately:
   `GarbageCollectorOptions`
 - `utils::build_toxic(rand, root_path, index)`: randomized deterministic
   `Toxic` values for object-store fault injection
+- `utils::dst_seeds(default_count)`: the seeds a DST test should run — the
+  comma-separated list from `SLATEDB_DST_SEEDS` when set, otherwise
+  `default_count` random seeds
 
 Because these values are derived from supplied RNGs, they expand scenario
 coverage without sacrificing reproducibility.
@@ -417,3 +420,21 @@ If you want both in one pass, run the DST-gated command for the package:
 ```bash
 RUSTFLAGS="--cfg dst --cfg tokio_unstable" cargo test -p slatedb-dst
 ```
+
+### Reproducing a failed run
+
+Every DST test logs the seeds it runs (e.g. `dst bank seed: ...` or
+`dst determinism seed [core=0, seed=...]`). To re-run a test with specific
+seeds instead of fresh random ones, set `SLATEDB_DST_SEEDS` to a
+comma-separated list of seeds:
+
+```bash
+SLATEDB_DST_SEEDS=17689751483034105621 \
+RUSTFLAGS="--cfg dst --cfg tokio_unstable" \
+cargo test -p slatedb-dst --test determinism
+```
+
+The scenario tests (`determinism`, `segments`) run one OS thread per listed
+seed; the `bank` test runs the listed seeds serially. The variable applies to
+every DST test in the invocation, so target one test binary with
+`--test <name>` when reproducing a single failure.

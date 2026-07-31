@@ -1,5 +1,6 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering::SeqCst;
+use std::sync::Arc;
 
 use crate::db_status::DbStatusManager;
 
@@ -23,7 +24,7 @@ pub(crate) struct DbOracle {
     last_seq: AtomicU64,
     last_committed_seq: AtomicU64,
     last_durable_seq: AtomicU64,
-    status_reporter: DbStatusManager,
+    status_reporter: Arc<DbStatusManager>,
 }
 
 impl DbOracle {
@@ -31,7 +32,7 @@ impl DbOracle {
         last_seq: u64,
         last_committed_seq: u64,
         last_durable_seq: u64,
-        status_reporter: DbStatusManager,
+        status_reporter: Arc<DbStatusManager>,
     ) -> Self {
         Self {
             last_seq: AtomicU64::new(last_seq),
@@ -60,12 +61,6 @@ impl DbOracle {
     pub(crate) fn advance_durable_seq(&self, seq: u64) {
         self.last_durable_seq.fetch_max(seq, SeqCst);
         self.status_reporter.report_durable_seq(seq);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_durable_seq_unsafe(&self, value: u64) {
-        self.last_durable_seq.store(value, SeqCst);
-        self.status_reporter.report_durable_seq(value);
     }
 }
 

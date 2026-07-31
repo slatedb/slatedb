@@ -9,6 +9,23 @@ The garbage collector has a configurable minimum age and interval for each file 
 
 Each garbage collection directory type supports a `dry_run` option. When enabled, the collector logs files that would be deleted without actually deleting them. This is useful for testing or verifying garbage collection behavior before enabling actual deletion.
 
+## Boundary files
+
+Before deleting old manifest or compactions metadata, SlateDB normally advances a durable boundary
+file. Metadata writers check that boundary after creating a new version, which prevents a stale
+writer from successfully publishing metadata that GC has already passed.
+
+Boundary advancement can be disabled with
+`GarbageCollectorOptions::boundary_files_enabled`. This supports object stores without conditional
+overwrite (`If-Match`) while allowing GC to continue deleting eligible metadata. Metadata readers
+and writers still check any existing boundary; on a new database, no boundary file is created while
+all garbage collectors use this mode. Without a boundary, a SlateDB client or compactor can begin
+updating a manifest or compactions file, stop making progress (for example, because its process or
+host is suspended), then resume after `min_age`. GC may have deleted the ID it intended to create,
+so create-if-absent can reuse that ID and report a stale update as successful even though newer
+metadata has superseded it. Every garbage collector must use a compatible setting, and the manifest
+and compactions `min_age` values must exceed the maximum lifetime of a stale process.
+
 ## Filtering Deletion Candidates
 
 SlateDB supports custom filtering of garbage collection candidates through the `GcFilter` trait. This allows users to intercept files before deletion and approve or reject them based on custom logic.

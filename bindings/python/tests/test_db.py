@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import pytest
-
 from conftest import (
+    TEST_DB_PATH,
     ConcatMergeOperator,
     FixedThreeByteSegmentExtractor,
-    TEST_DB_PATH,
     drain_iterator,
     merge_options,
     new_memory_store,
@@ -16,6 +15,7 @@ from conftest import (
     scan_options,
     write_options,
 )
+
 from slatedb.uniffi import (
     CloseReason,
     DbBuilder,
@@ -96,8 +96,9 @@ async def test_db_crud_and_metadata() -> None:
 
     async with open_db(store) as db:
         first_write = await db.put(b"alpha", b"one")
-        assert first_write.seqnum > 0
-        assert first_write.create_ts > 0
+        await first_write.await_durable()
+        assert first_write.seqnum() > 0
+        assert first_write.create_ts() > 0
 
         assert await db.get(b"alpha") == b"one"
         assert await db.get_with_options(b"alpha", read_options()) == b"one"
@@ -106,8 +107,8 @@ async def test_db_crud_and_metadata() -> None:
         assert metadata is not None
         assert metadata.key == b"alpha"
         assert metadata.value == b"one"
-        assert metadata.seq == first_write.seqnum
-        assert metadata.create_ts == first_write.create_ts
+        assert metadata.seq == first_write.seqnum()
+        assert metadata.create_ts == first_write.create_ts()
 
         metadata_with_options = await db.get_key_value_with_options(b"alpha", read_options())
         assert metadata_with_options is not None
@@ -119,8 +120,9 @@ async def test_db_crud_and_metadata() -> None:
             put_options(),
             write_options(),
         )
-        assert second_write.seqnum > first_write.seqnum
-        assert second_write.create_ts > 0
+        await second_write.await_durable()
+        assert second_write.seqnum() > first_write.seqnum()
+        assert second_write.create_ts() > 0
         assert await db.get(b"beta") == b"two"
 
         await db.put(b"empty", b"")
@@ -128,11 +130,12 @@ async def test_db_crud_and_metadata() -> None:
         assert await db.get(b"missing") is None
 
         delete_alpha = await db.delete(b"alpha")
-        assert delete_alpha.seqnum > second_write.seqnum
+        assert delete_alpha.seqnum() > second_write.seqnum()
         assert await db.get(b"alpha") is None
 
         delete_beta = await db.delete_with_options(b"beta", write_options())
-        assert delete_beta.seqnum > second_write.seqnum
+        await delete_beta.await_durable()
+        assert delete_beta.seqnum() > second_write.seqnum()
         assert await db.get(b"beta") is None
 
 
@@ -248,7 +251,7 @@ async def test_db_batch_write_and_consumption() -> None:
         batch.delete(b"remove-me")
 
         batch_write = await db.write(batch)
-        assert batch_write.seqnum > 0
+        assert batch_write.seqnum() > 0
         assert await db.get(b"batch-put") == b"value"
         assert await db.get(b"remove-me") is None
 
@@ -258,7 +261,8 @@ async def test_db_batch_write_and_consumption() -> None:
 
         second_batch = WriteBatch()
         second_batch.put_with_options(b"batch-put-2", b"value-2", put_options())
-        await db.write_with_options(second_batch, write_options())
+        second_batch_write = await db.write_with_options(second_batch, write_options())
+        await second_batch_write.await_durable()
         assert await db.get(b"batch-put-2") == b"value-2"
 
 
@@ -285,12 +289,13 @@ async def test_db_merge_and_merge_with_options() -> None:
         await db.merge(b"merge", b":one")
         assert await db.get(b"merge") == b"base:one"
 
-        await db.merge_with_options(
+        merge_write = await db.merge_with_options(
             b"merge",
             b":two",
             merge_options(),
             write_options(),
         )
+        await merge_write.await_durable()
         assert await db.get(b"merge") == b"base:one:two"
 
 
@@ -322,7 +327,7 @@ async def test_db_transactions() -> None:
 
         commit_handle = await tx.commit()
         assert commit_handle is not None
-        assert commit_handle.seqnum > 0
+        assert commit_handle.seqnum() > 0
         assert await db.get(b"txn-key") == b"pending"
 
         rollback_tx = await db.begin(IsolationLevel.SNAPSHOT)
@@ -385,7 +390,8 @@ async def test_db_writer_fencing_reports_closed_reason() -> None:
     await secondary.put(b"secondary", b"value")
 
     with pytest.raises(Error.Closed) as exc:
-        await primary.put(b"stale", b"value")
+        write = await primary.put(b"stale", b"value")
+        await write.await_durable()
     assert exc.value.reason == CloseReason.FENCED
     assert "detected newer DB client" in exc.value.message
 

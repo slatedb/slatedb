@@ -34,10 +34,7 @@ impl Db {
     ) -> Result<CheckpointCreateResult, crate::Error> {
         let target = match scope {
             CheckpointScope::All => {
-                if self.inner.wal_enabled {
-                    self.inner.flush_wals().await?;
-                }
-                self.inner.freeze_current_memtable()?;
+                self.inner.request_batch_writer_flush(true).await?;
                 FlushTarget::All
             }
             CheckpointScope::Durable => FlushTarget::CurrentDurable,
@@ -54,6 +51,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use crate::admin::AdminBuilder;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
     use crate::config::{CheckpointOptions, CheckpointScope, Settings};
@@ -447,6 +445,7 @@ mod tests {
             path.clone(),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let sst_handle = SsTableView::identity(table_store.open_sst(table_id).await.unwrap());
 

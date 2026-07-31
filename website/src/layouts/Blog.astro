@@ -1,0 +1,304 @@
+---
+import SocialIcons from '../components/SocialIcons.astro';
+import ThemeProvider from '../components/ThemeProvider.astro';
+import barsIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/bars.svg?raw';
+import timesIcon from '@hackernoon/pixel-icon-library/icons/SVG/regular/times.svg?raw';
+import { getStarsLabel } from '../lib/github-stars';
+import Analytics from '../components/Analytics.astro';
+
+interface Props {
+	title: string;
+	description?: string;
+	/** Per-page social image; falls back to the site default. */
+	ogImage?: string;
+	/** Canonical/OG url for this page. */
+	url?: string;
+}
+
+const { title, description, ogImage = '/img/slatedb-opengraph.jpg', url } = Astro.props;
+const starsLabel = await getStarsLabel();
+const canonical = url ?? new URL(Astro.url.pathname, Astro.site ?? Astro.url).href;
+---
+
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>{title}</title>
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		{description && <meta name="description" content={description} />}
+		<link rel="canonical" href={canonical} />
+		<meta property="og:type" content="article" />
+		<meta property="og:title" content={title} />
+		{description && <meta property="og:description" content={description} />}
+		<meta property="og:url" content={canonical} />
+		<meta property="og:image" content={ogImage} />
+		<meta name="twitter:card" content="summary_large_image" />
+		<link rel="alternate" type="application/rss+xml" title="SlateDB Blog" href="/blog/rss.xml" />
+		<link rel="preconnect" href="https://fonts.googleapis.com" />
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+		<link
+			rel="stylesheet"
+			href="https://fonts.googleapis.com/css2?family=Marcellus&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,500;0,8..60,600;0,8..60,700;1,8..60,400;1,8..60,500;1,8..60,600;1,8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+		/>
+		<Analytics />
+	</head>
+	<body>
+		<ThemeProvider />
+		<div class="page">
+			<header class="header">
+				<div class="header-content">
+					<a href="/" class="site-title">
+						<img src="/img/logo-full.svg" alt="SlateDB" />
+					</a>
+					<div class="right-group">
+						<nav class="header-links">
+							<a href="/docs/get-started/introduction/" class="header-link">docs</a>
+							<a href="/blog/" class="header-link">blog</a>
+							<a href="https://discord.gg/mHYmGy5MgA" target="_blank" rel="noopener noreferrer" class="header-link">discord</a>
+							<a href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer" class="header-link" id="github-link">github <span class="star-count"><span class="star-icon">★</span>{starsLabel}</span></a>
+						</nav>
+						<button class="mobile-menu-toggle" id="mobile-menu-toggle" aria-label="Toggle menu" aria-expanded="false">
+							<span class="menu-icon menu-icon-bars" set:html={barsIcon}></span>
+							<span class="menu-icon menu-icon-times" set:html={timesIcon}></span>
+						</button>
+					</div>
+					<div class="mobile-menu" id="mobile-menu">
+						<a href="/docs/get-started/introduction/" class="mobile-menu-link">docs</a>
+						<a href="/blog/" class="mobile-menu-link">blog</a>
+						<a href="https://discord.gg/mHYmGy5MgA" target="_blank" rel="noopener noreferrer" class="mobile-menu-link">discord</a>
+						<a href="https://github.com/slatedb/slatedb" target="_blank" rel="noopener noreferrer" class="mobile-menu-link" id="mobile-github-link">github <span class="star-count"><span class="star-icon">★</span>{starsLabel}</span></a>
+					</div>
+				</div>
+			</header>
+
+			<main>
+				<slot />
+			</main>
+
+			<footer class="footer">
+				<div class="footer-content">
+					<div class="footer-icons">
+						<SocialIcons />
+					</div>
+					<div class="copyright-wrapper">
+						<p>
+							<img src="https://raw.githubusercontent.com/commonhaus/artwork/main/foundation/brand/svg/CF_logo_horizontal_single_default.svg" height="20" alt="Commonhaus Foundation"/><br />
+							Copyright © <a href="https://slatedb.io">SlateDB</a>. All rights reserved. For details on our trademarks, please visit our <a href="https://www.commonhaus.org/policies/trademark-policy/">Trademark Policy</a> and <a href="https://www.commonhaus.org/trademarks/">Trademark List</a>.<br/>
+							Trademarks of third parties are owned by their respective holders and their mention here does not suggest any endorsement or association.
+						</p>
+					</div>
+				</div>
+			</footer>
+		</div>
+
+		<script>
+			const toggle = document.getElementById('mobile-menu-toggle');
+			const menu = document.getElementById('mobile-menu');
+			toggle?.addEventListener('click', () => {
+				const open = menu?.classList.toggle('open');
+				toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+			});
+		</script>
+	</body>
+</html>
+
+<style>
+	/* ---------------------------------------------------------------
+	 * Tokens mirrored from custom.css. Bespoke (non-Starlight) pages
+	 * don't load Starlight's stylesheet, so the blog carries its own.
+	 * ------------------------------------------------------------- */
+	:root {
+		--ink-1: #0f1620;
+		--ink-2: #1f2a37;
+		--ink-3: #3d4856;
+		--ink-4: #5e6878;
+		--ink-5: #8b94a3;
+		--ink-6: #c8cdd5;
+		--ink-7: #dfe2e8;
+		--surface-0: #f6f7f9;
+		--surface-1: #ffffff;
+		--surface-2: #eef0f3;
+		--surface-3: #e2e6eb;
+		--accent-high: #7a3e22;
+		--accent: #b26844;
+		--accent-low: #f3e3d8;
+	}
+
+	:global(html), :global(body) {
+		margin: 0;
+		padding: 0;
+		background-color: var(--surface-0);
+		color: var(--ink-2);
+		font-family:
+			'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+			'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
+		text-rendering: optimizeLegibility;
+	}
+	:global(body) { min-height: 100vh; }
+
+	.page {
+		display: flex;
+		flex-direction: column;
+		min-height: 100vh;
+		position: relative;
+		/* Fixed-radius terracotta glow in the top-right corner. Uses an explicit
+		   px radius (not a %) so it stays a subtle corner accent on long posts
+		   rather than scaling with page height. Mirrors index.astro's look. */
+		background:
+			radial-gradient(circle 480px at 100% 0%, rgba(178, 104, 68, 0.08), transparent),
+			var(--surface-0);
+		isolation: isolate;
+	}
+
+	/* ---------- Header (mirrors index.astro) ---------- */
+
+	.header {
+		position: sticky;
+		top: 0;
+		z-index: 100;
+		background-color: rgba(246, 247, 249, 0.45);
+		backdrop-filter: saturate(180%) blur(16px);
+		-webkit-backdrop-filter: saturate(180%) blur(16px);
+		padding: 1rem clamp(1.5rem, 4vw, 4rem);
+	}
+	.header-content {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		max-width: 80rem;
+		margin: 0 auto;
+		position: relative;
+	}
+	.site-title { display: inline-flex; align-items: center; }
+	.site-title img { height: 1.6rem; width: auto; }
+	.right-group { display: flex; align-items: center; gap: 1rem; }
+	.header-links { display: flex; gap: 1.5rem; align-items: center; }
+	.header-link {
+		font-size: 0.8125rem;
+		font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		color: var(--ink-2);
+		text-decoration: none;
+		transition: color 0.15s ease;
+		display: inline-flex;
+		align-items: center;
+	}
+	.header-link:hover { color: var(--accent); }
+	.header-link .star-count,
+	.mobile-menu-link .star-count {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.2rem;
+		margin-left: 0.55rem;
+		padding: 0.12rem 0.45rem;
+		background-color: var(--surface-1);
+		border: 1px solid var(--ink-6);
+		border-radius: 0;
+		color: var(--ink-2);
+		font-size: 0.72rem;
+		font-weight: 500;
+		line-height: 1;
+		transition: border-color 0.15s ease, background-color 0.15s ease;
+	}
+	.header-link:hover .star-count,
+	.mobile-menu-link:hover .star-count { border-color: var(--ink-4); }
+	.header-link .star-count .star-icon,
+	.mobile-menu-link .star-count .star-icon { color: var(--accent); font-size: 0.8rem; line-height: 1; }
+
+	.mobile-menu-toggle {
+		display: none;
+		background: none;
+		border: none;
+		cursor: pointer;
+		padding: 0.5rem;
+		margin: -0.5rem;
+		position: relative;
+		width: 2rem;
+		height: 2rem;
+		color: var(--ink-2);
+	}
+	.menu-icon {
+		position: absolute;
+		inset: 0.5rem;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: opacity 0.15s ease;
+	}
+	.menu-icon :global(svg) { width: 1rem; height: 1rem; fill: currentColor; }
+	.menu-icon-times { opacity: 0; }
+	.mobile-menu-toggle[aria-expanded='true'] .menu-icon-bars { opacity: 0; }
+	.mobile-menu-toggle[aria-expanded='true'] .menu-icon-times { opacity: 1; }
+
+	.mobile-menu {
+		display: none;
+		flex-direction: column;
+		gap: 0.5rem;
+		padding: 1rem 1.5rem;
+		background-color: var(--surface-0);
+		border-top: 1px solid var(--ink-6);
+		position: absolute;
+		top: 100%;
+		left: 0;
+		right: 0;
+	}
+	.mobile-menu.open { display: flex; }
+	.mobile-menu-link {
+		font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+		font-size: 0.875rem;
+		color: var(--ink-2);
+		text-decoration: none;
+		padding: 0.5rem 0;
+	}
+	@media (max-width: 768px) {
+		.header-links { display: none; }
+		.mobile-menu-toggle { display: flex; }
+	}
+
+	/* ---------- Main wrapper ---------- */
+	/* Full-width gutter container mirroring .header: the horizontal padding is the
+	   page gutter, and children (.post card, .index list) carry their own 80rem cap.
+	   This keeps content edges aligned with .header-content at every width. */
+	main {
+		margin: 0 auto;
+		padding: 0 clamp(1.5rem, 4vw, 4rem);
+		width: 100%;
+		box-sizing: border-box;
+		flex: 1;
+	}
+
+	/* ---------- Footer (mirrors index.astro) ---------- */
+	.footer {
+		border-top: 1px solid var(--ink-6);
+		background-color: var(--surface-0);
+		padding: 2rem clamp(1.5rem, 4vw, 4rem);
+		margin-top: 5rem;
+	}
+	.footer-content {
+		max-width: 80rem;
+		margin: 0 auto;
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+		align-items: center;
+	}
+	.footer-icons { display: flex; gap: 1rem; align-items: center; justify-content: center; order: 1; }
+	.copyright-wrapper {
+		font-size: 0.75rem;
+		font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+		order: 2;
+		text-align: center;
+		line-height: 1.5;
+		color: var(--ink-4);
+	}
+	.copyright-wrapper :global(a) { color: var(--ink-4); }
+	.copyright-wrapper :global(a:hover) { color: var(--ink-2); }
+	.copyright-wrapper p { margin: 0; }
+	@media (min-width: 50rem) {
+		.footer-content { flex-direction: row; justify-content: space-between; }
+		.footer-icons { order: 2; }
+		.copyright-wrapper { order: 1; text-align: left; }
+	}
+</style>

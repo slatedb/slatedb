@@ -34,7 +34,6 @@ use std::{
 #[allow(dead_code)] // unused during DST
 pub(crate) struct MonotonicClock {
     pub(crate) last_tick: AtomicI64,
-    pub(crate) last_durable_tick: AtomicI64,
     delegate: Arc<dyn SystemClock>,
 }
 
@@ -43,16 +42,11 @@ impl MonotonicClock {
         Self {
             delegate,
             last_tick: AtomicI64::new(init_tick),
-            last_durable_tick: AtomicI64::new(init_tick),
         }
     }
 
     pub(crate) fn set_last_tick(&self, tick: i64) -> Result<i64, SlateDBError> {
         self.enforce_monotonic(tick)
-    }
-
-    pub(crate) fn fetch_max_last_durable_tick(&self, tick: i64) -> i64 {
-        self.last_durable_tick.fetch_max(tick, Ordering::SeqCst)
     }
 
     #[cfg_attr(dst, allow(dead_code))]

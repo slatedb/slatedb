@@ -59,6 +59,7 @@
 //! [compactor_options]
 //! poll_interval = "5s"
 //! max_concurrent_compactions = 4
+//! enable_trivial_move = false
 //!
 //! [compactor_options.worker]
 //! max_sst_size = 1073741824
@@ -110,6 +111,7 @@
 //!  "compactor_options": {
 //!    "poll_interval": "5s",
 //!    "max_concurrent_compactions": 4,
+//!    "enable_trivial_move": false,
 //!    "worker": {
 //!      "max_sst_size": 1073741824
 //!    },
@@ -165,6 +167,7 @@
 //! compactor_options:
 //!   poll_interval: '5s'
 //!   max_concurrent_compactions: 4
+//!   enable_trivial_move: false
 //!   worker:
 //!     max_sst_size: 1073741824
 //!   scheduler_options:
@@ -209,6 +212,10 @@ pub use slatedb_common::metrics::MetricLevel;
 use crate::error::SlateDBError;
 
 use crate::garbage_collector::{DEFAULT_INTERVAL, DEFAULT_MIN_AGE};
+
+fn default_true() -> bool {
+    true
+}
 
 /// Enum representing different levels of cache preloading on startup
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -454,13 +461,36 @@ impl Default for FlushOptions {
     }
 }
 
+/// Options controlling how a database is closed.
+#[derive(Clone, Debug)]
+pub struct CloseOptions {
+    /// Whether to trigger a final flush of the active memtable before closing.
+    ///
+    /// When `false`, memtables already being flushed continue through the
+    /// existing shutdown pipeline. Defaults to `true`.
+    pub flush_memtables: bool,
+}
+
+impl Default for CloseOptions {
+    fn default() -> Self {
+        Self {
+            flush_memtables: true,
+        }
+    }
+}
+
+impl CloseOptions {
+    /// Configure whether the active memtable is flushed before closing.
+    pub fn with_flush_memtables(mut self, flush_memtables: bool) -> Self {
+        self.flush_memtables = flush_memtables;
+        self
+    }
+}
+
 /// Configuration for client write operations. `WriteOptions` is supplied for each
 /// write call and controls the behavior of the write.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct WriteOptions {
-    /// Whether `put` calls should block until the write has been durably committed
-    /// to the DB.
-    pub await_durable: bool,
     #[cfg(dst)]
     /// Force the current timestamp for DST operations. See #719 for details.
     pub now: i64,
@@ -469,18 +499,6 @@ pub struct WriteOptions {
     /// The value must be strictly greater than the current maximum sequence number
     /// or the write will fail with an `InvalidSequenceNumber` error.
     pub seqnum: u64,
-}
-
-impl Default for WriteOptions {
-    /// Create a new `WriteOptions`` with `await_durable` set to `true`.
-    fn default() -> Self {
-        Self {
-            await_durable: true,
-            #[cfg(dst)]
-            now: 0,
-            seqnum: 0,
-        }
-    }
 }
 
 /// Configuration for client put operations. `PutOptions` is supplied for each
@@ -496,25 +514,29 @@ pub struct PutOptions {
 }
 
 impl PutOptions {
-    pub(crate) fn expire_ts_from(&self, default: Option<u64>, now: i64) -> Option<i64> {
+    pub(crate) fn expire_ts_from(
+        &self,
+        default_ttl_millis: Option<u64>,
+        now_millis: i64,
+    ) -> Option<i64> {
         match self.ttl {
-            Ttl::Default => match default {
+            Ttl::Default => match default_ttl_millis {
                 None => None,
-                Some(default_ttl) => Self::checked_expire_ts(now, default_ttl),
+                Some(default_ttl_millis) => Self::checked_expire_ts(now_millis, default_ttl_millis),
             },
             Ttl::NoExpiry => None,
-            Ttl::ExpireAfter(ttl) => Self::checked_expire_ts(now, ttl),
-            Ttl::ExpireAt(ts) => Some(ts),
+            Ttl::ExpireAfterMillis(ttl_millis) => Self::checked_expire_ts(now_millis, ttl_millis),
+            Ttl::ExpireAtMillis(timestamp_millis) => Some(timestamp_millis),
         }
     }
 
-    fn checked_expire_ts(now: i64, ttl: u64) -> Option<i64> {
+    fn checked_expire_ts(now_millis: i64, ttl_millis: u64) -> Option<i64> {
         // for overflow, we will just assume no TTL
-        if ttl > i64::MAX as u64 {
+        if ttl_millis > i64::MAX as u64 {
             return None;
         };
-        let expire_ts = now + (ttl as i64);
-        if expire_ts < now {
+        let expire_ts = now_millis + (ttl_millis as i64);
+        if expire_ts < now_millis {
             return None;
         };
 
@@ -534,25 +556,29 @@ pub struct MergeOptions {
 
 impl MergeOptions {
     // TODO(agavra): deduplicate this with PutOptions::expire_ts_from
-    pub(crate) fn expire_ts_from(&self, default: Option<u64>, now: i64) -> Option<i64> {
+    pub(crate) fn expire_ts_from(
+        &self,
+        default_ttl_millis: Option<u64>,
+        now_millis: i64,
+    ) -> Option<i64> {
         match self.ttl {
-            Ttl::Default => match default {
+            Ttl::Default => match default_ttl_millis {
                 None => None,
-                Some(default_ttl) => Self::checked_expire_ts(now, default_ttl),
+                Some(default_ttl_millis) => Self::checked_expire_ts(now_millis, default_ttl_millis),
             },
             Ttl::NoExpiry => None,
-            Ttl::ExpireAfter(ttl) => Self::checked_expire_ts(now, ttl),
-            Ttl::ExpireAt(ts) => Some(ts),
+            Ttl::ExpireAfterMillis(ttl_millis) => Self::checked_expire_ts(now_millis, ttl_millis),
+            Ttl::ExpireAtMillis(timestamp_millis) => Some(timestamp_millis),
         }
     }
 
-    fn checked_expire_ts(now: i64, ttl: u64) -> Option<i64> {
+    fn checked_expire_ts(now_millis: i64, ttl_millis: u64) -> Option<i64> {
         // for overflow, we will just assume no TTL
-        if ttl > i64::MAX as u64 {
+        if ttl_millis > i64::MAX as u64 {
             return None;
         };
-        let expire_ts = now + (ttl as i64);
-        if expire_ts < now {
+        let expire_ts = now_millis + (ttl_millis as i64);
+        if expire_ts < now_millis {
             return None;
         };
 
@@ -560,14 +586,25 @@ impl MergeOptions {
     }
 }
 
+/// Time-to-live policy applied to an inserted value or merge operand.
+///
+/// TTL durations are expressed in milliseconds. Absolute expiration timestamps are
+/// expressed as milliseconds since the Unix epoch.
+///
+/// Expiration is applied during compaction and is therefore best effort; an expired
+/// value may remain visible until compaction processes it.
 #[non_exhaustive]
 #[derive(Clone, Default, PartialEq, Debug)]
 pub enum Ttl {
+    /// Use [`Settings::default_ttl_millis`].
     #[default]
     Default,
+    /// Store the value without an expiration.
     NoExpiry,
-    ExpireAfter(u64),
-    ExpireAt(i64),
+    /// Expire the value after the specified number of milliseconds.
+    ExpireAfterMillis(u64),
+    /// Expire the value at the specified Unix timestamp in milliseconds.
+    ExpireAtMillis(i64),
 }
 
 /// Defines the scope targeted by a given checkpoint. If set to All, then the checkpoint will
@@ -738,7 +775,14 @@ pub struct Settings {
     /// The compression algorithm to use for SSTables.
     pub compression_codec: Option<CompressionCodec>,
 
-    /// The object store cache options.
+    /// The object store cache options. When `root_folder` is set, the database
+    /// wraps its main object store in a
+    /// [`CachedObjectStore`](crate::cached_object_store::CachedObjectStore)
+    /// built from these options. To construct and share the cache yourself,
+    /// build one with
+    /// [`CachedObjectStore::builder`](crate::cached_object_store::CachedObjectStore::builder)
+    /// and pass it to [`Db::builder`](crate::Db::builder) instead, leaving
+    /// these options unset.
     pub object_store_cache_options: ObjectStoreCacheOptions,
 
     /// Configuration options for the garbage collector.
@@ -751,11 +795,22 @@ pub struct Settings {
     #[serde(default)]
     pub metric_level: MetricLevel,
 
-    /// The default time-to-live (TTL) for insertions (note that re-inserting a key
-    /// with any value will update the TTL to use the default_ttl)
+    /// The default time-to-live (TTL), in milliseconds, for insertions (note that
+    /// re-inserting a key with any value will update the TTL to use
+    /// `default_ttl_millis`).
     ///
     /// Default: no TTL (insertions will remain until deleted)
-    pub default_ttl: Option<u64>,
+    pub default_ttl_millis: Option<u64>,
+
+    /// Maximum number of wrapper-level retries for a single object-store
+    /// operation, on top of the `object_store` client's own HTTP retries.
+    /// Applies to both foreground (user API) and background-task operations,
+    /// since both share the same retrying object store.
+    ///
+    /// * `None` (default): retry transient errors indefinitely (historical behavior).
+    /// * `Some(n)`: give up after `n` retries and return the underlying error.
+    #[serde(default)]
+    pub object_store_max_retries: Option<u32>,
 
     /// The block format for SST files. This is only available in tests
     /// to verify backward compatibility between V1 and V2 formats.
@@ -795,7 +850,7 @@ impl std::fmt::Debug for Settings {
             )
             .field("garbage_collector_options", &self.garbage_collector_options)
             .field("metric_level", &self.metric_level)
-            .field("default_ttl", &self.default_ttl);
+            .field("default_ttl_millis", &self.default_ttl_millis);
         data.finish()
     }
 }
@@ -804,6 +859,39 @@ impl Settings {
     /// Converts the Settings to a JSON string representation
     pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
+    }
+
+    /// Validates that the settings are internally consistent, rejecting field
+    /// combinations that would deadlock or fail at runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`crate::Error`] with [`crate::ErrorKind::Invalid`] describing
+    /// the first invalid setting or combination encountered.
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        if self.l0_flush_parallelism == 0 {
+            return Err(SlateDBError::InvalidConfiguration(
+                "l0_flush_parallelism must be at least 1".into(),
+            )
+            .into());
+        }
+        if self.max_wal_flushes_before_l0_flush < 4096 {
+            return Err(SlateDBError::InvalidConfiguration(
+                "max_wal_flushes_before_l0_flush must be at least 4096".into(),
+            )
+            .into());
+        }
+        // `max_unflushed_bytes` (the backpressure threshold) must exceed
+        // `l0_sst_size_bytes` (the memtable freeze threshold) so that memory can
+        // hold a memtable up to the freeze point before backpressure kicks in.
+        if self.max_unflushed_bytes <= self.l0_sst_size_bytes {
+            return Err(SlateDBError::InvalidConfiguration(format!(
+                "max_unflushed_bytes ({}) must be greater than l0_sst_size_bytes ({})",
+                self.max_unflushed_bytes, self.l0_sst_size_bytes,
+            ))
+            .into());
+        }
+        Ok(())
     }
 
     /// Loads Settings from a file.
@@ -992,7 +1080,8 @@ impl Default for Settings {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             metric_level: MetricLevel::default(),
-            default_ttl: None,
+            default_ttl_millis: None,
+            object_store_max_retries: None,
             #[cfg(test)]
             block_format: None,
         }
@@ -1003,14 +1092,14 @@ impl Default for Settings {
 pub struct DbReaderOptions {
     /// How frequently to poll for new manifest files and WAL data. Refreshing the manifest
     /// file allows readers to detect newly compacted data. The reader will also look for
-    /// new writes to the WAL at this poll interval. If the reader is using an explicit checkpoint,
-    /// then the manifest and WAL will not be polled.
+    /// new writes to the WAL at this poll interval. Readers using
+    /// [`crate::DbReaderMode::Checkpoint`] do not poll the manifest or WAL.
     pub manifest_poll_interval: Duration,
 
-    /// For readers that do not provide an explicit checkpoint, the client will
-    /// maintain its own checkpoint against the latest database state. The checkpoint's
-    /// expire time will be set to the current time plus this value. This lifetime
-    /// must always be greater than manifest_poll_interval x 2.
+    /// For readers using [`crate::DbReaderMode::ManagedCheckpoint`], the client maintains a
+    /// checkpoint against the latest database state. The checkpoint's expire time is set to the
+    /// current time plus this value. This lifetime must always be greater than
+    /// `manifest_poll_interval * 2`. This option is ignored by other reader modes.
     pub checkpoint_lifetime: Duration,
 
     /// The max size of a single in-memory table used to buffer WAL entries
@@ -1027,10 +1116,10 @@ pub struct DbReaderOptions {
     /// don't need to see the most recent uncommitted writes and want to minimize the
     /// cost of opening many readers.
     ///
-    /// WAL replay is also skipped when the reader is opened from a checkpoint.
+    /// WAL replay is also skipped in [`crate::DbReaderMode::Checkpoint`] mode.
     ///
-    /// When combined with manifest polling (no explicit checkpoint), the reader will
-    /// still see newly compacted data as manifests are updated.
+    /// When combined with a reader mode that polls manifests, the reader will still see newly
+    /// compacted data as manifests are updated.
     ///
     /// Defaults to false.
     pub skip_wal_replay: bool,
@@ -1038,6 +1127,11 @@ pub struct DbReaderOptions {
     /// Optional metrics reporting level for standalone readers. Defaults to
     /// [`MetricLevel::default`] when unset.
     pub metric_level: Option<MetricLevel>,
+
+    /// Controls wrapper-level retries for this reader's object-store operations.
+    /// Defaults to unbounded retries.
+    #[serde(default)]
+    pub object_store_max_retries: Option<u32>,
 }
 
 impl Default for DbReaderOptions {
@@ -1049,6 +1143,7 @@ impl Default for DbReaderOptions {
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             skip_wal_replay: false,
             metric_level: None,
+            object_store_max_retries: None,
         }
     }
 }
@@ -1106,6 +1201,16 @@ pub struct CompactorOptions {
     /// The maximum number of concurrent compactions to execute at once
     pub max_concurrent_compactions: usize,
 
+    /// Whether the coordinator may complete compactions with non-overlapping
+    /// input SSTs by moving them directly into the destination sorted run,
+    /// without dispatching a worker job. Because a trivial move does not rewrite
+    /// rows, it does not remove tombstones, apply compaction filters, or process
+    /// merges during that compaction. It also preserves the input SST sizes,
+    /// which can increase manifest size and read amplification compared with
+    /// rewriting inputs into larger output SSTs. Defaults to false.
+    #[serde(default)]
+    pub enable_trivial_move: bool,
+
     /// Scheduler-specific options expressed as string key/value pairs.
     #[serde(default)]
     pub scheduler_options: HashMap<String, String>,
@@ -1141,6 +1246,11 @@ pub struct CompactorOptions {
     #[serde(deserialize_with = "deserialize_duration")]
     #[serde(serialize_with = "serialize_duration")]
     pub worker_heartbeat_timeout: Duration,
+
+    /// Controls wrapper-level retries for this compactor's object-store
+    /// operations. Defaults to unbounded retries.
+    #[serde(default)]
+    pub object_store_max_retries: Option<u32>,
 }
 
 /// Default options for the compactor. Currently, only a
@@ -1153,11 +1263,13 @@ impl Default for CompactorOptions {
             poll_interval: Duration::from_secs(5),
             manifest_update_timeout: Duration::from_secs(300),
             max_concurrent_compactions: 4,
+            enable_trivial_move: false,
             scheduler_options: HashMap::new(),
             worker: Some(CompactionWorkerOptions::default()),
             metric_level: None,
             commit_compacted_interval: Duration::from_secs(1),
             worker_heartbeat_timeout: Duration::from_secs(30),
+            object_store_max_retries: None,
         }
     }
 }
@@ -1172,11 +1284,13 @@ impl std::fmt::Debug for CompactorOptions {
                 "max_concurrent_compactions",
                 &self.max_concurrent_compactions,
             )
+            .field("enable_trivial_move", &self.enable_trivial_move)
             .field("scheduler_options", &self.scheduler_options)
             .field("worker", &self.worker)
             .field("metric_level", &self.metric_level)
             .field("commit_compacted_interval", &self.commit_compacted_interval)
             .field("worker_heartbeat_timeout", &self.worker_heartbeat_timeout)
+            .field("object_store_max_retries", &self.object_store_max_retries)
             .finish()
     }
 }
@@ -1192,13 +1306,11 @@ pub struct CompactionWorkerOptions {
     #[serde(serialize_with = "serialize_duration")]
     pub compactions_poll_interval: Duration,
 
-    /// How many bytes a worker must process before emitting a heartbeat.
-    pub heartbeat_bytes: u64,
-
-    /// Minimum wall-clock time between heartbeat writes.
+    /// How often a worker heartbeats the jobs it owns, refreshing their
+    /// liveness and publishing their latest progress to `.compactions`.
     #[serde(deserialize_with = "deserialize_duration")]
     #[serde(serialize_with = "serialize_duration")]
-    pub heartbeat_min_interval: Duration,
+    pub heartbeat_interval: Duration,
 
     /// Maximum size of an output SST before a new one is rolled.
     pub max_sst_size: usize,
@@ -1220,6 +1332,37 @@ pub struct CompactionWorkerOptions {
     /// ahead of the cursor.
     pub bytes_to_fetch: usize,
 
+    /// The maximum number of subcompactions to split a single compaction into
+    /// (RFC-0028). Each subcompaction covers a disjoint sub-range of the key
+    /// space and executes concurrently with its siblings, so a single large
+    /// compaction can use multiple cores. Any value `<= 1` disables
+    /// subcompactions. The default is 4.
+    ///
+    /// The planner targets sub-ranges of
+    /// `max(total_input_bytes / max_subcompactions, max_sst_size)`, so a
+    /// compaction smaller than `max_subcompactions * max_sst_size` is split
+    /// into fewer (or zero) ranges rather than fragmented into undersized
+    /// SSTs. There is deliberately no separate minimum-size knob; the
+    /// [`max_sst_size`](CompactionWorkerOptions::max_sst_size) floor subsumes
+    /// it.
+    pub max_subcompactions: usize,
+
+    /// Write SSTables with a bloom filter if the number of keys in the SSTable
+    /// is greater than or equal to this value. Reads on small SSTables might be
+    /// faster without a bloom filter.
+    ///
+    /// Must match the writer's [`Settings::min_filter_keys`] configuration so
+    /// that SSTs rewritten by the worker carry filters consistent with those
+    /// produced by the DB.
+    pub min_filter_keys: u32,
+
+    /// The compression algorithm to use for SSTables the worker writes.
+    ///
+    /// Must match the writer's [`Settings::compression_codec`] configuration so
+    /// that SSTs rewritten by the worker are encoded consistently with those
+    /// produced by the DB.
+    pub compression_codec: Option<CompressionCodec>,
+
     /// Optional metrics reporting level for standalone compaction workers.
     /// Defaults to [`MetricLevel::default`] when unset.
     pub metric_level: Option<MetricLevel>,
@@ -1232,11 +1375,13 @@ impl Default for CompactionWorkerOptions {
         Self {
             max_concurrent_compactions: 4,
             compactions_poll_interval: Duration::from_secs(5),
-            heartbeat_bytes: 5_242_880,
-            heartbeat_min_interval: Duration::from_secs(5),
+            heartbeat_interval: Duration::from_secs(10),
             max_sst_size: 256 * 1024 * 1024,
             max_fetch_tasks: 4,
             bytes_to_fetch: 2 * 1024 * 1024,
+            max_subcompactions: 4,
+            min_filter_keys: 1000,
+            compression_codec: None,
             metric_level: None,
         }
     }
@@ -1400,6 +1545,23 @@ pub struct GarbageCollectorOptions {
     /// a garbage collector is owned by a [`Settings`] configured DB, unset means
     /// inherit [`Settings::metric_level`].
     pub metric_level: Option<MetricLevel>,
+
+    /// Whether manifest and compactions boundary files are advanced before deletion.
+    ///
+    /// Disable this only for object stores that do not support conditional overwrites (`If-Match`).
+    /// Without boundary advancement, a SlateDB client or compactor can begin updating a manifest or
+    /// compactions file, stop making progress (for example, because its process or host is
+    /// suspended), then resume after the garbage collector's `min_age`. It can then recreate a
+    /// deleted metadata ID and incorrectly report its stale update as successful. Set `min_age`
+    /// longer than the maximum lifetime of a stale process, and use the same setting for every
+    /// garbage collector operating on the database.
+    #[serde(default = "default_true")]
+    pub boundary_files_enabled: bool,
+
+    /// Controls wrapper-level retries for this garbage collector's object-store
+    /// operations. Defaults to unbounded retries.
+    #[serde(default)]
+    pub object_store_max_retries: Option<u32>,
 }
 
 impl GarbageCollectorOptions {
@@ -1415,7 +1577,7 @@ impl GarbageCollectorOptions {
 
 /// Default options for the garbage collector for a directory.
 ///
-/// By default, the garbage collector will run every minute and deletes files
+/// By default, the garbage collector will run every 10 minutes and deletes files
 /// that are at least 5 minutes old.
 impl Default for GarbageCollectorDirectoryOptions {
     fn default() -> Self {
@@ -1500,6 +1662,8 @@ impl Default for GarbageCollectorOptions {
             compactions_options: Some(GarbageCollectorDirectoryOptions::default()),
             detach_options: Some(GarbageCollectorScheduleOptions::default()),
             metric_level: None,
+            boundary_files_enabled: true,
+            object_store_max_retries: None,
         }
     }
 }
@@ -1524,9 +1688,17 @@ pub struct ObjectStoreCacheOptions {
     /// its default value is 4mb.
     pub part_size_bytes: usize,
 
-    /// Whether to cache PUT operations to disk. When enabled, data written via PUT operations
-    /// will be cached locally for faster subsequent reads. Default is false.
-    pub cache_puts: bool,
+    /// Whether to cache compacted SSTs produced by memtable flushes to the
+    /// local disk cache, for faster subsequent reads.
+    ///
+    /// Default is false.
+    pub cache_on_flush: bool,
+
+    /// Whether to cache compacted SSTs produced by compaction to the local
+    /// disk cache, for faster subsequent reads.
+    ///
+    /// Default is false.
+    pub cache_on_compaction: bool,
 
     /// Whether to preload SST files into cache during database startup. When enabled,
     /// the database will load SST files into the cache up to the cache size limit
@@ -1558,7 +1730,8 @@ impl Default for ObjectStoreCacheOptions {
             #[cfg(not(target_pointer_width = "32"))]
             max_cache_size_bytes: Some(16 * 1024 * 1024 * 1024),
             part_size_bytes: 4 * 1024 * 1024,
-            cache_puts: false,
+            cache_on_flush: false,
+            cache_on_compaction: false,
             preload_disk_cache_on_startup: None,
             scan_interval: Some(Duration::from_secs(3600)),
             max_open_file_handles: 1000,
@@ -1599,10 +1772,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
-
-    use super::*;
 
     #[test]
     fn test_db_options_load_from_env() {
@@ -1620,7 +1792,6 @@ mod tests {
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
             );
-
             Ok(())
         });
     }
@@ -1664,6 +1835,24 @@ mod tests {
     }
 
     #[test]
+    fn test_gc_boundary_files_are_enabled_by_default_when_omitted() {
+        fn without_boundary_setting<T: Serialize>(value: T) -> serde_json::Value {
+            let mut value = serde_json::to_value(value).unwrap();
+            value
+                .as_object_mut()
+                .unwrap()
+                .remove("boundary_files_enabled");
+            value
+        }
+
+        let gc: GarbageCollectorOptions =
+            serde_json::from_value(without_boundary_setting(GarbageCollectorOptions::default()))
+                .unwrap();
+
+        assert!(gc.boundary_files_enabled);
+    }
+
+    #[test]
     fn test_db_options_load_from_json_file() {
         figment::Jail::expect_with(|jail| {
             jail.create_file(
@@ -1672,7 +1861,7 @@ mod tests {
 {
     "flush_interval": "1s",
     "metric_level": "Debug",
-    "object_store_cache_options": {
+     "object_store_cache_options": {
         "root_folder": "/tmp/slatedb-root"
     }
 }
@@ -1833,7 +2022,7 @@ object_store_cache_options:
     fn should_return_exact_timestamp_for_put_expire_at() {
         // given
         let opts = PutOptions {
-            ttl: Ttl::ExpireAt(12345),
+            ttl: Ttl::ExpireAtMillis(12345),
         };
 
         // when
@@ -1847,7 +2036,7 @@ object_store_cache_options:
     fn should_ignore_default_ttl_for_put_expire_at() {
         // given
         let opts = PutOptions {
-            ttl: Ttl::ExpireAt(12345),
+            ttl: Ttl::ExpireAtMillis(12345),
         };
 
         // when
@@ -1861,7 +2050,7 @@ object_store_cache_options:
     fn should_allow_past_timestamp_for_put_expire_at() {
         // given
         let opts = PutOptions {
-            ttl: Ttl::ExpireAt(50),
+            ttl: Ttl::ExpireAtMillis(50),
         };
 
         // when
@@ -1875,7 +2064,7 @@ object_store_cache_options:
     fn should_return_exact_timestamp_for_merge_expire_at() {
         // given
         let opts = MergeOptions {
-            ttl: Ttl::ExpireAt(12345),
+            ttl: Ttl::ExpireAtMillis(12345),
         };
 
         // when
@@ -1887,9 +2076,9 @@ object_store_cache_options:
 
     #[test]
     fn should_return_deterministic_expire_ts_for_expire_at() {
-        // given: same ExpireAt value used at different times
+        // given: same ExpireAtMillis value used at different times
         let opts = PutOptions {
-            ttl: Ttl::ExpireAt(99999),
+            ttl: Ttl::ExpireAtMillis(99999),
         };
 
         // when
@@ -1901,5 +2090,59 @@ object_store_cache_options:
         assert_eq!(ts1, Some(99999));
         assert_eq!(ts2, Some(99999));
         assert_eq!(ts3, Some(99999));
+    }
+
+    #[test]
+    fn test_validate_accepts_default_settings() {
+        assert!(Settings::default().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_l0_flush_parallelism() {
+        let settings = Settings {
+            l0_flush_parallelism: 0,
+            ..Settings::default()
+        };
+        let err = settings.validate().expect_err("expected invalid settings");
+        assert!(err.to_string().contains("l0_flush_parallelism"));
+    }
+
+    #[test]
+    fn test_validate_rejects_low_max_wal_flushes_before_l0_flush() {
+        let settings = Settings {
+            max_wal_flushes_before_l0_flush: 4095,
+            ..Settings::default()
+        };
+        let err = settings.validate().expect_err("expected invalid settings");
+        assert!(err.to_string().contains("max_wal_flushes_before_l0_flush"));
+    }
+
+    #[test]
+    fn test_validate_rejects_max_unflushed_bytes_not_greater_than_l0_sst_size() {
+        // Equal is invalid: must be strictly greater.
+        let equal = Settings {
+            l0_sst_size_bytes: 64 * 1024 * 1024,
+            max_unflushed_bytes: 64 * 1024 * 1024,
+            ..Settings::default()
+        };
+        let err = equal.validate().expect_err("expected invalid settings");
+        assert!(err.to_string().contains("max_unflushed_bytes"));
+
+        let smaller = Settings {
+            l0_sst_size_bytes: 64 * 1024 * 1024,
+            max_unflushed_bytes: 32 * 1024 * 1024,
+            ..Settings::default()
+        };
+        assert!(smaller.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_max_unflushed_bytes_greater_than_l0_sst_size() {
+        let settings = Settings {
+            l0_sst_size_bytes: 64 * 1024 * 1024,
+            max_unflushed_bytes: 64 * 1024 * 1024 + 1,
+            ..Settings::default()
+        };
+        assert!(settings.validate().is_ok());
     }
 }

@@ -60,6 +60,21 @@ func newMemoryStore(t *testing.T) *slatedb.ObjectStore {
 	return store
 }
 
+// newLocalStore returns a local-filesystem object store rooted at `/` together
+// with a fresh temp-directory DB path relative to that root. SlateDB requires
+// the resolved store to have an empty path, so the directory is carried as the
+// path passed to the builders rather than baked into the store URL.
+func newLocalStore(t *testing.T) (*slatedb.ObjectStore, string) {
+	t.Helper()
+
+	store, err := slatedb.ObjectStoreResolve("file:///")
+	if err != nil {
+		t.Fatalf("ObjectStoreResolve(file:///): %v", err)
+	}
+	t.Cleanup(store.Destroy)
+	return store, strings.TrimPrefix(t.TempDir(), "/")
+}
+
 func openTestDB(t *testing.T, store *slatedb.ObjectStore, configure func(*testing.T, *slatedb.DbBuilder)) *testDB {
 	t.Helper()
 
@@ -141,6 +156,22 @@ func bytesPtr(b []byte) *[]byte {
 
 func uint64Ptr(v uint64) *uint64 {
 	return &v
+}
+
+func trackWriteHandle(t *testing.T, handle *slatedb.WriteHandle) *slatedb.WriteHandle {
+	t.Helper()
+	if handle == nil {
+		t.Fatal("got nil write handle")
+	}
+	t.Cleanup(handle.Destroy)
+	return handle
+}
+
+func awaitDurable(t *testing.T, handle *slatedb.WriteHandle) {
+	t.Helper()
+	if err := handle.AwaitDurable(); err != nil {
+		t.Fatalf("WriteHandle.AwaitDurable(): %v", err)
+	}
 }
 
 func drainIterator(t *testing.T, iter *slatedb.DbIterator) []slatedb.KeyValue {
@@ -582,16 +613,17 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	}
 
 	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlDefault{}}
-	writeOptions := slatedb.WriteOptions{AwaitDurable: true}
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
 
 	firstWrite, err := handle.db.Put([]byte("alpha"), []byte("one"))
 	if err != nil {
 		t.Fatalf("Put(alpha): %v", err)
 	}
-	if firstWrite.Seqnum == 0 {
+	firstWrite = trackWriteHandle(t, firstWrite)
+	if firstWrite.Seqnum() == 0 {
 		t.Fatalf("Put(alpha): Seqnum = 0")
 	}
-	if firstWrite.CreateTs == 0 {
+	if firstWrite.CreateTs() == 0 {
 		t.Fatalf("Put(alpha): CreateTs = 0")
 	}
 
@@ -624,11 +656,11 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	if !bytes.Equal(metadata.Value, []byte("one")) {
 		t.Fatalf("GetKeyValue(alpha): value = %q, want %q", metadata.Value, "one")
 	}
-	if metadata.Seq != firstWrite.Seqnum {
-		t.Fatalf("GetKeyValue(alpha): seq = %d, want %d", metadata.Seq, firstWrite.Seqnum)
+	if metadata.Seq != firstWrite.Seqnum() {
+		t.Fatalf("GetKeyValue(alpha): seq = %d, want %d", metadata.Seq, firstWrite.Seqnum())
 	}
-	if metadata.CreateTs != firstWrite.CreateTs {
-		t.Fatalf("GetKeyValue(alpha): create ts = %d, want %d", metadata.CreateTs, firstWrite.CreateTs)
+	if metadata.CreateTs != firstWrite.CreateTs() {
+		t.Fatalf("GetKeyValue(alpha): create ts = %d, want %d", metadata.CreateTs, firstWrite.CreateTs())
 	}
 
 	metadata, err = handle.db.GetKeyValueWithOptions([]byte("alpha"), readOptions)
@@ -643,10 +675,12 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PutWithOptions(beta): %v", err)
 	}
-	if secondWrite.Seqnum <= firstWrite.Seqnum {
-		t.Fatalf("PutWithOptions(beta): seq = %d, want > %d", secondWrite.Seqnum, firstWrite.Seqnum)
+	secondWrite = trackWriteHandle(t, secondWrite)
+	awaitDurable(t, secondWrite)
+	if secondWrite.Seqnum() <= firstWrite.Seqnum() {
+		t.Fatalf("PutWithOptions(beta): seq = %d, want > %d", secondWrite.Seqnum(), firstWrite.Seqnum())
 	}
-	if secondWrite.CreateTs == 0 {
+	if secondWrite.CreateTs() == 0 {
 		t.Fatalf("PutWithOptions(beta): CreateTs = 0")
 	}
 
@@ -681,8 +715,9 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Delete(alpha): %v", err)
 	}
-	if deleteWrite.Seqnum <= secondWrite.Seqnum {
-		t.Fatalf("Delete(alpha): seq = %d, want > %d", deleteWrite.Seqnum, secondWrite.Seqnum)
+	deleteWrite = trackWriteHandle(t, deleteWrite)
+	if deleteWrite.Seqnum() <= secondWrite.Seqnum() {
+		t.Fatalf("Delete(alpha): seq = %d, want > %d", deleteWrite.Seqnum(), secondWrite.Seqnum())
 	}
 
 	value, err = handle.db.Get([]byte("alpha"))
@@ -697,8 +732,9 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteWithOptions(beta): %v", err)
 	}
-	if deleteWrite.Seqnum <= secondWrite.Seqnum {
-		t.Fatalf("DeleteWithOptions(beta): seq = %d, want > %d", deleteWrite.Seqnum, secondWrite.Seqnum)
+	deleteWrite = trackWriteHandle(t, deleteWrite)
+	if deleteWrite.Seqnum() <= secondWrite.Seqnum() {
+		t.Fatalf("DeleteWithOptions(beta): seq = %d, want > %d", deleteWrite.Seqnum(), secondWrite.Seqnum())
 	}
 
 	value, err = handle.db.Get([]byte("beta"))
@@ -831,7 +867,8 @@ func TestDbBatchWriteAndConsumption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Write(): %v", err)
 	}
-	if batchWrite.Seqnum == 0 {
+	batchWrite = trackWriteHandle(t, batchWrite)
+	if batchWrite.Seqnum() == 0 {
 		t.Fatalf("Write(): Seqnum = 0")
 	}
 
@@ -862,9 +899,12 @@ func TestDbBatchWriteAndConsumption(t *testing.T) {
 		t.Fatalf("WriteBatch.PutWithOptions(): %v", err)
 	}
 
-	if _, err := handle.db.WriteWithOptions(secondBatch, slatedb.WriteOptions{AwaitDurable: true}); err != nil {
+	secondBatchWrite, err := handle.db.WriteWithOptions(secondBatch, slatedb.WriteOptions{Seqnum: 0})
+	if err != nil {
 		t.Fatalf("WriteWithOptions(): %v", err)
 	}
+	secondBatchWrite = trackWriteHandle(t, secondBatchWrite)
+	awaitDurable(t, secondBatchWrite)
 
 	value, err = handle.db.Get([]byte("batch-put-2"))
 	if err != nil {
@@ -922,14 +962,17 @@ func TestDbMerge(t *testing.T) {
 		t.Fatalf("Get(merge) after Merge(): got %v, want %q", value, "base:one")
 	}
 
-	if _, err := handle.db.MergeWithOptions(
+	mergeWrite, err := handle.db.MergeWithOptions(
 		[]byte("merge"),
 		[]byte(":two"),
 		slatedb.MergeOptions{Ttl: slatedb.TtlDefault{}},
-		slatedb.WriteOptions{AwaitDurable: true},
-	); err != nil {
+		slatedb.WriteOptions{Seqnum: 0},
+	)
+	if err != nil {
 		t.Fatalf("MergeWithOptions(): %v", err)
 	}
+	mergeWrite = trackWriteHandle(t, mergeWrite)
+	awaitDurable(t, mergeWrite)
 
 	value, err = handle.db.Get([]byte("merge"))
 	if err != nil {
@@ -1009,11 +1052,15 @@ func TestDbTransactions(t *testing.T) {
 		t.Fatalf("db.Get(txn-key) before commit: got %q, want nil", *liveValue)
 	}
 
-	commitHandle, err := tx.Commit()
+	optionalCommitHandle, err := tx.Commit()
 	if err != nil {
 		t.Fatalf("tx.Commit(): %v", err)
 	}
-	if commitHandle == nil || commitHandle.Seqnum == 0 {
+	if optionalCommitHandle == nil {
+		t.Fatal("tx.Commit(): got nil write handle")
+	}
+	commitHandle := trackWriteHandle(t, *optionalCommitHandle)
+	if commitHandle.Seqnum() == 0 {
 		t.Fatalf("tx.Commit(): got %v, want non-nil write handle", commitHandle)
 	}
 
@@ -1109,18 +1156,22 @@ func TestDbInvalidInputsAndErrorMapping(t *testing.T) {
 			t.Fatalf("secondary Put(): %v", err)
 		}
 
-		_, err := primary.db.Put([]byte("stale"), []byte("value"))
+		write, err := primary.db.Put([]byte("stale"), []byte("value"))
+		if err == nil {
+			write = trackWriteHandle(t, write)
+			err = write.AwaitDurable()
+		}
 		if !errors.Is(err, slatedb.ErrErrorClosed) {
-			t.Fatalf("primary Put() after fencing: got %v, want closed error", err)
+			t.Fatalf("primary write durability after fencing: got %v, want closed error", err)
 		}
 		primary.open = false
 
 		var closedErr *slatedb.ErrorClosed
 		if !errors.As(err, &closedErr) {
-			t.Fatalf("primary Put() after fencing: expected *ErrorClosed, got %T", err)
+			t.Fatalf("primary write durability after fencing: expected *ErrorClosed, got %T", err)
 		}
 		if closedErr.Reason != slatedb.CloseReasonFenced {
-			t.Fatalf("primary Put() after fencing: got close reason %v, want %v", closedErr.Reason, slatedb.CloseReasonFenced)
+			t.Fatalf("primary write durability after fencing: got close reason %v, want %v", closedErr.Reason, slatedb.CloseReasonFenced)
 		}
 	})
 }
@@ -1516,9 +1567,9 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		builder := slatedb.NewDbReaderBuilder(testDBPath, store)
 		defer builder.Destroy()
 
-		err := builder.WithCheckpointId("not-a-uuid")
+		err := builder.WithReaderMode(slatedb.ReaderModeCheckpoint{Field0: "not-a-uuid"})
 		if !errors.Is(err, slatedb.ErrErrorInvalid) {
-			t.Fatalf("DbReaderBuilder.WithCheckpointId(invalid): got %v, want invalid error", err)
+			t.Fatalf("DbReaderBuilder.WithReaderMode(invalid checkpoint): got %v, want invalid error", err)
 		}
 	})
 
@@ -1535,8 +1586,10 @@ func TestDbReaderBuilderValidationAndErrors(t *testing.T) {
 		builder := slatedb.NewDbReaderBuilder(testDBPath, store)
 		defer builder.Destroy()
 
-		if err := builder.WithCheckpointId("ffffffff-ffff-ffff-ffff-ffffffffffff"); err != nil {
-			t.Fatalf("DbReaderBuilder.WithCheckpointId(valid): %v", err)
+		if err := builder.WithReaderMode(slatedb.ReaderModeCheckpoint{
+			Field0: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+		}); err != nil {
+			t.Fatalf("DbReaderBuilder.WithReaderMode(checkpoint): %v", err)
 		}
 
 		_, err := builder.Build()
@@ -1888,6 +1941,42 @@ func TestAdminQueries(t *testing.T) {
 	}
 }
 
+func TestAdminRunGcOnce(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key"), []byte("value")); err != nil {
+		t.Fatalf("Put(key): %v", err)
+	}
+	if err := dbHandle.db.Flush(); err != nil {
+		t.Fatalf("Flush(): %v", err)
+	}
+
+	if err := admin.RunGcOnce(nil); err != nil {
+		t.Fatalf("RunGcOnce(nil): %v", err)
+	}
+
+	directoryOptions := &slatedb.GarbageCollectorDirectoryOptions{
+		IntervalMs: nil,
+		MinAgeMs:   0,
+		DryRun:     true,
+	}
+	options := &slatedb.GarbageCollectorOptions{
+		ManifestOptions:      nil,
+		WalOptions:           directoryOptions,
+		WalFenceOptions:      directoryOptions,
+		CompactedOptions:     nil,
+		CompactionsOptions:   nil,
+		DetachOptions:        &slatedb.GarbageCollectorScheduleOptions{IntervalMs: nil},
+		DisableBoundaryFiles: true,
+	}
+
+	if err := admin.RunGcOnce(options); err != nil {
+		t.Fatalf("RunGcOnce(custom): %v", err)
+	}
+}
+
 func TestAdminClone(t *testing.T) {
 	store := newMemoryStore(t)
 
@@ -1963,6 +2052,644 @@ func TestAdminClone(t *testing.T) {
 			t.Fatalf("Get(k%d): got %q, want %q", i, *got, want)
 		}
 	}
+}
+
+func TestAdminCreateDetachedCheckpointWithoutOptions(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	options := slatedb.CheckpointOptions{
+		LifetimeMs: nil,
+		Source:     nil,
+		Name:       nil,
+	}
+	result, err := admin.CreateDetachedCheckpoint(options)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(): %v", err)
+	}
+
+	if result.Id == "" {
+		t.Fatal("CreateDetachedCheckpoint(): got empty id")
+	}
+	if result.ManifestId == 0 {
+		t.Fatal("CreateDetachedCheckpoint(): got ManifestId = 0")
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 1 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 1", len(checkpoints))
+	}
+	if checkpoints[0].Id != result.Id {
+		t.Fatalf("checkpoint id: got %q, want %q", checkpoints[0].Id, result.Id)
+	}
+	if checkpoints[0].ManifestId != result.ManifestId {
+		t.Fatalf("checkpoint manifest_id: got %d, want %d", checkpoints[0].ManifestId, result.ManifestId)
+	}
+	if checkpoints[0].Name != nil {
+		t.Fatalf("checkpoint name: got %v, want nil", *checkpoints[0].Name)
+	}
+	if checkpoints[0].ExpireTimeSecs != nil {
+		t.Fatalf("checkpoint expire_time_secs: got %v, want nil", *checkpoints[0].ExpireTimeSecs)
+	}
+}
+
+func TestAdminCreateDetachedCheckpointWithLifetime(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	lifetimeMs := uint64(60_000)
+	options := slatedb.CheckpointOptions{
+		LifetimeMs: &lifetimeMs,
+		Source:     nil,
+		Name:       nil,
+	}
+	result, err := admin.CreateDetachedCheckpoint(options)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(): %v", err)
+	}
+
+	if result.Id == "" {
+		t.Fatal("CreateDetachedCheckpoint(): got empty id")
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 1 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 1", len(checkpoints))
+	}
+
+	checkpoint := checkpoints[0]
+	if checkpoint.Id != result.Id {
+		t.Fatalf("checkpoint id: got %q, want %q", checkpoint.Id, result.Id)
+	}
+	if checkpoint.ExpireTimeSecs == nil {
+		t.Fatal("checkpoint expire_time_secs: got nil, want non-nil")
+	}
+	if *checkpoint.ExpireTimeSecs <= checkpoint.CreateTimeSecs {
+		t.Fatalf("checkpoint expire_time_secs: got %d, want > %d", *checkpoint.ExpireTimeSecs, checkpoint.CreateTimeSecs)
+	}
+
+	expectedExpireSecs := checkpoint.CreateTimeSecs + int64(lifetimeMs/1000)
+	delta := *checkpoint.ExpireTimeSecs - expectedExpireSecs
+	if delta < -2 || delta > 2 {
+		t.Fatalf("checkpoint expire_time_secs: got %d, want approximately %d", *checkpoint.ExpireTimeSecs, expectedExpireSecs)
+	}
+}
+
+func TestAdminCreateDetachedCheckpointWithName(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	checkpointName := "backup-2026-06-25"
+	options := slatedb.CheckpointOptions{
+		LifetimeMs: nil,
+		Source:     nil,
+		Name:       &checkpointName,
+	}
+	result, err := admin.CreateDetachedCheckpoint(options)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(): %v", err)
+	}
+
+	if result.Id == "" {
+		t.Fatal("CreateDetachedCheckpoint(): got empty id")
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 1 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 1", len(checkpoints))
+	}
+	if checkpoints[0].Id != result.Id {
+		t.Fatalf("checkpoint id: got %q, want %q", checkpoints[0].Id, result.Id)
+	}
+	if checkpoints[0].Name == nil || *checkpoints[0].Name != checkpointName {
+		t.Fatalf("checkpoint name: got %v, want %q", checkpoints[0].Name, checkpointName)
+	}
+
+	filteredByName, err := admin.ListCheckpoints(&checkpointName)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(name): %v", err)
+	}
+	if len(filteredByName) != 1 {
+		t.Fatalf("ListCheckpoints(name): got %d checkpoints, want 1", len(filteredByName))
+	}
+	if filteredByName[0].Id != result.Id {
+		t.Fatalf("filtered checkpoint id: got %q, want %q", filteredByName[0].Id, result.Id)
+	}
+
+	otherName := "other-name"
+	filteredOther, err := admin.ListCheckpoints(&otherName)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(other-name): %v", err)
+	}
+	if len(filteredOther) != 0 {
+		t.Fatalf("ListCheckpoints(other-name): got %d checkpoints, want 0", len(filteredOther))
+	}
+}
+
+func TestAdminDrainSegment(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, func(t *testing.T, builder *slatedb.DbBuilder) {
+		t.Helper()
+		if err := builder.WithSegmentExtractor(fixedThreeByteSegmentExtractor{}); err != nil {
+			t.Fatalf("WithSegmentExtractor(): %v", err)
+		}
+	})
+
+	// Write to two segments and flush so they land in the manifest as L0.
+	if _, err := dbHandle.db.Put([]byte("aaa-1"), []byte("value")); err != nil {
+		t.Fatalf("Put(aaa-1): %v", err)
+	}
+	if _, err := dbHandle.db.Put([]byte("bbb-1"), []byte("value")); err != nil {
+		t.Fatalf("Put(bbb-1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	// Locate the "aaa" segment in the manifest and enumerate its sources.
+	view, err := admin.ReadCompactorStateView()
+	if err != nil {
+		t.Fatalf("ReadCompactorStateView(): %v", err)
+	}
+	sources := collectSegmentSources(view.Manifest.Segments, []byte("aaa"))
+	if len(sources) == 0 {
+		t.Fatal("segment aaa: got 0 sources, want its L0 SSTs")
+	}
+
+	// Submitting a drain spec retires the segment.
+	compaction, err := admin.SubmitCompaction(slatedb.CompactionSpecDrainSegment{
+		Segment: []byte("aaa"),
+		Sources: sources,
+	})
+	if err != nil {
+		t.Fatalf("SubmitCompaction(drain aaa): %v", err)
+	}
+	spec, ok := compaction.Spec.(slatedb.CompactionSpecDrainSegment)
+	if !ok {
+		t.Fatalf("submitted spec: got %T, want CompactionSpecDrainSegment", compaction.Spec)
+	}
+	if !bytes.Equal(spec.Segment, []byte("aaa")) {
+		t.Fatalf("drain spec segment: got %q, want %q", spec.Segment, "aaa")
+	}
+	if len(spec.Sources) != len(sources) {
+		t.Fatalf("drain spec sources: got %d, want %d", len(spec.Sources), len(sources))
+	}
+}
+
+// collectSegmentSources returns every L0 SST and sorted run of the segment with
+// the given prefix as drain/compaction sources.
+func collectSegmentSources(segments []slatedb.Segment, prefix []byte) []slatedb.SourceId {
+	var sources []slatedb.SourceId
+	for i := range segments {
+		if !bytes.Equal(segments[i].Prefix, prefix) {
+			continue
+		}
+		for _, v := range segments[i].L0 {
+			sources = append(sources, slatedb.SourceIdSstView{Field0: v.Id})
+		}
+		for _, r := range segments[i].Compacted {
+			sources = append(sources, slatedb.SourceIdSortedRun{Field0: r.Id})
+		}
+	}
+	return sources
+}
+
+// segmentDrained reports whether the segment with the given prefix has been
+// retired: either absent from the manifest, or reduced to an empty drain marker.
+func segmentDrained(segments []slatedb.Segment, prefix []byte) bool {
+	for i := range segments {
+		if bytes.Equal(segments[i].Prefix, prefix) {
+			return len(segments[i].L0) == 0 && len(segments[i].Compacted) == 0
+		}
+	}
+	return true
+}
+
+// TestAdminDrainSegmentEndToEnd exercises the full drain lifecycle against a
+// local-filesystem object store: write two segments, submit a drain for one,
+// and let the embedded compactor retire it while the other is left intact.
+func TestAdminDrainSegmentEndToEnd(t *testing.T) {
+	store, dbPath := newLocalStore(t)
+
+	// Writer with a segment extractor and a fast compactor poll so the
+	// submitted drain is executed promptly by the embedded compactor.
+	dbBuilder := slatedb.NewDbBuilder(dbPath, store)
+	defer dbBuilder.Destroy()
+	if err := dbBuilder.WithSegmentExtractor(fixedThreeByteSegmentExtractor{}); err != nil {
+		t.Fatalf("WithSegmentExtractor(): %v", err)
+	}
+	settings := slatedb.SettingsDefault()
+	defer settings.Destroy()
+	if err := settings.Set("compactor_options.poll_interval", `"200ms"`); err != nil {
+		t.Fatalf("Set(compactor_options.poll_interval): %v", err)
+	}
+	if err := dbBuilder.WithSettings(settings); err != nil {
+		t.Fatalf("WithSettings(): %v", err)
+	}
+	db, err := dbBuilder.Build()
+	if err != nil {
+		t.Fatalf("DbBuilder.Build(): %v", err)
+	}
+	defer func() {
+		if err := db.Shutdown(); err != nil {
+			t.Errorf("Shutdown(): %v", err)
+		}
+		db.Destroy()
+	}()
+
+	// Two segments, flushed to L0 so they are visible in the manifest.
+	if _, err := db.Put([]byte("aaa-1"), []byte("value")); err != nil {
+		t.Fatalf("Put(aaa-1): %v", err)
+	}
+	if _, err := db.Put([]byte("bbb-1"), []byte("value")); err != nil {
+		t.Fatalf("Put(bbb-1): %v", err)
+	}
+	if err := db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	adminBuilder := slatedb.NewAdminBuilder(dbPath, store)
+	defer adminBuilder.Destroy()
+	admin, err := adminBuilder.Build()
+	if err != nil {
+		t.Fatalf("AdminBuilder.Build(): %v", err)
+	}
+	defer admin.Destroy()
+
+	// Build the drain from the segment's current L0s and sorted runs.
+	view, err := admin.ReadCompactorStateView()
+	if err != nil {
+		t.Fatalf("ReadCompactorStateView(): %v", err)
+	}
+	sources := collectSegmentSources(view.Manifest.Segments, []byte("aaa"))
+	if len(sources) == 0 {
+		t.Fatal("segment aaa: got 0 sources before drain")
+	}
+	if _, err := admin.SubmitCompaction(slatedb.CompactionSpecDrainSegment{
+		Segment: []byte("aaa"),
+		Sources: sources,
+	}); err != nil {
+		t.Fatalf("SubmitCompaction(drain aaa): %v", err)
+	}
+
+	// The embedded compactor picks up the drain and retires "aaa". Poll the
+	// manifest until it is drained, and confirm "bbb" is left intact.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		view, err := admin.ReadCompactorStateView()
+		if err != nil {
+			t.Fatalf("ReadCompactorStateView(): %v", err)
+		}
+		if segmentDrained(view.Manifest.Segments, []byte("aaa")) {
+			if len(collectSegmentSources(view.Manifest.Segments, []byte("bbb"))) == 0 {
+				t.Fatal("segment bbb was retired by a drain targeting aaa")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for segment aaa to drain")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func TestAdminCreateDetachedCheckpointFromSource(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	firstCheckpointName := "first-checkpoint"
+	firstOptions := slatedb.CheckpointOptions{
+		LifetimeMs: nil,
+		Source:     nil,
+		Name:       &firstCheckpointName,
+	}
+	firstResult, err := admin.CreateDetachedCheckpoint(firstOptions)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(first): %v", err)
+	}
+
+	secondCheckpointName := "second-checkpoint"
+	lifetimeMs := uint64(120_000)
+	secondOptions := slatedb.CheckpointOptions{
+		LifetimeMs: &lifetimeMs,
+		Source:     &firstResult.Id,
+		Name:       &secondCheckpointName,
+	}
+	secondResult, err := admin.CreateDetachedCheckpoint(secondOptions)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(second): %v", err)
+	}
+
+	if secondResult.Id == "" {
+		t.Fatal("CreateDetachedCheckpoint(second): got empty id")
+	}
+	if secondResult.ManifestId != firstResult.ManifestId {
+		t.Fatalf("second checkpoint manifest_id: got %d, want %d", secondResult.ManifestId, firstResult.ManifestId)
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 2 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 2", len(checkpoints))
+	}
+}
+
+func TestAdminRefreshCheckpointUpdatesLifetime(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	initialLifetimeMs := uint64(30_000)
+	checkpointName := "refresh-test"
+	options := slatedb.CheckpointOptions{
+		LifetimeMs: &initialLifetimeMs,
+		Source:     nil,
+		Name:       &checkpointName,
+	}
+	result, err := admin.CreateDetachedCheckpoint(options)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(): %v", err)
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	initial := checkpoints[0]
+	if initial.ExpireTimeSecs == nil {
+		t.Fatal("initial checkpoint expire_time_secs: got nil")
+	}
+	initialExpireTime := *initial.ExpireTimeSecs
+
+	time.Sleep(1 * time.Second)
+
+	newLifetimeMs := uint64(90_000)
+	if err := admin.RefreshCheckpoint(result.Id, &newLifetimeMs); err != nil {
+		t.Fatalf("RefreshCheckpoint(): %v", err)
+	}
+
+	updatedCheckpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil) after refresh: %v", err)
+	}
+	refreshed := updatedCheckpoints[0]
+	if refreshed.ExpireTimeSecs == nil {
+		t.Fatal("refreshed checkpoint expire_time_secs: got nil")
+	}
+	if *refreshed.ExpireTimeSecs <= initialExpireTime {
+		t.Fatalf("refreshed expire_time_secs: got %d, want > %d", *refreshed.ExpireTimeSecs, initialExpireTime)
+	}
+}
+
+func TestAdminRefreshCheckpointWithoutLifetime(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	options := slatedb.CheckpointOptions{
+		LifetimeMs: nil,
+		Source:     nil,
+		Name:       nil,
+	}
+	result, err := admin.CreateDetachedCheckpoint(options)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(): %v", err)
+	}
+
+	if err := admin.RefreshCheckpoint(result.Id, nil); err != nil {
+		t.Fatalf("RefreshCheckpoint(nil lifetime): %v", err)
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 1 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 1", len(checkpoints))
+	}
+	if checkpoints[0].Id != result.Id {
+		t.Fatalf("checkpoint id: got %q, want %q", checkpoints[0].Id, result.Id)
+	}
+}
+
+func TestAdminRefreshCheckpointWithInvalidIdFails(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	lifetimeMs := uint64(60_000)
+	err := admin.RefreshCheckpoint("invalid-uuid", &lifetimeMs)
+	if !errors.Is(err, slatedb.ErrErrorInvalid) {
+		t.Fatalf("RefreshCheckpoint(invalid-uuid): got %v, want invalid error", err)
+	}
+	var invalidErr *slatedb.ErrorInvalid
+	if !errors.As(err, &invalidErr) {
+		t.Fatalf("RefreshCheckpoint(invalid-uuid): expected *ErrorInvalid, got %T", err)
+	}
+	if !strings.Contains(invalidErr.Message, "invalid checkpoint_id") {
+		t.Fatalf("RefreshCheckpoint(invalid-uuid): message = %q, want substring %q", invalidErr.Message, "invalid checkpoint_id")
+	}
+}
+
+func TestAdminDeleteCheckpointRemovesCheckpoint(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	checkpointName := "delete-test"
+	options := slatedb.CheckpointOptions{
+		LifetimeMs: nil,
+		Source:     nil,
+		Name:       &checkpointName,
+	}
+	result, err := admin.CreateDetachedCheckpoint(options)
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(): %v", err)
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 1 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 1", len(checkpoints))
+	}
+	if checkpoints[0].Id != result.Id {
+		t.Fatalf("checkpoint id: got %q, want %q", checkpoints[0].Id, result.Id)
+	}
+
+	if err := admin.DeleteCheckpoint(result.Id); err != nil {
+		t.Fatalf("DeleteCheckpoint(): %v", err)
+	}
+
+	waitUntil(t, 60*time.Second, 25*time.Millisecond, func() (bool, error) {
+		remaining, err := admin.ListCheckpoints(nil)
+		if err != nil {
+			return false, err
+		}
+		return len(remaining) == 0, nil
+	})
+}
+
+func TestAdminDeleteCheckpointWithInvalidIdFails(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	err := admin.DeleteCheckpoint("invalid-uuid")
+	if !errors.Is(err, slatedb.ErrErrorInvalid) {
+		t.Fatalf("DeleteCheckpoint(invalid-uuid): got %v, want invalid error", err)
+	}
+	var invalidErr *slatedb.ErrorInvalid
+	if !errors.As(err, &invalidErr) {
+		t.Fatalf("DeleteCheckpoint(invalid-uuid): expected *ErrorInvalid, got %T", err)
+	}
+	if !strings.Contains(invalidErr.Message, "invalid checkpoint_id") {
+		t.Fatalf("DeleteCheckpoint(invalid-uuid): message = %q, want substring %q", invalidErr.Message, "invalid checkpoint_id")
+	}
+}
+
+func TestAdminDeleteMultipleCheckpoints(t *testing.T) {
+	store := newMemoryStore(t)
+	admin := openTestAdmin(t, store, nil)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("key1"), []byte("value1")); err != nil {
+		t.Fatalf("Put(key1): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	var results []slatedb.CheckpointCreateResult
+	for i := 1; i <= 3; i++ {
+		name := fmt.Sprintf("checkpoint-%d", i)
+		options := slatedb.CheckpointOptions{
+			LifetimeMs: nil,
+			Source:     nil,
+			Name:       &name,
+		}
+		result, err := admin.CreateDetachedCheckpoint(options)
+		if err != nil {
+			t.Fatalf("CreateDetachedCheckpoint(%d): %v", i, err)
+		}
+		results = append(results, result)
+	}
+
+	checkpoints, err := admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil): %v", err)
+	}
+	if len(checkpoints) != 3 {
+		t.Fatalf("ListCheckpoints(nil): got %d checkpoints, want 3", len(checkpoints))
+	}
+
+	if err := admin.DeleteCheckpoint(results[0].Id); err != nil {
+		t.Fatalf("DeleteCheckpoint(first): %v", err)
+	}
+	checkpoints, err = admin.ListCheckpoints(nil)
+	if err != nil {
+		t.Fatalf("ListCheckpoints(nil) after first delete: %v", err)
+	}
+	for _, c := range checkpoints {
+		if c.Id == results[0].Id {
+			t.Fatalf("found deleted checkpoint %q", results[0].Id)
+		}
+	}
+
+	if err := admin.DeleteCheckpoint(results[1].Id); err != nil {
+		t.Fatalf("DeleteCheckpoint(second): %v", err)
+	}
+	if err := admin.DeleteCheckpoint(results[2].Id); err != nil {
+		t.Fatalf("DeleteCheckpoint(third): %v", err)
+	}
+
+	waitUntil(t, 60*time.Second, 25*time.Millisecond, func() (bool, error) {
+		remaining, err := admin.ListCheckpoints(nil)
+		if err != nil {
+			return false, err
+		}
+		return len(remaining) == 0, nil
+	})
 }
 
 func TestWalReaderEmptyStore(t *testing.T) {
@@ -2381,12 +3108,14 @@ func TestDbTtl(t *testing.T) {
 
 	key, value := []byte("alpha"), []byte("one")
 
-	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlExpireAt{Field0: 1}}
-	writeOptions := slatedb.WriteOptions{AwaitDurable: true}
-	_, err := handle.db.PutWithOptions(key, value, putOptions, writeOptions)
+	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlExpireAtMillis{Field0: 1}}
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
+	write, err := handle.db.PutWithOptions(key, value, putOptions, writeOptions)
 	if err != nil {
 		t.Fatalf("Put(alpha): %v", err)
 	}
+	write = trackWriteHandle(t, write)
+	awaitDurable(t, write)
 
 	readerHandle := openTestReader(t, store, nil)
 
@@ -2408,6 +3137,379 @@ func TestDbTtl(t *testing.T) {
 			}
 			if !bytes.Equal(value, kv.Value) {
 				t.Fatalf("Get(alpha): got %v, want %v", kv.Value, value)
+			}
+		})
+	}
+}
+
+// batchSeedRow describes one row written by seedBatchRows.
+type batchSeedRow struct {
+	key   string
+	value string
+	ttl   slatedb.Ttl
+}
+
+// batchSeedRows mixes rows with and without a TTL so that both the Some and the
+// None case of KeyValue.ExpireTs round trip through NextBatch. Six rows lets a
+// batch size of 3 or 6 exercise the exact-multiple case, where the drain loop
+// needs one extra call returning an empty slice to detect exhaustion.
+var batchSeedRows = []batchSeedRow{
+	{key: "batch:01", value: "one", ttl: slatedb.TtlNoExpiry{}},
+	{key: "batch:02", value: "two", ttl: slatedb.TtlExpireAfterMillis{Field0: batchSeedTtlMillis}},
+	{key: "batch:03", value: "three", ttl: slatedb.TtlNoExpiry{}},
+	{key: "batch:04", value: "four", ttl: slatedb.TtlExpireAfterMillis{Field0: batchSeedTtlMillis}},
+	{key: "batch:05", value: "five", ttl: slatedb.TtlNoExpiry{}},
+	{key: "batch:06", value: "six", ttl: slatedb.TtlExpireAfterMillis{Field0: batchSeedTtlMillis}},
+}
+
+// batchSeedTtlMillis is far enough in the future that TTL'd seed rows never
+// expire mid-test, while still producing a non-nil ExpireTs.
+const batchSeedTtlMillis = 3_600_000
+
+func seedBatchRows(t *testing.T, db *slatedb.Db) {
+	t.Helper()
+
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
+	for _, row := range batchSeedRows {
+		putOptions := slatedb.PutOptions{Ttl: row.ttl}
+		write, err := db.PutWithOptions([]byte(row.key), []byte(row.value), putOptions, writeOptions)
+		if err != nil {
+			t.Fatalf("PutWithOptions(%q): %v", row.key, err)
+		}
+		write = trackWriteHandle(t, write)
+		awaitDurable(t, write)
+	}
+}
+
+// scanBatchRows opens a full scan, which covers exactly the seed rows written
+// by seedBatchRows. An unbounded range keeps Seek keys unambiguous: they are
+// whole keys rather than suffixes relative to a prefix.
+func scanBatchRows(t *testing.T, db *slatedb.Db) *slatedb.DbIterator {
+	t.Helper()
+
+	iter, err := db.Scan(slatedb.KeyRange{})
+	if err != nil {
+		t.Fatalf("Scan(): %v", err)
+	}
+	t.Cleanup(iter.Destroy)
+	return iter
+}
+
+// drainBatch drains iter with NextBatch(max), applying the documented
+// exhaustion rule: a batch shorter than max (including an empty one) ends the
+// scan. When the row count is an exact multiple of max this performs one extra
+// call that returns an empty slice.
+func drainBatch(t *testing.T, iter *slatedb.DbIterator, max uint32) []slatedb.KeyValue {
+	t.Helper()
+
+	if max == 0 {
+		t.Fatalf("drainBatch requires max > 0; NextBatch(0) never advances")
+	}
+
+	var rows []slatedb.KeyValue
+	for {
+		batch, err := iter.NextBatch(max)
+		if err != nil {
+			t.Fatalf("NextBatch(%d): %v", max, err)
+		}
+		rows = append(rows, batch...)
+		if len(batch) < int(max) {
+			return rows
+		}
+	}
+}
+
+func int64PtrString(value *int64) string {
+	if value == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%d", *value)
+}
+
+// requireKeyValuesEqual asserts two row slices are identical across every
+// KeyValue field, not just key and value.
+func requireKeyValuesEqual(t *testing.T, context string, got []slatedb.KeyValue, want []slatedb.KeyValue) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("%s: got %d rows, want %d", context, len(got), len(want))
+	}
+
+	for i := range want {
+		gotRow, wantRow := got[i], want[i]
+		if !bytes.Equal(gotRow.Key, wantRow.Key) {
+			t.Fatalf("%s: row %d key: got %q, want %q", context, i, gotRow.Key, wantRow.Key)
+		}
+		if !bytes.Equal(gotRow.Value, wantRow.Value) {
+			t.Fatalf("%s: row %d value: got %q, want %q", context, i, gotRow.Value, wantRow.Value)
+		}
+		if gotRow.Seq != wantRow.Seq {
+			t.Fatalf("%s: row %d seq: got %d, want %d", context, i, gotRow.Seq, wantRow.Seq)
+		}
+		if gotRow.CreateTs != wantRow.CreateTs {
+			t.Fatalf("%s: row %d create_ts: got %d, want %d", context, i, gotRow.CreateTs, wantRow.CreateTs)
+		}
+		if (gotRow.ExpireTs == nil) != (wantRow.ExpireTs == nil) ||
+			(gotRow.ExpireTs != nil && *gotRow.ExpireTs != *wantRow.ExpireTs) {
+			t.Fatalf("%s: row %d expire_ts: got %s, want %s",
+				context, i, int64PtrString(gotRow.ExpireTs), int64PtrString(wantRow.ExpireTs))
+		}
+	}
+}
+
+func TestDbIteratorNextBatchMatchesNext(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+	seedBatchRows(t, handle.db)
+
+	// Row-by-row Next() is the oracle every batch size is compared against.
+	want := drainIterator(t, scanBatchRows(t, handle.db))
+	if len(want) != len(batchSeedRows) {
+		t.Fatalf("oracle drain: got %d rows, want %d", len(want), len(batchSeedRows))
+	}
+
+	// Guard against the differential assertion going vacuous on expire_ts: the
+	// seed set must actually produce both Some and None.
+	var withTTL, withoutTTL int
+	for _, row := range want {
+		if row.ExpireTs != nil {
+			withTTL++
+		} else {
+			withoutTTL++
+		}
+	}
+	if withTTL == 0 || withoutTTL == 0 {
+		t.Fatalf("seed rows must cover both expire_ts states: with=%d without=%d", withTTL, withoutTTL)
+	}
+
+	// 3 and 6 divide the row count exactly; 4, 5 and 7 leave a short final
+	// batch; 1 must behave exactly like repeated Next(); 1000 exceeds the row
+	// count entirely.
+	for _, max := range []uint32{1, 2, 3, 4, 5, 6, 7, 1000} {
+		t.Run(fmt.Sprintf("max=%d", max), func(t *testing.T) {
+			got := drainBatch(t, scanBatchRows(t, handle.db), max)
+			requireKeyValuesEqual(t, fmt.Sprintf("NextBatch(%d) drain", max), got, want)
+		})
+	}
+}
+
+func TestDbIteratorNextBatchLargerThanRowCount(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+	seedBatchRows(t, handle.db)
+
+	want := drainIterator(t, scanBatchRows(t, handle.db))
+
+	iter := scanBatchRows(t, handle.db)
+	first, err := iter.NextBatch(1000)
+	if err != nil {
+		t.Fatalf("NextBatch(1000): %v", err)
+	}
+	requireKeyValuesEqual(t, "single oversized NextBatch", first, want)
+
+	second, err := iter.NextBatch(1000)
+	if err != nil {
+		t.Fatalf("NextBatch(1000) after exhaustion: %v", err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("NextBatch(1000) after exhaustion: got %d rows, want 0", len(second))
+	}
+}
+
+func TestDbIteratorNextBatchEmptyRange(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+	seedBatchRows(t, handle.db)
+
+	// A range that starts past every seeded key.
+	iter, err := handle.db.Scan(slatedb.KeyRange{
+		Start:          bytesPtr([]byte("zzz:")),
+		StartInclusive: true,
+	})
+	if err != nil {
+		t.Fatalf("Scan(empty range): %v", err)
+	}
+	t.Cleanup(iter.Destroy)
+
+	batch, err := iter.NextBatch(16)
+	if err != nil {
+		t.Fatalf("NextBatch(16) on empty range: %v", err)
+	}
+	if len(batch) != 0 {
+		t.Fatalf("NextBatch(16) on empty range: got %d rows, want 0", len(batch))
+	}
+}
+
+func TestDbIteratorNextBatchZeroMaxDoesNotAdvance(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+	seedBatchRows(t, handle.db)
+
+	want := drainIterator(t, scanBatchRows(t, handle.db))
+
+	iter := scanBatchRows(t, handle.db)
+	for i := 0; i < 3; i++ {
+		batch, err := iter.NextBatch(0)
+		if err != nil {
+			t.Fatalf("NextBatch(0) call %d: %v", i, err)
+		}
+		if len(batch) != 0 {
+			t.Fatalf("NextBatch(0) call %d: got %d rows, want 0", i, len(batch))
+		}
+	}
+
+	// The zero-max calls must not have consumed anything.
+	got, err := iter.NextBatch(1000)
+	if err != nil {
+		t.Fatalf("NextBatch(1000) after NextBatch(0): %v", err)
+	}
+	requireKeyValuesEqual(t, "NextBatch(1000) after NextBatch(0)", got, want)
+}
+
+func TestDbIteratorNextBatchAfterSeek(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+	seedBatchRows(t, handle.db)
+
+	seekKey := []byte("batch:04")
+
+	oracle := scanBatchRows(t, handle.db)
+	if err := oracle.Seek(seekKey); err != nil {
+		t.Fatalf("Seek(%q) on oracle iterator: %v", seekKey, err)
+	}
+	want := drainIterator(t, oracle)
+	if len(want) != 3 {
+		t.Fatalf("oracle drain after seek: got %d rows, want 3", len(want))
+	}
+
+	t.Run("seek then batch drain", func(t *testing.T) {
+		iter := scanBatchRows(t, handle.db)
+		if err := iter.Seek(seekKey); err != nil {
+			t.Fatalf("Seek(%q): %v", seekKey, err)
+		}
+		requireKeyValuesEqual(t, "NextBatch(2) after seek", drainBatch(t, iter, 2), want)
+	})
+
+	t.Run("seek mid batch drain", func(t *testing.T) {
+		iter := scanBatchRows(t, handle.db)
+		if _, err := iter.NextBatch(2); err != nil {
+			t.Fatalf("NextBatch(2) before seek: %v", err)
+		}
+		if err := iter.Seek(seekKey); err != nil {
+			t.Fatalf("Seek(%q) mid-drain: %v", seekKey, err)
+		}
+		requireKeyValuesEqual(t, "NextBatch(2) after mid-drain seek", drainBatch(t, iter, 2), want)
+	})
+}
+
+// benchScanRows is the number of rows each scan benchmark drains.
+const benchScanRows = 1000
+
+func openBenchDB(b *testing.B) *slatedb.Db {
+	b.Helper()
+
+	store, err := slatedb.ObjectStoreResolve("memory:///")
+	if err != nil {
+		b.Fatalf("ObjectStoreResolve(memory:///): %v", err)
+	}
+	b.Cleanup(store.Destroy)
+
+	builder := slatedb.NewDbBuilder(testDBPath, store)
+	defer builder.Destroy()
+
+	db, err := builder.Build()
+	if err != nil {
+		b.Fatalf("Build(): %v", err)
+	}
+	b.Cleanup(func() {
+		if err := db.Shutdown(); err != nil {
+			b.Errorf("Shutdown(): %v", err)
+		}
+		db.Destroy()
+	})
+
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
+	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlDefault{}}
+	for i := 0; i < benchScanRows; i++ {
+		key := []byte(fmt.Sprintf("bench:%06d", i))
+		value := []byte(fmt.Sprintf("value-%06d", i))
+		if _, err := db.PutWithOptions(key, value, putOptions, writeOptions); err != nil {
+			b.Fatalf("PutWithOptions(%q): %v", key, err)
+		}
+	}
+	if err := db.Flush(); err != nil {
+		b.Fatalf("Flush(): %v", err)
+	}
+
+	return db
+}
+
+func benchScanIterator(b *testing.B, db *slatedb.Db) *slatedb.DbIterator {
+	b.Helper()
+
+	iter, err := db.Scan(slatedb.KeyRange{})
+	if err != nil {
+		b.Fatalf("Scan(): %v", err)
+	}
+	return iter
+}
+
+// BenchmarkScanNext measures the row-at-a-time drain: one async FFI call, and
+// the RustBuffer decode that comes with it, per row.
+func BenchmarkScanNext(b *testing.B) {
+	db := openBenchDB(b)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		iter := benchScanIterator(b, db)
+		rows := 0
+		for {
+			row, err := iter.Next()
+			if err != nil {
+				b.Fatalf("Next(): %v", err)
+			}
+			if row == nil {
+				break
+			}
+			rows++
+		}
+		iter.Destroy()
+		if rows != benchScanRows {
+			b.Fatalf("drained %d rows, want %d", rows, benchScanRows)
+		}
+	}
+}
+
+// BenchmarkScanNextBatch measures the same drain amortized over batches, which
+// is the point of NextBatch: the per-call cost is paid once per batch instead
+// of once per row.
+func BenchmarkScanNextBatch(b *testing.B) {
+	db := openBenchDB(b)
+
+	for _, max := range []uint32{16, 64, 256, 1024} {
+		b.Run(fmt.Sprintf("max=%d", max), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				iter := benchScanIterator(b, db)
+				rows := 0
+				for {
+					batch, err := iter.NextBatch(max)
+					if err != nil {
+						b.Fatalf("NextBatch(%d): %v", max, err)
+					}
+					rows += len(batch)
+					if len(batch) < int(max) {
+						break
+					}
+				}
+				iter.Destroy()
+				if rows != benchScanRows {
+					b.Fatalf("drained %d rows, want %d", rows, benchScanRows)
+				}
 			}
 		})
 	}
