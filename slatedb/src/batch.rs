@@ -470,6 +470,7 @@ impl RowEntryIterator for WriteBatchIterator {
                 IterationOrder::Descending => entry.key.as_ref() > next_key,
             } {
                 self.iter.next();
+                // Keep in-memory seeking cooperative.
                 tokio::task::coop::consume_budget().await;
             } else {
                 break;

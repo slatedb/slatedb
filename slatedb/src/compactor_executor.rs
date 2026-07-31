@@ -859,6 +859,7 @@ impl TokioCompactionExecutorInner {
                 progress(total_bytes, &output_ssts);
             }
 
+            // Keep cached compaction work cooperative.
             tokio::task::coop::consume_budget().await;
         }
 

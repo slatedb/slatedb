@@ -285,6 +285,7 @@ impl DbIterator {
         } else {
             let result = loop {
                 let next = self.iter.next().await;
+                // Keep cached iteration cooperative.
                 tokio::task::coop::consume_budget().await;
                 match next {
                     Ok(Some(entry)) => match entry.value {
@@ -425,6 +426,7 @@ impl DbRecencyIterator {
             }
 
             let next = iter.next().await;
+            // Keep cached iteration cooperative.
             tokio::task::coop::consume_budget().await;
             match next {
                 Ok(Some(entry)) => return Ok(Some(entry)),

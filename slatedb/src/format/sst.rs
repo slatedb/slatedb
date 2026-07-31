@@ -538,6 +538,7 @@ pub(crate) async fn compress_and_transform(
         None => data,
         Some(c) => {
             let compressed = compress(data, c)?;
+            // Account for CPU-only compression work.
             tokio::task::coop::consume_budget().await;
             compressed
         }
@@ -609,6 +610,7 @@ pub(crate) async fn transform(
                 .encode(data)
                 .await
                 .map_err(|_| SlateDBError::BlockTransformError)?;
+            // Account for CPU-only transformation work.
             tokio::task::coop::consume_budget().await;
             transformed
         }
