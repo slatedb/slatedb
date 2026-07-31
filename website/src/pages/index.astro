@@ -926,6 +926,19 @@ const osLinks = [
         filter: grayscale(0%);
     }
 
+    @media (max-width: 640px) {
+        .usedby-row {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            column-gap: 0.75rem;
+        }
+        .usedby-logo {
+            flex: 0 0 calc((100% - 1.5rem) / 3);
+            width: calc((100% - 1.5rem) / 3);
+        }
+    }
+
     /* ---------- Editorial prose ---------- */
 
     .prose {
