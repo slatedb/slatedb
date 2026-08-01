@@ -128,6 +128,14 @@ pub(crate) enum CliCommands {
         id: Uuid,
     },
 
+    /// Clean up a database: delete the checkpoints it pinned in each parent, and
+    /// (with --force) delete the db's own objects.
+    CleanupDb {
+        /// Also delete the db's own objects. Guards against wiping a live db.
+        #[arg(long)]
+        force: bool,
+    },
+
     /// List the current checkpoints of the db.
     ListCheckpoints {
         /// Optionally specify the name to filter the checkpoints. Note that name may not be unique
