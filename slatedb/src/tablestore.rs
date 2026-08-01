@@ -1207,12 +1207,42 @@ async fn write_sst_streaming_in_object_store(
     tag: ObjectStoreCallTag,
 ) -> Result<(), SlateDBError> {
     let mut writer = tagged_buf_writer(object_store, path.clone(), tag);
-    for block in &encoded_sst.unconsumed_blocks {
-        writer.put(block.encoded_bytes.clone()).await?;
+    let result: Result<(), SlateDBError> = async {
+        for block in &encoded_sst.unconsumed_blocks {
+            writer.put(block.encoded_bytes.clone()).await?;
+        }
+        writer.put(encoded_sst.footer.clone()).await?;
+        Ok(())
     }
-    writer.put(encoded_sst.footer.clone()).await?;
-    writer.shutdown().await?;
+    .await;
+    if let Err(err) = result {
+        abort_sst_upload(&mut writer, path).await;
+        return Err(err);
+    }
+    if let Err(err) = writer.shutdown().await {
+        warn_sst_upload_not_aborted(path, &err);
+        return Err(err.into());
+    }
     Ok(())
+}
+
+/// Best-effort abort of a failed SST upload so it doesn't leak server-side.
+/// Must not be called once `shutdown` has run — `BufWriter` panics; see
+/// [`warn_sst_upload_not_aborted`] for that phase.
+async fn abort_sst_upload(writer: &mut BufWriter, path: &Path) {
+    if let Err(err) = writer.abort().await {
+        warn!("failed to abort SST upload [path={}, error={}]", path, err);
+    }
+}
+
+/// A failure surfacing from `shutdown` cannot be aborted through `BufWriter`:
+/// the upload is left behind until lifecycle cleanup or, on the low-level
+/// multipart path, the dropped writer's best-effort abort.
+fn warn_sst_upload_not_aborted(path: &Path, err: &std::io::Error) {
+    warn!(
+        "SST upload failed at shutdown and may be left incomplete [path={}, error={}]",
+        path, err
+    );
 }
 
 pub(crate) struct EncodedSsTableWriter {
@@ -1234,13 +1264,34 @@ impl EncodedSsTableWriter {
         Ok(block_size)
     }
 
-    pub(crate) async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
-        let encoded_sst = self.builder.build().await?;
-        for block in &encoded_sst.unconsumed_blocks {
-            self.writer.write_all(block.encoded_bytes.as_ref()).await?;
+    pub(crate) async fn close(self) -> Result<SsTableHandle, SlateDBError> {
+        let EncodedSsTableWriter {
+            id,
+            builder,
+            mut writer,
+            table_store,
+            ..
+        } = self;
+        let result: Result<EncodedSsTable, SlateDBError> = async {
+            let encoded_sst = builder.build().await?;
+            for block in &encoded_sst.unconsumed_blocks {
+                writer.write_all(block.encoded_bytes.as_ref()).await?;
+            }
+            writer.write_all(encoded_sst.footer.as_ref()).await?;
+            Ok(encoded_sst)
         }
-        self.writer.write_all(encoded_sst.footer.as_ref()).await?;
-        self.writer.shutdown().await?;
+        .await;
+        let encoded_sst = match result {
+            Ok(encoded_sst) => encoded_sst,
+            Err(err) => {
+                abort_sst_upload(&mut writer, &table_store.path(&id)).await;
+                return Err(err);
+            }
+        };
+        if let Err(err) = writer.shutdown().await {
+            warn_sst_upload_not_aborted(&table_store.path(&id), &err);
+            return Err(err.into());
+        }
 
         // Cache inserts happen after writer shutdown so an SST whose upload
         // fails contributes no metadata entries.
@@ -1248,11 +1299,9 @@ impl EncodedSsTableWriter {
         // Blocks drained while entries were added are cached by `write_block`,
         // so the only data block left for `cache_on_sst_write` is the tail
         // block that `build` finished.
-        self.table_store
-            .cache_on_sst_write(self.id, &encoded_sst)
-            .await;
+        table_store.cache_on_sst_write(id, &encoded_sst).await;
         Ok(SsTableHandle::new(
-            self.id,
+            id,
             encoded_sst.format_version,
             encoded_sst.info,
         ))
@@ -1269,8 +1318,16 @@ impl EncodedSsTableWriter {
         Ok(())
     }
 
+    async fn abort_upload(&mut self) {
+        let path = self.table_store.path(&self.id);
+        abort_sst_upload(&mut self.writer, &path).await;
+    }
+
     async fn write_block(&mut self, block: EncodedSsTableBlock) -> Result<(), SlateDBError> {
-        self.writer.write_all(block.encoded_bytes.as_ref()).await?;
+        if let Err(err) = self.writer.write_all(block.encoded_bytes.as_ref()).await {
+            self.abort_upload().await;
+            return Err(err.into());
+        }
         if let (Some(cache), Some(key_span)) = (&self.table_store.cache, &block.key_span) {
             let targets = self.table_store.targets_to_cache(&self.id);
             if should_cache_data_block(targets, key_span) {
@@ -1324,7 +1381,7 @@ mod tests {
     use crate::db_cache::{CachedKey, DbCache, DbCacheWrapper};
     use crate::error;
     use crate::format::block::Block;
-    use crate::format::sst::SsTableFormat;
+    use crate::format::sst::{EncodedSsTable, SsTableFormat};
     use crate::manifest::SsTableView;
     use crate::object_stores::ObjectStores;
     use crate::retrying_object_store::RetryingObjectStore;
@@ -1522,6 +1579,69 @@ mod tests {
         if let Some(wal_store) = wal_store {
             assert_eq!(count_ssts_in(&wal_store).await, 0);
         }
+    }
+
+    fn flaky_table_store(flaky: Arc<FlakyObjectStore>) -> Arc<TableStore> {
+        Arc::new(TableStore::new(
+            ObjectStores::new(flaky, None),
+            SsTableFormat::default(),
+            Path::from(ROOT),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ))
+    }
+
+    async fn build_large_sst(ts: &TableStore, mib: usize) -> EncodedSsTable {
+        let mut builder = ts.table_builder();
+        let value = vec![7u8; 1024 * 1024];
+        for i in 0..mib {
+            builder
+                .add(RowEntry::new_value(&(i as u64).to_be_bytes(), &value, 0))
+                .await
+                .unwrap();
+        }
+        builder.build().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_streaming_sst_write_part_failure_aborts_upload() {
+        // given: every part fails, no retry layer. The SST exceeds BufWriter's
+        // in-flight cap (8 parts of 10 MiB), so a put polls its upload tasks
+        // and surfaces the failure before shutdown, where abort is possible.
+        let inner = Arc::new(InMemory::new());
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_put_part_failures(usize::MAX));
+        let ts = flaky_table_store(flaky.clone());
+        let encoded = build_large_sst(&ts, 95).await;
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+
+        // when:
+        ts.write_sst(&id, &encoded)
+            .await
+            .expect_err("write should surface the part failure");
+
+        // then: the failed upload was aborted, not abandoned.
+        assert_eq!(flaky.multipart_abort_attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_part_failure_at_shutdown_surfaces_without_abort() {
+        // given: a single part failure below the in-flight cap, so it is
+        // first observed by shutdown, where BufWriter offers no way to abort:
+        // the write must surface the error cleanly and skip the abort.
+        let inner = Arc::new(InMemory::new());
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_put_part_failures(1));
+        let ts = flaky_table_store(flaky.clone());
+        let encoded = build_large_sst(&ts, 12).await;
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+
+        // when:
+        ts.write_sst(&id, &encoded)
+            .await
+            .expect_err("write should surface the part failure");
+
+        // then:
+        assert_eq!(flaky.multipart_abort_attempts(), 0);
     }
 
     #[rstest]
