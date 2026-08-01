@@ -821,7 +821,8 @@ impl Compactions {
 ///
 /// This is the in-memory view that a single compactor task uses to:
 /// - keep a fresh `DirtyManifest` (view of `CoreDbState`),
-/// - track in-flight compactions by id (ULID).
+/// - track in-flight compactions by id (ULID), and
+/// - retain terminal tombstones until their `.compactions` write succeeds.
 pub struct CompactorState {
     manifest: DirtyObject<Manifest>,
     compactions: DirtyObject<Compactions>,
@@ -918,11 +919,11 @@ impl CompactorState {
         // For compactions not in local state (Vacant), accept new submissions,
         // worker-completed results, and retained terminal entries. On a write
         // conflict, the retry path reloads and merges the persisted `.compactions`
-        // object before writing again. At that point, local state may already have
-        // committed or pruned an entry while persisted state still contains an older
-        // Compacted/Completed/Failed view. Insert those entries, let the commit path
-        // resolve stale Compacted entries via `validate_compaction`, and let the compactions
-        // write path resolve stale terminal entries via `retain_active_and_last_finished`.
+        // object before writing again. Process-local terminal entries are deliberately
+        // retained until that write succeeds, so an older remote state for the same id
+        // is treated as a stale transition rather than resurrected as active work.
+        // Insert genuinely absent entries and let the commit path resolve stale
+        // Compacted entries via `validate_compaction`.
         //
         // Scheduled/Running are different: they carry no finished output and require prior
         // coordinator ownership, so seeing them absent from local state remains anomalous.
@@ -960,11 +961,10 @@ impl CompactorState {
             }
         }
 
-        let mut merged_compactions = Compactions {
+        let merged_compactions = Compactions {
             compactor_epoch: self.compactions.value.compactor_epoch,
             core: CompactionsCore::new().with_compactions(merged),
         };
-        merged_compactions.retain_active_and_last_finished();
         remote_compactions.value = merged_compactions;
         self.set_compactions(remote_compactions);
     }
@@ -1050,7 +1050,13 @@ impl CompactorState {
         Ok(())
     }
 
-    /// Mutates a compaction in place if it exists, then trims retained state.
+    /// Mutates a compaction in place if it exists.
+    ///
+    /// Terminal entries remain in process-local state until the next successful
+    /// `.compactions` write. They act as tombstones during conflict retries so
+    /// an older persisted `Submitted` or `Compacted` record cannot be resurrected.
+    /// The persisted value is still trimmed by
+    /// [`crate::compactor_state_protocols::CompactorStateWriter`].
     pub(crate) fn update_compaction<F>(&mut self, compaction_id: &Ulid, f: F)
     where
         F: FnOnce(&mut Compaction),
@@ -1064,7 +1070,6 @@ impl CompactorState {
         {
             f(compaction);
         }
-        self.compactions.value.retain_active_and_last_finished();
     }
 
     /// Applies the effects of a finished compaction to the in-memory manifest.
