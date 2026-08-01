@@ -109,6 +109,7 @@ use bytes::Bytes;
 use fail_parallel::FailPointRegistry;
 use log::info;
 use log::warn;
+use object_store::multipart::MultipartStore;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use rand::RngCore;
@@ -179,6 +180,7 @@ pub struct DbBuilder<P: Into<Path>> {
     path: P,
     settings: Settings,
     main_object_store: Arc<dyn ObjectStore>,
+    multipart_store: Option<Arc<dyn MultipartStore>>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     db_cache: Option<Arc<dyn DbCache>>,
     block_cache_policy: BlockCachePolicy,
@@ -207,6 +209,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         Self {
             path,
             main_object_store,
+            multipart_store: None,
             settings: Settings::default(),
             wal_object_store: None,
             db_cache: default_db_cache(),
@@ -224,6 +227,25 @@ impl<P: Into<Path>> DbBuilder<P> {
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             segment_extractor: None,
         }
+    }
+
+    /// Like [`DbBuilder::new`], but for a client that also implements the
+    /// low-level [`MultipartStore`] API (S3, GCS, and Azure all do), enabling
+    /// in-place retries of multipart part uploads under
+    /// [`Settings::object_store_max_retries`]. Without it, a failed part is
+    /// covered only by the client's own retries (the high-level
+    /// [`ObjectStore`] multipart API offers no way to retry a part).
+    ///
+    /// Applies to components sharing the main store (db, compactor, GC).
+    /// These uploads are instrumented and, when object store caching is
+    /// configured, mirror their bytes into the cache like high-level writes.
+    pub fn new_with_multipart<T>(path: P, store: Arc<T>) -> Self
+    where
+        T: ObjectStore + MultipartStore,
+    {
+        let mut builder = Self::new(path, store.clone());
+        builder.multipart_store = Some(store);
+        builder
     }
 
     /// Set the segment extractor (RFC-0024). When configured, every
@@ -445,19 +467,22 @@ impl<P: Into<Path>> DbBuilder<P> {
         // under the given component and store-type metric labels. Each
         // component (db, compactor, gc) gets its own layer over the store its
         // builder holds.
-        let wrap_object_store = |store: Arc<dyn ObjectStore>,
-                                 component: ObjectStoreComponent,
-                                 store_type: ObjectStoreType| {
-            instrumented_retrying_object_store(
-                store,
-                &recorder,
-                component,
-                store_type,
-                rand.clone(),
-                system_clock.clone(),
-                max_retries,
-            )
-        };
+        let wrap_object_store =
+            |store: Arc<dyn ObjectStore>,
+             component: ObjectStoreComponent,
+             store_type: ObjectStoreType,
+             multipart_store: Option<Arc<dyn MultipartStore>>| {
+                instrumented_retrying_object_store(
+                    store,
+                    &recorder,
+                    component,
+                    store_type,
+                    rand.clone(),
+                    system_clock.clone(),
+                    max_retries,
+                    multipart_store,
+                )
+            };
         // Set up the object store with optional caching from the settings,
         // producing the same layering as a caller-built
         // [`CachedObjectStore`] passed to [`DbBuilder::new`]: the cache sits
@@ -477,14 +502,33 @@ impl<P: Into<Path>> DbBuilder<P> {
             None => self.main_object_store.clone(),
         };
 
+        // A component's multipart handle: its own if set, else the DB's when
+        // it uses the main store instance; wrapped to mirror uploads into the
+        // shared cache like the high-level write path.
+        let multipart_store_for = {
+            let db_multipart_store = self.multipart_store.clone();
+            let main_object_store = self.main_object_store.clone();
+            let cached_object_store = cached_object_store.clone();
+            move |store: &Arc<dyn ObjectStore>, own_handle: Option<Arc<dyn MultipartStore>>| {
+                let uses_main_store = Arc::ptr_eq(store, &main_object_store);
+                own_handle
+                    .or_else(|| db_multipart_store.clone().filter(|_| uses_main_store))
+                    .map(|handle| match &cached_object_store {
+                        Some(cached) if uses_main_store => cached.caching_multipart_store(handle),
+                        _ => handle,
+                    })
+            }
+        };
+
         let retrying_main_object_store = wrap_object_store(
             maybe_cached_main_object_store,
             ObjectStoreComponent::Db,
             ObjectStoreType::Main,
+            multipart_store_for(&self.main_object_store, None),
         );
         let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> = self
             .wal_object_store
-            .map(|s| wrap_object_store(s, ObjectStoreComponent::Db, ObjectStoreType::Wal));
+            .map(|s| wrap_object_store(s, ObjectStoreComponent::Db, ObjectStoreType::Wal, None));
 
         // Log the database opening
         if let Ok(settings_json) = self.settings.to_json_string() {
@@ -721,6 +765,8 @@ impl<P: Into<Path>> DbBuilder<P> {
                 background_component_store(builder.main_object_store.clone()),
                 ObjectStoreComponent::Compactor,
                 ObjectStoreType::Main,
+                // The compactor's own handle wins; else inherit the DB's.
+                multipart_store_for(&builder.main_object_store, builder.multipart_store.clone()),
             );
             let compactor_table_store = Arc::new(TableStore::new_with_fp_registry(
                 ObjectStores::new(
@@ -778,6 +824,8 @@ impl<P: Into<Path>> DbBuilder<P> {
                 background_component_store(gc_builder.main_object_store.clone()),
                 ObjectStoreComponent::Gc,
                 ObjectStoreType::Main,
+                // GC never streams multipart uploads.
+                None,
             );
             let gc_table_store = Arc::new(TableStore::new_with_fp_registry(
                 ObjectStores::new(gc_object_store.clone(), retrying_wal_object_store.clone()),
@@ -1047,6 +1095,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             self.rand.clone(),
             self.system_clock.clone(),
             self.options.object_store_max_retries,
+            None,
         );
         let retrying_wal_object_store = self.wal_object_store.map(|s| {
             instrumented_retrying_object_store(
@@ -1057,6 +1106,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
                 self.rand.clone(),
                 self.system_clock.clone(),
                 self.options.object_store_max_retries,
+                None,
             )
         });
         let manifest_store = Arc::new(ManifestStore::new(
@@ -1113,6 +1163,7 @@ pub(crate) struct CompactorHandlers {
 pub struct CompactorBuilder<P: Into<Path>> {
     path: P,
     main_object_store: Arc<dyn ObjectStore>,
+    multipart_store: Option<Arc<dyn MultipartStore>>,
     compaction_runtime: Handle,
     options: CompactorOptions,
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
@@ -1134,6 +1185,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         Self {
             path,
             main_object_store,
+            multipart_store: None,
             compaction_runtime: Handle::current(),
             options: CompactorOptions::default(),
             scheduler_supplier: None,
@@ -1150,10 +1202,25 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         }
     }
 
+    /// Like [`CompactorBuilder::new`], but for a client that also implements
+    /// [`MultipartStore`], enabling in-place retries of multipart part
+    /// uploads; see [`DbBuilder::new_with_multipart`]. When embedded via
+    /// [`DbBuilder::with_compactor_builder`], a plain [`CompactorBuilder::new`]
+    /// falls back to the DbBuilder's multipart handle.
+    pub fn new_with_multipart<T>(path: P, store: Arc<T>) -> Self
+    where
+        T: ObjectStore + MultipartStore,
+    {
+        let mut builder = Self::new(path, store.clone());
+        builder.multipart_store = Some(store);
+        builder
+    }
+
     pub fn into_path_builder(self) -> CompactorBuilder<Path> {
         CompactorBuilder {
             path: self.path.into(),
             main_object_store: self.main_object_store,
+            multipart_store: self.multipart_store,
             compaction_runtime: self.compaction_runtime,
             options: self.options,
             scheduler_supplier: self.scheduler_supplier,
@@ -1281,6 +1348,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.rand.clone(),
             self.system_clock.clone(),
             self.options.object_store_max_retries,
+            self.multipart_store,
         );
         let manifest_store = Arc::new(ManifestStore::new(
             &path,
@@ -1794,6 +1862,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             self.rand.clone(),
             self.system_clock.clone(),
             self.options.object_store_max_retries,
+            None,
         );
 
         let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> =
@@ -1806,6 +1875,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
                     self.rand.clone(),
                     self.system_clock.clone(),
                     self.options.object_store_max_retries,
+                    None,
                 )
             });
 
@@ -2079,19 +2149,21 @@ fn instrumented_retrying_object_store(
     rand: Arc<DbRand>,
     system_clock: Arc<dyn SystemClock>,
     max_retries: Option<u32>,
+    multipart_store: Option<Arc<dyn MultipartStore>>,
 ) -> Arc<dyn ObjectStore> {
-    let instrumented: Arc<dyn ObjectStore> = Arc::new(InstrumentedObjectStore::new(
+    let instrumented = Arc::new(InstrumentedObjectStore::new(
         object_store,
         recorder,
         component,
         store_type,
     ));
-    Arc::new(RetryingObjectStore::new(
-        instrumented,
-        rand,
-        system_clock,
-        max_retries,
-    ))
+    let mut retrying =
+        RetryingObjectStore::new(instrumented.clone(), rand, system_clock, max_retries);
+    if let Some(multipart_store) = multipart_store {
+        retrying =
+            retrying.with_multipart_store(instrumented.instrument_multipart_store(multipart_store));
+    }
+    Arc::new(retrying)
 }
 
 #[allow(unreachable_code)]
@@ -2423,6 +2495,63 @@ mod tests {
         assert!(!cached_db_path.join("compactions").exists());
         assert!(!cached_db_path.join("gc").exists());
 
+        db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn test_builder_with_multipart_wires_retries_and_cache_mirroring() {
+        let inner = Arc::new(InMemory::new());
+        let flaky = Arc::new(
+            crate::test_utils::FlakyObjectStore::new(inner.clone(), 0)
+                .with_multipart_store(inner)
+                .with_put_part_failures(2),
+        );
+        let path = Path::from("test_builder_with_multipart");
+        let cache_dir = tempfile::Builder::new()
+            .prefix("multipart_cache_test_")
+            .tempdir()
+            .expect("failed to create cache dir");
+        let mut settings = Settings {
+            garbage_collector_options: None,
+            ..Settings::default()
+        };
+        settings.object_store_cache_options.root_folder = Some(cache_dir.path().to_path_buf());
+        settings.object_store_cache_options.part_size_bytes = 1024;
+        settings.object_store_cache_options.cache_on_flush = true;
+
+        let db = crate::Db::builder_with_multipart(path.clone(), flaky.clone())
+            .with_settings(settings)
+            .build()
+            .await
+            .expect("failed to build db");
+
+        // Exceed BufWriter's 10 MiB buffer so the L0 flush streams a
+        // multipart upload through the injected part failures.
+        let value = vec![42u8; 11 * 1024 * 1024];
+        db.put(b"k1", &value).await.expect("failed to put");
+        db.flush_with_options(crate::config::FlushOptions {
+            flush_type: crate::config::FlushType::MemTable,
+        })
+        .await
+        .expect("failed to flush");
+
+        // The low-level path recovered in place: one create, no restart,
+        // more part attempts than a clean upload.
+        assert_eq!(flaky.multipart_attempts(), 1);
+        assert!(flaky.put_part_attempts() >= 3);
+        assert_eq!(flaky.multipart_complete_attempts(), 1);
+
+        // The upload mirrored into the object store cache on flush.
+        let cached_compacted =
+            std::fs::read_dir(cache_dir.path().join(path.as_ref()).join("compacted"))
+                .expect("expected cached compacted dir")
+                .count();
+        assert!(cached_compacted > 0);
+
+        assert_eq!(
+            db.get(b"k1").await.expect("failed to get").as_deref(),
+            Some(value.as_slice())
+        );
         db.close().await.expect("failed to close db");
     }
 
