@@ -7,16 +7,20 @@ use crate::cached_object_store::storage_fs::FsCacheStorage;
 use crate::cached_object_store::LocalCacheEntry;
 use crate::config::ObjectStoreCacheOptions;
 use crate::object_store_tag::ObjectStoreCallTag;
+use crate::retrying_object_store::RetryingObjectStore;
 use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
+use object_store::multipart::{MultipartStore, PartId};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore, ObjectStoreExt};
 use object_store::{
     Attributes, CopyOptions, Extensions, GetRange, GetResultPayload, PutMultipartOptions,
     PutResult, RenameOptions,
 };
-use object_store::{ListResult, MultipartUpload, PutOptions, PutPayload};
+use object_store::{ListResult, MultipartId, MultipartUpload, PutOptions, PutPayload};
 use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 use slatedb_common::DbRand;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
 use std::{ops::Range, sync::Arc};
 
 use crate::single_flight::SingleFlight;
@@ -121,6 +125,22 @@ impl CachedObjectStore {
 
     pub(crate) async fn start_evictor(&self) {
         self.cache_storage.start_evictor().await;
+    }
+
+    /// Wraps a low-level [`MultipartStore`] handle so its uploads mirror
+    /// their bytes into this store's cache, as
+    /// [`CachedObjectStore::put_multipart_opts`] does for high-level uploads.
+    pub(crate) fn caching_multipart_store(
+        &self,
+        inner: Arc<dyn MultipartStore>,
+    ) -> Arc<dyn MultipartStore> {
+        Arc::new(CachingMultipartStore {
+            inner,
+            cache_storage: Arc::clone(&self.cache_storage),
+            part_size: self.part_size_bytes,
+            put_policy: Arc::clone(&self.put_policy),
+            uploads: Mutex::new(HashMap::new()),
+        })
     }
 
     /// Build a `CachedObjectStore` from `ObjectStoreCacheOptions`, returning `None`
@@ -1111,6 +1131,187 @@ impl MultipartUpload for CachingMultipartUpload {
     }
 }
 
+/// The [`MultipartStore`] analogue of [`CachingMultipartUpload`]: mirrors
+/// uploaded bytes into the local cache. Parts may complete out of order, so
+/// payloads are held until the contiguous prefix folds into cache parts
+/// (memory bounded by the caller's in-flight window). As in the high-level
+/// path, the head is the commit point and cache writes are best effort. A
+/// part index is assumed to be re-sent only with identical bytes.
+struct CachingMultipartStore {
+    inner: Arc<dyn MultipartStore>,
+    cache_storage: Arc<dyn LocalCacheStorage>,
+    part_size: usize,
+    put_policy: Arc<dyn PutPolicy>,
+    /// Mirror state per active upload; absent when the put policy skipped it.
+    uploads: Mutex<HashMap<MultipartId, UploadMirror>>,
+}
+
+struct UploadMirror {
+    location: Path,
+    attributes: Attributes,
+    /// Uploaded payloads waiting for the contiguous prefix to reach them.
+    pending: BTreeMap<usize, PutPayload>,
+    /// The next upload part index to fold into `buffer`.
+    next_idx: usize,
+    /// In-order bytes observed so far that have not yet filled a cache part.
+    buffer: BytesMut,
+    /// The next cache part number to write.
+    next_cache_part: PartID,
+    /// Total bytes teed so far; becomes the committed head's `size`.
+    total_len: u64,
+}
+
+impl std::fmt::Debug for CachingMultipartStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachingMultipartStore")
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl MultipartStore for CachingMultipartStore {
+    async fn create_multipart(&self, path: &Path) -> object_store::Result<MultipartId> {
+        self.create_multipart_opts(path, PutMultipartOptions::default())
+            .await
+    }
+
+    async fn create_multipart_opts(
+        &self,
+        path: &Path,
+        opts: PutMultipartOptions,
+    ) -> object_store::Result<MultipartId> {
+        let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
+        let attributes = opts.attributes.clone();
+        let cache = self.put_policy.put_action(tag.as_ref()) == PutAction::Cache;
+
+        let id = self.inner.create_multipart_opts(path, opts).await?;
+        if cache {
+            self.uploads.lock().expect("lock poisoned").insert(
+                id.clone(),
+                UploadMirror {
+                    location: path.clone(),
+                    attributes,
+                    pending: BTreeMap::new(),
+                    next_idx: 0,
+                    buffer: BytesMut::new(),
+                    next_cache_part: 0,
+                    total_len: 0,
+                },
+            );
+        }
+        Ok(id)
+    }
+
+    async fn put_part(
+        &self,
+        path: &Path,
+        id: &MultipartId,
+        part_idx: usize,
+        data: PutPayload,
+    ) -> object_store::Result<PartId> {
+        let part = self
+            .inner
+            .put_part(path, id, part_idx, data.clone())
+            .await?;
+
+        // Tee the payload into the mirror once it is durable upstream, and
+        // collect any cache parts the contiguous prefix now fills.
+        let chunks = {
+            let mut uploads = self.uploads.lock().expect("lock poisoned");
+            let Some(mirror) = uploads.get_mut(id) else {
+                return Ok(part);
+            };
+            if part_idx >= mirror.next_idx {
+                mirror.pending.entry(part_idx).or_insert(data);
+            }
+            while let Some(data) = mirror.pending.remove(&mirror.next_idx) {
+                mirror.total_len += data.content_length() as u64;
+                mirror.buffer.reserve(data.content_length());
+                for bytes in &data {
+                    mirror.buffer.extend_from_slice(bytes);
+                }
+                mirror.next_idx += 1;
+            }
+            let mut chunks = Vec::new();
+            while mirror.buffer.len() >= self.part_size {
+                let chunk = mirror.buffer.split_to(self.part_size).freeze();
+                chunks.push((mirror.next_cache_part, chunk));
+                mirror.next_cache_part += 1;
+            }
+            (mirror.location.clone(), chunks)
+        };
+
+        let (location, chunks) = chunks;
+        if !chunks.is_empty() {
+            let entry = self.cache_storage.entry(&location, self.part_size);
+            for (part_number, chunk) in chunks {
+                // Best-effort: a failed cache write never fails the upload.
+                entry.save_part(part_number, chunk).await.ok();
+            }
+        }
+        Ok(part)
+    }
+
+    async fn complete_multipart(
+        &self,
+        path: &Path,
+        id: &MultipartId,
+        parts: Vec<PartId>,
+    ) -> object_store::Result<PutResult> {
+        let result = match self.inner.complete_multipart(path, id, parts).await {
+            Ok(result) => result,
+            // A transient error keeps the mirror for the retry layer's next
+            // attempt. A permanent error ends the retry loop for good (a lost
+            // complete resolves via put-id), so drop the mirror and entry.
+            Err(err) => {
+                if !RetryingObjectStore::should_retry(&err) {
+                    let mirror = self.uploads.lock().expect("lock poisoned").remove(id);
+                    if let Some(mirror) = mirror {
+                        self.cache_storage
+                            .entry(&mirror.location, self.part_size)
+                            .delete()
+                            .await;
+                    }
+                }
+                return Err(err);
+            }
+        };
+
+        let mirror = self.uploads.lock().expect("lock poisoned").remove(id);
+        if let Some(mut mirror) = mirror {
+            let entry = self.cache_storage.entry(&mirror.location, self.part_size);
+            if mirror.pending.is_empty() {
+                // Flush the trailing partial part, then commit by writing the
+                // head last (see CachingMultipartUpload::complete).
+                if !mirror.buffer.is_empty() {
+                    let chunk = std::mem::take(&mut mirror.buffer).freeze();
+                    entry.save_part(mirror.next_cache_part, chunk).await.ok();
+                }
+                let meta = build_head(&mirror.location, mirror.total_len, &result);
+                entry.save_head((&meta, &mirror.attributes)).await.ok();
+            } else {
+                // Some parts never reached the mirror; drop the incomplete
+                // entry instead of committing it.
+                entry.delete().await;
+            }
+        }
+        Ok(result)
+    }
+
+    async fn abort_multipart(&self, path: &Path, id: &MultipartId) -> object_store::Result<()> {
+        let result = self.inner.abort_multipart(path, id).await;
+        let mirror = self.uploads.lock().expect("lock poisoned").remove(id);
+        if let Some(mirror) = mirror {
+            // The object will never exist upstream, so drop any cached parts.
+            self.cache_storage
+                .entry(&mirror.location, self.part_size)
+                .delete()
+                .await;
+        }
+        result
+    }
+}
+
 /// Where a read (of the object head or of a single part) was served from.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReadResultSource {
@@ -1170,7 +1371,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{CachedObjectStore, ReadResultSource};
+    use super::{CachedObjectStore, CachingMultipartStore, ReadResultSource};
     use crate::cached_object_store::policy::CachePutConfig;
     use crate::cached_object_store::stats::CachedObjectStoreStats;
     use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
@@ -1184,9 +1385,13 @@ mod tests {
     use crate::test_utils::{
         gen_rand_bytes, ExtensionMarker, ExtensionObjectStore, FlakyObjectStore, GatedObjectStore,
     };
+    use object_store::memory::InMemory;
+    use object_store::multipart::MultipartStore;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::MetricsRecorderHelper;
     use slatedb_common::DbRand;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
 
     fn new_test_cache_folder() -> std::path::PathBuf {
         let mut rng = rand::rng();
@@ -2918,6 +3123,245 @@ mod tests {
         upload.complete().await.unwrap();
 
         assert_eq!(cached_part_count(&store, &location).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_upload_mirrors_out_of_order_parts() {
+        let upstream = Arc::new(object_store::memory::InMemory::new());
+        let store = policy_test_store(
+            upstream.clone(),
+            CachePutConfig {
+                cache_on_flush: false,
+                cache_on_compaction: true,
+            },
+        );
+        let multipart = store.caching_multipart_store(upstream);
+
+        let location = Path::from("compacted/big.sst");
+        let tag = ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted);
+        let chunks: Vec<Bytes> = (0..3).map(|_| gen_rand_bytes(1500)).collect();
+
+        let id = multipart
+            .create_multipart_opts(&location, multipart_opts(tag))
+            .await
+            .unwrap();
+        // Parts complete out of order; the mirror folds them in index order.
+        let part1 = multipart
+            .put_part(&location, &id, 1, chunks[1].clone().into())
+            .await
+            .unwrap();
+        let part0 = multipart
+            .put_part(&location, &id, 0, chunks[0].clone().into())
+            .await
+            .unwrap();
+        let part2 = multipart
+            .put_part(&location, &id, 2, chunks[2].clone().into())
+            .await
+            .unwrap();
+        multipart
+            .complete_multipart(&location, &id, vec![part0, part1, part2])
+            .await
+            .unwrap();
+
+        // The entry is committed with the full size...
+        let entry = store.cache_storage.entry(&location, store.part_size_bytes);
+        let head = entry
+            .read_head()
+            .await
+            .unwrap()
+            .expect("head should be committed on complete");
+        assert_eq!(head.0.size, 4500);
+
+        // ...and the teed bytes round-trip in order through the cache parts.
+        let expected: Vec<u8> = chunks.iter().flat_map(|c| c.to_vec()).collect();
+        let expected_part_sizes = [1024usize, 1024, 1024, 1024, 404];
+        let cached = entry.cached_parts().await.unwrap();
+        assert_eq!(
+            cached,
+            (0..expected_part_sizes.len()).collect::<Vec<PartID>>()
+        );
+        let mut offset = 0;
+        for (part_id, part_size) in expected_part_sizes.iter().enumerate() {
+            let bytes = entry
+                .read_part(part_id, 0..*part_size)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&bytes[..], &expected[offset..offset + part_size]);
+            offset += part_size;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_upload_not_cached_when_policy_skips() {
+        let upstream = Arc::new(object_store::memory::InMemory::new());
+        let store = policy_test_store(
+            upstream.clone(),
+            CachePutConfig {
+                cache_on_flush: true,
+                cache_on_compaction: false,
+            },
+        );
+        let multipart = store.caching_multipart_store(upstream);
+
+        let location = Path::from("compacted/big.sst");
+        let tag = ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted);
+        let id = multipart
+            .create_multipart_opts(&location, multipart_opts(tag))
+            .await
+            .unwrap();
+        let part = multipart
+            .put_part(&location, &id, 0, gen_rand_bytes(2048).into())
+            .await
+            .unwrap();
+        multipart
+            .complete_multipart(&location, &id, vec![part])
+            .await
+            .unwrap();
+
+        assert_eq!(cached_part_count(&store, &location).await, 0);
+    }
+
+    /// Builds a [`CachingMultipartStore`] over `inner`, sharing `store`'s
+    /// cache storage and policy, keeping the concrete type so tests can
+    /// inspect the mirror map.
+    fn caching_multipart_store_fixture(
+        store: &CachedObjectStore,
+        inner: Arc<dyn MultipartStore>,
+    ) -> CachingMultipartStore {
+        CachingMultipartStore {
+            inner,
+            cache_storage: store.cache_storage.clone(),
+            part_size: store.part_size_bytes,
+            put_policy: store.put_policy.clone(),
+            uploads: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn mirror_count(caching: &CachingMultipartStore) -> usize {
+        caching.uploads.lock().unwrap().len()
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_abort_drops_mirror_and_cached_parts() {
+        let upstream = Arc::new(InMemory::new());
+        let store = policy_test_store(
+            upstream.clone(),
+            CachePutConfig {
+                cache_on_flush: false,
+                cache_on_compaction: true,
+            },
+        );
+        let caching = caching_multipart_store_fixture(&store, upstream);
+
+        let location = Path::from("compacted/big.sst");
+        let tag = ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted);
+        let id = caching
+            .create_multipart_opts(&location, multipart_opts(tag))
+            .await
+            .unwrap();
+        caching
+            .put_part(&location, &id, 0, gen_rand_bytes(2048).into())
+            .await
+            .unwrap();
+        assert_eq!(cached_part_count(&store, &location).await, 2);
+
+        caching.abort_multipart(&location, &id).await.unwrap();
+
+        assert_eq!(mirror_count(&caching), 0);
+        assert_eq!(cached_part_count(&store, &location).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_permanent_complete_error_drops_mirror() {
+        let upstream = Arc::new(InMemory::new());
+        let store = policy_test_store(
+            upstream.clone(),
+            CachePutConfig {
+                cache_on_flush: false,
+                cache_on_compaction: true,
+            },
+        );
+        // Complete finishes server-side but reports NotFound — the error the
+        // retry layer resolves by put-id verification without ever retrying.
+        let flaky = Arc::new(
+            FlakyObjectStore::new(upstream.clone(), 0)
+                .with_multipart_store(upstream)
+                .with_multipart_complete_succeeds_but_returns_not_found(),
+        );
+        let caching = caching_multipart_store_fixture(&store, flaky);
+
+        let location = Path::from("compacted/big.sst");
+        let tag = ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted);
+        let id = caching
+            .create_multipart_opts(&location, multipart_opts(tag))
+            .await
+            .unwrap();
+        let part = caching
+            .put_part(&location, &id, 0, gen_rand_bytes(2048).into())
+            .await
+            .unwrap();
+        assert_eq!(cached_part_count(&store, &location).await, 2);
+
+        let err = caching
+            .complete_multipart(&location, &id, vec![part])
+            .await
+            .expect_err("injected NotFound should surface");
+        assert!(matches!(err, object_store::Error::NotFound { .. }));
+
+        // The mirror and its uncommitted entry are dropped, not stranded.
+        assert_eq!(mirror_count(&caching), 0);
+        assert_eq!(cached_part_count(&store, &location).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_transient_complete_error_keeps_mirror_for_retry() {
+        let upstream = Arc::new(InMemory::new());
+        let store = policy_test_store(
+            upstream.clone(),
+            CachePutConfig {
+                cache_on_flush: false,
+                cache_on_compaction: true,
+            },
+        );
+        let flaky = Arc::new(
+            FlakyObjectStore::new(upstream.clone(), 0)
+                .with_multipart_store(upstream)
+                .with_multipart_complete_failures(1),
+        );
+        let caching = caching_multipart_store_fixture(&store, flaky);
+
+        let location = Path::from("compacted/big.sst");
+        let tag = ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted);
+        let id = caching
+            .create_multipart_opts(&location, multipart_opts(tag))
+            .await
+            .unwrap();
+        let part = caching
+            .put_part(&location, &id, 0, gen_rand_bytes(2048).into())
+            .await
+            .unwrap();
+
+        // Transient failure: the mirror survives for the retry...
+        caching
+            .complete_multipart(&location, &id, vec![part.clone()])
+            .await
+            .expect_err("first complete should fail transiently");
+        assert_eq!(mirror_count(&caching), 1);
+
+        // ...which commits the entry.
+        caching
+            .complete_multipart(&location, &id, vec![part])
+            .await
+            .unwrap();
+        assert_eq!(mirror_count(&caching), 0);
+        let head = store
+            .cache_storage
+            .entry(&location, store.part_size_bytes)
+            .read_head()
+            .await
+            .unwrap();
+        assert_eq!(head.expect("head should be committed").0.size, 2048);
     }
 
     #[tokio::test]
