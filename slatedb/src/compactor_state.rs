@@ -679,7 +679,7 @@ impl CompactionsCore {
     }
 
     /// Returns all compactions retained in this state. Persisted state contains all active
-    /// compactions and the most recently finished one; process-local state may also retain
+    /// compactions and the most recently finished one. Process-local state may also retain
     /// older terminal entries until its next successful write.
     pub(crate) fn recent_compactions(&self) -> impl Iterator<Item = &Compaction> {
         self.recent_compactions.values()
