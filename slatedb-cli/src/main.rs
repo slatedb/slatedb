@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             exec_refresh_checkpoint(&admin, id, lifetime).await?;
         }
         CliCommands::DeleteCheckpoint { id } => exec_delete_checkpoint(&admin, id).await?,
-        CliCommands::CleanupDb { force } => exec_cleanup_db(&admin, force).await?,
+        CliCommands::CleanupClone { force } => exec_cleanup_clone(&admin, force).await?,
         CliCommands::ListCheckpoints { name } => exec_list_checkpoints(&admin, name).await?,
         CliCommands::RunGarbageCollection {
             resource,
@@ -281,7 +281,7 @@ async fn exec_delete_checkpoint(admin: &Admin, id: Uuid) -> Result<(), Box<dyn E
     Ok(())
 }
 
-async fn exec_cleanup_db(admin: &Admin, force: bool) -> Result<(), Box<dyn Error>> {
+async fn exec_cleanup_clone(admin: &Admin, force: bool) -> Result<(), Box<dyn Error>> {
     admin.cleanup_db(force).await?;
     Ok(())
 }

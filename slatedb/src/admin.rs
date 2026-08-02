@@ -564,21 +564,22 @@ impl Admin {
     /// pinned in each parent. `force` must be true to also delete the db's own
     /// objects (guards against wiping a live db). Idempotent.
     pub async fn cleanup_db(&self, force: bool) -> Result<(), crate::Error> {
-        // If this db's manifest is already gone, there is nothing to clean up.
-        let Some(manifest) = self.manifest_store().try_read_latest_manifest().await? else {
-            return Ok(());
-        };
-
-        for external_db in manifest.external_dbs() {
-            let Some(final_checkpoint_id) = external_db.final_checkpoint_id else {
-                continue;
-            };
-            let parent_store = Arc::new(ManifestStore::new(
-                &Path::from(external_db.path.as_str()),
-                self.retrying_store(ObjectStoreType::Main),
-            ));
-            let mut parent = StoredManifest::load(parent_store, self.system_clock.clone()).await?;
-            parent.delete_checkpoint(final_checkpoint_id).await?;
+        // The manifest may already be gone from a prior partial run. The parent
+        // checkpoint cleanup needs it, but the `force` prefix delete does not, so
+        // we still fall through to it to finish an interrupted deletion
+        if let Some(manifest) = self.manifest_store().try_read_latest_manifest().await? {
+            for external_db in manifest.external_dbs() {
+                let Some(final_checkpoint_id) = external_db.final_checkpoint_id else {
+                    continue;
+                };
+                let parent_store = Arc::new(ManifestStore::new(
+                    &Path::from(external_db.path.as_str()),
+                    self.retrying_store(ObjectStoreType::Main),
+                ));
+                let mut parent =
+                    StoredManifest::load(parent_store, self.system_clock.clone()).await?;
+                parent.delete_checkpoint(final_checkpoint_id).await?;
+            }
         }
 
         if force {
@@ -1583,6 +1584,59 @@ mod tests {
             .cleanup_db(true)
             .await
             .expect("second cleanup should be a no-op");
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_db_force_finishes_partial_deletion() {
+        use crate::admin::CloneSourceSpec;
+        use crate::Db;
+        use futures::StreamExt;
+        use object_store::ObjectStoreExt;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_cleanup_partial_parent");
+        let clone_path = Path::from("/tmp/test_cleanup_partial_clone");
+
+        Db::open(parent_path.clone(), object_store.clone())
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+
+        let clone_admin = AdminBuilder::new(clone_path.clone(), object_store.clone()).build();
+        clone_admin
+            .create_clone_builder_from_source(CloneSourceSpec::new(parent_path.clone()))
+            .build()
+            .await
+            .expect("clone should succeed");
+
+        // Simulate a crash mid-cleanup: the manifests are gone but the clone's
+        // other objects under the prefix remain
+        let manifest_prefix = Path::from("/tmp/test_cleanup_partial_clone/manifest");
+        let mut listing = object_store.list(Some(&manifest_prefix));
+        while let Some(meta) = listing.next().await {
+            object_store.delete(&meta.unwrap().location).await.unwrap();
+        }
+        let count_under = |prefix: Path| {
+            let object_store = object_store.clone();
+            async move { object_store.list(Some(&prefix)).count().await }
+        };
+        assert!(
+            count_under(clone_path.clone()).await > 0,
+            "leftover clone objects should remain after partial deletion"
+        );
+
+        // force must finish the job even though the manifest is already gone
+        clone_admin
+            .cleanup_db(true)
+            .await
+            .expect("cleanup should finish partial deletion");
+        assert_eq!(
+            count_under(clone_path.clone()).await,
+            0,
+            "leftover objects should be gone"
+        );
     }
 
     #[cfg(feature = "wal_disable")]
