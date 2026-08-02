@@ -10,14 +10,17 @@ Table of Contents:
 - [Non-Goals](#non-goals)
 - [Design](#design)
   - [Principle](#principle)
+  - [Example](#example)
+  - [Budgeting](#budgeting)
   - [Planning](#planning)
   - [Read path](#read-path)
   - [Garbage collection](#garbage-collection)
   - [TTL (RFC-0003)](#ttl-rfc-0003)
   - [Merge operators (RFC-0006)](#merge-operators-rfc-0006)
   - [Compaction filters (RFC-0017)](#compaction-filters-rfc-0017)
-  - [Per-segment enablement (RFC-0024)](#per-segment-enablement-rfc-0024)
   - [Resumable compaction (RFC-0013)](#resumable-compaction-rfc-0013)
+  - [Per-segment enablement (RFC-0024)](#per-segment-enablement-rfc-0024)
+  - [Trivial moves (0.15)](#trivial-moves-015)
 - [Impact Analysis](#impact-analysis)
   - [Core API & Query Semantics](#core-api-query-semantics)
   - [Consistency, Isolation, and Multi-Versioning](#consistency-isolation-and-multi-versioning)
@@ -48,14 +51,15 @@ Authors:
 ## Summary
 
 Lazy Compaction avoids rewriting untouched SST regions during compaction. For
-non-overlapping inputs, we move the SST
+wholly disjoint inputs, `enable_trivial_move` (0.15) already moves the SST
 ([trivial moves](https://github.com/facebook/rocksdb/wiki/Compaction-Trivial-Move)).
-In low-overlap situations, we trade reclaiming storage for avoiding work via a
+We generalize it to the block level: rewrite the overlapping blocks, keep the
+rest by reference, and trade reclaiming storage for avoiding work via a
 configurable tradeoff.
 
-It reuses existing `SsTableView`, so the manifest format is unchanged. No new
-state is persisted; resumability relies on re-deriving the plan from the frozen
-`CompactionSpec`.
+It reuses existing `SsTableView`, already placed into sorted runs by trivial
+moves, so the manifest format is unchanged. No new state is persisted;
+resumability relies on re-deriving the plan from the frozen `CompactionSpec`.
 
 ## Motivation
 
@@ -68,7 +72,13 @@ compacting less often saves writes but lets dead bytes accumulate.
 Frequency only moves a deployment _along_ a fixed curve, and that curve has a
 floor: each compaction rewrites whole SSTs, including regions that overlap
 nothing, so even at the best frequency a deployment pays to rewrite untouched
-data. Lazy compaction removes that floor: a compaction's cost scales with the
+data.
+
+Trivial moves lift that floor only when _every_ input of a compaction is
+disjoint from every other: one overlapping key pair forces a full rewrite of all
+inputs.
+
+Lazy compaction removes the floor: a compaction's cost scales with the
 _changed_ fraction of its inputs rather than their total size, pushing the whole
 space/write-amplification frontier outward. For a given space target it reaches
 lower write amplification, and for a given write budget it reclaims more space,
@@ -154,6 +164,7 @@ And drop `sst1`, which is now unreferenced. This illustrates that the amortized
 cost can be lower with lazy compaction, when some rows are more stable than
 others.
 
+
 ### Budgeting
 
 Two budgets limit lazy compaction:
@@ -172,7 +183,8 @@ next time a compaction is planned.
 
 The scheduler reads DB-wide budget headroom once at submit and freezes a per-job
 allocation (dead-bytes and extra-views caps) into the immutable
-`CompactionSpec`.
+`CompactionSpec`. Both the planner and the coordinator read their budget from
+that allocation (see [Trivial moves](#trivial-moves-015)).
 
 ### Planning
 
@@ -259,6 +271,21 @@ When segments (RFC-0024) are configured, the scheduler controls eligibility per
 segment by setting the budget to zero in the `TieredCompactionSpec` submitted
 for a segment.
 
+### Trivial moves (0.15)
+
+`CompactorOptions::enable_trivial_move` (0.15, default off) short-circuits the
+creation of a compaction job: the coordinator completes the compaction itself
+when lazy compaction is permitted (no stateful
+[filter](#compaction-filters-rfc-0017), no periodic [TTL](#ttl-rfc-0003)
+trigger) and every input SST view has a pairwise-disjoint
+`compacted_effective_range()`.
+
+A trivial move is what planning emits when no block is partially live: one
+full-range view per input, no overlay. Both paths therefore produce the same
+output run. The coordinator's costs nothing: it reads manifest metadata, where
+planning reads one index block per input and dispatches a worker. Creating no
+job, it is never resumed.
+
 ## Impact Analysis
 
 SlateDB features and components impacted by this RFC:
@@ -297,7 +324,7 @@ SlateDB features and components impacted by this RFC:
 - [ ] Compaction state persistence
 - [x] Compaction filters
 - [x] Compaction strategies
-- [ ] Distributed compaction
+- [x] Distributed compaction
 - [ ] Compactions format
 
 ### Storage Engine Internals
@@ -338,7 +365,7 @@ SlateDB features and components impacted by this RFC:
 ### Observability
 
 - **Tunables and defaults:**
-  - Enable flag (default: off): Enables lazy compaction.
+  - `enable_lazy_compaction` (default: off): Implies `enable_trivial_move`.
   - Space budget (default `10%` of estimated live bytes, minimum `200 MiB`): Max
     resident dead bytes.
   - Manifest budget (default `10%` of referenced SSTs, minimum `1000`): Max
@@ -361,17 +388,22 @@ SlateDB features and components impacted by this RFC:
   byte-identical. The read path [derives block ranges in memory](#read-path),
   matching `effective_range` behavior.
 - **Existing public APIs (including bindings):** Read/write semantics are
-  unchanged. Adds configuration: the enable flag, two budgets, per-segment
-  opt-in, and the `is_stateless()` / `lazy_compaction_enabled` filter hooks.
-- **Rolling upgrades / mixed-version behavior:** Interoperable. Older compactors
-  perform ordinary rewrites. A newer compactor resuming a job re-derives the
-  plan from the frozen `CompactionSpec` (see
+  unchanged. Adds configuration: `enable_lazy_compaction`, two budgets,
+  per-segment opt-in, and the `is_stateless()` / `lazy_compaction_enabled`
+  filter hooks.
+- **Rolling upgrades / mixed-version behavior:** Interoperable. Trivial moves
+  already write sorted runs holding key-bounded views, so 0.15+ readers handle
+  them. Older compactors perform ordinary rewrites. A newer compactor resuming a
+  job re-derives the plan from the frozen `CompactionSpec` (see
   [Resumable compaction](#resumable-compaction-rfc-0013)).
 
 ## Testing
 
 - **No-overhead guarantee:** Manifests and SSTs are byte-identical with the
   enable flag off.
+- **Trivial-move parity:** A wholly disjoint compaction produces the same output
+  run under lazy compaction as under `enable_trivial_move` alone, and issues no
+  planning-time index GET.
 - **Run disjointness and snapping:** Randomized compactions assert view and
   overlay ranges never overlap. All live keys remain reachable, and no
   superseded version is exposed, including versions an active snapshot below
@@ -391,9 +423,6 @@ TODO
 
 ## Alternatives
 
-- **Whole-SST trivial move only:** Moving inputs by reference only when wholly
-  disjoint misses partial-overlap cases. This RFC generalizes trivial moves to
-  block-aligned ranges.
 - **Explicit reference counting:** Implementing reference counts over base SSTs
   would reclaim dead holes before the entire base is dereferenced, but is
   rejected to keep GC simple (relying on set-membership over object IDs).
@@ -441,10 +470,14 @@ TODO
 - [SST format](https://slatedb.io/docs/design/sorted-string-table/) — block
   index / separator structure.
 - [RocksDB Compaction Trivial Move](https://github.com/facebook/rocksdb/wiki/Compaction-Trivial-Move)
+- [Add simple trivial moves to compactor scheduler (#1982)](https://github.com/slatedb/slatedb/pull/1982)
+  — the whole-SST fast path this RFC generalizes.
+- [Compaction: Trivial moves](https://slatedb.io/docs/design/compaction/)
 - [Pebble virtual SSTables (#1683)](https://github.com/cockroachdb/pebble/issues/1683)
   — prior art for the broad technique; SlateDB's `SsTableView` is the analogous
   primitive.
 
 ## Updates
 
-Log major changes to this RFC over time (optional).
+- 2026-07-31: Generalize the whole-SST trivial move shipped in 0.15 (#1982)
+  rather than introducing it.
