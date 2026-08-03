@@ -24,6 +24,7 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
+use crate::wal::gc::{SlateDbWalGc, WalGcMode};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
@@ -40,7 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tracing::instrument;
-use wal_gc::{WalGcMode, WalGcTask};
+use wal_gc::WalGcTask;
 
 mod compacted_gc;
 mod compactions_gc;
@@ -50,6 +51,7 @@ mod manifest_gc;
 pub mod stats;
 mod wal_gc;
 
+pub(crate) use filter::retain_allowed_by_gc_filter;
 pub use filter::GcFilter;
 
 pub(crate) const DEFAULT_MIN_AGE: Duration = Duration::from_secs(300);
@@ -243,24 +245,30 @@ impl GarbageCollector {
             system_clock.clone(),
         ));
         let wal_gc_task = options.wal_options.map(|wal_options| {
-            WalGcTask::new(
-                manifest_store.clone(),
+            let wal_gc = Arc::new(SlateDbWalGc::new(
                 table_store.clone(),
                 stats.clone(),
                 wal_options,
                 WalGcMode::Regular,
                 gc_filter.clone(),
+                system_clock.clone(),
+            ));
+            WalGcTask::new(
+                manifest_store.clone(),
+                wal_gc,
+                WalGcMode::Regular.resource(),
             )
         });
         let wal_fence_gc_task = options.wal_fence_options.map(|wal_fence_options| {
-            WalGcTask::new(
-                manifest_store.clone(),
+            let wal_gc = Arc::new(SlateDbWalGc::new(
                 table_store.clone(),
                 stats.clone(),
                 wal_fence_options,
                 WalGcMode::Fence,
                 gc_filter.clone(),
-            )
+                system_clock.clone(),
+            ));
+            WalGcTask::new(manifest_store.clone(), wal_gc, WalGcMode::Fence.resource())
         });
         let compacted_gc_task = options.compacted_options.map(|compacted_options| {
             CompactedGcTask::new(

@@ -1,51 +1,27 @@
 use crate::manifest::Manifest;
 use crate::{
-    config::GarbageCollectorDirectoryOptions, db_state::SsTableId, error::SlateDBError,
-    manifest::store::ManifestStore, tablestore::TableStore,
+    error::SlateDBError,
+    manifest::store::ManifestStore,
+    wal::{WalFileRange, WalGC},
 };
 use chrono::{DateTime, Utc};
-use futures::StreamExt;
-use log::error;
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::Arc;
 
-use super::filter::retain_allowed_by_gc_filter;
-use super::{GcFilter, GcStats, GcTask, GC_DELETE_CONCURRENCY};
-use slatedb_common::object_metadata::IdentifiedObjectMetadata;
-
-/// Selects which class of WAL object a [`WalGcTask`] collects.
-///
-/// Regular WAL SSTs and zero-byte WAL fence objects share the same WAL
-/// directory and `SsTableId::Wal` identifier space, but they have separate
-/// retention policies. This mode keeps a single task implementation while
-/// allowing regular WAL GC and fence WAL GC to run on independent schedules.
-#[derive(Debug, Clone, Copy)]
-pub(super) enum WalGcMode {
-    /// Collect non-empty WAL SSTs that are older than the compacted WAL
-    /// boundary, old enough for retention, and unreferenced by active
-    /// checkpoint manifests.
-    Regular,
-
-    /// Collect zero-byte WAL fence objects under the same safety checks as
-    /// regular WAL GC.
-    Fence,
-}
+use super::GcTask;
 
 #[derive(Clone)]
 pub(crate) struct WalGcTask {
     manifest_store: Arc<ManifestStore>,
-    table_store: Arc<TableStore>,
-    stats: Arc<GcStats>,
-    wal_options: GarbageCollectorDirectoryOptions,
-    mode: WalGcMode,
-    gc_filter: Option<Arc<dyn GcFilter>>,
+    wal_gc: Arc<dyn WalGC>,
+    resource: &'static str,
 }
 
 impl std::fmt::Debug for WalGcTask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WalGcTask")
-            .field("wal_options", &self.wal_options)
-            .field("mode", &self.mode)
+            .field("resource", &self.resource.to_string())
             .finish()
     }
 }
@@ -53,136 +29,165 @@ impl std::fmt::Debug for WalGcTask {
 impl WalGcTask {
     pub(super) fn new(
         manifest_store: Arc<ManifestStore>,
-        table_store: Arc<TableStore>,
-        stats: Arc<GcStats>,
-        wal_options: GarbageCollectorDirectoryOptions,
-        mode: WalGcMode,
-        gc_filter: Option<Arc<dyn GcFilter>>,
+        wal_gc: Arc<dyn WalGC>,
+        resource: &'static str,
     ) -> Self {
-        WalGcTask {
+        Self {
             manifest_store,
-            table_store,
-            stats,
-            wal_options,
-            mode,
-            gc_filter,
+            wal_gc,
+            resource,
         }
     }
 
-    fn is_wal_sst_eligible_for_deletion(
-        utc_now: &DateTime<Utc>,
-        wal_sst: &IdentifiedObjectMetadata<SsTableId>,
-        min_age: &chrono::Duration,
+    fn referenced_wal_ranges(
+        latest_manifest_id: u64,
         active_manifests: &BTreeMap<u64, Manifest>,
-    ) -> bool {
-        if utc_now.signed_duration_since(wal_sst.metadata.last_modified) <= *min_age {
-            return false;
-        }
-
-        let wal_sst_id = wal_sst.id.unwrap_wal_id();
-        !active_manifests
-            .values()
-            .any(|manifest| manifest.has_wal_sst_reference(wal_sst_id))
-    }
-
-    fn wal_sst_min_age(&self) -> chrono::Duration {
-        chrono::Duration::from_std(self.wal_options.min_age).expect("invalid duration")
-    }
-
-    /// Deletes the given WAL SSTs from the table store.
-    ///
-    /// In case of dryrun, the actual deletion doesn't happen.
-    async fn maybe_delete_wal_ssts(&self, sst_ids: Vec<SsTableId>) {
-        if self.wal_options.dry_run {
-            if !sst_ids.is_empty() {
-                log::info!(
-                    "dry run: skipping {} deletion [count={}]",
-                    self.resource(),
-                    sst_ids.len()
-                );
-                if matches!(self.mode, WalGcMode::Fence) {
-                    log::info!(
-                        "WAL fence GC is dry-run by default. This is a conservative setting. \
-                        Set wal_fence_options.dry_run=false and use a conservative min_age to enable. \
-                        Silence this log with wal_fence_options=None. See #352 for details."
-                    );
-                }
-            }
-            for id in sst_ids {
-                log::debug!(
-                    "dry run: would delete {} but skipped [id={:?}]",
-                    self.resource(),
-                    id
-                );
-            }
-            return;
-        }
-
-        futures::stream::iter(sst_ids)
-            .for_each_concurrent(GC_DELETE_CONCURRENCY, |id| async move {
-                if let Err(e) = self.table_store.delete_sst(&id).await {
-                    error!("error deleting WAL SST [id={:?}, error={}]", id, e);
+    ) -> Vec<WalFileRange> {
+        active_manifests
+            .iter()
+            .map(|(manifest_id, manifest)| {
+                if *manifest_id == latest_manifest_id {
+                    // Keep the current compaction boundary and everything after it. Retaining the
+                    // boundary matches the existing GC protocol and protects concurrent writers.
+                    WalFileRange(
+                        Bound::Included(manifest.core.replay_after_wal_id),
+                        Bound::Unbounded,
+                    )
                 } else {
-                    match self.mode {
-                        WalGcMode::Regular => self.stats.gc_wal_count.increment(1),
-                        WalGcMode::Fence => self.stats.gc_wal_fence_count.increment(1),
-                    }
+                    // A checkpoint only references WALs that must be replayed for its manifest.
+                    WalFileRange(
+                        Bound::Excluded(manifest.core.replay_after_wal_id),
+                        Bound::Excluded(manifest.core.next_wal_sst_id),
+                    )
                 }
             })
-            .await;
+            .collect()
     }
 }
 
 impl GcTask for WalGcTask {
-    /// Collect garbage from the WAL SSTs. This will delete any WAL SSTs that meet
-    /// the following conditions:
-    ///  - not referenced by an active checkpoint
-    ///  - older than the minimum age specified in the options
-    ///  - older than the last compacted WAL SST.
-    async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
+    /// Resolve the WAL ranges referenced by the current manifest and active checkpoints, then
+    /// delegate collection to the configured WAL implementation.
+    async fn collect(&self, _utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
         let latest_manifest = self.manifest_store.read_latest_manifest().await?;
         let active_manifests = self
             .manifest_store
             .read_referenced_manifests(latest_manifest.id, &latest_manifest.manifest)
             .await?;
-        let last_compacted_wal_sst_id = latest_manifest.manifest.core.replay_after_wal_id;
-        let min_age = self.wal_sst_min_age();
-        let ssts_to_delete = self
-            .table_store
-            .list_wal_ssts(..last_compacted_wal_sst_id)
-            .await?
-            .into_iter()
-            .filter(|wal_sst| match self.mode {
-                // In regular mode, only consider WAL SSTs with size > 0 for deletion.
-                WalGcMode::Regular => wal_sst.metadata.size > 0,
-                // In fence mode, only consider zero-byte WAL SSTs for deletion.
-                WalGcMode::Fence => wal_sst.metadata.size == 0,
-            })
-            // Respect min_age and any WAL references held by active checkpoint manifests.
-            .filter(|wal_sst| {
-                Self::is_wal_sst_eligible_for_deletion(
-                    &utc_now,
-                    wal_sst,
-                    &min_age,
-                    &active_manifests,
-                )
-            })
-            .collect::<Vec<_>>();
-        let ssts_to_delete = retain_allowed_by_gc_filter(&self.gc_filter, ssts_to_delete).await;
-        let sst_ids_to_delete = ssts_to_delete
-            .into_iter()
-            .map(|wal_sst| wal_sst.id)
-            .collect::<Vec<_>>();
+        let referenced_ranges = Self::referenced_wal_ranges(latest_manifest.id, &active_manifests);
 
-        self.maybe_delete_wal_ssts(sst_ids_to_delete).await;
-
-        Ok(())
+        self.wal_gc
+            .collect(referenced_ranges)
+            .await
+            .map_err(Into::into)
     }
 
     fn resource(&self) -> &str {
-        match self.mode {
-            WalGcMode::Regular => "WAL",
-            WalGcMode::Fence => "WAL fence",
+        self.resource
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checkpoint::Checkpoint;
+    use crate::manifest::store::StoredManifest;
+    use crate::manifest::ManifestCore;
+    use crate::wal::WalError;
+    use async_trait::async_trait;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+    use slatedb_common::clock::DefaultSystemClock;
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    #[derive(Default)]
+    struct RecordingWalGc {
+        calls: Mutex<Vec<Vec<WalFileRange>>>,
+    }
+
+    impl RecordingWalGc {
+        fn calls(&self) -> Vec<Vec<WalFileRange>> {
+            self.calls.lock().unwrap().clone()
         }
+    }
+
+    #[async_trait]
+    impl WalGC for RecordingWalGc {
+        async fn collect(&self, referenced_ranges: Vec<WalFileRange>) -> Result<(), WalError> {
+            self.calls.lock().unwrap().push(referenced_ranges);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_referenced_wal_ranges() {
+        let mut checkpoint_core = ManifestCore::new();
+        checkpoint_core.replay_after_wal_id = 2;
+        checkpoint_core.next_wal_sst_id = 6;
+
+        let mut current_core = ManifestCore::new();
+        current_core.replay_after_wal_id = 5;
+        current_core.next_wal_sst_id = 8;
+
+        let active_manifests = BTreeMap::from([
+            (1, Manifest::initial(checkpoint_core)),
+            (2, Manifest::initial(current_core)),
+        ]);
+
+        assert_eq!(
+            WalGcTask::referenced_wal_ranges(2, &active_manifests),
+            vec![
+                WalFileRange(Bound::Excluded(2), Bound::Excluded(6)),
+                WalFileRange(Bound::Included(5), Bound::Unbounded),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_calls_wal_gc_with_referenced_ranges() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from("/test/wal-gc-ranges"),
+            object_store,
+        ));
+
+        let mut checkpoint_core = ManifestCore::new();
+        checkpoint_core.replay_after_wal_id = 2;
+        checkpoint_core.next_wal_sst_id = 6;
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            checkpoint_core,
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        let checkpoint_manifest_id = stored_manifest.id();
+
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        dirty.value.core.replay_after_wal_id = 5;
+        dirty.value.core.next_wal_sst_id = 8;
+        dirty.value.core.checkpoints.push(Checkpoint {
+            id: Uuid::new_v4(),
+            manifest_id: checkpoint_manifest_id,
+            expire_time: None,
+            create_time: Utc::now(),
+            name: None,
+        });
+        stored_manifest.update(dirty).await.unwrap();
+
+        let wal_gc = Arc::new(RecordingWalGc::default());
+        let task = WalGcTask::new(manifest_store, wal_gc.clone(), "WAL");
+
+        task.collect(Utc::now()).await.unwrap();
+
+        assert_eq!(
+            wal_gc.calls(),
+            vec![vec![
+                WalFileRange(Bound::Excluded(2), Bound::Excluded(6)),
+                WalFileRange(Bound::Included(5), Bound::Unbounded),
+            ]]
+        );
     }
 }
