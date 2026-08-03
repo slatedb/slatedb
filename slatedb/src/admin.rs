@@ -560,14 +560,48 @@ impl Admin {
             .map_err(Into::into)
     }
 
-    /// Cleans up a database that is no longer needed: deletes the checkpoints it
-    /// pinned in each parent. `force` must be true to also delete the db's own
-    /// objects (guards against wiping a live db). Idempotent.
-    pub async fn cleanup_db(&self, force: bool) -> Result<(), crate::Error> {
-        // The manifest may already be gone from a prior partial run. The parent
-        // checkpoint cleanup needs it, but the `force` prefix delete does not, so
-        // we still fall through to it to finish an interrupted deletion
-        if let Some(manifest) = self.manifest_store().try_read_latest_manifest().await? {
+    /// Deletes a database, stripping any checkpoints it pinned in parent
+    /// databases (a clone) before removing its own objects. Works for plain and
+    /// cloned dbs alike: a plain db just has no parent checkpoints to strip.
+    ///
+    /// Without `confirm` this is a dry run: it returns every object it *would*
+    /// delete and touches nothing. Pass `confirm` to actually delete.
+    ///
+    /// The delete writes a `.deleting` marker while the manifest still proves
+    /// this is a slatedb dir, then removes everything else, then the marker. If a
+    /// prior run crashed mid-delete, the leftover marker lets a rerun finish the
+    /// job. A `confirm` delete of a dir with neither a manifest nor a marker is
+    /// refused, so a fat-fingered `--path` can't wipe an unrelated directory.
+    /// Idempotent.
+    pub async fn delete_db(&self, confirm: bool) -> Result<Vec<Path>, crate::Error> {
+        let main = self.retrying_store(ObjectStoreType::Main);
+
+        if !confirm {
+            return self.list_prefix(&main).await;
+        }
+
+        let marker = self.path.clone().join(".deleting");
+        let marker_exists = main.get(&marker).await.map(|_| true).or_else(|e| match e {
+            object_store::Error::NotFound { .. } => Ok(false),
+            other => Err(SlateDBError::from(other)),
+        })?;
+
+        let manifest = self.manifest_store().try_read_latest_manifest().await?;
+
+        // No manifest and no marker means we never proved this is a slatedb dir.
+        // If there are objects under the prefix, it may be a fat-fingered path we
+        // must not wipe, so refuse. If empty, there's nothing to delete anyway
+        // (also the already-deleted no-op), so fall through to a clean return.
+        if manifest.is_none()
+            && !marker_exists
+            && !collect_prefix(&main, &self.path).await?.is_empty()
+        {
+            return Err(SlateDBError::InvalidDBState.into());
+        }
+
+        // Strip the checkpoints this db pinned in each parent. Needs the
+        // manifest, which a resumed (marker-only) run may no longer have.
+        if let Some(manifest) = manifest.as_ref() {
             for external_db in manifest.external_dbs() {
                 let Some(final_checkpoint_id) = external_db.final_checkpoint_id else {
                     continue;
@@ -582,32 +616,54 @@ impl Admin {
             }
         }
 
-        if force {
-            self.delete_prefix(&self.retrying_store(ObjectStoreType::Main))
-                .await?;
-            if self.object_stores.has_wal_object_store() {
-                self.delete_prefix(&self.retrying_store(ObjectStoreType::Wal))
-                    .await?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Deletes every object under this db's path prefix in the given store.
-    async fn delete_prefix(&self, store: &Arc<dyn ObjectStore>) -> Result<(), crate::Error> {
-        let mut listing = store.list(Some(&self.path));
-        while let Some(meta) = listing
-            .next()
-            .await
-            .transpose()
-            .map_err(SlateDBError::from)?
-        {
-            store
-                .delete(&meta.location)
+        // Commit the intent to delete while the manifest still proves this dir.
+        if !marker_exists {
+            main.put(&marker, Bytes::new().into())
                 .await
                 .map_err(SlateDBError::from)?;
         }
-        Ok(())
+
+        // Delete everything but the marker, then the marker last, so a crash in
+        // between leaves the marker to prove a rerun should finish.
+        let mut deleted = self.delete_prefix(&main, Some(&marker)).await?;
+        if self.object_stores.has_wal_object_store() {
+            deleted.extend(
+                self.delete_prefix(&self.retrying_store(ObjectStoreType::Wal), None)
+                    .await?,
+            );
+        }
+        main.delete(&marker).await.map_err(SlateDBError::from)?;
+        deleted.push(marker);
+        Ok(deleted)
+    }
+
+    /// Lists every object under this db's path prefix across the main and WAL stores.
+    async fn list_prefix(&self, main: &Arc<dyn ObjectStore>) -> Result<Vec<Path>, crate::Error> {
+        let mut paths = collect_prefix(main, &self.path).await?;
+        if self.object_stores.has_wal_object_store() {
+            paths.extend(
+                collect_prefix(&self.retrying_store(ObjectStoreType::Wal), &self.path).await?,
+            );
+        }
+        Ok(paths)
+    }
+
+    /// Deletes every object under this db's path prefix in the given store,
+    /// skipping `keep` if set. Returns the deleted paths.
+    async fn delete_prefix(
+        &self,
+        store: &Arc<dyn ObjectStore>,
+        keep: Option<&Path>,
+    ) -> Result<Vec<Path>, crate::Error> {
+        let mut deleted = Vec::new();
+        for path in collect_prefix(store, &self.path).await? {
+            if Some(&path) == keep {
+                continue;
+            }
+            store.delete(&path).await.map_err(SlateDBError::from)?;
+            deleted.push(path);
+        }
+        Ok(deleted)
     }
 
     /// Returns the timestamp or sequence from the latest manifest's sequence tracker.
@@ -864,6 +920,24 @@ pub fn load_gcp() -> Result<Arc<dyn ObjectStore>, crate::Error> {
             source: Box::new(error),
         }))
     })?) as Arc<dyn ObjectStore>)
+}
+
+/// Collects every object path under `prefix` in the given store.
+async fn collect_prefix(
+    store: &Arc<dyn ObjectStore>,
+    prefix: &Path,
+) -> Result<Vec<Path>, crate::Error> {
+    let mut listing = store.list(Some(prefix));
+    let mut paths = Vec::new();
+    while let Some(meta) = listing
+        .next()
+        .await
+        .transpose()
+        .map_err(SlateDBError::from)?
+    {
+        paths.push(meta.location);
+    }
+    Ok(paths)
 }
 
 #[cfg(test)]
@@ -1441,7 +1515,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cleanup_db_removes_checkpoint_from_parent() {
+    async fn test_delete_db_removes_checkpoint_from_parent() {
         use crate::admin::CloneSourceSpec;
         use crate::config::CheckpointOptions;
         use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -1509,9 +1583,9 @@ mod tests {
         );
 
         clone_admin
-            .cleanup_db(true)
+            .delete_db(true)
             .await
-            .expect("cleanup should succeed");
+            .expect("delete should succeed");
 
         let after = read_parent_checkpoints().await;
         assert!(
@@ -1525,14 +1599,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cleanup_db_deletes_own_objects_only_with_force() {
+    async fn test_delete_db_deletes_own_objects_only_with_confirm() {
         use crate::admin::CloneSourceSpec;
         use crate::Db;
         use futures::StreamExt;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let parent_path = Path::from("/tmp/test_cleanup_force_parent");
-        let clone_path = Path::from("/tmp/test_cleanup_force_clone");
+        let parent_path = Path::from("/tmp/test_delete_confirm_parent");
+        let clone_path = Path::from("/tmp/test_delete_confirm_clone");
 
         Db::open(parent_path.clone(), object_store.clone())
             .await
@@ -1553,49 +1627,54 @@ mod tests {
             async move { object_store.list(Some(&prefix)).count().await }
         };
 
-        assert!(
-            count_under(clone_path.clone()).await > 0,
-            "clone should have objects"
+        let initial = count_under(clone_path.clone()).await;
+        assert!(initial > 0, "clone should have objects");
+
+        // confirm = false is a dry run: it reports what it would delete and
+        // touches nothing.
+        let would_delete = clone_admin
+            .delete_db(false)
+            .await
+            .expect("dry run should succeed");
+        assert_eq!(
+            would_delete.len(),
+            initial,
+            "dry run should report every object under the prefix"
+        );
+        assert_eq!(
+            count_under(clone_path.clone()).await,
+            initial,
+            "dry run must not delete anything"
         );
 
-        // force = false leaves the clone's own data untouched.
+        // confirm = true deletes the clone's own objects.
         clone_admin
-            .cleanup_db(false)
+            .delete_db(true)
             .await
-            .expect("cleanup should succeed");
-        assert!(
-            count_under(clone_path.clone()).await > 0,
-            "clone objects should remain without force"
-        );
-
-        // force = true deletes the clone's own objects.
-        clone_admin
-            .cleanup_db(true)
-            .await
-            .expect("cleanup should succeed");
+            .expect("delete should succeed");
         assert_eq!(
             count_under(clone_path.clone()).await,
             0,
-            "clone objects should be gone with force"
+            "clone objects should be gone after confirm"
         );
 
-        // Idempotent: a second run over an already-cleaned db is a clean no-op.
+        // Idempotent: a second run over an already-deleted db is a clean no-op.
         clone_admin
-            .cleanup_db(true)
+            .delete_db(true)
             .await
-            .expect("second cleanup should be a no-op");
+            .expect("second delete should be a no-op");
     }
 
     #[tokio::test]
-    async fn test_cleanup_db_force_finishes_partial_deletion() {
+    async fn test_delete_db_finishes_partial_deletion_via_marker() {
         use crate::admin::CloneSourceSpec;
         use crate::Db;
         use futures::StreamExt;
         use object_store::ObjectStoreExt;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let parent_path = Path::from("/tmp/test_cleanup_partial_parent");
-        let clone_path = Path::from("/tmp/test_cleanup_partial_clone");
+        let parent_path = Path::from("/tmp/test_delete_partial_parent");
+        let clone_path = Path::from("/tmp/test_delete_partial_clone");
 
         Db::open(parent_path.clone(), object_store.clone())
             .await
@@ -1611,9 +1690,16 @@ mod tests {
             .await
             .expect("clone should succeed");
 
-        // Simulate a crash mid-cleanup: the manifests are gone but the clone's
-        // other objects under the prefix remain
-        let manifest_prefix = Path::from("/tmp/test_cleanup_partial_clone/manifest");
+        // Simulate a crash mid-delete: the marker was written, then the manifests
+        // (and some objects) were removed, but the marker and other objects remain.
+        object_store
+            .put(
+                &clone_path.clone().join(".deleting"),
+                bytes::Bytes::new().into(),
+            )
+            .await
+            .unwrap();
+        let manifest_prefix = Path::from("/tmp/test_delete_partial_clone/manifest");
         let mut listing = object_store.list(Some(&manifest_prefix));
         while let Some(meta) = listing.next().await {
             object_store.delete(&meta.unwrap().location).await.unwrap();
@@ -1627,16 +1713,45 @@ mod tests {
             "leftover clone objects should remain after partial deletion"
         );
 
-        // force must finish the job even though the manifest is already gone
+        // The marker proves this is a real slatedb dir, so delete resumes and
+        // finishes the job even though the manifest is already gone.
         clone_admin
-            .cleanup_db(true)
+            .delete_db(true)
             .await
-            .expect("cleanup should finish partial deletion");
+            .expect("delete should finish partial deletion");
         assert_eq!(
             count_under(clone_path.clone()).await,
             0,
-            "leftover objects should be gone"
+            "leftover objects, including the marker, should be gone"
         );
+    }
+
+    #[tokio::test]
+    async fn test_delete_db_refuses_without_manifest_or_marker() {
+        use futures::StreamExt;
+        use object_store::ObjectStoreExt;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let dir = Path::from("/tmp/test_delete_fat_finger");
+
+        // A directory that is NOT a slatedb dir: no manifest, no .deleting marker.
+        // This stands in for a fat-fingered --path.
+        object_store
+            .put(
+                &dir.clone().join("important.txt"),
+                bytes::Bytes::from_static(b"keepme").into(),
+            )
+            .await
+            .unwrap();
+
+        let admin = AdminBuilder::new(dir.clone(), object_store.clone()).build();
+        admin
+            .delete_db(true)
+            .await
+            .expect_err("delete must refuse a dir with no manifest and no marker");
+
+        let count = object_store.list(Some(&dir)).count().await;
+        assert_eq!(count, 1, "the unrelated object must be left untouched");
     }
 
     #[cfg(feature = "wal_disable")]
@@ -1724,7 +1839,7 @@ mod tests {
 
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
-    async fn test_cleanup_db_removes_checkpoints_from_all_parents() {
+    async fn test_delete_db_removes_checkpoints_from_all_parents() {
         use crate::config::{PutOptions, Settings, WriteOptions};
         use crate::manifest::store::{ManifestStore, StoredManifest};
         use crate::{admin::CloneSourceSpec, Db};
@@ -1777,9 +1892,9 @@ mod tests {
         assert_eq!(pinned.len(), 2);
 
         clone_admin
-            .cleanup_db(true)
+            .delete_db(true)
             .await
-            .expect("cleanup should succeed");
+            .expect("delete should succeed");
 
         for (parent_path, checkpoint_id) in pinned {
             let ms = Arc::new(ManifestStore::new(

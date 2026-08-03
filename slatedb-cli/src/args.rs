@@ -128,12 +128,13 @@ pub(crate) enum CliCommands {
         id: Uuid,
     },
 
-    /// Clean up a clone: delete the checkpoints it pinned in each parent, and
-    /// (with --force) delete the clone's own objects.
-    CleanupClone {
-        /// Also delete the clone's own objects. Guards against wiping a live db.
+    /// Delete a database: strip any checkpoints it pinned in parent databases,
+    /// then delete its own objects. Without --confirm, prints what it would
+    /// delete and does nothing.
+    DeleteDb {
+        /// Actually delete. Without it, this is a dry run.
         #[arg(long)]
-        force: bool,
+        confirm: bool,
     },
 
     /// List the current checkpoints of the db.
