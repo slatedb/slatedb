@@ -268,7 +268,10 @@ pub trait WalReader {
     ) -> Result<Box<dyn WalIterator>, WalError>;
 }
 
-/// API for plugging into WAL GC
+/// Trait that defines the contract between SlateDB's garbage collector and a custom WAL
+/// implementation. SlateDB tracks the set of currently referenced WAL ranges in its manifest.
+/// When the Garbage Collector runs, it computes this set and calls [`WalGC::collect`] so that
+/// the implementation can clean up any un-referenced WAL storage.
 #[async_trait]
 pub trait WalGC: Send + Sync + 'static {
     /// Hook for garbage collecting the WAL. Takes a list of ranges of WAL Files that are currently
