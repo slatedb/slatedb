@@ -659,16 +659,15 @@ impl ManifestWriterHandler {
         &self,
         remote_dirty: slatedb_txn_obj::DirtyObject<crate::manifest::Manifest>,
     ) {
-        let dirty_manifest = {
+        let cow = {
             let mut wguard_state = self.db.state.write();
             wguard_state.merge_remote_manifest(remote_dirty);
-            let cow = wguard_state.state();
-            self.update_stats_for_manifest(&cow);
-            cow.manifest.clone()
+            wguard_state.state()
         };
+        self.update_stats_for_manifest(&cow);
         self.db
             .status_manager
-            .report_manifest(dirty_manifest.into());
+            .report_manifest(cow.manifest.clone().into());
     }
 
     fn update_stats_for_manifest(&self, cow: &COWDbState) {
