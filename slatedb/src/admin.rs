@@ -611,7 +611,12 @@ impl Admin {
                     self.retrying_store(ObjectStoreType::Main),
                 ));
                 let mut parent =
-                    StoredManifest::load(parent_store, self.system_clock.clone()).await?;
+                    match StoredManifest::load(parent_store, self.system_clock.clone()).await {
+                        Ok(parent) => parent,
+                        // parent already deleted: no checkpoint left to strip, skip it
+                        Err(SlateDBError::LatestTransactionalObjectVersionMissing) => continue,
+                        Err(e) => return Err(e.into()),
+                    };
                 parent.delete_checkpoint(final_checkpoint_id).await?;
             }
         }
@@ -1595,6 +1600,51 @@ mod tests {
         assert!(
             after.contains(&unrelated),
             "unrelated checkpoint should remain"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_db_deletes_clone_after_parent_already_gone() {
+        use crate::admin::CloneSourceSpec;
+        use crate::Db;
+        use futures::StreamExt;
+        use object_store::ObjectStoreExt;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_delete_orphan_parent");
+        let clone_path = Path::from("/tmp/test_delete_orphan_clone");
+
+        Db::open(parent_path.clone(), object_store.clone())
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+
+        let clone_admin = AdminBuilder::new(clone_path.clone(), object_store.clone()).build();
+        clone_admin
+            .create_clone_builder_from_source(CloneSourceSpec::new(parent_path.clone()))
+            .build()
+            .await
+            .expect("clone should succeed");
+
+        // Wipe the parent out from under the clone. The clone still names it in
+        // external_dbs with a pinned checkpoint, but the parent manifest is gone.
+        let mut parent_listing = object_store.list(Some(&parent_path));
+        while let Some(meta) = parent_listing.next().await {
+            object_store.delete(&meta.unwrap().location).await.unwrap();
+        }
+
+        // A missing parent means there is no checkpoint left to strip, so the
+        // clone must still be deletable rather than wedged on a Data error.
+        clone_admin
+            .delete_db(true)
+            .await
+            .expect("clone should delete even with parent already gone");
+        assert_eq!(
+            object_store.list(Some(&clone_path)).count().await,
+            0,
+            "clone objects should be gone"
         );
     }
 
