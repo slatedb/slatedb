@@ -206,7 +206,7 @@ jobs:
           echo "Total diagrams: $(ls -1 target/bencher/transaction-results/mermaid/*.mermaid 2>/dev/null | wc -l)"
 
   microbenchmark-pprofs:
-    runs-on: ubuntu-latest
+    runs-on: warp-ubuntu-latest-arm64-8x
     steps:
       - uses: actions/checkout@v4
 
@@ -234,10 +234,15 @@ jobs:
       # install instructions from https://github.com/polarsignals/pprofme/tree/main
       - name: Install pprofme
         run: |
-          curl -LO https://github.com/polarsignals/pprofme/releases/latest/download/pprofme_$(uname)_$(uname -m)
+          PPROFME_ARCH=$(uname -m)
+          if [ "$PPROFME_ARCH" = "aarch64" ]; then
+            PPROFME_ARCH=arm64
+          fi
+          PPROFME_BINARY="pprofme_$(uname)_${PPROFME_ARCH}"
+          curl -fLO "https://github.com/polarsignals/pprofme/releases/latest/download/${PPROFME_BINARY}"
           curl -sL https://github.com/polarsignals/pprofme/releases/latest/download/pprofme_checksums.txt | shasum --ignore-missing -a 256 --check
-          chmod a+x pprofme_$(uname)_$(uname -m)
-          sudo mv pprofme_$(uname)_$(uname -m) /usr/local/bin/pprofme
+          chmod a+x "${PPROFME_BINARY}"
+          sudo mv "${PPROFME_BINARY}" /usr/local/bin/pprofme
 
       - name: Upload pprofs and add links to summary
         run: |
