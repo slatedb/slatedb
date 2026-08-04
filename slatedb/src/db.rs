@@ -10147,29 +10147,37 @@ mod tests {
     }
 
     struct GaugeBlockControl {
+        target: &'static str,
         armed: AtomicBool,
         tripped: AtomicBool,
         release: AtomicBool,
         entered_tx: tokio::sync::mpsc::UnboundedSender<()>,
     }
 
-    impl GaugeFn for GaugeBlockControl {
+    struct BlockableGauge {
+        name: String,
+        control: Arc<GaugeBlockControl>,
+    }
+
+    impl GaugeFn for BlockableGauge {
         fn set(&self, _value: i64) {
-            if !self.armed.load(Ordering::SeqCst) {
+            if self.name != self.control.target {
                 return;
             }
-            if self.tripped.swap(true, Ordering::SeqCst) {
+            if !self.control.armed.load(Ordering::SeqCst) {
                 return;
             }
-            let _ = self.entered_tx.send(());
-            while !self.release.load(Ordering::SeqCst) {
+            if self.control.tripped.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let _ = self.control.entered_tx.send(());
+            while !self.control.release.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
     }
 
     struct BlockingGaugeRecorder {
-        target: &'static str,
         control: Arc<GaugeBlockControl>,
     }
 
@@ -10186,14 +10194,13 @@ mod tests {
         fn register_gauge(
             &self,
             name: &str,
-            description: &str,
-            labels: &[(&str, &str)],
+            _description: &str,
+            _labels: &[(&str, &str)],
         ) -> Arc<dyn GaugeFn> {
-            if name == self.target {
-                self.control.clone()
-            } else {
-                NoopMetricsRecorder.register_gauge(name, description, labels)
-            }
+            Arc::new(BlockableGauge {
+                name: name.to_string(),
+                control: self.control.clone(),
+            })
         }
 
         fn register_up_down_counter(
@@ -10223,13 +10230,13 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
         let control = Arc::new(GaugeBlockControl {
+            target: crate::db_stats::L0_SST_COUNT,
             armed: AtomicBool::new(false),
             tripped: AtomicBool::new(false),
             release: AtomicBool::new(false),
             entered_tx,
         });
         let recorder = Arc::new(BlockingGaugeRecorder {
-            target: crate::db_stats::L0_SST_COUNT,
             control: control.clone(),
         });
         let db = Db::builder(
