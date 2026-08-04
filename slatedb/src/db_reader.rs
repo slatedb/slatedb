@@ -68,6 +68,39 @@ pub enum DbReaderMode {
     FollowLatest,
 }
 
+/// Where a reader stops replaying the WAL when it builds its state.
+///
+/// This is only reached when replay is wanted at all; a reader configured with
+/// [`DbReaderOptions::skip_wal_replay`] reads no WAL, which
+/// [`WalReplayEnd::for_reader`] expresses as `None`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WalReplayEnd {
+    /// Stop at the manifest's `next_wal_sst_id`, replaying exactly the WAL that
+    /// the manifest itself records as durable.
+    Manifest,
+
+    /// Probe the object store for the newest WAL file and replay through it,
+    /// picking up writes made after the manifest was written.
+    Latest,
+}
+
+impl WalReplayEnd {
+    /// Returns `None` when the reader is configured to skip WAL replay, in which
+    /// case it observes only the state recorded in the manifest (L0 and below).
+    fn for_reader(mode: DbReaderMode, options: &DbReaderOptions) -> Option<Self> {
+        if options.skip_wal_replay {
+            return None;
+        }
+        Some(match mode {
+            // A pinned checkpoint reads the state its manifest captured, so it
+            // stops at that manifest's WAL boundary instead of following WAL
+            // files written after the checkpoint was taken.
+            DbReaderMode::Checkpoint(_) => Self::Manifest,
+            DbReaderMode::ManagedCheckpoint | DbReaderMode::FollowLatest => Self::Latest,
+        })
+    }
+}
+
 /// Read-only interface for accessing a database from either
 /// the latest persistent state or from an arbitrary checkpoint.
 pub struct DbReader {
@@ -154,15 +187,13 @@ impl DbReaderInner {
         } else {
             (manifest.id(), manifest.manifest().clone())
         };
-        let replay_new_wals =
-            !matches!(mode, DbReaderMode::Checkpoint(_)) && !options.skip_wal_replay;
         let initial_state = Arc::new(
             Self::build_reader_state(
                 checkpoint,
                 manifest_id,
                 initial_manifest,
                 VecDeque::new(),
-                replay_new_wals,
+                WalReplayEnd::for_reader(mode, &options),
                 Arc::clone(&table_store),
                 &options,
                 segment_extractor.as_ref(),
@@ -363,7 +394,7 @@ impl DbReaderInner {
                 &self.options,
                 current_state.core(),
                 &mut imm_memtable,
-                true,
+                WalReplayEnd::Latest,
                 self.segment_extractor.as_ref(),
             )
             .await?;
@@ -433,7 +464,7 @@ impl DbReaderInner {
             manifest_id,
             manifest,
             imm_memtable,
-            !self.options.skip_wal_replay,
+            WalReplayEnd::for_reader(self.mode, &self.options),
             Arc::clone(&self.table_store),
             &self.options,
             self.segment_extractor.as_ref(),
@@ -446,20 +477,28 @@ impl DbReaderInner {
         manifest_id: u64,
         manifest: Manifest,
         mut imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
-        replay_new_wals: bool,
+        and_replay_wal: Option<WalReplayEnd>,
         table_store: Arc<TableStore>,
         options: &DbReaderOptions,
         segment_extractor: Option<&Arc<dyn PrefixExtractor>>,
     ) -> Result<ReaderState, SlateDBError> {
-        let (last_wal_id, last_committed_seq) = Self::replay_wal_into(
-            Arc::clone(&table_store),
-            options,
-            &manifest.core,
-            &mut imm_memtable,
-            replay_new_wals,
-            segment_extractor,
-        )
-        .await?;
+        let (last_wal_id, last_committed_seq) = match and_replay_wal {
+            Some(replay_end) => {
+                Self::replay_wal_into(
+                    Arc::clone(&table_store),
+                    options,
+                    &manifest.core,
+                    &mut imm_memtable,
+                    replay_end,
+                    segment_extractor,
+                )
+                .await?
+            }
+            // Skipping replay reads no WAL at all: the reader stays at the
+            // watermark it has already reached, which is the manifest's when it
+            // has replayed nothing.
+            None => Self::replayed_watermark(&manifest.core, &imm_memtable),
+        };
 
         Ok(ReaderState {
             manifest_id,
@@ -577,12 +616,28 @@ impl DbReaderInner {
         result
     }
 
+    /// The `(last replayed WAL id, last committed seq)` the reader has already
+    /// reached: the watermark of the most recently replayed table, or the
+    /// manifest's own boundary when nothing has been replayed into `tables`.
+    fn replayed_watermark(
+        core: &ManifestCore,
+        tables: &VecDeque<Arc<ImmutableMemtable>>,
+    ) -> (u64, u64) {
+        match tables.front() {
+            Some(latest_replayed_table) => (
+                latest_replayed_table.recent_flushed_wal_id(),
+                latest_replayed_table.table().last_seq().unwrap_or(0),
+            ),
+            None => (core.replay_after_wal_id, core.last_l0_seq),
+        }
+    }
+
     async fn replay_wal_into(
         table_store: Arc<TableStore>,
         reader_options: &DbReaderOptions,
         core: &ManifestCore,
         into_tables: &mut VecDeque<Arc<ImmutableMemtable>>,
-        replay_new_wals: bool,
+        replay_end: WalReplayEnd,
         segment_extractor: Option<&Arc<dyn PrefixExtractor>>,
     ) -> Result<(u64, u64), SlateDBError> {
         let sst_iter_options = SstIteratorOptions {
@@ -597,18 +652,10 @@ impl DbReaderInner {
         };
 
         let (mut replay_after_wal_id, mut last_committed_seq) =
-            if let Some(latest_replayed_table) = into_tables.front() {
-                (
-                    latest_replayed_table.recent_flushed_wal_id(),
-                    latest_replayed_table.table().last_seq().unwrap_or(0),
-                )
-            } else {
-                (core.replay_after_wal_id, core.last_l0_seq)
-            };
-        let wal_id_end = if replay_new_wals {
-            table_store.last_seen_wal_id(replay_after_wal_id).await? + 1
-        } else {
-            core.next_wal_sst_id
+            Self::replayed_watermark(core, into_tables);
+        let wal_id_end = match replay_end {
+            WalReplayEnd::Manifest => core.next_wal_sst_id,
+            WalReplayEnd::Latest => table_store.last_seen_wal_id(replay_after_wal_id).await? + 1,
         };
 
         let iterator_options = WalIteratorOptions {
@@ -1373,15 +1420,15 @@ impl DbCacheManagerOps for DbReader {
 
 #[cfg(test)]
 mod tests {
-    use super::{DbReaderMessage, ManifestPoller, ReaderState};
+    use super::{DbReaderMessage, ManifestPoller, ReaderState, WalReplayEnd};
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::clock::MonotonicClock;
     use crate::config::{
-        CheckpointOptions, CheckpointScope, FlushOptions, FlushType, MergeOptions, PutOptions,
-        Settings, WriteOptions,
+        CheckpointOptions, CheckpointScope, CloseOptions, FlushOptions, FlushType, MergeOptions,
+        PutOptions, Settings, WriteOptions,
     };
     use crate::db_reader::{DbReader, DbReaderInner, DbReaderMode, DbReaderOptions};
-    use crate::db_state::SsTableId;
+    use crate::db_state::{SsTableId, SstType};
     use crate::db_stats::DbStats;
     use crate::db_status::DbStatusManager;
     use crate::dispatcher::MessageHandler;
@@ -2263,7 +2310,7 @@ mod tests {
             &DbReaderOptions::default(),
             &core,
             &mut into_tables,
-            false,
+            WalReplayEnd::Manifest,
             None,
         )
         .await
@@ -2308,7 +2355,7 @@ mod tests {
             &DbReaderOptions::default(),
             &core,
             &mut into_tables,
-            false,
+            WalReplayEnd::Manifest,
             None,
         )
         .await
@@ -2363,7 +2410,7 @@ mod tests {
             &reader_options,
             &core,
             &mut into_tables,
-            false,
+            WalReplayEnd::Manifest,
             None,
         )
         .await
@@ -2399,7 +2446,7 @@ mod tests {
             &DbReaderOptions::default(),
             &core,
             &mut into_tables,
-            true,
+            WalReplayEnd::Latest,
             None,
         )
         .await
@@ -2430,7 +2477,7 @@ mod tests {
             &DbReaderOptions::default(),
             &core,
             &mut into_tables,
-            true,
+            WalReplayEnd::Latest,
             None,
         )
         .await
@@ -2476,7 +2523,7 @@ mod tests {
             &DbReaderOptions::default(),
             &core,
             &mut into_tables,
-            true,
+            WalReplayEnd::Latest,
             None,
         )
         .await
@@ -2708,6 +2755,152 @@ mod tests {
             reader.get(key).await.unwrap(),
             Some(Bytes::from_static(value))
         );
+    }
+
+    /// A manifest records the WAL files written since the last L0 flush in
+    /// `next_wal_sst_id`. Opening a reader must not read them when WAL replay
+    /// is skipped: that range is exactly the expensive one, since it grows
+    /// with everything written between L0 flushes.
+    #[tokio::test]
+    async fn skip_wal_replay_should_not_read_wals_recorded_in_manifest() {
+        let recording_store = Arc::new(test_utils::RecordingObjectStore::new(Arc::new(
+            InMemory::new(),
+        )));
+        let object_store: Arc<dyn ObjectStore> = recording_store.clone();
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        let flushed_key = b"flushed_key";
+        let flushed_value = b"flushed_value";
+        db.put(flushed_key, flushed_value).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Write data that stays in the WAL, then close without flushing the
+        // memtable. Closing persists the manifest, so `next_wal_sst_id` covers
+        // these WAL files while `replay_after_wal_id` stays at the last L0 flush.
+        let wal_only_key = b"wal_only_key";
+        db.put(wal_only_key, b"wal_only_value").await.unwrap();
+        db.close_with_options(CloseOptions::default().with_flush_memtables(false))
+            .await
+            .unwrap();
+
+        let core = test_provider
+            .manifest_store()
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .manifest
+            .core;
+        assert!(
+            core.replay_after_wal_id + 1 < core.next_wal_sst_id,
+            "test needs a manifest that records live WAL files \
+             [replay_after_wal_id={}, next_wal_sst_id={}]",
+            core.replay_after_wal_id,
+            core.next_wal_sst_id
+        );
+
+        recording_store.clear();
+        let reader = test_provider
+            .new_db_reader(
+                DbReaderOptions {
+                    skip_wal_replay: true,
+                    ..DbReaderOptions::default()
+                },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let wal_reads = recording_store
+            .get_sst_types(false)
+            .into_iter()
+            .chain(recording_store.get_sst_types(true))
+            .filter(|sst_type| *sst_type == Some(SstType::Wal))
+            .count();
+        assert_eq!(wal_reads, 0, "reader read WAL SSTs despite skip_wal_replay");
+
+        assert_eq!(reader.get(wal_only_key).await.unwrap(), None);
+        assert_eq!(
+            reader.get(flushed_key).await.unwrap(),
+            Some(Bytes::from_static(flushed_value))
+        );
+    }
+
+    /// A checkpoint captures the WAL files that were durable when it was taken,
+    /// so a pinned reader replays them by default. `skip_wal_replay` opts out of
+    /// that read, at the cost of not seeing the checkpointed WAL writes.
+    #[rstest]
+    #[case(true, None)]
+    #[case(false, Some(Bytes::from_static(b"wal_only_value")))]
+    #[tokio::test]
+    async fn skip_wal_replay_should_control_checkpoint_wal_reads(
+        #[case] skip_wal_replay: bool,
+        #[case] expected: Option<Bytes>,
+    ) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_kv_store");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        db.put(b"flushed_key", b"flushed_value").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // This write is only durable in the WAL, so the checkpoint references it
+        // through the manifest's `next_wal_sst_id` rather than through L0. The
+        // scope must be `Durable`: `All` would flush the memtable to L0 first,
+        // leaving the checkpoint with no live WAL.
+        let wal_only_key = b"wal_only_key";
+        db.put(wal_only_key, b"wal_only_value").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+        let checkpoint = db
+            .create_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        db.close_with_options(CloseOptions::default().with_flush_memtables(false))
+            .await
+            .unwrap();
+
+        let core = test_provider
+            .manifest_store()
+            .read_manifest(checkpoint.manifest_id)
+            .await
+            .unwrap()
+            .core;
+        assert!(
+            core.replay_after_wal_id + 1 < core.next_wal_sst_id,
+            "test needs a checkpoint whose manifest records live WAL files \
+             [replay_after_wal_id={}, next_wal_sst_id={}]",
+            core.replay_after_wal_id,
+            core.next_wal_sst_id
+        );
+
+        let reader = test_provider
+            .new_db_reader(
+                DbReaderOptions {
+                    skip_wal_replay,
+                    ..DbReaderOptions::default()
+                },
+                Some(checkpoint.id),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(reader.get(wal_only_key).await.unwrap(), expected);
     }
 
     struct TestProvider {
