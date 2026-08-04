@@ -66,6 +66,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             exec_refresh_checkpoint(&admin, id, lifetime).await?;
         }
         CliCommands::DeleteCheckpoint { id } => exec_delete_checkpoint(&admin, id).await?,
+        CliCommands::DeleteDb { confirm } => exec_delete_db(&admin, confirm).await?,
         CliCommands::ListCheckpoints { name } => exec_list_checkpoints(&admin, name).await?,
         CliCommands::RunGarbageCollection {
             resource,
@@ -277,6 +278,20 @@ async fn exec_refresh_checkpoint(
 
 async fn exec_delete_checkpoint(admin: &Admin, id: Uuid) -> Result<(), Box<dyn Error>> {
     println!("{:?}", admin.delete_checkpoint(id).await?);
+    Ok(())
+}
+
+async fn exec_delete_db(admin: &Admin, confirm: bool) -> Result<(), Box<dyn Error>> {
+    let paths = admin.delete_db(confirm).await?;
+    if confirm {
+        println!("deleted {} objects", paths.len());
+    } else {
+        println!("would delete {} objects:", paths.len());
+        for path in &paths {
+            println!("  {path}");
+        }
+        println!("rerun with --confirm to delete");
+    }
     Ok(())
 }
 
