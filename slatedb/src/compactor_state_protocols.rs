@@ -290,6 +290,11 @@ impl CompactorStateWriter {
     /// Persists the current compactions state to the compactions store and refreshes the
     /// local dirty object with the latest version.
     ///
+    /// Process-local state retains every terminal transition until this write succeeds.
+    /// Only the outgoing value is trimmed to the latest terminal entry. This preserves
+    /// terminal entries as tombstones across conflict retries while keeping the persisted
+    /// `.compactions` object bounded.
+    ///
     /// ## Returns
     /// - `Ok(())` when compactions are successfully written.
     /// - `SlateDBError` if an unrecoverable error occurs.
@@ -307,8 +312,10 @@ impl CompactorStateWriter {
                 }
                 Err(err) if err.is_sequenced_write_conflict() => {
                     // Merge the latest remote state (e.g. a worker's Compacted write) into
-                    // the coordinator's view before retrying. Without this, retrying with a stale
-                    // desired_value could silently overwrite worker progress.
+                    // the coordinator's untrimmed local view before retrying. Without this,
+                    // retrying with a stale desired_value could silently overwrite worker
+                    // progress. Local terminal entries also prevent stale remote active states
+                    // for the same ids from being resurrected.
                     self.load_compactions().await?;
                     desired_value = self.state.compactions().value.clone();
                     desired_value.retain_active_and_last_finished();
@@ -888,6 +895,82 @@ mod tests {
             .unwrap()
             .id;
         assert_eq!(final_id, start_id + 2);
+    }
+
+    #[tokio::test]
+    async fn test_write_compactions_safely_does_not_resurrect_terminal_on_conflict() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let mut writer = CompactorStateWriter::new(
+            manifest_store,
+            compactions_store.clone(),
+            system_clock,
+            &CompactorOptions::default(),
+            Arc::new(DbRand::new(7)),
+        )
+        .await
+        .unwrap();
+
+        let completed_id = Ulid::from_parts(10, 0);
+        let failed_id = Ulid::from_parts(20, 0);
+        let spec = CompactionSpec::new(vec![], 0);
+        writer
+            .state
+            .insert_compaction_for_test(Compaction::new(completed_id, spec.clone()));
+        writer
+            .state
+            .insert_compaction_for_test(Compaction::new(failed_id, spec.clone()));
+        writer.state.update_compaction(&completed_id, |compaction| {
+            compaction.set_status(CompactionStatus::Completed)
+        });
+        writer.state.update_compaction(&failed_id, |compaction| {
+            compaction.set_status(CompactionStatus::Failed)
+        });
+
+        // Advance the remote version with the pre-transition state of the completed
+        // compaction. This forces the coordinator's first write to conflict and reload.
+        let mut external = StoredCompactions::load(compactions_store.clone())
+            .await
+            .unwrap();
+        let mut dirty = external.prepare_dirty().unwrap();
+        dirty.value.insert(Compaction::new(completed_id, spec));
+        external.update(dirty).await.unwrap();
+
+        writer.write_compactions_safely().await.unwrap();
+
+        let persisted = compactions_store.read_latest_compactions().await.unwrap();
+        assert!(
+            persisted
+                .recent_compactions()
+                .all(|compaction| compaction.id() != completed_id),
+            "stale Submitted compaction was resurrected"
+        );
+        assert_eq!(
+            persisted
+                .recent_compactions()
+                .find(|compaction| compaction.id() == failed_id)
+                .expect("latest terminal compaction was not retained")
+                .status(),
+            CompactionStatus::Failed
+        );
+        assert_eq!(writer.state.active_compactions().count(), 0);
     }
 
     #[tokio::test]
