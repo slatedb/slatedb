@@ -32,8 +32,6 @@ use futures::{FutureExt, StreamExt};
 use std::sync::Arc;
 use tracing::instrument;
 
-use std::collections::BTreeSet;
-
 use crate::config::WriteOptions;
 use crate::db_state::DbState;
 use crate::db_transaction::DbTransaction;
@@ -45,6 +43,7 @@ use crate::wal::{FlushResultFuture, WalWriter};
 use crate::{batch::WriteBatch, db::DbInner, db::WriteHandle, error::SlateDBError};
 use bytes::Bytes;
 use parking_lot::RwLockWriteGuard;
+use std::collections::BTreeSet;
 use tokio::sync::oneshot;
 
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
@@ -121,9 +120,10 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
                 done,
                 txn,
             }) => {
+                let wal_writer = self.wal_writer.as_deref_mut();
                 let result = self
                     .db_inner
-                    .write_batch(batch, &options, txn.as_ref(), self.wal_writer.as_mut())
+                    .write_batch(batch, &options, txn.as_ref(), wal_writer)
                     .await;
                 match result {
                     Ok(write_result) => {
@@ -189,12 +189,12 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
 impl DbInner {
     #[allow(clippy::panic)]
     #[instrument(level = "trace", skip_all, fields(batch_size = batch.op_count()))]
-    async fn write_batch(
-        &self,
+    async fn write_batch<'a>(
+        &'a self,
         batch: WriteBatch,
         options: &WriteOptions,
         txn: Option<&DbTransaction>,
-        wal_writer: Option<&mut Box<dyn WalWriter>>,
+        mut wal_writer: Option<&mut (dyn WalWriter + 'static)>,
     ) -> Result<WriteBatchResult, SlateDBError> {
         let _options = options;
         #[cfg(not(dst))]
@@ -252,7 +252,7 @@ impl DbInner {
             return Ok(Err(error));
         }
 
-        if let Some(wal_writer) = wal_writer {
+        if let Some(wal_writer) = wal_writer.as_mut() {
             assert!(self.wal_enabled);
             // WAL entries must be appended to the wal buffer atomically. Otherwise,
             // the WAL buffer might flush the entries in the middle of the batch, which
@@ -303,7 +303,7 @@ impl DbInner {
         self.record_memtable_sequence(commit_seq);
 
         // maybe freeze the memtable.
-        self.maybe_freeze_current_memtable()?;
+        self.maybe_freeze_current_memtable(wal_writer.as_deref())?;
 
         let write_handle =
             WriteHandle::new_with_waiter(commit_seq, now, self.status_manager.durability_waiter());
@@ -311,7 +311,10 @@ impl DbInner {
         Ok(Ok(write_handle))
     }
 
-    fn maybe_freeze_current_memtable(&self) -> Result<(), SlateDBError> {
+    fn maybe_freeze_current_memtable(
+        &self,
+        wal_writer: Option<&dyn WalWriter>,
+    ) -> Result<(), SlateDBError> {
         let replay_after_wal_id = self.wal_observer.status()?.last_flushed_wal_id;
         let mut guard = self.state.write();
         let meta = guard.memtable().metadata();
@@ -327,13 +330,10 @@ impl DbInner {
             .table_store
             .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes);
 
-        let wal_id_gap = replay_after_wal_id
-            .checked_sub(last_freeze_wal_id)
-            .ok_or_else(|| SlateDBError::InvalidDBState)?;
+        let wal_should_flush_memtable = wal_writer
+            .is_some_and(|wal_writer| wal_writer.should_flush_memtable(last_freeze_wal_id));
 
-        if wal_id_gap < self.settings.max_wal_flushes_before_l0_flush
-            && l0_sst_size_est < self.settings.l0_sst_size_bytes
-        {
+        if !wal_should_flush_memtable && l0_sst_size_est < self.settings.l0_sst_size_bytes {
             return Ok(());
         }
         self.freeze_current_memtable_with_state_guard(&mut guard, replay_after_wal_id);
