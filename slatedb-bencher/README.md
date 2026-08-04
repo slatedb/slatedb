@@ -76,10 +76,6 @@ The command above will produce results at `target/bencher/results` directory. Th
 
 The script also has a `SLATEDB_BENCH_CLEAN` environment variable which can be set to `true` to clean up the test data in object storage after each benchmark.
 
-### `nightly.yaml`
-
-`benchmark-db.sh` is also used in `.github/workflows/nightly.yaml` to benchmark the nightly build. The tests are run using [WarpBuild](https://warpbuild.com), and each run appends to mermaid `xyChart` files that are posted to the workflow's GitHub Actions job summary.
-
 ## `compaction` Subcommand
 
 The `compaction` subcommand is used to benchmark the compaction process in SlateDB.
