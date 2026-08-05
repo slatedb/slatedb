@@ -2829,11 +2829,8 @@ mod tests {
         let wal_only_key = b"wal_only_key";
         db.put(wal_only_key, b"wal_only_value")
             .await
-            .unwrap()
-            .await_durable()
-            .await
             .unwrap();
-        db.close_with_options(CloseOptions::default().with_flush_memtables(false))
+        db.close_with_options(CloseOptions::default().with_flush_type(Some(FlushType::Wal)))
             .await
             .unwrap();
 
@@ -2918,7 +2915,7 @@ mod tests {
             .create_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
             .await
             .unwrap();
-        db.close_with_options(CloseOptions::default().with_flush_memtables(false))
+        db.close_with_options(CloseOptions::default().with_flush_type(Some(FlushType::Wal)))
             .await
             .unwrap();
 
