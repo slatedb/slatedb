@@ -19,7 +19,7 @@ use super::uploader::UploadedMemtable;
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
-use crate::db_state::{collect_touched_segments, COWDbState, DbState, SsTableId, SsTableView};
+use crate::db_state::{collect_touched_segments, DbState, SsTableId, SsTableView};
 use crate::dispatcher::MessageHandler;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
@@ -659,24 +659,25 @@ impl ManifestWriterHandler {
         &self,
         remote_dirty: slatedb_txn_obj::DirtyObject<crate::manifest::Manifest>,
     ) {
-        let cow = {
+        let manifest = {
             let mut wguard_state = self.db.state.write();
             wguard_state.merge_remote_manifest(remote_dirty);
-            wguard_state.state()
+            wguard_state.state().manifest.clone()
         };
-        self.update_stats_for_manifest(&cow);
-        self.db
-            .status_manager
-            .report_manifest(cow.manifest.clone().into());
+        self.update_stats_for_manifest(&manifest);
+        self.db.status_manager.report_manifest(manifest.into());
     }
 
-    fn update_stats_for_manifest(&self, cow: &COWDbState) {
+    fn update_stats_for_manifest(
+        &self,
+        manifest: &slatedb_txn_obj::DirtyObject<crate::manifest::Manifest>,
+    ) {
         let mut l0_ssts = 0usize;
         let mut segment_max_l0_ssts = 0usize;
         let mut sorted_runs = 0usize;
         let mut sst_views = 0usize;
         let mut distinct_ssts: HashSet<SsTableId> = HashSet::new();
-        for tree in cow.core().trees() {
+        for tree in manifest.value.core.trees() {
             l0_ssts += tree.l0.len();
             // Track the largest single tree: backpressure is driven by `segment_max_l0_sst_count`
             // because `l0_max_ssts` is enforced per-tree.
@@ -704,7 +705,7 @@ impl ManifestWriterHandler {
         self.db
             .db_stats
             .external_db_count
-            .set(cow.manifest.value.external_dbs.len() as i64);
+            .set(manifest.value.external_dbs.len() as i64);
     }
 
     async fn write_checkpoint_safely(
