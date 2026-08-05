@@ -24,7 +24,7 @@ mod write_handle;
 pub use admin::Admin;
 pub use builder::{AdminBuilder, CloneBuilder, DbBuilder, DbReaderBuilder};
 pub use config::{
-    DurabilityLevel, FlushOptions, FlushType, GarbageCollectorDirectoryOptions,
+    CloseOptions, DurabilityLevel, FlushOptions, FlushType, GarbageCollectorDirectoryOptions,
     GarbageCollectorOptions, GarbageCollectorScheduleOptions, IsolationLevel, IterationOrder,
     MergeOptions, PutOptions, ReadOptions, ReaderMode, ReaderOptions, ScanOptions, SstBlockSize,
     Ttl, WriteOptions,

@@ -520,6 +520,38 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 	}
 }
 
+func TestDbShutdownWithOptions(t *testing.T) {
+	wal := slatedb.FlushTypeWal
+	tests := []struct {
+		name      string
+		flushType *slatedb.FlushType
+	}{
+		{name: "wal", flushType: &wal},
+		{name: "none", flushType: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newMemoryStore(t)
+			handle := openTestDB(t, store, nil)
+
+			if _, err := handle.db.Put([]byte("shutdown-options"), []byte("value")); err != nil {
+				t.Fatalf("Put(): %v", err)
+			}
+
+			if err := handle.db.ShutdownWithOptions(slatedb.CloseOptions{FlushType: tt.flushType}); err != nil {
+				t.Fatalf("ShutdownWithOptions(): %v", err)
+			}
+			handle.open = false
+
+			status := handle.db.Status()
+			if status.CloseReason == nil || *status.CloseReason != slatedb.CloseReasonClean {
+				t.Fatalf("Status() after ShutdownWithOptions(): got close reason %v, want %v", status.CloseReason, slatedb.CloseReasonClean)
+			}
+		})
+	}
+}
+
 type fixedThreeByteSegmentExtractor struct{}
 
 func (fixedThreeByteSegmentExtractor) Name() string { return "fixed_three_byte" }
