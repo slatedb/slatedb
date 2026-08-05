@@ -959,6 +959,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_db_shutdown_with_options()
+		})
+		if checksum != 54951 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_shutdown_with_options: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_db_snapshot()
 		})
 		if checksum != 53137 {
@@ -3333,6 +3342,8 @@ type DbInterface interface {
 	ScanWithOptions(varRange KeyRange, options ScanOptions) (*DbIterator, error)
 	// Flushes outstanding work and closes the database.
 	Shutdown() error
+	// Performs the requested final flush and closes the database.
+	ShutdownWithOptions(options CloseOptions) error
 	// Creates a read-only snapshot representing a consistent point in time.
 	Snapshot() (*DbSnapshot, error)
 	// Returns the latest database status snapshot, including the segment
@@ -3994,6 +4005,38 @@ func (_self *Db) Shutdown() error {
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_db_shutdown(
 			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+// Performs the requested final flush and closes the database.
+func (_self *Db) ShutdownWithOptions(options CloseOptions) error {
+	_pointer := _self.ffiObject.incrementPointer("*Db")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_db_shutdown_with_options(
+			_pointer, FfiConverterCloseOptionsINSTANCE.Lower(options)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
@@ -9277,6 +9320,49 @@ func (_ FfiDestroyerCloneSourceSpec) Destroy(value CloneSourceSpec) {
 	value.Destroy()
 }
 
+// Options controlling how a database is shut down.
+type CloseOptions struct {
+	// The final flush to perform before shutdown. When `None`, no final flush is
+	// triggered and writes that are not durable may be lost.
+	FlushType *FlushType
+}
+
+func (r *CloseOptions) Destroy() {
+	FfiDestroyerOptionalFlushType{}.Destroy(r.FlushType)
+}
+
+type FfiConverterCloseOptions struct{}
+
+var FfiConverterCloseOptionsINSTANCE = FfiConverterCloseOptions{}
+
+func (c FfiConverterCloseOptions) Lift(rb RustBufferI) CloseOptions {
+	return LiftFromRustBuffer[CloseOptions](c, rb)
+}
+
+func (c FfiConverterCloseOptions) Read(reader io.Reader) CloseOptions {
+	return CloseOptions{
+		FfiConverterOptionalFlushTypeINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterCloseOptions) Lower(value CloseOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[CloseOptions](c, value)
+}
+
+func (c FfiConverterCloseOptions) LowerExternal(value CloseOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[CloseOptions](c, value))
+}
+
+func (c FfiConverterCloseOptions) Write(writer io.Writer, value CloseOptions) {
+	FfiConverterOptionalFlushTypeINSTANCE.Write(writer, value.FlushType)
+}
+
+type FfiDestroyerCloseOptions struct{}
+
+func (_ FfiDestroyerCloseOptions) Destroy(value CloseOptions) {
+	value.Destroy()
+}
+
 // Canonical compaction record.
 type Compaction struct {
 	// Compaction ULID string.
@@ -13735,6 +13821,47 @@ type FfiDestroyerOptionalFilterContext struct{}
 func (_ FfiDestroyerOptionalFilterContext) Destroy(value *FilterContext) {
 	if value != nil {
 		FfiDestroyerFilterContext{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalFlushType struct{}
+
+var FfiConverterOptionalFlushTypeINSTANCE = FfiConverterOptionalFlushType{}
+
+func (c FfiConverterOptionalFlushType) Lift(rb RustBufferI) *FlushType {
+	return LiftFromRustBuffer[*FlushType](c, rb)
+}
+
+func (_ FfiConverterOptionalFlushType) Read(reader io.Reader) *FlushType {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterFlushTypeINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalFlushType) Lower(value *FlushType) C.RustBuffer {
+	return LowerIntoRustBuffer[*FlushType](c, value)
+}
+
+func (c FfiConverterOptionalFlushType) LowerExternal(value *FlushType) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*FlushType](c, value))
+}
+
+func (_ FfiConverterOptionalFlushType) Write(writer io.Writer, value *FlushType) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterFlushTypeINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalFlushType struct{}
+
+func (_ FfiDestroyerOptionalFlushType) Destroy(value *FlushType) {
+	if value != nil {
+		FfiDestroyerFlushType{}.Destroy(*value)
 	}
 }
 

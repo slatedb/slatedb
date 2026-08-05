@@ -1004,6 +1004,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_db_scan_with_options(uint64_t ptr, Rust
 uint64_t uniffi_slatedb_uniffi_fn_method_db_shutdown(uint64_t ptr
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SHUTDOWN_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SHUTDOWN_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_db_shutdown_with_options(uint64_t ptr, RustBuffer options
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SNAPSHOT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SNAPSHOT
 uint64_t uniffi_slatedb_uniffi_fn_method_db_snapshot(uint64_t ptr
@@ -2424,6 +2429,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_db_scan_with_options(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_SHUTDOWN
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_SHUTDOWN
 uint16_t uniffi_slatedb_uniffi_checksum_method_db_shutdown(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_SHUTDOWN_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_SHUTDOWN_WITH_OPTIONS
+uint16_t uniffi_slatedb_uniffi_checksum_method_db_shutdown_with_options(void
     
 );
 #endif
