@@ -1,46 +1,50 @@
-use crate::bytes_range::{ByteRangeBounds, BytesRange};
-use crate::cached_object_store::CachedObjectStore;
-use crate::clock::MonotonicClock;
-use crate::config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions};
-use crate::db_cache::CacheTarget;
-use crate::db_cache_manager;
-use crate::db_common::extract_segment_prefix;
-use crate::db_state::{collect_touched_segments, SsTableId};
-use crate::db_stats::DbStats;
-use crate::db_status::{ClosedResultWriter, DbStatus, DbStatusManager};
-use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
-use crate::error::SlateDBError;
-use crate::iter::IterationOrder;
-use crate::manifest::store::{ManifestStore, StoredManifest};
-use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
-use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
-use crate::merge_operator::MergeOperatorType;
-use crate::oracle::DbReaderOracle;
-use crate::paths::PathResolver;
-use crate::prefix_extractor::PrefixExtractor;
-use crate::reader::{DbStateReader, Reader, ScanContext};
-use crate::sst_iter::SstIteratorOptions;
-use crate::tablestore::TableStore;
-use crate::types::KeyValue;
-use crate::utils::IdGenerator;
-use crate::wal_replay::{WalIteratorOptions, WalReplayIterator, WalReplayOptions};
-use crate::{Checkpoint, DbIterator};
-use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps};
-use async_trait::async_trait;
-use bytes::Bytes;
-use futures::stream::BoxStream;
-use log::{info, warn};
-use object_store::path::Path;
-use object_store::ObjectStore;
-use parking_lot::RwLock;
-use slatedb_common::clock::SystemClock;
-use slatedb_common::DbRand;
-use std::collections::{BTreeSet, VecDeque};
-use std::ops::Sub;
-use std::sync::Arc;
-use std::sync::LazyLock;
-use tokio::runtime::Handle;
-use uuid::Uuid;
+use {
+    crate::{
+        bytes_range::{ByteRangeBounds, BytesRange},
+        cached_object_store::CachedObjectStore,
+        clock::MonotonicClock,
+        config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions},
+        db_cache::CacheTarget,
+        db_cache_manager,
+        db_common::extract_segment_prefix,
+        db_state::{collect_touched_segments, SsTableId},
+        db_stats::DbStats,
+        db_status::{ClosedResultWriter, DbStatus, DbStatusManager},
+        dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef},
+        error::SlateDBError,
+        iter::IterationOrder,
+        manifest::{
+            store::{ManifestStore, StoredManifest},
+            Manifest, ManifestCore, VersionedManifest,
+        },
+        mem_table::{ImmutableMemtable, KVTable, WritableKVTable},
+        merge_operator::MergeOperatorType,
+        oracle::DbReaderOracle,
+        paths::PathResolver,
+        prefix_extractor::PrefixExtractor,
+        reader::{DbStateReader, Reader, ScanContext},
+        sst_iter::SstIteratorOptions,
+        tablestore::TableStore,
+        types::KeyValue,
+        utils::IdGenerator,
+        wal_replay::{WalIteratorOptions, WalReplayIterator, WalReplayOptions},
+        Checkpoint, DbCacheManagerOps, DbIterator, DbMetadataOps, DbReadOps,
+    },
+    async_trait::async_trait,
+    bytes::Bytes,
+    futures::stream::BoxStream,
+    log::{info, warn},
+    object_store::{path::Path, ObjectStore},
+    parking_lot::RwLock,
+    slatedb_common::{clock::SystemClock, DbRand},
+    std::{
+        collections::{BTreeSet, VecDeque},
+        ops::Sub,
+        sync::{Arc, LazyLock},
+    },
+    tokio::runtime::Handle,
+    uuid::Uuid,
+};
 
 pub(crate) const DB_READER_TASK_NAME: &str = "manifest_poller";
 
@@ -206,8 +210,8 @@ impl DbReaderInner {
             initial_state.core().last_l0_clock_tick,
         ));
 
-        // initial_state contains the last_committed_seq after WAL replay. in no-wal mode, we can simply fallback
-        // to last_l0_seq.
+        // initial_state contains the last_committed_seq after WAL replay. in no-wal mode, we can
+        // simply fallback to last_l0_seq.
         let initial_durable_seq = initial_state
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
@@ -477,12 +481,12 @@ impl DbReaderInner {
         manifest_id: u64,
         manifest: Manifest,
         mut imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
-        and_replay_wal: Option<WalReplayEnd>,
+        replay_wals: Option<WalReplayEnd>,
         table_store: Arc<TableStore>,
         options: &DbReaderOptions,
         segment_extractor: Option<&Arc<dyn PrefixExtractor>>,
     ) -> Result<ReaderState, SlateDBError> {
-        let (last_wal_id, last_committed_seq) = match and_replay_wal {
+        let (last_wal_id, last_committed_seq) = match replay_wals {
             Some(replay_end) => {
                 Self::replay_wal_into(
                     Arc::clone(&table_store),
@@ -663,7 +667,8 @@ impl DbReaderInner {
         };
         let replay_options = WalReplayOptions {
             max_memtable_bytes: reader_options.max_memtable_bytes as usize,
-            // Skip entries that we already have in `imm_memtable` (that might be above last_l0_seq).
+            // Skip entries that we already have in `imm_memtable` (that might be above
+            // last_l0_seq).
             min_seq: Some(last_committed_seq),
         };
 
@@ -741,8 +746,8 @@ impl DbReaderInner {
     ///
     /// ## Returns
     /// - `Ok(())` if the reader is still open.
-    /// - `Err(SlateDBError::Closed)` if the reader was closed successfully
-    ///   (state.result_reader() returns Ok(())).
+    /// - `Err(SlateDBError::Closed)` if the reader was closed successfully (state.result_reader()
+    ///   returns Ok(())).
     /// - `Err(e)` if the reader was closed with an error, where `e` is the error
     ///   (state.result_reader() returns Err(e)).
     pub(crate) fn check_closed(&self) -> Result<(), SlateDBError> {
@@ -910,9 +915,13 @@ impl DbReader {
     /// # Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, Error};
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
-    /// use std::sync::Arc;
+    /// use {
+    ///     slatedb::{
+    ///         object_store::{memory::InMemory, ObjectStore},
+    ///         Db, DbReader, Error,
+    ///     },
+    ///     std::sync::Arc,
+    /// };
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Error> {
@@ -921,9 +930,7 @@ impl DbReader {
     ///     let db = Db::open("test_db", Arc::clone(&object_store)).await?;
     ///     db.close().await?;
     ///     // Then open a reader
-    ///     let reader = DbReader::builder("test_db", object_store)
-    ///         .build()
-    ///         .await?;
+    ///     let reader = DbReader::builder("test_db", object_store).build().await?;
     ///     Ok(())
     /// }
     /// ```
@@ -1010,9 +1017,14 @@ impl DbReader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, DbReaderMode, config::DbReaderOptions, Error};
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
-    /// use std::sync::Arc;
+    /// use {
+    ///     slatedb::{
+    ///         config::DbReaderOptions,
+    ///         object_store::{memory::InMemory, ObjectStore},
+    ///         Db, DbReader, DbReaderMode, Error,
+    ///     },
+    ///     std::sync::Arc,
+    /// };
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Error> {
@@ -1022,11 +1034,12 @@ impl DbReader {
     ///     db.flush().await?;
     ///
     ///     let reader = DbReader::open(
-    ///       "test_db",
-    ///       Arc::clone(&object_store),
-    ///       DbReaderMode::ManagedCheckpoint,
-    ///       DbReaderOptions::default(),
-    ///     ).await?;
+    ///         "test_db",
+    ///         Arc::clone(&object_store),
+    ///         DbReaderMode::ManagedCheckpoint,
+    ///         DbReaderOptions::default(),
+    ///     )
+    ///     .await?;
     ///     assert_eq!(reader.get(b"key").await?, Some("value".into()));
     ///     Ok(())
     /// }
@@ -1058,9 +1071,14 @@ impl DbReader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, DbReaderMode, config::DbReaderOptions, config::ReadOptions, Error};
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
-    /// use std::sync::Arc;
+    /// use {
+    ///     slatedb::{
+    ///         config::{DbReaderOptions, ReadOptions},
+    ///         object_store::{memory::InMemory, ObjectStore},
+    ///         Db, DbReader, DbReaderMode, Error,
+    ///     },
+    ///     std::sync::Arc,
+    /// };
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Error> {
@@ -1070,12 +1088,16 @@ impl DbReader {
     ///     db.flush().await?;
     ///
     ///     let reader = DbReader::open(
-    ///       "test_db",
-    ///       Arc::clone(&object_store),
-    ///       DbReaderMode::ManagedCheckpoint,
-    ///       DbReaderOptions::default(),
-    ///     ).await?;
-    ///     assert_eq!(db.get_with_options(b"key", &ReadOptions::default()).await?, Some("value".into()));
+    ///         "test_db",
+    ///         Arc::clone(&object_store),
+    ///         DbReaderMode::ManagedCheckpoint,
+    ///         DbReaderOptions::default(),
+    ///     )
+    ///     .await?;
+    ///     assert_eq!(
+    ///         db.get_with_options(b"key", &ReadOptions::default()).await?,
+    ///         Some("value".into())
+    ///     );
     ///     Ok(())
     /// }
     /// ```
@@ -1129,9 +1151,14 @@ impl DbReader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, DbReaderMode, config::DbReaderOptions, Error};
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
-    /// use std::sync::Arc;
+    /// use {
+    ///     slatedb::{
+    ///         config::DbReaderOptions,
+    ///         object_store::{memory::InMemory, ObjectStore},
+    ///         Db, DbReader, DbReaderMode, Error,
+    ///     },
+    ///     std::sync::Arc,
+    /// };
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Error> {
@@ -1142,11 +1169,12 @@ impl DbReader {
     ///     db.flush().await?;
     ///
     ///     let reader = DbReader::open(
-    ///       "test_db",
-    ///       Arc::clone(&object_store),
-    ///       DbReaderMode::ManagedCheckpoint,
-    ///       DbReaderOptions::default(),
-    ///     ).await?;
+    ///         "test_db",
+    ///         Arc::clone(&object_store),
+    ///         DbReaderMode::ManagedCheckpoint,
+    ///         DbReaderOptions::default(),
+    ///     )
+    ///     .await?;
     ///     let mut iter = reader.scan("a".."b").await?;
     ///     let kv = iter.next().await?.unwrap();
     ///     assert_eq!(kv.key.as_ref(), b"a");
@@ -1234,8 +1262,8 @@ impl DbReader {
     ///
     /// ## Arguments
     /// - `prefix`: the key prefix to scan
-    /// - `subrange`: the range of key suffixes (relative to `prefix`) to
-    ///   scan; `..` scans all keys with the prefix
+    /// - `subrange`: the range of key suffixes (relative to `prefix`) to scan; `..` scans all keys
+    ///   with the prefix
     ///
     /// ## Returns
     /// - `Result<DbIterator, Error>`: An iterator with the results of the scan
@@ -1258,8 +1286,8 @@ impl DbReader {
     ///
     /// ## Arguments
     /// - `prefix`: the key prefix to scan
-    /// - `subrange`: the range of key suffixes (relative to `prefix`) to
-    ///   scan; `..` scans all keys with the prefix
+    /// - `subrange`: the range of key suffixes (relative to `prefix`) to scan; `..` scans all keys
+    ///   with the prefix
     /// - `options`: the scan options to use
     ///
     /// ## Returns
@@ -1290,9 +1318,14 @@ impl DbReader {
     /// ## Examples
     ///
     /// ```
-    /// use slatedb::{Db, DbReader, DbReaderMode, config::DbReaderOptions, Error};
-    /// use slatedb::object_store::{ObjectStore, memory::InMemory};
-    /// use std::sync::Arc;
+    /// use {
+    ///     slatedb::{
+    ///         config::DbReaderOptions,
+    ///         object_store::{memory::InMemory, ObjectStore},
+    ///         Db, DbReader, DbReaderMode, Error,
+    ///     },
+    ///     std::sync::Arc,
+    /// };
     ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Error> {
@@ -1304,12 +1337,12 @@ impl DbReader {
     ///         object_store.clone(),
     ///         DbReaderMode::ManagedCheckpoint,
     ///         options,
-    ///     ).await?;
+    ///     )
+    ///     .await?;
     ///     reader.close().await?;
     ///     Ok(())
     /// }
     /// ```
-    ///
     pub async fn close(&self) -> Result<(), crate::Error> {
         self.task_executor
             .shutdown_task(DB_READER_TASK_NAME)
@@ -1419,46 +1452,54 @@ impl DbCacheManagerOps for DbReader {
 
 #[cfg(test)]
 mod tests {
-    use super::{DbReaderMessage, ManifestPoller, ReaderState, WalReplayEnd};
-    use crate::block_cache_policy::BlockCachePolicy;
-    use crate::clock::MonotonicClock;
-    use crate::config::{
-        CheckpointOptions, CheckpointScope, CloseOptions, FlushOptions, FlushType, MergeOptions,
-        PutOptions, Settings, WriteOptions,
+    use {
+        super::{DbReaderMessage, ManifestPoller, ReaderState, WalReplayEnd},
+        crate::{
+            block_cache_policy::BlockCachePolicy,
+            clock::MonotonicClock,
+            config::{
+                CheckpointOptions, CheckpointScope, CloseOptions, FlushOptions, FlushType,
+                MergeOptions, PutOptions, Settings, WriteOptions,
+            },
+            db_reader::{DbReader, DbReaderInner, DbReaderMode, DbReaderOptions},
+            db_state::{SsTableId, SstType},
+            db_stats::DbStats,
+            db_status::DbStatusManager,
+            dispatcher::MessageHandler,
+            error::SlateDBError,
+            format::sst::SsTableFormat,
+            iter::IterationOrder,
+            manifest::{
+                store::{ManifestStore, StoredManifest},
+                Manifest, ManifestCore, VersionedManifest,
+            },
+            mem_table::{ImmutableMemtable, WritableKVTable},
+            merge_operator::MergeOperatorType,
+            object_stores::ObjectStores,
+            oracle::DbReaderOracle,
+            paths::PathResolver,
+            proptest_util::{rng::new_test_rng, sample},
+            reader::Reader,
+            tablestore::{TableStore, TableStoreKind},
+            test_utils,
+            types::RowEntry,
+            CloseReason, Db,
+        },
+        bytes::Bytes,
+        fail_parallel::FailPointRegistry,
+        object_store::{memory::InMemory, path::Path, ObjectStore, ObjectStoreExt},
+        rstest::rstest,
+        slatedb_common::{
+            clock::{DefaultSystemClock, SystemClock},
+            DbRand, MockSystemClock,
+        },
+        std::{
+            collections::{BTreeMap, VecDeque},
+            sync::Arc,
+            time::Duration,
+        },
+        uuid::Uuid,
     };
-    use crate::db_reader::{DbReader, DbReaderInner, DbReaderMode, DbReaderOptions};
-    use crate::db_state::{SsTableId, SstType};
-    use crate::db_stats::DbStats;
-    use crate::db_status::DbStatusManager;
-    use crate::dispatcher::MessageHandler;
-    use crate::format::sst::SsTableFormat;
-    use crate::iter::IterationOrder;
-    use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
-    use crate::mem_table::{ImmutableMemtable, WritableKVTable};
-    use crate::merge_operator::MergeOperatorType;
-    use crate::object_stores::ObjectStores;
-    use crate::oracle::DbReaderOracle;
-    use crate::paths::PathResolver;
-    use crate::proptest_util::rng::new_test_rng;
-    use crate::proptest_util::sample;
-    use crate::reader::Reader;
-    use crate::tablestore::{TableStore, TableStoreKind};
-    use crate::types::RowEntry;
-    use crate::{error::SlateDBError, test_utils, CloseReason, Db};
-    use bytes::Bytes;
-    use fail_parallel::FailPointRegistry;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::{ObjectStore, ObjectStoreExt};
-    use rstest::rstest;
-    use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-    use slatedb_common::DbRand;
-    use slatedb_common::MockSystemClock;
-    use std::collections::{BTreeMap, VecDeque};
-    use std::sync::Arc;
-    use std::time::Duration;
-    use uuid::Uuid;
 
     #[tokio::test]
     async fn should_get_value_from_db() {
@@ -3258,9 +3299,11 @@ mod tests {
         // RFC-0024: per-segment compactions, drains, and segment-set changes
         // are invisible to the root-tree diff. Verify the segments comparison
         // fires on each of those shapes.
-        use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
-        use crate::format::sst::SST_FORMAT_VERSION_LATEST;
-        use crate::manifest::{LsmTreeState, Segment};
+        use crate::{
+            db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView},
+            format::sst::SST_FORMAT_VERSION_LATEST,
+            manifest::{LsmTreeState, Segment},
+        };
 
         fn view(seq: u64) -> SsTableView {
             SsTableView::identity(SsTableHandle::new(
