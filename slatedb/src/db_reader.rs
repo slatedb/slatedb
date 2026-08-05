@@ -2827,9 +2827,7 @@ mod tests {
         // memtable flush does not flush the WAL, so an unawaited write would
         // race the flush interval and might never reach a WAL SST.
         let wal_only_key = b"wal_only_key";
-        db.put(wal_only_key, b"wal_only_value")
-            .await
-            .unwrap();
+        db.put(wal_only_key, b"wal_only_value").await.unwrap();
         db.close_with_options(CloseOptions::default().with_flush_type(Some(FlushType::Wal)))
             .await
             .unwrap();
