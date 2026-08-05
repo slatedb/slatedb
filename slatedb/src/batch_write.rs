@@ -315,20 +315,25 @@ impl DbInner {
         &self,
         wal_writer: Option<&dyn WalWriter>,
     ) -> Result<(), SlateDBError> {
-        let replay_after_wal_id = self.wal_observer.status()?.last_flushed_wal_id;
-        let mut guard = self.state.write();
-        let meta = guard.memtable().metadata();
+        // extract the information required to make a freeze decision under a read-lock first
+        // so we don't call into `WalWriter` while holding a lock
+        let (l0_sst_size_est, last_freeze_wal_id) = {
+            let guard = self.state.read();
+            let meta = guard.memtable().metadata();
 
-        let last_freeze_wal_id = guard
-            .state()
-            .imm_memtable
-            .front()
-            .map(|imm| imm.recent_flushed_wal_id())
-            .unwrap_or(guard.state().core().replay_after_wal_id);
+            let last_freeze_wal_id = guard
+                .state()
+                .imm_memtable
+                .front()
+                .map(|imm| imm.recent_flushed_wal_id())
+                .unwrap_or(guard.state().core().replay_after_wal_id);
 
-        let l0_sst_size_est = self
-            .table_store
-            .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes);
+            let l0_sst_size_est = self
+                .table_store
+                .estimate_encoded_size_compacted(meta.entry_num, meta.entries_size_in_bytes);
+
+            (l0_sst_size_est, last_freeze_wal_id)
+        };
 
         let wal_should_flush_memtable = wal_writer
             .is_some_and(|wal_writer| wal_writer.should_flush_memtable(last_freeze_wal_id));
@@ -336,6 +341,9 @@ impl DbInner {
         if !wal_should_flush_memtable && l0_sst_size_est < self.settings.l0_sst_size_bytes {
             return Ok(());
         }
+
+        let replay_after_wal_id = self.wal_observer.status()?.last_flushed_wal_id;
+        let mut guard = self.state.write();
         self.freeze_current_memtable_with_state_guard(&mut guard, replay_after_wal_id);
         Ok(())
     }

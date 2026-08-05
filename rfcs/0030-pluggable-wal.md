@@ -334,7 +334,7 @@ pub trait WalWriter: Send {
     /// Returns true if the WAL implementation wants to request that the current in-memory
     /// writes be flushed to a new l0. WAL implementations can use this to (1) bound the range
     /// of writes that need to be replayed when SlateDB restarts, and (2) push data to L0s earlier
-    /// so that its available to readers which poll the latest manifest.
+    /// so that it's available to readers, which poll the latest manifest.
     ///
     /// ## Arguments
     /// - `replay_after_wal_id`: The WAL ID used as the replay point for the last memtable
