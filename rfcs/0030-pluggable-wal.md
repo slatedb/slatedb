@@ -331,6 +331,18 @@ pub trait WalWriter: Send {
     /// future that receives the result of the flush once it completes.
     async fn flush(&mut self) -> Result<FlushResultFuture, WalError>;
 
+    /// Returns true if the WAL implementation wants to request that the current in-memory
+    /// writes be flushed to a new l0. WAL implementations can use this to (1) bound the range
+    /// of writes that need to be replayed when SlateDB restarts, and (2) push data to L0s earlier
+    /// so that it's available to readers, which poll the latest manifest.
+    ///
+    /// ## Arguments
+    /// - `replay_after_wal_id`: The WAL ID used as the replay point for the last memtable
+    ///   that was flushed to L0
+    fn should_flush_memtable(&self, _replay_after_wal_id: u64) -> bool {
+        false
+    }
+    
     /// Returns a `WalObserver` for reading [`WalStatus`] and subscribing to events.
     fn observer(&self) -> Box<dyn WalObserver>;
 
@@ -556,6 +568,10 @@ allowing custom WALs to apply backpressure.
 Memtable and Db flushing stay the same. The Batch Writer task annotates each immutable memtable 
 with a safe replay point using `WalStatus::last_flushed_wal_id`, and flushes the WAL using 
 `WalWriter::flush`.
+
+As part of this change we will move tracking of early memtable flush via
+`max_wal_flushes_before_l0_flush` to the native WAL implementation in the implementation of
+`WalWriter::should_flush_memtable`.
 
 #### Garbage Collection
 

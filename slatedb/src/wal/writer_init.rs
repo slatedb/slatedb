@@ -18,6 +18,7 @@ use std::time::Duration;
 #[derive(Clone, Copy)]
 pub(crate) struct WalWriterInitOptions {
     max_wal_bytes_size: usize,
+    max_wal_flushes_before_l0_flush: u64,
     max_flush_interval: Option<Duration>,
 }
 
@@ -25,6 +26,7 @@ impl From<&Settings> for WalWriterInitOptions {
     fn from(settings: &Settings) -> Self {
         Self {
             max_wal_bytes_size: settings.l0_sst_size_bytes,
+            max_wal_flushes_before_l0_flush: settings.max_wal_flushes_before_l0_flush,
             max_flush_interval: settings.flush_interval,
         }
     }
@@ -35,6 +37,7 @@ pub(crate) struct WalWriterInit {
     recorder: MetricsRecorderHelper,
     table_store: Arc<TableStore>,
     max_wal_bytes_size: usize,
+    max_wal_flushes_before_l0_flush: u64,
     max_flush_interval: Option<Duration>,
     empty_wal_id: u64,
     task_executor: Arc<MessageHandlerExecutor>,
@@ -61,6 +64,7 @@ impl WalWriterInit {
             recorder,
             table_store,
             max_wal_bytes_size: options.max_wal_bytes_size,
+            max_wal_flushes_before_l0_flush: options.max_wal_flushes_before_l0_flush,
             max_flush_interval: options.max_flush_interval,
             empty_wal_id,
             task_executor,
@@ -135,6 +139,7 @@ impl wal::WriterInit for WalWriterInit {
                     empty_wal_id,
                     self.table_store.clone(),
                     self.max_wal_bytes_size,
+                    self.max_wal_flushes_before_l0_flush,
                     self.max_flush_interval,
                     self.task_executor.clone(),
                 )
