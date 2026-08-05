@@ -2823,8 +2823,16 @@ mod tests {
         // Write data that stays in the WAL, then close without flushing the
         // memtable. Closing persists the manifest, so `next_wal_sst_id` covers
         // these WAL files while `replay_after_wal_id` stays at the last L0 flush.
+        // The write must be awaited to durability first: closing without a
+        // memtable flush does not flush the WAL, so an unawaited write would
+        // race the flush interval and might never reach a WAL SST.
         let wal_only_key = b"wal_only_key";
-        db.put(wal_only_key, b"wal_only_value").await.unwrap();
+        db.put(wal_only_key, b"wal_only_value")
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
         db.close_with_options(CloseOptions::default().with_flush_memtables(false))
             .await
             .unwrap();
