@@ -1,18 +1,55 @@
 ---
 title: Benchmarks
-description: See nightly performance results and learn how to run your own benchmarks
+description: Review SlateDB performance results and learn how to run your own benchmarks
 ---
 
-SlateDB currently has two benchmarking tools: **bencher** and **microbenchmarks**.
+## Release benchmarks
 
-- [bencher](https://github.com/slatedb/slatedb/tree/main/slatedb-bencher) is a tool to benchmark put/get operations against an object store. You can configure the tool with a variety of options. See [bencher/README.md](https://github.com/slatedb/slatedb/blob/main/slatedb-bencher/README.md) for details. [benchmark-db.sh](https://github.com/slatedb/slatedb/blob/main/slatedb-bencher/benchmark-db.sh) also serves as an example.
+SlateDB publishes release benchmark results at
+[benchmark.slatedb.io](https://benchmark.slatedb.io). The
+[slatedb/slatedb-benchmark](https://github.com/slatedb/slatedb-benchmark)
+repository contains the runner and workload definitions. It also stores the
+raw results published on the site.
 
-- Microbenchmarks run with [Criterion](https://bheisler.github.io/criterion.rs/). They are located in [benches](https://github.com/slatedb/slatedb/tree/main/slatedb/benches) and run for specific internal SlateDB functions. A comment is left on all PRs when a > 200% slowdown is detected.
+The release suite starts from a shared database with 300 million records, about
+120 GiB of logical data. The runner applies a fixed workload catalog to each
+SlateDB revision. The catalog combines relevant workloads from
+[YCSB Core](https://github.com/brianfrankcooper/YCSB/wiki/Core-Workloads) and
+RocksDB's
+[`db_bench`](https://github.com/facebook/rocksdb/wiki/Benchmarking-tools).
+SlateDB-specific cases exercise idle behavior and transaction contention. Most
+workloads run 64 closed-loop clients after a five-minute warmup and record 15
+minutes of activity.
 
-### Nightly Benchmarks
+## Other benchmarking tools
 
-We run both **bencher** and **microbenchmarks** nightly. The [results](https://github.com/slatedb/slatedb/actions/workflows/nightly.yaml) are published in the Github action summary.
+- [slatedb-bencher](https://github.com/slatedb/slatedb/tree/main/slatedb-bencher)
+  runs configurable database, compaction, and transaction benchmarks against
+  an object store. Its
+  [README](https://github.com/slatedb/slatedb/blob/main/slatedb-bencher/README.md)
+  documents the command-line options, and
+  [benchmark-db.sh](https://github.com/slatedb/slatedb/blob/main/slatedb-bencher/benchmark-db.sh)
+  provides an example workload matrix.
 
-- **Bencher** benchmarks run on [WarpBuild](https://warpbuild.com)'s [warp-ubuntu-latest-x64-16x](https://docs.warpbuild.com/cloud-runners) runners, which use [Hetzner](https://hetzner.com/) machines in Frankfurt. We use [Tigris](https://www.tigrisdata.com/) for object storage with the `auto` region setting, which resolves to Frankfurt as well. Bandwidth between WarpBuild (Hetzner) and Tigris seems to be about 500MiB/s down and 130MiB/s up. We routinely max out the bandwidth in the nightly tests.
+- SlateDB uses [Criterion](https://bheisler.github.io/criterion.rs/) for
+  microbenchmarks of internal functions. The benchmark sources live in
+  [slatedb/benches](https://github.com/slatedb/slatedb/tree/main/slatedb/benches).
 
-- **Microbenchmarks** run on [standard Linux Github action runners](https://docs.github.com/en/actions/using-github-hosted-runners/using-github-hosted-runners/about-github-hosted-runners#standard-github-hosted-runners-for-public-repositories) with the [pprof-rs](https://github.com/tikv/pprof-rs) profiler. The resulting profiler protobuf files are published to [pprof.me](https://pprof.me) and links to each microbenchmark are provided in the Github action summary.
+## Nightly microbenchmarks
+
+The
+[nightly workflow](https://github.com/slatedb/slatedb/actions/workflows/nightly.yaml)
+runs the Criterion microbenchmarks on standard Linux GitHub-hosted runners. It
+also records profiles with [pprof-rs](https://github.com/tikv/pprof-rs) and
+uploads them to [pprof.me](https://pprof.me). The GitHub Actions job summary
+links to each profile.
+
+## Benchmarking object stores
+
+SlateDB benchmarks measure the database and object store together. Use
+[MinIO Warp](https://github.com/minio/warp) to measure raw S3-compatible object
+store performance without SlateDB in the request path. Warp runs concurrent
+GET, PUT, DELETE, and mixed-request benchmarks with configurable object sizes
+and concurrency. Run it from the same region and network used by your SlateDB
+clients, ideally on the same machine, so the network path and client capacity
+remain comparable.
