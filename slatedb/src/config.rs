@@ -435,7 +435,7 @@ impl ScanOptions {
 }
 
 /// Enum representing the type of flush to perform.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum FlushType {
     /// Freeze the active memtable [crate::mem_table::KVTable] and write
     /// all immutable memtable entries (including the formerly active
@@ -464,25 +464,28 @@ impl Default for FlushOptions {
 /// Options controlling how a database is closed.
 #[derive(Clone, Debug)]
 pub struct CloseOptions {
-    /// Whether to trigger a final flush of the active memtable before closing.
+    /// The type of flush to perform before closing.
     ///
-    /// When `false`, memtables already being flushed continue through the
-    /// existing shutdown pipeline. Defaults to `true`.
-    pub flush_memtables: bool,
+    /// When `None`, no final flush is triggered. Memtables already being
+    /// flushed continue through the existing shutdown pipeline, and writes
+    /// that are not durable may be lost. When set to `Some` flushes the
+    /// database in accordance with the specified [`FlushType`]
+    /// Defaults to `Some(FlushType::MemTable)`.
+    pub flush_type: Option<FlushType>,
 }
 
 impl Default for CloseOptions {
     fn default() -> Self {
         Self {
-            flush_memtables: true,
+            flush_type: Some(FlushType::MemTable),
         }
     }
 }
 
 impl CloseOptions {
-    /// Configure whether the active memtable is flushed before closing.
-    pub fn with_flush_memtables(mut self, flush_memtables: bool) -> Self {
-        self.flush_memtables = flush_memtables;
+    /// Configure the type of flush to perform before closing.
+    pub fn with_flush_type(mut self, flush_type: Option<FlushType>) -> Self {
+        self.flush_type = flush_type;
         self
     }
 }
