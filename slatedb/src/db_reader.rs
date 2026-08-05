@@ -495,8 +495,7 @@ impl DbReaderInner {
                 .await?
             }
             // Skipping replay reads no WAL at all: the reader stays at the
-            // watermark it has already reached, which is the manifest's when it
-            // has replayed nothing.
+            // watermark it has already reached (the most recently read manifest)
             None => Self::replayed_watermark(&manifest.core, &imm_memtable),
         };
 
