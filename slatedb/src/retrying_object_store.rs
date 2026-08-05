@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -9,11 +9,12 @@ use backon::{ExponentialBuilder, Retryable, Sleeper};
 use futures::stream::BoxStream;
 use futures::{stream, StreamExt, TryStreamExt};
 use log::{debug, info};
+use object_store::multipart::{MultipartStore, PartId};
 use object_store::path::Path;
 use object_store::{
     Attribute, CopyOptions, Extensions, GetOptions, GetRange, GetResult, GetResultPayload,
-    ListResult, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions,
-    PutOptions, PutPayload, PutResult, RenameOptions,
+    ListResult, MultipartId, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
 };
 
 use crate::utils::IdGenerator;
@@ -53,9 +54,13 @@ impl Sleeper for SystemClockSleeper {
 /// returns its underlying error instead of retrying forever. This applies to
 /// both foreground and background object-store operations, since both go
 /// through this wrapper.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct RetryingObjectStore {
     inner: Arc<dyn ObjectStore>,
+    /// Low-level multipart handle for the same backend as `inner`. When set,
+    /// part uploads are retried in place; without it, parts get only the
+    /// inner client's retries (`MultipartUpload` can't re-send a failed part).
+    multipart_store: Option<Arc<dyn MultipartStore>>,
     rand: Arc<DbRand>,
     clock: Arc<dyn SystemClock>,
     /// Maximum wrapper-level retries per operation. `None` = unbounded.
@@ -71,10 +76,18 @@ impl RetryingObjectStore {
     ) -> Self {
         Self {
             inner,
+            multipart_store: None,
             rand,
             clock,
             max_retries,
         }
+    }
+
+    /// Enables in-place part-upload retries. `multipart_store` must be
+    /// backed by the same storage as the wrapped store.
+    pub(crate) fn with_multipart_store(mut self, multipart_store: Arc<dyn MultipartStore>) -> Self {
+        self.multipart_store = Some(multipart_store);
+        self
     }
 
     #[inline]
@@ -104,7 +117,7 @@ impl RetryingObjectStore {
     }
 
     #[inline]
-    fn should_retry(err: &object_store::Error) -> bool {
+    pub(crate) fn should_retry(err: &object_store::Error) -> bool {
         let retry = !matches!(
             err,
             object_store::Error::AlreadyExists { .. }
@@ -170,6 +183,115 @@ impl RetryingObjectStore {
         new_attrs
     }
 
+    /// Converts `result` into success if the object in the store carries our
+    /// put id, else returns it unchanged.
+    async fn resolved_by_put_id(
+        &self,
+        location: &Path,
+        put_id: &str,
+        result: object_store::Result<PutResult>,
+    ) -> object_store::Result<PutResult> {
+        if let Some(meta) = self.verify_put_succeeded(location, put_id).await {
+            return Ok(PutResult {
+                e_tag: meta.e_tag,
+                version: meta.version,
+                extensions: Extensions::new(),
+            });
+        }
+        result
+    }
+
+    /// Converts an AlreadyExists/Precondition result into success if the
+    /// object in the store carries our put id (a timeout-after-write).
+    async fn verified_result(
+        &self,
+        location: &Path,
+        put_id: &str,
+        result: object_store::Result<PutResult>,
+    ) -> object_store::Result<PutResult> {
+        match &result {
+            Err(object_store::Error::AlreadyExists { .. })
+            | Err(object_store::Error::Precondition { .. }) => {
+                self.resolved_by_put_id(location, put_id, result).await
+            }
+            _ => result,
+        }
+    }
+
+    /// Like [`Self::verified_result`], but for multipart completes NotFound
+    /// is ambiguous too: a complete whose response was lost leaves the upload
+    /// finished server-side, so a retry fails with e.g. S3's NoSuchUpload.
+    async fn verified_complete_result(
+        &self,
+        location: &Path,
+        put_id: &str,
+        result: object_store::Result<PutResult>,
+    ) -> object_store::Result<PutResult> {
+        match &result {
+            Err(object_store::Error::NotFound { .. }) => {
+                self.resolved_by_put_id(location, put_id, result).await
+            }
+            _ => self.verified_result(location, put_id, result).await,
+        }
+    }
+
+    /// Runs `op` under this store's retry policy.
+    async fn with_retries<T, F, Fut>(&self, op: F) -> object_store::Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = object_store::Result<T>>,
+    {
+        op.retry(self.retry_builder())
+            .sleep(self.sleeper())
+            .notify(Self::notify)
+            .when(Self::should_retry)
+            .await
+    }
+
+    /// Runs `op` with the put-id attribute merged into `attributes`, under
+    /// the retry policy. If the store rejects attributes as unsupported,
+    /// retries once more with the original attributes.
+    async fn with_put_id_fallback<T, F, Fut>(
+        &self,
+        attributes: &object_store::Attributes,
+        put_id: &str,
+        op: F,
+    ) -> object_store::Result<T>
+    where
+        F: Fn(object_store::Attributes) -> Fut,
+        Fut: Future<Output = object_store::Result<T>>,
+    {
+        let result = self
+            .with_retries(|| op(Self::with_put_id(attributes.clone(), put_id)))
+            .await;
+        match result {
+            Err(
+                object_store::Error::NotSupported { .. }
+                | object_store::Error::NotImplemented { .. },
+            ) => self.with_retries(|| op(attributes.clone())).await,
+            result => result,
+        }
+    }
+
+    /// Creates a multipart upload via the low-level [`MultipartStore`] API
+    /// with the put-id attribute.
+    async fn create_multipart_id(
+        &self,
+        multipart_store: &Arc<dyn MultipartStore>,
+        location: &Path,
+        opts: &PutMultipartOptions,
+        put_id: &str,
+    ) -> object_store::Result<MultipartId> {
+        self.with_put_id_fallback(&opts.attributes, put_id, |attributes| {
+            let opts = PutMultipartOptions {
+                attributes,
+                ..opts.clone()
+            };
+            async move { multipart_store.create_multipart_opts(location, opts).await }
+        })
+        .await
+    }
+
     /// Compute the expected byte length of a range read, truncating at the
     /// actual file size. This handles the case where a `GetRange::Bounded`
     /// end exceeds the file length.
@@ -191,7 +313,19 @@ impl std::fmt::Display for RetryingObjectStore {
     }
 }
 
-/// Wrapper around MultipartUpload that adds ULID verification on complete() failure.
+impl std::fmt::Debug for RetryingObjectStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RetryingObjectStore")
+            .field("inner", &self.inner)
+            .field("multipart_store", &self.multipart_store.is_some())
+            .field("max_retries", &self.max_retries)
+            .finish()
+    }
+}
+
+/// MultipartUpload wrapper that adds put-id verification on complete().
+/// Parts delegate to the inner upload and can't be retried here (see
+/// [`RetryingObjectStore::multipart_store`]); [`MultipartStoreUpload`] can.
 struct RetryingMultipartUpload {
     inner: Box<dyn MultipartUpload>,
     retrying_store: RetryingObjectStore,
@@ -216,29 +350,121 @@ impl MultipartUpload for RetryingMultipartUpload {
 
     async fn complete(&mut self) -> object_store::Result<PutResult> {
         let result = self.inner.complete().await;
-
-        match &result {
-            Err(object_store::Error::AlreadyExists { .. })
-            | Err(object_store::Error::Precondition { .. }) => {
-                if let Some(meta) = self
-                    .retrying_store
-                    .verify_put_succeeded(&self.location, &self.put_id)
-                    .await
-                {
-                    return Ok(PutResult {
-                        e_tag: meta.e_tag,
-                        version: meta.version,
-                        extensions: Extensions::new(),
-                    });
-                }
-                result
-            }
-            _ => result,
-        }
+        self.retrying_store
+            .verified_complete_result(&self.location, &self.put_id, result)
+            .await
     }
 
     async fn abort(&mut self) -> object_store::Result<()> {
         self.inner.abort().await
+    }
+}
+
+/// MultipartUpload backed by the low-level [`MultipartStore`] API: parts
+/// carry explicit indexes, so a failed part is retried in place. Dropping
+/// an unfinished upload aborts it best-effort.
+struct MultipartStoreUpload {
+    retrying_store: RetryingObjectStore,
+    multipart_store: Arc<dyn MultipartStore>,
+    location: Path,
+    multipart_id: MultipartId,
+    put_id: String,
+    /// Part ids indexed by part index, filled in as part futures resolve.
+    parts: Arc<Mutex<Vec<Option<PartId>>>>,
+    /// Set once complete succeeds or abort runs; suppresses the drop abort.
+    finished: bool,
+}
+
+impl Drop for MultipartStoreUpload {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let store = Arc::clone(&self.multipart_store);
+        let location = self.location.clone();
+        let id = self.multipart_id.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                store.abort_multipart(&location, &id).await.ok();
+            });
+        }
+    }
+}
+
+impl std::fmt::Debug for MultipartStoreUpload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MultipartStoreUpload")
+            .field("location", &self.location)
+            .field("multipart_id", &self.multipart_id)
+            .field("put_id", &self.put_id)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl MultipartUpload for MultipartStoreUpload {
+    fn put_part(&mut self, data: PutPayload) -> object_store::UploadPart {
+        let part_idx = {
+            let mut parts = self.parts.lock().expect("lock poisoned");
+            parts.push(None);
+            parts.len() - 1
+        };
+
+        let store = self.retrying_store.clone();
+        let multipart_store = Arc::clone(&self.multipart_store);
+        let location = self.location.clone();
+        let multipart_id = self.multipart_id.clone();
+        let parts = Arc::clone(&self.parts);
+        Box::pin(async move {
+            let part = store
+                .with_retries(|| async {
+                    multipart_store
+                        .put_part(&location, &multipart_id, part_idx, data.clone())
+                        .await
+                })
+                .await?;
+            parts.lock().expect("lock poisoned")[part_idx] = Some(part);
+            Ok(())
+        })
+    }
+
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        // Read, don't drain: a failed complete leaves the slots intact so it
+        // can be retried once in-flight parts settle.
+        let parts = self
+            .parts
+            .lock()
+            .expect("lock poisoned")
+            .iter()
+            .cloned()
+            .map(|part| {
+                part.ok_or_else(|| object_store::Error::Generic {
+                    store: "retrying_object_store",
+                    source: "complete() called before all part uploads finished".into(),
+                })
+            })
+            .collect::<object_store::Result<Vec<_>>>()?;
+
+        let store = &self.retrying_store;
+        let result = store
+            .with_retries(|| async {
+                self.multipart_store
+                    .complete_multipart(&self.location, &self.multipart_id, parts.clone())
+                    .await
+            })
+            .await;
+        let result = store
+            .verified_complete_result(&self.location, &self.put_id, result)
+            .await;
+        self.finished |= result.is_ok();
+        result
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        self.finished = true;
+        self.multipart_store
+            .abort_multipart(&self.location, &self.multipart_id)
+            .await
     }
 }
 
@@ -386,6 +612,22 @@ impl ObjectStore for RetryingObjectStore {
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         let put_id = self.rand.rng().gen_ulid(self.clock.as_ref()).to_string();
+
+        if let Some(multipart_store) = &self.multipart_store {
+            let multipart_id = self
+                .create_multipart_id(multipart_store, location, &opts, &put_id)
+                .await?;
+            return Ok(Box::new(MultipartStoreUpload {
+                retrying_store: self.clone(),
+                multipart_store: Arc::clone(multipart_store),
+                location: location.clone(),
+                multipart_id,
+                put_id,
+                parts: Arc::new(Mutex::new(Vec::new())),
+                finished: false,
+            }));
+        }
+
         let opts_with_id = PutMultipartOptions {
             attributes: Self::with_put_id(opts.attributes.clone(), &put_id),
             ..opts.clone()
@@ -1115,6 +1357,341 @@ mod tests {
         assert_eq!(bytes, Bytes::from_static(b"hello"));
         // 1 truncated attempt + 1 successful retry
         assert_eq!(flaky.get_range_attempts(), 2);
+    }
+
+    /// Builds a retrying store over a flaky store with the low-level
+    /// multipart path enabled, backed by a shared InMemory. `configure` adds
+    /// failure injection to the flaky store.
+    fn multipart_fixture(
+        max_retries: Option<u32>,
+        configure: impl FnOnce(FlakyObjectStore) -> FlakyObjectStore,
+    ) -> (Arc<FlakyObjectStore>, RetryingObjectStore) {
+        let inner = Arc::new(InMemory::new());
+        let flaky = FlakyObjectStore::new(inner.clone(), 0).with_multipart_store(inner);
+        let flaky = Arc::new(configure(flaky));
+        let retrying =
+            RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), max_retries)
+                .with_multipart_store(flaky.clone());
+        (flaky, retrying)
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_part_transient_failure_retried_in_place() {
+        let (flaky, retrying) = multipart_fixture(None, |f| f.with_put_part_failures(1));
+        let path = Path::from("/data/multipart");
+
+        let mut upload = retrying
+            .put_multipart_opts(&path, Default::default())
+            .await
+            .unwrap();
+        upload
+            .put_part(PutPayload::from_static(b"part0"))
+            .await
+            .expect("part should succeed after in-place retry");
+        upload
+            .put_part(PutPayload::from_static(b"part1"))
+            .await
+            .unwrap();
+        upload.complete().await.expect("complete should succeed");
+
+        let got = retrying.get(&path).await.unwrap();
+        assert_eq!(
+            got.bytes().await.unwrap(),
+            Bytes::from_static(b"part0part1")
+        );
+        // 1 failure + retry of the same index + second part.
+        assert_eq!(flaky.put_part_attempts(), 3);
+        // The upload is created exactly once; no restart.
+        assert_eq!(flaky.multipart_attempts(), 1);
+        assert_eq!(flaky.multipart_complete_attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_part_failures_exhaust_bounded_retries() {
+        let (flaky, retrying) =
+            multipart_fixture(Some(2), |f| f.with_put_part_failures(usize::MAX));
+        let path = Path::from("/data/multipart");
+
+        let mut upload = retrying
+            .put_multipart_opts(&path, Default::default())
+            .await
+            .unwrap();
+        let err = upload
+            .put_part(PutPayload::from_static(b"part0"))
+            .await
+            .expect_err("bounded retries should exhaust and surface at the part");
+        assert!(matches!(err, object_store::Error::Generic { .. }));
+
+        // Initial attempt + 2 retries.
+        assert_eq!(flaky.put_part_attempts(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_part_permanent_error_fails_fast() {
+        // Unbounded retries: a permanent error must still surface immediately.
+        let (flaky, retrying) = multipart_fixture(None, |f| f.with_put_part_permanent_failures(1));
+        let path = Path::from("/data/multipart");
+
+        let mut upload = retrying
+            .put_multipart_opts(&path, Default::default())
+            .await
+            .unwrap();
+        let err = upload
+            .put_part(PutPayload::from_static(b"part0"))
+            .await
+            .expect_err("permanent error should fail fast");
+        assert!(matches!(err, object_store::Error::NotSupported { .. }));
+        assert_eq!(flaky.put_part_attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_create_falls_back_when_attributes_unsupported() {
+        let (flaky, retrying) =
+            multipart_fixture(None, |f| f.with_multipart_create_attributes_unsupported());
+        let path = Path::from("/data/multipart");
+
+        let mut upload = retrying
+            .put_multipart_opts(&path, Default::default())
+            .await
+            .expect("create should fall back to attribute-less options");
+        upload
+            .put_part(PutPayload::from_static(b"part0"))
+            .await
+            .unwrap();
+        upload.complete().await.unwrap();
+
+        let got = retrying.get(&path).await.unwrap();
+        assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"part0"));
+        // Attributed attempt rejected with NotSupported, then the fallback.
+        assert_eq!(flaky.multipart_attempts(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_lost_complete_surfaces_without_put_id_attribute() {
+        // With the attribute fallback in play the object carries no put id,
+        // so a complete whose response was lost cannot be resolved and the
+        // NotFound must surface instead of being converted to success.
+        let (_, retrying) = multipart_fixture(None, |f| {
+            f.with_multipart_create_attributes_unsupported()
+                .with_multipart_complete_succeeds_but_returns_not_found()
+        });
+        let path = Path::from("/data/multipart");
+
+        let mut upload = retrying
+            .put_multipart_opts(&path, Default::default())
+            .await
+            .unwrap();
+        upload
+            .put_part(PutPayload::from_static(b"part0"))
+            .await
+            .unwrap();
+        let err = upload
+            .complete()
+            .await
+            .expect_err("lost complete should surface without a put id to verify");
+        assert!(matches!(err, object_store::Error::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_complete_with_in_flight_part_does_not_panic() {
+        let (_, retrying) = multipart_fixture(None, |f| f);
+        let path = Path::from("/data/multipart");
+
+        let mut upload = retrying
+            .put_multipart_opts(&path, Default::default())
+            .await
+            .unwrap();
+        let part_fut = upload.put_part(PutPayload::from_static(b"part0"));
+
+        // Misuse: complete before the part future resolved. It must error...
+        let err = upload
+            .complete()
+            .await
+            .expect_err("complete with an unresolved part should error");
+        assert!(matches!(err, object_store::Error::Generic { .. }));
+
+        // ...without disturbing the racing part future or the slots: once
+        // the part settles, complete can be retried successfully.
+        part_fut.await.unwrap();
+        upload
+            .complete()
+            .await
+            .expect("complete should succeed once the part settled");
+
+        let got = retrying.get(&path).await.unwrap();
+        assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"part0"));
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_complete_transient_failure_retried_without_reupload() {
+        let (flaky, retrying) = multipart_fixture(None, |f| f.with_multipart_complete_failures(1));
+        let path = Path::from("/data/multipart");
+
+        let mut upload = retrying
+            .put_multipart_opts(&path, Default::default())
+            .await
+            .unwrap();
+        upload
+            .put_part(PutPayload::from_static(b"part0"))
+            .await
+            .unwrap();
+        upload
+            .put_part(PutPayload::from_static(b"part1"))
+            .await
+            .unwrap();
+        upload
+            .complete()
+            .await
+            .expect("complete should succeed after retry");
+
+        let got = retrying.get(&path).await.unwrap();
+        assert_eq!(
+            got.bytes().await.unwrap(),
+            Bytes::from_static(b"part0part1")
+        );
+        assert_eq!(flaky.multipart_complete_attempts(), 2);
+        // Parts are not re-uploaded when only complete fails.
+        assert_eq!(flaky.put_part_attempts(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_complete_succeeds_on_matching_ulid() {
+        // Complete finishes server-side but the response is lost (NotFound on
+        // the surfaced error); the put-id check should resolve it to success.
+        let (flaky, retrying) = multipart_fixture(None, |f| {
+            f.with_multipart_complete_succeeds_but_returns_not_found()
+        });
+        let path = Path::from("/data/multipart");
+
+        let mut upload = retrying
+            .put_multipart_opts(&path, Default::default())
+            .await
+            .unwrap();
+        upload
+            .put_part(PutPayload::from_static(b"part0"))
+            .await
+            .unwrap();
+        upload
+            .complete()
+            .await
+            .expect("complete should succeed via ULID verification");
+
+        let got = retrying.get(&path).await.unwrap();
+        assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"part0"));
+        assert_eq!(flaky.multipart_complete_attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_abort_forwards_to_multipart_api() {
+        let (flaky, retrying) = multipart_fixture(None, |f| f);
+        let path = Path::from("/data/multipart");
+
+        let mut upload = retrying
+            .put_multipart_opts(&path, Default::default())
+            .await
+            .unwrap();
+        upload
+            .put_part(PutPayload::from_static(b"part0"))
+            .await
+            .unwrap();
+        upload.abort().await.expect("abort should succeed");
+        assert_eq!(flaky.multipart_abort_attempts(), 1);
+
+        // An explicitly aborted upload is not aborted again on drop.
+        drop(upload);
+        assert_eq!(wait_for_abort_attempts(&flaky, 1).await, 1);
+    }
+
+    /// Yields until the spawned drop-guard abort lands (or a bounded number
+    /// of yields passes) and returns the observed abort count.
+    async fn wait_for_abort_attempts(flaky: &FlakyObjectStore, expected: usize) -> usize {
+        for _ in 0..100 {
+            if flaky.multipart_abort_attempts() == expected {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        flaky.multipart_abort_attempts()
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_dropped_unfinished_upload_aborts_best_effort() {
+        let (flaky, retrying) = multipart_fixture(None, |f| f);
+        let path = Path::from("/data/multipart");
+
+        let mut upload = retrying
+            .put_multipart_opts(&path, Default::default())
+            .await
+            .unwrap();
+        upload
+            .put_part(PutPayload::from_static(b"part0"))
+            .await
+            .unwrap();
+
+        // Dropped without complete/abort: the guard aborts the upload so it
+        // isn't stranded server-side (or as a mirror in the caching layer).
+        drop(upload);
+        assert_eq!(wait_for_abort_attempts(&flaky, 1).await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_dropped_completed_upload_does_not_abort() {
+        let (flaky, retrying) = multipart_fixture(None, |f| f);
+        let path = Path::from("/data/multipart");
+
+        let mut upload = retrying
+            .put_multipart_opts(&path, Default::default())
+            .await
+            .unwrap();
+        upload
+            .put_part(PutPayload::from_static(b"part0"))
+            .await
+            .unwrap();
+        upload.complete().await.unwrap();
+
+        drop(upload);
+        assert_eq!(wait_for_abort_attempts(&flaky, 1).await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_buf_writer_recovers_from_transient_part_failures() {
+        use tokio::io::AsyncWriteExt;
+
+        let (flaky, retrying) = multipart_fixture(None, |f| f.with_put_part_failures(2));
+        let retrying: Arc<dyn ObjectStore> = Arc::new(retrying);
+        let path = Path::from("/data/sst");
+
+        let data: Vec<u8> = (0..5000u32).flat_map(|i| i.to_le_bytes()).collect();
+        let mut writer =
+            object_store::buffered::BufWriter::with_capacity(retrying.clone(), path.clone(), 1024);
+        writer.write_all(&data).await.unwrap();
+        writer.shutdown().await.unwrap();
+
+        let got = retrying.get(&path).await.unwrap();
+        assert_eq!(got.bytes().await.unwrap(), Bytes::from(data));
+        assert!(flaky.put_part_attempts() > 2);
+        assert_eq!(flaky.multipart_attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_multipart_without_multipart_store_does_not_retry_parts() {
+        // Without the low-level handle, part failures surface to the caller;
+        // only the inner client's own retries apply.
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_put_part_failures(1));
+        let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), None);
+        let path = Path::from("/data/multipart");
+
+        let mut upload = retrying
+            .put_multipart_opts(&path, Default::default())
+            .await
+            .unwrap();
+        let err = upload
+            .put_part(PutPayload::from_static(b"part0"))
+            .await
+            .expect_err("part failure should surface without a MultipartStore");
+        assert!(matches!(err, object_store::Error::Generic { .. }));
+        assert_eq!(flaky.put_part_attempts(), 1);
     }
 
     #[tokio::test]

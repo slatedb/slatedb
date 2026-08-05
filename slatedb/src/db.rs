@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use fail_parallel::{fail_point, FailPointRegistry};
+use object_store::multipart::MultipartStore;
 use object_store::path::Path;
 use object_store::{parse_url_opts, ObjectStore};
 
@@ -658,6 +659,38 @@ impl Db {
     /// ```
     pub fn builder<P: Into<Path>>(path: P, object_store: Arc<dyn ObjectStore>) -> DbBuilder<P> {
         DbBuilder::new(path, object_store)
+    }
+
+    /// Like [`Db::builder`], but for an object store client that also
+    /// implements the low-level
+    /// [`MultipartStore`](object_store::multipart::MultipartStore) API (S3,
+    /// GCS, and Azure all do). This enables in-place retries of multipart
+    /// part uploads under
+    /// [`Settings::object_store_max_retries`](crate::config::Settings::object_store_max_retries);
+    /// with [`Db::builder`], a failed part is covered only by the client's
+    /// own retries.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use slatedb::{Db, Error};
+    /// use slatedb::object_store::memory::InMemory;
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Error> {
+    ///     let object_store = Arc::new(InMemory::new());
+    ///     let db = Db::builder_with_multipart("/tmp/test_db", object_store)
+    ///         .build()
+    ///         .await?;
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn builder_with_multipart<P: Into<Path>, T>(path: P, object_store: Arc<T>) -> DbBuilder<P>
+    where
+        T: ObjectStore + MultipartStore,
+    {
+        DbBuilder::new_with_multipart(path, object_store)
     }
 
     /// Close the database.

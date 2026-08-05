@@ -14,10 +14,13 @@ use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::stream::BoxStream;
 use futures::{stream, StreamExt};
+use object_store::memory::InMemory;
+use object_store::multipart::{MultipartStore, PartId};
 use object_store::path::Path;
 use object_store::{
-    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions as OS_PutOptions, PutPayload, PutResult, RenameOptions,
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartId, MultipartUpload, ObjectMeta,
+    ObjectStore, PutMultipartOptions, PutOptions as OS_PutOptions, PutPayload, PutResult,
+    RenameOptions,
 };
 use rand::{Rng, RngCore};
 use std::cmp::Ordering as CmpOrdering;
@@ -573,6 +576,28 @@ pub(crate) struct FlakyObjectStore {
     // get_range: truncate response body to this many bytes on first N attempts (0 = no truncation)
     truncate_get_range_bytes: AtomicUsize,
     truncate_get_range_count: AtomicUsize,
+    // Multipart part/complete failure injection, shared with returned uploads
+    multipart_failures: Arc<MultipartFailures>,
+    // Low-level multipart handle, set via with_multipart_store
+    inner_multipart: Option<Arc<InMemory>>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MultipartFailures {
+    // Transient failures on the first N put_part calls
+    fail_first_put_part: AtomicUsize,
+    // Permanent (NotSupported) failures on the first N put_part calls
+    fail_first_put_part_permanent: AtomicUsize,
+    // Low-level create rejects non-default attributes with NotSupported
+    create_attributes_unsupported: std::sync::atomic::AtomicBool,
+    put_part_attempts: AtomicUsize,
+    // Transient failures on the first N complete calls
+    fail_first_complete: AtomicUsize,
+    complete_attempts: AtomicUsize,
+    // Complete succeeds but returns NotFound, simulating a lost response
+    // followed by a retry against the finished upload
+    complete_succeeds_but_returns_not_found: std::sync::atomic::AtomicBool,
+    abort_attempts: AtomicUsize,
 }
 
 impl FlakyObjectStore {
@@ -598,7 +623,21 @@ impl FlakyObjectStore {
             get_range_attempts: AtomicUsize::new(0),
             truncate_get_range_bytes: AtomicUsize::new(0),
             truncate_get_range_count: AtomicUsize::new(0),
+            multipart_failures: Arc::new(MultipartFailures::default()),
+            inner_multipart: None,
         }
+    }
+
+    /// Exposes the low-level multipart API via the same `InMemory` as `inner`.
+    pub(crate) fn with_multipart_store(mut self, inner: Arc<InMemory>) -> Self {
+        self.inner_multipart = Some(inner);
+        self
+    }
+
+    fn multipart_store(&self) -> &Arc<InMemory> {
+        self.inner_multipart
+            .as_ref()
+            .expect("FlakyObjectStore built without with_multipart_store")
     }
 
     pub(crate) fn with_put_precondition_always(self) -> Self {
@@ -686,6 +725,63 @@ impl FlakyObjectStore {
 
     pub(crate) fn get_range_attempts(&self) -> usize {
         self.get_range_attempts.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn with_put_part_failures(self, n: usize) -> Self {
+        self.multipart_failures
+            .fail_first_put_part
+            .store(n, Ordering::SeqCst);
+        self
+    }
+
+    pub(crate) fn with_put_part_permanent_failures(self, n: usize) -> Self {
+        self.multipart_failures
+            .fail_first_put_part_permanent
+            .store(n, Ordering::SeqCst);
+        self
+    }
+
+    /// Low-level create rejects non-default attributes with NotSupported,
+    /// simulating a store without attribute support.
+    pub(crate) fn with_multipart_create_attributes_unsupported(self) -> Self {
+        self.multipart_failures
+            .create_attributes_unsupported
+            .store(true, Ordering::SeqCst);
+        self
+    }
+
+    pub(crate) fn with_multipart_complete_failures(self, n: usize) -> Self {
+        self.multipart_failures
+            .fail_first_complete
+            .store(n, Ordering::SeqCst);
+        self
+    }
+
+    /// Complete finishes the upload but returns NotFound, simulating a
+    /// timeout after a successful complete.
+    pub(crate) fn with_multipart_complete_succeeds_but_returns_not_found(self) -> Self {
+        self.multipart_failures
+            .complete_succeeds_but_returns_not_found
+            .store(true, Ordering::SeqCst);
+        self
+    }
+
+    pub(crate) fn multipart_abort_attempts(&self) -> usize {
+        self.multipart_failures
+            .abort_attempts
+            .load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn put_part_attempts(&self) -> usize {
+        self.multipart_failures
+            .put_part_attempts
+            .load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn multipart_complete_attempts(&self) -> usize {
+        self.multipart_failures
+            .complete_attempts
+            .load(Ordering::SeqCst)
     }
 
     /// Inject a failure after `fail_after` successful items in the stream.
@@ -871,7 +967,11 @@ impl ObjectStore for FlakyObjectStore {
         opts: object_store::PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         self.put_multipart_attempts.fetch_add(1, Ordering::SeqCst);
-        self.inner.put_multipart_opts(location, opts).await
+        let inner = self.inner.put_multipart_opts(location, opts).await?;
+        Ok(Box::new(FlakyMultipartUpload {
+            inner,
+            failures: Arc::clone(&self.multipart_failures),
+        }))
     }
 
     fn delete_stream(
@@ -945,6 +1045,153 @@ impl ObjectStore for FlakyObjectStore {
         options: CopyOptions,
     ) -> object_store::Result<()> {
         self.inner.copy_opts(from, to, options).await
+    }
+}
+
+/// Multipart upload returned by [`FlakyObjectStore`] that injects transient
+/// failures into `put_part` calls. Complete/abort failure injection lives on
+/// the [`MultipartStore`] impl, the only path that retries them.
+struct FlakyMultipartUpload {
+    inner: Box<dyn MultipartUpload>,
+    failures: Arc<MultipartFailures>,
+}
+
+impl fmt::Debug for FlakyMultipartUpload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FlakyMultipartUpload").finish()
+    }
+}
+
+impl MultipartFailures {
+    fn injected_error(op: &'static str) -> object_store::Error {
+        object_store::Error::Generic {
+            store: "flaky_multipart",
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("injected {op} timeout"),
+            )),
+        }
+    }
+
+    fn permanent_error(op: &'static str) -> object_store::Error {
+        object_store::Error::NotSupported {
+            source: format!("injected permanent {op} failure").into(),
+        }
+    }
+
+    fn take_failure(counter: &AtomicUsize) -> bool {
+        counter
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                if v > 0 {
+                    Some(v - 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+    }
+}
+
+#[async_trait::async_trait]
+impl MultipartUpload for FlakyMultipartUpload {
+    fn put_part(&mut self, data: PutPayload) -> object_store::UploadPart {
+        self.failures
+            .put_part_attempts
+            .fetch_add(1, Ordering::SeqCst);
+        if MultipartFailures::take_failure(&self.failures.fail_first_put_part) {
+            return Box::pin(async { Err(MultipartFailures::injected_error("put_part")) });
+        }
+        self.inner.put_part(data)
+    }
+
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        self.inner.complete().await
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        self.failures.abort_attempts.fetch_add(1, Ordering::SeqCst);
+        self.inner.abort().await
+    }
+}
+
+/// Low-level multipart API with the same failure injection as
+/// [`FlakyMultipartUpload`]. Requires [`FlakyObjectStore::with_multipart_store`].
+#[async_trait::async_trait]
+impl MultipartStore for FlakyObjectStore {
+    async fn create_multipart(&self, path: &Path) -> object_store::Result<MultipartId> {
+        self.create_multipart_opts(path, PutMultipartOptions::default())
+            .await
+    }
+
+    async fn create_multipart_opts(
+        &self,
+        path: &Path,
+        opts: PutMultipartOptions,
+    ) -> object_store::Result<MultipartId> {
+        self.put_multipart_attempts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .multipart_failures
+            .create_attributes_unsupported
+            .load(Ordering::SeqCst)
+            && !opts.attributes.is_empty()
+        {
+            return Err(MultipartFailures::permanent_error("create with attributes"));
+        }
+        self.multipart_store()
+            .create_multipart_opts(path, opts)
+            .await
+    }
+
+    async fn put_part(
+        &self,
+        path: &Path,
+        id: &MultipartId,
+        part_idx: usize,
+        data: PutPayload,
+    ) -> object_store::Result<PartId> {
+        let failures = &self.multipart_failures;
+        failures.put_part_attempts.fetch_add(1, Ordering::SeqCst);
+        if MultipartFailures::take_failure(&failures.fail_first_put_part) {
+            return Err(MultipartFailures::injected_error("put_part"));
+        }
+        if MultipartFailures::take_failure(&failures.fail_first_put_part_permanent) {
+            return Err(MultipartFailures::permanent_error("put_part"));
+        }
+        self.multipart_store()
+            .put_part(path, id, part_idx, data)
+            .await
+    }
+
+    async fn complete_multipart(
+        &self,
+        path: &Path,
+        id: &MultipartId,
+        parts: Vec<PartId>,
+    ) -> object_store::Result<PutResult> {
+        let failures = &self.multipart_failures;
+        failures.complete_attempts.fetch_add(1, Ordering::SeqCst);
+        if MultipartFailures::take_failure(&failures.fail_first_complete) {
+            return Err(MultipartFailures::injected_error("complete"));
+        }
+        let result = self.multipart_store().complete_multipart(path, id, parts);
+        if failures
+            .complete_succeeds_but_returns_not_found
+            .load(Ordering::SeqCst)
+        {
+            result.await?;
+            return Err(object_store::Error::NotFound {
+                path: path.to_string(),
+                source: "injected not found after successful complete".into(),
+            });
+        }
+        result.await
+    }
+
+    async fn abort_multipart(&self, path: &Path, id: &MultipartId) -> object_store::Result<()> {
+        self.multipart_failures
+            .abort_attempts
+            .fetch_add(1, Ordering::SeqCst);
+        self.multipart_store().abort_multipart(path, id).await
     }
 }
 

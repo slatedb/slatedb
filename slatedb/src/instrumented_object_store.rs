@@ -34,10 +34,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
+use object_store::multipart::{MultipartStore, PartId};
 use object_store::path::Path;
 use object_store::{
-    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartId, MultipartUpload, ObjectMeta,
+    ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    RenameOptions,
 };
 use slatedb_common::metrics::MetricsRecorderHelper;
 
@@ -95,6 +97,18 @@ impl InstrumentedObjectStore {
             )),
         }
     }
+
+    /// Wraps a low-level [`MultipartStore`] handle so its calls are recorded
+    /// under this store's (component, store_type) metrics.
+    pub(crate) fn instrument_multipart_store(
+        &self,
+        inner: Arc<dyn MultipartStore>,
+    ) -> Arc<dyn MultipartStore> {
+        Arc::new(InstrumentedMultipartStore {
+            inner,
+            stats: Arc::clone(&self.stats),
+        })
+    }
 }
 
 impl std::fmt::Display for InstrumentedObjectStore {
@@ -145,6 +159,77 @@ impl MultipartUpload for InstrumentedMultipartUpload {
 
     async fn abort(&mut self) -> object_store::Result<()> {
         self.inner.abort().await
+    }
+}
+
+/// Records the low-level [`MultipartStore`] calls under the same metrics as
+/// [`InstrumentedMultipartUpload`] records the high-level ones.
+struct InstrumentedMultipartStore {
+    inner: Arc<dyn MultipartStore>,
+    stats: Arc<stats::ObjectStoreStats>,
+}
+
+impl std::fmt::Debug for InstrumentedMultipartStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstrumentedMultipartStore").finish()
+    }
+}
+
+#[async_trait]
+impl MultipartStore for InstrumentedMultipartStore {
+    async fn create_multipart(&self, path: &Path) -> object_store::Result<MultipartId> {
+        let start = Instant::now();
+        let result = self.inner.create_multipart(path).await;
+        self.stats
+            .multipart_init
+            .record(start.elapsed(), result.is_ok());
+        result
+    }
+
+    async fn create_multipart_opts(
+        &self,
+        path: &Path,
+        opts: PutMultipartOptions,
+    ) -> object_store::Result<MultipartId> {
+        let start = Instant::now();
+        let result = self.inner.create_multipart_opts(path, opts).await;
+        self.stats
+            .multipart_init
+            .record(start.elapsed(), result.is_ok());
+        result
+    }
+
+    async fn put_part(
+        &self,
+        path: &Path,
+        id: &MultipartId,
+        part_idx: usize,
+        data: PutPayload,
+    ) -> object_store::Result<PartId> {
+        let start = Instant::now();
+        let result = self.inner.put_part(path, id, part_idx, data).await;
+        self.stats
+            .multipart_part
+            .record(start.elapsed(), result.is_ok());
+        result
+    }
+
+    async fn complete_multipart(
+        &self,
+        path: &Path,
+        id: &MultipartId,
+        parts: Vec<PartId>,
+    ) -> object_store::Result<PutResult> {
+        let start = Instant::now();
+        let result = self.inner.complete_multipart(path, id, parts).await;
+        self.stats
+            .multipart_complete
+            .record(start.elapsed(), result.is_ok());
+        result
+    }
+
+    async fn abort_multipart(&self, path: &Path, id: &MultipartId) -> object_store::Result<()> {
+        self.inner.abort_multipart(path, id).await
     }
 }
 
@@ -742,6 +827,45 @@ mod tests {
             ),
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    async fn test_multipart_store_records_each_api_call() {
+        // given:
+        let (recorder, helper) = test_recorder_helper();
+        let inner = Arc::new(InMemory::new());
+        let store = InstrumentedObjectStore::new(
+            inner.clone(),
+            &helper,
+            ObjectStoreComponent::Db,
+            ObjectStoreType::Main,
+        );
+        let multipart = store.instrument_multipart_store(inner);
+        let path = Path::from("multipart");
+
+        // when:
+        let id = multipart.create_multipart(&path).await.unwrap();
+        let part = multipart
+            .put_part(&path, &id, 0, "hello".into())
+            .await
+            .unwrap();
+        multipart
+            .complete_multipart(&path, &id, vec![part])
+            .await
+            .unwrap();
+
+        // then:
+        for api in ["multipart_init", "multipart_part", "multipart_complete"] {
+            assert_eq!(
+                lookup_metric_with_labels(
+                    &recorder,
+                    REQUEST_COUNT,
+                    &get_labels(ObjectStoreComponent::Db, ObjectStoreType::Main, "put", api),
+                ),
+                Some(1),
+                "expected one {api} request recorded"
+            );
+        }
     }
 
     #[test]
