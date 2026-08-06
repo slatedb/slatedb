@@ -390,7 +390,7 @@ pub(crate) fn sign_extend(val: u32, bits: u8) -> i32 {
 /// Returns:
 /// - The effective max parallelism.
 pub(crate) fn compute_max_parallel(l0_count: usize, srs: &[SortedRun], cap: usize) -> usize {
-    let total_ssts = l0_count + srs.iter().map(|sr| sr.sst_views.len()).sum::<usize>();
+    let total_ssts = l0_count + srs.iter().map(|sr| sr.sst_views().len()).sum::<usize>();
     total_ssts.min(cap).max(1)
 }
 
@@ -416,7 +416,7 @@ pub(crate) fn estimate_bytes_before_key(sorted_runs: &[SortedRun], key: &Bytes) 
                 return 0;
             };
             sorted_run
-                .sst_views
+                .sst_views()
                 .iter()
                 .take(idx)
                 .map(|sst| sst.estimate_size())
@@ -662,7 +662,7 @@ pub(crate) async fn preload_cache_from_manifest(
         Some(PreloadLevel::AllSst) => {
             let all_sst_paths: Vec<object_store::path::Path> = core
                 .all_sst_views()
-                .map(|view| path_resolver.table_path(&view.sst.id))
+                .map(|view| path_resolver.sst_path(&view.sst.id))
                 .collect();
             if !all_sst_paths.is_empty() {
                 if let Err(e) = cached_obj_store
@@ -677,7 +677,7 @@ pub(crate) async fn preload_cache_from_manifest(
             let l0_sst_paths: Vec<object_store::path::Path> = core
                 .trees()
                 .flat_map(|tree| tree.l0.iter())
-                .map(|view| path_resolver.table_path(&view.sst.id))
+                .map(|view| path_resolver.sst_path(&view.sst.id))
                 .collect();
             if !l0_sst_paths.is_empty() {
                 if let Err(e) = cached_obj_store
@@ -1109,7 +1109,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let _sst1 = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst, false)
+            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst)
             .await
             .unwrap();
 
@@ -1124,7 +1124,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let sst2 = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst, false)
+            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst)
             .await
             .unwrap();
 
@@ -1162,7 +1162,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let sst = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst, false)
+            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst)
             .await
             .unwrap();
 
@@ -1328,19 +1328,19 @@ mod tests {
 
     #[test]
     fn test_estimate_bytes_before_key() {
-        let run1 = SortedRun {
-            id: 1,
-            sst_views: vec![
+        let run1 = SortedRun::new(
+            1,
+            [
                 make_sst_view("a", 10),
                 make_sst_view("k", 20), // k < m < z, so only "a" counts
                 make_sst_view("z", 30),
             ],
-        };
-        let run2 = SortedRun {
-            id: 2,
+        );
+        let run2 = SortedRun::new(
+            2,
             // f < m < ..., so only "b" counts
-            sst_views: vec![make_sst_view("b", 40), make_sst_view("f", 50)],
-        };
+            [make_sst_view("b", 40), make_sst_view("f", 50)],
+        );
 
         let key = Bytes::from("m");
         let total = estimate_bytes_before_key(&[run1, run2], &key);

@@ -765,16 +765,13 @@ impl TokioCompactionExecutorInner {
             );
             return Err(SlateDBError::CompactorExecutorFailed);
         }
-        Ok(SortedRun {
-            id: destination,
-            sst_views: output_ssts
-                .into_iter()
-                .map(|sst| {
-                    let id = self.rand.rng().gen_ulid(self.clock.as_ref());
-                    SsTableView::new(id, sst.clone())
-                })
-                .collect(),
-        })
+        Ok(SortedRun::new(
+            destination,
+            output_ssts.into_iter().map(|sst| {
+                let id = self.rand.rng().gen_ulid(self.clock.as_ref());
+                SsTableView::new(id, sst.clone())
+            }),
+        ))
     }
 
     /// Runs the merge for one key range of a compaction job and returns the
@@ -861,6 +858,9 @@ impl TokioCompactionExecutorInner {
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
                 progress(total_bytes, &output_ssts);
             }
+
+            // Keep cached compaction work cooperative.
+            tokio::task::coop::consume_budget().await;
         }
 
         // Drain the in-flight close, then flush the final partial SST. Order
@@ -1010,6 +1010,7 @@ impl TokioCompactionExecutorInner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_range::BytesRange;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::ManifestCore;
@@ -1470,6 +1471,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
         StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
@@ -1520,10 +1522,10 @@ mod tests {
                     sr_ssts.extend(ssts);
                     all_entries.extend(entries.iter().cloned());
                 }
-                sorted_runs.push(SortedRun {
-                    id: sr_id as u32,
-                    sst_views: sr_ssts.into_iter().map(SsTableView::identity).collect(),
-                });
+                sorted_runs.push(SortedRun::new(
+                    sr_id as u32,
+                    sr_ssts.into_iter().map(SsTableView::identity),
+                ));
             }
         }
 
@@ -1691,7 +1693,7 @@ mod tests {
                     },
                     root_path.clone(),
                     None,
-                    TableStoreKind::Compactor));
+                    TableStoreKind::Compactor, BlockCachePolicy::default()));
                 let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
                 StoredManifest::create_new_db(
                     manifest_store.clone(),
@@ -1747,7 +1749,7 @@ mod tests {
                     .unwrap();
 
                 let mut expected_entries = Vec::new();
-                for view in &full_run.sst_views {
+                for view in full_run.sst_views() {
                     let mut iter = SstIterator::new(
                         SstView::Owned(
                             Box::new(SsTableView::identity(view.sst.clone())),
@@ -1799,7 +1801,7 @@ mod tests {
                         .unwrap();
 
                     let mut resumed_entries = Vec::new();
-                    for view in &resumed_run.sst_views {
+                    for view in resumed_run.sst_views() {
                         let mut iter = SstIterator::new(
                             SstView::Owned(
                                 Box::new(SsTableView::identity(view.sst.clone())),
@@ -1826,7 +1828,7 @@ mod tests {
     /// runs can be compared for byte-identical merged output.
     async fn read_run_entries(table_store: &Arc<TableStore>, run: &SortedRun) -> Vec<RowEntry> {
         let mut entries = Vec::new();
-        for sst in &run.sst_views {
+        for sst in run.sst_views() {
             let mut iter = SstIterator::new(
                 SstView::Borrowed(sst, BytesRange::from(..)),
                 table_store.clone(),
@@ -1926,6 +1928,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
         StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
@@ -2076,7 +2079,7 @@ mod tests {
             .sum();
         assert_eq!(
             final_output,
-            split.sst_views.len(),
+            split.sst_views().len(),
             "final snapshot should capture every output SST"
         );
     }
@@ -2145,7 +2148,7 @@ mod tests {
             );
             for sst in snapshot.iter().flat_map(|s| s.output_ssts()) {
                 assert!(
-                    resumed.sst_views.iter().any(|v| v.sst.id == sst.id),
+                    resumed.sst_views().iter().any(|v| v.sst.id == sst.id),
                     "previously recorded subcompaction output SST was not reused"
                 );
             }
@@ -2156,7 +2159,7 @@ mod tests {
             if index == snapshots.len() - 1 {
                 let recorded: usize = snapshot.iter().map(|s| s.output_ssts().len()).sum();
                 assert_eq!(
-                    resumed.sst_views.len(),
+                    resumed.sst_views().len(),
                     recorded,
                     "resuming a completed compaction must not produce new SSTs"
                 );
@@ -2486,6 +2489,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
         StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
@@ -2619,6 +2623,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
         StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
@@ -2735,7 +2740,7 @@ mod tests {
 
         // then: multiple output SSTs were produced (proving real boundaries and
         // background closes ran) ...
-        let result_ssts = &result.sst_views;
+        let result_ssts = result.sst_views();
         assert!(
             result_ssts.len() >= 2,
             "expected multiple output SSTs, got {}",
@@ -2743,7 +2748,7 @@ mod tests {
         );
         // ... and the merged output preserves every key in ascending order.
         let mut read_back = Vec::new();
-        for view in result_ssts {
+        for view in result_ssts.iter() {
             let mut iter = SstIterator::new(
                 SstView::Owned(
                     Box::new(SsTableView::identity(view.sst.clone())),
@@ -2909,10 +2914,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
-        let l0 = table_store
-            .write_sst(&id, &encoded_sst, false)
-            .await
-            .unwrap();
+        let l0 = table_store.write_sst(&id, &encoded_sst).await.unwrap();
         let retention_min_seq_num = 2;
 
         let result = ctx
@@ -2920,8 +2922,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(1, result.sst_views.len());
-        let sst = result.sst_views[0].clone();
+        assert_eq!(1, result.sst_views().len());
+        let sst = result.sst_views()[0].clone();
         let mut iter = SstIterator::new(
             SstView::Borrowed(&sst, BytesRange::from(..)),
             table_store.clone(),
@@ -3054,16 +3056,13 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
-        let l0 = table_store
-            .write_sst(&id, &encoded_sst, false)
-            .await
-            .unwrap();
+        let l0 = table_store.write_sst(&id, &encoded_sst).await.unwrap();
 
         let result = ctx.run_compaction(vec![l0], true, None).await.unwrap();
 
         // Verify the output SST
-        assert_eq!(1, result.sst_views.len());
-        let sst = result.sst_views[0].clone();
+        assert_eq!(1, result.sst_views().len());
+        let sst = result.sst_views()[0].clone();
         let mut iter = SstIterator::new(
             SstView::Borrowed(&sst, BytesRange::from(..)),
             table_store.clone(),
@@ -3155,10 +3154,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
-        let l0 = table_store
-            .write_sst(&id, &encoded_sst, false)
-            .await
-            .unwrap();
+        let l0 = table_store.write_sst(&id, &encoded_sst).await.unwrap();
 
         let result = ctx.run_compaction(vec![l0], true, None).await;
 
@@ -3221,10 +3217,7 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let id = SsTableId::Compacted(Ulid::new());
-        let l0 = table_store
-            .write_sst(&id, &encoded_sst, false)
-            .await
-            .unwrap();
+        let l0 = table_store.write_sst(&id, &encoded_sst).await.unwrap();
 
         let result = ctx.run_compaction(vec![l0], true, None).await;
 

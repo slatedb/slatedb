@@ -53,19 +53,18 @@ fn concat_merge_operator() -> Arc<dyn MergeOperator + Send + Sync> {
 
 fn put_options() -> PutOptions {
     PutOptions {
-        ttl: Ttl::ExpireAfter(3_600),
+        ttl: Ttl::ExpireAfterMillis(3_600_000),
     }
 }
 
 fn merge_options() -> MergeOptions {
     MergeOptions {
-        ttl: Ttl::ExpireAfter(3_600),
+        ttl: Ttl::ExpireAfterMillis(3_600_000),
     }
 }
 
 fn write_options() -> WriteOptions {
     WriteOptions {
-        await_durable: false,
         ..WriteOptions::default()
     }
 }

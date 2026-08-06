@@ -5,8 +5,9 @@ use tokio::sync::Mutex;
 use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::error::{Error, SlateDbError};
 use crate::iterator::DbIterator;
-use crate::types::{KeyRange, KeyValue, WriteHandle};
+use crate::types::{KeyRange, KeyValue};
 use crate::validation::{validate_key, validate_key_value};
+use crate::write_handle::WriteHandle;
 
 /// Transaction handle returned by [`crate::Db::begin`].
 ///
@@ -226,12 +227,15 @@ impl DbTransaction {
     /// Commits the transaction.
     ///
     /// Returns `None` when the transaction performed no writes.
-    pub async fn commit(&self) -> Result<Option<WriteHandle>, Error> {
+    pub async fn commit(&self) -> Result<Option<Arc<WriteHandle>>, Error> {
         let tx = {
             let mut guard = self.inner.lock().await;
             guard.take().ok_or(SlateDbError::TransactionCompleted)?
         };
-        Ok(tx.commit().await?.map(WriteHandle::from))
+        Ok(tx
+            .commit()
+            .await?
+            .map(|handle| Arc::new(WriteHandle::new(handle))))
     }
 
     /// Commits the transaction using custom write options.
@@ -240,7 +244,7 @@ impl DbTransaction {
     pub async fn commit_with_options(
         &self,
         options: WriteOptions,
-    ) -> Result<Option<WriteHandle>, Error> {
+    ) -> Result<Option<Arc<WriteHandle>>, Error> {
         let options = options.into();
         let tx = {
             let mut guard = self.inner.lock().await;
@@ -249,6 +253,6 @@ impl DbTransaction {
         Ok(tx
             .commit_with_options(&options)
             .await?
-            .map(WriteHandle::from))
+            .map(|handle| Arc::new(WriteHandle::new(handle))))
     }
 }

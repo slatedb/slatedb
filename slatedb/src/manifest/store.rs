@@ -66,6 +66,10 @@ impl FenceableManifest {
         Ok(Self { inner: fr, clock })
     }
 
+    pub(crate) fn manifest(&self) -> (u64, &Manifest) {
+        (self.inner.id().id(), self.inner.object())
+    }
+
     pub(crate) fn local_epoch(&self) -> u64 {
         self.inner.local_epoch()
     }

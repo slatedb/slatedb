@@ -24,6 +24,7 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
+use crate::wal::gc::{SlateDbWalGc, WalGcMode};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
@@ -40,7 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tracing::instrument;
-use wal_gc::{WalGcMode, WalGcTask};
+use wal_gc::WalGcTask;
 
 mod compacted_gc;
 mod compactions_gc;
@@ -50,10 +51,11 @@ mod manifest_gc;
 pub mod stats;
 mod wal_gc;
 
+pub(crate) use filter::retain_allowed_by_gc_filter;
 pub use filter::GcFilter;
 
 pub(crate) const DEFAULT_MIN_AGE: Duration = Duration::from_secs(300);
-pub(crate) const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
+pub(crate) const DEFAULT_INTERVAL: Duration = Duration::from_secs(600);
 pub(crate) const GC_TASK_NAME: &str = "garbage_collector";
 /// Maximum number of concurrent object-store deletes issued by a GC task's
 /// deletion pass. Deletes are independent single-object operations, so a small
@@ -243,24 +245,30 @@ impl GarbageCollector {
             system_clock.clone(),
         ));
         let wal_gc_task = options.wal_options.map(|wal_options| {
-            WalGcTask::new(
-                manifest_store.clone(),
+            let wal_gc = Arc::new(SlateDbWalGc::new(
                 table_store.clone(),
                 stats.clone(),
                 wal_options,
                 WalGcMode::Regular,
                 gc_filter.clone(),
+                system_clock.clone(),
+            ));
+            WalGcTask::new(
+                manifest_store.clone(),
+                wal_gc,
+                WalGcMode::Regular.resource(),
             )
         });
         let wal_fence_gc_task = options.wal_fence_options.map(|wal_fence_options| {
-            WalGcTask::new(
-                manifest_store.clone(),
+            let wal_gc = Arc::new(SlateDbWalGc::new(
                 table_store.clone(),
                 stats.clone(),
                 wal_fence_options,
                 WalGcMode::Fence,
                 gc_filter.clone(),
-            )
+                system_clock.clone(),
+            ));
+            WalGcTask::new(manifest_store.clone(), wal_gc, WalGcMode::Fence.resource())
         });
         let compacted_gc_task = options.compacted_options.map(|compacted_options| {
             CompactedGcTask::new(
@@ -445,6 +453,7 @@ impl GarbageCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::tablestore::TableStoreKind;
 
     use std::collections::HashSet;
@@ -926,14 +935,14 @@ mod tests {
         let mut sst = table_store.table_builder();
         sst.add(RowEntry::new_value(b"key", b"value", 0)).await?;
         let table1 = sst.build().await?;
-        table_store.write_sst(table_id, &table1, false).await?;
+        table_store.write_sst(table_id, &table1).await?;
         Ok(())
     }
 
     #[tokio::test]
     async fn test_collect_garbage_wal_ssts() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         // write a wal sst
         let id1 = SsTableId::Wal(1);
@@ -945,7 +954,7 @@ mod tests {
         // Set the first WAL SST file to be a day old
         let now_minus_24h = set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&SsTableId::Wal(1)),
+            &path_resolver.sst_path(&SsTableId::Wal(1)),
             86400,
         );
 
@@ -992,7 +1001,7 @@ mod tests {
     #[tokio::test]
     async fn test_do_not_remove_wals_referenced_by_active_checkpoints() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         let id1 = SsTableId::Wal(1);
         write_sst(table_store.clone(), &id1).await.unwrap();
@@ -1028,7 +1037,7 @@ mod tests {
         for i in 1..=3 {
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&SsTableId::Wal(i)),
+                &path_resolver.sst_path(&SsTableId::Wal(i)),
                 86400,
             );
         }
@@ -1053,7 +1062,7 @@ mod tests {
     #[tokio::test]
     async fn test_collect_garbage_wal_ssts_and_keep_expired_last_compacted() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         // write a wal sst
         let id1 = SsTableId::Wal(1);
@@ -1063,7 +1072,7 @@ mod tests {
             .unwrap();
 
         let table1 = sst1.build().await.unwrap();
-        table_store.write_sst(&id1, &table1, false).await.unwrap();
+        table_store.write_sst(&id1, &table1).await.unwrap();
 
         let id2 = SsTableId::Wal(2);
         let mut sst2 = table_store.table_builder();
@@ -1071,17 +1080,17 @@ mod tests {
             .await
             .unwrap();
         let table2 = sst2.build().await.unwrap();
-        table_store.write_sst(&id2, &table2, false).await.unwrap();
+        table_store.write_sst(&id2, &table2).await.unwrap();
 
         // Set the both WAL SST file to be a day old
         let now_minus_24h_1 = set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&SsTableId::Wal(1)),
+            &path_resolver.sst_path(&SsTableId::Wal(1)),
             86400,
         );
         let now_minus_24h_2 = set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&SsTableId::Wal(2)),
+            &path_resolver.sst_path(&SsTableId::Wal(2)),
             86400,
         );
 
@@ -1129,7 +1138,7 @@ mod tests {
     #[tokio::test]
     async fn test_regular_wal_gc_does_not_delete_wal_fences() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         let fence_id = SsTableId::Wal(1);
         table_store.write_wal_fence(1).await.unwrap();
@@ -1142,7 +1151,7 @@ mod tests {
         for id in [fence_id, regular_wal_id] {
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&id),
+                &path_resolver.sst_path(&id),
                 86400,
             );
         }
@@ -1194,7 +1203,7 @@ mod tests {
     #[tokio::test]
     async fn test_wal_fence_gc_deletes_old_fences() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         let old_fence_id = SsTableId::Wal(1);
         table_store.write_wal_fence(1).await.unwrap();
@@ -1210,7 +1219,7 @@ mod tests {
         for id in [old_fence_id, regular_wal_id, newer_fence_id] {
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&id),
+                &path_resolver.sst_path(&id),
                 86400,
             );
         }
@@ -1272,13 +1281,13 @@ mod tests {
     #[tokio::test]
     async fn test_wal_fence_gc_deletes_single_old_fence() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         let fence_id = SsTableId::Wal(1);
         table_store.write_wal_fence(1).await.unwrap();
         set_modified(
             local_object_store,
-            &path_resolver.table_path(&fence_id),
+            &path_resolver.sst_path(&fence_id),
             86400,
         );
 
@@ -1327,7 +1336,7 @@ mod tests {
     #[tokio::test]
     async fn test_regular_and_wal_fence_gc_run_independently() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         let old_fence_id = SsTableId::Wal(1);
         table_store.write_wal_fence(1).await.unwrap();
@@ -1353,7 +1362,7 @@ mod tests {
         ] {
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&id),
+                &path_resolver.sst_path(&id),
                 86400,
             );
         }
@@ -1448,14 +1457,16 @@ mod tests {
             .l0
             .push_back(SsTableView::identity(active_expired_l0_sst_handle.clone()));
         // Dont' push inactive_expired_l0_sst_handle
-        Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
-            id: 1,
-            // Don't add inactive_expired_sst_handle
-            sst_views: vec![
-                SsTableView::identity(active_sst_handle.clone()),
-                SsTableView::identity(active_expired_sst_handle.clone()),
-            ],
-        });
+        Arc::make_mut(&mut state.tree)
+            .compacted
+            .push(SortedRun::new(
+                1,
+                // Don't add inactive_expired_sst_handle
+                [
+                    SsTableView::identity(active_sst_handle.clone()),
+                    SsTableView::identity(active_expired_sst_handle.clone()),
+                ],
+            ));
         StoredManifest::create_new_db(
             manifest_store.clone(),
             state.clone(),
@@ -1487,7 +1498,7 @@ mod tests {
         assert_eq!(current_manifest.manifest.core.tree.compacted.len(), 1);
         assert_eq!(
             current_manifest.manifest.core.tree.compacted[0]
-                .sst_views
+                .sst_views()
                 .len(),
             2
         );
@@ -1524,7 +1535,7 @@ mod tests {
         assert_eq!(current_manifest.manifest.core.tree.compacted.len(), 1);
         assert_eq!(
             current_manifest.manifest.core.tree.compacted[0]
-                .sst_views
+                .sst_views()
                 .len(),
             2
         );
@@ -1568,14 +1579,18 @@ mod tests {
             .push_back(SsTableView::identity(
                 active_checkpoint_l0_sst_handle.clone(),
             ));
-        Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
-            id: 1,
-            sst_views: vec![SsTableView::identity(active_sst_handle.clone())],
-        });
-        Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
-            id: 2,
-            sst_views: vec![SsTableView::identity(active_checkpoint_sst_handle.clone())],
-        });
+        Arc::make_mut(&mut state.tree)
+            .compacted
+            .push(SortedRun::new(
+                1,
+                [SsTableView::identity(active_sst_handle.clone())],
+            ));
+        Arc::make_mut(&mut state.tree)
+            .compacted
+            .push(SortedRun::new(
+                2,
+                [SsTableView::identity(active_checkpoint_sst_handle.clone())],
+            ));
         let mut stored_manifest = StoredManifest::create_new_db(
             manifest_store.clone(),
             state.clone(),
@@ -1669,6 +1684,7 @@ mod tests {
             path,
             None,
             TableStoreKind::GC,
+            BlockCachePolicy::default(),
         ));
 
         (
@@ -1692,7 +1708,7 @@ mod tests {
             .await
             .unwrap();
         let table = sst.build().await.unwrap();
-        table_store.write_sst(&sst_id, &table, false).await.unwrap()
+        table_store.write_sst(&sst_id, &table).await.unwrap()
     }
 
     /// Set the modified time of a file to be a certain number of seconds ago.
@@ -1754,7 +1770,7 @@ mod tests {
             }
 
             for sr in &manifest.core.tree.compacted {
-                for view in &sr.sst_views {
+                for view in sr.sst_views() {
                     assert!(compacted_ssts.contains(&view.sst.id));
                 }
             }
@@ -2161,14 +2177,14 @@ mod tests {
     #[tokio::test]
     async fn test_should_record_gc_wal_deleted_count() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         // given: two WAL SSTs, first one old enough to GC
         let id1 = SsTableId::Wal(1);
         write_sst(table_store.clone(), &id1).await.unwrap();
         let id2 = SsTableId::Wal(2);
         write_sst(table_store.clone(), &id2).await.unwrap();
-        set_modified(local_object_store, &path_resolver.table_path(&id1), 86400);
+        set_modified(local_object_store, &path_resolver.sst_path(&id1), 86400);
 
         let mut state = ManifestCore::new();
         state.replay_after_wal_id = id2.unwrap_wal_id();
@@ -2219,10 +2235,9 @@ mod tests {
         Arc::make_mut(&mut state.tree)
             .l0
             .push_back(SsTableView::identity(active_l0_handle));
-        Arc::make_mut(&mut state.tree).compacted.push(SortedRun {
-            id: 1,
-            sst_views: vec![SsTableView::identity(active_handle)],
-        });
+        Arc::make_mut(&mut state.tree)
+            .compacted
+            .push(SortedRun::new(1, [SsTableView::identity(active_handle)]));
         // inactive_expired_handle is NOT in manifest -> eligible for GC
         StoredManifest::create_new_db(
             manifest_store.clone(),
@@ -2330,7 +2345,7 @@ mod tests {
     #[tokio::test]
     async fn test_gc_filter_can_reject_all_directory_gc_deletes() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
         let now = DefaultSystemClock::default().now();
         let expired_ms = (now - TimeDelta::seconds(7200)).timestamp_millis() as u64;
         let unexpired_ms = (now - TimeDelta::seconds(1800)).timestamp_millis() as u64;
@@ -2347,12 +2362,12 @@ mod tests {
 
         set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&old_wal_id),
+            &path_resolver.sst_path(&old_wal_id),
             86400,
         );
         set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&old_fence_id),
+            &path_resolver.sst_path(&old_fence_id),
             86400,
         );
 
@@ -2483,7 +2498,7 @@ mod tests {
     #[tokio::test]
     async fn test_gc_filter_allows_subset_and_stats_count_successful_deletes() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
 
         // Create three old WALs below the replay boundary so all would be eligible
         // without a filter. The middle one is the only filter-approved delete.
@@ -2498,7 +2513,7 @@ mod tests {
             write_sst(table_store.clone(), &id).await.unwrap();
             set_modified(
                 local_object_store.clone(),
-                &path_resolver.table_path(&id),
+                &path_resolver.sst_path(&id),
                 86400,
             );
         }
@@ -2541,7 +2556,7 @@ mod tests {
             &helper,
             Arc::new(DefaultSystemClock::default()),
             Some(Arc::new(LocationGcFilter {
-                allowed_locations: HashSet::from([path_resolver.table_path(&allowed_wal_id)]),
+                allowed_locations: HashSet::from([path_resolver.sst_path(&allowed_wal_id)]),
             })),
         );
 
@@ -2570,7 +2585,7 @@ mod tests {
     #[tokio::test]
     async fn test_dry_run_skips_directory_gc_deletes() {
         let (manifest_store, compactions_store, table_store, local_object_store) = build_objects();
-        let path_resolver = PathResolver::new("/");
+        let path_resolver = PathResolver::from_root("/");
         let now = DefaultSystemClock::default().now();
         let expired_ms = (now - TimeDelta::seconds(7200)).timestamp_millis() as u64;
         let unexpired_ms = (now - TimeDelta::seconds(1800)).timestamp_millis() as u64;
@@ -2586,12 +2601,12 @@ mod tests {
 
         set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&old_wal_id),
+            &path_resolver.sst_path(&old_wal_id),
             86400,
         );
         set_modified(
             local_object_store.clone(),
-            &path_resolver.table_path(&old_fence_id),
+            &path_resolver.sst_path(&old_fence_id),
             86400,
         );
 

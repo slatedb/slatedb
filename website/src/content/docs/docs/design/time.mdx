@@ -33,18 +33,18 @@ SlateDB also preserves the same metadata in the WAL path, which is why [Change D
 
 ## Expiration
 
-TTL is stored as an absolute expiration timestamp, not a relative duration. On commit, SlateDB computes `expire_ts = create_ts + ttl`.
+TTL is stored as an absolute expiration timestamp in milliseconds since the Unix epoch, not as a relative duration. On commit, SlateDB computes `expire_ts = create_ts + ttl_millis`.
 
-[`Settings::default_ttl`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.default_ttl) sets a default TTL for puts and merges. [`PutOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.PutOptions.html) and [`MergeOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.MergeOptions.html) can override that per operation:
+[`Settings::default_ttl_millis`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.default_ttl_millis) sets a default TTL in milliseconds for puts and merges. [`PutOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.PutOptions.html) and [`MergeOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.MergeOptions.html) can override that per operation:
 
 - [`Ttl::NoExpiry`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.NoExpiry) — store the value without expiration
-- [`Ttl::ExpireAfter(u64)`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.ExpireAfter) — expire after a relative duration (clock ticks)
-- [`Ttl::ExpireAt(i64)`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.ExpireAt) — expire at a fixed absolute timestamp (clock ticks)
+- [`Ttl::ExpireAfterMillis(u64)`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.ExpireAfterMillis) — expire after a relative duration in milliseconds
+- [`Ttl::ExpireAtMillis(i64)`](https://docs.rs/slatedb/latest/slatedb/config/enum.Ttl.html#variant.ExpireAtMillis) — expire at a fixed Unix timestamp in milliseconds
 
 Deletes write tombstones and do not carry TTL.
 
 :::caution
-Batch-local merges requires one effective `expire_ts` per key. `Db::write(...)` and transaction commit return `ErrorKind::Invalid` if a single batch tries to merge the same key across different expiration timestamps. Effective timestamps are computed after applying `Settings::default_ttl`, so `Ttl::Default` can still differ from `Ttl::NoExpiry` or from another explicit TTL.
+Batch-local merges requires one effective `expire_ts` per key. `Db::write(...)` and transaction commit return `ErrorKind::Invalid` if a single batch tries to merge the same key across different expiration timestamps. Effective timestamps are computed after applying `Settings::default_ttl_millis`, so `Ttl::Default` can still differ from `Ttl::NoExpiry` or from another explicit TTL.
 :::
 
 :::note

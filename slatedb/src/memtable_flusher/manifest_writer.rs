@@ -686,7 +686,7 @@ impl ManifestWriterHandler {
             let all_views = tree
                 .l0
                 .iter()
-                .chain(tree.compacted.iter().flat_map(|run| run.sst_views.iter()));
+                .chain(tree.compacted.iter().flat_map(|run| run.sst_views().iter()));
             for view in all_views {
                 sst_views += 1;
                 // Dedupe by physical SST id: a range clone/rescale can project one SST into
@@ -894,6 +894,7 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
 #[cfg(test)]
 mod tests {
     use super::{ManifestWriter, ManifestWriterCommand, ManifestWriterHandler, TrackerMessage};
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
@@ -907,7 +908,9 @@ mod tests {
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
-    use crate::wal_buffer::WalBufferManager;
+
+    use crate::wal::test_utils::FakeWalWriter;
+    use crate::wal::WalWriter;
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -915,7 +918,7 @@ mod tests {
     use object_store::ObjectStore;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::SystemClock;
-    use slatedb_common::metrics::{DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper};
+    use slatedb_common::metrics::MetricsRecorderHelper;
     use slatedb_common::DbRand;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1060,24 +1063,16 @@ mod tests {
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(Arc::clone(&object_store), None),
             SsTableFormat::default(),
-            PathResolver::new(Path::from(path.clone())),
+            PathResolver::from_root(Path::from(path.clone())),
             Arc::clone(&fp_registry),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =
             crate::utils::SafeSender::unbounded_channel(status_manager.result_reader());
-        let recorder = Arc::new(DefaultMetricsRecorder::new());
-        let helper = MetricsRecorderHelper::new(recorder, MetricLevel::Info);
-        let wal_buffer = Arc::new(WalBufferManager::new(
-            status_manager.clone(),
-            &helper,
-            0,
-            table_store.clone(),
-            1024,
-            None,
-        ));
+        let wal_writer = Box::new(FakeWalWriter::new(0));
         let inner = Arc::new(
             DbInner::new(
                 settings.clone(),
@@ -1089,11 +1084,11 @@ mod tests {
                     &WatchableOnceCell::new(),
                 )),
                 write_tx,
-                wal_buffer.observer(),
+                wal_writer.observer(),
                 db_metrics,
                 fp_registry,
                 None,
-                status_manager,
+                Arc::new(status_manager),
                 segment_extractor,
             )
             .await
@@ -1205,10 +1200,7 @@ mod tests {
         value: &[u8],
     ) -> UploadedMemtable {
         let imm_memtable = freeze_imm(inner, key, value);
-        let handles = inner
-            .flush_l0_for_test(imm_memtable.table(), true)
-            .await
-            .unwrap();
+        let handles = inner.flush_l0_for_test(imm_memtable.table()).await.unwrap();
         let sst_handle = handles.into_iter().next().expect("expected single SST");
         let first_seq = imm_memtable.table().first_seq().unwrap();
         let last_seq = imm_memtable.table().last_seq().unwrap();
@@ -1842,7 +1834,7 @@ mod tests {
             let id = crate::db_state::SsTableId::Compacted(
                 inner.rand.rng().gen_ulid(inner.system_clock.as_ref()),
             );
-            let sst_handle = inner.upload_sst(&id, &encoded_sst, false).await.unwrap();
+            let sst_handle = inner.upload_sst(&id, &encoded_sst).await.unwrap();
             segments.push(SegmentedSstHandle {
                 prefix: Bytes::copy_from_slice(prefix),
                 sst_handle,

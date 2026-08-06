@@ -21,6 +21,11 @@ use crate::{DbReadOps, DbTransactionOps};
 /// configurable isolation levels. This is the main interface for transactional
 /// operations in SlateDB.
 ///
+/// Committing a non-empty transaction returns a [`WriteHandle`] without
+/// waiting for durability. Call [`WriteHandle::await_durable`] on that handle
+/// to wait for that commit, or call [`crate::Db::flush`] to flush all pending
+/// writes.
+///
 /// # Examples
 ///
 /// Basic transaction usage:
@@ -516,10 +521,16 @@ impl DbTransaction {
 
     /// Commit the transaction by applying all buffered operations to the database.
     ///
-    /// This method finalizes the transaction by writing all pending puts, deletes, and other
-    /// operations from the write batch to persistent storage. The actual conflict detection
-    /// (including read-write and write-write conflicts) is deferred to the task that processes
-    /// the WriteBatch, which ensures the atomicity of transactions.
+    /// This method finalizes the transaction by writing all pending puts,
+    /// deletes, and other operations from the write batch to the in-memory WAL
+    /// and MemTable. The actual conflict detection (including read-write and
+    /// write-write conflicts) is deferred to the task that processes the
+    /// WriteBatch, which ensures the atomicity of transactions.
+    ///
+    /// A successful commit does not wait for durability in object storage.
+    /// Call [`WriteHandle::await_durable`] on the returned handle when the
+    /// result is `Some`, or call [`crate::Db::flush`] to flush all pending
+    /// writes.
     ///
     /// If the transaction's write batch is empty, this operation is a no-op and returns `Ok(())`
     /// immediately without any database interaction. Since it's impossible to have read-write
@@ -540,7 +551,12 @@ impl DbTransaction {
     /// Commit the transaction with custom write options.
     ///
     /// This method behaves the same as [`DbTransaction::commit`], but allows callers
-    /// to specify custom [`WriteOptions`], such as `await_durable`.
+    /// to specify custom [`WriteOptions`].
+    ///
+    /// A successful commit does not wait for durability in object storage.
+    /// Call [`WriteHandle::await_durable`] on the returned handle when the
+    /// result is `Some`, or call [`crate::Db::flush`] to flush all pending
+    /// writes.
     ///
     /// ## Arguments
     /// - `options`: the write options to use for the commit
@@ -1174,14 +1190,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_txn_commit_await_durable_false() {
+    async fn test_txn_commit_returns_before_durable() {
         use crate::config::{DurabilityLevel::*, ReadOptions, WriteOptions};
         use fail_parallel::FailPointRegistry;
 
         // Setup database with failpoints to pause durable writes
         let fp_registry = Arc::new(FailPointRegistry::new());
         let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let db = crate::Db::builder("/tmp/test_txn_commit_await_durable_false", object_store)
+        let db = crate::Db::builder("/tmp/test_txn_commit_returns_before_durable", object_store)
             .with_fp_registry(fp_registry.clone())
             .build()
             .await
@@ -1194,13 +1210,10 @@ mod tests {
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
         txn.put(b"k", b"v").unwrap();
 
-        // Commit without waiting for durability
-        txn.commit_with_options(&WriteOptions {
-            await_durable: false,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+        // Commits return without waiting for durability.
+        txn.commit_with_options(&WriteOptions::default())
+            .await
+            .unwrap();
 
         // Memory (in-memory) read should see the value
         let val = db
@@ -2050,7 +2063,7 @@ mod tests {
             b"counter",
             1u64.to_le_bytes(),
             &MergeOptions {
-                ttl: crate::config::Ttl::ExpireAfter(3600),
+                ttl: crate::config::Ttl::ExpireAfterMillis(3600),
             },
         )
         .unwrap();
@@ -2058,7 +2071,7 @@ mod tests {
             b"counter",
             2u64.to_le_bytes(),
             &MergeOptions {
-                ttl: crate::config::Ttl::ExpireAfter(7200),
+                ttl: crate::config::Ttl::ExpireAfterMillis(7200),
             },
         )
         .unwrap();
@@ -2098,7 +2111,7 @@ mod tests {
             object_store_cache_options: crate::config::ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             metric_level: MetricLevel::default(),
-            default_ttl: None,
+            default_ttl_millis: None,
             object_store_max_retries: None,
             block_format: None,
         }
@@ -2124,7 +2137,6 @@ mod tests {
         txn.put(b"key1", b"value1").unwrap();
         let handle = txn
             .commit_with_options(&WriteOptions {
-                await_durable: false,
                 ..Default::default()
             })
             .await
@@ -2137,12 +2149,11 @@ mod tests {
         clock.set(200);
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let put_opts = PutOptions {
-            ttl: crate::config::Ttl::ExpireAfter(1000),
+            ttl: crate::config::Ttl::ExpireAfterMillis(1000),
         };
         txn.put_with_options(b"key2", b"value2", &put_opts).unwrap();
         let handle = txn
             .commit_with_options(&WriteOptions {
-                await_durable: false,
                 ..Default::default()
             })
             .await
@@ -2157,7 +2168,6 @@ mod tests {
         txn.delete(b"key1").unwrap();
         let handle = txn
             .commit_with_options(&WriteOptions {
-                await_durable: false,
                 ..Default::default()
             })
             .await
@@ -2177,7 +2187,6 @@ mod tests {
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let result = txn
             .commit_with_options(&WriteOptions {
-                await_durable: false,
                 ..Default::default()
             })
             .await

@@ -102,10 +102,10 @@ pub enum Ttl {
     Default,
     /// Store the value without expiration.
     NoExpiry,
-    /// Expire the value after the given number of clock ticks.
-    ExpireAfterTicks(u64),
-    /// Expire the value at the given absolute timestamp (clock ticks).
-    ExpireAt(i64),
+    /// Expire the value after the given number of milliseconds.
+    ExpireAfterMillis(u64),
+    /// Expire the value at the given Unix timestamp in milliseconds.
+    ExpireAtMillis(i64),
 }
 
 impl From<Ttl> for slatedb::config::Ttl {
@@ -113,8 +113,8 @@ impl From<Ttl> for slatedb::config::Ttl {
         match value {
             Ttl::Default => Self::Default,
             Ttl::NoExpiry => Self::NoExpiry,
-            Ttl::ExpireAfterTicks(ttl) => Self::ExpireAfter(ttl),
-            Ttl::ExpireAt(ts) => Self::ExpireAt(ts),
+            Ttl::ExpireAfterMillis(ttl_millis) => Self::ExpireAfterMillis(ttl_millis),
+            Ttl::ExpireAtMillis(timestamp_millis) => Self::ExpireAtMillis(timestamp_millis),
         }
     }
 }
@@ -305,26 +305,18 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
     }
 }
 
-/// Options that control durability behavior for writes and commits.
-#[derive(Clone, Debug, uniffi::Record)]
+/// Options that control writes and commits.
+#[derive(Clone, Debug, Default, uniffi::Record)]
 pub struct WriteOptions {
-    /// Whether the call waits for the write to become durable before returning.
-    pub await_durable: bool,
-}
-
-impl Default for WriteOptions {
-    fn default() -> Self {
-        Self {
-            await_durable: true,
-        }
-    }
+    /// Optional caller-supplied sequence number. Zero uses SlateDB's sequence oracle.
+    #[uniffi(default = 0)]
+    pub seqnum: u64,
 }
 
 impl From<WriteOptions> for slatedb::config::WriteOptions {
     fn from(value: WriteOptions) -> Self {
         slatedb::config::WriteOptions {
-            await_durable: value.await_durable,
-            ..Default::default()
+            seqnum: value.seqnum,
         }
     }
 }
@@ -370,6 +362,30 @@ impl From<FlushOptions> for slatedb::config::FlushOptions {
     fn from(value: FlushOptions) -> Self {
         slatedb::config::FlushOptions {
             flush_type: value.flush_type.into(),
+        }
+    }
+}
+
+/// Options controlling how a database is shut down.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct CloseOptions {
+    /// The final flush to perform before shutdown. When `None`, no final flush is
+    /// triggered and writes that are not durable may be lost.
+    pub flush_type: Option<FlushType>,
+}
+
+impl Default for CloseOptions {
+    fn default() -> Self {
+        Self {
+            flush_type: Some(FlushType::MemTable),
+        }
+    }
+}
+
+impl From<CloseOptions> for slatedb::config::CloseOptions {
+    fn from(value: CloseOptions) -> Self {
+        slatedb::config::CloseOptions {
+            flush_type: value.flush_type.map(Into::into),
         }
     }
 }
@@ -527,7 +543,37 @@ impl From<GarbageCollectorOptions> for slatedb::config::GarbageCollectorOptions 
 
 #[cfg(test)]
 mod tests {
-    use super::{GarbageCollectorOptions, ReaderOptions};
+    use super::{CloseOptions, FlushType, GarbageCollectorOptions, ReaderOptions};
+
+    #[test]
+    fn close_options_default_flushes_memtable() {
+        let options: slatedb::config::CloseOptions = CloseOptions::default().into();
+
+        assert!(matches!(
+            options.flush_type,
+            Some(slatedb::config::FlushType::MemTable)
+        ));
+    }
+
+    #[test]
+    fn close_options_can_flush_wal_only() {
+        let options: slatedb::config::CloseOptions = CloseOptions {
+            flush_type: Some(FlushType::Wal),
+        }
+        .into();
+
+        assert!(matches!(
+            options.flush_type,
+            Some(slatedb::config::FlushType::Wal)
+        ));
+    }
+
+    #[test]
+    fn close_options_can_skip_final_flush() {
+        let options: slatedb::config::CloseOptions = CloseOptions { flush_type: None }.into();
+
+        assert!(options.flush_type.is_none());
+    }
 
     #[test]
     fn boundary_files_are_enabled_by_default() {

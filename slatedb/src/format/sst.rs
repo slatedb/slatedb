@@ -230,6 +230,9 @@ pub(crate) struct EncodedSsTableBlock {
     pub(crate) block: Arc<Block>,
     /// compressed and transformed block
     pub(crate) encoded_bytes: Bytes,
+    /// first and last key of the block. None when the producer does not track
+    /// keys (WAL blocks, whose index tracks sequence numbers instead)
+    pub(crate) key_span: Option<(Bytes, Bytes)>,
 }
 
 impl EncodedSsTableBlock {
@@ -244,6 +247,8 @@ pub(crate) struct EncodedSsTableBlockBuilder {
     block_builder: BlockBuilder,
     /// offset of the block within the SST
     offset: u64,
+    /// first and last key of the block
+    key_span: Option<(Bytes, Bytes)>,
     /// codec for compressing the data block
     compression_codec: Option<CompressionCodec>,
     /// transformer for transforming the data block (e.g. encryption)
@@ -255,9 +260,16 @@ impl EncodedSsTableBlockBuilder {
         Self {
             block_builder,
             offset,
+            key_span: None,
             compression_codec: None,
             block_transformer: None,
         }
+    }
+
+    /// Sets the first and last key of the block
+    pub(crate) fn with_key_span(mut self, first_key: Bytes, last_key: Bytes) -> Self {
+        self.key_span = Some((first_key, last_key));
+        self
     }
 
     /// Sets the compression codec for compressing the data block
@@ -287,6 +299,7 @@ impl EncodedSsTableBlockBuilder {
             offset: self.offset,
             block: Arc::new(block),
             encoded_bytes: Bytes::from(compressed_and_transformed_block),
+            key_span: self.key_span,
         })
     }
 }
@@ -484,7 +497,6 @@ pub(crate) struct EncodedSsTable {
     pub(crate) info: SsTableInfo,
     pub(crate) index: SsTableIndexOwned,
     pub(crate) filters: Arc<[NamedFilter]>,
-    #[allow(dead_code)]
     pub(crate) stats: Option<SstStats>,
     pub(crate) unconsumed_blocks: VecDeque<EncodedSsTableBlock>,
     pub(crate) footer: Bytes,
@@ -524,7 +536,12 @@ pub(crate) async fn compress_and_transform(
 ) -> Result<usize, SlateDBError> {
     let compressed = match compression_codec {
         None => data,
-        Some(c) => compress(data, c)?,
+        Some(c) => {
+            let compressed = compress(data, c)?;
+            // Account for CPU-only compression work.
+            tokio::task::coop::consume_budget().await;
+            compressed
+        }
     };
     let transformed = transform(compressed, block_transformer).await?;
     let checksum = crc32fast::hash(&transformed);
@@ -588,10 +605,15 @@ pub(crate) async fn transform(
     block_transformer: Option<&Arc<dyn BlockTransformer>>,
 ) -> Result<Bytes, SlateDBError> {
     let transformed = match block_transformer {
-        Some(t) => t
-            .encode(data)
-            .await
-            .map_err(|_| SlateDBError::BlockTransformError)?,
+        Some(t) => {
+            let transformed = t
+                .encode(data)
+                .await
+                .map_err(|_| SlateDBError::BlockTransformError)?;
+            // Account for CPU-only transformation work.
+            tokio::task::coop::consume_budget().await;
+            transformed
+        }
         None => data,
     };
     Ok(transformed)

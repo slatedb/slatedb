@@ -72,26 +72,26 @@ test("admin manifest read list and state view", async (t) => {
   const admin = openAdmin(store, { path, cleanup });
   const db = await openDb(store, { path, cleanup });
 
-  const firstWrite = await db.put_with_options(
+  const firstWrite = cleanup.track(await db.put_with_options(
     bytes("alpha"),
     bytes("one"),
     putOptions(),
     writeOptions(false),
-  );
+  ));
   await db.flush_with_options({ flush_type: FlushType.MemTable });
 
-  const secondWrite = await db.put_with_options(
+  const secondWrite = cleanup.track(await db.put_with_options(
     bytes("beta"),
     bytes("two"),
     putOptions(),
     writeOptions(false),
-  );
+  ));
   await db.flush_with_options({ flush_type: FlushType.MemTable });
 
   const latest = await admin.read_manifest(undefined);
   assert.notEqual(latest, undefined);
   assert.ok(BigInt(latest.id) >= 3n);
-  assert.ok(BigInt(latest.last_l0_seq) >= BigInt(secondWrite.seqnum));
+  assert.ok(BigInt(latest.last_l0_seq) >= BigInt(secondWrite.seqnum()));
 
   const first = await admin.read_manifest(1n);
   assert.notEqual(first, undefined);
@@ -113,7 +113,7 @@ test("admin manifest read list and state view", async (t) => {
 
   const stateView = await admin.read_compactor_state_view();
   assert.equal(BigInt(stateView.manifest.id), BigInt(latest.id));
-  assert.ok(BigInt(firstWrite.seqnum) > 0n);
+  assert.ok(BigInt(firstWrite.seqnum()) > 0n);
 });
 
 test("admin compaction queries handle empty store and invalid ids", async (t) => {
@@ -234,27 +234,27 @@ test("admin sequence lookups use persisted tracker", async (t) => {
   const admin = openAdmin(store, { path, cleanup });
   const db = await openDb(store, { path, cleanup });
 
-  const firstWrite = await db.put_with_options(
+  const firstWrite = cleanup.track(await db.put_with_options(
     bytes("k1"),
     bytes("v1"),
     putOptions(),
     writeOptions(false),
-  );
+  ));
   await db.put_with_options(
     bytes("k2"),
     bytes("v2"),
     putOptions(),
     writeOptions(false),
   );
-  const thirdWrite = await db.put_with_options(
+  const thirdWrite = cleanup.track(await db.put_with_options(
     bytes("k3"),
     bytes("v3"),
     putOptions(),
     writeOptions(false),
-  );
+  ));
   await db.flush_with_options({ flush_type: FlushType.MemTable });
 
-  const firstTimestamp = await admin.get_timestamp_for_sequence(firstWrite.seqnum, true);
+  const firstTimestamp = await admin.get_timestamp_for_sequence(firstWrite.seqnum(), true);
   assert.notEqual(firstTimestamp, undefined);
 
   const afterLastTimestamp = await admin.get_timestamp_for_sequence(MAX_U64, true);
@@ -267,7 +267,7 @@ test("admin sequence lookups use persisted tracker", async (t) => {
   const seqAfterLast = await admin.get_sequence_for_timestamp(tomorrow, false);
   assert.notEqual(seqAfterLast, undefined);
   assert.ok(BigInt(seqAfterLast) > 0n);
-  assert.ok(BigInt(thirdWrite.seqnum) > BigInt(firstWrite.seqnum));
+  assert.ok(BigInt(thirdWrite.seqnum()) > BigInt(firstWrite.seqnum()));
 
   const invalidTimestamp = await expectInvalid(
     () => admin.get_sequence_for_timestamp(MAX_I64, false),

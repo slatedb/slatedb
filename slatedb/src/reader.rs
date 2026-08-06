@@ -468,6 +468,7 @@ mod tests {
             .as_ref()
             .map(|wb| WriteBatchIterator::new(wb, range.clone(), order, u64::MAX, None, None))
     }
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId};
     use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
@@ -522,6 +523,7 @@ mod tests {
                 Path::from("/test"),
                 None,
                 TableStoreKind::Main,
+                BlockCachePolicy::default(),
             ));
 
             Self {
@@ -572,17 +574,11 @@ mod tests {
             }
             let sst_handle = self.build_sst(entries).await?;
 
-            // Find or create the sorted run
-            let tree = Arc::make_mut(&mut self.core.tree);
-            if let Some(sr) = tree.compacted.iter_mut().find(|sr| sr.id == sr_id) {
-                sr.sst_views.push(SsTableView::identity(sst_handle));
-            } else {
-                let new_sr = SortedRun {
-                    id: sr_id,
-                    sst_views: vec![SsTableView::identity(sst_handle)],
-                };
-                tree.compacted.push(new_sr);
-            }
+            // The fixture groups all entries for a run into one SST before
+            // calling this helper, so each run is constructed exactly once.
+            Arc::make_mut(&mut self.core.tree)
+                .compacted
+                .push(SortedRun::new(sr_id, [SsTableView::identity(sst_handle)]));
             Ok(())
         }
 
@@ -602,7 +598,7 @@ mod tests {
 
             let encoded = builder.build().await?;
             let id = SsTableId::Compacted(Ulid::new());
-            self.table_store.write_sst(&id, &encoded, false).await
+            self.table_store.write_sst(&id, &encoded).await
         }
     }
 

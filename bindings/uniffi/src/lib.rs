@@ -19,11 +19,12 @@ mod types;
 mod validation;
 mod wal_reader;
 mod write_batch;
+mod write_handle;
 
 pub use admin::Admin;
 pub use builder::{AdminBuilder, CloneBuilder, DbBuilder, DbReaderBuilder};
 pub use config::{
-    DurabilityLevel, FlushOptions, FlushType, GarbageCollectorDirectoryOptions,
+    CloseOptions, DurabilityLevel, FlushOptions, FlushType, GarbageCollectorDirectoryOptions,
     GarbageCollectorOptions, GarbageCollectorScheduleOptions, IsolationLevel, IterationOrder,
     MergeOptions, PutOptions, ReadOptions, ReaderMode, ReaderOptions, ScanOptions, SstBlockSize,
     Ttl, WriteOptions,
@@ -50,9 +51,10 @@ pub use types::{
     CompactorStateView, CompressionCodec, DbStatus, ExternalDb, FilterFormat,
     IdentifiedObjectMetadata, KeyRange, KeyValue, ObjectMetadata, RowEntry, RowEntryKind, Segment,
     SegmentPrefix, SortedRun, SourceId, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
-    SstType, VersionedCompactions, VersionedManifest, WriteHandle,
+    SstType, VersionedCompactions, VersionedManifest,
 };
 pub use wal_reader::{WalFile, WalFileIterator, WalReader};
 pub use write_batch::WriteBatch;
+pub use write_handle::WriteHandle;
 
 uniffi::setup_scaffolding!("slatedb");

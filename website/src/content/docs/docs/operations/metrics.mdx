@@ -170,8 +170,11 @@ All object store metrics carry four labels:
 | `slatedb.object_store.request_duration_seconds` | histogram | Per-request latency |
 
 The instrumented store sits beneath the retrying layer, so each retry attempt
-is counted separately. Cache hits that never reach the remote store are not
-counted.
+is counted separately. It sits above the optional object-store cache, so these metrics
+count the calls SlateDB makes into the cache: a cache hit is counted as one
+request even though it never reaches the remote store, and the requests the
+cache issues against the remote store to fill a miss are not counted.
+Use the cache metrics below to tell hits from misses.
 
 ### Object store cache (`slatedb.object_store_cache.*`)
 
@@ -183,6 +186,11 @@ counted.
 | `slatedb.object_store_cache.cache_bytes` | gauge | | Cached bytes |
 | `slatedb.object_store_cache.evicted_keys` | counter | | Evicted keys |
 | `slatedb.object_store_cache.evicted_bytes` | counter | | Evicted bytes |
+
+When the cache comes from `object_store_cache_options`, it records to the
+recorder configured on the database builder. When you build a
+`CachedObjectStore` yourself, it records to a no-op recorder unless you pass
+one with `with_metrics_recorder`, so these metrics stay empty until you do.
 
 These are passed to `register_histogram` as the `boundaries` parameter.
 
@@ -246,7 +254,7 @@ impl MetricsRecorder for MetricsRsRecorder {
 ```
 
 `MetricsRsRecorder` is stateless since the `metrics` facade manages all state
-globally. 
+globally.
 
 ## Implementing a Prometheus recorder
 

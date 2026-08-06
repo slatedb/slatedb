@@ -220,12 +220,12 @@ impl DbOptions {
 
 ### Extending TTL support
 
-The last public API change is extending the `Ttl` enum to support a new `ExpireAt(ts)` variant. This allows users to set a specific expiration time for a key, which overrides the default TTL behavior.
+The last public API change is extending the `Ttl` enum to support a new `ExpireAtMillis(timestamp_millis)` variant. This allows users to set a specific expiration time for a key, expressed as milliseconds since the Unix epoch, which overrides the default TTL behavior.
 
 ```rust
 pub enum Ttl {
     ...
-    ExpireAt(i64),
+    ExpireAtMillis(i64),
 }
 ```
 
@@ -425,8 +425,8 @@ SlateDB supports two TTL approaches:
 
 1. **Operation-Level TTL**
    - Each operation (put/merge) has its own independent TTL, specified via:
-     - `Ttl::ExpireAfter(duration)`: Expires after specified duration (internally this is implemented as `ExpireAt(Instant::now() + duration)`)
-     - `Ttl::ExpireAt(timestamp)`: Expires at specified timestamp
+     - `Ttl::ExpireAfterMillis(duration_millis)`: Expires after the specified duration in milliseconds (internally this is implemented as `create_ts + duration_millis`)
+     - `Ttl::ExpireAtMillis(timestamp_millis)`: Expires at the specified Unix timestamp in milliseconds
    - Enables per-element expiration in collections
 
 2. **TTL Renewal (NOT SUPPORTED NATIVELY)**
@@ -439,7 +439,7 @@ When merging values with different TTLs, the merge operation only combines value
 
 Unlike regular values which become tombstones upon expiration, expired merge entries are simply removed, enabling per-element expiration in collections.
 
-Users can implement custom TTL patterns by consistently using either `ExpireAt` or `ExpireAfter` across operations.
+Users can implement custom TTL patterns by consistently using either `ExpireAtMillis` or `ExpireAfterMillis` across operations.
 
 ### Ordering Guarantees
 

@@ -146,15 +146,27 @@ async fn create_clone_manifest<R: RangeBounds<Bytes> + Clone>(
                 )
                 .await?;
 
+                let projection_requested = projection_range.is_some()
+                    || segment_filter.is_some()
+                    || segment_projection.is_some()
+                    || source_specs.iter().any(|s| s.projection_range.is_some());
+
                 let manifest: Manifest = match &sources[..] {
-                    // no need to call validate_no_data_wal() because for single source,
-                    // WAL is copied by the caller (create_clone)
-                    [single_source] => Manifest::cloned(
-                        &single_source.manifest,
-                        single_source.path.to_string(),
-                        single_source.checkpoint.id,
-                        rand,
-                    ),
+                    [single_source] => {
+                        // WAL SSTs are copied to the clone verbatim and replayed in full
+                        // when the clone is opened, so entries outside the projected
+                        // range would leak into the clone. So we reject projections if
+                        // there are non-fence WALs to copy.
+                        if projection_requested {
+                            validate_no_data_wal(&sources, &wal_object_store).await?;
+                        }
+                        Manifest::cloned(
+                            &single_source.manifest,
+                            single_source.path.to_string(),
+                            single_source.checkpoint.id,
+                            rand,
+                        )
+                    }
                     [..] => {
                         validate_no_data_wal(&sources, &wal_object_store).await?;
                         Manifest::cloned_from_union(sources, rand)?
@@ -344,10 +356,10 @@ async fn validate_no_data_wal(
             continue;
         }
 
-        let path_resolver = PathResolver::new(source.path.clone());
+        let path_resolver = PathResolver::from_root(source.path.clone());
         let mut has_data_wal = false;
         for wal_id in (core.replay_after_wal_id + 1)..core.next_wal_sst_id {
-            let path = path_resolver.table_path(&SsTableId::Wal(wal_id));
+            let path = path_resolver.sst_path(&SsTableId::Wal(wal_id));
             match wal_object_store.head(&path).await {
                 Ok(meta) => {
                     // Fence WALs are zero-byte `SsTableId::Wal` objects (written via
@@ -368,7 +380,7 @@ async fn validate_no_data_wal(
         }
     }
     if !parents_with_wal.is_empty() {
-        return Err(SlateDBError::InvalidUnionSourceWithWal {
+        return Err(SlateDBError::InvalidCloneSourceWithWal {
             paths: parents_with_wal,
         });
     }
@@ -462,8 +474,8 @@ async fn copy_wal_ssts(
     clone_path: &Path,
     #[allow(unused)] fp_registry: Arc<FailPointRegistry>,
 ) -> Result<(), SlateDBError> {
-    let parent_path_resolver = PathResolver::new(parent_path.clone());
-    let clone_path_resolver = PathResolver::new(clone_path.clone());
+    let parent_path_resolver = PathResolver::from_root(parent_path.clone());
+    let clone_path_resolver = PathResolver::from_root(clone_path.clone());
 
     let mut wal_id = parent_checkpoint_state.replay_after_wal_id + 1;
     while wal_id < parent_checkpoint_state.next_wal_sst_id {
@@ -472,8 +484,8 @@ async fn copy_wal_ssts(
         ));
 
         let id = SsTableId::Wal(wal_id);
-        let parent_path = parent_path_resolver.table_path(&id);
-        let clone_path = clone_path_resolver.table_path(&id);
+        let parent_path = parent_path_resolver.sst_path(&id);
+        let clone_path = clone_path_resolver.sst_path(&id);
         object_store
             .as_ref()
             .copy(&parent_path, &clone_path)
@@ -1185,7 +1197,6 @@ mod tests {
             .await
             .unwrap();
         let write_options = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
         let put_options = PutOptions::default();
@@ -1276,7 +1287,6 @@ mod tests {
             .await
             .unwrap();
         let write_options = WriteOptions {
-            await_durable: false,
             ..Default::default()
         };
         let put_options = PutOptions::default();
@@ -1317,8 +1327,8 @@ mod tests {
             manifest.manifest.core.replay_after_wal_id + 1 < manifest.manifest.core.next_wal_sst_id,
             "expected cloned state to retain WAL-only SSTs"
         );
-        let expected_missing_wal_path = PathResolver::new(Path::from(parent_path))
-            .table_path(&SsTableId::Wal(
+        let expected_missing_wal_path = PathResolver::from_root(Path::from(parent_path))
+            .sst_path(&SsTableId::Wal(
                 manifest.manifest.core.replay_after_wal_id + 1,
             ))
             .to_string();
@@ -1356,6 +1366,158 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn should_disallow_projected_clone_when_source_has_data_wal() {
+        // Data that only lives in the parent's WAL at the checkpoint is copied
+        // to the clone verbatim and replayed in full on first open, so a
+        // projection cannot be applied to it. Cloning with a projection must
+        // fail while the source still has data in its WAL, and succeed once
+        // that data has been flushed into L0.
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path = Path::from("/tmp/test_parent_wal_projection");
+        let clone_path = Path::from("/tmp/test_clone_wal_projection");
+
+        let parent_db = Db::builder(parent_path.clone(), object_store.clone())
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+        let write_options = WriteOptions::default();
+        let put_options = PutOptions::default();
+
+        // Keys inside and outside the projection range [aaa, bbb), flushed
+        // through to L0 ...
+        parent_db
+            .put_with_options(b"aaa-l0", b"v1", &put_options, &write_options)
+            .await
+            .unwrap();
+        parent_db
+            .put_with_options(b"zzz-l0", b"v2", &put_options, &write_options)
+            .await
+            .unwrap();
+        parent_db.flush().await.unwrap();
+        parent_db
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+
+        // ... and the same shape of data made durable only in the WAL.
+        parent_db
+            .put_with_options(b"aaa-wal", b"v3", &put_options, &write_options)
+            .await
+            .unwrap();
+        parent_db
+            .put_with_options(b"zzz-wal", b"v4", &put_options, &write_options)
+            .await
+            .unwrap();
+        parent_db.flush().await.unwrap();
+
+        let manifest = parent_db.manifest();
+        assert!(
+            !manifest.manifest.core.tree.l0.is_empty(),
+            "expected parent state to include L0 data"
+        );
+        assert!(
+            manifest.manifest.core.replay_after_wal_id + 1 < manifest.manifest.core.next_wal_sst_id,
+            "expected parent state to retain WAL-only SSTs"
+        );
+
+        // Block L0 uploads so the WAL-only data stays in the WAL.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            "return",
+        )
+        .unwrap();
+        // expect to fail since l0 upload is blocked
+        assert!(parent_db.close().await.is_err());
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
+
+        // Cloning with a projection that keeps only keys in [aaa, bbb) must
+        // be rejected while the WAL-only data is still in the WAL.
+        let range = (
+            Bound::Included(Bytes::from_static(b"aaa")),
+            Bound::Excluded(Bytes::from_static(b"bbb")),
+        );
+        let err = crate::clone::create_clone(
+            vec![CloneSourceSpec::new(parent_path.clone())],
+            clone_path.clone(),
+            ObjectStores::new(object_store.clone(), Some(object_store.clone())),
+            Arc::new(FailPointRegistry::new()),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            Some(range.clone()),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SlateDBError::InvalidCloneSourceWithWal { ref paths }
+                if paths == &vec![parent_path.clone()]
+        ));
+
+        // Reopen the parent so the WAL tail is replayed, flush it into L0,
+        // and close cleanly. With no data WALs left to copy the projected
+        // clone is allowed.
+        let parent_db = Db::open(parent_path.clone(), object_store.clone())
+            .await
+            .unwrap();
+        parent_db
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        parent_db.close().await.unwrap();
+
+        crate::clone::create_clone(
+            vec![CloneSourceSpec::new(parent_path.clone())],
+            clone_path.clone(),
+            ObjectStores::new(object_store.clone(), Some(object_store.clone())),
+            Arc::new(FailPointRegistry::new()),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::default()),
+            Some(range),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let clone_db = Db::open(clone_path.clone(), object_store.clone())
+            .await
+            .unwrap();
+
+        // L0 data respects the projection.
+        assert_eq!(
+            clone_db.get(b"aaa-l0").await.unwrap(),
+            Some(Bytes::from_static(b"v1"))
+        );
+        assert_eq!(
+            clone_db.get(b"zzz-l0").await.unwrap(),
+            None,
+            "L0 entry outside the projection range must not be visible in the clone"
+        );
+
+        // The formerly WAL-only data was flushed into L0 before the retry,
+        // so it must respect the projection too.
+        assert_eq!(
+            clone_db.get(b"aaa-wal").await.unwrap(),
+            Some(Bytes::from_static(b"v3"))
+        );
+        assert_eq!(
+            clone_db.get(b"zzz-wal").await.unwrap(),
+            None,
+            "entry outside the projection range must not be visible in the clone"
+        );
+        clone_db.close().await.unwrap();
+    }
+
     fn segmented_table() -> BTreeMap<Bytes, Bytes> {
         BTreeMap::from([
             (Bytes::from_static(b"aaa-001"), Bytes::from_static(b"v1")),
@@ -1382,15 +1544,25 @@ mod tests {
         settings: Settings,
         table: &BTreeMap<Bytes, Bytes>,
     ) {
+        #[cfg(feature = "wal_disable")]
+        let wal_enabled = settings.wal_enabled;
+        #[cfg(not(feature = "wal_disable"))]
+        let wal_enabled = true;
         let db = Db::builder(path.clone(), object_store)
             .with_settings(settings)
             .with_segment_extractor(extractor)
             .build()
             .await
             .unwrap();
-        // await_durable would deadlock under wal_enabled=false because the
+        // Do not await the returned handle here: with wal_enabled=false, the
         // memtable flush is gated on the explicit call below.
         test_utils::seed_database(&db, table, false).await.unwrap();
+        if wal_enabled {
+            // Flush the WAL before the memtable so that `replay_after_wal_id`
+            // covers every data WAL; projected clones of this parent would
+            // otherwise be rejected.
+            db.flush().await.unwrap();
+        }
         db.flush_with_options(FlushOptions {
             flush_type: FlushType::MemTable,
         })
@@ -1997,7 +2169,8 @@ mod tests {
 
         // Plant the WAL object directly in the object store at the resolved path.
         use object_store::ObjectStoreExt;
-        let wal_path = PathResolver::new(path.clone()).table_path(&SsTableId::Wal(planted_wal_id));
+        let wal_path =
+            PathResolver::from_root(path.clone()).sst_path(&SsTableId::Wal(planted_wal_id));
         object_store.put(&wal_path, wal_bytes.into()).await.unwrap();
 
         planted_wal_id
@@ -2094,7 +2267,7 @@ mod tests {
     }
 
     /// A union clone whose source references a real (non-empty) data WAL above
-    /// `replay_after_wal_id` must FAIL with `InvalidUnionSourceWithWal`, since
+    /// `replay_after_wal_id` must FAIL with `InvalidCloneSourceWithWal`, since
     /// the union clone would silently drop that WAL data.
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
@@ -2143,10 +2316,10 @@ mod tests {
         .unwrap_err();
 
         match err {
-            SlateDBError::InvalidUnionSourceWithWal { paths } => {
+            SlateDBError::InvalidCloneSourceWithWal { paths } => {
                 assert!(paths.contains(&parent_path_a));
             }
-            other => panic!("expected InvalidUnionSourceWithWal, got {other:?}"),
+            other => panic!("expected InvalidCloneSourceWithWal, got {other:?}"),
         }
     }
 
@@ -2183,8 +2356,8 @@ mod tests {
         .await;
         build_plain_wal_disabled_parent(&parent_path_b, object_store.clone(), &table_b).await;
 
-        let expected_missing_wal_path = PathResolver::new(parent_path_a.clone())
-            .table_path(&SsTableId::Wal({
+        let expected_missing_wal_path = PathResolver::from_root(parent_path_a.clone())
+            .sst_path(&SsTableId::Wal({
                 let manifest_store =
                     Arc::new(ManifestStore::new(&parent_path_a, object_store.clone()));
                 let sm = StoredManifest::load(manifest_store, system_clock.clone())

@@ -17,11 +17,29 @@ You can replace the cache with [`DbBuilder::with_db_cache`](https://docs.rs/slat
 
 ## Object-Store Cache
 
-[`ObjectStoreCacheOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html) enables a second cache layer for raw object-store bytes. When [`root_folder`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.root_folder) is set, SlateDB wraps the configured object store in a local cache. It splits each object into fixed-size parts, stores those parts under the local root, and can serve later `GET` and `HEAD` requests from those local files when the needed parts are already present.
+[`CachedObjectStore`](https://docs.rs/slatedb/latest/slatedb/cached_object_store/struct.CachedObjectStore.html) is a second cache layer for raw object-store bytes. It splits each object into fixed-size parts, stores those parts under a local root folder, and can serve later `GET` and `HEAD` requests from those local files when the needed parts are already present.
+
+There are two ways to enable it. The first is configuration: set [`root_folder`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.root_folder) in [`ObjectStoreCacheOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html), and SlateDB builds the cache from those options and wraps the object store you passed to the builder in it. This is the only way to enable the cache from a settings file.
+
+The second is to build the cache yourself with [`CachedObjectStore::builder`](https://docs.rs/slatedb/latest/slatedb/cached_object_store/struct.CachedObjectStore.html#method.builder) and pass it to SlateDB as the object store:
+
+```rust
+let cache = CachedObjectStore::builder("/var/slatedb-cache", object_store)
+    .with_cache_on_flush(true)
+    .with_cache_on_compaction(true)
+    .with_max_cache_size_bytes(Some(16 * 1024 * 1024 * 1024))
+    .build()
+    .await?;
+let db = Db::builder(path, cache).build().await?;
+```
+
+Building it yourself lets you hold on to the cache instance, share it across several `Db` and `DbReader` instances in the same process, and warm it directly. Leave [`root_folder`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.root_folder) unset when you do this, otherwise SlateDB wraps your cache in a second one.
+
+Either way the cache ends up as the innermost layer, closest to the object store you provided. SlateDB adds its own retry and metrics handling above it, so a read served from the cache is still counted as an object-store request. See [Metrics](/docs/operations/metrics) for what that means for the `slatedb.object_store.*` metrics.
 
 This cache stores object-store bytes, not decoded SST blocks. It helps when the block cache is cold because it can avoid a remote read even though SlateDB still needs to read from local disk and decode the block afterward. On a miss, SlateDB aligns the requested range to the configured part size, fetches that larger range from the object store, and saves the returned parts locally. The default part size is 4 MiB.
 
-The built-in object-store cache is disk-backed today. [`root_folder`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.root_folder) is a filesystem path, and the current implementation stores parts under that directory. If you want an in-memory cache, use the block cache layer instead.
+The built-in object-store cache is disk-backed today. The root folder is a filesystem path, and the current implementation stores parts under that directory. If you want an in-memory cache, use the block cache layer instead.
 
 ## How Caches Get Filled
 
@@ -31,17 +49,54 @@ Reads consult the block cache first. On a miss there, SlateDB fetches bytes thro
 
 The defaults reflect the usual access patterns. Point reads default to `cache_blocks = true` because they are more likely to revisit hot data. Scans default to `cache_blocks = false` so a long sequential read does not fill the cache with data blocks that probably will not be reused soon. Scans can still benefit from entries that are already hot. Internal tasks follow the same idea: WAL replay and compaction read SSTs without populating the foreground cache.
 
-The disk cache stays disabled unless `object_store_cache_options.root_folder` is set. If you want it warm before serving traffic, you can preload it on startup with [`PreloadLevel::L0Sst`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html#variant.L0Sst) or [`PreloadLevel::AllSst`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html#variant.AllSst). SlateDB loads recent SSTs, or all SSTs, into the local cache until the cache size limit is reached.
+Writes fill the block cache as well. [`BlockCachePolicy`](https://docs.rs/slatedb/latest/slatedb/struct.BlockCachePolicy.html) selects which components of an SST are inserted as that SST is written, and you install it with [`DbBuilder::with_block_cache_policy`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_block_cache_policy). The policy applies to the block cache only. Admission into the object-store cache is controlled separately, as described below.
 
-By default, writes go straight to the upstream object store and do not populate the object-store cache. Each SST write source has its own admission flag: [`cache_on_flush`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.cache_on_flush) stores SSTs written by memtable flushes locally, and [`cache_on_compaction`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.cache_on_compaction) does the same for compaction output. Enabling them can help if readers are likely to touch freshly written SSTs soon afterward. WAL and manifest writes are never cached.
+The policy holds one target list per write source. The default inserts data blocks, the index, and the filters after a memtable flush, and inserts only the index and the filters as compaction output is written, so compaction does not evict blocks that reads have made hot. Replace either list with [`BlockCachePolicy::with_flush_targets`](https://docs.rs/slatedb/latest/slatedb/struct.BlockCachePolicy.html#method.with_flush_targets) or [`BlockCachePolicy::with_compaction_output_targets`](https://docs.rs/slatedb/latest/slatedb/struct.BlockCachePolicy.html#method.with_compaction_output_targets). An empty list disables insertion for that source.
+
+Each list holds [`CacheTarget`](https://docs.rs/slatedb/latest/slatedb/db_cache/enum.CacheTarget.html) values:
+
+- `CacheTarget::Filters` inserts the SST filter blocks, if any exist.
+- `CacheTarget::Index` inserts the SST index.
+- `CacheTarget::Stats` inserts the SST stats block, if one exists.
+- `CacheTarget::data(range)` inserts the data blocks whose key span overlaps `range`.
+
+`CacheTarget::data` accepts any key range, so `CacheTarget::data::<&[u8], _>(..)` selects every data block, while `CacheTarget::data(b"user:".as_slice()..b"user;".as_slice())` selects only the blocks covering that key range. This policy caches all four components after a flush and nothing after compaction:
+
+```rust
+use slatedb::{BlockCachePolicy, CacheTarget, Db};
+
+let policy = BlockCachePolicy::default()
+    .with_flush_targets(&[
+        CacheTarget::data::<&[u8], _>(..),
+        CacheTarget::Index,
+        CacheTarget::Filters,
+        CacheTarget::Stats,
+    ])
+    .with_compaction_output_targets(&[]);
+
+let db = Db::builder(path, object_store)
+    .with_block_cache_policy(policy)
+    .build()
+    .await?;
+```
+
+The disk cache stays disabled unless you enable it, either by setting `object_store_cache_options.root_folder` or by passing your own `CachedObjectStore` to the builder.
+
+By default, writes go straight to the upstream object store and do not populate the object-store cache. Each SST write source has its own admission flag: [`cache_on_flush`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.cache_on_flush) stores SSTs written by memtable flushes locally, and [`cache_on_compaction`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.cache_on_compaction) does the same for compaction output. The builder exposes the same two flags as [`with_cache_on_flush`](https://docs.rs/slatedb/latest/slatedb/cached_object_store/struct.CachedObjectStoreBuilder.html#method.with_cache_on_flush) and [`with_cache_on_compaction`](https://docs.rs/slatedb/latest/slatedb/cached_object_store/struct.CachedObjectStoreBuilder.html#method.with_cache_on_compaction). Enabling them can help if readers are likely to touch freshly written SSTs soon afterward. WAL and manifest writes are never cached.
+
+## Warming the Object-Store Cache
+
+If you want the disk cache warm before serving traffic, and you configured it through [`ObjectStoreCacheOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html), set [`preload_disk_cache_on_startup`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.preload_disk_cache_on_startup) to [`PreloadLevel::L0Sst`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html#variant.L0Sst) or [`PreloadLevel::AllSst`](https://docs.rs/slatedb/latest/slatedb/config/enum.PreloadLevel.html#variant.AllSst). `Db` and `DbReader` load recent SSTs, or all SSTs, into the local cache on open until the cache size limit is reached.
+
+That setting only applies to a cache SlateDB built for you. A cache you built yourself is warmed by you. Read the current SST set from [`DbMetadataOps::manifest`](https://docs.rs/slatedb/latest/slatedb/ops/trait.DbMetadataOps.html#tymethod.manifest), resolve each SST id to an object-store path with [`PathResolver::sst_path`](https://docs.rs/slatedb/latest/slatedb/struct.PathResolver.html#method.sst_path), and pass the paths to [`CachedObjectStore::load_files_to_cache`](https://docs.rs/slatedb/latest/slatedb/cached_object_store/struct.CachedObjectStore.html#method.load_files_to_cache). Construct the resolver with [`PathResolver::new`](https://docs.rs/slatedb/latest/slatedb/struct.PathResolver.html#method.new), which takes the manifest as well as the database path because a manifest can reference SSTs owned by another database after a clone. The `max_bytes` budget is applied in path order, so order paths by priority. Fetches are best-effort, and failures are logged and skipped.
 
 ## Sharing Between Instances
 
 The two cache layers behave differently when you open multiple [`Db`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html) or [`DbReader`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html) instances against the same cache.
 
-For the object-store cache, sharing is straightforward. If multiple instances on the same machine use the same [`root_folder`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.root_folder), they reuse the same local cache directory. For the same database path, that lets one instance benefit from parts fetched by another. When you use [`Db::resolve_object_store`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html#method.resolve_object_store) and provide different path arguments to builder methods like [`DbBuilder::new`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.new), SlateDB keeps the cached files under different path prefixes, so they do not clobber one another. Using the same [`part_size_bytes`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.part_size_bytes) gives the best reuse. Different part sizes can coexist, but they will not reuse the same cached part files.
+For the object-store cache, sharing is straightforward. If multiple instances on the same machine use the same root folder, whether they set [`root_folder`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.root_folder) or pass it to `CachedObjectStore::builder`, they reuse the same local cache directory. Instances in the same process can also share one `CachedObjectStore` instance directly. For the same database path, that lets one instance benefit from parts fetched by another. When you use [`Db::resolve_object_store`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html#method.resolve_object_store) and provide different path arguments to builder methods like [`DbBuilder::new`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.new), SlateDB keeps the cached files under different path prefixes, so they do not clobber one another. Using the same part size gives the best reuse. Different part sizes can coexist, but they will not reuse the same cached part files.
 
-If you provide an object store directly with `PrefixStore` or other custom wrapping instead of using `Db::resolve_object_store`, you must configure different [`root_folder`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.root_folder) values for each instance to prevent cache collisions. SlateDB no longer automatically resolves root prefixes from metadata locations.
+If you provide an object store directly with `PrefixStore` or other custom wrapping instead of using `Db::resolve_object_store`, you must configure different root folder values for each instance to prevent cache collisions. SlateDB no longer automatically resolves root prefixes from metadata locations.
 
 The block cache is different. Both [`DbBuilder::with_db_cache`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_db_cache) and [`DbReaderBuilder::with_db_cache`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbReaderBuilder.html#method.with_db_cache) let you pass in your own cache object, so you can choose to reuse the same process-local cache implementation across builders. For `Db`, that mainly gives you a shared memory or disk budget, not shared hits: SlateDB scopes each instance's entries so one `Db` does not read another `Db`'s cached blocks by accident. If your main goal is cross-instance warming, the object-store cache is the better fit.
 
