@@ -155,8 +155,16 @@ impl SstFile {
 
     /// Returns `(block_offset, first_key)` pairs from the SST index block.
     pub async fn index(&self) -> Result<Vec<(u64, Bytes)>, crate::Error>;
+
+    /// Returns a zero-copy view of the SST index block.
+    pub async fn index_view(&self) -> Result<SstIndex, crate::Error>;
 }
 ```
+
+`SstIndex` retains the cached index data and provides indexed access,
+iteration, and binary-search partition points over borrowed first keys. This
+avoids materializing and copying the full index for consumers that only need
+to locate blocks.
 
 ```rust
 pub struct SstStats {
@@ -181,7 +189,7 @@ The `SstFile::info()` call is primarily for users that don't have access to a `M
 
 The downside is that `open()` requires a read to obtain the `SsTableHandle` even if the caller only wants to call `metadata()`, which doesn't need it. This is a fine tradeoff.
 
-`index()` calls `SsTableFormat::read_index()`, which reads `info.index_offset..info.index_offset + info.index_len`, decompresses, and returns an `SsTableIndexOwned`. The method materializes `Vec<(u64, Bytes)>` from the FlatBuffer `BlockMeta` entries (each has `offset()` and `first_key()`). Caching uses `DbCache::get_index` / `insert` keyed by `(sst_id, index_offset)`, matching the existing pattern in `TableStore::read_index()`.
+`index_view()` calls `SsTableFormat::read_index()`, which reads `info.index_offset..info.index_offset + info.index_len`, decompresses, and returns an `SsTableIndexOwned`. The view retains the cached `Arc<SsTableIndexOwned>` and reads FlatBuffer `BlockMeta` entries without copying their keys. `index()` remains available when an owned `Vec<(u64, Bytes)>` is required and materializes it from `index_view()`. Caching uses `DbCache::get_index` / `insert` keyed by `(sst_id, index_offset)`, matching the existing pattern in `TableStore::read_index()`.
 
 The existing `SstFileMetadata` struct in `tablestore.rs` (currently `pub(crate)`) is made `pub`.
 

@@ -72,7 +72,7 @@ pub use prefix_extractor::{PrefixExtractor, PrefixTarget};
 pub use slatedb_common::{DbRand, IdentifiedObjectMetadata, ObjectMetadata};
 #[cfg(test)]
 pub use sst_builder::BlockFormat;
-pub use sst_reader::{SstFile, SstReader};
+pub use sst_reader::{SstFile, SstIndex, SstReader};
 pub use sst_stats::{BlockStats, SstStats};
 pub use transaction_manager::IsolationLevel;
 pub use types::KeyValue;
