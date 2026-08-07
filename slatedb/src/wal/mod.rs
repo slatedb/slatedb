@@ -3,11 +3,13 @@ use crate::manifest::store::FenceableManifest;
 use crate::{CloseReason, ErrorKind, RowEntry, VersionedManifest};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
+use object_store::path::Path;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::{Bound, Range};
 use std::sync::Arc;
 
+pub(crate) mod admin;
 pub(crate) mod gc;
 #[cfg(test)]
 pub(crate) mod test_utils;
@@ -290,6 +292,58 @@ pub trait WalGC: Send + Sync + 'static {
     /// referenced by some active Manifest. The implementation may delete any WAL File that is not
     /// included in the ranges in this list.
     async fn collect(&self, referenced_ranges: Vec<WalFileRange>) -> Result<(), WalError>;
+}
+
+/// Administrative operations for a WAL implementation.
+#[async_trait]
+pub trait WalAdmin: Send + Sync + 'static {
+    /// Creates a garbage collector scoped to the WAL at `path`.
+    ///
+    /// ## Arguments
+    /// - `path`: The database path whose WAL should be garbage collected.
+    ///
+    /// ## Returns
+    /// A garbage collector that can remove unreferenced WAL files at `path`.
+    fn garbage_collector(&self, path: &Path) -> Box<dyn WalGC>;
+
+    /// Deletes the WAL at `path`.
+    ///
+    /// ## Arguments
+    /// - `path`: The database path whose WAL should be deleted.
+    ///
+    /// ## Returns
+    /// `Ok(())` after the WAL has been deleted, or a [`WalError`] if deletion fails.
+    async fn delete_wal(&self, path: &Path) -> Result<(), WalError>;
+
+    /// Given a path and manifest, returns true if the WAL referenced by the manifest at that path
+    /// is empty. A WAL is empty if it holds no records.
+    ///
+    /// ## Arguments
+    /// - `path`: The database path containing the WAL.
+    /// - `manifest`: The source manifest that identifies the WAL state to inspect.
+    ///
+    /// ## Returns
+    /// `Ok(true)` if the referenced WAL contains no records, `Ok(false)` if it contains records,
+    /// or a [`WalError`] if the WAL could not be inspected.
+    async fn is_empty(&self, path: &Path, manifest: VersionedManifest) -> Result<bool, WalError>;
+
+    /// Given a source path and manifest, copy the referenced WAL to a destination path and return
+    /// a replay range. This call must be idempotent (TODO: clarify)
+    ///
+    /// ## Arguments
+    /// - `from_path`: The db path that holds the source WAL range to be copied
+    /// - `from_manifest`: The source manifest that identifies the WAL to copy
+    /// - `to_path`: The db path of the clone that the WAL is being copied to.
+    ///
+    /// ## Returns
+    /// A (u64, u64) pair. The first item will be used as the replay start point (exclusive). The
+    /// second item should be the id of the last WAL file id in the copied WAL.
+    async fn clone_wal(
+        &self,
+        from_path: &Path,
+        from_manifest: VersionedManifest,
+        to_path: &Path,
+    ) -> Result<(u64, u64), WalError>;
 }
 
 impl From<WalStatus> for WalError {
