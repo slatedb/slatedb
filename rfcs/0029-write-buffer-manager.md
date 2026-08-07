@@ -356,11 +356,13 @@ key/value data bytes themselves — only the `KVTable` does.
 
 2. **`DbInner::write_with_options`** reserves with non-blocking
    `force_acquire(estimated_size)`, attaches the permit, dispatches the batch,
-   awaits apply completion, then calls `maybe_apply_backpressure()`. Blocking
-   happens only after the write is in the memtable. Blocking in `acquire`
-   before dispatch was rejected: a freeze requested while parked can run before
-   the batch is applied (or on the wrong shared-manager instance), after which
-   nothing re-arms relief and the waiter hangs.
+   awaits apply completion, then calls `maybe_apply_backpressure()` **only if**
+   `at_capacity()`. Blocking happens only after the write is in the memtable,
+   and only when over the watermark (so a successful apply is not turned into
+   an error by a racing `check_closed()` when under capacity). Blocking in
+   `acquire` before dispatch was rejected: a freeze requested while parked can
+   run before the batch is applied (or on the wrong shared-manager instance),
+   after which nothing re-arms relief and the waiter hangs.
 
 3. **`DbInner::write_batch`** (batch writer) merges the permit into the
    `KVTable`, applies entries, runs size/WAL-based `maybe_freeze_current_memtable`,
