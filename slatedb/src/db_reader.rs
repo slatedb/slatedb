@@ -829,9 +829,7 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
                 // reader for good. Structural errors still propagate and close.
                 match self.poll_managed_checkpoint().await {
                     Err(error) if Self::is_transient_poll_error(&error) => {
-                        warn!(
-                            "failed to poll manifest; will retry on next tick [error={error:?}]"
-                        );
+                        warn!("failed to poll manifest; will retry on next tick [error={error:?}]");
                         Ok(())
                     }
                     result => result,
