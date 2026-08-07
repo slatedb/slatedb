@@ -51,9 +51,9 @@ mod manifest_gc;
 pub mod stats;
 mod wal_gc;
 
+use crate::wal::WalGC;
 pub(crate) use filter::retain_allowed_by_gc_filter;
 pub use filter::GcFilter;
-use crate::wal::WalGC;
 
 pub(crate) const DEFAULT_MIN_AGE: Duration = Duration::from_secs(300);
 pub(crate) const DEFAULT_INTERVAL: Duration = Duration::from_secs(600);
@@ -238,7 +238,7 @@ impl GarbageCollector {
         gc_filter: Option<Arc<dyn GcFilter>>,
         wal_gc: Option<Arc<dyn WalGC>>,
     ) -> Self {
-        let stats = Arc::new(GcStats::new(&recorder));
+        let stats = Arc::new(GcStats::new(recorder));
         // The standalone GC lifecycle does not surface a closed result yet, so the
         // task executor uses a throwaway sink.
         let closed_result: Arc<dyn ClosedResultWriter> = Arc::new(WatchableOnceCell::new());
@@ -247,7 +247,7 @@ impl GarbageCollector {
             system_clock.clone(),
         ));
         let wal_gc_task = options.wal_options.map(|wal_options| {
-            let wal_gc = wal_gc.unwrap_or_else(||
+            let wal_gc = wal_gc.unwrap_or_else(|| {
                 Arc::new(SlateDbWalGc::new(
                     table_store.clone(),
                     stats.clone(),
@@ -255,13 +255,13 @@ impl GarbageCollector {
                     gc_filter.clone(),
                     system_clock.clone(),
                 ))
-            );
+            });
             WalGcTask::new(
                 manifest_store.clone(),
                 wal_gc,
                 WalGcMode::Regular.resource(),
                 wal_options.min_age,
-                wal_options.dry_run
+                wal_options.dry_run,
             )
         });
         let wal_fence_gc_task = options.wal_fence_options.map(|wal_fence_options| {
@@ -277,7 +277,7 @@ impl GarbageCollector {
                 wal_gc,
                 WalGcMode::Fence.resource(),
                 wal_fence_options.min_age,
-                wal_fence_options.dry_run
+                wal_fence_options.dry_run,
             )
         });
         let compacted_gc_task = options.compacted_options.map(|compacted_options| {

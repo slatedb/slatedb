@@ -161,7 +161,7 @@ use crate::retrying_object_store::RetryingObjectStore;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
-use crate::{retrying_object_store, wal};
+use crate::wal;
 use crate::wal::admin::SlateDbWalAdmin;
 use crate::wal::wal_disabled::DisabledWalObserver;
 use crate::wal::{WalAdmin, WalGC, WalObserver};
@@ -944,9 +944,10 @@ impl<P: Into<Path>> AdminBuilder<P> {
                 self.system_clock.clone(),
                 self.object_store_max_retries,
             ));
-            Arc::new(
-                SlateDbWalAdmin::new(retrying_object_store, Arc::new(FailPointRegistry::new()))
-            )
+            Arc::new(SlateDbWalAdmin::new(
+                retrying_object_store,
+                Arc::new(FailPointRegistry::new()),
+            ))
         });
         Admin {
             path: self.path.into(),

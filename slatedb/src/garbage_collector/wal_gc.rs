@@ -1,3 +1,4 @@
+use super::GcTask;
 use crate::manifest::Manifest;
 use crate::{
     error::SlateDBError,
@@ -9,7 +10,6 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Duration;
-use super::GcTask;
 
 #[derive(Clone)]
 pub(crate) struct WalGcTask {

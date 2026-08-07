@@ -292,13 +292,12 @@ mod tests {
             write_regular_wal(&table_store, wal_id).await;
         }
         make_all_wals_older_than(&table_store, &clock, Duration::ZERO).await;
-        let collector = build_collector(
-            table_store.clone(),
-            clock,
-            WalGcMode::Regular,
-        );
+        let collector = build_collector(table_store.clone(), clock, WalGcMode::Regular);
 
-        collector.collect(protect_outer_wals(), Duration::ZERO, false).await.unwrap();
+        collector
+            .collect(protect_outer_wals(), Duration::ZERO, false)
+            .await
+            .unwrap();
 
         assert_eq!(wal_ids(&table_store).await, vec![1, 4]);
     }
@@ -310,13 +309,12 @@ mod tests {
         write_regular_wal(&table_store, 1).await;
         write_fence_wal(&table_store, 2).await;
         make_all_wals_older_than(&table_store, &clock, Duration::ZERO).await;
-        let collector = build_collector(
-            table_store.clone(),
-            clock,
-            WalGcMode::Regular,
-        );
+        let collector = build_collector(table_store.clone(), clock, WalGcMode::Regular);
 
-        collector.collect(vec![], Duration::ZERO, false).await.unwrap();
+        collector
+            .collect(vec![], Duration::ZERO, false)
+            .await
+            .unwrap();
 
         assert_eq!(wal_ids(&table_store).await, vec![2]);
     }
@@ -332,11 +330,7 @@ mod tests {
             .unwrap()
             .last_modified;
         let min_age = Duration::from_secs(60 * 60);
-        let collector = build_collector(
-            table_store.clone(),
-            clock.clone(),
-            WalGcMode::Regular,
-        );
+        let collector = build_collector(table_store.clone(), clock.clone(), WalGcMode::Regular);
 
         clock.set((last_modified + chrono::Duration::minutes(30)).timestamp_millis());
         collector.collect(vec![], min_age, false).await.unwrap();
@@ -355,10 +349,12 @@ mod tests {
             write_fence_wal(&table_store, wal_id).await;
         }
         make_all_wals_older_than(&table_store, &clock, Duration::ZERO).await;
-        let collector =
-            build_collector(table_store.clone(), clock, WalGcMode::Fence);
+        let collector = build_collector(table_store.clone(), clock, WalGcMode::Fence);
 
-        collector.collect(protect_outer_wals(), Duration::ZERO, false).await.unwrap();
+        collector
+            .collect(protect_outer_wals(), Duration::ZERO, false)
+            .await
+            .unwrap();
 
         assert_eq!(wal_ids(&table_store).await, vec![1, 4]);
     }
@@ -370,10 +366,12 @@ mod tests {
         write_fence_wal(&table_store, 1).await;
         write_regular_wal(&table_store, 2).await;
         make_all_wals_older_than(&table_store, &clock, Duration::ZERO).await;
-        let collector =
-            build_collector(table_store.clone(), clock, WalGcMode::Fence);
+        let collector = build_collector(table_store.clone(), clock, WalGcMode::Fence);
 
-        collector.collect(vec![], Duration::ZERO, false).await.unwrap();
+        collector
+            .collect(vec![], Duration::ZERO, false)
+            .await
+            .unwrap();
 
         assert_eq!(wal_ids(&table_store).await, vec![2]);
     }
@@ -389,11 +387,7 @@ mod tests {
             .unwrap()
             .last_modified;
         let min_age = Duration::from_secs(60 * 60);
-        let collector = build_collector(
-            table_store.clone(),
-            clock.clone(),
-            WalGcMode::Fence,
-        );
+        let collector = build_collector(table_store.clone(), clock.clone(), WalGcMode::Fence);
 
         clock.set((last_modified + chrono::Duration::minutes(30)).timestamp_millis());
         collector.collect(vec![], min_age, false).await.unwrap();

@@ -1,6 +1,6 @@
-use std::collections::{BTreeSet};
 pub use crate::db::builder::CloneBuilder;
 pub use crate::db::builder::CloneSourceSpec;
+use std::collections::BTreeSet;
 
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::compactions_store::CompactionsStore;
@@ -36,8 +36,8 @@ use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
 use crate::merge_operator::MergeOperatorType;
-use slatedb_txn_obj::TransactionalObject;
 use crate::wal::WalAdmin;
+use slatedb_txn_obj::TransactionalObject;
 
 /// An Admin struct for SlateDB administration operations.
 ///
@@ -637,10 +637,10 @@ impl Admin {
         // between leaves the marker to prove a rerun should finish.
         let mut deleted = self.delete_prefix(&main, Some(&marker)).await?;
         deleted.extend(
-            self.wal_admin.delete_wal(
-                &self.path,
-                false
-            ).await.map_err(|e| SlateDBError::from(e))?
+            self.wal_admin
+                .delete_wal(&self.path, false)
+                .await
+                .map_err(SlateDBError::from)?,
         );
         main.delete(&marker).await.map_err(SlateDBError::from)?;
         deleted.push(marker.to_string());
@@ -652,8 +652,11 @@ impl Admin {
         let paths = collect_prefix(main, &self.path).await?;
         // track the dry run paths in a set since the WAL and db may overlap
         let mut paths = paths.iter().map(Path::to_string).collect::<BTreeSet<_>>();
-        let wal_paths = self.wal_admin.delete_wal(&self.path, true).await
-            .map_err(|e| SlateDBError::from(e))?;
+        let wal_paths = self
+            .wal_admin
+            .delete_wal(&self.path, true)
+            .await
+            .map_err(SlateDBError::from)?;
         for wp in wal_paths {
             paths.insert(wp);
         }
