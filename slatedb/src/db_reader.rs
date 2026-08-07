@@ -766,6 +766,46 @@ struct ManifestPoller {
     inner: Arc<DbReaderInner>,
 }
 
+impl ManifestPoller {
+    /// One `ManagedCheckpoint` poll tick: load the latest manifest, reestablish
+    /// or refresh the checkpoint, and replay new WALs as needed.
+    async fn poll_managed_checkpoint(&self) -> Result<(), SlateDBError> {
+        let mut manifest = StoredManifest::load(
+            Arc::clone(&self.inner.manifest_store),
+            self.inner.system_clock.clone(),
+        )
+        .await?;
+
+        let latest_manifest = manifest.manifest();
+        if self
+            .inner
+            .should_reestablish_checkpoint(&latest_manifest.core)
+        {
+            let checkpoint = self.inner.replace_checkpoint(&mut manifest).await?;
+            self.inner.reestablish_checkpoint(checkpoint).await?;
+        } else {
+            self.inner.maybe_replay_new_wals().await?;
+        }
+
+        self.inner.maybe_refresh_checkpoint(&mut manifest).await
+    }
+
+    /// Whether a poll-tick error is a transient transport fault that the next
+    /// tick can plausibly succeed past. Structural errors (a missing object,
+    /// fencing, invariant violations) are not transient: retrying the same
+    /// poll cannot fix them, so they still fail the poller task and close the
+    /// reader.
+    fn is_transient_poll_error(error: &SlateDBError) -> bool {
+        match error {
+            SlateDBError::IoError(_) => true,
+            SlateDBError::ObjectStoreError(e) => {
+                !matches!(e.as_ref(), object_store::Error::NotFound { .. })
+            }
+            _ => false,
+        }
+    }
+}
+
 #[async_trait]
 impl MessageHandler<DbReaderMessage> for ManifestPoller {
     fn tickers(&mut self) -> Vec<MessageTickerDef<DbReaderMessage>> {
@@ -779,24 +819,21 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
         assert!(matches!(message, DbReaderMessage::PollManifest));
         match self.inner.mode {
             DbReaderMode::ManagedCheckpoint => {
-                let mut manifest = StoredManifest::load(
-                    Arc::clone(&self.inner.manifest_store),
-                    self.inner.system_clock.clone(),
-                )
-                .await?;
-
-                let latest_manifest = manifest.manifest();
-                if self
-                    .inner
-                    .should_reestablish_checkpoint(&latest_manifest.core)
-                {
-                    let checkpoint = self.inner.replace_checkpoint(&mut manifest).await?;
-                    self.inner.reestablish_checkpoint(checkpoint).await?;
-                } else {
-                    self.inner.maybe_replay_new_wals().await?;
+                // A transient transport fault must not fail the poller task:
+                // that would record a closed result and permanently fail every
+                // subsequent read on this handle, turning a brief object-store
+                // brownout into a reader that never recovers (the FollowLatest
+                // arm below already warns and continues for the same reason).
+                // This matters most when `object_store_max_retries` bounds the
+                // retry layer: a single exhausted poll tick used to close the
+                // reader for good. Structural errors still propagate and close.
+                match self.poll_managed_checkpoint().await {
+                    Err(error) if Self::is_transient_poll_error(&error) => {
+                        warn!("failed to poll manifest; will retry on next tick [error={error:?}]");
+                        Ok(())
+                    }
+                    result => result,
                 }
-
-                self.inner.maybe_refresh_checkpoint(&mut manifest).await
             }
             DbReaderMode::FollowLatest => {
                 let result = self.inner.refresh_latest_manifest().await;
@@ -2574,7 +2611,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn should_fail_new_reads_if_manifest_poller_crashes() {
+    async fn should_keep_serving_reads_across_transient_poller_errors() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
@@ -2589,6 +2626,9 @@ mod tests {
             .await
             .unwrap();
 
+        // Inject a transient io error into the poller's WAL probing. The tick
+        // fails, but a transient transport fault must not close the reader —
+        // it warns and retries on the next tick instead.
         fail_parallel::cfg(
             Arc::clone(&test_provider.fp_registry),
             "probe-wal-ssts",
@@ -2596,9 +2636,17 @@ mod tests {
         )
         .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
-        let result = reader.get(b"key").await.unwrap_err();
-        dbg!(&result);
-        assert_eq!(result.to_string(), "Unavailable error: io error (oops)");
+        assert!(reader.get(b"key").await.is_ok());
+
+        // Clear the fault; a later tick succeeds and reads still work.
+        fail_parallel::cfg(
+            Arc::clone(&test_provider.fp_registry),
+            "probe-wal-ssts",
+            "off",
+        )
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(reader.get(b"key").await.is_ok());
     }
 
     #[tokio::test]
