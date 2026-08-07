@@ -1,3 +1,4 @@
+use super::GcTask;
 use crate::manifest::Manifest;
 use crate::{
     error::SlateDBError,
@@ -8,14 +9,15 @@ use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::Arc;
-
-use super::GcTask;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub(crate) struct WalGcTask {
     manifest_store: Arc<ManifestStore>,
     wal_gc: Arc<dyn WalGC>,
     resource: &'static str,
+    min_age: Duration,
+    dry_run: bool,
 }
 
 impl std::fmt::Debug for WalGcTask {
@@ -31,11 +33,15 @@ impl WalGcTask {
         manifest_store: Arc<ManifestStore>,
         wal_gc: Arc<dyn WalGC>,
         resource: &'static str,
+        min_age: Duration,
+        dry_run: bool,
     ) -> Self {
         Self {
             manifest_store,
             wal_gc,
             resource,
+            min_age,
+            dry_run,
         }
     }
 
@@ -77,7 +83,7 @@ impl GcTask for WalGcTask {
         let referenced_ranges = Self::referenced_wal_ranges(latest_manifest.id, &active_manifests);
 
         self.wal_gc
-            .collect(referenced_ranges)
+            .collect(referenced_ranges, self.min_age, self.dry_run)
             .await
             .map_err(Into::into)
     }
@@ -100,6 +106,7 @@ mod tests {
     use object_store::ObjectStore;
     use slatedb_common::clock::DefaultSystemClock;
     use std::sync::Mutex;
+    use std::time::Duration;
     use uuid::Uuid;
 
     #[derive(Default)]
@@ -115,7 +122,12 @@ mod tests {
 
     #[async_trait]
     impl WalGC for RecordingWalGc {
-        async fn collect(&self, referenced_ranges: Vec<WalFileRange>) -> Result<(), WalError> {
+        async fn collect(
+            &self,
+            referenced_ranges: Vec<WalFileRange>,
+            _min_age: Duration,
+            _dry_run: bool,
+        ) -> Result<(), WalError> {
             self.calls.lock().unwrap().push(referenced_ranges);
             Ok(())
         }
@@ -178,7 +190,7 @@ mod tests {
         stored_manifest.update(dirty).await.unwrap();
 
         let wal_gc = Arc::new(RecordingWalGc::default());
-        let task = WalGcTask::new(manifest_store, wal_gc.clone(), "WAL");
+        let task = WalGcTask::new(manifest_store, wal_gc.clone(), "WAL", Duration::ZERO, false);
 
         task.collect(Utc::now()).await.unwrap();
 

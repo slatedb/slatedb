@@ -8,9 +8,11 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::{Bound, Range};
 use std::sync::Arc;
+use std::time::Duration;
 
 pub(crate) mod admin;
 pub(crate) mod gc;
+pub(crate) mod reader;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub(crate) mod wal_disabled;
@@ -146,7 +148,7 @@ pub struct WriterInitResult {
 ///     rows in WAL files between [`WriterManifest::replay_after_wal_id`] (exclusive) and the
 ///     current end of the WAL.
 #[async_trait]
-pub trait WriterInit {
+pub trait WriterInit: Send + Sync + 'static {
     /// Fences the WAL and returns a [`WriterInitResult`] with a [`WalWriter`] and
     /// [`WalReplayIterator`] used to recover writes that have not yet been flushed to the tree.
     async fn fence_and_init(
@@ -271,7 +273,7 @@ pub trait WalIterator: Send + 'static {
 
 /// API for reading from the WAL. Used by the Reader/
 #[async_trait]
-pub trait WalReader {
+pub trait WalReader: Send + Sync + 'static {
     /// Returns an iterator over the specified range of WAL File IDs. The start of the range must
     /// not be `Unbounded`. If the end of the range is `Unbounded` then the returned iterator
     /// continues returning writes as new writes are appended to the WAL. Otherwise, it returns
@@ -280,6 +282,10 @@ pub trait WalReader {
         &self,
         wal_file_id_range: WalFileRange,
     ) -> Result<Box<dyn WalIterator>, WalError>;
+
+    /// Returns the ID of the last WAL file currently present in the WAL, or `0` if the WAL is
+    /// empty.
+    async fn last_wal_file_id(&self) -> Result<u64, WalError>;
 }
 
 /// Trait that defines the contract between SlateDB's garbage collector and a custom WAL
@@ -291,7 +297,12 @@ pub trait WalGC: Send + Sync + 'static {
     /// Hook for garbage collecting the WAL. Takes a list of ranges of WAL Files that are currently
     /// referenced by some active Manifest. The implementation may delete any WAL File that is not
     /// included in the ranges in this list.
-    async fn collect(&self, referenced_ranges: Vec<WalFileRange>) -> Result<(), WalError>;
+    async fn collect(
+        &self,
+        referenced_ranges: Vec<WalFileRange>,
+        min_age: Duration,
+        dry_run: bool,
+    ) -> Result<(), WalError>;
 }
 
 /// Administrative operations for a WAL implementation.
@@ -304,16 +315,20 @@ pub trait WalAdmin: Send + Sync + 'static {
     ///
     /// ## Returns
     /// A garbage collector that can remove unreferenced WAL files at `path`.
-    fn garbage_collector(&self, path: &Path) -> Box<dyn WalGC>;
+    fn garbage_collector(&self, path: &Path) -> Arc<dyn WalGC>;
 
     /// Deletes the WAL at `path`.
     ///
     /// ## Arguments
     /// - `path`: The database path whose WAL should be deleted.
+    /// - `dry_run`: If set to true, the implementation should just return the list of resources
+    ///              that would be deleted without actually deleting anything.
     ///
     /// ## Returns
-    /// `Ok(())` after the WAL has been deleted, or a [`WalError`] if deletion fails.
-    async fn delete_wal(&self, path: &Path) -> Result<(), WalError>;
+    /// `Ok(resources)` after the WAL has been deleted, or a [`WalError`] if deletion fails, where
+    /// `resources` is a list of descriptions of resources that were deleted by this fn. This
+    /// list is used to display the output of deleting the WAL (e.g. in logs or tool output)
+    async fn delete_wal(&self, path: &Path, dry_run: bool) -> Result<Vec<String>, WalError>;
 
     /// Given a path and manifest, returns true if the WAL referenced by the manifest at that path
     /// is empty. A WAL is empty if it holds no records.
