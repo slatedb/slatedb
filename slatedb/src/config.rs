@@ -435,7 +435,7 @@ impl ScanOptions {
 }
 
 /// Enum representing the type of flush to perform.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum FlushType {
     /// Freeze the active memtable [crate::mem_table::KVTable] and write
     /// all immutable memtable entries (including the formerly active
@@ -464,25 +464,28 @@ impl Default for FlushOptions {
 /// Options controlling how a database is closed.
 #[derive(Clone, Debug)]
 pub struct CloseOptions {
-    /// Whether to trigger a final flush of the active memtable before closing.
+    /// The type of flush to perform before closing.
     ///
-    /// When `false`, memtables already being flushed continue through the
-    /// existing shutdown pipeline. Defaults to `true`.
-    pub flush_memtables: bool,
+    /// When `None`, no final flush is triggered. Memtables already being
+    /// flushed continue through the existing shutdown pipeline, and writes
+    /// that are not durable may be lost. When set to `Some` flushes the
+    /// database in accordance with the specified [`FlushType`]
+    /// Defaults to `Some(FlushType::MemTable)`.
+    pub flush_type: Option<FlushType>,
 }
 
 impl Default for CloseOptions {
     fn default() -> Self {
         Self {
-            flush_memtables: true,
+            flush_type: Some(FlushType::MemTable),
         }
     }
 }
 
 impl CloseOptions {
-    /// Configure whether the active memtable is flushed before closing.
-    pub fn with_flush_memtables(mut self, flush_memtables: bool) -> Self {
-        self.flush_memtables = flush_memtables;
+    /// Configure the type of flush to perform before closing.
+    pub fn with_flush_type(mut self, flush_type: Option<FlushType>) -> Self {
+        self.flush_type = flush_type;
         self
     }
 }
@@ -1111,12 +1114,11 @@ pub struct DbReaderOptions {
     /// local filesystem, mirroring the behaviour of `Db`.
     pub object_store_cache_options: ObjectStoreCacheOptions,
 
-    /// When true, skip WAL replay entirely. The reader will only see data that has been
-    /// compacted into L0 or lower levels. This is useful for read-heavy workloads that
-    /// don't need to see the most recent uncommitted writes and want to minimize the
+    /// When true, skip WAL replay entirely, in every reader mode. The reader reads no WAL
+    /// when it opens or when it refreshes its state, so it only sees data that has been
+    /// flushed to L0 or lower levels. This is useful for read-heavy workloads that
+    /// don't need to see the most recent writes and want to minimize the
     /// cost of opening many readers.
-    ///
-    /// WAL replay is also skipped in [`crate::DbReaderMode::Checkpoint`] mode.
     ///
     /// When combined with a reader mode that polls manifests, the reader will still see newly
     /// compacted data as manifests are updated.

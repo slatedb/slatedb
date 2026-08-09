@@ -686,36 +686,26 @@ impl Db {
 
     /// Close the database with custom options.
     ///
-    /// Setting [`CloseOptions::flush_memtables`] to `false` skips the final
-    /// active memtable flush. Memtables already being flushed are allowed to
-    /// finish, and writes that are not durable may be lost.
     pub async fn close_with_options(&self, options: CloseOptions) -> Result<(), crate::Error> {
-        let should_flush = match self.status().close_reason {
+        let flush_type = match self.status().close_reason {
             // If already closed, don't close again.
             Some(CloseReason::Clean) => return Err(SlateDBError::Closed.into()),
             // If in failed state, allow close, but don't flush since the database
             // might be in a bad state. Note that multiple close() calls will always
             // run when in a failed state (vs. a clean closure, which will return
             // Error::Closed(CloseReason::Clean) on subsequent calls).
-            Some(_) => false,
+            Some(_) => None,
             // Flush outstanding writes if the database is still open and the
-            // caller requested a final memtable flush.
-            None => options.flush_memtables,
+            // caller requested a final flush.
+            None => options.flush_type,
         };
 
         // Mark the database as closed before flushing.
         self.inner.status_manager.write_result(Ok(()));
 
-        let result = if should_flush {
-            // Flush memtables to L0 so that the WAL does not need to be
-            // replayed on the next startup.
+        let result = if let Some(flush_type) = flush_type {
             self.inner
-                .flush(
-                    FlushOptions {
-                        flush_type: FlushType::MemTable,
-                    },
-                    false,
-                )
+                .flush(FlushOptions { flush_type }, false)
                 .await
                 .map_err(Into::into)
                 .inspect_err(|e| warn!("failed to flush db during close [error={:?}]", e))
@@ -3512,6 +3502,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_close_with_options_flushes_wal_only() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut settings = test_db_options(0, 1024, None);
+        settings.flush_interval = None;
+        let path = "/tmp/test_close_with_options_flushes_wal_only";
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings.clone())
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"test_key", b"test_value").await.unwrap();
+
+        db.close_with_options(CloseOptions::default().with_flush_type(Some(FlushType::Wal)))
+            .await
+            .unwrap();
+
+        let manifest = db.manifest();
+        assert!(
+            manifest.manifest.core.replay_after_wal_id + 1 < manifest.manifest.core.next_wal_sst_id,
+            "expected a data WAL after the replay watermark"
+        );
+        assert!(
+            manifest.manifest.core.tree.l0.is_empty(),
+            "expected no flushed memtables in the manifest"
+        );
+
+        let reopened = Db::builder(path, object_store)
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.get(b"test_key").await.unwrap(),
+            Some(Bytes::from_static(b"test_value"))
+        );
+        reopened.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_close_with_options_skips_final_flush() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut settings = test_db_options(0, 1024, None);
@@ -3529,10 +3559,15 @@ mod tests {
 
         db.put(b"test_key", b"test_value").await.unwrap();
 
-        db.close_with_options(CloseOptions::default().with_flush_memtables(false))
+        db.close_with_options(CloseOptions::default().with_flush_type(None))
             .await
             .unwrap();
 
+        assert_eq!(
+            lookup_metric(&metrics_recorder, crate::wal_buffer::stats::WAL_FLUSH_BYTES)
+                .unwrap_or(0),
+            0
+        );
         assert_eq!(
             lookup_metric(&metrics_recorder, crate::db_stats::L0_FLUSH_BYTES).unwrap_or(0),
             0
@@ -3557,7 +3592,7 @@ mod tests {
 
         let handle = db.put(b"key", b"value").await.unwrap();
 
-        db.close_with_options(CloseOptions::default().with_flush_memtables(false))
+        db.close_with_options(CloseOptions::default().with_flush_type(None))
             .await
             .unwrap();
 

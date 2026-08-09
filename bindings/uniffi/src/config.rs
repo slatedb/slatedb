@@ -366,6 +366,30 @@ impl From<FlushOptions> for slatedb::config::FlushOptions {
     }
 }
 
+/// Options controlling how a database is shut down.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct CloseOptions {
+    /// The final flush to perform before shutdown. When `None`, no final flush is
+    /// triggered and writes that are not durable may be lost.
+    pub flush_type: Option<FlushType>,
+}
+
+impl Default for CloseOptions {
+    fn default() -> Self {
+        Self {
+            flush_type: Some(FlushType::MemTable),
+        }
+    }
+}
+
+impl From<CloseOptions> for slatedb::config::CloseOptions {
+    fn from(value: CloseOptions) -> Self {
+        slatedb::config::CloseOptions {
+            flush_type: value.flush_type.map(Into::into),
+        }
+    }
+}
+
 /// Garbage collector options for one age-thresholded directory.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct GarbageCollectorDirectoryOptions {
@@ -519,7 +543,37 @@ impl From<GarbageCollectorOptions> for slatedb::config::GarbageCollectorOptions 
 
 #[cfg(test)]
 mod tests {
-    use super::{GarbageCollectorOptions, ReaderOptions};
+    use super::{CloseOptions, FlushType, GarbageCollectorOptions, ReaderOptions};
+
+    #[test]
+    fn close_options_default_flushes_memtable() {
+        let options: slatedb::config::CloseOptions = CloseOptions::default().into();
+
+        assert!(matches!(
+            options.flush_type,
+            Some(slatedb::config::FlushType::MemTable)
+        ));
+    }
+
+    #[test]
+    fn close_options_can_flush_wal_only() {
+        let options: slatedb::config::CloseOptions = CloseOptions {
+            flush_type: Some(FlushType::Wal),
+        }
+        .into();
+
+        assert!(matches!(
+            options.flush_type,
+            Some(slatedb::config::FlushType::Wal)
+        ));
+    }
+
+    #[test]
+    fn close_options_can_skip_final_flush() {
+        let options: slatedb::config::CloseOptions = CloseOptions { flush_type: None }.into();
+
+        assert!(options.flush_type.is_none());
+    }
 
     #[test]
     fn boundary_files_are_enabled_by_default() {

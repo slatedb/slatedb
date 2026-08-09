@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use crate::config::{
-    FlushOptions, IsolationLevel, MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
+    CloseOptions, FlushOptions, IsolationLevel, MergeOptions, PutOptions, ReadOptions, ScanOptions,
+    WriteOptions,
 };
 use crate::db_snapshot::DbSnapshot;
 use crate::db_transaction::DbTransaction;
@@ -41,6 +42,15 @@ impl Db {
     #[uniffi::method(name = "shutdown")]
     pub async fn close(&self) -> Result<(), Error> {
         self.inner.close().await.map_err(Into::into)
+    }
+
+    /// Performs the requested final flush and closes the database.
+    #[uniffi::method(name = "shutdown_with_options")]
+    pub async fn close_with_options(&self, options: CloseOptions) -> Result<(), Error> {
+        self.inner
+            .close_with_options(options.into())
+            .await
+            .map_err(Into::into)
     }
 
     /// Reads the current value for `key`.

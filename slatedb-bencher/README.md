@@ -58,10 +58,10 @@ following environment variables before benchmarking:
 
 ## `benchmark-db.sh`
 
-There is also a shell script which runs a series of benchmarks and then draws
-the plots using `gnuplot`. Think of it as a template to start with to create
-a set of benchmarks suitable for your task. The script should be run from
-the repository root:
+There is also a shell script which runs a series of benchmarks and records
+the results. Think of it as a template to start with to create a set of
+benchmarks suitable for your task. The script should be run from the repository
+root:
 
 ```bash
 ./slatedb-bencher/benchmark-db.sh
@@ -69,16 +69,32 @@ the repository root:
 
 The command above will produce results at `target/bencher/results` directory. The results include:
 
-- `plots`: Plots for each benchmark
 - `dats`: Data files for each benchmark
 - `logs`: Log files for each benchmark
-- `benchmark-data.json`: A JSON file containing all the benchmark results in [github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark) format.
+
+### Plotting results with `gnuplot`
+
+The `.dat` files are whitespace-delimited, with columns for elapsed time,
+puts per second, and gets per second. After installing `gnuplot`, you can render
+a result file to a PNG with:
+
+```bash
+gnuplot <<'EOF'
+set terminal pngcairo size 1280,720
+set output "target/bencher/results/20_1.png"
+set title "SlateDB benchmark: 20% puts, concurrency 1"
+set xlabel "Elapsed time (seconds)"
+set ylabel "Requests per second"
+set key outside
+plot "target/bencher/results/dats/20_1.dat" using 1:2 with lines title "puts/s", \
+     "target/bencher/results/dats/20_1.dat" using 1:3 with lines title "gets/s"
+EOF
+```
+
+Replace `20_1.dat` and the labels with the benchmark configuration you want to
+plot.
 
 The script also has a `SLATEDB_BENCH_CLEAN` environment variable which can be set to `true` to clean up the test data in object storage after each benchmark.
-
-### `nightly.yaml`
-
-`benchmark-db.sh` is also used in `.github/workflows/nightly.yaml` to benchmark the nightly build. The tests are run using [WarpBuild](https://warpbuild.com), and each run appends to mermaid `xyChart` files that are posted to the workflow's GitHub Actions job summary.
 
 ## `compaction` Subcommand
 

@@ -33,6 +33,8 @@ pub(crate) const WAL_BUFFER_TASK_NAME: &str = "wal_writer";
 ///
 /// - `max_wal_size`: Flushes when `max_wal_size` bytes is exceeded
 /// - `max_flush_interval`: Flushes after `max_flush_interval` elapses, if set
+/// - `max_wal_flushes_before_l0_flush`: Requests a memtable flush when this many WAL files have
+///   been flushed since the latest memtable replay point
 ///
 /// For strict durability requirements on synchronous writes, use [`WalBufferManager::flush()`] to explicitly
 /// trigger a flush operation and await the result. This will flush ALL the in memory WALs (including the
@@ -51,6 +53,7 @@ pub(crate) struct WalBufferManager {
     stats: Arc<WalBufferStats>,
     table_store: Arc<TableStore>,
     max_wal_bytes_size: usize,
+    max_wal_flushes_before_l0_flush: u64,
     /// The largest flush_epoch for which a size-triggered flush request has been
     /// sent. Compared against `flush_epoch` in the inner struct to avoid sending
     /// redundant flush requests for the same WAL.
@@ -111,6 +114,7 @@ impl WalBufferManager {
         last_flushed_wal_id: u64,
         table_store: Arc<TableStore>,
         max_wal_bytes_size: usize,
+        max_wal_flushes_before_l0_flush: u64,
         max_flush_interval: Option<Duration>,
         task_executor: Arc<MessageHandlerExecutor>,
     ) -> Result<Self, SlateDBError> {
@@ -147,6 +151,7 @@ impl WalBufferManager {
             stats,
             table_store,
             max_wal_bytes_size,
+            max_wal_flushes_before_l0_flush,
             last_flush_requested_epoch: AtomicU64::new(0),
             task_executor,
         })
@@ -208,6 +213,14 @@ impl WalWriter for WalBufferManager {
         self.inner.write().append(entries)?;
         self.maybe_trigger_flush()?;
         Ok(())
+    }
+
+    fn should_flush_memtable(&self, replay_after_wal_id: u64) -> bool {
+        let last_flushed_wal_id = self.inner.read().last_flushed_wal_id;
+        let Some(wal_id_gap) = last_flushed_wal_id.checked_sub(replay_after_wal_id) else {
+            return false;
+        };
+        wal_id_gap >= self.max_wal_flushes_before_l0_flush
     }
 
     fn observer(&self) -> Box<dyn wal::WalObserver> {
@@ -840,6 +853,7 @@ mod tests {
             0, // recent_flushed_wal_id
             table_store.clone(),
             1000,                 // max_wal_bytes_size
+            4096,                 // max_wal_flushes_before_l0_flush
             Some(flush_interval), // max_flush_interval
             task_executor.clone(),
         )
@@ -859,6 +873,19 @@ mod tests {
             .monitor_on(&Handle::current())
             .expect("failed to monitor executor");
         (wal_buffer, table_store, status_manager, recorder)
+    }
+
+    #[tokio::test]
+    async fn test_should_flush_memtable_at_max_wal_gap() {
+        let (wal_buffer, _, _, _) = setup_wal_buffer().await;
+        let max_wal_gap = wal_buffer.max_wal_flushes_before_l0_flush;
+        let last_flushed_wal_id = max_wal_gap + 10;
+        wal_buffer.inner.write().last_flushed_wal_id = last_flushed_wal_id;
+
+        assert!(!wal_buffer.should_flush_memtable(last_flushed_wal_id - max_wal_gap + 1));
+        assert!(wal_buffer.should_flush_memtable(last_flushed_wal_id - max_wal_gap));
+        assert!(wal_buffer.should_flush_memtable(last_flushed_wal_id - max_wal_gap - 1));
+        assert!(!wal_buffer.should_flush_memtable(last_flushed_wal_id + 1));
     }
 
     #[tokio::test]
