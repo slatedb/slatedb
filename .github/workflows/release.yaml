@@ -32,6 +32,18 @@ jobs:
         with:
           ssh-key: ${{ secrets.RELEASE_SSH_KEY }}
           ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      # Select the most recent stable release tag reachable from the release branch.
+      - name: Find previous release tag
+        id: previous_release
+        run: |
+          previous_tag="$(git describe \
+            --tags \
+            --abbrev=0 \
+            --match 'v[0-9]*.[0-9]*.[0-9]*' \
+            --exclude '*-*')"
+          echo "tag=${previous_tag}" >> "${GITHUB_OUTPUT}"
 
       # Set up Rust stable for installing cargo-edit
       - name: Setup Rust stable
@@ -67,6 +79,7 @@ jobs:
           tag: v${{ github.event.inputs.version }}
           name: v${{ github.event.inputs.version }}
           generateReleaseNotes: true
+          generateReleaseNotesPreviousTag: ${{ steps.previous_release.outputs.tag }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
       # Publish crate chain to crates.io in dependency order
