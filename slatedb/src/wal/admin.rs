@@ -90,7 +90,8 @@ impl WalAdmin for SlateDbWalAdmin {
 
     async fn delete_wal(&self, path: &Path) -> Result<(), WalError> {
         // Collect the paths first so listing is complete before objects are removed.
-        for object_path in self.paths_under(path).await? {
+        let wal_path = PathResolver::from_root(path.clone()).wal_path();
+        for object_path in self.paths_under(&wal_path).await? {
             self.object_store
                 .delete(&object_path)
                 .await
@@ -99,9 +100,12 @@ impl WalAdmin for SlateDbWalAdmin {
         Ok(())
     }
 
-    async fn is_empty(&self, path: &Path, manifest: VersionedManifest) -> Result<bool, WalError> {
-        let (replay_after_wal_id, wal_id_last_seen) = Self::replay_range(&manifest)?;
-
+    async fn is_empty(
+        &self,
+        path: &Path,
+        replay_after_wal_id: u64,
+        wal_id_last_seen: u64,
+    ) -> Result<bool, WalError> {
         // Avoid object-store requests when the manifest's WAL range contains no file IDs.
         if !Self::has_wal_file_ids(replay_after_wal_id, wal_id_last_seen) {
             return Ok(true);
@@ -162,15 +166,23 @@ mod tests {
     use object_store::memory::InMemory;
 
     #[tokio::test]
-    async fn delete_wal_deletes_only_objects_under_the_requested_path() {
+    async fn delete_wal_deletes_only_objects_under_the_wal_prefix() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let wal_admin =
             SlateDbWalAdmin::new(object_store.clone(), Arc::new(FailPointRegistry::new()));
-        let wal_path = Path::from("db/wal");
-        let wal_object = wal_path.clone().join("00000000000000000001.sst");
+        let db_path = Path::from("db");
+        let wal_object = PathResolver::from_root(db_path.clone()).sst_path(&SsTableId::Wal(1));
+        let non_wal_object = db_path
+            .clone()
+            .join("manifest")
+            .join("00000000000000000001");
         let sibling_object = Path::from("other/wal/00000000000000000002.sst");
         object_store
             .put(&wal_object, Bytes::from_static(b"wal").into())
+            .await
+            .unwrap();
+        object_store
+            .put(&non_wal_object, Bytes::from_static(b"keep").into())
             .await
             .unwrap();
         object_store
@@ -178,12 +190,13 @@ mod tests {
             .await
             .unwrap();
 
-        wal_admin.delete_wal(&wal_path).await.unwrap();
+        wal_admin.delete_wal(&db_path).await.unwrap();
 
         assert!(matches!(
             object_store.head(&wal_object).await,
             Err(object_store::Error::NotFound { .. })
         ));
+        assert!(object_store.head(&non_wal_object).await.is_ok());
         assert!(object_store.head(&sibling_object).await.is_ok());
     }
 

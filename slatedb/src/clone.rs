@@ -467,8 +467,15 @@ async fn validate_no_data_wal(
 ) -> Result<(), SlateDBError> {
     let mut parents_with_wal = vec![];
     for source in sources {
+        let replay_after_wal_id = source.manifest.core.replay_after_wal_id;
+        let wal_id_last_seen = source
+            .manifest
+            .core
+            .next_wal_sst_id
+            .checked_sub(1)
+            .ok_or(SlateDBError::InvalidDBState)?;
         if !wal_admin
-            .is_empty(&source.path, source.versioned_manifest())
+            .is_empty(&source.path, replay_after_wal_id, wal_id_last_seen)
             .await?
         {
             parents_with_wal.push(source.path.clone());
@@ -644,7 +651,8 @@ mod tests {
         async fn is_empty(
             &self,
             _path: &Path,
-            _manifest: VersionedManifest,
+            _replay_after_wal_id: u64,
+            _wal_id_last_seen: u64,
         ) -> Result<bool, WalError> {
             Ok(true)
         }

@@ -424,12 +424,13 @@ pub trait WalAdmin: Send + Sync + 'static {
     /// `Ok(())` after the WAL has been deleted, or a [`WalError`] if deletion fails.
     async fn delete_wal(&self, path: &Path) -> Result<(), WalError>;
 
-    /// Given a path and manifest, returns true if the WAL referenced by the manifest at that path
-    /// is empty. A WAL is empty if it holds no records.
+    /// Given a path and WAL ID range, returns true if the WAL at that path is empty within the
+    /// specified range. A WAL is empty if it holds no records.
     ///
     /// ## Arguments
     /// - `path`: The database path containing the WAL.
-    /// - `manifest`: The source manifest that identifies the WAL state to inspect.
+    /// - `replay_after_wal_id`: The exclusive lower bound of the WAL range to inspect.
+    /// - `wal_id_last_seen`: The inclusive upper bound of the WAL range to inspect.
     ///
     /// ## Returns
     /// `Ok(true)` if the referenced WAL contains no records, `Ok(false)` if it contains records,
@@ -437,7 +438,8 @@ pub trait WalAdmin: Send + Sync + 'static {
     async fn is_empty(
         &self,
         path: &Path,
-        manifest: VersionedManifest,
+        replay_after_wal_id: u64,
+        wal_id_last_seen: u64,
     ) -> Result<bool, WalError>;
 
     /// Given a source path and manifest, copy the referenced WAL to a destination path and return
