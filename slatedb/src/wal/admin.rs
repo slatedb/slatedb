@@ -21,6 +21,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub(crate) struct SlateDbWalAdmin {
     object_store: Arc<dyn ObjectStore>,
+    #[cfg_attr(not(test), allow(dead_code))]
     fp_registry: Arc<FailPointRegistry>,
 }
 
