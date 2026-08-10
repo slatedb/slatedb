@@ -345,6 +345,22 @@ impl SlateDBError {
         matches!(self, Self::TransactionalObjectVersionExists)
     }
 
+    /// Returns true if this error is transient: the operation that produced it
+    /// could plausibly succeed if it were tried again. Callers use this to
+    /// decide whether to reissue work later instead of treating the failure as
+    /// final.
+    ///
+    /// Only transport-level faults qualify. Everything else — a definitive
+    /// answer from the store, fencing, or an invariant violation — returns the
+    /// same result no matter how often it is retried.
+    pub(crate) fn is_transient(&self) -> bool {
+        match self {
+            Self::IoError(_) => true,
+            Self::ObjectStoreError(err) => is_transient_object_store_error(err),
+            _ => false,
+        }
+    }
+
     /// Classifies this error as a recoverable SST validation failure to reissue
     /// the read with a [`RetryReason`], or `None` if it is not recoverable.
     ///
@@ -369,6 +385,25 @@ impl SlateDBError {
             _ => None,
         }
     }
+}
+
+/// Returns true if an object-store error is transient — i.e. retrying the same
+/// operation could plausibly succeed. The excluded variants are a definitive
+/// answer from the store, so a retry can only produce the same error.
+///
+/// Single source of truth for retryability: both the retry layer
+/// ([`crate::retrying_object_store`]) and callers deciding whether to reissue
+/// failed work classify errors through here.
+pub(crate) fn is_transient_object_store_error(err: &object_store::Error) -> bool {
+    !matches!(
+        err,
+        object_store::Error::AlreadyExists { .. }
+            | object_store::Error::Precondition { .. }
+            | object_store::Error::NotModified { .. }
+            | object_store::Error::NotFound { .. }
+            | object_store::Error::NotImplemented { .. }
+            | object_store::Error::NotSupported { .. }
+    )
 }
 
 impl From<TransactionalObjectError> for SlateDBError {

@@ -105,15 +105,7 @@ impl RetryingObjectStore {
 
     #[inline]
     fn should_retry(err: &object_store::Error) -> bool {
-        let retry = !matches!(
-            err,
-            object_store::Error::AlreadyExists { .. }
-                | object_store::Error::Precondition { .. }
-                | object_store::Error::NotModified { .. }
-                | object_store::Error::NotFound { .. }
-                | object_store::Error::NotImplemented { .. }
-                | object_store::Error::NotSupported { .. }
-        );
+        let retry = crate::error::is_transient_object_store_error(err);
         if !retry {
             debug!("not retrying object store operation [error={:?}]", err);
         }

@@ -789,21 +789,6 @@ impl ManifestPoller {
 
         self.inner.maybe_refresh_checkpoint(&mut manifest).await
     }
-
-    /// Whether a poll-tick error is a transient transport fault that the next
-    /// tick can plausibly succeed past. Structural errors (a missing object,
-    /// fencing, invariant violations) are not transient: retrying the same
-    /// poll cannot fix them, so they still fail the poller task and close the
-    /// reader.
-    fn is_transient_poll_error(error: &SlateDBError) -> bool {
-        match error {
-            SlateDBError::IoError(_) => true,
-            SlateDBError::ObjectStoreError(e) => {
-                !matches!(e.as_ref(), object_store::Error::NotFound { .. })
-            }
-            _ => false,
-        }
-    }
 }
 
 #[async_trait]
@@ -828,7 +813,7 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
                 // retry layer: a single exhausted poll tick used to close the
                 // reader for good. Structural errors still propagate and close.
                 match self.poll_managed_checkpoint().await {
-                    Err(error) if Self::is_transient_poll_error(&error) => {
+                    Err(error) if error.is_transient() => {
                         warn!("failed to poll manifest; will retry on next tick [error={error:?}]");
                         Ok(())
                     }
