@@ -428,7 +428,8 @@ Memtable stats (`num_puts`, `num_deletes`, `num_merges`, `raw_key_bytes`, `raw_v
 ### Compatibility
 
 - `SsTableInfo` gets new `stats_offset`/`stats_len` fields in Phase 1. Old SSTs without a stats block will have these fields default to `0` (FlatBuffers default), and `SstFile::stats()` returns `None`.
-- `SstFile::index()` now returns `SstIndex` instead of `Vec<(u64, Bytes)>`. This is a breaking API change; consumers must use `SstIndex::get()`, `iter()`, or `partition_point()` instead of slice operations.
+- New APIs are additive only
+- No breaking changes to existing APIs
 - Language bindings will need to expose new types and methods
 
 ## Testing
