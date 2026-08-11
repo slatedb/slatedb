@@ -3,7 +3,7 @@ use crate::db_state::SsTableId;
 use crate::garbage_collector::stats::GcStats;
 use crate::garbage_collector::{retain_allowed_by_gc_filter, GcFilter, GC_DELETE_CONCURRENCY};
 use crate::tablestore::TableStore;
-use crate::wal::{WalError, WalFileRange, WalGC};
+use crate::wal::{WalError, WalFileRange, WalGc};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
@@ -155,7 +155,7 @@ impl SlateDbWalGc {
 }
 
 #[async_trait]
-impl WalGC for SlateDbWalGc {
+impl WalGc for SlateDbWalGc {
     async fn collect(&self, referenced_ranges: Vec<WalFileRange>) -> Result<(), WalError> {
         let utc_now = self.system_clock.now();
         let min_age = self.wal_sst_min_age();

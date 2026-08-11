@@ -161,6 +161,7 @@ use crate::retrying_object_store::RetryingObjectStore;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
+use crate::wal::admin::SlateDbWalAdmin;
 use crate::wal::wal_disabled::DisabledWalObserver;
 use crate::wal::WalObserver;
 use slatedb_common::clock::DefaultSystemClock;
@@ -2054,11 +2055,17 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
 
     /// Build and execute the clone operation.
     pub async fn build(self) -> Result<(), crate::Error> {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let wal_admin = Arc::new(SlateDbWalAdmin::new(
+            self.wal_object_store.unwrap_or(self.object_store.clone()),
+            fp_registry.clone(),
+        ));
         crate::clone::create_clone(
             self.sources,
             self.clone_path,
-            ObjectStores::new(self.object_store, self.wal_object_store),
-            Arc::new(FailPointRegistry::new()),
+            self.object_store,
+            wal_admin,
+            fp_registry,
             self.system_clock
                 .unwrap_or_else(|| Arc::new(DefaultSystemClock::new())),
             self.rand.unwrap_or_else(|| Arc::new(Default::default())),
