@@ -258,11 +258,11 @@ impl SstFile {
 
     /// Returns a zero-copy view of the SST index block.
     ///
-    /// The returned index is parallel to the data blocks in the SST. Each
-    /// entry contains the on-disk byte offset of the block and the first key
-    /// stored in that block. The index keeps the cached index data alive, and
-    /// keys returned by its accessors borrow directly from that data without
-    /// allocation or copying.
+    /// The returned [`SstIndex`] contains one entry for each data block in the
+    /// SST, in block order. Each entry contains the on-disk byte offset of
+    /// the block and the first key stored in that block. The index keeps
+    /// the cached index data alive, and keys returned by its accessors borrow
+    /// directly from that data without allocation or copying.
     ///
     /// ## Errors
     ///
