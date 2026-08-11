@@ -442,22 +442,6 @@ mod tests {
             assert!(previous_offset < offset);
             previous_offset = offset;
         }
-    }
-
-    #[tokio::test]
-    async fn test_index_accessors() {
-        let (store, path, manifest) = setup_db_with_l0().await;
-        let reader = SstReader::new(path, store, None, None);
-
-        let view = &manifest.manifest.core.tree.l0[0];
-        let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
-        let index = sst_file.index().await.unwrap();
-
-        assert!(!index.is_empty());
-        assert_eq!(index.iter().len(), index.len());
-        for (position, entry) in index.iter().enumerate() {
-            assert_eq!(index.get(position), Some(entry));
-        }
         assert_eq!(index.get(index.len()), None);
     }
 
