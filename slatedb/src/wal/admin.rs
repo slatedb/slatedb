@@ -7,7 +7,7 @@ use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::wal::gc::{SlateDbWalGc, WalGcMode};
-use crate::wal::{WalAdmin, WalError, WalGC};
+use crate::wal::{WalAdmin, WalError, WalGc};
 use crate::VersionedManifest;
 use async_trait::async_trait;
 use fail_parallel::{fail_point, FailPointRegistry};
@@ -69,7 +69,7 @@ impl SlateDbWalAdmin {
 
 #[async_trait]
 impl WalAdmin for SlateDbWalAdmin {
-    fn garbage_collector(&self, path: &Path) -> Box<dyn WalGC> {
+    fn garbage_collector(&self, path: &Path) -> Box<dyn WalGc> {
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(self.object_store.clone(), None),
             SsTableFormat::default(),

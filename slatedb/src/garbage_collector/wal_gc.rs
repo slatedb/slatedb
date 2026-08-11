@@ -2,7 +2,7 @@ use crate::manifest::Manifest;
 use crate::{
     error::SlateDBError,
     manifest::store::ManifestStore,
-    wal::{WalFileRange, WalGC},
+    wal::{WalFileRange, WalGc},
 };
 use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
@@ -14,7 +14,7 @@ use super::GcTask;
 #[derive(Clone)]
 pub(crate) struct WalGcTask {
     manifest_store: Arc<ManifestStore>,
-    wal_gc: Arc<dyn WalGC>,
+    wal_gc: Arc<dyn WalGc>,
     resource: &'static str,
 }
 
@@ -29,7 +29,7 @@ impl std::fmt::Debug for WalGcTask {
 impl WalGcTask {
     pub(super) fn new(
         manifest_store: Arc<ManifestStore>,
-        wal_gc: Arc<dyn WalGC>,
+        wal_gc: Arc<dyn WalGc>,
         resource: &'static str,
     ) -> Self {
         Self {
@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl WalGC for RecordingWalGc {
+    impl WalGc for RecordingWalGc {
         async fn collect(&self, referenced_ranges: Vec<WalFileRange>) -> Result<(), WalError> {
             self.calls.lock().unwrap().push(referenced_ranges);
             Ok(())

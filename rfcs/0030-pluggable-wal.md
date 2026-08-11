@@ -393,7 +393,7 @@ pub trait WalReader {
 
 /// API for plugging into WAL GC
 #[async_trait]
-pub trait WalGC {
+pub trait WalGc {
     /// Hook for garbage collecting the WAL. Takes a list of ranges of WAL Files that are currently
     /// referenced by some active Manifest. The implementation may delete any WAL File that is not
     /// included in the ranges in this list.
@@ -413,7 +413,7 @@ pub trait WalAdmin: Send + Sync + 'static {
     ///
     /// ## Returns
     /// A garbage collector that can remove unreferenced WAL files at `path`.
-    fn garbage_collector(&self, path: &Path) -> Box<dyn WalGC>;
+    fn garbage_collector(&self, path: &Path) -> Box<dyn WalGc>;
 
     /// Deletes the WAL at `path`.
     ///

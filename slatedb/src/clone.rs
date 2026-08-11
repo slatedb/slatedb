@@ -606,7 +606,7 @@ mod tests {
     use crate::test_utils;
     use crate::utils::IdGenerator;
     use crate::wal::admin::SlateDbWalAdmin;
-    use crate::wal::{WalAdmin, WalError, WalFileRange, WalGC};
+    use crate::wal::{WalAdmin, WalError, WalFileRange, WalGc};
     use async_trait::async_trait;
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
@@ -632,7 +632,7 @@ mod tests {
     struct NoopWalGc;
 
     #[async_trait]
-    impl WalGC for NoopWalGc {
+    impl WalGc for NoopWalGc {
         async fn collect(&self, _referenced_ranges: Vec<WalFileRange>) -> Result<(), WalError> {
             Ok(())
         }
@@ -640,7 +640,7 @@ mod tests {
 
     #[async_trait]
     impl WalAdmin for RemappingWalAdmin {
-        fn garbage_collector(&self, _path: &Path) -> Box<dyn WalGC> {
+        fn garbage_collector(&self, _path: &Path) -> Box<dyn WalGc> {
             Box::new(NoopWalGc)
         }
 
