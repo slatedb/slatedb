@@ -710,7 +710,7 @@ mod tests {
 
     fn new_checkpoint(manifest_id: u64, expire_time: Option<DateTime<Utc>>) -> Checkpoint {
         Checkpoint {
-            id: uuid::Uuid::new_v4(),
+            id: Uuid::new_v4(),
             manifest_id,
             expire_time,
             create_time: DefaultSystemClock::default().now(),
@@ -1283,7 +1283,7 @@ mod tests {
         assert_eq!(
             lookup_metric_with_labels(
                 &recorder,
-                crate::garbage_collector::stats::DELETED_COUNT,
+                stats::DELETED_COUNT,
                 &[("resource", "wal_fence")]
             ),
             Some(2)
@@ -1848,23 +1848,23 @@ mod tests {
 
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
-            wal_options: Some(crate::config::GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+            wal_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
             wal_fence_options: None,
-            compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+            compacted_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
-            compactions_options: Some(crate::config::GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+            compactions_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
@@ -1926,23 +1926,23 @@ mod tests {
         let recorder = MetricsRecorderHelper::noop();
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
             wal_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
             wal_fence_options: None,
             compacted_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
             compactions_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
@@ -2004,18 +2004,18 @@ mod tests {
         let gc_opts = GarbageCollectorOptions {
             manifest_options: None,
             wal_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
             wal_fence_options: None,
             compacted_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
             compactions_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
@@ -2111,18 +2111,18 @@ mod tests {
                 interval: Some(Duration::from_secs(1)),
                 dry_run: false,
             }),
-            wal_options: Some(crate::config::GarbageCollectorDirectoryOptions {
+            wal_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
                 dry_run: false,
             }),
             wal_fence_options: None,
-            compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
+            compacted_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
                 dry_run: false,
             }),
-            compactions_options: Some(crate::config::GarbageCollectorDirectoryOptions {
+            compactions_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
                 dry_run: false,
@@ -2184,11 +2184,7 @@ mod tests {
 
         // then:
         assert_eq!(
-            lookup_metric_with_labels(
-                &recorder,
-                crate::garbage_collector::stats::DELETED_COUNT,
-                &[("resource", "manifest")]
-            ),
+            lookup_metric_with_labels(&recorder, stats::DELETED_COUNT, &[("resource", "manifest")]),
             Some(1)
         );
     }
@@ -2229,11 +2225,7 @@ mod tests {
 
         // then:
         assert_eq!(
-            lookup_metric_with_labels(
-                &recorder,
-                crate::garbage_collector::stats::DELETED_COUNT,
-                &[("resource", "wal")]
-            ),
+            lookup_metric_with_labels(&recorder, stats::DELETED_COUNT, &[("resource", "wal")]),
             Some(1)
         );
     }
@@ -2290,7 +2282,7 @@ mod tests {
         assert_eq!(
             lookup_metric_with_labels(
                 &recorder,
-                crate::garbage_collector::stats::DELETED_COUNT,
+                stats::DELETED_COUNT,
                 &[("resource", "compacted")]
             ),
             Some(1)
@@ -2354,7 +2346,7 @@ mod tests {
         assert_eq!(
             lookup_metric_with_labels(
                 &recorder,
-                crate::garbage_collector::stats::DELETED_COUNT,
+                stats::DELETED_COUNT,
                 &[("resource", "compactions")]
             ),
             Some(2)
@@ -2594,11 +2586,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(wal_ids, vec![rejected_before_wal_id, rejected_after_wal_id]);
         assert_eq!(
-            lookup_metric_with_labels(
-                &recorder,
-                crate::garbage_collector::stats::DELETED_COUNT,
-                &[("resource", "wal")]
-            ),
+            lookup_metric_with_labels(&recorder, stats::DELETED_COUNT, &[("resource", "wal")]),
             Some(1)
         );
     }

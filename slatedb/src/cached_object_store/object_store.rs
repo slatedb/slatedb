@@ -336,8 +336,8 @@ impl CachedObjectStore {
     async fn cached_put_opts(
         &self,
         location: &Path,
-        payload: object_store::PutPayload,
-        opts: object_store::PutOptions,
+        payload: PutPayload,
+        opts: PutOptions,
     ) -> object_store::Result<PutResult> {
         // The per-call tag decides whether this write is cached.
         let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
@@ -1406,7 +1406,7 @@ mod tests {
         inner
             .put(
                 &location,
-                PutPayload::from_bytes(bytes::Bytes::from_static(b"hello world")),
+                PutPayload::from_bytes(Bytes::from_static(b"hello world")),
             )
             .await
             .unwrap();
@@ -1426,10 +1426,7 @@ mod tests {
             .expect("cache miss should fetch from inner store");
 
         assert!(result.extensions.get::<ExtensionMarker>().is_some());
-        assert_eq!(
-            result.bytes().await.unwrap(),
-            bytes::Bytes::from_static(b"hello")
-        );
+        assert_eq!(result.bytes().await.unwrap(), Bytes::from_static(b"hello"));
     }
 
     #[tokio::test]
@@ -1439,7 +1436,7 @@ mod tests {
         inner
             .put(
                 &location,
-                PutPayload::from_bytes(bytes::Bytes::from_static(b"hello")),
+                PutPayload::from_bytes(Bytes::from_static(b"hello")),
             )
             .await
             .unwrap();

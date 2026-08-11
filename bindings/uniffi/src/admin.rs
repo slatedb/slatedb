@@ -170,7 +170,7 @@ impl Admin {
     }
 
     /// Deletes the checkpoint with the specified id.
-    pub async fn delete_checkpoint(&self, id: String) -> Result<(), crate::Error> {
+    pub async fn delete_checkpoint(&self, id: String) -> Result<(), Error> {
         self.inner
             .delete_checkpoint(try_checkpoint_id_from_str(&id)?)
             .await

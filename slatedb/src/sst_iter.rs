@@ -82,7 +82,7 @@ impl SstView<'_> {
 
     fn point_key(&self) -> Option<&[u8]> {
         match (self.start_key(), self.end_key()) {
-            (Bound::Included(start), Bound::Included(end)) if start == end => Some(start),
+            (Included(start), Included(end)) if start == end => Some(start),
             _ => None,
         }
     }

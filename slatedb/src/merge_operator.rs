@@ -523,12 +523,12 @@ mod tests {
 
     /// Mock merge operator that tracks whether merge_batch is called
     struct MockBatchedMergeOperator {
-        merge_batch_call_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        merge_batch_call_count: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl MockBatchedMergeOperator {
-        fn new() -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
-            let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        fn new() -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+            let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             (
                 Self {
                     merge_batch_call_count: counter.clone(),

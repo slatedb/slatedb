@@ -454,7 +454,7 @@ where
     I::Item: Send,
     T: Send,
     F: Fn(I::Item) -> Fut + Send,
-    Fut: std::future::Future<Output = Result<Option<T>, SlateDBError>> + Send,
+    Fut: Future<Output = Result<Option<T>, SlateDBError>> + Send,
 {
     let mut out = VecDeque::new();
 
@@ -522,11 +522,8 @@ pub(crate) fn panic_string(panic: &Box<dyn Any + Send>) -> String {
 /// - (Err(SlateDBError::BackgroundTaskPanic), Some(payload)) if the task panicked
 pub(crate) fn split_unwind_result(
     name: String,
-    unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>>,
-) -> (
-    Result<(), SlateDBError>,
-    Option<Box<dyn std::any::Any + Send>>,
-) {
+    unwind_result: Result<Result<(), SlateDBError>, Box<dyn Any + Send>>,
+) -> (Result<(), SlateDBError>, Option<Box<dyn Any + Send>>) {
     match unwind_result {
         Ok(result) => (result, None),
         Err(payload) => (Err(SlateDBError::BackgroundTaskPanic(name)), Some(payload)),
@@ -552,10 +549,7 @@ pub(crate) fn split_unwind_result(
 pub(crate) fn split_join_result(
     name: String,
     join_result: Result<Result<(), SlateDBError>, tokio::task::JoinError>,
-) -> (
-    Result<(), SlateDBError>,
-    Option<Box<dyn std::any::Any + Send>>,
-) {
+) -> (Result<(), SlateDBError>, Option<Box<dyn Any + Send>>) {
     match join_result {
         Ok(task_result) => (task_result, None),
         Err(join_error) => {
@@ -1485,8 +1479,7 @@ mod tests {
     #[test]
     fn test_split_unwind_result_ok_ok() {
         // Given: a successful unwind result
-        let unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
-            Ok(Ok(()));
+        let unwind_result: Result<Result<(), SlateDBError>, Box<dyn Any + Send>> = Ok(Ok(()));
 
         // When: we split the result
         let (result, payload) = super::split_unwind_result("test".to_string(), unwind_result);
@@ -1499,7 +1492,7 @@ mod tests {
     #[test]
     fn test_split_unwind_result_ok_error() {
         // Given: an unwind result with a task error
-        let unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
+        let unwind_result: Result<Result<(), SlateDBError>, Box<dyn Any + Send>> =
             Ok(Err(SlateDBError::Fenced));
 
         // When: we split the result
@@ -1514,7 +1507,7 @@ mod tests {
     fn test_split_unwind_result_panic() {
         // Given: an unwind result that panicked with a non-SlateDBError (e.g., a string)
         let panic_msg = "something went wrong";
-        let unwind_result: Result<Result<(), SlateDBError>, Box<dyn std::any::Any + Send>> =
+        let unwind_result: Result<Result<(), SlateDBError>, Box<dyn Any + Send>> =
             Err(Box::new(panic_msg));
 
         // When: we split the result

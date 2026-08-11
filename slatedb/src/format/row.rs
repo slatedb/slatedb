@@ -147,10 +147,10 @@ impl SstRowCodecV0 {
 
     /// estimated_entries_size include the size of seqnum,create_ts(if exist),expire_ts(exist),key,value
     pub(crate) fn estimate_encoded_size(entry_num: usize, estimated_entries_size: usize) -> usize {
-        let key_prefix_len_size = std::mem::size_of::<u16>();
-        let key_suffix_len_size = std::mem::size_of::<u16>();
-        let value_len_size = std::mem::size_of::<u32>();
-        let flag_size = std::mem::size_of::<u8>();
+        let key_prefix_len_size = size_of::<u16>();
+        let key_suffix_len_size = size_of::<u16>();
+        let value_len_size = size_of::<u32>();
+        let flag_size = size_of::<u8>();
         let mut ans = estimated_entries_size;
         ans += (key_prefix_len_size + key_suffix_len_size + value_len_size + flag_size) * entry_num;
         ans

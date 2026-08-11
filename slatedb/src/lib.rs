@@ -184,5 +184,5 @@ mod wal_replay;
 #[cfg(test)]
 #[ctor::ctor]
 fn init_test_infrastructure() {
-    crate::test_utils::init_test_infrastructure();
+    test_utils::init_test_infrastructure();
 }

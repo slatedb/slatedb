@@ -455,15 +455,15 @@ impl WriteBatchIterator {
 
 #[async_trait]
 impl RowEntryIterator for WriteBatchIterator {
-    async fn init(&mut self) -> Result<(), crate::error::SlateDBError> {
+    async fn init(&mut self) -> Result<(), SlateDBError> {
         Ok(())
     }
 
-    async fn next(&mut self) -> Result<Option<RowEntry>, crate::error::SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         Ok(self.iter.next())
     }
 
-    async fn seek(&mut self, next_key: &[u8]) -> Result<(), crate::error::SlateDBError> {
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         while let Some(entry) = self.iter.peek() {
             if match self.ordering {
                 IterationOrder::Ascending => entry.key.as_ref() < next_key,
@@ -1326,8 +1326,8 @@ mod tests {
         ];
         assert_iterator(&mut iter, expected).await;
 
-        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
-            as crate::merge_operator::MergeOperatorType);
+        let merge_operator =
+            Some(std::sync::Arc::new(StringConcatMergeOperator) as MergeOperatorType);
         let (result, _, _) = batch
             .extract_entries(100, 1000, None, merge_operator, None)
             .await
@@ -1401,8 +1401,8 @@ mod tests {
         batch.merge(b"key1", b"merge3");
 
         // When: extracting entries with a merge operator
-        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
-            as crate::merge_operator::MergeOperatorType);
+        let merge_operator =
+            Some(std::sync::Arc::new(StringConcatMergeOperator) as MergeOperatorType);
         let (result, _, _) = batch
             .extract_entries(100, 1000, None, merge_operator, None)
             .await
@@ -1435,8 +1435,8 @@ mod tests {
             },
         );
 
-        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
-            as crate::merge_operator::MergeOperatorType);
+        let merge_operator =
+            Some(std::sync::Arc::new(StringConcatMergeOperator) as MergeOperatorType);
         let (result, _, _) = batch
             .extract_entries(100, 1000, None, merge_operator, None)
             .await
@@ -1469,8 +1469,8 @@ mod tests {
             },
         );
 
-        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
-            as crate::merge_operator::MergeOperatorType);
+        let merge_operator =
+            Some(std::sync::Arc::new(StringConcatMergeOperator) as MergeOperatorType);
         let err = batch
             .extract_entries(100, 1000, None, merge_operator, None)
             .await
@@ -1508,8 +1508,8 @@ mod tests {
             },
         );
 
-        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
-            as crate::merge_operator::MergeOperatorType);
+        let merge_operator =
+            Some(std::sync::Arc::new(StringConcatMergeOperator) as MergeOperatorType);
         let (result, _, _) = batch
             .extract_entries(100, 1000, None, merge_operator, None)
             .await
@@ -1534,8 +1534,8 @@ mod tests {
             },
         );
 
-        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
-            as crate::merge_operator::MergeOperatorType);
+        let merge_operator =
+            Some(std::sync::Arc::new(StringConcatMergeOperator) as MergeOperatorType);
         let err = batch
             .extract_entries(100, 1000, None, merge_operator, None)
             .await
@@ -1556,8 +1556,8 @@ mod tests {
             },
         );
 
-        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
-            as crate::merge_operator::MergeOperatorType);
+        let merge_operator =
+            Some(std::sync::Arc::new(StringConcatMergeOperator) as MergeOperatorType);
         let err = batch
             .extract_entries(100, 1000, None, merge_operator, None)
             .await
@@ -1575,8 +1575,8 @@ mod tests {
         batch.merge(b"key1", b"merge2");
 
         // When: extracting entries with a merge operator
-        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
-            as crate::merge_operator::MergeOperatorType);
+        let merge_operator =
+            Some(std::sync::Arc::new(StringConcatMergeOperator) as MergeOperatorType);
         let (result, _, _) = batch
             .extract_entries(100, 1000, None, merge_operator, None)
             .await
@@ -1601,8 +1601,8 @@ mod tests {
         batch.merge(b"key1", b"merge2");
 
         // When: extracting entries with a merge operator
-        let merge_operator = Some(std::sync::Arc::new(StringConcatMergeOperator)
-            as crate::merge_operator::MergeOperatorType);
+        let merge_operator =
+            Some(std::sync::Arc::new(StringConcatMergeOperator) as MergeOperatorType);
         let (result, _, _) = batch
             .extract_entries(100, 1000, None, merge_operator, None)
             .await

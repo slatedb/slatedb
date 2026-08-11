@@ -868,7 +868,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
 
         // then:
-        assert_eq!(encoded.info.sst_type, crate::db_state::SstType::Wal,);
+        assert_eq!(encoded.info.sst_type, SstType::Wal,);
     }
 
     mod block_transformer_tests {

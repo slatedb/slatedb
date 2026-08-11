@@ -271,7 +271,7 @@ impl FlushTracker {
     /// When the imm's touched-segment set is empty (no extractor
     /// configured, or the imm came from a path that bypassed
     /// validation) we fall back to the max-across-trees heuristic.
-    fn can_dispatch(&self, imm: &crate::mem_table::ImmutableMemtable) -> bool {
+    fn can_dispatch(&self, imm: &ImmutableMemtable) -> bool {
         let state = self.inner.state.read().state();
         let core = state.core();
         let settings = &self.inner.settings;
@@ -413,7 +413,7 @@ fn allocate_segment_sst_ids(inner: &DbInner, imm: &ImmutableMemtable) -> BTreeMa
 struct TrackedImm {
     first_seq: u64,
     last_seq: u64,
-    imm_memtable: Arc<crate::mem_table::ImmutableMemtable>,
+    imm_memtable: Arc<ImmutableMemtable>,
     state: TrackedImmState,
 }
 
@@ -432,10 +432,7 @@ impl TrackedImmFrontier {
     }
 
     /// Register newly frozen immutable memtables, deduplicating by `last_seq`.
-    fn register(
-        &mut self,
-        imm_memtables: impl Iterator<Item = Arc<crate::mem_table::ImmutableMemtable>>,
-    ) {
+    fn register(&mut self, imm_memtables: impl Iterator<Item = Arc<ImmutableMemtable>>) {
         for imm_memtable in imm_memtables {
             let first_seq = imm_memtable
                 .table()

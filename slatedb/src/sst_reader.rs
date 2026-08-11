@@ -587,11 +587,7 @@ mod tests {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let reader = SstReader::new("/test", store, None, None);
 
-        let wal_handle = SsTableHandle::new(
-            SsTableId::Wal(42),
-            0,
-            crate::db_state::SsTableInfo::default(),
-        );
+        let wal_handle = SsTableHandle::new(SsTableId::Wal(42), 0, SsTableInfo::default());
         let result = reader.open_with_handle(wal_handle);
         assert!(result.is_err());
     }

@@ -871,7 +871,7 @@ impl DbReader {
     pub(crate) async fn preload_cache(
         &self,
         cached_obj_store: &CachedObjectStore,
-        path: object_store::path::Path,
+        path: Path,
     ) -> Result<(), SlateDBError> {
         let state = Arc::clone(&self.inner.state.read());
         let external_ssts = state.manifest.external_ssts();
@@ -1855,7 +1855,7 @@ mod tests {
 
         let parent_manifest = Manifest::initial(ManifestCore::new());
         let parent_path = "/tmp/parent_store".to_string();
-        let source_checkpoint_id = uuid::Uuid::new_v4();
+        let source_checkpoint_id = Uuid::new_v4();
 
         let _ = StoredManifest::store_uninitialized_clone(
             Arc::clone(&manifest_store),
@@ -3607,8 +3607,7 @@ mod tests {
         let mut test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
         test_provider.system_clock = clock.clone();
 
-        let merge_operator: crate::merge_operator::MergeOperatorType =
-            Arc::new(crate::test_utils::StringConcatMergeOperator);
+        let merge_operator: MergeOperatorType = Arc::new(test_utils::StringConcatMergeOperator);
 
         let db = Db::builder(path.clone(), Arc::clone(&object_store))
             .with_settings(Settings {

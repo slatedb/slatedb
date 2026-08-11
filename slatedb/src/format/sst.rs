@@ -69,10 +69,7 @@ impl BlockBuilder {
         }
     }
 
-    pub(crate) fn add(
-        &mut self,
-        entry: crate::types::RowEntry,
-    ) -> Result<bool, crate::error::SlateDBError> {
+    pub(crate) fn add(&mut self, entry: crate::types::RowEntry) -> Result<bool, SlateDBError> {
         match self {
             Self::V1(builder) => builder.add(entry),
             Self::V2(builder) => builder.add(entry),
@@ -125,10 +122,7 @@ impl BlockBuilderWithStats {
         self.builder.would_fit(entry)
     }
 
-    pub(crate) fn add(
-        &mut self,
-        entry: crate::types::RowEntry,
-    ) -> Result<bool, crate::error::SlateDBError> {
+    pub(crate) fn add(&mut self, entry: crate::types::RowEntry) -> Result<bool, SlateDBError> {
         match &entry.value {
             crate::types::ValueDeletable::Value(_) => self.stats.num_puts += 1,
             crate::types::ValueDeletable::Merge(_) => self.stats.num_merges += 1,
@@ -329,7 +323,7 @@ pub(crate) struct EncodedSsTableFooterBuilder<'a, 'b> {
     /// codec for the SST info
     sst_info_codec: &'a dyn SsTableInfoCodec,
     /// builder for the index block
-    index_builder: flatbuffers::FlatBufferBuilder<'b, flatbuffers::DefaultAllocator>,
+    index_builder: flatbuffers::FlatBufferBuilder<'b, DefaultAllocator>,
     /// metadata block
     block_meta: Vec<flatbuffers::WIPOffset<BlockMeta<'b>>>,
     /// filter blocks

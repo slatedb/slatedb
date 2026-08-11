@@ -188,7 +188,7 @@ pub trait CompactionScheduler: Send + Sync {
                         "rejected full-segment compaction: unknown segment {:?}",
                         segment
                     );
-                    return Err(crate::Error::from(SlateDBError::InvalidCompaction));
+                    return Err(Error::from(SlateDBError::InvalidCompaction));
                 };
                 match plan_full_tree(segment, tree) {
                     Some(spec) => Ok(vec![spec]),
@@ -200,7 +200,7 @@ pub trait CompactionScheduler: Send + Sync {
                                 segment
                             );
                         }
-                        Err(crate::Error::from(SlateDBError::InvalidCompaction))
+                        Err(Error::from(SlateDBError::InvalidCompaction))
                     }
                 }
             }
@@ -373,12 +373,12 @@ impl Compactor {
     ///
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
-    pub async fn run(&self) -> Result<(), crate::Error> {
+    pub async fn run(&self) -> Result<(), Error> {
         self.start().await?;
         self.join().await
     }
 
-    pub(crate) async fn start(&self) -> Result<(), crate::Error> {
+    pub(crate) async fn start(&self) -> Result<(), Error> {
         // The coordinator delegates compaction execution to [`crate::compaction_worker::CompactionWorker`]
         // either spawned in this process (set `worker: Some`) or running standalone (set `worker: None`).
         let (_tx, rx) = async_channel::unbounded::<CompactorMessage>();
@@ -401,7 +401,7 @@ impl Compactor {
                 rx,
                 &Handle::current(),
             )
-            .map_err(crate::Error::from)?;
+            .map_err(Error::from)?;
 
         // Spawn an in-process worker if configured. The worker runs under its
         // own cancellation token; Compactor::stop and run() are responsible for
@@ -429,23 +429,23 @@ impl Compactor {
                     worker_rx,
                     &Handle::current(),
                 )
-                .map_err(crate::Error::from)?;
+                .map_err(Error::from)?;
         }
 
         self.task_executor.monitor_on(&Handle::current())?;
         Ok(())
     }
 
-    pub(crate) async fn join(&self) -> Result<(), crate::Error> {
+    pub(crate) async fn join(&self) -> Result<(), Error> {
         self.task_executor
             .join_task(COMPACTOR_TASK_NAME)
             .await
-            .map_err(crate::Error::from)?;
+            .map_err(Error::from)?;
         if self.options.worker.is_some() {
             self.task_executor
                 .join_task(crate::compaction_worker::COMPACTION_WORKER_TASK_NAME)
                 .await
-                .map_err(crate::Error::from)?;
+                .map_err(Error::from)?;
         }
         Ok(())
     }
@@ -454,16 +454,16 @@ impl Compactor {
     ///
     /// ## Returns
     /// - `Ok(())` once the task has shut down, or [`SlateDBError`] if shutdown fails.
-    pub async fn stop(&self) -> Result<(), crate::Error> {
+    pub async fn stop(&self) -> Result<(), Error> {
         self.task_executor
             .shutdown_task(COMPACTOR_TASK_NAME)
             .await
-            .map_err(crate::Error::from)?;
+            .map_err(Error::from)?;
         if self.options.worker.is_some() {
             self.task_executor
                 .shutdown_task(crate::compaction_worker::COMPACTION_WORKER_TASK_NAME)
                 .await
-                .map_err(crate::Error::from)?;
+                .map_err(Error::from)?;
         }
         Ok(())
     }
@@ -480,13 +480,13 @@ impl Compactor {
         compactions_store: Arc<CompactionsStore>,
         rand: Arc<DbRand>,
         system_clock: Arc<dyn SystemClock>,
-    ) -> Result<Ulid, crate::Error> {
+    ) -> Result<Ulid, Error> {
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
         let compaction = Compaction::new(compaction_id, spec);
         let mut stored_compactions =
             match StoredCompactions::try_load(compactions_store.clone()).await? {
                 Some(stored) => stored,
-                None => return Err(crate::Error::from(SlateDBError::InvalidDBState)),
+                None => return Err(Error::from(SlateDBError::InvalidDBState)),
             };
 
         loop {
@@ -497,7 +497,7 @@ impl Compactor {
                 Err(err) if err.is_sequenced_write_conflict() => {
                     stored_compactions.refresh().await?;
                 }
-                Err(err) => return Err(crate::Error::from(err)),
+                Err(err) => return Err(Error::from(err)),
             }
         }
     }
@@ -972,16 +972,12 @@ impl CompactorEventHandler {
             );
             return Err(SlateDBError::InvalidCompaction);
         };
-        let l0_view_ids = tree
-            .l0
-            .iter()
-            .map(|view| view.id)
-            .collect::<std::collections::HashSet<_>>();
+        let l0_view_ids = tree.l0.iter().map(|view| view.id).collect::<HashSet<_>>();
         let sr_ids = tree
             .compacted
             .iter()
             .map(|sr| sr.id)
-            .collect::<std::collections::HashSet<_>>();
+            .collect::<HashSet<_>>();
 
         if let Some(missing) = spec.sources().iter().find(|source| match source {
             SourceId::SstView(id) => !l0_view_ids.contains(id),
@@ -1107,7 +1103,7 @@ impl CompactorEventHandler {
         if !compaction.is_drain() {
             return Ok(());
         }
-        let drained_l0_ids: std::collections::HashSet<ulid::Ulid> = compaction
+        let drained_l0_ids: HashSet<Ulid> = compaction
             .sources()
             .iter()
             .filter_map(|s| match s {
@@ -3121,7 +3117,7 @@ mod tests {
         db.merge_with_options(
             b"key1",
             &[b'a'; 32],
-            &crate::config::MergeOptions {
+            &MergeOptions {
                 ttl: Ttl::ExpireAfterMillis(10),
             },
             &WriteOptions {
@@ -3139,7 +3135,7 @@ mod tests {
         db.merge_with_options(
             b"key1",
             &[b'b'; 32],
-            &crate::config::MergeOptions { ttl: Ttl::NoExpiry },
+            &MergeOptions { ttl: Ttl::NoExpiry },
             &WriteOptions {
                 ..Default::default()
             },
@@ -3312,7 +3308,7 @@ mod tests {
         db.merge_with_options(
             b"key1",
             b"a",
-            &crate::config::MergeOptions {
+            &MergeOptions {
                 ttl: Ttl::ExpireAfterMillis(100),
             },
             &WriteOptions {
@@ -3336,7 +3332,7 @@ mod tests {
         db.merge_with_options(
             b"key1",
             b"b",
-            &crate::config::MergeOptions {
+            &MergeOptions {
                 ttl: Ttl::ExpireAfterMillis(200),
             },
             &WriteOptions {
@@ -5415,7 +5411,7 @@ mod tests {
         // Build the handler and trigger a ticker to pick up the pre-existing Submitted entry.
         let scheduler = Arc::new(MockScheduler::new());
         let rand = Arc::new(DbRand::default());
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let recorder = MetricsRecorderHelper::noop();
         let compactor_stats = Arc::new(CompactionStats::new(&recorder));
         let mut handler = CompactorEventHandler::new(
             manifest_store,
@@ -6586,11 +6582,9 @@ mod tests {
         assert!(c.worker().is_none(), "worker should be cleared");
 
         // and: the reclamation is counted.
-        let reclaimed = slatedb_common::metrics::lookup_metric(
-            &fixture.test_recorder,
-            crate::compactor::stats::JOBS_RECLAIMED,
-        )
-        .expect("metric not found");
+        let reclaimed =
+            slatedb_common::metrics::lookup_metric(&fixture.test_recorder, stats::JOBS_RECLAIMED)
+                .expect("metric not found");
         assert_eq!(reclaimed, 1, "one job should be counted as reclaimed");
     }
 
@@ -6602,11 +6596,8 @@ mod tests {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
 
         let claimed_count = || {
-            slatedb_common::metrics::lookup_metric(
-                &fixture.test_recorder,
-                crate::compactor::stats::JOBS_CLAIMED,
-            )
-            .expect("metric not found")
+            slatedb_common::metrics::lookup_metric(&fixture.test_recorder, stats::JOBS_CLAIMED)
+                .expect("metric not found")
         };
 
         // given: a job already claimed (Running) before the coordinator's first tick.

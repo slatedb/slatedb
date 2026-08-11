@@ -5,7 +5,7 @@ use crate::types::RowEntry;
 use crate::utils::clamp_allocated_size_bytes;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-pub(crate) const SIZEOF_U16: usize = std::mem::size_of::<u16>();
+pub(crate) const SIZEOF_U16: usize = size_of::<u16>();
 
 #[derive(Eq, PartialEq)]
 pub(crate) struct Block {

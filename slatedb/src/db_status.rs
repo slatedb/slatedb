@@ -67,9 +67,9 @@ impl DbStatus {
     }
 }
 
-pub(crate) trait ClosedResultWriter: std::fmt::Debug + Send + Sync + 'static {
+pub(crate) trait ClosedResultWriter: fmt::Debug + Send + Sync + 'static {
     fn write_result(&self, result: Result<(), SlateDBError>);
-    fn result_reader(&self) -> crate::utils::WatchableOnceCellReader<Result<(), SlateDBError>>;
+    fn result_reader(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>>;
 }
 
 /// Manages database lifecycle status, including the close result and
@@ -246,7 +246,7 @@ impl ClosedResultWriter for WatchableOnceCell<Result<(), SlateDBError>> {
         self.write(result);
     }
 
-    fn result_reader(&self) -> crate::utils::WatchableOnceCellReader<Result<(), SlateDBError>> {
+    fn result_reader(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
         self.reader()
     }
 }
@@ -262,7 +262,7 @@ impl ClosedResultWriter for DbStatusManager {
         }
     }
 
-    fn result_reader(&self) -> crate::utils::WatchableOnceCellReader<Result<(), SlateDBError>> {
+    fn result_reader(&self) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
         self.cell.reader()
     }
 }

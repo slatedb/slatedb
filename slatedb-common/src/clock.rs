@@ -265,7 +265,7 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "test-util")]
     async fn test_mock_system_clock_set_now() {
-        let clock = std::sync::Arc::new(MockSystemClock::new());
+        let clock = Arc::new(MockSystemClock::new());
 
         // Test positive timestamp
         let positive_ts = 1625097600000i64; // 2021-07-01T00:00:00Z in milliseconds
@@ -289,7 +289,7 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "test-util")]
     async fn test_mock_system_clock_advance() {
-        let clock = std::sync::Arc::new(MockSystemClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let initial_ts = 1000;
 
         // Set initial time
@@ -310,7 +310,7 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "test-util")]
     async fn test_mock_system_clock_sleep() {
-        let clock = std::sync::Arc::new(MockSystemClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let initial_ts = 2000;
 
         // Set initial time
@@ -352,7 +352,7 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "test-util")]
     async fn test_mock_system_clock_ticker() {
-        let clock = std::sync::Arc::new(MockSystemClock::new());
+        let clock = Arc::new(MockSystemClock::new());
         let tick_duration = Duration::from_millis(100);
 
         // Create a ticker
@@ -388,7 +388,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_default_system_clock_now() {
-        let clock = std::sync::Arc::new(DefaultSystemClock::new());
+        let clock = Arc::new(DefaultSystemClock::new());
 
         // Record initial time
         let initial_now = clock.now();
@@ -409,7 +409,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     #[cfg(feature = "test-util")]
     async fn test_default_system_clock_advance() {
-        let clock = std::sync::Arc::new(DefaultSystemClock::new());
+        let clock = Arc::new(DefaultSystemClock::new());
         let start = clock.now();
         let duration = Duration::from_millis(500);
         clock.clone().advance(duration).await;
@@ -424,7 +424,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_default_system_clock_ticker() {
-        let clock = std::sync::Arc::new(DefaultSystemClock::new());
+        let clock = Arc::new(DefaultSystemClock::new());
         let tick_duration = Duration::from_millis(10);
 
         // Create a ticker

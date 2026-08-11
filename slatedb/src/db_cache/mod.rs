@@ -320,7 +320,7 @@ impl From<(SsTableId, u64)> for CachedKey {
 #[derive(Clone)]
 pub(crate) struct EncodedCachedFilter {
     pub(crate) name: String,
-    pub(crate) data: bytes::Bytes,
+    pub(crate) data: Bytes,
 }
 
 #[non_exhaustive]
@@ -1477,11 +1477,11 @@ mod tests {
         // given: a cache that always returns errors
         let recorder = Arc::new(DefaultMetricsRecorder::new());
         let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
-        let failing_cache: Arc<dyn super::DbCache> = Arc::new(super::test_utils::FailingCache);
-        let cache = super::DbCacheWrapper::new(
+        let failing_cache: Arc<dyn DbCache> = Arc::new(super::test_utils::FailingCache);
+        let cache = DbCacheWrapper::new(
             failing_cache,
             &helper,
-            Arc::new(slatedb_common::clock::DefaultSystemClock::default()),
+            Arc::new(DefaultSystemClock::default()),
         );
         let key = CachedKey::from((SST_ID, 12345u64));
 

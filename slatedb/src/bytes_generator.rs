@@ -30,7 +30,7 @@ impl OrderedBytesGenerator {
     }
 
     pub(crate) fn next(&mut self) -> Bytes {
-        let mut result = BytesMut::with_capacity(self.bytes.len() + std::mem::size_of::<u32>());
+        let mut result = BytesMut::with_capacity(self.bytes.len() + size_of::<u32>());
         result.put_slice(self.bytes.as_slice());
         result.put(self.suffix.as_ref());
         self.increment();
