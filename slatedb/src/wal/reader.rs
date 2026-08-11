@@ -50,14 +50,11 @@ impl WalReader for SlateDbWalReader {
         Ok(Box::new(iterator))
     }
 
-    async fn last_wal_file_id(&self) -> Result<u64, WalError> {
+    async fn last_wal_file_id(&self, replay_after_wal_id: u64) -> Result<u64, WalError> {
         Ok(self
             .table_store
-            .list_wal_ssts(..)
-            .await?
-            .last()
-            .map(|wal| wal.id.unwrap_wal_id())
-            .unwrap_or(0))
+            .last_seen_wal_id(replay_after_wal_id)
+            .await?)
     }
 }
 
@@ -97,7 +94,7 @@ mod tests {
             BlockCachePolicy::default(),
         ));
         let wal_reader = SlateDbWalReader::new(table_store);
-        let last_wal_id = wal_reader.last_wal_file_id().await.unwrap();
+        let last_wal_id = wal_reader.last_wal_file_id(0).await.unwrap();
         let mut iterator = wal_reader
             .iterator((1..last_wal_id + 1).into())
             .await

@@ -82,13 +82,14 @@ impl WalReader for BTreeMapWal {
         Ok(Box::new(BTreeMapWalIterator { batches }))
     }
 
-    async fn last_wal_file_id(&self) -> Result<u64, WalError> {
+    async fn last_wal_file_id(&self, replay_after_wal_id: u64) -> Result<u64, WalError> {
         Ok(self
             .files
             .lock()
-            .last_key_value()
+            .range((Bound::Excluded(replay_after_wal_id), Bound::Unbounded))
+            .next_back()
             .map(|(id, _)| *id)
-            .unwrap_or(0))
+            .unwrap_or(replay_after_wal_id))
     }
 }
 
@@ -209,16 +210,12 @@ impl WriterInit for BTreeMapWal {
         &self,
         manifest: &mut WriterManifest,
     ) -> Result<WriterInitResult, WalError> {
-        let start = manifest
-            .replay_after_wal_id()
-            .checked_add(1)
-            .ok_or_else(|| {
-                WalError::InternalError(Arc::new(std::io::Error::other(
-                    "WAL replay range overflow",
-                )))
-            })?;
+        let replay_after_wal_id = manifest.replay_after_wal_id();
+        let start = replay_after_wal_id.checked_add(1).ok_or_else(|| {
+            WalError::InternalError(Arc::new(std::io::Error::other("WAL replay range overflow")))
+        })?;
         let end = self
-            .last_wal_file_id()
+            .last_wal_file_id(replay_after_wal_id)
             .await?
             .checked_add(1)
             .ok_or_else(|| {

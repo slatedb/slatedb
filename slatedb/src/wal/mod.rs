@@ -283,9 +283,10 @@ pub trait WalReader: Send + Sync + 'static {
         wal_file_id_range: WalFileRange,
     ) -> Result<Box<dyn WalIterator>, WalError>;
 
-    /// Returns the ID of the last WAL file currently present in the WAL, or `0` if the WAL is
-    /// empty.
-    async fn last_wal_file_id(&self) -> Result<u64, WalError>;
+    /// Returns the ID of the last WAL file currently present after `replay_after_wal_id`, or
+    /// `replay_after_wal_id` if no later WAL file is present. Implementations may use
+    /// `replay_after_wal_id` as a known lower bound when locating the end of the WAL.
+    async fn last_wal_file_id(&self, replay_after_wal_id: u64) -> Result<u64, WalError>;
 }
 
 /// Trait that defines the contract between SlateDB's garbage collector and a custom WAL

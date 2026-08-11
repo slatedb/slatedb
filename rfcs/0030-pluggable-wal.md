@@ -389,6 +389,11 @@ pub trait WalReader {
         &self,
         wal_file_id_range: WalFileRange,
     ) -> Result<Box<dyn WalIterator>, WalError>;
+
+    /// Returns the ID of the last WAL file currently present after `replay_after_wal_id`, or
+    /// `replay_after_wal_id` if no later WAL file is present. Implementations may use
+    /// `replay_after_wal_id` as a known lower bound when locating the end of the WAL.
+    async fn last_wal_file_id(&self, replay_after_wal_id: u64) -> Result<u64, WalError>;
 }
 
 /// API for plugging into WAL GC

@@ -658,7 +658,7 @@ impl DbReaderInner {
         let wal_id_end = match replay_end {
             WalReplayEnd::Manifest => core.next_wal_sst_id,
             WalReplayEnd::Latest => wal_reader
-                .last_wal_file_id()
+                .last_wal_file_id(replay_after_wal_id)
                 .await?
                 .checked_add(1)
                 .ok_or(SlateDBError::InvalidDBState)?,
@@ -1536,7 +1536,7 @@ mod tests {
             Ok(Box::new(EmptyTestWalIterator))
         }
 
-        async fn last_wal_file_id(&self) -> Result<u64, WalError> {
+        async fn last_wal_file_id(&self, _replay_after_wal_id: u64) -> Result<u64, WalError> {
             self.last_wal_file_id_calls.fetch_add(1, Ordering::Relaxed);
             Ok(10)
         }
@@ -2668,7 +2668,7 @@ mod tests {
 
         fail_parallel::cfg(
             Arc::clone(&test_provider.fp_registry),
-            "list-wal-ssts",
+            "probe-wal-ssts",
             "return",
         )
         .unwrap();
@@ -2794,14 +2794,14 @@ mod tests {
             .unwrap()
             .id;
 
-        // Inject a failpoint on WAL listing before flushing so it is active
+        // Inject a failpoint on WAL probing before flushing so it is active
         // when the poller fires. With the buggy replay_new_wals=true,
-        // reestablish_checkpoint resolves the last WAL file by listing WAL SSTs
+        // reestablish_checkpoint resolves the last WAL file by probing WAL SSTs
         // and hits this failpoint. With the fix (replay_new_wals=false), the
-        // WAL listing is skipped entirely.
+        // WAL probe is skipped entirely.
         fail_parallel::cfg(
             Arc::clone(&test_provider.fp_registry),
-            "list-wal-ssts",
+            "probe-wal-ssts",
             "return",
         )
         .unwrap();
@@ -2819,7 +2819,7 @@ mod tests {
 
         // Wait for the manifest poller to see the changed L0 state and
         // reestablish the checkpoint. Without the fix, the poller crashes
-        // on the WAL listing failpoint.
+        // on the WAL probing failpoint.
         let timeout = Duration::from_secs(5);
         let start = tokio::time::Instant::now();
         loop {

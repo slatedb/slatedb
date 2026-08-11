@@ -793,7 +793,6 @@ impl Admin {
             self.retrying_store(ObjectStoreType::Main),
         )
         .with_wal_admin(self.wal_admin.clone())
-        // TODO: make sure wal_admin uses retrying object store
     }
 
     /// Creates a new builder for an admin client at the given path.
