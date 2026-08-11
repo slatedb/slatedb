@@ -2263,7 +2263,8 @@ mod tests {
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::MockSystemClock;
     use slatedb_common::metrics::{
-        lookup_metric, lookup_metric_with_labels, DefaultMetricsRecorder, MetricValue,
+        lookup_metric, lookup_metric_with_labels, CounterFn, DefaultMetricsRecorder, GaugeFn,
+        HistogramFn, MetricValue, MetricsRecorder, NoopMetricsRecorder, UpDownCounterFn,
     };
     use std::collections::BTreeMap;
     use std::collections::Bound::Included;
@@ -10177,6 +10178,130 @@ mod tests {
             Some(0),
             "expected external_db_count == 0 for a standalone DB"
         );
+        db.close().await.unwrap();
+    }
+
+    struct GaugeBlockControl {
+        target: &'static str,
+        armed: AtomicBool,
+        tripped: AtomicBool,
+        release: AtomicBool,
+        entered_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    }
+
+    struct BlockableGauge {
+        name: String,
+        control: Arc<GaugeBlockControl>,
+    }
+
+    impl GaugeFn for BlockableGauge {
+        fn set(&self, _value: i64) {
+            if self.name != self.control.target {
+                return;
+            }
+            if !self.control.armed.load(Ordering::SeqCst) {
+                return;
+            }
+            if self.control.tripped.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let _ = self.control.entered_tx.send(());
+            while !self.control.release.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    struct BlockingGaugeRecorder {
+        control: Arc<GaugeBlockControl>,
+    }
+
+    impl MetricsRecorder for BlockingGaugeRecorder {
+        fn register_counter(
+            &self,
+            name: &str,
+            description: &str,
+            labels: &[(&str, &str)],
+        ) -> Arc<dyn CounterFn> {
+            NoopMetricsRecorder.register_counter(name, description, labels)
+        }
+
+        fn register_gauge(
+            &self,
+            name: &str,
+            _description: &str,
+            _labels: &[(&str, &str)],
+        ) -> Arc<dyn GaugeFn> {
+            Arc::new(BlockableGauge {
+                name: name.to_string(),
+                control: self.control.clone(),
+            })
+        }
+
+        fn register_up_down_counter(
+            &self,
+            name: &str,
+            description: &str,
+            labels: &[(&str, &str)],
+        ) -> Arc<dyn UpDownCounterFn> {
+            NoopMetricsRecorder.register_up_down_counter(name, description, labels)
+        }
+
+        fn register_histogram(
+            &self,
+            name: &str,
+            description: &str,
+            labels: &[(&str, &str)],
+            boundaries: &[f64],
+        ) -> Arc<dyn HistogramFn> {
+            NoopMetricsRecorder.register_histogram(name, description, labels, boundaries)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_should_not_hold_state_lock_during_metrics_callbacks() {
+        // User metrics callbacks must not run under the `db.state` write
+        // lock. Block a gauge callback and assert `get()` still completes.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let control = Arc::new(GaugeBlockControl {
+            target: crate::db_stats::L0_SST_COUNT,
+            armed: AtomicBool::new(false),
+            tripped: AtomicBool::new(false),
+            release: AtomicBool::new(false),
+            entered_tx,
+        });
+        let recorder = Arc::new(BlockingGaugeRecorder {
+            control: control.clone(),
+        });
+        let db = Db::builder(
+            "/tmp/test_should_not_hold_state_lock_during_metrics_callbacks",
+            object_store,
+        )
+        .with_settings(test_db_options(0, 1024, None))
+        .with_metrics_recorder(recorder)
+        .build()
+        .await
+        .unwrap();
+
+        control.armed.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .expect("manifest stats gauge was never set")
+            .unwrap();
+
+        let read_task = tokio::spawn({
+            let db = db.clone();
+            async move { db.get(b"key").await }
+        });
+        let read_result = tokio::time::timeout(Duration::from_secs(5), read_task).await;
+        control.release.store(true, Ordering::SeqCst);
+        let value = read_result
+            .expect("db.get() deadlocked while a metrics callback was in flight")
+            .unwrap()
+            .unwrap();
+        assert_eq!(value, None);
+
         db.close().await.unwrap();
     }
 
