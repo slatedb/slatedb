@@ -186,7 +186,7 @@ The `SstFile::info()` call is primarily for users that don't have access to a `M
 
 The downside is that `open()` requires a read to obtain the `SsTableHandle` even if the caller only wants to call `metadata()`, which doesn't need it. This is a fine tradeoff.
 
-`index()` calls `SsTableFormat::read_index()`, which reads `info.index_offset..info.index_offset + info.index_len`, decompresses, and returns an `SsTableIndexOwned`. The returned `SstIndex` retains the cached `Arc<SsTableIndexOwned>` and reads FlatBuffer `BlockMeta` entries without copying their keys. Caching uses `DbCache::get_index` / `insert` keyed by `(sst_id, index_offset)`, matching the existing pattern in `TableStore::read_index()`.
+`index()` calls `SsTableFormat::read_index()`, which reads `info.index_offset..info.index_offset + info.index_len`, decompresses, and returns an `SsTableIndexOwned`. The returned `SstIndex` retains the cached `Arc<SsTableIndexOwned>` and reads FlatBuffer `BlockMeta` entries without copying their keys. Caching is handled by `TableStore::read_index()`.
 
 The existing `SstFileMetadata` struct in `tablestore.rs` (currently `pub(crate)`) is made `pub`.
 
