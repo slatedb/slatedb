@@ -47,7 +47,6 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use ulid::Ulid;
@@ -257,32 +256,18 @@ impl SstFile {
             .map_err(Into::into)
     }
 
-    /// Returns `(block_offset, first_key)` pairs from the SST index block.
-    ///
-    /// The returned vector is parallel to the data blocks in the SST. Each
-    /// entry contains the on-disk byte offset of the block and the first key
-    /// stored in that block.
-    ///
-    /// ## Errors
-    ///
-    /// Returns an error if there is an issue reading from object storage.
-    pub async fn index(&self) -> Result<Vec<(u64, Bytes)>, crate::Error> {
-        let index = self.index_view().await?;
-        Ok(index
-            .iter()
-            .map(|(offset, first_key)| (offset, Bytes::copy_from_slice(first_key)))
-            .collect())
-    }
-
     /// Returns a zero-copy view of the SST index block.
     ///
-    /// Unlike [`SstFile::index`], this does not materialize an owned vector or
-    /// copy first keys. The returned view keeps the cached index data alive.
+    /// The returned index is parallel to the data blocks in the SST. Each
+    /// entry contains the on-disk byte offset of the block and the first key
+    /// stored in that block. The index keeps the cached index data alive, and
+    /// keys returned by its accessors borrow directly from that data without
+    /// allocation or copying.
     ///
     /// ## Errors
     ///
     /// Returns an error if there is an issue reading from object storage.
-    pub async fn index_view(&self) -> Result<SstIndex, crate::Error> {
+    pub async fn index(&self) -> Result<SstIndex, crate::Error> {
         let inner = self.table_store.read_index(&self.handle, true).await?;
         Ok(SstIndex { inner })
     }
@@ -332,6 +317,7 @@ mod tests {
     use crate::test_utils::StringConcatMergeOperator;
     use crate::types::ValueDeletable;
     use crate::Db;
+    use bytes::Bytes;
     use object_store::memory::InMemory;
 
     /// Helper: create a DB with 10 puts, 3 deletes, and 2 merges, flush to
@@ -446,53 +432,55 @@ mod tests {
         // First index key should be <= the SST's first entry (it may be a
         // shortened separator key rather than the exact first key).
         if let Some(first_entry) = sst_file.info().first_entry.as_ref() {
-            assert!(index[0].1.as_ref() <= first_entry.as_ref());
+            let (_, first_key) = index.get(0).expect("index should not be empty");
+            assert!(first_key <= first_entry.as_ref());
         }
         // Offsets should be monotonically increasing
-        for window in index.windows(2) {
-            assert!(window[0].0 < window[1].0);
+        let mut entries = index.iter();
+        let mut previous_offset = entries.next().expect("index should not be empty").0;
+        for (offset, _) in entries {
+            assert!(previous_offset < offset);
+            previous_offset = offset;
         }
     }
 
     #[tokio::test]
-    async fn test_index_view_matches_owned_index() {
+    async fn test_index_accessors() {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
         let view = &manifest.manifest.core.tree.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
-        let owned = sst_file.index().await.unwrap();
-        let index_view = sst_file.index_view().await.unwrap();
+        let index = sst_file.index().await.unwrap();
 
-        assert_eq!(index_view.len(), owned.len());
-        assert_eq!(index_view.is_empty(), owned.is_empty());
-        assert_eq!(index_view.get(index_view.len()), None);
-        assert_eq!(
-            index_view
-                .iter()
-                .map(|(offset, first_key)| (offset, Bytes::copy_from_slice(first_key)))
-                .collect::<Vec<_>>(),
-            owned
-        );
+        assert!(!index.is_empty());
+        assert_eq!(index.iter().len(), index.len());
+        for (position, entry) in index.iter().enumerate() {
+            assert_eq!(index.get(position), Some(entry));
+        }
+        assert_eq!(index.get(index.len()), None);
     }
 
     #[tokio::test]
-    async fn test_index_view_partition_point_matches_owned_index() {
+    async fn test_index_partition_point_matches_slice() {
         let (store, path, manifest) = setup_db_with_l0().await;
         let reader = SstReader::new(path, store, None, None);
 
         let view = &manifest.manifest.core.tree.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
-        let owned = sst_file.index().await.unwrap();
-        let index_view = sst_file.index_view().await.unwrap();
+        let index = sst_file.index().await.unwrap();
+        let owned = index
+            .iter()
+            .map(|(offset, first_key)| (offset, Bytes::copy_from_slice(first_key)))
+            .collect::<Vec<_>>();
 
         for key in [b"".as_slice(), b"k00", b"k05", b"k99"] {
             assert_eq!(
-                index_view.partition_point(|candidate| candidate < key),
+                index.partition_point(|candidate| candidate < key),
                 owned.partition_point(|(_, candidate)| candidate.as_ref() < key)
             );
             assert_eq!(
-                index_view.partition_point(|candidate| candidate <= key),
+                index.partition_point(|candidate| candidate <= key),
                 owned.partition_point(|(_, candidate)| candidate.as_ref() <= key)
             );
         }
@@ -589,7 +577,7 @@ mod tests {
         // block's actual first key is always >= the index's separator key.
         for (i, (_, first_key)) in index.iter().enumerate() {
             let rows = sst_file.read_block(i).await.unwrap();
-            assert!(rows[0].key >= *first_key);
+            assert!(rows[0].key.as_ref() >= first_key);
         }
     }
 

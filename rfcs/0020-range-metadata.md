@@ -153,11 +153,8 @@ impl SstFile {
     /// SSTs that were written before the stats block was added.
     pub async fn stats(&self) -> Result<Option<SstStats>, crate::Error>;
 
-    /// Returns `(block_offset, first_key)` pairs from the SST index block.
-    pub async fn index(&self) -> Result<Vec<(u64, Bytes)>, crate::Error>;
-
     /// Returns a zero-copy view of the SST index block.
-    pub async fn index_view(&self) -> Result<SstIndex, crate::Error>;
+    pub async fn index(&self) -> Result<SstIndex, crate::Error>;
 }
 ```
 
@@ -189,7 +186,7 @@ The `SstFile::info()` call is primarily for users that don't have access to a `M
 
 The downside is that `open()` requires a read to obtain the `SsTableHandle` even if the caller only wants to call `metadata()`, which doesn't need it. This is a fine tradeoff.
 
-`index_view()` calls `SsTableFormat::read_index()`, which reads `info.index_offset..info.index_offset + info.index_len`, decompresses, and returns an `SsTableIndexOwned`. The view retains the cached `Arc<SsTableIndexOwned>` and reads FlatBuffer `BlockMeta` entries without copying their keys. `index()` remains available when an owned `Vec<(u64, Bytes)>` is required and materializes it from `index_view()`. Caching uses `DbCache::get_index` / `insert` keyed by `(sst_id, index_offset)`, matching the existing pattern in `TableStore::read_index()`.
+`index()` calls `SsTableFormat::read_index()`, which reads `info.index_offset..info.index_offset + info.index_len`, decompresses, and returns an `SsTableIndexOwned`. The returned `SstIndex` retains the cached `Arc<SsTableIndexOwned>` and reads FlatBuffer `BlockMeta` entries without copying their keys. Caching uses `DbCache::get_index` / `insert` keyed by `(sst_id, index_offset)`, matching the existing pattern in `TableStore::read_index()`.
 
 The existing `SstFileMetadata` struct in `tablestore.rs` (currently `pub(crate)`) is made `pub`.
 
@@ -261,7 +258,7 @@ For cardinality: open each covering SST with `SstReader` (via `view.sst`) and ca
 
 #### Refined estimate — block-level for boundary SSTs
 
-Most `SsTableView`s returned by `tables_covering_range()` are fully contained within the query range — their stats apply directly. Only the first and last view in each sorted run partially overlap. For these two boundary SSTs, call `sst_file.index()` to get the index `[(offset, first_key), ...]`. Binary search for the range start key in the first boundary SST to find where the range begins; binary search for the range end key in the last boundary SST to find where it ends. Note that an `SsTableView` may have a `visible_range()` projection that further restricts the effective key range — the query range should be intersected with the view's visible range before performing the binary search.
+Most `SsTableView`s returned by `tables_covering_range()` are fully contained within the query range — their stats apply directly. Only the first and last view in each sorted run partially overlap. For these two boundary SSTs, call `sst_file.index()` to get an `SstIndex`. Use `partition_point()` to find the range start in the first boundary SST and the range end in the last boundary SST. Note that an `SsTableView` may have a `visible_range()` projection that further restricts the effective key range — the query range should be intersected with the view's visible range before searching the index.
 
 These offsets are compressed/stored sizes since the block index tracks on-disk offsets.
 
@@ -406,7 +403,7 @@ SST stats block:
 - Record counting requires both stats (for `block_stats`) and index (for binary search on keys). Approximate count: stats + index reads. Exact count: + at most 2 data block reads per boundary SST.
 
 `SstFile::index()`:
-- One index block read per SST, cacheable via the block cache. No changes to `BlockMeta` format.
+- One index block read per SST, cacheable via the block cache. The returned `SstIndex` retains the cached data and exposes borrowed first keys without copying them. No changes to `BlockMeta` format.
 
 Memtable metrics via `Db::metrics()`:
 - No I/O. Reads atomic counters.
@@ -431,8 +428,7 @@ Memtable stats (`num_puts`, `num_deletes`, `num_merges`, `raw_key_bytes`, `raw_v
 ### Compatibility
 
 - `SsTableInfo` gets new `stats_offset`/`stats_len` fields in Phase 1. Old SSTs without a stats block will have these fields default to `0` (FlatBuffers default), and `SstFile::stats()` returns `None`.
-- New APIs are additive only
-- No breaking changes to existing APIs
+- `SstFile::index()` now returns `SstIndex` instead of `Vec<(u64, Bytes)>`. This is a breaking API change; consumers must use `SstIndex::get()`, `iter()`, or `partition_point()` instead of slice operations.
 - Language bindings will need to expose new types and methods
 
 ## Testing
@@ -443,7 +439,7 @@ Unit tests:
 - `SstReader::open()`: loading SST footer and constructing `SstFile`
 - `SstReader::open_with_handle()`: constructing `SstFile` from an existing `SsTableHandle`
 - `SstFile::stats()`: correct reading and population of `SstStats` from the stats block
-- `SstFile::index()`: returns correct `(offset, first_key)` pairs matching the SST's block index
+- `SstFile::index()`: returns an `SstIndex` whose accessors expose the correct `(offset, first_key)` pairs and partition points
 - `block_stats` vector: parallel to index, builder correctly tracks per-block put/delete/merge counts
 - Backward compatibility: old SSTs without stats return `None`
 - `Db::manifest()`: returns current manifest state with L0 and sorted runs
