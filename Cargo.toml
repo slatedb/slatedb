@@ -110,3 +110,4 @@ unexpected_cfgs = { level = "allow", check-cfg = [
     'cfg(tokio_unstable)',
 ] }
 unreachable_pub = "warn"
+unused_qualifications = "warn"
