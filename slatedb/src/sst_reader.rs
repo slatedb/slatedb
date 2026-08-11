@@ -577,7 +577,7 @@ mod tests {
         // block's actual first key is always >= the index's separator key.
         for (i, (_, first_key)) in index.iter().enumerate() {
             let rows = sst_file.read_block(i).await.unwrap();
-            assert!(rows[0].key.as_ref() >= first_key);
+            assert!(rows[0].key >= *first_key);
         }
     }
 
