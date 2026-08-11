@@ -47,7 +47,6 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use ulid::Ulid;
@@ -56,9 +55,11 @@ use crate::block_cache_policy::BlockCachePolicy;
 use crate::block_iterator::DataBlockIterator;
 use crate::db_cache::DbCache;
 use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo};
+use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::iter::IterationOrder;
 use crate::object_stores::ObjectStores;
+use crate::partitioned_keyspace::{partition_point, RangePartitionedKeySpace};
 use crate::sst_stats::SstStats;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::types::RowEntry;
@@ -147,6 +148,69 @@ pub struct SstFile {
     table_store: Arc<TableStore>,
 }
 
+/// A zero-copy view of an SST's block index.
+///
+/// The view owns a reference to the cached index data. Keys returned by its
+/// accessors borrow directly from that data without allocation or copying.
+#[derive(Clone)]
+pub struct SstIndex {
+    inner: Arc<SsTableIndexOwned>,
+}
+
+impl SstIndex {
+    /// Returns the number of data blocks described by the index.
+    pub fn len(&self) -> usize {
+        self.inner.borrow().block_meta().len()
+    }
+
+    /// Returns whether the index contains no data blocks.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the block offset and first key at `index`.
+    pub fn get(&self, index: usize) -> Option<(u64, &[u8])> {
+        let block_meta = self.inner.borrow().block_meta();
+        if index >= block_meta.len() {
+            return None;
+        }
+        let meta = block_meta.get(index);
+        Some((meta.offset(), meta.first_key().bytes()))
+    }
+
+    /// Iterates over block offsets and first keys in index order.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (u64, &[u8])> + '_ {
+        let block_meta = self.inner.borrow().block_meta();
+        (0..block_meta.len()).map(move |index| {
+            let meta = block_meta.get(index);
+            (meta.offset(), meta.first_key().bytes())
+        })
+    }
+
+    /// Returns the first index for which `pred` is false.
+    ///
+    /// The index first keys are sorted, so `pred` must return `true` for a
+    /// contiguous prefix of the index, matching [`slice::partition_point`].
+    pub fn partition_point<P>(&self, pred: P) -> usize
+    where
+        P: Fn(&[u8]) -> bool,
+    {
+        partition_point(self, pred)
+    }
+}
+
+impl RangePartitionedKeySpace for SstIndex {
+    fn partitions(&self) -> usize {
+        self.len()
+    }
+
+    fn partition_first_key(&self, partition: usize) -> &[u8] {
+        self.get(partition)
+            .expect("partition index should be in range")
+            .1
+    }
+}
+
 impl SstFile {
     /// Returns the SST's ULID identifier.
     pub fn id(&self) -> Ulid {
@@ -192,29 +256,20 @@ impl SstFile {
             .map_err(Into::into)
     }
 
-    /// Returns `(block_offset, first_key)` pairs from the SST index block.
+    /// Returns a zero-copy view of the SST index block.
     ///
-    /// The returned vector is parallel to the data blocks in the SST. Each
-    /// entry contains the on-disk byte offset of the block and the first key
-    /// stored in that block.
+    /// The returned [`SstIndex`] contains one entry for each data block in the
+    /// SST, in block order. Each entry contains the on-disk byte offset of
+    /// the block and the first key stored in that block. The index keeps
+    /// the cached index data alive, and keys returned by its accessors borrow
+    /// directly from that data without allocation or copying.
     ///
     /// ## Errors
     ///
     /// Returns an error if there is an issue reading from object storage.
-    pub async fn index(&self) -> Result<Vec<(u64, Bytes)>, crate::Error> {
-        let index = self.table_store.read_index(&self.handle, true).await?;
-        let borrowed = index.borrow();
-        let block_meta = borrowed.block_meta();
-        let result: Vec<(u64, Bytes)> = (0..block_meta.len())
-            .map(|i| {
-                let meta = block_meta.get(i);
-                (
-                    meta.offset(),
-                    Bytes::copy_from_slice(meta.first_key().bytes()),
-                )
-            })
-            .collect();
-        Ok(result)
+    pub async fn index(&self) -> Result<SstIndex, crate::Error> {
+        let inner = self.table_store.read_index(&self.handle, true).await?;
+        Ok(SstIndex { inner })
     }
 
     /// Reads a single data block by its index and returns the decoded rows.
@@ -262,6 +317,7 @@ mod tests {
     use crate::test_utils::StringConcatMergeOperator;
     use crate::types::ValueDeletable;
     use crate::Db;
+    use bytes::Bytes;
     use object_store::memory::InMemory;
 
     /// Helper: create a DB with 10 puts, 3 deletes, and 2 merges, flush to
@@ -376,11 +432,41 @@ mod tests {
         // First index key should be <= the SST's first entry (it may be a
         // shortened separator key rather than the exact first key).
         if let Some(first_entry) = sst_file.info().first_entry.as_ref() {
-            assert!(index[0].1.as_ref() <= first_entry.as_ref());
+            let (_, first_key) = index.get(0).expect("index should not be empty");
+            assert!(first_key <= first_entry.as_ref());
         }
         // Offsets should be monotonically increasing
-        for window in index.windows(2) {
-            assert!(window[0].0 < window[1].0);
+        let mut entries = index.iter();
+        let mut previous_offset = entries.next().expect("index should not be empty").0;
+        for (offset, _) in entries {
+            assert!(previous_offset < offset);
+            previous_offset = offset;
+        }
+        assert_eq!(index.get(index.len()), None);
+    }
+
+    #[tokio::test]
+    async fn test_index_partition_point_matches_slice() {
+        let (store, path, manifest) = setup_db_with_l0().await;
+        let reader = SstReader::new(path, store, None, None);
+
+        let view = &manifest.manifest.core.tree.l0[0];
+        let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
+        let index = sst_file.index().await.unwrap();
+        let owned = index
+            .iter()
+            .map(|(offset, first_key)| (offset, Bytes::copy_from_slice(first_key)))
+            .collect::<Vec<_>>();
+
+        for key in [b"".as_slice(), b"k00", b"k05", b"k99"] {
+            assert_eq!(
+                index.partition_point(|candidate| candidate < key),
+                owned.partition_point(|(_, candidate)| candidate.as_ref() < key)
+            );
+            assert_eq!(
+                index.partition_point(|candidate| candidate <= key),
+                owned.partition_point(|(_, candidate)| candidate.as_ref() <= key)
+            );
         }
     }
 
