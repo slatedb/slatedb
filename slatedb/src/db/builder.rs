@@ -164,7 +164,7 @@ use crate::utils::WatchableOnceCell;
 use crate::wal;
 use crate::wal::admin::SlateDbWalAdmin;
 use crate::wal::wal_disabled::DisabledWalObserver;
-use crate::wal::{WalAdmin, WalGC, WalObserver};
+use crate::wal::{WalAdmin, WalGc, WalObserver};
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorder;
@@ -970,7 +970,7 @@ pub struct GarbageCollectorBuilder<P: Into<Path>> {
     path: P,
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
-    wal_gc: Option<Arc<dyn WalGC>>,
+    wal_gc: Option<Arc<dyn WalGc>>,
     options: GarbageCollectorOptions,
     gc_filter: Option<Arc<dyn GcFilter>>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
@@ -1047,7 +1047,7 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
         self
     }
 
-    pub fn with_wal_gc(mut self, wal_gc: Arc<dyn WalGC>) -> Self {
+    pub fn with_wal_gc(mut self, wal_gc: Arc<dyn WalGc>) -> Self {
         self.wal_gc = Some(wal_gc);
         self
     }

@@ -51,7 +51,7 @@ mod manifest_gc;
 pub mod stats;
 mod wal_gc;
 
-use crate::wal::WalGC;
+use crate::wal::WalGc;
 pub(crate) use filter::retain_allowed_by_gc_filter;
 pub use filter::GcFilter;
 
@@ -236,7 +236,7 @@ impl GarbageCollector {
         recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
         gc_filter: Option<Arc<dyn GcFilter>>,
-        wal_gc: Option<Arc<dyn WalGC>>,
+        wal_gc: Option<Arc<dyn WalGc>>,
     ) -> Self {
         let stats = Arc::new(GcStats::new(recorder));
         // The standalone GC lifecycle does not surface a closed result yet, so the

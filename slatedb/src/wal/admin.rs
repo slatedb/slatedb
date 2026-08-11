@@ -89,7 +89,7 @@ impl WalAdmin for SlateDbWalAdmin {
     async fn delete_wal(&self, path: &Path, dry_run: bool) -> Result<Vec<String>, WalError> {
         // Collect the paths first so listing is complete before objects are removed.
         let wal_path = PathResolver::from_root(path.clone()).wal_path();
-        let paths = self.paths_under(wal_path).await?;
+        let paths = self.paths_under(&wal_path).await?;
         if !dry_run {
             for object_path in &paths {
                 self.object_store

@@ -14,7 +14,7 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::path::Path;
 use slatedb::object_store::ObjectStore;
 use slatedb::wal::{
-    FlushResultFuture, WalAdmin, WalError, WalEvent, WalFileRange, WalGC, WalIterator, WalObserver,
+    FlushResultFuture, WalAdmin, WalError, WalEvent, WalFileRange, WalGc, WalIterator, WalObserver,
     WalReader, WalRows, WalStatus, WalStatusListener, WalWriter, WriterInit, WriterInitResult,
     WriterManifest,
 };
@@ -250,7 +250,7 @@ fn range_contains(range: &WalFileRange, wal_file_id: u64) -> bool {
 }
 
 #[async_trait]
-impl WalGC for BTreeMapWal {
+impl WalGc for BTreeMapWal {
     async fn collect(
         &self,
         referenced_ranges: Vec<WalFileRange>,
@@ -287,7 +287,7 @@ impl BTreeMapWalAdmin {
 
 #[async_trait]
 impl WalAdmin for BTreeMapWalAdmin {
-    fn garbage_collector(&self, path: &Path) -> Arc<dyn WalGC> {
+    fn garbage_collector(&self, path: &Path) -> Arc<dyn WalGc> {
         Arc::new(self.wal(path))
     }
 
@@ -303,7 +303,12 @@ impl WalAdmin for BTreeMapWalAdmin {
             .collect())
     }
 
-    async fn is_empty(&self, path: &Path, _manifest: VersionedManifest) -> Result<bool, WalError> {
+    async fn is_empty(
+        &self,
+        path: &Path,
+        _replay_after_wal_id: u64,
+        _wal_id_last_seen: u64,
+    ) -> Result<bool, WalError> {
         Ok(self.wal(path).files.lock().values().all(Vec::is_empty))
     }
 
