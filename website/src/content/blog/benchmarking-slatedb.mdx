@@ -8,35 +8,37 @@ authorGithub: criccomini
 
 import ChartEmbed from '../../components/ChartEmbed.astro';
 
-SlateDB has been around for a few years now. Recently, I've begun to focus on performance. As Kent Beck (purportedly) said, "Make It Work, Make It Right, Make It Fast." I feel we've earned the right to make SlateDB fast. Of course, before we improve things, we need to measure them. When it comes to performance, that means benchmarks.
+SlateDB has been around for a few years now. We've begun to pay more attention to performance recently. As [Kent Beck](https://en.wikipedia.org/wiki/Kent_Beck) (purportedly) said, ["Make It Work, Make It Right, Make It Fast."](https://wiki.c2.com/?MakeItWorkMakeItRightMakeItFast) We feel we've earned the right to make SlateDB fast. Of course, before we improve things, we need to measure them. When it comes to performance, that means benchmarks.
 
 Benchmarks are tricky. It's easy to do something that is perceived as marketing, hyperbole, or outright dishonesty. It's questionable whether public benchmarks are even useful anymore. A max-effort LLM such as Fable or Sol is capable of building excellent bespoke benchmarks for each user.
 
-Yet I found myself re-building SlateDB's benchmark suite a few weeks back. In this post, I'll share the benchmarking philosophy I landed on, how I benchmarked SlateDB, and some things I learned along the way.
+Yet we found ourselves rebuilding SlateDB's benchmark suite a few weeks back. In this post, we'll share the benchmarking philosophy we landed on, how we benchmarked SlateDB, and some things we learned along the way.
+
+You can head over to [benchmark.slatedb.io](https://benchmark.slatedb.io) if you just want the results.
 
 ## Legacy benchmarks
 
 We have had benchmarks for quite a while. We added [Criterion microbenchmarks](https://github.com/bheisler/criterion.rs) and a `benchmark.sh` script early on in the project. We also built a nightly job that runs `benchmark.sh` against a real [Tigris](https://www.tigrisdata.com/) object store. (A special thanks to them for donating the bucket to us free of charge.)
 
-Unfortunately, no one was looking at the benchmark results. The output was buried in a [GitHub Actions](https://docs.github.com/actions) summary that no one looked at. It didn't alert when significant regressions occurred, either. If you even managed to find it, the output was hard to read. We used [Mermaid charts](https://mermaid.js.org/) with enough daily data points that the labels only worked when rotated vertically.
+Unfortunately, no one was looking at the benchmark results. The output was buried in a [GitHub Actions](https://docs.github.com/actions) summary. It didn't alert when significant regressions occurred, either. If you managed to find it, the output was hard to read. We used [Mermaid charts](https://mermaid.js.org/) with enough data points that the labels only worked when rotated vertically.
 
 ## Why bother
 
-I wrestled with whether we even needed benchmarks, and if so, for whom? Our "benchmarks" were really meant for us--the developers. We wanted to detect regressions and find areas to improve. For that, you want a lot of different workloads, configurations, charts, tables, and raw data. A lot of everything.
+We wrestled with whether we should bother fixing them, and if so, how and for whom? Our "benchmarks" were really meant for us--the developers. We wanted to detect regressions and find areas to improve. For that, you want a lot of different workloads, configurations, charts, tables, and raw data. A lot of everything.
 
 It's difficult to present all of this data in a way that's easy for an average user to consume. Users generally want to gauge the rough performance of a system to see if it's in the ballpark of their needs. For that, less is more.
 
-I decided to look at user-facing benchmarks since we already have developer-facing benchmarks (albeit, ones we mostly ignored). That begs the question: why bother? As I said in the beginning of this post, it is easy to generate an application-specific workload. Users can use an LLM to build their own benchmarks.
+We decided to look at user-facing benchmarks. The hope was that user-facing benchmarks would be good enough for the developers as well (spoiler alert: they were). But as we said, it is easy enough for users to generate an application-specific workload.
 
-That work is not free, though. You need machines, object storage, time, and enough familiarity with SlateDB configure and test it sensibly (yes, even with an LLM). I felt that a public suite still had value as a way to show SlateDB's behavior under different workloads. It could also be informative to demonstrate tradeoffs of an object-storage LSM.
+That work is not free, though. You need machines, object storage, time, and enough familiarity with SlateDB configure and test it sensibly (yes, even with an LLM). We felt that a public suite still had value as a way to show SlateDB's behavior under different workloads. It could also be informative to demonstrate tradeoffs of an object-storage LSM.
 
 ## Inspired by
 
-I looked at several benchmark efforts while working through the design: [ClickBench](https://github.com/ClickHouse/ClickBench), [DuckDB’s benchmark suite](https://duckdb.org/docs/current/dev/benchmark), [DuckDB’s narrative benchmark write-up](https://duckdb.org/2025/10/09/benchmark-results-14-lts), [Lucene’s nightly benchmarks](https://lucene.apache.org/core/developer.html), and [Apache Iggy’s public benchmark dashboard](https://iggy.apache.org/blogs/2025/02/17/transparent-benchmarks/). I also skimmed [Tectonic](https://scholarworks.brandeis.edu/esploro/outputs/conferencePresentation/Tectonic-Bridging-Synthetic-and-Real-World-Workloads/9924594037601921), a paper on bridging synthetic and real-world key-value workloads.
+We looked at several benchmark efforts while working through the design: [ClickBench](https://github.com/ClickHouse/ClickBench), [DuckDB’s benchmark suite](https://duckdb.org/docs/current/dev/benchmark), [DuckDB’s narrative benchmark write-up](https://duckdb.org/2025/10/09/benchmark-results-14-lts), [Lucene’s nightly benchmarks](https://lucene.apache.org/core/developer.html), and [Apache Iggy’s public benchmark dashboard](https://iggy.apache.org/blogs/2025/02/17/transparent-benchmarks/). We also skimmed [Tectonic](https://scholarworks.brandeis.edu/esploro/outputs/conferencePresentation/Tectonic-Bridging-Synthetic-and-Real-World-Workloads/9924594037601921), a paper on bridging synthetic and real-world key-value workloads.
 
-For SlateDB itself, I started from the two obvious references: [YCSB](https://github.com/brianfrankcooper/YCSB) and [RocksDB’s `db_bench`](https://github.com/facebook/rocksdb/wiki/RocksDB-Overview).
+For SlateDB itself, we started from the two obvious references: [YCSB](https://github.com/brianfrankcooper/YCSB) and [RocksDB’s `db_bench`](https://github.com/facebook/rocksdb/wiki/RocksDB-Overview).
 
-Both YCSB and db_bench contain more workloads than I wanted to publish. I'm paying for these myself, and I don't want to spend a fortune on cloud bills. We selected a smaller set that stays close to their intent and covers behavior users are likely to care about. If a user needs a more specialized workload, they should run it themselves. The [benchmark repository](https://github.com/slatedb/slatedb-benchmark/) is available for that purpose.
+Both YCSB and db_bench contain more workloads than we wanted to publish. We're paying for these myself, and we don't want to spend a fortune on cloud bills. We selected a smaller set that stays close to their intent and covers behavior users are likely to care about. If a user needs a more specialized workload, they should run it themselves. The [benchmark repository](https://github.com/slatedb/slatedb-benchmark/) is available for that purpose.
 
 ## Best effort honesty
 
