@@ -1268,6 +1268,34 @@ mod tests {
         assert_eq!(total, 500);
     }
 
+    #[tokio::test]
+    async fn write_wal_should_write_at_most_max_entries() {
+        let table_store = test_table_store();
+        let entries: BTreeMap<Bytes, Bytes> = (0..10)
+            .map(|i| {
+                (
+                    Bytes::from(format!("key_{i:03}")),
+                    Bytes::from(format!("value_{i:03}")),
+                )
+            })
+            .collect();
+        let mut iter = entries.iter();
+
+        let next_seq = write_wal(1, 1, &mut iter, 3, Arc::clone(&table_store))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            next_seq, 4,
+            "write_wal should consume at most max_entries entries"
+        );
+        assert_eq!(
+            iter.count(),
+            7,
+            "write_wal should leave the remaining entries for later WALs"
+        );
+    }
+
     fn test_table_store() -> Arc<TableStore> {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
@@ -1333,7 +1361,8 @@ mod tests {
     ) -> Result<u64, SlateDBError> {
         let mut writer = table_store.table_writer(SsTableId::Wal(wal_id));
         let mut next_seq = next_seq;
-        while next_seq < next_seq + (max_entries as u64) {
+        let end_seq = next_seq + (max_entries as u64);
+        while next_seq < end_seq {
             let Some((key, value)) = entries.next() else {
                 break;
             };
