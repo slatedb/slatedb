@@ -77,6 +77,7 @@ pub(crate) struct WalReplayIterator {
 }
 
 impl WalReplayIterator {
+    #[cfg(test)]
     pub(crate) fn range(
         wal_id_range: Range<u64>,
         db_state: &ManifestCore,

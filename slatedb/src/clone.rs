@@ -622,6 +622,7 @@ mod tests {
     use std::ops::Bound;
     use std::ops::RangeBounds;
     use std::sync::Arc;
+    use std::time::Duration;
     use uuid::Uuid;
 
     struct RemappingWalAdmin {
@@ -633,19 +634,24 @@ mod tests {
 
     #[async_trait]
     impl WalGc for NoopWalGc {
-        async fn collect(&self, _referenced_ranges: Vec<WalFileRange>) -> Result<(), WalError> {
+        async fn collect(
+            &self,
+            _referenced_ranges: Vec<WalFileRange>,
+            _min_age: Duration,
+            _dry_run: bool,
+        ) -> Result<(), WalError> {
             Ok(())
         }
     }
 
     #[async_trait]
     impl WalAdmin for RemappingWalAdmin {
-        fn garbage_collector(&self, _path: &Path) -> Box<dyn WalGc> {
-            Box::new(NoopWalGc)
+        fn garbage_collector(&self, _path: &Path) -> Arc<dyn WalGc> {
+            Arc::new(NoopWalGc)
         }
 
-        async fn delete_wal(&self, _path: &Path) -> Result<(), WalError> {
-            Ok(())
+        async fn delete_wal(&self, _path: &Path, _dry_run: bool) -> Result<Vec<String>, WalError> {
+            Ok(vec![])
         }
 
         async fn is_empty(
