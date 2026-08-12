@@ -769,7 +769,6 @@ mod tests {
                     b"value2",
                     &PutOptions::default(),
                     &WriteOptions {
-                        await_durable: false,
                         ..Default::default()
                     },
                 )

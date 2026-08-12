@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import pytest
-
 from conftest import (
-    ConcatMergeOperator,
     TEST_DB_PATH,
+    ConcatMergeOperator,
     drain_iterator,
     new_memory_store,
     open_db,
@@ -15,6 +14,7 @@ from conftest import (
     scan_options,
     wait_until,
 )
+
 from slatedb.uniffi import (
     CloseReason,
     DbReaderBuilder,
@@ -198,18 +198,17 @@ async def test_reader_refresh_polling_updates_visible_state() -> None:
 async def test_reader_default_mode_replays_new_wal_data() -> None:
     store = new_memory_store()
 
-    async with open_db(store) as db:
-        async with open_reader(
-            store,
-            configure=lambda builder: builder.with_options(reader_options(False)),
-        ) as reader:
-            await db.put(b"wal-key", b"wal-value")
-            await db.flush_with_options(FlushOptions(flush_type=FlushType.WAL))
+    async with open_db(store) as db, open_reader(
+        store,
+        configure=lambda builder: builder.with_options(reader_options(False)),
+    ) as reader:
+        await db.put(b"wal-key", b"wal-value")
+        await db.flush_with_options(FlushOptions(flush_type=FlushType.WAL))
 
-            async def has_wal_value() -> bool:
-                return await reader.get(b"wal-key") == b"wal-value"
+        async def has_wal_value() -> bool:
+            return await reader.get(b"wal-key") == b"wal-value"
 
-            await wait_until(has_wal_value)
+        await wait_until(has_wal_value)
 
 
 @pytest.mark.asyncio

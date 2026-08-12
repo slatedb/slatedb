@@ -158,6 +158,22 @@ func uint64Ptr(v uint64) *uint64 {
 	return &v
 }
 
+func trackWriteHandle(t *testing.T, handle *slatedb.WriteHandle) *slatedb.WriteHandle {
+	t.Helper()
+	if handle == nil {
+		t.Fatal("got nil write handle")
+	}
+	t.Cleanup(handle.Destroy)
+	return handle
+}
+
+func awaitDurable(t *testing.T, handle *slatedb.WriteHandle) {
+	t.Helper()
+	if err := handle.AwaitDurable(); err != nil {
+		t.Fatalf("WriteHandle.AwaitDurable(): %v", err)
+	}
+}
+
 func drainIterator(t *testing.T, iter *slatedb.DbIterator) []slatedb.KeyValue {
 	t.Helper()
 
@@ -504,6 +520,38 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 	}
 }
 
+func TestDbShutdownWithOptions(t *testing.T) {
+	wal := slatedb.FlushTypeWal
+	tests := []struct {
+		name      string
+		flushType *slatedb.FlushType
+	}{
+		{name: "wal", flushType: &wal},
+		{name: "none", flushType: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newMemoryStore(t)
+			handle := openTestDB(t, store, nil)
+
+			if _, err := handle.db.Put([]byte("shutdown-options"), []byte("value")); err != nil {
+				t.Fatalf("Put(): %v", err)
+			}
+
+			if err := handle.db.ShutdownWithOptions(slatedb.CloseOptions{FlushType: tt.flushType}); err != nil {
+				t.Fatalf("ShutdownWithOptions(): %v", err)
+			}
+			handle.open = false
+
+			status := handle.db.Status()
+			if status.CloseReason == nil || *status.CloseReason != slatedb.CloseReasonClean {
+				t.Fatalf("Status() after ShutdownWithOptions(): got close reason %v, want %v", status.CloseReason, slatedb.CloseReasonClean)
+			}
+		})
+	}
+}
+
 type fixedThreeByteSegmentExtractor struct{}
 
 func (fixedThreeByteSegmentExtractor) Name() string { return "fixed_three_byte" }
@@ -597,16 +645,17 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	}
 
 	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlDefault{}}
-	writeOptions := slatedb.WriteOptions{AwaitDurable: true}
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
 
 	firstWrite, err := handle.db.Put([]byte("alpha"), []byte("one"))
 	if err != nil {
 		t.Fatalf("Put(alpha): %v", err)
 	}
-	if firstWrite.Seqnum == 0 {
+	firstWrite = trackWriteHandle(t, firstWrite)
+	if firstWrite.Seqnum() == 0 {
 		t.Fatalf("Put(alpha): Seqnum = 0")
 	}
-	if firstWrite.CreateTs == 0 {
+	if firstWrite.CreateTs() == 0 {
 		t.Fatalf("Put(alpha): CreateTs = 0")
 	}
 
@@ -639,11 +688,11 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	if !bytes.Equal(metadata.Value, []byte("one")) {
 		t.Fatalf("GetKeyValue(alpha): value = %q, want %q", metadata.Value, "one")
 	}
-	if metadata.Seq != firstWrite.Seqnum {
-		t.Fatalf("GetKeyValue(alpha): seq = %d, want %d", metadata.Seq, firstWrite.Seqnum)
+	if metadata.Seq != firstWrite.Seqnum() {
+		t.Fatalf("GetKeyValue(alpha): seq = %d, want %d", metadata.Seq, firstWrite.Seqnum())
 	}
-	if metadata.CreateTs != firstWrite.CreateTs {
-		t.Fatalf("GetKeyValue(alpha): create ts = %d, want %d", metadata.CreateTs, firstWrite.CreateTs)
+	if metadata.CreateTs != firstWrite.CreateTs() {
+		t.Fatalf("GetKeyValue(alpha): create ts = %d, want %d", metadata.CreateTs, firstWrite.CreateTs())
 	}
 
 	metadata, err = handle.db.GetKeyValueWithOptions([]byte("alpha"), readOptions)
@@ -658,10 +707,12 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PutWithOptions(beta): %v", err)
 	}
-	if secondWrite.Seqnum <= firstWrite.Seqnum {
-		t.Fatalf("PutWithOptions(beta): seq = %d, want > %d", secondWrite.Seqnum, firstWrite.Seqnum)
+	secondWrite = trackWriteHandle(t, secondWrite)
+	awaitDurable(t, secondWrite)
+	if secondWrite.Seqnum() <= firstWrite.Seqnum() {
+		t.Fatalf("PutWithOptions(beta): seq = %d, want > %d", secondWrite.Seqnum(), firstWrite.Seqnum())
 	}
-	if secondWrite.CreateTs == 0 {
+	if secondWrite.CreateTs() == 0 {
 		t.Fatalf("PutWithOptions(beta): CreateTs = 0")
 	}
 
@@ -696,8 +747,9 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Delete(alpha): %v", err)
 	}
-	if deleteWrite.Seqnum <= secondWrite.Seqnum {
-		t.Fatalf("Delete(alpha): seq = %d, want > %d", deleteWrite.Seqnum, secondWrite.Seqnum)
+	deleteWrite = trackWriteHandle(t, deleteWrite)
+	if deleteWrite.Seqnum() <= secondWrite.Seqnum() {
+		t.Fatalf("Delete(alpha): seq = %d, want > %d", deleteWrite.Seqnum(), secondWrite.Seqnum())
 	}
 
 	value, err = handle.db.Get([]byte("alpha"))
@@ -712,8 +764,9 @@ func TestDbCrudAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteWithOptions(beta): %v", err)
 	}
-	if deleteWrite.Seqnum <= secondWrite.Seqnum {
-		t.Fatalf("DeleteWithOptions(beta): seq = %d, want > %d", deleteWrite.Seqnum, secondWrite.Seqnum)
+	deleteWrite = trackWriteHandle(t, deleteWrite)
+	if deleteWrite.Seqnum() <= secondWrite.Seqnum() {
+		t.Fatalf("DeleteWithOptions(beta): seq = %d, want > %d", deleteWrite.Seqnum(), secondWrite.Seqnum())
 	}
 
 	value, err = handle.db.Get([]byte("beta"))
@@ -846,7 +899,8 @@ func TestDbBatchWriteAndConsumption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Write(): %v", err)
 	}
-	if batchWrite.Seqnum == 0 {
+	batchWrite = trackWriteHandle(t, batchWrite)
+	if batchWrite.Seqnum() == 0 {
 		t.Fatalf("Write(): Seqnum = 0")
 	}
 
@@ -877,9 +931,12 @@ func TestDbBatchWriteAndConsumption(t *testing.T) {
 		t.Fatalf("WriteBatch.PutWithOptions(): %v", err)
 	}
 
-	if _, err := handle.db.WriteWithOptions(secondBatch, slatedb.WriteOptions{AwaitDurable: true}); err != nil {
+	secondBatchWrite, err := handle.db.WriteWithOptions(secondBatch, slatedb.WriteOptions{Seqnum: 0})
+	if err != nil {
 		t.Fatalf("WriteWithOptions(): %v", err)
 	}
+	secondBatchWrite = trackWriteHandle(t, secondBatchWrite)
+	awaitDurable(t, secondBatchWrite)
 
 	value, err = handle.db.Get([]byte("batch-put-2"))
 	if err != nil {
@@ -937,14 +994,17 @@ func TestDbMerge(t *testing.T) {
 		t.Fatalf("Get(merge) after Merge(): got %v, want %q", value, "base:one")
 	}
 
-	if _, err := handle.db.MergeWithOptions(
+	mergeWrite, err := handle.db.MergeWithOptions(
 		[]byte("merge"),
 		[]byte(":two"),
 		slatedb.MergeOptions{Ttl: slatedb.TtlDefault{}},
-		slatedb.WriteOptions{AwaitDurable: true},
-	); err != nil {
+		slatedb.WriteOptions{Seqnum: 0},
+	)
+	if err != nil {
 		t.Fatalf("MergeWithOptions(): %v", err)
 	}
+	mergeWrite = trackWriteHandle(t, mergeWrite)
+	awaitDurable(t, mergeWrite)
 
 	value, err = handle.db.Get([]byte("merge"))
 	if err != nil {
@@ -1024,11 +1084,15 @@ func TestDbTransactions(t *testing.T) {
 		t.Fatalf("db.Get(txn-key) before commit: got %q, want nil", *liveValue)
 	}
 
-	commitHandle, err := tx.Commit()
+	optionalCommitHandle, err := tx.Commit()
 	if err != nil {
 		t.Fatalf("tx.Commit(): %v", err)
 	}
-	if commitHandle == nil || commitHandle.Seqnum == 0 {
+	if optionalCommitHandle == nil {
+		t.Fatal("tx.Commit(): got nil write handle")
+	}
+	commitHandle := trackWriteHandle(t, *optionalCommitHandle)
+	if commitHandle.Seqnum() == 0 {
 		t.Fatalf("tx.Commit(): got %v, want non-nil write handle", commitHandle)
 	}
 
@@ -1124,18 +1188,22 @@ func TestDbInvalidInputsAndErrorMapping(t *testing.T) {
 			t.Fatalf("secondary Put(): %v", err)
 		}
 
-		_, err := primary.db.Put([]byte("stale"), []byte("value"))
+		write, err := primary.db.Put([]byte("stale"), []byte("value"))
+		if err == nil {
+			write = trackWriteHandle(t, write)
+			err = write.AwaitDurable()
+		}
 		if !errors.Is(err, slatedb.ErrErrorClosed) {
-			t.Fatalf("primary Put() after fencing: got %v, want closed error", err)
+			t.Fatalf("primary write durability after fencing: got %v, want closed error", err)
 		}
 		primary.open = false
 
 		var closedErr *slatedb.ErrorClosed
 		if !errors.As(err, &closedErr) {
-			t.Fatalf("primary Put() after fencing: expected *ErrorClosed, got %T", err)
+			t.Fatalf("primary write durability after fencing: expected *ErrorClosed, got %T", err)
 		}
 		if closedErr.Reason != slatedb.CloseReasonFenced {
-			t.Fatalf("primary Put() after fencing: got close reason %v, want %v", closedErr.Reason, slatedb.CloseReasonFenced)
+			t.Fatalf("primary write durability after fencing: got close reason %v, want %v", closedErr.Reason, slatedb.CloseReasonFenced)
 		}
 	})
 }
@@ -3072,12 +3140,14 @@ func TestDbTtl(t *testing.T) {
 
 	key, value := []byte("alpha"), []byte("one")
 
-	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlExpireAt{Field0: 1}}
-	writeOptions := slatedb.WriteOptions{AwaitDurable: true}
-	_, err := handle.db.PutWithOptions(key, value, putOptions, writeOptions)
+	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlExpireAtMillis{Field0: 1}}
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
+	write, err := handle.db.PutWithOptions(key, value, putOptions, writeOptions)
 	if err != nil {
 		t.Fatalf("Put(alpha): %v", err)
 	}
+	write = trackWriteHandle(t, write)
+	awaitDurable(t, write)
 
 	readerHandle := openTestReader(t, store, nil)
 
@@ -3099,6 +3169,379 @@ func TestDbTtl(t *testing.T) {
 			}
 			if !bytes.Equal(value, kv.Value) {
 				t.Fatalf("Get(alpha): got %v, want %v", kv.Value, value)
+			}
+		})
+	}
+}
+
+// batchSeedRow describes one row written by seedBatchRows.
+type batchSeedRow struct {
+	key   string
+	value string
+	ttl   slatedb.Ttl
+}
+
+// batchSeedRows mixes rows with and without a TTL so that both the Some and the
+// None case of KeyValue.ExpireTs round trip through NextBatch. Six rows lets a
+// batch size of 3 or 6 exercise the exact-multiple case, where the drain loop
+// needs one extra call returning an empty slice to detect exhaustion.
+var batchSeedRows = []batchSeedRow{
+	{key: "batch:01", value: "one", ttl: slatedb.TtlNoExpiry{}},
+	{key: "batch:02", value: "two", ttl: slatedb.TtlExpireAfterMillis{Field0: batchSeedTtlMillis}},
+	{key: "batch:03", value: "three", ttl: slatedb.TtlNoExpiry{}},
+	{key: "batch:04", value: "four", ttl: slatedb.TtlExpireAfterMillis{Field0: batchSeedTtlMillis}},
+	{key: "batch:05", value: "five", ttl: slatedb.TtlNoExpiry{}},
+	{key: "batch:06", value: "six", ttl: slatedb.TtlExpireAfterMillis{Field0: batchSeedTtlMillis}},
+}
+
+// batchSeedTtlMillis is far enough in the future that TTL'd seed rows never
+// expire mid-test, while still producing a non-nil ExpireTs.
+const batchSeedTtlMillis = 3_600_000
+
+func seedBatchRows(t *testing.T, db *slatedb.Db) {
+	t.Helper()
+
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
+	for _, row := range batchSeedRows {
+		putOptions := slatedb.PutOptions{Ttl: row.ttl}
+		write, err := db.PutWithOptions([]byte(row.key), []byte(row.value), putOptions, writeOptions)
+		if err != nil {
+			t.Fatalf("PutWithOptions(%q): %v", row.key, err)
+		}
+		write = trackWriteHandle(t, write)
+		awaitDurable(t, write)
+	}
+}
+
+// scanBatchRows opens a full scan, which covers exactly the seed rows written
+// by seedBatchRows. An unbounded range keeps Seek keys unambiguous: they are
+// whole keys rather than suffixes relative to a prefix.
+func scanBatchRows(t *testing.T, db *slatedb.Db) *slatedb.DbIterator {
+	t.Helper()
+
+	iter, err := db.Scan(slatedb.KeyRange{})
+	if err != nil {
+		t.Fatalf("Scan(): %v", err)
+	}
+	t.Cleanup(iter.Destroy)
+	return iter
+}
+
+// drainBatch drains iter with NextBatch(max), applying the documented
+// exhaustion rule: a batch shorter than max (including an empty one) ends the
+// scan. When the row count is an exact multiple of max this performs one extra
+// call that returns an empty slice.
+func drainBatch(t *testing.T, iter *slatedb.DbIterator, max uint32) []slatedb.KeyValue {
+	t.Helper()
+
+	if max == 0 {
+		t.Fatalf("drainBatch requires max > 0; NextBatch(0) never advances")
+	}
+
+	var rows []slatedb.KeyValue
+	for {
+		batch, err := iter.NextBatch(max)
+		if err != nil {
+			t.Fatalf("NextBatch(%d): %v", max, err)
+		}
+		rows = append(rows, batch...)
+		if len(batch) < int(max) {
+			return rows
+		}
+	}
+}
+
+func int64PtrString(value *int64) string {
+	if value == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%d", *value)
+}
+
+// requireKeyValuesEqual asserts two row slices are identical across every
+// KeyValue field, not just key and value.
+func requireKeyValuesEqual(t *testing.T, context string, got []slatedb.KeyValue, want []slatedb.KeyValue) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("%s: got %d rows, want %d", context, len(got), len(want))
+	}
+
+	for i := range want {
+		gotRow, wantRow := got[i], want[i]
+		if !bytes.Equal(gotRow.Key, wantRow.Key) {
+			t.Fatalf("%s: row %d key: got %q, want %q", context, i, gotRow.Key, wantRow.Key)
+		}
+		if !bytes.Equal(gotRow.Value, wantRow.Value) {
+			t.Fatalf("%s: row %d value: got %q, want %q", context, i, gotRow.Value, wantRow.Value)
+		}
+		if gotRow.Seq != wantRow.Seq {
+			t.Fatalf("%s: row %d seq: got %d, want %d", context, i, gotRow.Seq, wantRow.Seq)
+		}
+		if gotRow.CreateTs != wantRow.CreateTs {
+			t.Fatalf("%s: row %d create_ts: got %d, want %d", context, i, gotRow.CreateTs, wantRow.CreateTs)
+		}
+		if (gotRow.ExpireTs == nil) != (wantRow.ExpireTs == nil) ||
+			(gotRow.ExpireTs != nil && *gotRow.ExpireTs != *wantRow.ExpireTs) {
+			t.Fatalf("%s: row %d expire_ts: got %s, want %s",
+				context, i, int64PtrString(gotRow.ExpireTs), int64PtrString(wantRow.ExpireTs))
+		}
+	}
+}
+
+func TestDbIteratorNextBatchMatchesNext(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+	seedBatchRows(t, handle.db)
+
+	// Row-by-row Next() is the oracle every batch size is compared against.
+	want := drainIterator(t, scanBatchRows(t, handle.db))
+	if len(want) != len(batchSeedRows) {
+		t.Fatalf("oracle drain: got %d rows, want %d", len(want), len(batchSeedRows))
+	}
+
+	// Guard against the differential assertion going vacuous on expire_ts: the
+	// seed set must actually produce both Some and None.
+	var withTTL, withoutTTL int
+	for _, row := range want {
+		if row.ExpireTs != nil {
+			withTTL++
+		} else {
+			withoutTTL++
+		}
+	}
+	if withTTL == 0 || withoutTTL == 0 {
+		t.Fatalf("seed rows must cover both expire_ts states: with=%d without=%d", withTTL, withoutTTL)
+	}
+
+	// 3 and 6 divide the row count exactly; 4, 5 and 7 leave a short final
+	// batch; 1 must behave exactly like repeated Next(); 1000 exceeds the row
+	// count entirely.
+	for _, max := range []uint32{1, 2, 3, 4, 5, 6, 7, 1000} {
+		t.Run(fmt.Sprintf("max=%d", max), func(t *testing.T) {
+			got := drainBatch(t, scanBatchRows(t, handle.db), max)
+			requireKeyValuesEqual(t, fmt.Sprintf("NextBatch(%d) drain", max), got, want)
+		})
+	}
+}
+
+func TestDbIteratorNextBatchLargerThanRowCount(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+	seedBatchRows(t, handle.db)
+
+	want := drainIterator(t, scanBatchRows(t, handle.db))
+
+	iter := scanBatchRows(t, handle.db)
+	first, err := iter.NextBatch(1000)
+	if err != nil {
+		t.Fatalf("NextBatch(1000): %v", err)
+	}
+	requireKeyValuesEqual(t, "single oversized NextBatch", first, want)
+
+	second, err := iter.NextBatch(1000)
+	if err != nil {
+		t.Fatalf("NextBatch(1000) after exhaustion: %v", err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("NextBatch(1000) after exhaustion: got %d rows, want 0", len(second))
+	}
+}
+
+func TestDbIteratorNextBatchEmptyRange(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+	seedBatchRows(t, handle.db)
+
+	// A range that starts past every seeded key.
+	iter, err := handle.db.Scan(slatedb.KeyRange{
+		Start:          bytesPtr([]byte("zzz:")),
+		StartInclusive: true,
+	})
+	if err != nil {
+		t.Fatalf("Scan(empty range): %v", err)
+	}
+	t.Cleanup(iter.Destroy)
+
+	batch, err := iter.NextBatch(16)
+	if err != nil {
+		t.Fatalf("NextBatch(16) on empty range: %v", err)
+	}
+	if len(batch) != 0 {
+		t.Fatalf("NextBatch(16) on empty range: got %d rows, want 0", len(batch))
+	}
+}
+
+func TestDbIteratorNextBatchZeroMaxDoesNotAdvance(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+	seedBatchRows(t, handle.db)
+
+	want := drainIterator(t, scanBatchRows(t, handle.db))
+
+	iter := scanBatchRows(t, handle.db)
+	for i := 0; i < 3; i++ {
+		batch, err := iter.NextBatch(0)
+		if err != nil {
+			t.Fatalf("NextBatch(0) call %d: %v", i, err)
+		}
+		if len(batch) != 0 {
+			t.Fatalf("NextBatch(0) call %d: got %d rows, want 0", i, len(batch))
+		}
+	}
+
+	// The zero-max calls must not have consumed anything.
+	got, err := iter.NextBatch(1000)
+	if err != nil {
+		t.Fatalf("NextBatch(1000) after NextBatch(0): %v", err)
+	}
+	requireKeyValuesEqual(t, "NextBatch(1000) after NextBatch(0)", got, want)
+}
+
+func TestDbIteratorNextBatchAfterSeek(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+	seedBatchRows(t, handle.db)
+
+	seekKey := []byte("batch:04")
+
+	oracle := scanBatchRows(t, handle.db)
+	if err := oracle.Seek(seekKey); err != nil {
+		t.Fatalf("Seek(%q) on oracle iterator: %v", seekKey, err)
+	}
+	want := drainIterator(t, oracle)
+	if len(want) != 3 {
+		t.Fatalf("oracle drain after seek: got %d rows, want 3", len(want))
+	}
+
+	t.Run("seek then batch drain", func(t *testing.T) {
+		iter := scanBatchRows(t, handle.db)
+		if err := iter.Seek(seekKey); err != nil {
+			t.Fatalf("Seek(%q): %v", seekKey, err)
+		}
+		requireKeyValuesEqual(t, "NextBatch(2) after seek", drainBatch(t, iter, 2), want)
+	})
+
+	t.Run("seek mid batch drain", func(t *testing.T) {
+		iter := scanBatchRows(t, handle.db)
+		if _, err := iter.NextBatch(2); err != nil {
+			t.Fatalf("NextBatch(2) before seek: %v", err)
+		}
+		if err := iter.Seek(seekKey); err != nil {
+			t.Fatalf("Seek(%q) mid-drain: %v", seekKey, err)
+		}
+		requireKeyValuesEqual(t, "NextBatch(2) after mid-drain seek", drainBatch(t, iter, 2), want)
+	})
+}
+
+// benchScanRows is the number of rows each scan benchmark drains.
+const benchScanRows = 1000
+
+func openBenchDB(b *testing.B) *slatedb.Db {
+	b.Helper()
+
+	store, err := slatedb.ObjectStoreResolve("memory:///")
+	if err != nil {
+		b.Fatalf("ObjectStoreResolve(memory:///): %v", err)
+	}
+	b.Cleanup(store.Destroy)
+
+	builder := slatedb.NewDbBuilder(testDBPath, store)
+	defer builder.Destroy()
+
+	db, err := builder.Build()
+	if err != nil {
+		b.Fatalf("Build(): %v", err)
+	}
+	b.Cleanup(func() {
+		if err := db.Shutdown(); err != nil {
+			b.Errorf("Shutdown(): %v", err)
+		}
+		db.Destroy()
+	})
+
+	writeOptions := slatedb.WriteOptions{Seqnum: 0}
+	putOptions := slatedb.PutOptions{Ttl: slatedb.TtlDefault{}}
+	for i := 0; i < benchScanRows; i++ {
+		key := []byte(fmt.Sprintf("bench:%06d", i))
+		value := []byte(fmt.Sprintf("value-%06d", i))
+		if _, err := db.PutWithOptions(key, value, putOptions, writeOptions); err != nil {
+			b.Fatalf("PutWithOptions(%q): %v", key, err)
+		}
+	}
+	if err := db.Flush(); err != nil {
+		b.Fatalf("Flush(): %v", err)
+	}
+
+	return db
+}
+
+func benchScanIterator(b *testing.B, db *slatedb.Db) *slatedb.DbIterator {
+	b.Helper()
+
+	iter, err := db.Scan(slatedb.KeyRange{})
+	if err != nil {
+		b.Fatalf("Scan(): %v", err)
+	}
+	return iter
+}
+
+// BenchmarkScanNext measures the row-at-a-time drain: one async FFI call, and
+// the RustBuffer decode that comes with it, per row.
+func BenchmarkScanNext(b *testing.B) {
+	db := openBenchDB(b)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		iter := benchScanIterator(b, db)
+		rows := 0
+		for {
+			row, err := iter.Next()
+			if err != nil {
+				b.Fatalf("Next(): %v", err)
+			}
+			if row == nil {
+				break
+			}
+			rows++
+		}
+		iter.Destroy()
+		if rows != benchScanRows {
+			b.Fatalf("drained %d rows, want %d", rows, benchScanRows)
+		}
+	}
+}
+
+// BenchmarkScanNextBatch measures the same drain amortized over batches, which
+// is the point of NextBatch: the per-call cost is paid once per batch instead
+// of once per row.
+func BenchmarkScanNextBatch(b *testing.B) {
+	db := openBenchDB(b)
+
+	for _, max := range []uint32{16, 64, 256, 1024} {
+		b.Run(fmt.Sprintf("max=%d", max), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for i := 0; i < b.N; i++ {
+				iter := benchScanIterator(b, db)
+				rows := 0
+				for {
+					batch, err := iter.NextBatch(max)
+					if err != nil {
+						b.Fatalf("NextBatch(%d): %v", max, err)
+					}
+					rows += len(batch)
+					if len(batch) < int(max) {
+						break
+					}
+				}
+				iter.Destroy()
+				if rows != benchScanRows {
+					b.Fatalf("drained %d rows, want %d", rows, benchScanRows)
+				}
 			}
 		})
 	}

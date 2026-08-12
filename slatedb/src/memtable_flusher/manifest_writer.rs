@@ -19,10 +19,11 @@ use super::uploader::UploadedMemtable;
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
-use crate::db_state::{collect_touched_segments, COWDbState, DbState, SsTableId, SsTableView};
+use crate::db_state::{collect_touched_segments, DbState, SsTableId, SsTableView};
 use crate::dispatcher::MessageHandler;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
+use crate::manifest::Manifest;
 use crate::oracle::Oracle;
 use crate::utils::IdGenerator;
 use crate::utils::SafeSender;
@@ -32,6 +33,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use parking_lot::RwLockWriteGuard;
+use slatedb_txn_obj::DirtyObject;
 use std::cmp;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
@@ -502,10 +504,10 @@ impl ManifestWriterHandler {
                 // still advances. (This is true with or without an
                 // extractor configured.)
                 for segment in &uploaded.segments {
-                    let view = SsTableView::new(
-                        self.db.rand.rng().gen_ulid(self.db.system_clock.as_ref()),
-                        segment.sst_handle.clone(),
-                    );
+                    // Identity view: the view id is the physical SST ULID, so
+                    // the timestamp `last_compacted_l0_sst_view_id` reads
+                    // equals the one GC deletion reads (RFC-0029).
+                    let view = SsTableView::identity(segment.sst_handle.clone());
                     let tree = if segmented {
                         // Extractor configured — every flush handle, including
                         // any with empty prefix, is routed into `segments`.
@@ -620,9 +622,7 @@ impl ManifestWriterHandler {
         Ok(())
     }
 
-    fn clone_local_manifest_for_write(
-        &self,
-    ) -> slatedb_txn_obj::DirtyObject<crate::manifest::Manifest> {
+    fn clone_local_manifest_for_write(&self) -> DirtyObject<Manifest> {
         let dirty = {
             let rguard_state = self.db.state.read();
             rguard_state.state().manifest.clone()
@@ -655,29 +655,23 @@ impl ManifestWriterHandler {
         result
     }
 
-    fn merge_remote_manifest(
-        &self,
-        remote_dirty: slatedb_txn_obj::DirtyObject<crate::manifest::Manifest>,
-    ) {
-        let dirty_manifest = {
+    fn merge_remote_manifest(&self, remote_dirty: DirtyObject<Manifest>) {
+        let manifest = {
             let mut wguard_state = self.db.state.write();
             wguard_state.merge_remote_manifest(remote_dirty);
-            let cow = wguard_state.state();
-            self.update_stats_for_manifest(&cow);
-            cow.manifest.clone()
+            wguard_state.state().manifest.clone()
         };
-        self.db
-            .status_manager
-            .report_manifest(dirty_manifest.into());
+        self.update_stats_for_manifest(&manifest);
+        self.db.status_manager.report_manifest(manifest.into());
     }
 
-    fn update_stats_for_manifest(&self, cow: &COWDbState) {
+    fn update_stats_for_manifest(&self, manifest: &DirtyObject<Manifest>) {
         let mut l0_ssts = 0usize;
         let mut segment_max_l0_ssts = 0usize;
         let mut sorted_runs = 0usize;
         let mut sst_views = 0usize;
         let mut distinct_ssts: HashSet<SsTableId> = HashSet::new();
-        for tree in cow.core().trees() {
+        for tree in manifest.value.core.trees() {
             l0_ssts += tree.l0.len();
             // Track the largest single tree: backpressure is driven by `segment_max_l0_sst_count`
             // because `l0_max_ssts` is enforced per-tree.
@@ -686,7 +680,7 @@ impl ManifestWriterHandler {
             let all_views = tree
                 .l0
                 .iter()
-                .chain(tree.compacted.iter().flat_map(|run| run.sst_views.iter()));
+                .chain(tree.compacted.iter().flat_map(|run| run.sst_views().iter()));
             for view in all_views {
                 sst_views += 1;
                 // Dedupe by physical SST id: a range clone/rescale can project one SST into
@@ -705,7 +699,7 @@ impl ManifestWriterHandler {
         self.db
             .db_stats
             .external_db_count
-            .set(cow.manifest.value.external_dbs.len() as i64);
+            .set(manifest.value.external_dbs.len() as i64);
     }
 
     async fn write_checkpoint_safely(
@@ -894,6 +888,7 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
 #[cfg(test)]
 mod tests {
     use super::{ManifestWriter, ManifestWriterCommand, ManifestWriterHandler, TrackerMessage};
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
@@ -907,7 +902,9 @@ mod tests {
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
-    use crate::wal_buffer::WalBufferManager;
+
+    use crate::wal::test_utils::FakeWalWriter;
+    use crate::wal::WalWriter;
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -915,7 +912,7 @@ mod tests {
     use object_store::ObjectStore;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::SystemClock;
-    use slatedb_common::metrics::{DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper};
+    use slatedb_common::metrics::MetricsRecorderHelper;
     use slatedb_common::DbRand;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1060,24 +1057,16 @@ mod tests {
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             ObjectStores::new(Arc::clone(&object_store), None),
             SsTableFormat::default(),
-            PathResolver::new(Path::from(path.clone())),
+            PathResolver::from_root(Path::from(path.clone())),
             Arc::clone(&fp_registry),
             None,
             TableStoreKind::Main,
+            BlockCachePolicy::default(),
         ));
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =
             crate::utils::SafeSender::unbounded_channel(status_manager.result_reader());
-        let recorder = Arc::new(DefaultMetricsRecorder::new());
-        let helper = MetricsRecorderHelper::new(recorder, MetricLevel::Info);
-        let wal_buffer = Arc::new(WalBufferManager::new(
-            status_manager.clone(),
-            &helper,
-            0,
-            table_store.clone(),
-            1024,
-            None,
-        ));
+        let wal_writer = Box::new(FakeWalWriter::new(0));
         let inner = Arc::new(
             DbInner::new(
                 settings.clone(),
@@ -1089,11 +1078,11 @@ mod tests {
                     &WatchableOnceCell::new(),
                 )),
                 write_tx,
-                wal_buffer.observer(),
+                wal_writer.observer(),
                 db_metrics,
                 fp_registry,
                 None,
-                status_manager,
+                Arc::new(status_manager),
                 segment_extractor,
             )
             .await
@@ -1205,10 +1194,7 @@ mod tests {
         value: &[u8],
     ) -> UploadedMemtable {
         let imm_memtable = freeze_imm(inner, key, value);
-        let handles = inner
-            .flush_l0_for_test(imm_memtable.table(), true)
-            .await
-            .unwrap();
+        let handles = inner.flush_l0_for_test(imm_memtable.table()).await.unwrap();
         let sst_handle = handles.into_iter().next().expect("expected single SST");
         let first_seq = imm_memtable.table().first_seq().unwrap();
         let last_seq = imm_memtable.table().last_seq().unwrap();
@@ -1842,7 +1828,7 @@ mod tests {
             let id = crate::db_state::SsTableId::Compacted(
                 inner.rand.rng().gen_ulid(inner.system_clock.as_ref()),
             );
-            let sst_handle = inner.upload_sst(&id, &encoded_sst, false).await.unwrap();
+            let sst_handle = inner.upload_sst(&id, &encoded_sst).await.unwrap();
             segments.push(SegmentedSstHandle {
                 prefix: Bytes::copy_from_slice(prefix),
                 sst_handle,
@@ -1909,6 +1895,41 @@ mod tests {
         assert_eq!(core.segments[1].tree.l0.len(), 1);
         assert_eq!(core.segments[0].tree.l0[0].sst.id, aaa_id);
         assert_eq!(core.segments[1].tree.l0[0].sst.id, bbb_id);
+        // Newly flushed L0s are identity views: the view id equals the
+        // physical SST ULID (RFC-0029).
+        assert_eq!(core.segments[0].tree.l0[0].id, aaa_id.unwrap_compacted_id());
+        assert_eq!(core.segments[1].tree.l0[0].id, bbb_id.unwrap_compacted_id());
+
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_create_identity_l0_view_on_flush() {
+        let harness = setup_harness(
+            "/tmp/test_manifest_writer_identity_l0_view",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        let uploaded = next_uploaded_memtable(&inner, b"k1", b"v1").await;
+        let physical_id = uploaded.segments[0].sst_handle.id;
+        started.notify_uploaded(uploaded).await.unwrap();
+        let _ = expect_flushed(&started.tracker_rx).await;
+
+        // The published L0 view id must equal the physical SST ULID so the
+        // timestamp `last_compacted_l0_sst_view_id` reads matches the one GC
+        // deletion reads (RFC-0029).
+        let core = inner.state.read().state().core().clone();
+        assert_eq!(core.tree.l0.len(), 1);
+        let view = &core.tree.l0[0];
+        assert_eq!(view.sst.id, physical_id);
+        assert_eq!(view.id, physical_id.unwrap_compacted_id());
 
         started.shutdown().await;
     }

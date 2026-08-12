@@ -1004,6 +1004,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_db_scan_with_options(uint64_t ptr, Rust
 uint64_t uniffi_slatedb_uniffi_fn_method_db_shutdown(uint64_t ptr
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SHUTDOWN_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SHUTDOWN_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_method_db_shutdown_with_options(uint64_t ptr, RustBuffer options
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SNAPSHOT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_SNAPSHOT
 uint64_t uniffi_slatedb_uniffi_fn_method_db_snapshot(uint64_t ptr
@@ -1347,6 +1352,11 @@ void uniffi_slatedb_uniffi_fn_free_dbiterator(uint64_t handle, RustCallStatus *o
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_NEXT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_NEXT
 uint64_t uniffi_slatedb_uniffi_fn_method_dbiterator_next(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_NEXT_BATCH
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_NEXT_BATCH
+uint64_t uniffi_slatedb_uniffi_fn_method_dbiterator_next_batch(uint64_t ptr, uint32_t max
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBITERATOR_SEEK
@@ -1746,6 +1756,31 @@ void uniffi_slatedb_uniffi_fn_method_writebatch_put(uint64_t ptr, RustBuffer key
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_PUT_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_PUT_WITH_OPTIONS
 void uniffi_slatedb_uniffi_fn_method_writebatch_put_with_options(uint64_t ptr, RustBuffer key, RustBuffer value, RustBuffer options, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_WRITEHANDLE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_WRITEHANDLE
+uint64_t uniffi_slatedb_uniffi_fn_clone_writehandle(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_WRITEHANDLE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_WRITEHANDLE
+void uniffi_slatedb_uniffi_fn_free_writehandle(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEHANDLE_AWAIT_DURABLE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEHANDLE_AWAIT_DURABLE
+uint64_t uniffi_slatedb_uniffi_fn_method_writehandle_await_durable(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEHANDLE_CREATE_TS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEHANDLE_CREATE_TS
+int64_t uniffi_slatedb_uniffi_fn_method_writehandle_create_ts(uint64_t ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEHANDLE_SEQNUM
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEHANDLE_SEQNUM
+uint64_t uniffi_slatedb_uniffi_fn_method_writehandle_seqnum(uint64_t ptr, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FUNC_INIT_LOGGING
@@ -2397,6 +2432,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_db_shutdown(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_SHUTDOWN_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_SHUTDOWN_WITH_OPTIONS
+uint16_t uniffi_slatedb_uniffi_checksum_method_db_shutdown_with_options(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_SNAPSHOT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_SNAPSHOT
 uint16_t uniffi_slatedb_uniffi_checksum_method_db_snapshot(void
@@ -2691,6 +2732,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_dbiterator_next(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_NEXT_BATCH
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_NEXT_BATCH
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbiterator_next_batch(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_SEEK
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_SEEK
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbiterator_seek(void
@@ -2886,6 +2933,24 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_writebatch_put(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEBATCH_PUT_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEBATCH_PUT_WITH_OPTIONS
 uint16_t uniffi_slatedb_uniffi_checksum_method_writebatch_put_with_options(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEHANDLE_AWAIT_DURABLE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEHANDLE_AWAIT_DURABLE
+uint16_t uniffi_slatedb_uniffi_checksum_method_writehandle_await_durable(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEHANDLE_CREATE_TS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEHANDLE_CREATE_TS
+uint16_t uniffi_slatedb_uniffi_checksum_method_writehandle_create_ts(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEHANDLE_SEQNUM
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEHANDLE_SEQNUM
+uint16_t uniffi_slatedb_uniffi_checksum_method_writehandle_seqnum(void
     
 );
 #endif

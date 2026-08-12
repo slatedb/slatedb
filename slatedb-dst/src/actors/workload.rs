@@ -5,13 +5,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use log::info;
 use rand::RngCore;
-use slatedb::config::{
-    DurabilityLevel, MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
-};
-use slatedb::{Error, MergeOperator, MergeOperatorError, WriteBatch};
+use slatedb::config::{DurabilityLevel, MergeOptions, PutOptions, ReadOptions, WriteOptions};
+use slatedb::{Error, IterationOrder, MergeOperator, MergeOperatorError, WriteBatch};
 use tracing::instrument;
 
-use crate::{Actor, ActorCtx};
+use crate::{utils::build_scan_options, Actor, ActorCtx};
 
 use super::PROGRESS_LOG_INTERVAL;
 
@@ -162,7 +160,6 @@ impl Actor for WorkloadActor {
     async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
         let put_options = PutOptions::default();
         let write_options = WriteOptions {
-            await_durable: false,
             ..WriteOptions::default()
         };
         let key_prefix = self
@@ -351,12 +348,13 @@ async fn verify_scan(
     read_durability: DurabilityLevel,
     observed: &mut BTreeMap<Bytes, Observation>,
 ) -> Result<(), Error> {
-    let scan_options = ScanOptions::new().with_durability_filter(read_durability);
+    let scan_options = build_scan_options(ctx.rand(), read_durability);
     let mut iter = ctx
         .db()
         .scan_prefix_with_options(key_prefix.as_bytes(), .., &scan_options)
         .await?;
     let mut seen = BTreeSet::new();
+    let mut previous_key: Option<Bytes> = None;
 
     while let Some(key_value) = iter.next().await? {
         assert!(
@@ -375,6 +373,23 @@ async fn verify_scan(
             key_prefix,
             String::from_utf8_lossy(key_value.key.as_ref()).into_owned(),
         );
+        if let Some(previous_key) = previous_key.as_ref() {
+            let is_ordered = match scan_options.order {
+                IterationOrder::Ascending => previous_key < &key_value.key,
+                IterationOrder::Descending => previous_key > &key_value.key,
+            };
+            assert!(
+                is_ordered,
+                "workload scan returned keys out of order [name={}, step={}, key_prefix={}, order={:?}, previous_key={}, key={}]",
+                ctx.name(),
+                step,
+                key_prefix,
+                scan_options.order,
+                String::from_utf8_lossy(previous_key.as_ref()),
+                String::from_utf8_lossy(key_value.key.as_ref()),
+            );
+        }
+        previous_key = Some(key_value.key.clone());
         observe_present(ctx, step, &key_value.key, &key_value.value, observed);
     }
 

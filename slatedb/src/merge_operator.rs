@@ -403,6 +403,8 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
                 }
 
                 next = self.delegate.next().await?;
+                // Keep cached operand scans cooperative.
+                tokio::task::coop::consume_budget().await;
             } else {
                 break None;
             }

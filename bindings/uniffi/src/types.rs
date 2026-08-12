@@ -108,24 +108,6 @@ impl KeyRange {
     }
 }
 
-/// Metadata returned by a successful write.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct WriteHandle {
-    /// Sequence number assigned to the write.
-    pub seqnum: u64,
-    /// Creation timestamp assigned to the write.
-    pub create_ts: i64,
-}
-
-impl From<slatedb::WriteHandle> for WriteHandle {
-    fn from(value: slatedb::WriteHandle) -> Self {
-        Self {
-            seqnum: value.seqnum(),
-            create_ts: value.create_ts(),
-        }
-    }
-}
-
 /// A segment (RFC-0024), identified by the key prefix it owns; the segment
 /// spans the key interval `[prefix, prefix++)`.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -832,7 +814,7 @@ impl From<&CoreSortedRun> for SortedRun {
     fn from(value: &CoreSortedRun) -> Self {
         Self {
             id: value.id,
-            sst_views: value.sst_views.iter().map(SsTableView::from).collect(),
+            sst_views: value.sst_views().iter().map(SsTableView::from).collect(),
             estimated_size_bytes: value.estimate_size(),
         }
     }

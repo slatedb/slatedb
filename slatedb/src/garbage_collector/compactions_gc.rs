@@ -25,6 +25,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use log::error;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::filter::retain_allowed_by_gc_filter;
@@ -72,7 +73,9 @@ impl CompactionsGcTask {
     /// Deletes the given compactions files from the compactions store.
     ///
     /// In case of dryrun, the actual deletion doesn't happen.
-    async fn maybe_delete_compactions(&self, compactions_ids: Vec<u64>) {
+    ///
+    /// Returns the number of compactions files actually deleted.
+    async fn maybe_delete_compactions(&self, compactions_ids: Vec<u64>) -> u64 {
         if self.compactions_options.dry_run {
             if !compactions_ids.is_empty() {
                 log::info!(
@@ -86,22 +89,28 @@ impl CompactionsGcTask {
                     id
                 );
             }
-            return;
+            return 0;
         }
 
+        let deleted_count = AtomicU64::new(0);
         futures::stream::iter(compactions_ids)
-            .for_each_concurrent(GC_DELETE_CONCURRENCY, |id| async move {
-                if let Err(e) = self
-                    .compactions_store
-                    .delete_compactions_unchecked(id)
-                    .await
-                {
-                    error!("error deleting compactions [id={:?}, error={}]", id, e);
-                } else {
-                    self.stats.gc_compactions_count.increment(1);
+            .for_each_concurrent(GC_DELETE_CONCURRENCY, |id| {
+                let deleted_count = &deleted_count;
+                async move {
+                    if let Err(e) = self
+                        .compactions_store
+                        .delete_compactions_unchecked(id)
+                        .await
+                    {
+                        error!("error deleting compactions [id={:?}, error={}]", id, e);
+                    } else {
+                        self.stats.gc_compactions_count.increment(1);
+                        deleted_count.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             })
             .await;
+        deleted_count.load(Ordering::Relaxed)
     }
 }
 
@@ -112,6 +121,7 @@ impl GcTask for CompactionsGcTask {
     async fn collect(&self, utc_now: DateTime<Utc>) -> Result<(), SlateDBError> {
         let min_age = self.compactions_min_age();
         let mut compactions_metadata_list = self.compactions_store.list_compactions(..).await?;
+        let pre_gc_count = compactions_metadata_list.len() as u64;
 
         // Remove the last element so we never delete the latest compactions file
         compactions_metadata_list.pop();
@@ -142,8 +152,17 @@ impl GcTask for CompactionsGcTask {
             .map(|compactions_metadata| compactions_metadata.id)
             .collect::<Vec<_>>();
 
-        self.maybe_delete_compactions(compactions_ids_to_delete)
+        self.stats.gc_compactions_versions.set(pre_gc_count as i64);
+
+        let deleted_count = self
+            .maybe_delete_compactions(compactions_ids_to_delete)
             .await;
+
+        if deleted_count > 0 {
+            self.stats
+                .gc_compactions_versions
+                .set((pre_gc_count - deleted_count) as i64);
+        }
 
         Ok(())
     }
@@ -160,7 +179,9 @@ mod tests {
     use async_trait::async_trait;
     use chrono::TimeDelta;
     use object_store::{memory::InMemory, path::Path, ObjectStoreExt};
-    use slatedb_common::metrics::MetricsRecorderHelper;
+    use slatedb_common::metrics::{
+        lookup_metric_with_labels, DefaultMetricsRecorder, MetricsRecorderHelper,
+    };
     use slatedb_common::ObjectMetadata;
     use std::collections::HashSet;
     use std::time::Duration;
@@ -336,5 +357,147 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    async fn make_compactions_store() -> (Arc<CompactionsStore>, StoredCompactions) {
+        let object_store = Arc::new(InMemory::new());
+        let compactions_store = Arc::new(CompactionsStore::new(&Path::from("/root"), object_store));
+        let stored = StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+        (compactions_store, stored)
+    }
+
+    #[tokio::test]
+    async fn test_version_count_after_gc_deletes_old_compactions() {
+        let (compactions_store, mut stored) = make_compactions_store().await;
+        // Write two more compactions files: ids 1 (create), 2, 3
+        stored
+            .update(stored.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        stored
+            .update(stored.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+
+        let metrics = Arc::new(DefaultMetricsRecorder::new());
+        let recorder = MetricsRecorderHelper::new(metrics.clone(), Default::default());
+        let task = CompactionsGcTask::new(
+            compactions_store.clone(),
+            Arc::new(GcStats::new(&recorder)),
+            GarbageCollectorDirectoryOptions {
+                min_age: Duration::ZERO,
+                interval: None,
+                dry_run: false,
+            },
+            None,
+            true,
+        );
+
+        task.collect(Utc::now() + TimeDelta::hours(1))
+            .await
+            .unwrap();
+
+        // GC deletes compactions 1 and 2 (older than min_age=0); compactions 3 survives as latest.
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics,
+                crate::garbage_collector::stats::VERSION_COUNT,
+                &[("resource", "compactions")]
+            ),
+            Some(1),
+            "expected 1 surviving compactions file after GC"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_version_count_when_nothing_to_delete() {
+        let (compactions_store, mut stored) = make_compactions_store().await;
+        stored
+            .update(stored.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        stored
+            .update(stored.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+
+        let metrics = Arc::new(DefaultMetricsRecorder::new());
+        let recorder = MetricsRecorderHelper::new(metrics.clone(), Default::default());
+        let task = CompactionsGcTask::new(
+            compactions_store.clone(),
+            Arc::new(GcStats::new(&recorder)),
+            GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600), // too new to delete
+                interval: None,
+                dry_run: false,
+            },
+            None,
+            true,
+        );
+
+        task.collect(Utc::now()).await.unwrap();
+
+        // Nothing deleted — all 3 compactions files survive.
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics,
+                crate::garbage_collector::stats::VERSION_COUNT,
+                &[("resource", "compactions")]
+            ),
+            Some(3),
+            "expected all 3 compactions files when nothing qualifies for deletion"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_version_count_unchanged_on_dry_run() {
+        let (compactions_store, mut stored) = make_compactions_store().await;
+        // Write two more compactions files: ids 1 (create), 2, 3
+        stored
+            .update(stored.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        stored
+            .update(stored.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+
+        let metrics = Arc::new(DefaultMetricsRecorder::new());
+        let recorder = MetricsRecorderHelper::new(metrics.clone(), Default::default());
+        let task = CompactionsGcTask::new(
+            compactions_store.clone(),
+            Arc::new(GcStats::new(&recorder)),
+            GarbageCollectorDirectoryOptions {
+                min_age: Duration::ZERO,
+                interval: None,
+                dry_run: true,
+            },
+            None,
+            true,
+        );
+
+        task.collect(Utc::now() + TimeDelta::hours(1))
+            .await
+            .unwrap();
+
+        // Dry run deletes nothing, so all 3 compactions files still exist and the gauge
+        // reports the true current count rather than the hypothetical post-deletion count.
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics,
+                crate::garbage_collector::stats::VERSION_COUNT,
+                &[("resource", "compactions")]
+            ),
+            Some(3),
+            "expected dry run to leave the gauge at the true current count"
+        );
+        let compactions = compactions_store.list_compactions(..).await.unwrap();
+        assert_eq!(
+            compactions.len(),
+            3,
+            "dry run should not delete any compactions files"
+        );
     }
 }

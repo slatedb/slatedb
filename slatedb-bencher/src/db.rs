@@ -162,6 +162,7 @@ pub struct DbBench {
     key_gen_supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>>,
     val_len: usize,
     write_options: WriteOptions,
+    await_durable: bool,
     concurrency: u32,
     num_rows: Option<u64>,
     duration: Option<Duration>,
@@ -176,6 +177,7 @@ impl DbBench {
         key_gen_supplier: Box<dyn Fn() -> Box<dyn KeyGenerator>>,
         val_len: usize,
         write_options: WriteOptions,
+        await_durable: bool,
         concurrency: u32,
         num_rows: Option<u64>,
         duration: Option<Duration>,
@@ -187,6 +189,7 @@ impl DbBench {
             key_gen_supplier,
             val_len,
             write_options,
+            await_durable,
             concurrency,
             num_rows,
             duration,
@@ -209,6 +212,7 @@ impl DbBench {
                 (*self.key_gen_supplier)(),
                 self.val_len,
                 self.write_options.clone(),
+                self.await_durable,
                 self.num_rows,
                 self.duration,
                 self.put_percentage,
@@ -229,6 +233,7 @@ struct Task {
     key_generator: Box<dyn KeyGenerator>,
     val_len: usize,
     write_options: WriteOptions,
+    await_durable: bool,
     num_keys: Option<u64>,
     duration: Option<Duration>,
     put_percentage: u32,
@@ -243,6 +248,7 @@ impl Task {
         key_generator: Box<dyn KeyGenerator>,
         val_len: usize,
         write_options: WriteOptions,
+        await_durable: bool,
         num_keys: Option<u64>,
         duration: Option<Duration>,
         put_percentage: u32,
@@ -254,6 +260,7 @@ impl Task {
             key_generator,
             val_len,
             write_options,
+            await_durable,
             num_keys,
             duration,
             put_percentage,
@@ -283,12 +290,17 @@ impl Task {
                 let key = self.key_generator.next_key();
                 let mut value = vec![0; self.val_len];
                 random.fill_bytes(value.as_mut_slice());
-                match self
+                let result = self
                     .db
                     .put_with_options(key, value, &PutOptions::default(), &self.write_options)
-                    .await
-                {
-                    Ok(_) => {
+                    .await;
+                let result = match result {
+                    Ok(handle) if self.await_durable => handle.await_durable().await,
+                    Ok(_) => Ok(()),
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(()) => {
                         puts += 1;
                         puts_bytes += self.val_len as u64;
                     }

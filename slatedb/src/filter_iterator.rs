@@ -41,6 +41,8 @@ impl<T: RowEntryIterator> RowEntryIterator for FilterIterator<T> {
             if (self.predicate)(&entry) {
                 return Ok(Some(entry));
             }
+            // Keep filtered scans cooperative.
+            tokio::task::coop::consume_budget().await;
         }
         Ok(None)
     }

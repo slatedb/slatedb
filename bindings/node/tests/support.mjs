@@ -69,9 +69,9 @@ export function readerOptions(skipWalReplay) {
   };
 }
 
-export function writeOptions(awaitDurable = true) {
+export function writeOptions() {
   return {
-    await_durable: awaitDurable,
+    seqnum: 0,
   };
 }
 

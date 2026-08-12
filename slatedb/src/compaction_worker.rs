@@ -616,7 +616,13 @@ impl CompactionWorkerHandler {
             let heartbeat_ms = self.clock.now().timestamp_millis() as u64;
             let updated = existing
                 .with_status(CompactionStatus::Compacted)
-                .with_output_ssts(sorted_run.sst_views.iter().map(|v| v.sst.clone()).collect())
+                .with_output_ssts(
+                    sorted_run
+                        .sst_views()
+                        .iter()
+                        .map(|v| v.sst.clone())
+                        .collect(),
+                )
                 .with_worker(Some(WorkerSpec::new(self.worker_id.clone(), heartbeat_ms)))
                 .with_ctx(None);
             dirty.value.insert(updated);
@@ -776,6 +782,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_range::BytesRange;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo, SsTableView};
@@ -1113,10 +1120,7 @@ mod tests {
                 ..SsTableInfo::default()
             },
         );
-        let sorted_run = SortedRun {
-            id: 0,
-            sst_views: vec![SsTableView::identity(output_handle.clone())],
-        };
+        let sorted_run = SortedRun::new(0, [SsTableView::identity(output_handle.clone())]);
 
         fx.handler
             .handle_finished(id, Ok(sorted_run))
@@ -1321,6 +1325,7 @@ mod tests {
             root_path.clone(),
             None,
             TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
         ));
         let manifest_store = Arc::new(ManifestStore::new(&root_path, inner.clone()));
         let compactions_store = Arc::new(CompactionsStore::new(&root_path, inner.clone()));

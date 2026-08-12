@@ -24,7 +24,6 @@ async fn main() -> anyhow::Result<()> {
     // Put 1000 keys, do not wait for it to be durable
     println!("Writing 1000 keys without waiting for flush");
     let write_options = slatedb::config::WriteOptions {
-        await_durable: false,
         ..Default::default()
     };
     for i in 0..1000 {

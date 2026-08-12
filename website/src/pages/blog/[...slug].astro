@@ -10,7 +10,7 @@ export async function getStaticPaths() {
 
 const { post } = Astro.props;
 const { Content, headings } = await render(post);
-const { title, author, authorGithub, pubDate, ogImage } = post.data;
+const { title, author, authorGithub, pubDate, ogImage, canonicalUrl } = post.data;
 
 // Default the social card to the per-post image generated at build time
 // (src/pages/blog/og/[...slug].png.ts); frontmatter `ogImage` can override it.
@@ -25,7 +25,7 @@ const dateLabel = pubDate.toLocaleDateString('en-US', {
 const isoDate = pubDate.toISOString();
 ---
 
-<Blog title={`${title} — SlateDB`} ogImage={socialImage}>
+<Blog title={`${title} — SlateDB`} ogImage={socialImage} url={canonicalUrl}>
 	<PostToc headings={headings} />
 	<article class="post">
 		<header class="post-head">

@@ -128,6 +128,15 @@ pub(crate) enum CliCommands {
         id: Uuid,
     },
 
+    /// Delete a database: strip any checkpoints it pinned in parent databases,
+    /// then delete its own objects. Without --confirm, prints what it would
+    /// delete and does nothing.
+    DeleteDb {
+        /// Actually delete. Without it, this is a dry run.
+        #[arg(long)]
+        confirm: bool,
+    },
+
     /// List the current checkpoints of the db.
     ListCheckpoints {
         /// Optionally specify the name to filter the checkpoints. Note that name may not be unique
