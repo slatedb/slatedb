@@ -11,7 +11,13 @@ const DEFAULT_CAPACITY: u32 = 8192;
 const DEFAULT_INTERVAL_SECS: u64 = 60;
 
 /// Version number for the serialization format
-const SERIALIZATION_VERSION: u8 = 1;
+const SERIALIZATION_VERSION: u8 = 2;
+
+/// Legacy serialization version whose Gorilla fallback branch stored
+/// delta-of-deltas in 32 bits. Values outside the i32 range could not be
+/// represented; version 2 widens the fallback to 64 bits. Version 1 data
+/// remains readable.
+const SERIALIZATION_VERSION_V1: u8 = 1;
 
 #[derive(PartialEq, Clone, Copy)]
 pub(crate) struct TrackedSeq {
@@ -247,9 +253,11 @@ fn decode_sequence_tracker(buf: &[u8]) -> Result<SequenceTracker, String> {
 
     // Read version
     let version = buf[offset];
-    if version != SERIALIZATION_VERSION {
-        return Err(format!("Unsupported version: {}", version));
-    }
+    let wide_fallback = match version {
+        SERIALIZATION_VERSION => true,
+        SERIALIZATION_VERSION_V1 => false,
+        _ => return Err(format!("Unsupported version: {}", version)),
+    };
     offset += 1;
 
     // Read length
@@ -263,7 +271,8 @@ fn decode_sequence_tracker(buf: &[u8]) -> Result<SequenceTracker, String> {
     offset += 4;
 
     // Decode sequence numbers
-    let (encoded_seq_len, sequence_numbers) = decode_sequence_numbers_with_length(&buf[offset..])?;
+    let (encoded_seq_len, sequence_numbers) =
+        decode_sequence_numbers_with_length(&buf[offset..], wide_fallback)?;
     if sequence_numbers.len() != len {
         return Err(format!(
             "Expected {} sequence numbers, got {}",
@@ -274,7 +283,7 @@ fn decode_sequence_tracker(buf: &[u8]) -> Result<SequenceTracker, String> {
     offset += encoded_seq_len;
 
     // Decode timestamps
-    let timestamps = decode_timestamps(&buf[offset..])?;
+    let timestamps = decode_timestamps(&buf[offset..], wide_fallback)?;
     if timestamps.len() != len {
         return Err(format!(
             "Expected {} timestamps, got {}",
@@ -328,8 +337,12 @@ fn encode_gorilla_i64(values: &[i64]) -> Vec<u8> {
                     w.push32((dod as u32) & 0xFFF, 12);
                 }
                 _ => {
+                    // Store the full 64 bits: sequence numbers are arbitrary
+                    // u64s (e.g. user-supplied `WriteOptions::seqnum`), so a
+                    // delta-of-delta can exceed the i32 range that a 32-bit
+                    // slot can represent.
                     w.push32(0b1111, 4);
-                    w.push32(dod as u32, 32);
+                    w.push64(dod as u64, 64);
                 }
             }
 
@@ -341,8 +354,15 @@ fn encode_gorilla_i64(values: &[i64]) -> Vec<u8> {
     w.finish()
 }
 
-/// Generic Gorilla decoding for i64 values, returning bytes consumed
-fn decode_gorilla_i64_with_length(buf: &[u8]) -> Result<(usize, Vec<i64>), String> {
+/// Generic Gorilla decoding for i64 values, returning bytes consumed.
+///
+/// `wide_fallback` selects the width of the `0b1111`-prefixed fallback slot:
+/// 64 bits for the current format version, 32 bits (sign-extended) for
+/// version 1 data.
+fn decode_gorilla_i64_with_length(
+    buf: &[u8],
+    wide_fallback: bool,
+) -> Result<(usize, Vec<i64>), String> {
     let mut values = Vec::new();
     let mut reader = BitReader::new(buf);
     let mut bits_read = 0usize;
@@ -380,13 +400,21 @@ fn decode_gorilla_i64_with_length(buf: &[u8]) -> Result<(usize, Vec<i64>), Strin
                     }
                 }
 
-                let bits = GORILLA_PREFIX_BYTES[count];
-                let raw = reader
-                    .read32(bits)
-                    .ok_or_else(|| format!("Unexpected EOF reading {}-bit delta-of-delta", bits))?;
-                bits_read += bits as usize;
+                if count == 4 && wide_fallback {
+                    let raw = reader
+                        .read64(64)
+                        .ok_or("Unexpected EOF reading 64-bit delta-of-delta")?;
+                    bits_read += 64;
+                    raw as i64
+                } else {
+                    let bits = GORILLA_PREFIX_BYTES[count];
+                    let raw = reader.read32(bits).ok_or_else(|| {
+                        format!("Unexpected EOF reading {}-bit delta-of-delta", bits)
+                    })?;
+                    bits_read += bits as usize;
 
-                sign_extend(raw, bits) as i64
+                    sign_extend(raw, bits) as i64
+                }
             };
 
             let delta = prev_delta + dod;
@@ -416,8 +444,11 @@ fn encode_sequence_numbers(sequences: &[u64]) -> Vec<u8> {
 }
 
 /// Decode sequence numbers from Gorilla encoding, returning the number of bytes consumed
-fn decode_sequence_numbers_with_length(buf: &[u8]) -> Result<(usize, Vec<u64>), String> {
-    let (bytes_consumed, values) = decode_gorilla_i64_with_length(buf)?;
+fn decode_sequence_numbers_with_length(
+    buf: &[u8],
+    wide_fallback: bool,
+) -> Result<(usize, Vec<u64>), String> {
+    let (bytes_consumed, values) = decode_gorilla_i64_with_length(buf, wide_fallback)?;
 
     // Convert i64 back to u64 using bit cast (preserves bit pattern)
     // This correctly handles values that were > i64::MAX
@@ -432,8 +463,8 @@ fn encode_timestamps(timestamps: &[i64]) -> Vec<u8> {
 }
 
 /// Decode timestamps from Gorilla encoding
-fn decode_timestamps(buf: &[u8]) -> Result<Vec<i64>, String> {
-    let (_, timestamps) = decode_gorilla_i64_with_length(buf)?;
+fn decode_timestamps(buf: &[u8], wide_fallback: bool) -> Result<Vec<i64>, String> {
+    let (_, timestamps) = decode_gorilla_i64_with_length(buf, wide_fallback)?;
     Ok(timestamps)
 }
 
@@ -790,10 +821,13 @@ mod tests {
     #[case::u64_values_that_become_negative(vec![u64::MAX - 100, u64::MAX - 50, u64::MAX])]
     #[case::large_u64_with_small_deltas(vec![u64::MAX - 10, u64::MAX - 9, u64::MAX - 8, u64::MAX - 7])]
     #[case::wraparound_sequence(vec![u64::MAX - 1, u64::MAX, 0, 1, 2])]
+    #[case::dod_at_i32_boundary(vec![0, i32::MAX as u64 + 1])]
+    #[case::user_seqnum_jump(vec![1, 5_000_000_000])]
+    #[case::values_after_large_jump(vec![1, 5_000_000_000, 5_000_000_100])]
     fn test_encode_decode_sequence_numbers(#[case] sequences: Vec<u64>) {
         // when
         let encoded = encode_sequence_numbers(&sequences);
-        let (_, decoded) = decode_sequence_numbers_with_length(&encoded).unwrap();
+        let (_, decoded) = decode_sequence_numbers_with_length(&encoded, true).unwrap();
 
         // then
         assert_eq!(decoded, sequences);
@@ -816,10 +850,58 @@ mod tests {
     fn test_encode_decode_timestamps(#[case] timestamps: Vec<i64>) {
         // when
         let encoded = encode_timestamps(&timestamps);
-        let decoded = decode_timestamps(&encoded).unwrap();
+        let decoded = decode_timestamps(&encoded, true).unwrap();
 
         // then
         assert_eq!(decoded, timestamps);
+    }
+
+    #[test]
+    fn test_decode_version_1_data() {
+        // given: bytes produced by the version 1 encoder (32-bit fallback)
+        // for sequence_numbers [4, 8, 1000000, 1000064] and
+        // timestamps [100, 200, 300, 400]. Captured before the fallback
+        // slot was widened to 64 bits, so decoding must keep honoring the
+        // 32-bit layout for version 1 data.
+        let v1_bytes: Vec<u8> = vec![
+            1, 4, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 4, 130, 120, 0, 122, 17, 167, 255, 248,
+            95, 4, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 100, 198, 64,
+        ];
+
+        // when
+        let decoded = decode_sequence_tracker(&v1_bytes).unwrap();
+
+        // then
+        assert_eq!(decoded.sequence_numbers, vec![4, 8, 1_000_000, 1_000_064]);
+        assert_eq!(decoded.timestamps, vec![100, 200, 300, 400]);
+    }
+
+    #[test]
+    fn test_round_trip_preserves_large_seqnum_jump() {
+        // given: a tracker whose recorded sequence numbers jump by more than
+        // i32::MAX between entries, as can happen with user-supplied
+        // `WriteOptions::seqnum` values (e.g. offsets from an external log).
+        let mut tracker = SequenceTracker::with_config(10, 1);
+        tracker.insert(TrackedSeq {
+            seq: 1,
+            ts: DateTime::from_timestamp(1000, 0).unwrap(),
+        });
+        tracker.insert(TrackedSeq {
+            seq: 5_000_000_000,
+            ts: DateTime::from_timestamp(2000, 0).unwrap(),
+        });
+
+        // when
+        let encoded = encode_sequence_tracker(&tracker);
+        let decoded = decode_sequence_tracker(&encoded).unwrap();
+
+        // then: the decoded tracker matches and stays usable for lookups
+        assert_eq!(decoded.sequence_numbers, vec![1, 5_000_000_000]);
+        assert_eq!(decoded.timestamps, vec![1000, 2000]);
+        assert_eq!(
+            decoded.find_ts(5_000_000_000, FindOption::RoundDown),
+            DateTime::from_timestamp(2000, 0)
+        );
     }
 
     #[test]
@@ -855,14 +937,10 @@ mod tests {
             let mut current_ts = base_timestamp;
 
             for (seq_delta, ts_delta) in pairs {
-                // Limit deltas to avoid problematic ranges in Gorilla encoding
-                // Specifically avoid sequence number deltas >= 2^31 that cause sign issues
-                // It is reasonable to assume that production deltas wont exceed these bounds.
-                let safe_seq_delta = (seq_delta % (u32::MAX / 2)) as u64;
-                let safe_ts_delta = (ts_delta % (u32::MAX / 2)) as i64;
-
-                current_seq = current_seq.saturating_add(safe_seq_delta);
-                current_ts = current_ts.saturating_add(safe_ts_delta);
+                // The 64-bit Gorilla fallback slot handles arbitrarily large
+                // delta-of-deltas, so the full u32 delta range is safe.
+                current_seq = current_seq.saturating_add(seq_delta as u64);
+                current_ts = current_ts.saturating_add(ts_delta as i64);
 
                 tracker.insert(TrackedSeq {
                     seq: current_seq,
