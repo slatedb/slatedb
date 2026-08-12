@@ -392,16 +392,26 @@ impl CompactionWorkerHandler {
 
         for compaction in claimed {
             match Self::build_job_args(&compaction, manifest.core(), &self.worker_id) {
-                Ok(args) => {
-                    info!(
-                        "claimed compaction [worker_id={}, id={}]",
-                        self.worker_id,
-                        compaction.id()
-                    );
-                    self.job_progress
-                        .insert(compaction.id(), compaction.ctx().cloned());
-                    Self::dispatch_to_executor(&self.executor, args);
-                }
+                Ok(args) => match Self::dispatch_to_executor(&self.executor, args) {
+                    Ok(()) => {
+                        info!(
+                            "claimed compaction [worker_id={}, id={}]",
+                            self.worker_id,
+                            compaction.id()
+                        );
+                        self.job_progress
+                            .insert(compaction.id(), compaction.ctx().cloned());
+                    }
+                    Err(e) => {
+                        warn!(
+                                "executor rejected compaction; marking failed [worker_id={}, id={}, error={:?}]",
+                                self.worker_id,
+                                compaction.id(),
+                                e
+                            );
+                        self.write_failed(compaction.id()).await?;
+                    }
+                },
                 Err(e) => {
                     warn!(
                         "claimed compaction is invalid against the post-claim manifest; releasing claim [worker_id={}, id={}, error={:?}]",
@@ -505,8 +515,8 @@ impl CompactionWorkerHandler {
     fn dispatch_to_executor(
         executor: &Arc<dyn CompactionExecutor + Send + Sync>,
         args: StartCompactionJobArgs,
-    ) {
-        executor.start_compaction_job(args);
+    ) -> Result<(), SlateDBError> {
+        executor.start_compaction_job(args)
     }
 
     /// Refreshes liveness for every active job this worker still owns,
@@ -626,6 +636,32 @@ impl CompactionWorkerHandler {
                 .with_worker(Some(WorkerSpec::new(self.worker_id.clone(), heartbeat_ms)))
                 .with_ctx(None);
             dirty.value.insert(updated);
+            match stored.update(dirty).await {
+                Ok(()) => return Ok(()),
+                Err(e) if e.is_sequenced_write_conflict() => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Writes `Failed` for a job rejected by the executor. Only writes if this
+    /// worker still owns the claim.
+    async fn write_failed(&mut self, compaction_id: Ulid) -> Result<(), SlateDBError> {
+        loop {
+            let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
+            stored.refresh().await?;
+            let mut dirty = stored.prepare_dirty()?;
+            let Some(existing) = dirty.value.get(&compaction_id).cloned() else {
+                return Ok(());
+            };
+            if existing.worker().map(|w| w.worker_id.as_str()) != Some(self.worker_id.as_str()) {
+                return Ok(());
+            }
+            dirty.value.insert(
+                existing
+                    .with_status(CompactionStatus::Failed)
+                    .with_ctx(None),
+            );
             match stored.update(dirty).await {
                 Ok(()) => return Ok(()),
                 Err(e) if e.is_sequenced_write_conflict() => continue,
@@ -810,6 +846,7 @@ mod tests {
     struct NoopExecutor {
         jobs: Mutex<Vec<StartCompactionJobArgs>>,
         stopped_jobs: Mutex<Vec<Ulid>>,
+        reject_starts: Mutex<bool>,
     }
 
     impl NoopExecutor {
@@ -817,6 +854,7 @@ mod tests {
             Self {
                 jobs: Mutex::new(Vec::new()),
                 stopped_jobs: Mutex::new(Vec::new()),
+                reject_starts: Mutex::new(false),
             }
         }
 
@@ -827,11 +865,19 @@ mod tests {
         fn stopped_jobs(&self) -> Vec<Ulid> {
             self.stopped_jobs.lock().clone()
         }
+
+        fn reject_starts(&self) {
+            *self.reject_starts.lock() = true;
+        }
     }
 
     impl CompactionExecutor for NoopExecutor {
-        fn start_compaction_job(&self, args: StartCompactionJobArgs) {
+        fn start_compaction_job(&self, args: StartCompactionJobArgs) -> Result<(), SlateDBError> {
+            if *self.reject_starts.lock() {
+                return Err(SlateDBError::InvalidCompaction);
+            }
             self.jobs.lock().push(args);
+            Ok(())
         }
         fn stop_compaction_job(&self, id: Ulid) -> bool {
             self.stopped_jobs.lock().push(id);
@@ -1208,6 +1254,22 @@ mod tests {
         // No active job retained.
         assert!(fx.handler.job_progress.is_empty());
         // No job was dispatched to the executor either.
+        assert!(fx.executor.jobs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_worker_marks_executor_rejection_failed() {
+        let mut fx = WorkerFixture::new("worker-A").await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.executor.reject_starts();
+
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let c = fx.read_compaction(id).await.expect("compaction missing");
+        assert_eq!(c.status(), CompactionStatus::Failed);
+        assert!(fx.handler.job_progress.is_empty());
         assert!(fx.executor.jobs().is_empty());
     }
 

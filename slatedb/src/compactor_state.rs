@@ -304,6 +304,8 @@ impl CompactionStatus {
     ///     shutdown). Adopt the release so the job can be re-claimed;
     ///     otherwise the coordinator's stale Running/claimed copy would be
     ///     written back and no worker would ever pick the job up again.
+    ///   - `Running → Failed`: the coordinator observed the worker claim before
+    ///     the worker persisted an executor rejection.
     ///   - `Running -> Running`: should accept heartbeat updates when heartbeats
     ///     land for a job that is already in local state
     ///
@@ -323,7 +325,7 @@ impl CompactionStatus {
             }
             Self::Running => matches!(
                 updated_status,
-                Self::Scheduled | Self::Running | Self::Compacted
+                Self::Scheduled | Self::Running | Self::Compacted | Self::Failed
             ),
             Self::Compacted => matches!(updated_status, Self::Compacted),
             Self::Completed | Self::Failed => false,
@@ -1612,6 +1614,36 @@ mod tests {
         local_compactions
             .value
             .insert(compaction_with_status(id, CompactionStatus::Scheduled));
+        let mut state = CompactorState::new(manifest, local_compactions);
+
+        let mut remote_compactions = new_dirty_compactions(compactor_epoch);
+        remote_compactions
+            .value
+            .insert(compaction_with_status(id, CompactionStatus::Failed));
+
+        state.merge_remote_compactions(remote_compactions);
+
+        assert_eq!(
+            state
+                .compactions
+                .value
+                .get(&id)
+                .expect("not found")
+                .status(),
+            CompactionStatus::Failed
+        );
+    }
+
+    #[test]
+    fn test_merge_remote_compactions_accepts_failed_from_running() {
+        let manifest = new_dirty_manifest();
+        let compactor_epoch = manifest.value.compactor_epoch;
+        let id = Ulid::from_parts(1, 0);
+
+        let mut local_compactions = new_dirty_compactions(compactor_epoch);
+        local_compactions
+            .value
+            .insert(compaction_with_status(id, CompactionStatus::Running));
         let mut state = CompactorState::new(manifest, local_compactions);
 
         let mut remote_compactions = new_dirty_compactions(compactor_epoch);
