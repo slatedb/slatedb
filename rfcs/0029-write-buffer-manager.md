@@ -60,16 +60,31 @@ instance creates its own `ByteBufferManager` internally, sized from
 
 Phase 1 tracks and bounds the memory consumed by write batches, memtables, and
 WAL buffers. The live write path uses non-blocking `force_acquire` to reserve
-budget, dispatches and applies the batch into the memtable, freezes when the
-budget is at capacity, then waits in `maybe_apply_backpressure` until allocated
-bytes drop below the high watermark. Permit release is tied to memtable and WAL
-buffer drops. This byte-budget check **replaces** the old point-in-time
-`max_unflushed_bytes` snapshot backpressure mechanism entirely — it does not
-run alongside it. Soft overshoot via `force_acquire` is intentional so a shared
-manager across DB instances does not couple “I am waiting” with “freeze my
-local writer” before the write is freezeable. Phase 2 (WIP) builds on the
-shareable `ByteBufferManager` to add an instance registry for intelligent,
-per-instance backpressure across DB instances that share a budget.
+budget, dispatches and applies the batch into the memtable, then calls
+`maybe_apply_backpressure`, which centrally freezes a drainable imm and waits
+when over a watermark. Permit release is tied to memtable and WAL buffer drops.
+This byte-budget check **replaces** the old point-in-time `max_unflushed_bytes`
+snapshot backpressure mechanism entirely — it does not run alongside it. Soft
+overshoot via `force_acquire` is intentional so a shared manager across DB
+instances does not couple “I am waiting” with “freeze my local writer” before
+the write is freezeable.
+
+Backpressure continues to flow through the existing `maybe_apply_backpressure`
+gate, but the conditions it evaluates change. In place of the single
+`max_unflushed_bytes` snapshot it now checks **three** independent signals: the
+byte budget (memory, replacing the snapshot), and — newly added — *writer-side*
+stalls on the per-tree L0 SST count (`l0_max_ssts`) and the per-key L0 overlap
+(`l0_max_ssts_per_key`). Those two L0 thresholds, their `FlushTracker::can_dispatch`
+flush-dispatch gate, and the `l0_stall_count` metric already existed; what is
+new is stalling the *writer* on them (reading new `max_l0_sst_count` /
+`max_l0_overlap` atomics maintained by the manifest writer) so a small-value /
+fast-flush workload that keeps the byte budget under its watermark still can't
+drive L0 unbounded while compaction falls behind. Both L0 stalls are gated on a
+configured compactor so a no-compactor deployment can never stall unrelieved.
+
+Phase 2 (WIP) builds on the shareable `ByteBufferManager` to add an instance
+registry for intelligent, per-instance backpressure across DB instances that
+share a budget.
 
 ## Motivation
 
@@ -115,6 +130,13 @@ The `ByteBufferManager` addresses these opportunities by:
   the memtable on apply, release on memtable (and WAL buffer) drop.
 - Replace the point-in-time `max_unflushed_bytes` snapshot backpressure
   mechanism with the byte budget (not run both).
+- Add compaction-lag signals to the existing `maybe_apply_backpressure` gate so
+  writers also stall when compaction falls behind. The `l0_max_ssts` /
+  `l0_max_ssts_per_key` thresholds and their flush-dispatch gate
+  (`FlushTracker::can_dispatch`) already exist; this adds the *writer-side*
+  stall on the same thresholds so a fast-flush workload that never trips the
+  memory budget can't drive L0 unbounded. These L0 stalls are only active when a
+  compactor is configured to drain L0.
 - Keep the live path compatible with a **shared** manager across DB instances:
   do not block in `acquire` with a local freeze side-effect before the write is
   applied.
@@ -209,9 +231,10 @@ impl ByteBudgetSemaphore {
 #### ByteBufferManager
 
 A cloneable, generic byte-budget handle wrapping a shared
-`Arc<ByteBudgetSemaphore>`. In the write path it is stored
-as the `write_buffer_manager` field on `DbInner` because this instance
-specifically tracks write buffer memory.
+`Arc<ByteBudgetSemaphore>`. It is stored in a **new** `write_buffer_manager`
+field on `DbInner` (the baseline `DbInner` had no such field) and is also
+threaded into `DbState::new`, `KVTable::new`, and the WAL machinery — all of
+which gain a `ByteBufferManager` parameter they did not have before.
 
 ```slatedb/slatedb/src/byte_buffer_manager.rs#L18-L21
 #[derive(Clone)]
@@ -329,11 +352,12 @@ sequenceDiagram
     MT->>MT: add_write_permit (merge kv permit)
     MT->>MT: put(entry), force_expand structural overhead
     BW->>BW: maybe_freeze_current_memtable
-    Note over BW: if at_capacity, freeze active unconditionally
+    Note over BW: size / WAL thresholds only
     BW-->>DB: oneshot complete
 
     DB->>DB: maybe_apply_backpressure
-    Note over DB: wait until allocated below high watermark
+    Note over DB: if byte budget at capacity and imm queue empty, freeze active
+    Note over DB: wait until byte budget + L0 signals drop below their watermarks
 
     Note over WAL,MT: later, flush frees budget
     WAL->>WAL: flush WAL, drop WalBuffer, permit.drop()
@@ -347,27 +371,34 @@ values), and those byte buffer metrics are tracked exclusively in relation to
 the `KVTable`. The WAL buffer and dispatch channel do *not* account for the
 key/value data bytes themselves — only the `KVTable` does.
 
-1. **`WriteBatch`** has a `write_buffer_permit: Option<Arc<ByteBufferPermit>>`
-   field. `DbInner::write_with_options` `force_acquire`s the permit and assigns
+1. **`WriteBatch`** gains a **new** `write_buffer_permit: Option<Arc<ByteBufferPermit>>`
+   field (the baseline `WriteBatch` had no permit and no size method).
+   `DbInner::write_with_options` `force_acquire`s the permit and assigns
    it to this field before dispatching the batch. The permit accounts **only
    for the key and value byte buffers** that the user is storing (the batch's
-   `estimated_size()`) — it does not account for the `WriteBatch` struct itself,
-   the dispatch channel, or any other transient overhead.
+   new `estimated_size()`) — it does not account for the `WriteBatch` struct
+   itself, the dispatch channel, or any other transient overhead.
 
 2. **`DbInner::write_with_options`** reserves with non-blocking
    `force_acquire(estimated_size)`, attaches the permit, dispatches the batch,
-   awaits apply completion, then calls `maybe_apply_backpressure()` **only if**
-   `at_capacity()`. Blocking happens only after the write is in the memtable,
-   and only when over the watermark (so a successful apply is not turned into
-   an error by a racing `check_closed()` when under capacity). Blocking in
-   `acquire` before dispatch was rejected: a freeze requested while parked can
-   run before the batch is applied (or on the wrong shared-manager instance),
-   after which nothing re-arms relief and the waiter hangs.
+   awaits apply completion, then **always** calls `maybe_apply_backpressure()`.
+   In the baseline, `maybe_apply_backpressure` was called *before* enqueueing
+   the batch; it now runs *after* apply so the write lands in a freezeable
+   memtable before the writer can block. That method internally returns early
+   when no watermark is exceeded, so the common case is still just a few atomic
+   loads. Blocking happens only after the write is in the memtable, and only
+   when over a watermark (so a successful apply is not turned into an error by a
+   racing `check_closed()` when under capacity). Blocking in `acquire` before
+   dispatch was rejected: a freeze requested while parked can run before the
+   batch is applied (or on the wrong shared-manager instance), after which
+   nothing re-arms relief and the waiter hangs.
 
-3. **`DbInner::write_batch`** (batch writer) merges the permit into the
-   `KVTable`, applies entries, runs size/WAL-based `maybe_freeze_current_memtable`,
-   and if `write_buffer_manager.at_capacity()` freezes the active memtable
-   unconditionally so the subsequent wait has a flushable imm.
+3. **`DbInner::write_batch`** (batch writer) is unchanged relative to the
+   baseline except that it now merges the write permit into the `KVTable`. It
+   still applies entries and runs the same size/WAL-based
+   `maybe_freeze_current_memtable`; byte-budget freezing is handled separately
+   and centrally by `maybe_apply_backpressure` (see
+   [Backpressure Enhancement](#backpressure-enhancement)), not here.
 
 4. **`DbInner::write_entries_to_memtable`** takes the permit off the batch and
    merges it into the table's own permit. From this point, the `KVTable` owns
@@ -375,9 +406,14 @@ key/value data bytes themselves — only the `KVTable` does.
 
 #### Memory Tracking Responsibilities
 
-Each component tracks a distinct slice of memory:
+In the baseline none of these structures tracked memory against a budget —
+`KVTable::new()`, `WalBuffer::new()`, and `WriteBatch` took no manager and held
+no permit. This RFC gives each a permit (or a shared manager handle) and assigns
+each a distinct, non-overlapping slice of memory to charge:
 
-- **`KVTable` (memtable)** — Tracks *everything* related to its state:
+- **`KVTable` (memtable)** — `KVTable::new` gains a `&ByteBufferManager`
+  parameter and the struct gains an `Arc<ByteBufferPermit>` field. It now tracks
+  *everything* related to its state:
   - The user-provided key/value byte buffers (via the merged write permit)
   - Its own structural overhead: `KVTable` struct size, `SequenceTracker`
     pre-allocation, per-entry `SkipMap` node overhead, and `SequencedKey` +
@@ -386,35 +422,38 @@ Each component tracks a distinct slice of memory:
     the base cost; on each `put()`, `force_expand` adds per-entry structural
     overhead
 
-- **`WalBuffer`** — Tracks only its own structural overhead (the `WalBuffer`
-  struct size and `VecDeque` capacity growth as entries are appended). It does
-  **not** track the key/value data bytes. Those bytes are shared (via `Bytes`
-  reference counting) with the `KVTable`, which is the sole owner of the
-  key/value budget. The WAL buffer charges the **same shared DB
+- **`WalBuffer`** — gains a `write_buffer_manager` handle and a
+  `write_buffer_permit`, and now tracks only its own structural overhead (the
+  `WalBuffer` struct size and `VecDeque` capacity growth as entries are
+  appended). It does **not** track the key/value data bytes. Those bytes are
+  shared (via `Bytes` reference counting) with the `KVTable`, which is the sole
+  owner of the key/value budget. The WAL buffer charges the **same shared DB
   `write_buffer_manager`** as the memtables — it does not use a private
   `unbounded()` budget. The manager is threaded into the WAL machinery at
-  construction: `DbBuilder::build` → `WriterFencer::new(..)` →
+  construction, where `WalBufferManager::start_new` gains a `write_buffer_manager`
+  argument: `DbBuilder::build` → `WriterFencer::new(..)` →
   `WalWriterInit::load(..)` → `WalBufferManager::start_new(.., write_buffer_manager)`.
   Each `WalBuffer`'s permit is released when the buffer is flushed to object
   storage and dropped, freeing budget for new writes just like a memtable freed
   after its L0 flush.
 
-- **`DbStateView` (read-side `Arc<KVTable>`)** — The `KVTable` can be shared
-  via `Arc` for read access (e.g., in `DbStateView`). This shared reference
-  does **not** independently track byte buffers — it is a view on the original
-  table. The budget for key/value bytes remains with the original `KVTable`'s
-  permit and is released only when the last `Arc` reference is dropped (i.e.,
-  after flush completes and all readers release the table).
+- **`DbStateView` (read-side `Arc<KVTable>`)** — unchanged structurally; the
+  `KVTable` can be shared via `Arc` for read access (e.g., in `DbStateView`).
+  This shared reference does **not** independently track byte buffers — it is a
+  view on the original table. The budget for key/value bytes remains with the
+  original `KVTable`'s permit and is released only when the last `Arc` reference
+  is dropped (i.e., after flush completes and all readers release the table).
 
 #### Size Estimation Algorithms
 
-Each component uses a specific formula to calculate the bytes it charges
-against the write buffer budget.
+All of the accounting below is new; the baseline computed none of these budget
+charges. Each component uses a specific formula to calculate the bytes it
+charges against the write buffer budget.
 
 **Write Batch (user-provided key/value bytes)**
 
-The `WriteBatch::estimated_size()` sums only the raw key and value byte lengths
-across all operations in the batch:
+`WriteBatch::estimated_size()` is a **new** method. It sums only the raw key and
+value byte lengths across all operations in the batch:
 
 ```
 batch_size = ∑ op.estimated_kv_size()
@@ -508,12 +547,13 @@ when the buffer is dropped after its flush to object storage.
 
 #### Memtable Permit Tracking
 
-`KVTable` stores an `Arc<ByteBufferPermit>` that is created at construction
-time (covering the base structural overhead). When write batches land in the
-table, their permits are merged into this single table permit via
-`ByteBufferPermit::merge()`. This ensures all tracked bytes — both the
-user-provided key/value buffers and the table's own structural allocations —
-are released in a single `Drop` when the table is dropped after flush.
+`KVTable` gains an `Arc<ByteBufferPermit>` field (the baseline `KVTable` had no
+such field) that is created at construction time from the `&ByteBufferManager`
+now passed to `KVTable::new` (covering the base structural overhead). When write
+batches land in the table, their permits are merged into this single table
+permit via `ByteBufferPermit::merge()`. This ensures all tracked bytes — both
+the user-provided key/value buffers and the table's own structural allocations
+— are released in a single `Drop` when the table is dropped after flush.
 
 ```slatedb/slatedb/src/mem_table.rs#L114
 write_buffer_permit: Arc<ByteBufferPermit>,
@@ -531,90 +571,158 @@ pub(crate) fn add_write_permit(&self, permit: &ByteBufferPermit) {
 
 During WAL replay, the replay loop must make forward progress to populate the
 memtable state, so it cannot use the blocking `acquire` (which could stall the
-replay against its own not-yet-flushed tables). Instead, for each recovered
-memtable the shared DB `write_buffer_manager` is charged via non-blocking
-`force_acquire` for the sum of each applied row's `RowEntry::estimated_size()`
-(key + value + seq + optional timestamps — slightly heavier than the live
-`WriteBatch::estimated_size()` key/value-only estimate), and the resulting
-permit is merged into the table. The table's own base structural overhead is
-still reserved at `KVTable::new` as usual.
+replay against its own not-yet-flushed tables). Two things change here relative
+to the baseline. First, each recovered memtable now **charges the shared DB
+`write_buffer_manager`** via non-blocking `force_acquire` for the sum of each
+applied row's `RowEntry::estimated_size()` (key + value + seq + optional
+timestamps — slightly heavier than the live `WriteBatch::estimated_size()`
+key/value-only estimate), merging the resulting permit into the table; the
+baseline did no budget accounting during replay. The table's own base
+structural overhead is reserved at `KVTable::new` as usual. Second, the loop is
+**reordered**: the baseline ran freeze → `maybe_apply_backpressure` →
+`replay_memtable` (integrate last), whereas it now integrates first.
 
-For each recovered memtable the outer replay loop then:
+For each recovered memtable the outer replay loop now:
 
 1. **Integrates first** via `replay_memtable` (freezes the previous active into
    an imm the flusher can drain and installs the new table).
-2. Calls `maybe_freeze_memtable` (encoded size ≥ `max_unflushed_bytes`).
-3. If `write_buffer_manager.at_capacity()`, **unconditionally freezes** the
-   newly installed active so SkipMap/structural overhead that exceeds the
-   watermark still yields a flushable imm.
-4. Calls `maybe_apply_backpressure` to wait until allocated bytes drop below
-   the high watermark (freezing makes budget releasable; waiting bounds how
-   far replay races ahead of the flusher).
+2. Calls `maybe_freeze_memtable` (encoded size ≥ `max_unflushed_bytes`) so an
+   oversized active is frozen and can't park forever. (Unchanged from baseline.)
+3. Calls `maybe_apply_backpressure` to evaluate every backpressure signal
+   (byte budget, L0 count, L0 overlap). When the byte budget is at capacity and
+   the imm queue is empty, `maybe_apply_backpressure` itself freezes the active
+   so SkipMap/structural overhead that exceeds the watermark still yields a
+   flushable imm, then waits until pressure eases (freezing makes budget
+   releasable; waiting bounds how far replay races ahead of the flusher).
 
-Waiting *before* integrate would deadlock: the next table's `force_acquire`d
-bytes are still local and the active table is not yet frozen, so nothing can
-free budget. This is the remaining production caller of
-`maybe_apply_backpressure`; the steady write path blocks inside `acquire`
-instead.
+Waiting *before* integrate (as the baseline did) would deadlock once budget
+accounting is added: the next table's `force_acquire`d bytes are still local and
+the active table is not yet frozen, so nothing can free budget — hence the
+reorder. This is the remaining production caller of `maybe_apply_backpressure`
+that pairs it with an explicit encoded-size freeze; the steady write path relies
+on the central freeze inside `maybe_apply_backpressure`.
 
 #### Backpressure Enhancement
 
 The byte budget **replaces** the old `max_unflushed_bytes` snapshot
 backpressure mechanism; that snapshot check and its `await_uploaded` wait are
-gone from the write path. Within the new mechanism, backpressure is applied via
-`maybe_apply_backpressure`, keyed only off the byte budget's high watermark:
+gone from the write path. Backpressure already flowed through a single
+`maybe_apply_backpressure` method (called on the write path and per replayed
+table); what changes is the set of conditions it evaluates. Where the baseline
+checked one condition (`total_mem_size_bytes >= max_unflushed_bytes`), it now
+evaluates **three independent signals** and owns the freeze-then-wait loop for
+each. Only the **byte budget** signal is a brand-new mechanism; the two L0
+signals add *writer-side* stalls on infrastructure that already existed (the
+`l0_max_ssts` / `l0_max_ssts_per_key` settings, the `FlushTracker::can_dispatch`
+flush-dispatch gate, and the `l0_stall_count` metric).
 
-1. **Live write path** — `force_acquire` → dispatch → apply (with freeze if
-   `at_capacity()`) → `maybe_apply_backpressure()`. The wait runs only after the
-   batch is in a freezeable memtable.
+1. **Byte budget** (`write_buffer_manager.at_capacity()`) — *new.* Allocated
+   bytes have reached the high watermark. Relief comes from flushes releasing
+   permits; the writer waits on `await_capacity()`.
+2. **L0 SST count** (`l0_at_capacity()`) — *new writer-side stall on an existing
+   signal.* `l0_max_ssts` was already enforced per tree by the flush-dispatch
+   gate (`FlushTracker::can_dispatch`), which stops *dispatching* flushes to a
+   full tree. That gate stops *adding* to a full tree but only compaction
+   *removes* L0 SSTs, so a workload that flushes faster than it compacts (and
+   never trips the byte budget) could still stall the flusher indefinitely while
+   writers kept accepting work. The new check stalls the *writer* on the same
+   threshold so backpressure reaches the client.
+3. **Per-key L0 overlap** (`l0_overlap_at_capacity()`) — *new writer-side stall
+   on an existing signal.* The per-key analogue of the count check: the largest
+   single tree's per-key L0 overlap (the peak number of L0 SST views covering
+   any one key) has reached `l0_max_ssts_per_key`, bounding point-read
+   amplification the same way the count signal bounds manifest growth. Also
+   already enforced by the flush-dispatch gate; now surfaced as writer
+   backpressure too.
 
-2. **WAL replay** — integrate → freeze (size and/or `at_capacity`) →
-   `maybe_apply_backpressure()` (see [WAL Replay](#wal-replay)).
+The two L0 writer-side stalls were added because a small-value / fast-flush
+workload can keep the byte budget well under its watermark while L0 grows
+unbounded when compaction can't keep up. Each reads a new lock-free atomic on
+`DbInner` (`max_l0_sst_count`, `max_l0_overlap`) that the memtable flusher's
+manifest writer now maintains, and both are gated on
+`settings.compactor_options.is_some()`: without a compactor, nothing removes L0
+SSTs, so stalling on an L0 signal could never be relieved (and a single tree's
+L0 is already bounded by the flush-dispatch gate plus the byte budget). This
+keeps no-compactor deployments and tests from deadlocking.
 
-`maybe_apply_backpressure` has a single trigger condition
-(`write_buffer_manager.at_capacity()`), updates the `total_mem_size_bytes`
-metric from `write_buffer_manager.allocated()`, and — when at capacity —
-records backpressure, fires the fail point, warns, and waits for the budget
-to drain below the high watermark via `await_backpressure_relief(await_capacity())`
-before re-checking. The old `total_mem_size_bytes >= max_unflushed_bytes`
-condition (which waited on `await_uploaded`) has been **removed** — there is
-no parallel size-based check alongside the byte budget.
-(`total_mem_size_bytes` is also refreshed from `allocated()` after each live
-`force_acquire`.)
+```slatedb/slatedb/src/db.rs#L111-L125
+// DbInner tracks the per-tree maxima the flush-dispatch gate uses, updated
+// lock-free by the memtable flusher's manifest writer.
+pub(crate) max_l0_sst_count: Arc<AtomicUsize>,
+pub(crate) max_l0_overlap: Arc<AtomicUsize>,
+```
+
+The fast path is a single early-return when no signal is tripped, so a normal
+write pays only three atomic loads:
+
+```slatedb/slatedb/src/db.rs#L405-L410
+if !(self.write_buffer_manager.at_capacity()
+    || self.l0_at_capacity()
+    || self.l0_overlap_at_capacity())
+{
+    return Ok(());
+}
+```
+
+When a signal is tripped, `maybe_apply_backpressure` loops, re-checking
+`check_closed()` and refreshing the `total_mem_size_bytes` metric from
+`write_buffer_manager.allocated()` on each iteration, and handles whichever
+signal is active:
+
+- **Byte budget** — records backpressure, fires the `db-backpressure-applied`
+  fail point, warns, and — this is new — **freezes the active memtable itself**
+  to seed a drainable imm, but only when the imm queue is empty. Existing imms
+  will drain and release budget on their own; freezing an under-full active
+  when imms already exist just manufactures an extra small L0 SST. If draining
+  the existing imm(s) is not enough, the loop re-enters with an empty queue and
+  freezes then. It then waits via
+  `await_backpressure_relief(await_capacity())`.
+- **L0 count / L0 overlap** — records backpressure, increments the matching
+  `l0_stall_count` counter (`num_ssts` / `num_ssts_per_key`), fires the fail
+  point, and warns. There is no direct completion signal to await (a memtable
+  *upload* would only add to L0); relief comes from compaction draining L0,
+  which the writer observes when the manifest writer's poll refreshes the
+  atomics. So it re-checks after one `manifest_poll_interval` sleep.
+
+Every wait is wrapped in `await_backpressure_relief`, which resolves on the
+earliest of: the supplied progress future, the DB being closed/fenced (whose
+terminal error is returned), or a 30s watchdog that forces a re-check rather
+than block forever.
+
+```slatedb/slatedb/src/db.rs#L424-L461
+if self.write_buffer_manager.at_capacity() {
+    self.db_stats.backpressure_count.increment(1);
+    fail_point!(Arc::clone(&self.fp_registry), "db-backpressure-applied");
+    warn!(/* max_unflushed_bytes, write_buffer_allocated, write_buffer_remaining */);
+
+    // Central freeze: seed a drainable imm only when the flush queue is empty.
+    {
+        let replay_after_wal_id = self.wal_observer.status()?.last_flushed_wal_id;
+        let mut guard = self.state.write();
+        if guard.state().imm_memtable.is_empty() {
+            self.freeze_current_memtable_with_state_guard(&mut guard, replay_after_wal_id);
+        }
+    }
+
+    self.await_backpressure_relief(async {
+        self.write_buffer_manager.await_capacity().await;
+        Ok(())
+    }).await?;
+    continue;
+}
+```
+
+Byte-budget freezing lives **solely in `maybe_apply_backpressure`**: neither
+`write_batch` nor the replay loop freezes on the byte budget. They only perform
+the pre-existing size/WAL-threshold freeze via `maybe_freeze_current_memtable`
+/ `maybe_freeze_memtable` (unchanged from the baseline). Centralizing the
+byte-budget freeze here avoids manufacturing small L0 SSTs on every at-capacity
+write and lets the imm-queue-empty check gate it.
 
 Blocking `ByteBufferManager::acquire` remains available as a primitive (and is
 covered by unit tests) but is **not** used on the production write path: its
 `on_block` freeze model does not compose with a shared manager across
 instances.
-
-```slatedb/slatedb/src/db.rs#L344-L382
-// maybe_apply_backpressure: single write-buffer high-watermark condition
-loop {
-    self.check_closed()?;
-    self.db_stats
-        .total_mem_size_bytes
-        .set(self.write_buffer_manager.allocated() as i64);
-
-    if self.write_buffer_manager.at_capacity() {
-        self.db_stats.backpressure_count.increment(1);
-        // wait for the buffer to drain below the high watermark (or DB close)
-        self.await_backpressure_relief(async {
-            self.write_buffer_manager.await_capacity().await;
-            Ok(())
-        }).await?;
-        continue;
-    }
-    return Ok(());
-}
-```
-
-Note that `maybe_apply_backpressure` only *waits* — it does not itself freeze the
-active memtable. Freezing is the caller's responsibility: on the live path
-inside `write_batch` after apply when `at_capacity()`, and on the replay path
-via `maybe_freeze_memtable` plus an unconditional freeze when
-`write_buffer_manager.at_capacity()` (see [WAL Replay](#wal-replay)). The warn
-message logs `max_unflushed_bytes`, `write_buffer_allocated`, and
-`write_buffer_remaining` (in that order).
 
 > **Consideration:** The `ByteBufferManager` tracks outstanding bytes more
 > accurately than the old `max_unflushed_bytes` check, which relied on a
@@ -623,7 +731,9 @@ message logs `max_unflushed_bytes`, `write_buffer_allocated`, and
 > reservation through flush (memtable overhead + key/value bytes + WAL buffer
 > overhead), it fully replaces that snapshot mechanism — the write path no
 > longer consults `max_unflushed_bytes` for backpressure. The setting name is
-> kept only as the default seed for budget capacity and high watermark.
+> kept only as the default seed for budget capacity and high watermark. The L0
+> count / overlap signals are orthogonal to memory: they bound compaction lag
+> and read amplification, which the byte budget alone does not.
 
 #### Public API and Builder
 
@@ -768,9 +878,15 @@ apply.
 
 - [ ] Compaction state persistence
 - [ ] Compaction filters
-- [ ] Compaction strategies
+- [x] Compaction strategies
 - [ ] Distributed compaction
 - [ ] Compactions format
+
+Write backpressure now *also* stalls the writer on L0 SST count (`l0_max_ssts`)
+and per-key L0 overlap (`l0_max_ssts_per_key`) when compaction falls behind.
+These thresholds and their flush-dispatch gate already existed; this adds the
+writer-side stall on the same thresholds. It is only active when a compactor is
+configured to drain L0.
 
 ### Storage Engine Internals
 
@@ -792,12 +908,14 @@ apply.
 
 - **Write latency:** Under normal load, the reservation is a single atomic
   `fetch_add` (`force_acquire`) — sub-microsecond overhead, and never touches
-  the state lock. Under budget pressure, the write still applies (soft
-  overshoot), then the writer waits in `maybe_apply_backpressure` until flushes
-  free capacity. This is the desired behavior: controlled backpressure without
-  coupling waiters to a pre-apply local freeze.
+  the state lock; `maybe_apply_backpressure` then early-returns after three
+  atomic loads. Under pressure, the write still applies (soft overshoot), then
+  the writer waits in `maybe_apply_backpressure` until flushes free the byte
+  budget or compaction drains L0. This is the desired behavior: controlled
+  backpressure without coupling waiters to a pre-apply local freeze.
 - **Write throughput:** No change under steady-state. Under burst, throughput
-  is capped by flush rate, which is the correct bottleneck.
+  is capped by flush rate (or compaction rate, when an L0 signal is the
+  bottleneck), which is the correct bottleneck.
 - **Read latency/throughput:** No impact. The write-buffer manager is not on
   the read path.
 - **Object-store requests:** No change. Flush behavior is unchanged.
@@ -811,13 +929,32 @@ apply.
 - **New components:** `ByteBufferManager` (public, re-exported from `lib.rs`),
   `ByteBufferPermit` (`pub` in a private module; not crate-re-exported),
   `ByteBudgetSemaphore` (internal).
-- **Metrics:** The existing `backpressure_count` metric fires when
-  `maybe_apply_backpressure` stalls (live path after apply, and WAL replay).
-  `total_mem_size_bytes` is sourced from `write_buffer_manager.allocated()`
-  after each live `force_acquire` and inside `maybe_apply_backpressure`.
-- **Logging:** `maybe_apply_backpressure` warns with `max_unflushed_bytes`,
-  `write_buffer_allocated`, and `write_buffer_remaining`. (`acquire` still logs
-  if used, but is not on the production write path.)
+- **Metrics:** No new metric *names* are introduced; the change is which code
+  paths update pre-existing metrics.
+  - `backpressure_count` (existing) now fires whenever `maybe_apply_backpressure`
+    stalls on any of its signals (byte budget, L0 count, or L0 overlap; live
+    path after apply, and WAL replay), where before it fired only on the
+    `max_unflushed_bytes` snapshot stall.
+  - `l0_stall_count` (existing, labeled `type=num_ssts` / `type=num_ssts_per_key`)
+    was previously incremented only by the flush-dispatch gate
+    (`FlushTracker::can_dispatch`) when it blocked a flush. It is now *also*
+    incremented by the writer-side L0 stalls in `maybe_apply_backpressure`, so
+    the counter reflects both the flush gate and writer backpressure.
+  - `total_mem_size_bytes` (existing) is now sourced from
+    `write_buffer_manager.allocated()` (after each live `force_acquire` and on
+    each iteration of `maybe_apply_backpressure`) instead of the old
+    lock-held WAL + memtable size snapshot.
+  - `segment_max_l0_sst_count` (existing gauge, maintained by the manifest
+    writer) is unchanged; the manifest writer additionally now populates the
+    new `max_l0_sst_count` / `max_l0_overlap` **atomics** on `DbInner` that the
+    writer-side L0 checks read (these atomics are internal state, not metrics).
+- **Logging:** For byte-budget backpressure `maybe_apply_backpressure` warns
+  with `max_unflushed_bytes`, `write_buffer_allocated`, and
+  `write_buffer_remaining`. For L0 backpressure it warns with
+  `max_l0_sst_count` / `l0_max_ssts` (count) or `max_l0_overlap` /
+  `l0_max_ssts_per_key` (overlap). A 30s watchdog in `await_backpressure_relief`
+  also warns when no relief signal has arrived. (`acquire` still logs if used,
+  but is not on the production write path.)
 
 ### Compatibility
 
@@ -856,6 +993,9 @@ apply.
   high-watermark ≥ `l0_sst_size_bytes +` per-memtable overhead. WAL replay
   under a tight write-buffer budget confirms open does not deadlock when a
   single replayed table exceeds the watermark (integrate → freeze → wait).
+  Dedicated tests assert the L0 backpressure gates (`l0_at_capacity`,
+  `l0_overlap_at_capacity`) engage only with a compactor configured and only
+  at/above `l0_max_ssts` / `l0_max_ssts_per_key`.
   The `manifest_writer`, `tracker`, and `uploader` module tests are updated to
   construct/thread the `ByteBufferManager`.
 - **Fault-injection/chaos tests:** Not in Phase 1. A future phase could
@@ -931,8 +1071,9 @@ before its `WriteBatch` is applied, a Freeze can run too early (empty/stale
 memtable), and the waiter then never wakes to re-request freeze. It also does
 not compose with a **shared** `ByteBufferManager` across DB instances — a
 blocked instance would freeze itself while another instance holds the permits.
-The adopted design uses non-blocking `force_acquire` → apply → freeze if at
-capacity → `maybe_apply_backpressure` wait. Soft overshoot is accepted; Phase 2
+The adopted design uses non-blocking `force_acquire` → apply →
+`maybe_apply_backpressure`, which centrally freezes a drainable imm and waits
+when over a watermark. Soft overshoot is accepted; Phase 2
 adds intelligent cross-instance relief. Blocking `acquire` remains as a
 primitive for non-production use / tests.
 
@@ -1019,3 +1160,17 @@ simple and handles skewed workloads naturally.
   (Flush-before-WriteBatch deadlock; wrong-instance freeze under a shared
   manager). Removed `backpressure_flush_pending` /
   `notify_backpressure_flush`.
+- **2026-08-08 (central freeze + writer-side L0 backpressure):** Moved
+  byte-budget freezing into `maybe_apply_backpressure`, which now freezes the
+  active memtable itself (only when the imm queue is empty). Added two
+  *writer-side* backpressure stalls alongside the byte budget: per-tree L0 SST
+  count (`l0_at_capacity` / `l0_max_ssts`) and per-key L0 overlap
+  (`l0_overlap_at_capacity` / `l0_max_ssts_per_key`). The thresholds, the
+  `FlushTracker::can_dispatch` flush-dispatch gate, and the `l0_stall_count` /
+  `segment_max_l0_sst_count` metrics already existed; new here are the
+  writer-side checks, the lock-free `DbInner` atomics they read
+  (`max_l0_sst_count`, `max_l0_overlap`, populated by the manifest writer), the
+  extra `l0_stall_count` increments from the writer path, and the compactor
+  gating. L0 stalls are relieved by re-checking after a `manifest_poll_interval`
+  sleep; all waits are wrapped in `await_backpressure_relief` (close/fence-aware
+  with a 30s watchdog, refactored from the baseline's inline timeout).
