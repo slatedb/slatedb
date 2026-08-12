@@ -1,7 +1,11 @@
+use std::ops::Bound;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::sync::watch;
 
+use crate::db_status::DbStatus;
 use crate::iter::IterationOrder;
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
@@ -10,11 +14,15 @@ use crate::wal_replay::{WalIterator as WalReplayIterator, WalIteratorOptions};
 
 pub(crate) struct SlateDbWalReader {
     table_store: Arc<TableStore>,
+    status: watch::Receiver<DbStatus>,
 }
 
 impl SlateDbWalReader {
-    pub(crate) fn new(table_store: Arc<TableStore>) -> Self {
-        Self { table_store }
+    pub(crate) fn new(table_store: Arc<TableStore>, status: watch::Receiver<DbStatus>) -> Self {
+        Self {
+            table_store,
+            status,
+        }
     }
 }
 
@@ -24,14 +32,16 @@ impl WalReader for SlateDbWalReader {
         &self,
         wal_file_id_range: WalFileRange,
     ) -> Result<Box<dyn WalIterator>, WalError> {
-        let wal_id_range = wal_file_id_range.try_into().map_err(|()| {
-            WalError::InternalError(Arc::new(std::io::Error::new(
+        let valid_start = matches!(wal_file_id_range.0, Bound::Included(_));
+        let valid_end = matches!(wal_file_id_range.1, Bound::Excluded(_) | Bound::Unbounded);
+        if !valid_start || !valid_end {
+            return Err(WalError::InternalError(Arc::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "native WAL reader requires an included start and excluded end",
-            )))
-        })?;
+                "native WAL reader requires an included start and excluded or unbounded end",
+            ))));
+        }
         let iterator = WalReplayIterator::range(
-            wal_id_range,
+            wal_file_id_range,
             WalIteratorOptions {
                 sst_batch_size: 4,
                 sst_iter_options: SstIteratorOptions {
@@ -44,8 +54,10 @@ impl WalReader for SlateDbWalReader {
                     prefix: None,
                     filter_context: None,
                 },
+                poll_interval: Duration::from_secs(1),
             },
             Arc::clone(&self.table_store),
+            self.status.clone(),
         )?;
         Ok(Box::new(iterator))
     }
@@ -93,7 +105,8 @@ mod tests {
             TableStoreKind::Reader,
             BlockCachePolicy::default(),
         ));
-        let wal_reader = SlateDbWalReader::new(table_store);
+        let wal_reader = SlateDbWalReader::new(table_store, db.subscribe());
+
         let last_wal_id = wal_reader.last_wal_file_id(0).await.unwrap();
         let mut iterator = wal_reader
             .iterator((1..last_wal_id + 1).into())
@@ -110,5 +123,14 @@ mod tests {
             &rows[0].value,
             ValueDeletable::Value(value) if value.as_ref() == b"value"
         ));
+
+        let mut unbounded_iterator = wal_reader.iterator((last_wal_id..).into()).await.unwrap();
+        let wal_rows = unbounded_iterator
+            .next()
+            .await
+            .unwrap()
+            .expect("unbounded iterator returned None");
+        assert_eq!(wal_rows.rows.len(), 1);
+        assert_eq!(wal_rows.rows[0].key.as_ref(), b"key");
     }
 }

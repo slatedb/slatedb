@@ -1,3 +1,4 @@
+use crate::db_status::DbStatusManager;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
@@ -12,6 +13,7 @@ use crate::{wal, Settings};
 use async_trait::async_trait;
 use fail_parallel::{fail_point_send, FailPointTx};
 use slatedb_common::metrics::MetricsRecorderHelper;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -116,8 +118,21 @@ impl wal::WriterInit for WalWriterInit {
                 // older writers would have failed with a stale epoch
                 let replay_after_wal_id = manifest.core().replay_after_wal_id;
                 assert!(empty_wal_id > replay_after_wal_id);
+                // This fence was just written successfully, so it is a known part of
+                // the bounded replay range even though the persisted manifest has not
+                // recorded it yet. Include it in the iterator's status snapshot so a
+                // later 404 is reported as truncation rather than treated as a future
+                // WAL that may still appear.
+                let mut replay_manifest = manifest.clone();
+                let next_wal_sst_id = replay_manifest.core().next_wal_sst_id.max(empty_wal_id + 1);
+                replay_manifest.manifest.core.next_wal_sst_id = next_wal_sst_id;
+                let replay_status = DbStatusManager::new_with_initial_values(
+                    replay_manifest.core().last_l0_seq,
+                    replay_manifest,
+                    BTreeSet::new(),
+                );
                 let replay_iterator = WalIterator::range(
-                    replay_after_wal_id + 1..empty_wal_id + 1,
+                    (replay_after_wal_id + 1..empty_wal_id + 1).into(),
                     WalIteratorOptions {
                         sst_batch_size: 4,
                         sst_iter_options: SstIteratorOptions {
@@ -130,8 +145,10 @@ impl wal::WriterInit for WalWriterInit {
                             prefix: None,
                             filter_context: None,
                         },
+                        poll_interval: Duration::from_secs(1),
                     },
                     self.table_store.clone(),
+                    replay_status.subscribe(),
                 )?;
                 let wal_writer = WalBufferManager::start_new(
                     self.closed_result_reader.clone(),

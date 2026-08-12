@@ -1,4 +1,5 @@
 use crate::db_state::SsTableId;
+use crate::db_status::DbStatus;
 use crate::error::SlateDBError;
 use crate::iter::{EmptyIterator, RowEntryIterator};
 use crate::manifest::ManifestCore;
@@ -7,13 +8,15 @@ use crate::mem_table::WritableKVTable;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::utils::panic_string;
-use crate::wal::{WalError, WalIterator as WalIteratorTrait, WalRows};
+use crate::wal::{WalError, WalFileRange, WalIterator as WalIteratorTrait, WalRows};
 use crate::RowEntry;
 use async_trait::async_trait;
 use log::error;
 use std::collections::VecDeque;
-use std::ops::Range;
+use std::ops::{Bound, Range};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::watch;
 use tokio::task;
 use tokio::task::JoinHandle;
 
@@ -23,6 +26,9 @@ pub(crate) struct WalIteratorOptions {
 
     /// Options to pass through to underlying SST iterators
     pub(crate) sst_iter_options: SstIteratorOptions,
+
+    /// The interval between attempts to open a WAL SST that does not exist yet
+    pub(crate) poll_interval: Duration,
 }
 
 impl Default for WalIteratorOptions {
@@ -30,6 +36,7 @@ impl Default for WalIteratorOptions {
         Self {
             sst_batch_size: 4,
             sst_iter_options: SstIteratorOptions::default(),
+            poll_interval: Duration::from_secs(1),
         }
     }
 }
@@ -85,8 +92,20 @@ impl WalReplayIterator {
         replay_options: WalReplayOptions,
         table_store: Arc<TableStore>,
     ) -> Result<Self, SlateDBError> {
-        let wal_iter =
-            WalIterator::range(wal_id_range, iterator_options, Arc::clone(&table_store))?;
+        let status_manager = crate::db_status::DbStatusManager::new_with_initial_values(
+            db_state.last_l0_seq,
+            crate::manifest::VersionedManifest::from_manifest(
+                1,
+                crate::manifest::Manifest::initial(db_state.clone()),
+            ),
+            std::collections::BTreeSet::new(),
+        );
+        let wal_iter = WalIterator::range(
+            wal_id_range.into(),
+            iterator_options,
+            Arc::clone(&table_store),
+            status_manager.subscribe(),
+        )?;
         Self::for_wal_iterator(Box::new(wal_iter), db_state, replay_options, table_store)
     }
 
@@ -300,10 +319,11 @@ impl CurrentWalFile {
 pub(crate) struct WalIterator {
     options: WalIteratorOptions,
     /// Range of WAL IDs to iterate over
-    wal_id_range: Range<u64>,
+    wal_id_range: WalFileRange,
     table_store: Arc<TableStore>,
+    status: watch::Receiver<DbStatus>,
     next_files: VecDeque<JoinHandle<Result<WalRowsCollector, WalError>>>,
-    next_wal_id: u64,
+    next_wal_id: Option<u64>,
     /// The greatest seq returned so far, used to verify that WAL files arrive
     /// with strictly increasing seq ranges.
     last_seq: Option<u64>,
@@ -315,21 +335,31 @@ pub(crate) struct WalIterator {
 
 impl WalIterator {
     pub(crate) fn range(
-        wal_id_range: Range<u64>,
+        wal_id_range: WalFileRange,
         options: WalIteratorOptions,
         table_store: Arc<TableStore>,
+        status: watch::Receiver<DbStatus>,
     ) -> Result<Self, SlateDBError> {
         if options.sst_batch_size < 1 {
             return Err(SlateDBError::InvalidSSTBatchSize(options.sst_batch_size));
         }
 
-        let next_wal_id = wal_id_range.start;
+        let next_wal_id = match wal_id_range.0 {
+            Bound::Included(wal_id) => wal_id,
+            Bound::Excluded(_) | Bound::Unbounded => {
+                return Err(SlateDBError::InvalidDBState);
+            }
+        };
+        if !matches!(wal_id_range.1, Bound::Excluded(_) | Bound::Unbounded) {
+            return Err(SlateDBError::InvalidDBState);
+        }
         Ok(WalIterator {
             options,
             wal_id_range,
             table_store,
+            status,
             next_files: VecDeque::new(),
-            next_wal_id,
+            next_wal_id: Some(next_wal_id),
             last_seq: None,
             terminal_result: None,
             current_file: CurrentWalFile::initial(),
@@ -337,14 +367,19 @@ impl WalIterator {
     }
 
     fn maybe_spawn_open(&mut self) -> bool {
-        if !self.wal_id_range.contains(&self.next_wal_id)
-            || self.next_files.len() >= self.options.sst_batch_size
-        {
+        let Some(next_wal_id) = self.next_wal_id else {
+            return false;
+        };
+        let in_range = match self.wal_id_range.1 {
+            Bound::Excluded(end) => next_wal_id < end,
+            Bound::Unbounded => true,
+            Bound::Included(_) => unreachable!("validated in WalIterator::range"),
+        };
+        if !in_range || self.next_files.len() >= self.options.sst_batch_size {
             return false;
         }
 
-        let next_wal_id = self.next_wal_id;
-        self.next_wal_id += 1;
+        self.next_wal_id = next_wal_id.checked_add(1);
 
         async fn try_open_file_iter(
             wal_id: u64,
@@ -387,11 +422,37 @@ impl WalIterator {
             wal_id: u64,
             sst_iter_options: SstIteratorOptions,
             table_store: Arc<TableStore>,
+            mut status: watch::Receiver<DbStatus>,
+            poll_interval: Duration,
         ) -> Result<WalRowsCollector, WalError> {
-            match try_open_file_iter(wal_id, sst_iter_options, table_store).await {
-                Ok(iter) => Ok(iter),
-                Err(err) if err.has_object_store_not_found() => Err(WalError::WalTruncated(wal_id)),
-                Err(err) => Err(err.into()),
+            loop {
+                match try_open_file_iter(wal_id, sst_iter_options.clone(), Arc::clone(&table_store))
+                    .await
+                {
+                    Ok(iter) => return Ok(iter),
+                    Err(err) if err.has_object_store_not_found() => {
+                        let wal_was_seen = {
+                            let db_status = status.borrow_and_update();
+                            wal_id < db_status.current_manifest.core().next_wal_sst_id
+                        };
+                        if wal_was_seen {
+                            return Err(WalError::WalTruncated(wal_id));
+                        }
+
+                        tokio::select! {
+                            changed = status.changed() => {
+                                // A closed status channel can no longer wake us for manifest
+                                // changes. Keep polling at the configured interval instead of
+                                // spinning on the immediately-ready error.
+                                if changed.is_err() {
+                                    tokio::time::sleep(poll_interval).await;
+                                }
+                            }
+                            _ = tokio::time::sleep(poll_interval) => {}
+                        }
+                    }
+                    Err(err) => return Err(err.into()),
+                }
             }
         }
 
@@ -399,6 +460,8 @@ impl WalIterator {
             next_wal_id,
             self.options.sst_iter_options.clone(),
             Arc::clone(&self.table_store),
+            self.status.clone(),
+            self.options.poll_interval,
         ));
         self.next_files.push_back(handle);
         true
@@ -470,6 +533,11 @@ impl WalIteratorTrait for WalIterator {
         if let Err(err) = self.load_next_file().await {
             return self.terminate(Err(err));
         }
+        // Loading the front task removes it from the preload queue. Refill the
+        // queue before collecting/returning its rows so unbounded iterators keep
+        // polling the next `sst_batch_size` WAL IDs while the caller consumes this
+        // batch.
+        while self.maybe_spawn_open() {}
         match self.current_file.collect().await {
             Err(err) => self.terminate(Err(err)),
             Ok(None) => self.terminate(Ok(None)),
@@ -506,15 +574,24 @@ impl WalIteratorTrait for WalIterator {
     }
 }
 
+impl Drop for WalIterator {
+    fn drop(&mut self) {
+        for task in self.next_files.drain(..) {
+            task.abort();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{WalIterator, WalIteratorOptions, WalReplayIterator, WalReplayOptions};
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_range::BytesRange;
     use crate::db_state::SsTableId;
+    use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
     use crate::iter::{IterationOrder, RowEntryIterator};
-    use crate::manifest::ManifestCore;
+    use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
     use crate::mem_table::WritableKVTable;
     use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
@@ -533,6 +610,21 @@ mod tests {
     use std::collections::btree_map::Iter;
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::sync::Arc;
+    use std::time::Duration;
+
+    fn test_status_manager(core: &ManifestCore) -> DbStatusManager {
+        DbStatusManager::new_with_initial_values(
+            core.last_l0_seq,
+            VersionedManifest::from_manifest(1, Manifest::initial(core.clone())),
+            BTreeSet::new(),
+        )
+    }
+
+    fn test_status(
+        core: &ManifestCore,
+    ) -> tokio::sync::watch::Receiver<crate::db_status::DbStatus> {
+        test_status_manager(core).subscribe()
+    }
 
     struct ScriptedWalIterator {
         results: VecDeque<Result<Option<WalRows>, WalError>>,
@@ -641,10 +733,13 @@ mod tests {
     #[tokio::test]
     async fn should_repeat_terminal_error_for_wal_iterator() {
         let table_store = test_table_store();
+        let mut core = ManifestCore::new();
+        core.next_wal_sst_id = 2;
         let mut wal_iter = WalIterator::range(
-            1..2,
+            (1..2).into(),
             WalIteratorOptions::default(),
             Arc::clone(&table_store),
+            test_status(&core),
         )
         .unwrap();
 
@@ -662,14 +757,97 @@ mod tests {
     async fn should_repeat_terminal_none_for_wal_iterator() {
         let table_store = test_table_store();
         let mut wal_iter = WalIterator::range(
-            1..1,
+            (1..1).into(),
             WalIteratorOptions::default(),
             Arc::clone(&table_store),
+            test_status(&ManifestCore::new()),
         )
         .unwrap();
 
         assert!(wal_iter.next().await.unwrap().is_none());
         assert!(wal_iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn should_poll_future_wals_in_unbounded_range_and_keep_batch_in_flight() {
+        let table_store = test_table_store();
+        let status_manager = test_status_manager(&ManifestCore::new());
+        let mut wal_iter = WalIterator::range(
+            (1..).into(),
+            WalIteratorOptions {
+                sst_batch_size: 3,
+                poll_interval: Duration::from_millis(10),
+                ..WalIteratorOptions::default()
+            },
+            Arc::clone(&table_store),
+            status_manager.subscribe(),
+        )
+        .unwrap();
+
+        // The current tail is not the end of an unbounded iterator.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), wal_iter.next())
+                .await
+                .is_err()
+        );
+
+        write_empty_wal(1, Arc::clone(&table_store)).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_millis(100), wal_iter.next())
+            .await
+            .expect("iterator did not observe WAL 1")
+            .unwrap()
+            .expect("unbounded iterator returned None");
+        assert_eq!(first.last_consumed_wal_file_id, 1);
+
+        // WAL 1 was removed from the queue, and WAL 4 was immediately added so
+        // tasks for WAL IDs 2, 3, and 4 remain in flight.
+        assert_eq!(wal_iter.next_files.len(), 3);
+        assert_eq!(wal_iter.next_wal_id, Some(5));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), wal_iter.next())
+                .await
+                .is_err()
+        );
+        write_empty_wal(2, Arc::clone(&table_store)).await.unwrap();
+        let second = tokio::time::timeout(Duration::from_millis(100), wal_iter.next())
+            .await
+            .expect("iterator did not observe WAL 2")
+            .unwrap()
+            .expect("unbounded iterator returned None");
+        assert_eq!(second.last_consumed_wal_file_id, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn should_report_truncation_when_manifest_advances_past_missing_wal() {
+        let table_store = test_table_store();
+        let status_manager = test_status_manager(&ManifestCore::new());
+        let mut wal_iter = WalIterator::range(
+            (1..).into(),
+            WalIteratorOptions {
+                poll_interval: Duration::from_millis(10),
+                ..WalIteratorOptions::default()
+            },
+            Arc::clone(&table_store),
+            status_manager.subscribe(),
+        )
+        .unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), wal_iter.next())
+                .await
+                .is_err()
+        );
+
+        let mut core = ManifestCore::new();
+        core.next_wal_sst_id = 2;
+        status_manager
+            .report_manifest(VersionedManifest::from_manifest(2, Manifest::initial(core)));
+
+        let result = tokio::time::timeout(Duration::from_millis(100), wal_iter.next())
+            .await
+            .expect("iterator did not react to the manifest update");
+        assert!(matches!(result, Err(WalError::WalTruncated(1))));
     }
 
     #[tokio::test]
@@ -1105,9 +1283,10 @@ mod tests {
                 .unwrap();
         }
         let mut wal_iter = WalIterator::range(
-            1..(wal_file_count + 1),
+            (1..(wal_file_count + 1)).into(),
             WalIteratorOptions::default(),
             Arc::clone(&table_store),
+            test_status(&ManifestCore::new()),
         )
         .unwrap();
 

@@ -182,11 +182,6 @@ impl DbReaderInner {
         recorder: slatedb_common::metrics::MetricsRecorderHelper,
         mut manifest: StoredManifest,
     ) -> Result<Self, SlateDBError> {
-        let wal_reader = wal_reader.unwrap_or_else(|| {
-            Arc::new(crate::wal::reader::SlateDbWalReader::new(Arc::clone(
-                &table_store,
-            )))
-        });
         let checkpoint =
             Self::get_or_create_checkpoint(&mut manifest, mode, &options, rand.clone()).await?;
         let (manifest_id, initial_manifest) = if let Some(checkpoint) = checkpoint.as_ref() {
@@ -197,6 +192,19 @@ impl DbReaderInner {
         } else {
             (manifest.id(), manifest.manifest().clone())
         };
+        // Create status before WAL replay so native iterators can distinguish a
+        // future WAL ID from one that the current manifest had already observed.
+        let status_manager = DbStatusManager::new_with_initial_values(
+            initial_manifest.core.last_l0_seq,
+            VersionedManifest::from_manifest(manifest_id, initial_manifest.clone()),
+            BTreeSet::new(),
+        );
+        let wal_reader = wal_reader.unwrap_or_else(|| {
+            Arc::new(crate::wal::reader::SlateDbWalReader::new(
+                Arc::clone(&table_store),
+                status_manager.subscribe(),
+            ))
+        });
         let initial_state = Arc::new(
             Self::build_reader_state(
                 checkpoint,
@@ -222,8 +230,8 @@ impl DbReaderInner {
         let initial_durable_seq = initial_state
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
-        let status_manager = DbStatusManager::new_with_initial_values(
-            initial_durable_seq,
+        status_manager.report_durable_seq(initial_durable_seq);
+        status_manager.report_manifest_and_memtable_segments(
             VersionedManifest::from(initial_state.as_ref()),
             collect_touched_segments(initial_state.as_ref()),
         );
@@ -2418,7 +2426,7 @@ mod tests {
 
         let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
             Arc::clone(&table_store),
-            &native_wal_reader(&table_store),
+            &native_wal_reader(&table_store, &core),
             &DbReaderOptions::default(),
             &core,
             &mut into_tables,
@@ -2464,7 +2472,7 @@ mod tests {
 
         let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
             Arc::clone(&table_store),
-            &native_wal_reader(&table_store),
+            &native_wal_reader(&table_store, &core),
             &DbReaderOptions::default(),
             &core,
             &mut into_tables,
@@ -2520,7 +2528,7 @@ mod tests {
 
         let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
             Arc::clone(&table_store),
-            &native_wal_reader(&table_store),
+            &native_wal_reader(&table_store, &core),
             &reader_options,
             &core,
             &mut into_tables,
@@ -2557,7 +2565,7 @@ mod tests {
 
         let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
             Arc::clone(&table_store),
-            &native_wal_reader(&table_store),
+            &native_wal_reader(&table_store, &core),
             &DbReaderOptions::default(),
             &core,
             &mut into_tables,
@@ -2589,7 +2597,7 @@ mod tests {
 
         let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
             Arc::clone(&table_store),
-            &native_wal_reader(&table_store),
+            &native_wal_reader(&table_store, &core),
             &DbReaderOptions::default(),
             &core,
             &mut into_tables,
@@ -2636,7 +2644,7 @@ mod tests {
 
         let (last_wal_id, last_committed_seq) = DbReaderInner::replay_wal_into(
             Arc::clone(&table_store),
-            &native_wal_reader(&table_store),
+            &native_wal_reader(&table_store, &core),
             &DbReaderOptions::default(),
             &core,
             &mut into_tables,
@@ -3079,8 +3087,19 @@ mod tests {
         }
     }
 
-    fn native_wal_reader(table_store: &Arc<TableStore>) -> crate::wal::reader::SlateDbWalReader {
-        crate::wal::reader::SlateDbWalReader::new(Arc::clone(table_store))
+    fn native_wal_reader(
+        table_store: &Arc<TableStore>,
+        core: &ManifestCore,
+    ) -> crate::wal::reader::SlateDbWalReader {
+        let status_manager = DbStatusManager::new_with_initial_values(
+            core.last_l0_seq,
+            VersionedManifest::from_manifest(1, Manifest::initial(core.clone())),
+            std::collections::BTreeSet::new(),
+        );
+        crate::wal::reader::SlateDbWalReader::new(
+            Arc::clone(table_store),
+            status_manager.subscribe(),
+        )
     }
 
     fn immutable_memtable(
@@ -3257,7 +3276,7 @@ mod tests {
             oracle.clone(),
             None,
         );
-        let wal_reader = Arc::new(native_wal_reader(&table_store));
+        let wal_reader = Arc::new(native_wal_reader(&table_store, &prior_state.manifest.core));
         let inner = DbReaderInner {
             manifest_store,
             table_store,
@@ -3345,7 +3364,7 @@ mod tests {
             oracle.clone(),
             None,
         );
-        let wal_reader = Arc::new(native_wal_reader(&table_store));
+        let wal_reader = Arc::new(native_wal_reader(&table_store, &prior_state.manifest.core));
         DbReaderInner {
             manifest_store,
             table_store,
