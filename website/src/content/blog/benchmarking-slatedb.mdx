@@ -1,0 +1,79 @@
+---
+title: "Benchmarking SlateDB"
+pubDate: 2026-08-12
+author: Chris
+authorGithub: criccomini
+# ogImage: /img/some-custom-card.jpg   # optional per-post override
+---
+
+SlateDB has been around for a few years now. Recently, I've begun to focus on performance. As Kent Beck (purportedly) said, "Make It Work, Make It Right, Make It Fast." I feel we've earned the right to make SlateDB fast. Of course, before we improve things, we need to measure them. When it comes to performance, that means benchmarks.
+
+Benchmarks are tricky. It's easy to do something that is perceived as marketing, hyperbole, or outright dishonesty. It's questionable whether public benchmarks are even useful anymore. A max-effort LLM such as Fable or Sol is capable of building excellent bespoke benchmarks for each user.
+
+Yet I found myself re-building SlateDB's benchmark suite a few weeks back. In this post, I'll share the benchmarking philosophy I laned on, how I benchmarked SlateDB, and some things I learned along the way.
+
+## Legacy benchmarks
+
+We have had benchmarks for quite a while. We added [Criterion microbenchmarks](https://github.com/bheisler/criterion.rs) and a `benchmark.sh` script early on in the project. We also built a nightly job that runs `benchmark.sh` against a real [Tigris](https://www.tigrisdata.com/) object store. (A special thanks to them for donating the bucket to us free of charge.)
+
+Unfortunately, no one was looking at the benchmark results. The output was buried in a [GitHub Actions](https://docs.github.com/actions) summary that no one looked at. It didn't alert when significant regressions occurred, either. If you even managed to find it, the output was hard to read. We used [Mermaid charts](https://mermaid.js.org/) with enough daily data points that the labels only worked when rotated vertically.
+
+## Why bother
+
+I wrestled with whether we even needed benchmarks, and if so, for whom? Our "benchmarks" were really meant for us--the developers. We wanted to detect regressions and find areas to improve. For that, you want a lot of different workloads, configurations, charts, tables, and raw data. A lot of everything.
+
+It's difficult to present all of this data in a way that's easy for an average user to consume. Users genrally want to gauge the rough performance of a system to see if it's in the ballpark of their needs. For that, less is more.
+
+I decided to look at user-facing benchmarks since we already have developer-facing benchmarks (albeit, ones we mostly ignored). That begs the question: why bother? As I said in the beginning of this post, it is easy to generate an application-specific workload. Users can use an LLM to build their own benchmarks.
+
+That work is not free, though. You need machines, object storage, time, and enough familiarity with SlateDB configure and test it sensibly (yes, even with an LLM). I felt that a public suite still had value as a way to show SlateDB's behavior under different workloads. It could also be informative to demonstrate tradeoffs of an object-storage LSM.
+
+## Inspired by
+
+I looked at several benchmark efforts while working through the design: [ClickBench](https://github.com/ClickHouse/ClickBench), [DuckDB’s benchmark suite](https://duckdb.org/docs/current/dev/benchmark), [DuckDB’s narrative benchmark write-up](https://duckdb.org/2025/10/09/benchmark-results-14-lts), [Lucene’s nightly benchmarks](https://lucene.apache.org/core/developer.html), and [Apache Iggy’s public benchmark dashboard](https://iggy.apache.org/blogs/2025/02/17/transparent-benchmarks/). I also skimmed [Tectonic](https://scholarworks.brandeis.edu/esploro/outputs/conferencePresentation/Tectonic-Bridging-Synthetic-and-Real-World-Workloads/9924594037601921), a paper on bridging synthetic and real-world key-value workloads.
+
+For SlateDB itself, I started from the two obvious references: [YCSB](https://github.com/brianfrankcooper/YCSB) and [RocksDB’s `db_bench`](https://github.com/facebook/rocksdb/wiki/RocksDB-Overview).
+
+Both YCSB and db_bench contain more workloads than I wanted to publish. I'm paying for these myself, and I don't want to spend a fortune on cloud bills. We selected a smaller set that stays close to their intent and covers behavior users are likely to care about. If a user needs a more specialized workload, they should run it themselves. The benchmark repository is available for that purpose.
+
+## Best effort honesty
+
+The suite follows YCSB and DBBench workloads where possible, but SlateDB does not map perfectly to either. SlateDB is designed around object storage. That changes the cost and latency profile of a cache miss in ways that do not exist when the entire database sits on local NVMe.
+
+For many read benchmarks, we configured SlateDB’s cache to hold roughly a third of the database. The rest lives in object storage. A DBBench run of RocksDB may keep the entire database on local disk. This is clearly an apples to oranges comparison. They are, however, closer to the way many users would configure SlateDB than a fully local cache would be (though some of our users do that, too).
+
+The same tradeoff applies to mixed workloads. A read that misses the cache can take tens or hundreds of milliseconds while data comes back from object storage. If one task does both reads and writes, those misses hold back its write throughput. We could separate readers and writers, add far more tasks, and report a stronger aggregate throughput number. We kept the configuration closer to the original workload instead.
+
+## Benchmark tools
+
+The work produced three things:
+
+- A standalone benchmark repository with the suite and its configuration.
+- [GitHub Actions](https://docs.github.com/actions) workflows that run it.
+- A public [benchmark website](https://benchmark.slatedb.io/) where the results are easier to inspect.
+
+The workloads run on [AWS Graviton](https://aws.amazon.com/ec2/graviton/) machines from [WarpBuild](https://warpbuild.com) in `us-east-1`. They talk to an [Amazon S3](https://aws.amazon.com/s3/) bucket in the same region and to [Tigris](https://www.tigrisdata.com/) through its `us-east-1` on-ramp. We use a relatively large machine because compaction needs CPU. That gives us more memory and disk than the tests consume, but we keep the runtime configuration intentionally constrained.
+
+We also added cost metrics. Throughput and latency matter, but SlateDB exists in part because object storage changes the economics of persistence. Databases should be cheap to run. If it is not, we need to know.
+
+## Findings
+
+The first lesson had nothing to do with SlateDB code. We relearned an age-old lesson about the importance of networking. At one point, we ran in [Hetzner](https://www.hetzner.com/) and expected a nearby path to the object store. The traffic took a longer route through a different on-ramp, which showed up in latency. We also found local routing behavior that caused tail-latency problems in us-east-1. This led to very sawtoothed ingestion charts as SlateDB throttled writes.
+
+Th ingestion benchmark also pushed us toward a simple form of trivial moves. When loaded data has no overlapping key ranges, SlateDB can move it from L0 into the next sorted run instead of reading and rewriting it through compaction. [RocksDB supports this idea](https://github.com/facebook/rocksdb/wiki/Leveled-Compaction#trivial-move). We hadn't bothered implementing it yet. The benchmark showed it was worth doing (but we've left it disabled for the benchmark to keep things fair). We have [a more sophisticated trivial move](https://github.com/slatedb/slatedb/issues/1110) implementation in the works, too.
+
+Another result came from the new cost metrics. We recently added [distributed compaction](https://slatedb.io/blog/compaction-roadmap) support. Compaction can now run on one or more remote machines. The common case, though, keeps the writer, compactor, and garbage collector in one process.
+
+We kept remote-style coordination in that local case because it was simpler to implement. The benchmark showed that an idle database with default settings cost roughly $25 in API costs related to compaction state polling. We made the local coordination path in-memory while preserving the state needed for remote compactors to participate correctly. The idle cost fell to under $5. Again, in practice, you'd probably close an idle database and re-open it when needed, but $25/mo is clearly excessive.
+
+The benchmark also changed how we think about disk caching. SlateDB has a block cache and an object-store cache. The block cache holds pieces such as data blocks, index blocks, filters, and metadata. The object-store cache works at a larger granularity. Its default partition size was 4 MiB. That granularity is expensive on a miss. A request for a small key can trigger a four-megabyte fetch from object storage. This appeared as significant latency spikes in our P99 metrics.
+
+We are now planning a [more capable object-store mirror cache](https://github.com/slatedb/slatedb/issues/1980) with read-through, write-through, and write-back modes. The likely division of labor is clearer too. If you want to keep the whole database local, an object-level cache makes sense. If you only want partial local caching, the [Foyer hybrid cache](https://github.com/foyer-rs/foyer) is usually the better fit. It already supports eviction and works with much smaller units of data. [ZeroFS](http://zerofs.net/) has shown us that a [prefetching cache](https://github.com/Barre/ZeroFS/blob/main/zerofs/src/object_store_prefetch.rs) for spatial ocality is also possible.
+
+## Benchmarks are ongoing work
+
+The new suite is not a final answer to performance. No benchmark suite is.
+
+It is a public reference point. It gives users a way to understand SlateDB’s broad behavior before they build their own test. It gives us a repeatable system for finding problems that are easy to miss when performance work happens one investigation at a time. And it makes the results visible enough that somebody might actually notice them.
+
+You can explore the SlateDB benchmark results at [benchmark.slatedb.io](https://benchmark.slatedb.io/).
