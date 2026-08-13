@@ -57,7 +57,7 @@ Another tradeoff applies to mixed read/write workloads. A read that misses the c
 
 ## Findings
 
-The first lesson had nothing to do with SlateDB code. We relearned an age-old lesson about the importance of networking. At one point, we ran in [Hetzner](https://www.hetzner.com/) and expected a nearby path to the object store. The traffic took a longer route through a different on-ramp, which showed up in latency. We also found local routing behavior that caused tail-latency problems in `us-east-1`. This led to very sawtoothed ingestion charts as SlateDB throttled writes.
+Our first discovery was that routing over the public internet is unpredictable. At one point, we ran in [Hetzner](https://www.hetzner.com/) and expected a nearby path to our Tigris object store bucket. The traffic took a longer route through a different on-ramp, which showed up in latency. We also found local routing behavior that caused tail-latency problems in `us-east-1`. This led to very sawtoothed ingestion charts as SlateDB throttled writes. We eventually worked through these with our cloud provider.
 
 <ChartEmbed
 	src="/charts/benchmark-sustained-ingest-put.html"
@@ -65,13 +65,13 @@ The first lesson had nothing to do with SlateDB code. We relearned an age-old le
 	minHeight={420}
 />
 
-Th ingestion benchmark also pushed us toward a simple form of trivial moves. When loaded data has no overlapping key ranges, SlateDB can move it directly from L0 into the next sorted run without rewriting it. RocksDB [supports this idea](https://github.com/facebook/rocksdb/wiki/Leveled-Compaction#trivial-move). We hadn't bothered to implement it yet. The benchmark showed it was worth doing (but we've left it disabled in the benchmark to represent baseline performance). We have [a more sophisticated trivial move](https://github.com/slatedb/slatedb/issues/1110) implementation in the works, too.
+The ingestion benchmark also pushed us toward a simple form of trivial moves. When ingested data has no overlapping key ranges, SlateDB can move it directly from L0 into the next sorted run without rewriting it. RocksDB [supports this](https://github.com/facebook/rocksdb/wiki/Leveled-Compaction#trivial-move), but we hadn't bothered to implement it. Our `sustained-ingest` workload showed it was worth doing. We've opted to disable the setting in the benchmark so we continue to represent baseline performance. We have [a more sophisticated trivial move](https://github.com/slatedb/slatedb/issues/1110) implementation in the works, too.
 
-Another result came from new cost performance metrics. We recently added [distributed compaction](https://slatedb.io/blog/compaction-roadmap) support. Compaction can now run on one or more remote machines. The common case, though, keeps the writer, compactor, and garbage collector in one process.
+Another result came from our new cost performance metrics. We recently added [distributed compaction](https://slatedb.io/blog/compaction-roadmap) support. Compaction can now run on one or more remote machines. This implementation involves periodically checking persisted compaction state in object storage to see if new work is scheduled. Most SlateDB deployments keep the writer, compactor, and garbage collector in one process, though.
 
-We kept remote-style coordination in that local case because it was simpler to implement. The benchmark showed that an idle database with default settings cost roughly $40 in API fees. This was related to compaction state polling we were doing. We made the local coordination path in-memory while preserving the state needed for remote compactors to participate. The idle cost fell to under $5. In practice, you would tune your compactor settings or close idle databases, but $40/mo is clearly excessive.
+We were still using remote-style object store polling even when the compactor was in the same process. The benchmark showed that an idle database with default settings cost roughly $40 per-month in API polling fees. We made the local coordination path in-memory while preserving the state needed for remote compactors to participate. The idle cost fell to under $5. In practice, you would tune your compactor settings or close idle databases, but $40 per-month is clearly excessive.
 
-The benchmark also changed how we think about disk caching. SlateDB has a block cache and an object-store cache. The block cache holds pieces such as data blocks, index blocks, filters, and metadata. The object-store cache works at a larger granularity. Its default partition size was 4 MiB. That granularity is expensive on a miss. A request for a small key can trigger a four-megabyte fetch from object storage. This appeared as significant latency spikes in our P99 metrics.
+The benchmarks also changed how we think about disk caching. SlateDB has a block cache and an object-store cache. The block cache holds pieces such as data blocks, index blocks, filters, and metadata. The object-store cache works at a larger granularity; its default partition size was 4 MiB. That granularity is expensive when a cache miss occurs. A request for a small key can trigger a 4 MiB fetch from object storage. This appeared as significant latency spikes in our P99 metrics.
 
 <ChartEmbed
 	src="/charts/benchmark-balanced-get-latency.html"
@@ -79,12 +79,8 @@ The benchmark also changed how we think about disk caching. SlateDB has a block 
 	minHeight={440}
 />
 
-We are now planning a [more capable object-store mirror cache](https://github.com/slatedb/slatedb/issues/1980) with read-through, write-through, and write-back modes. The likely division of labor is clearer too. If you want to keep the whole database local, an object-level cache makes sense. If you only want partial local caching, the [Foyer hybrid cache](https://github.com/foyer-rs/foyer) is usually the better fit. It already supports eviction and works with much smaller units of data. [ZeroFS](http://zerofs.net/) has shown us that a [prefetching cache](https://github.com/Barre/ZeroFS/blob/main/zerofs/src/object_store_prefetch.rs) for spatial locality is also possible.
+We are now planning a [more capable object-store mirror cache](https://github.com/slatedb/slatedb/issues/1980) with read-through, write-through, and write-back modes. The division of labor is clearer, too. If you want to keep the whole database local, an object-level cache makes sense. If you only want partial local caching, the [Foyer hybrid cache](https://github.com/foyer-rs/foyer) is usually the better fit. It already supports eviction and works with much smaller units of data so a cache miss is less costly. [ZeroFS](http://zerofs.net/) has shown us that a [prefetching cache](https://github.com/Barre/ZeroFS/blob/main/zerofs/src/object_store_prefetch.rs) for spatial locality is also possible.
 
 ## More to come
 
-The new suite is not a final answer to measuring performance. No benchmark suite is.
-
-It is a public reference point. It gives users a way to understand SlateDB’s broad behavior before they build their own test. It gives us a repeatable system for finding problems that are easy to miss when performance work happens one investigation at a time. And it makes the results visible enough that somebody might actually notice them.
-
-You can explore the SlateDB benchmark results at [benchmark.slatedb.io](https://benchmark.slatedb.io/).
+Performance tuning is a never-ending endeavor. We will continue driving SlateDB's cost and latency down while improving its throughput. We now have a means to evaluate that progress. The results are availabe at [benchmark.slatedb.io](https://benchmark.slatedb.io/) if we've piqued your curiosity.
