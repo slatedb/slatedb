@@ -13,7 +13,7 @@ use crate::RowEntry;
 use async_trait::async_trait;
 use log::error;
 use std::collections::VecDeque;
-use std::ops::{Bound, Range};
+use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -77,38 +77,13 @@ pub(crate) struct WalReplayIterator {
     /// range are fully applied to returned tables. Tables are tagged with this
     /// conservative watermark so that a table ending mid-file never claims a WAL
     /// file it only partially contains.
-    last_consumed_wal_file_id: u64,
+    last_consumed_wal_file_id: Option<u64>,
     last_tick: i64,
     last_seq: u64,
     min_seq: u64,
 }
 
 impl WalReplayIterator {
-    #[cfg(test)]
-    pub(crate) fn range(
-        wal_id_range: Range<u64>,
-        db_state: &ManifestCore,
-        iterator_options: WalIteratorOptions,
-        replay_options: WalReplayOptions,
-        table_store: Arc<TableStore>,
-    ) -> Result<Self, SlateDBError> {
-        let status_manager = crate::db_status::DbStatusManager::new_with_initial_values(
-            db_state.last_l0_seq,
-            crate::manifest::VersionedManifest::from_manifest(
-                1,
-                crate::manifest::Manifest::initial(db_state.clone()),
-            ),
-            std::collections::BTreeSet::new(),
-        );
-        let wal_iter = WalIterator::range(
-            wal_id_range.into(),
-            iterator_options,
-            Arc::clone(&table_store),
-            status_manager.subscribe(),
-        )?;
-        Self::for_wal_iterator(Box::new(wal_iter), db_state, replay_options, table_store)
-    }
-
     pub(crate) fn for_wal_iterator(
         wal_iter: Box<dyn WalIteratorTrait>,
         db_state: &ManifestCore,
@@ -128,7 +103,7 @@ impl WalReplayIterator {
             table_store,
             wal_iter,
             terminal_result: None,
-            last_consumed_wal_file_id: db_state.replay_after_wal_id,
+            last_consumed_wal_file_id: None,
             last_tick,
             last_seq,
             min_seq,
@@ -174,10 +149,10 @@ impl WalReplayIterator {
 
             applied_any = true;
             assert!(
-                writes.last_consumed_wal_file_id >= self.last_consumed_wal_file_id,
+                writes.last_consumed_wal_file_id >= self.last_consumed_wal_file_id.unwrap_or(0),
                 "WAL iterator moved its consumed file watermark backwards"
             );
-            self.last_consumed_wal_file_id = writes.last_consumed_wal_file_id;
+            self.last_consumed_wal_file_id = Some(writes.last_consumed_wal_file_id);
 
             for row_entry in writes.rows {
                 // skip the entries that are already in the L0 SST.
@@ -211,7 +186,9 @@ impl WalReplayIterator {
                 table,
                 last_tick: self.last_tick,
                 last_seq: self.last_seq,
-                last_wal_id: self.last_consumed_wal_file_id,
+                last_wal_id: self
+                    .last_consumed_wal_file_id
+                    .expect("applied WAL rows must have a consumed file watermark"),
             }))
         } else {
             self.terminal_result
@@ -323,7 +300,7 @@ pub(crate) struct WalIterator {
     table_store: Arc<TableStore>,
     status: watch::Receiver<DbStatus>,
     next_files: VecDeque<JoinHandle<Result<WalRowsCollector, WalError>>>,
-    next_wal_id: Option<u64>,
+    next_wal_id: u64,
     /// The greatest seq returned so far, used to verify that WAL files arrive
     /// with strictly increasing seq ranges.
     last_seq: Option<u64>,
@@ -347,10 +324,18 @@ impl WalIterator {
         let next_wal_id = match wal_id_range.0 {
             Bound::Included(wal_id) => wal_id,
             Bound::Excluded(_) | Bound::Unbounded => {
+                error!(
+                    "WAL iterator range must have an included start bound. [range={:?}]",
+                    wal_id_range
+                );
                 return Err(SlateDBError::InvalidDBState);
             }
         };
         if !matches!(wal_id_range.1, Bound::Excluded(_) | Bound::Unbounded) {
+            error!(
+                "WAL iterator range must have an excluded or unbounded end bound. [range={:?}]",
+                wal_id_range
+            );
             return Err(SlateDBError::InvalidDBState);
         }
         Ok(WalIterator {
@@ -359,7 +344,7 @@ impl WalIterator {
             table_store,
             status,
             next_files: VecDeque::new(),
-            next_wal_id: Some(next_wal_id),
+            next_wal_id,
             last_seq: None,
             terminal_result: None,
             current_file: CurrentWalFile::initial(),
@@ -367,19 +352,21 @@ impl WalIterator {
     }
 
     fn maybe_spawn_open(&mut self) -> bool {
-        let Some(next_wal_id) = self.next_wal_id else {
-            return false;
-        };
+        let next_wal_id = self.next_wal_id;
         let in_range = match self.wal_id_range.1 {
             Bound::Excluded(end) => next_wal_id < end,
             Bound::Unbounded => true,
             Bound::Included(_) => unreachable!("validated in WalIterator::range"),
         };
+        // TODO: Once an unbounded iterator is fully caught up, consider polling only
+        // one future WAL file at a time instead of keeping the whole batch in flight.
         if !in_range || self.next_files.len() >= self.options.sst_batch_size {
             return false;
         }
 
-        self.next_wal_id = next_wal_id.checked_add(1);
+        self.next_wal_id = next_wal_id
+            .checked_add(1)
+            .expect("WAL file ID overflow while preloading");
 
         async fn try_open_file_iter(
             wal_id: u64,
@@ -441,11 +428,14 @@ impl WalIterator {
 
                         tokio::select! {
                             changed = status.changed() => {
-                                // A closed status channel can no longer wake us for manifest
-                                // changes. Keep polling at the configured interval instead of
-                                // spinning on the immediately-ready error.
-                                if changed.is_err() {
-                                    tokio::time::sleep(poll_interval).await;
+                                changed.map_err(|_| WalError::Closed)?;
+                                let replay_after_wal_id = status
+                                    .borrow_and_update()
+                                    .current_manifest
+                                    .core()
+                                    .replay_after_wal_id;
+                                if wal_id < replay_after_wal_id {
+                                    return Err(WalError::WalTruncated(wal_id));
                                 }
                             }
                             _ = tokio::time::sleep(poll_interval) => {}
@@ -609,6 +599,7 @@ mod tests {
     use std::cmp::min;
     use std::collections::btree_map::Iter;
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    use std::ops::Range;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -624,6 +615,32 @@ mod tests {
         core: &ManifestCore,
     ) -> tokio::sync::watch::Receiver<crate::db_status::DbStatus> {
         test_status_manager(core).subscribe()
+    }
+
+    fn wal_replay_range(
+        wal_id_range: Range<u64>,
+        db_state: &ManifestCore,
+        iterator_options: WalIteratorOptions,
+        replay_options: WalReplayOptions,
+        table_store: Arc<TableStore>,
+    ) -> Result<WalReplayIterator, SlateDBError> {
+        let status_manager = DbStatusManager::new_with_initial_values(
+            db_state.last_l0_seq,
+            VersionedManifest::from_manifest(1, Manifest::initial(db_state.clone())),
+            BTreeSet::new(),
+        );
+        let wal_iter = WalIterator::range(
+            wal_id_range.into(),
+            iterator_options,
+            Arc::clone(&table_store),
+            status_manager.subscribe(),
+        )?;
+        WalReplayIterator::for_wal_iterator(
+            Box::new(wal_iter),
+            db_state,
+            replay_options,
+            table_store,
+        )
     }
 
     struct ScriptedWalIterator {
@@ -648,7 +665,7 @@ mod tests {
                 .last_seen_wal_id(db_state.replay_after_wal_id)
                 .await?;
             let wal_id_range = wal_id_start..(wal_id_end + 1);
-            Self::range(
+            wal_replay_range(
                 wal_id_range,
                 db_state,
                 WalIteratorOptions::default(),
@@ -802,7 +819,7 @@ mod tests {
         // WAL 1 was removed from the queue, and WAL 4 was immediately added so
         // tasks for WAL IDs 2, 3, and 4 remain in flight.
         assert_eq!(wal_iter.next_files.len(), 3);
-        assert_eq!(wal_iter.next_wal_id, Some(5));
+        assert_eq!(wal_iter.next_wal_id, 5);
 
         assert!(
             tokio::time::timeout(Duration::from_millis(30), wal_iter.next())
@@ -840,7 +857,8 @@ mod tests {
         );
 
         let mut core = ManifestCore::new();
-        core.next_wal_sst_id = 2;
+        core.replay_after_wal_id = 2;
+        core.next_wal_sst_id = 3;
         status_manager
             .report_manifest(VersionedManifest::from_manifest(2, Manifest::initial(core)));
 
@@ -848,6 +866,31 @@ mod tests {
             .await
             .expect("iterator did not react to the manifest update");
         assert!(matches!(result, Err(WalError::WalTruncated(1))));
+    }
+
+    #[tokio::test]
+    async fn should_return_error_when_status_channel_closes() {
+        let table_store = test_table_store();
+        let status_manager = test_status_manager(&ManifestCore::new());
+        let mut wal_iter = WalIterator::range(
+            (1..).into(),
+            WalIteratorOptions {
+                poll_interval: Duration::from_secs(60),
+                ..WalIteratorOptions::default()
+            },
+            Arc::clone(&table_store),
+            status_manager.subscribe(),
+        )
+        .unwrap();
+        drop(status_manager);
+
+        let result = tokio::time::timeout(Duration::from_millis(100), wal_iter.next())
+            .await
+            .expect("iterator did not return after its status channel closed");
+        assert!(
+            result.is_err(),
+            "iterator should return an error when its status channel closes"
+        );
     }
 
     #[tokio::test]
