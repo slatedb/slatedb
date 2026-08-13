@@ -13,7 +13,7 @@ pub(crate) trait RangePartitionedKeySpace {
 }
 
 // equivalent to https://doc.rust-lang.org/std/primitive.slice.html#method.partition_point
-fn partition_point<T: RangePartitionedKeySpace, P: Fn(&[u8]) -> bool>(
+pub(crate) fn partition_point<T: RangePartitionedKeySpace, P: Fn(&[u8]) -> bool>(
     keyspace: &T,
     pred: P,
 ) -> usize {

@@ -15,7 +15,7 @@ permissions:
 jobs:
   # Run and save nightly microbenchmark data so PRs have a fresh baseline to compare against
   microbenchmarks:
-    runs-on: ubuntu-latest
+    runs-on: warp-ubuntu-latest-arm64-8x
     steps:
       - uses: actions/checkout@v4
 

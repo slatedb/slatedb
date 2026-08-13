@@ -39,9 +39,10 @@ minutes of activity.
 
 The
 [nightly workflow](https://github.com/slatedb/slatedb/actions/workflows/nightly.yaml)
-runs the Criterion microbenchmarks on standard Linux GitHub-hosted runners. It
-also records profiles with [pprof-rs](https://github.com/tikv/pprof-rs) and
-uploads them to [pprof.me](https://pprof.me). The GitHub Actions job summary
+runs the Criterion microbenchmarks on [WarpBuild](https://warpbuild.com)'s
+[warp-ubuntu-latest-arm64-8x](https://docs.warpbuild.com/cloud-runners) ARM
+runners. It also records profiles with [pprof-rs](https://github.com/tikv/pprof-rs)
+and uploads them to [pprof.me](https://pprof.me). The GitHub Actions job summary
 links to each profile.
 
 ## Benchmarking object stores

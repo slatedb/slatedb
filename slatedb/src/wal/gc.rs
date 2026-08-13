@@ -1,9 +1,8 @@
-use crate::config::GarbageCollectorDirectoryOptions;
 use crate::db_state::SsTableId;
 use crate::garbage_collector::stats::GcStats;
 use crate::garbage_collector::{retain_allowed_by_gc_filter, GcFilter, GC_DELETE_CONCURRENCY};
 use crate::tablestore::TableStore;
-use crate::wal::{WalError, WalFileRange, WalGC};
+use crate::wal::{WalError, WalFileRange, WalGc};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
@@ -12,6 +11,7 @@ use slatedb_common::clock::SystemClock;
 use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use std::ops::Bound;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Selects which class of SlateDB WAL object is collected.
 ///
@@ -42,7 +42,6 @@ impl WalGcMode {
 pub(crate) struct SlateDbWalGc {
     table_store: Arc<TableStore>,
     stats: Arc<GcStats>,
-    wal_options: GarbageCollectorDirectoryOptions,
     mode: WalGcMode,
     gc_filter: Option<Arc<dyn GcFilter>>,
     system_clock: Arc<dyn SystemClock>,
@@ -51,7 +50,6 @@ pub(crate) struct SlateDbWalGc {
 impl std::fmt::Debug for SlateDbWalGc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SlateDbWalGc")
-            .field("wal_options", &self.wal_options)
             .field("mode", &self.mode)
             .finish()
     }
@@ -61,7 +59,6 @@ impl SlateDbWalGc {
     pub(crate) fn new(
         table_store: Arc<TableStore>,
         stats: Arc<GcStats>,
-        wal_options: GarbageCollectorDirectoryOptions,
         mode: WalGcMode,
         gc_filter: Option<Arc<dyn GcFilter>>,
         system_clock: Arc<dyn SystemClock>,
@@ -69,7 +66,6 @@ impl SlateDbWalGc {
         Self {
             table_store,
             stats,
-            wal_options,
             mode,
             gc_filter,
             system_clock,
@@ -106,15 +102,15 @@ impl SlateDbWalGc {
         after_start && before_end
     }
 
-    fn wal_sst_min_age(&self) -> chrono::Duration {
-        chrono::Duration::from_std(self.wal_options.min_age).expect("invalid duration")
+    fn wal_sst_min_age(&self, min_age: Duration) -> chrono::Duration {
+        chrono::Duration::from_std(min_age).expect("invalid duration")
     }
 
     /// Deletes the given WAL SSTs from the table store.
     ///
     /// In case of dryrun, the actual deletion doesn't happen.
-    async fn maybe_delete_wal_ssts(&self, sst_ids: Vec<SsTableId>) {
-        if self.wal_options.dry_run {
+    async fn maybe_delete_wal_ssts(&self, sst_ids: Vec<SsTableId>, dry_run: bool) {
+        if dry_run {
             if !sst_ids.is_empty() {
                 log::info!(
                     "dry run: skipping {} deletion [count={}]",
@@ -155,10 +151,15 @@ impl SlateDbWalGc {
 }
 
 #[async_trait]
-impl WalGC for SlateDbWalGc {
-    async fn collect(&self, referenced_ranges: Vec<WalFileRange>) -> Result<(), WalError> {
+impl WalGc for SlateDbWalGc {
+    async fn collect(
+        &self,
+        referenced_ranges: Vec<WalFileRange>,
+        min_age: Duration,
+        dry_run: bool,
+    ) -> Result<(), WalError> {
         let utc_now = self.system_clock.now();
-        let min_age = self.wal_sst_min_age();
+        let min_age = self.wal_sst_min_age(min_age);
         let ssts_to_delete = self
             .table_store
             .list_wal_ssts(..)
@@ -185,7 +186,7 @@ impl WalGC for SlateDbWalGc {
             .map(|wal_sst| wal_sst.id)
             .collect::<Vec<_>>();
 
-        self.maybe_delete_wal_ssts(sst_ids_to_delete).await;
+        self.maybe_delete_wal_ssts(sst_ids_to_delete, dry_run).await;
 
         Ok(())
     }
@@ -222,16 +223,10 @@ mod tests {
         table_store: Arc<TableStore>,
         clock: Arc<MockSystemClock>,
         mode: WalGcMode,
-        min_age: Duration,
     ) -> SlateDbWalGc {
         SlateDbWalGc::new(
             table_store,
             Arc::new(GcStats::new(&MetricsRecorderHelper::noop())),
-            GarbageCollectorDirectoryOptions {
-                interval: None,
-                min_age,
-                dry_run: false,
-            },
             mode,
             None,
             clock,
@@ -297,14 +292,12 @@ mod tests {
             write_regular_wal(&table_store, wal_id).await;
         }
         make_all_wals_older_than(&table_store, &clock, Duration::ZERO).await;
-        let collector = build_collector(
-            table_store.clone(),
-            clock,
-            WalGcMode::Regular,
-            Duration::ZERO,
-        );
+        let collector = build_collector(table_store.clone(), clock, WalGcMode::Regular);
 
-        collector.collect(protect_outer_wals()).await.unwrap();
+        collector
+            .collect(protect_outer_wals(), Duration::ZERO, false)
+            .await
+            .unwrap();
 
         assert_eq!(wal_ids(&table_store).await, vec![1, 4]);
     }
@@ -316,14 +309,12 @@ mod tests {
         write_regular_wal(&table_store, 1).await;
         write_fence_wal(&table_store, 2).await;
         make_all_wals_older_than(&table_store, &clock, Duration::ZERO).await;
-        let collector = build_collector(
-            table_store.clone(),
-            clock,
-            WalGcMode::Regular,
-            Duration::ZERO,
-        );
+        let collector = build_collector(table_store.clone(), clock, WalGcMode::Regular);
 
-        collector.collect(vec![]).await.unwrap();
+        collector
+            .collect(vec![], Duration::ZERO, false)
+            .await
+            .unwrap();
 
         assert_eq!(wal_ids(&table_store).await, vec![2]);
     }
@@ -339,19 +330,14 @@ mod tests {
             .unwrap()
             .last_modified;
         let min_age = Duration::from_secs(60 * 60);
-        let collector = build_collector(
-            table_store.clone(),
-            clock.clone(),
-            WalGcMode::Regular,
-            min_age,
-        );
+        let collector = build_collector(table_store.clone(), clock.clone(), WalGcMode::Regular);
 
         clock.set((last_modified + chrono::Duration::minutes(30)).timestamp_millis());
-        collector.collect(vec![]).await.unwrap();
+        collector.collect(vec![], min_age, false).await.unwrap();
         assert_eq!(wal_ids(&table_store).await, vec![1]);
 
         clock.set((last_modified + chrono::Duration::minutes(61)).timestamp_millis());
-        collector.collect(vec![]).await.unwrap();
+        collector.collect(vec![], min_age, false).await.unwrap();
         assert!(wal_ids(&table_store).await.is_empty());
     }
 
@@ -363,10 +349,12 @@ mod tests {
             write_fence_wal(&table_store, wal_id).await;
         }
         make_all_wals_older_than(&table_store, &clock, Duration::ZERO).await;
-        let collector =
-            build_collector(table_store.clone(), clock, WalGcMode::Fence, Duration::ZERO);
+        let collector = build_collector(table_store.clone(), clock, WalGcMode::Fence);
 
-        collector.collect(protect_outer_wals()).await.unwrap();
+        collector
+            .collect(protect_outer_wals(), Duration::ZERO, false)
+            .await
+            .unwrap();
 
         assert_eq!(wal_ids(&table_store).await, vec![1, 4]);
     }
@@ -378,10 +366,12 @@ mod tests {
         write_fence_wal(&table_store, 1).await;
         write_regular_wal(&table_store, 2).await;
         make_all_wals_older_than(&table_store, &clock, Duration::ZERO).await;
-        let collector =
-            build_collector(table_store.clone(), clock, WalGcMode::Fence, Duration::ZERO);
+        let collector = build_collector(table_store.clone(), clock, WalGcMode::Fence);
 
-        collector.collect(vec![]).await.unwrap();
+        collector
+            .collect(vec![], Duration::ZERO, false)
+            .await
+            .unwrap();
 
         assert_eq!(wal_ids(&table_store).await, vec![2]);
     }
@@ -397,19 +387,14 @@ mod tests {
             .unwrap()
             .last_modified;
         let min_age = Duration::from_secs(60 * 60);
-        let collector = build_collector(
-            table_store.clone(),
-            clock.clone(),
-            WalGcMode::Fence,
-            min_age,
-        );
+        let collector = build_collector(table_store.clone(), clock.clone(), WalGcMode::Fence);
 
         clock.set((last_modified + chrono::Duration::minutes(30)).timestamp_millis());
-        collector.collect(vec![]).await.unwrap();
+        collector.collect(vec![], min_age, false).await.unwrap();
         assert_eq!(wal_ids(&table_store).await, vec![1]);
 
         clock.set((last_modified + chrono::Duration::minutes(61)).timestamp_millis());
-        collector.collect(vec![]).await.unwrap();
+        collector.collect(vec![], min_age, false).await.unwrap();
         assert!(wal_ids(&table_store).await.is_empty());
     }
 }
