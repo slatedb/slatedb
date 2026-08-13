@@ -1,3 +1,5 @@
+#![warn(clippy::absolute_paths)]
+#![cfg_attr(test, allow(clippy::absolute_paths))]
 //! Common utilities shared across SlateDB crates.
 //!
 //! This crate contains utilities that are used by multiple SlateDB

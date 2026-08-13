@@ -1,3 +1,5 @@
+#![warn(clippy::absolute_paths)]
+#![cfg_attr(test, allow(clippy::absolute_paths))]
 //! # SlateDB Transactional Object
 //!
 //! This module provides generic, reusable primitives for reading/writing an object in a durable

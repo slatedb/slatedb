@@ -1,3 +1,13 @@
+#![warn(clippy::absolute_paths)]
+#![cfg_attr(test, allow(clippy::absolute_paths))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_macros,
+        clippy::disallowed_methods,
+        clippy::disallowed_types
+    )
+)]
 mod admin;
 mod builder;
 mod config;

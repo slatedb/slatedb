@@ -97,3 +97,9 @@ disallowed-macros = [
     { path = "std::println", reason = "Use log::info instead" },
     { path = "std::print", reason = "Use log::info instead" },
 ]
+
+# Import items with `use` instead of spelling out deep paths at use sites. Only
+# the standard library stays exempt, where `std::fmt::Display` and friends read
+# fine fully qualified. `use` declarations themselves are never checked.
+absolute-paths-max-segments = 2
+absolute-paths-allowed-crates = ["std", "core", "alloc"]

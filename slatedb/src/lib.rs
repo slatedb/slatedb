@@ -1,4 +1,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
+#![warn(clippy::absolute_paths)]
+#![cfg_attr(test, allow(clippy::absolute_paths))]
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
 #![allow(clippy::result_large_err, clippy::too_many_arguments)]
