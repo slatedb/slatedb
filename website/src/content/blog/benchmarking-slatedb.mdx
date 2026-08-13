@@ -84,11 +84,11 @@ The benchmark also changed how we think about disk caching. SlateDB has a block 
 	minHeight={440}
 />
 
-We are now planning a [more capable object-store mirror cache](https://github.com/slatedb/slatedb/issues/1980) with read-through, write-through, and write-back modes. The likely division of labor is clearer too. If you want to keep the whole database local, an object-level cache makes sense. If you only want partial local caching, the [Foyer hybrid cache](https://github.com/foyer-rs/foyer) is usually the better fit. It already supports eviction and works with much smaller units of data. [ZeroFS](http://zerofs.net/) has shown us that a [prefetching cache](https://github.com/Barre/ZeroFS/blob/main/zerofs/src/object_store_prefetch.rs) for spatial ocality is also possible.
+We are now planning a [more capable object-store mirror cache](https://github.com/slatedb/slatedb/issues/1980) with read-through, write-through, and write-back modes. The likely division of labor is clearer too. If you want to keep the whole database local, an object-level cache makes sense. If you only want partial local caching, the [Foyer hybrid cache](https://github.com/foyer-rs/foyer) is usually the better fit. It already supports eviction and works with much smaller units of data. [ZeroFS](http://zerofs.net/) has shown us that a [prefetching cache](https://github.com/Barre/ZeroFS/blob/main/zerofs/src/object_store_prefetch.rs) for spatial locality is also possible.
 
 ## More to come
 
-The new suite is not a final answer to performance. No benchmark suite is.
+The new suite is not a final answer to measuring performance. No benchmark suite is.
 
 It is a public reference point. It gives users a way to understand SlateDB’s broad behavior before they build their own test. It gives us a repeatable system for finding problems that are easy to miss when performance work happens one investigation at a time. And it makes the results visible enough that somebody might actually notice them.
 
