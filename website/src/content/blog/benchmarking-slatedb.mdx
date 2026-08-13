@@ -51,7 +51,7 @@ We follow YCSB and `db_bench` workloads where possible, but SlateDB does not map
 
 The workloads run on [AWS Graviton](https://aws.amazon.com/ec2/graviton/) machines managed by [WarpBuild](https://warpbuild.com) in `us-east-1`. They talk to an [Amazon S3](https://aws.amazon.com/s3/) bucket in the same region and to [Tigris](https://www.tigrisdata.com/) through its `us-east-1` on-ramp. We use a relatively large machine instance ([m8g.2xlarge](https://aws.amazon.com/ec2/instance-types/m8g/)) because compaction is CPU-intensive.
 
-We configured SlateDB’s cache to hold roughly a 10% of the database. The rest lives in object storage. A `db_bench` run of RocksDB keeps the entire database on local disk. This is clearly an apples to oranges comparison. These settings are closer to the way many users configure SlateDB, though.
+We configured SlateDB’s cache to hold roughly 10% of the database. The rest lives in object storage. A `db_bench` run of RocksDB keeps the entire database on local disk. This is clearly an apples to oranges comparison. These settings are closer to the way many users configure SlateDB, though.
 
 Another tradeoff applies to mixed read/write workloads. A read that misses the cache can take tens or hundreds of milliseconds while data comes back from object storage. If one task does both reads and writes, those misses hold back its write throughput. We could separate readers and writers or add more parallelism to report a stronger aggregate throughput number. We kept the configuration closer to RocksDB's workload instead.
 
