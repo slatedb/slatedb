@@ -13,25 +13,25 @@ SlateDB has been around for a few years now. We've begun to pay more attention t
 
 Benchmarks are tricky. It's easy to do something that is perceived as marketing, hyperbole, or outright dishonesty. It's questionable whether public benchmarks are even useful anymore. A frontier LLM is capable of building excellent bespoke benchmarks for each user.
 
-Yet we found ourselves rebuilding SlateDB's benchmark suite a few weeks back. We--the SlateDB developers--still need them to measure performance. We also believe the data helps users understand ballpark performances
+Yet we found ourselves rebuilding SlateDB's benchmark suite a few weeks back. We--the SlateDB developers--still need them to measure performance. We also believe the data will help users gauge whether SlateDB meets their performance needs.
 
-In this post, we'll share the benchmarking philosophy we landed on, how we benchmarked SlateDB, and some things we learned along the way.
+This post covers the benchmarking philosophy we landed on, how we benchmarked SlateDB, and some things we learned along the way.
 
 (You can head over to [benchmark.slatedb.io](https://benchmark.slatedb.io) if you just want the results.)
 
 ## Legacy benchmarks
 
-We have had benchmarks for quite a while: [Criterion microbenchmarks](https://github.com/bheisler/criterion.rs) and a [`benchmark-db.sh`](https://github.com/slatedb/slatedb/blob/f88be86d17ac53260d3684edbc8f82811d945b5c/slatedb-bencher/benchmark-db.sh) script early on in the project. We also built a nightly job that runs `benchmark-db.sh` against a [Tigris](https://www.tigrisdata.com/) object store bucket. (A special thanks to them for donating the bucket to us free of charge.)
+We have had benchmarks for quite a while: both [Criterion microbenchmarks](https://github.com/bheisler/criterion.rs) and a [`benchmark-db.sh`](https://github.com/slatedb/slatedb/blob/f88be86d17ac53260d3684edbc8f82811d945b5c/slatedb-bencher/benchmark-db.sh) script. We also run a nightly `benchmark-db.sh` job against a [Tigris](https://www.tigrisdata.com/) object store bucket. (A special thanks to them for donating the bucket to us free of charge.)
 
-These benchmarks were largely ignored. The output was buried in a [GitHub Actions](https://docs.github.com/actions) summary. It didn't alert when significant regressions occurred, either. If you managed to find it, the output was hard to read. We used [Mermaid charts](https://mermaid.js.org/) with enough data points that the labels only worked when rotated vertically.
+These benchmarks were largely ignored. The output was buried in a [GitHub Actions](https://docs.github.com/actions) summary. It didn't alert when significant regressions occurred, either. If you managed to find it, the output was hard to read.
 
 Our goal was to make SlateDB's benchmarks easier to find and understand. We also wanted better diagnostic information so developers could visualize SlateDB's behavior under different workloads.
 
 ## Benchmark suite
 
-Several benchmark resources drove our design. [ClickBench](https://github.com/ClickHouse/ClickBench), [DuckDB’s benchmark suite](https://duckdb.org/docs/current/dev/benchmark), [DuckDB’s narrative benchmark write-up](https://duckdb.org/2025/10/09/benchmark-results-14-lts), [Lucene’s nightly benchmarks](https://lucene.apache.org/core/developer.html), and [Apache Iggy’s public benchmark dashboard](https://iggy.apache.org/blogs/2025/02/17/transparent-benchmarks/) all provided inspiration. We also drew from [Tectonic: Bridging Synthetic and Real-World Workloads for Key-Value Benchmarking](https://scholarworks.brandeis.edu/esploro/outputs/conferencePresentation/Tectonic-Bridging-Synthetic-and-Real-World-Workloads/9924594037601921).
+We drew inspiration from [ClickBench](https://github.com/ClickHouse/ClickBench), [DuckDB’s benchmark suite](https://duckdb.org/docs/current/dev/benchmark), Lucene’s [nightly benchmarks](https://lucene.apache.org/core/developer.html), and Apache Iggy’s [public benchmark dashboard](https://iggy.apache.org/blogs/2025/02/17/transparent-benchmarks/). [Tectonic: Bridging Synthetic and Real-World Workloads for Key-Value Benchmarking](https://scholarworks.brandeis.edu/esploro/outputs/conferencePresentation/Tectonic-Bridging-Synthetic-and-Real-World-Workloads/9924594037601921) provides a good overview of the space, for those looking to get up to speed.
 
-[Table 1 in the Tectonic paper](https://scholarworks.brandeis.edu/esploro/outputs/conferencePresentation/Tectonic-Bridging-Synthetic-and-Real-World-Workloads/9924594037601921) is particularly relevant. It compares [YCSB](https://github.com/brianfrankcooper/YCSB), [KVBench](https://dl.acm.org/doi/abs/10.1145/3662165.3662765), RocksDB’s [`db_bench`](https://github.com/facebook/rocksdb/wiki/RocksDB-Overview), and Tectonic's own framework.
+Table 1 in the Tectonic paper is particularly relevant. It compares [YCSB](https://github.com/brianfrankcooper/YCSB), [KVBench](https://dl.acm.org/doi/abs/10.1145/3662165.3662765), RocksDB’s [`db_bench`](https://github.com/facebook/rocksdb/wiki/RocksDB-Overview), and Tectonic's own workloads.
 
 <BenchmarkComparisonTable />
 
@@ -39,7 +39,7 @@ Many of the YCSB and `db_bench` workloads cover the behavior users are likely to
 
 We also added cost metrics. Throughput and latency matter, but SlateDB exists in part because object storage changes the economics of persistence. Databases should be cheap to run. If it is not, we need to know.
 
-The work produced three things:
+The suite is made up of three components:
 
 - A standalone benchmark repository with the suite and its configuration.
 - [GitHub Actions](https://github.com/slatedb/slatedb-benchmark/actions) workflows that run it.
@@ -47,13 +47,13 @@ The work produced three things:
 
 ## Methodology
 
-The suite follows YCSB and `db_bench` workloads where possible, but SlateDB does not map perfectly to either. SlateDB is designed around object storage. A cache miss is far more costly, both in money and latency. Misses for us incur a metered object store API call and a remote network hop. Rather than adjust our configurations to accommodate this, we opted to keep configuration close to SlateDB's defaults. This is suboptimal, but reflects an out-of-the-box experience users will see.
+We follow YCSB and `db_bench` workloads where possible, but SlateDB does not map perfectly to either. SlateDB is designed around object storage. A cache miss is far more costly, both in terms of money and latency. Misses incur a metered object store API call and a remote network hop. Rather than adjust our configurations to accommodate this, we opted to keep configuration close to SlateDB's defaults.
 
-The workloads run on [AWS Graviton](https://aws.amazon.com/ec2/graviton/) machines managed by [WarpBuild](https://warpbuild.com) in `us-east-1`. They talk to an [Amazon S3](https://aws.amazon.com/s3/) bucket in the same region and to [Tigris](https://www.tigrisdata.com/) through its `us-east-1` on-ramp. We use a relatively large machine ([m8g.2xlarge](https://aws.amazon.com/ec2/instance-types/m8g/)) because compaction needs CPU.
+The workloads run on [AWS Graviton](https://aws.amazon.com/ec2/graviton/) machines managed by [WarpBuild](https://warpbuild.com) in `us-east-1`. They talk to an [Amazon S3](https://aws.amazon.com/s3/) bucket in the same region and to [Tigris](https://www.tigrisdata.com/) through its `us-east-1` on-ramp. We use a relatively large machine instance ([m8g.2xlarge](https://aws.amazon.com/ec2/instance-types/m8g/)) because compaction is CPU-intensive.
 
-For many benchmarks, we configured SlateDB’s cache to hold roughly a 10% of the database. The rest lives in object storage. A `db_bench` run of RocksDB keeps the entire database on local disk. This is clearly an apples to oranges comparison. These settings are closer to the way many users configure SlateDB, though.
+We configured SlateDB’s cache to hold roughly a 10% of the database. The rest lives in object storage. A `db_bench` run of RocksDB keeps the entire database on local disk. This is clearly an apples to oranges comparison. These settings are closer to the way many users configure SlateDB, though.
 
-The same tradeoff applies to mixed workloads. A read that misses the cache can take tens or hundreds of milliseconds while data comes back from object storage. If one task does both reads and writes, those misses hold back its write throughput. We could separate readers and writers, add far more tasks, and report a stronger aggregate throughput number. We kept the configuration closer to RocksDB's workload instead.
+Another tradeoff applies to mixed read/write workloads. A read that misses the cache can take tens or hundreds of milliseconds while data comes back from object storage. If one task does both reads and writes, those misses hold back its write throughput. We could separate readers and writers or add more parallelism to report a stronger aggregate throughput number. We kept the configuration closer to RocksDB's workload instead.
 
 ## Findings
 
