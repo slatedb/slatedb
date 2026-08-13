@@ -1,0 +1,237 @@
+---
+type Support = boolean | 'manual';
+
+const benchmarks = ['YCSB', 'KVBench', 'db_bench', 'Tectonic'];
+const groups: Array<{
+	label: string;
+	rows: Array<{ capability: string; support: Support[] }>;
+}> = [
+	{
+		label: 'Operations',
+		rows: [
+			{ capability: 'Insert', support: [true, true, true, true] },
+			{ capability: 'Update', support: [true, true, true, true] },
+			{ capability: 'Read-modify-write', support: [true, false, true, true] },
+			{ capability: 'Point query', support: [true, true, true, true] },
+			{ capability: 'Empty point query', support: [false, true, true, true] },
+			{ capability: 'Range query', support: [true, true, true, true] },
+			{ capability: 'Point delete', support: [false, true, true, true] },
+			{ capability: 'Empty point delete', support: [false, true, false, true] },
+			{ capability: 'Range delete', support: [false, true, true, true] },
+		],
+	},
+	{
+		label: 'Distributions',
+		rows: [
+			{ capability: 'Uniform', support: [true, true, true, true] },
+			{ capability: 'Normal', support: [false, true, true, true] },
+			{ capability: 'Beta', support: [false, true, false, true] },
+			{ capability: 'Zipfian', support: [true, true, false, true] },
+			{ capability: 'Exponential', support: [false, false, true, true] },
+			{ capability: 'Log normal', support: [false, false, false, true] },
+			{ capability: 'Poisson', support: [false, false, false, true] },
+			{ capability: 'Weibull', support: [false, false, false, true] },
+			{ capability: 'Pareto', support: [false, false, true, true] },
+		],
+	},
+	{
+		label: 'Properties',
+		rows: [
+			{ capability: 'Dynamic workload shifts', support: [false, 'manual', 'manual', true] },
+			{ capability: 'Context-aware shifting', support: [false, false, false, true] },
+			{ capability: 'Data sortedness', support: [false, false, false, true] },
+			{ capability: 'Variable query selectivity', support: [true, false, true, true] },
+			{ capability: 'Variable key-value length', support: [false, false, false, true] },
+			{ capability: 'Temporality-based access', support: [false, false, true, true] },
+			{ capability: 'Customizable key prefix', support: [false, false, 'manual', true] },
+			{ capability: 'Composite keys', support: [false, false, false, true] },
+		],
+	},
+];
+---
+
+<figure class="benchmark-comparison">
+	<div class="table-scroll">
+		<table class="benchmark-table">
+			<caption>Feature coverage across YCSB, KVBench, db_bench, and Tectonic</caption>
+			<colgroup>
+				<col class="group-column" />
+				<col class="capability-column" />
+				<col span="4" class="support-column" />
+			</colgroup>
+			<thead>
+				<tr>
+					<th><span class="visually-hidden">Category</span></th>
+					<th scope="col">Capability</th>
+					{benchmarks.map((benchmark) => (
+						<th scope="col"><code class:list={{ benchmark: benchmark === 'db_bench' }}>{benchmark}</code></th>
+					))}
+				</tr>
+			</thead>
+			{groups.map((group) => (
+				<tbody>
+					{group.rows.map((row, rowIndex) => (
+						<tr>
+							{rowIndex === 0 && (
+								<th class="group-label" scope="rowgroup" rowspan={group.rows.length}>
+									<span>{group.label}</span>
+								</th>
+							)}
+							<th class="capability" scope="row">{row.capability}</th>
+							{row.support.map((value) => (
+								<td class:list={{ manual: value === 'manual' }}>
+									{value === true ? (
+										<><span aria-hidden="true">✓</span><span class="visually-hidden">Supported</span></>
+									) : value === 'manual' ? (
+										<><span aria-hidden="true">*</span><span class="visually-hidden">Requires significant manual intervention</span></>
+									) : (
+										<span class="visually-hidden">Not supported</span>
+									)}
+								</td>
+							))}
+						</tr>
+					))}
+				</tbody>
+			))}
+		</table>
+	</div>
+	<figcaption>* Requires significant manual intervention.</figcaption>
+</figure>
+
+<style>
+	.benchmark-comparison {
+		width: 100%;
+		min-width: 0;
+		max-width: 46rem;
+		margin: 1.4rem auto 1.8rem;
+		overflow: hidden;
+		contain: paint;
+		font-family: 'Inter', system-ui, sans-serif;
+	}
+
+	.table-scroll {
+		max-width: 100%;
+		overflow-x: auto;
+		border-block: 1px solid var(--ink-2);
+	}
+
+	.benchmark-comparison .benchmark-table {
+		width: 100%;
+		min-width: 37rem;
+		margin: 0;
+		border: 0;
+		border-collapse: collapse;
+		table-layout: fixed;
+		font-size: 0.76rem;
+		line-height: 1.15;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.benchmark-table caption,
+	.visually-hidden {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
+	}
+
+	.group-column { width: 1.75rem; }
+	.capability-column { width: 42%; }
+	.support-column { width: auto; }
+
+	.benchmark-table th,
+	.benchmark-table td {
+		border: 0;
+		background: transparent;
+		padding: 0.18rem 0.32rem;
+	}
+
+	.benchmark-table thead th {
+		border-bottom: 1px solid var(--ink-3);
+		padding-block: 0.38rem;
+		text-align: center;
+		font-size: 0.64rem;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		text-transform: uppercase;
+		white-space: nowrap;
+	}
+
+	.benchmark-table thead th:nth-child(2) { text-align: left; }
+
+	.benchmark-table thead code {
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		font: inherit;
+	}
+
+	.benchmark-table thead code.benchmark {
+		text-transform: none;
+		letter-spacing: 0;
+	}
+
+	.benchmark-table tbody + tbody tr:first-child > * {
+		border-top: 1px solid var(--ink-5);
+		padding-top: 0.36rem;
+	}
+
+	.benchmark-table tbody + tbody tr:last-child > * { padding-bottom: 0.34rem; }
+
+	.group-label {
+		border-right: 1px solid var(--ink-5) !important;
+		padding: 0.35rem 0.18rem !important;
+		text-align: center;
+		vertical-align: middle;
+		font-size: 0.64rem;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.group-label span {
+		display: inline-block;
+		writing-mode: vertical-rl;
+		transform: rotate(180deg);
+	}
+
+	.benchmark-table .capability {
+		text-align: right;
+		font-weight: 450;
+		white-space: nowrap;
+	}
+
+	.benchmark-table td {
+		text-align: center;
+		vertical-align: middle;
+		font-family: 'JetBrains Mono', ui-monospace, monospace;
+		font-size: 0.8rem;
+		font-weight: 600;
+	}
+
+	.benchmark-table td.manual { font-weight: 500; }
+
+	figcaption {
+		margin-top: 0.4rem;
+		text-align: right;
+		font-size: 0.68rem;
+		line-height: 1.35;
+		color: var(--ink-4);
+	}
+
+	@media (max-width: 40rem) {
+		.benchmark-comparison { max-width: 100%; }
+		.benchmark-table {
+			min-width: 34rem;
+			font-size: 0.7rem;
+		}
+		.benchmark-table th,
+		.benchmark-table td { padding-inline: 0.24rem; }
+	}
+</style>
