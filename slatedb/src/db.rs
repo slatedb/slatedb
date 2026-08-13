@@ -47,6 +47,7 @@ use crate::batch_write::{BatchWriterMessage, WriteBatchRequest, WRITE_BATCH_TASK
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
+use crate::compaction_worker;
 use crate::config::{
     CloseOptions, FlushOptions, FlushType, MergeOptions, PutOptions, ReadOptions, ScanOptions,
     Settings, WriteOptions,
@@ -69,6 +70,7 @@ use crate::snapshot_manager::SnapshotManager;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
 use crate::types::KeyValue;
+use crate::utils;
 use crate::utils::{format_bytes_si, SafeSender, WatchableOnceCellReader};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbWriteOps};
@@ -76,6 +78,7 @@ use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
+use tokio::sync::{oneshot, watch};
 
 use crate::db_status::{ClosedResultWriter, DbStatusManager, DurabilityWaiter};
 use crate::wal::{WalEvent, WalIterator, WalObserver, WalStatus};
@@ -288,7 +291,7 @@ impl DbInner {
             return Err(SlateDBError::EmptyBatch);
         }
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         let batch_msg = BatchWriterMessage::WriteBatch(WriteBatchRequest {
             batch,
             options: options.clone(),
@@ -552,7 +555,7 @@ impl DbInner {
     ) -> Result<(), SlateDBError> {
         let state = self.state.read().state();
         let cache_opts = &self.settings.object_store_cache_options;
-        crate::utils::preload_cache_from_manifest(
+        utils::preload_cache_from_manifest(
             &state.manifest.value.core,
             cached_obj_store,
             path_resolver,
@@ -721,7 +724,7 @@ impl Db {
 
         if let Err(e) = self
             .task_executor
-            .shutdown_task(crate::compaction_worker::COMPACTION_WORKER_TASK_NAME)
+            .shutdown_task(compaction_worker::COMPACTION_WORKER_TASK_NAME)
             .await
         {
             warn!("failed to shutdown compaction worker task [error={:?}]", e);
@@ -1954,7 +1957,7 @@ impl DbMetadataOps for Db {
         self.inner.manifest()
     }
 
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+    fn subscribe(&self) -> watch::Receiver<DbStatus> {
         self.inner.status_manager.subscribe()
     }
 
@@ -2031,7 +2034,7 @@ impl Db {
     }
 
     /// See [`DbMetadataOps::subscribe`].
-    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+    pub fn subscribe(&self) -> watch::Receiver<DbStatus> {
         <Self as DbMetadataOps>::subscribe(self)
     }
 
@@ -2142,7 +2145,7 @@ impl WriteHandle {
 /// via a [`tokio::sync::watch`] channel.
 #[derive(Clone)]
 pub(crate) struct DbWalObserver {
-    status_rx: tokio::sync::watch::Receiver<Result<WalStatus, WalStatus>>,
+    status_rx: watch::Receiver<Result<WalStatus, WalStatus>>,
     closed_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
     wrapped: Arc<dyn WalObserver>,
 }
@@ -2154,7 +2157,7 @@ impl DbWalObserver {
         db_state: Arc<RwLock<DbState>>,
         closed_writer: Arc<dyn ClosedResultWriter>,
     ) -> Self {
-        let (status_tx, status_rx) = tokio::sync::watch::channel(wrapped.status());
+        let (status_tx, status_rx) = watch::channel(wrapped.status());
         let closed_reader = closed_writer.result_reader();
         wrapped
             .subscribe(Arc::new(move |event| {

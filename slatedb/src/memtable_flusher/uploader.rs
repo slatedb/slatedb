@@ -22,6 +22,7 @@ use crate::mem_table::ImmutableMemtable;
 use crate::utils::SafeSender;
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::future;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use log::{info, warn};
@@ -208,7 +209,7 @@ impl UploadHandler {
         // on the first fatal error and drops the remaining futures; sibling
         // uploads that already landed before the abort are left for the
         // garbage collector to reclaim.
-        let segments = futures::future::try_join_all(built.iter().map(|sst| {
+        let segments = future::try_join_all(built.iter().map(|sst| {
             // Ids are pre-allocated at dispatch keyed by segment prefix. Every
             // built prefix is a subset of the dispatched touched set, so a
             // missing id is an internal invariant violation.

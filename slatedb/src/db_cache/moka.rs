@@ -31,6 +31,7 @@
 //!
 use crate::db_cache::{CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
 use async_trait::async_trait;
+use moka::future::Cache;
 use std::time::Duration;
 
 /// The options for the Moka cache.
@@ -67,7 +68,7 @@ impl Default for MokaCacheOptions {
 /// including settings for capacity, time-to-live (TTL), and time-to-idle (TTI).
 /// It uses a custom weigher to account for the size of cached blocks.
 pub struct MokaCache {
-    inner: moka::future::Cache<CachedKey, CachedEntry>,
+    inner: Cache<CachedKey, CachedEntry>,
 }
 
 impl MokaCache {
@@ -76,7 +77,7 @@ impl MokaCache {
     }
 
     pub fn new_with_opts(options: MokaCacheOptions) -> Self {
-        let mut builder = moka::future::Cache::builder()
+        let mut builder = Cache::builder()
             .weigher(|_, v: &CachedEntry| v.size() as u32)
             .max_capacity(options.max_capacity);
 

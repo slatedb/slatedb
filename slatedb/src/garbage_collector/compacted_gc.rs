@@ -9,6 +9,7 @@ use crate::{
     tablestore::TableStore,
 };
 use chrono::{DateTime, Utc};
+use futures::stream;
 use futures::StreamExt;
 use log::error;
 use std::collections::HashSet;
@@ -126,7 +127,7 @@ impl CompactedGcTask {
             return;
         }
 
-        futures::stream::iter(sst_ids)
+        stream::iter(sst_ids)
             .for_each_concurrent(GC_DELETE_CONCURRENCY, |id| async move {
                 log::info!("deleting SST [id={:?}]", id);
                 if let Err(e) = self.table_store.delete_sst(&id).await {

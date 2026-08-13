@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures::future;
 
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator, TrackedRowEntryIterator};
@@ -222,7 +223,7 @@ impl RowEntryIterator for MergeIterator<'_> {
             seek_futures.push_back(iterator.0.seek(next_key));
         }
 
-        for seek_result in futures::future::join_all(seek_futures).await {
+        for seek_result in future::join_all(seek_futures).await {
             if let Some(seeked_iterator) = seek_result? {
                 self.iterators.push(Reverse(seeked_iterator));
             }

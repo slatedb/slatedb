@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::BufMut;
+use futures::future;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use log::{error, info};
@@ -10,6 +11,7 @@ use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
 use rand::RngCore;
 use tokio::runtime::Handle;
+use tokio::task;
 use tokio::task::JoinHandle;
 use ulid::Ulid;
 
@@ -198,7 +200,7 @@ impl CompactionExecuteBench {
                     .await
             }))
         }
-        let results = futures::future::join_all(del_tasks).await;
+        let results = future::join_all(del_tasks).await;
         for result in results {
             match result {
                 Ok(Ok(())) => {}
@@ -399,7 +401,7 @@ impl CompactionExecuteBench {
         let start = self.system_clock.now();
         info!("start compaction job");
         #[allow(clippy::disallowed_methods)]
-        tokio::task::spawn_blocking(move || executor.start_compaction_job(job));
+        task::spawn_blocking(move || executor.start_compaction_job(job));
         while let Ok(msg) = rx.recv().await {
             if let WorkerMessage::CompactionJobFinished { id: _, result } = msg {
                 match result {

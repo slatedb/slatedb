@@ -28,6 +28,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::time;
 
 /// SlateDB uses MonotonicClock internally so that it can enforce that clock ticks
 /// from the underlying implementation are monotonically increasing.
@@ -63,7 +64,7 @@ impl MonotonicClock {
                     Sleeping {}ms to potentially resolve skew before returning InvalidClockTick.",
                     tick, last_tick, sync_millis
                 );
-                tokio::time::sleep(Duration::from_millis(sync_millis)).await;
+                time::sleep(Duration::from_millis(sync_millis)).await;
                 self.enforce_monotonic(self.delegate.now().timestamp_millis())
             }
             result => result,

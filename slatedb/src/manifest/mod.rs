@@ -8,10 +8,12 @@ use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::clone::{CloneSource, SegmentFilterFn, SegmentProjectionFn};
 use crate::error::SlateDBError;
+use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
 use log::{debug, warn};
+use object_store::path::Path;
 use serde::Serialize;
 use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
@@ -596,7 +598,7 @@ impl ManifestCore {
     /// - both `Some` but `name()` differs → reject.
     pub(crate) fn validate_extractor_configuration(
         &self,
-        configured: Option<&dyn crate::prefix_extractor::PrefixExtractor>,
+        configured: Option<&dyn PrefixExtractor>,
     ) -> Result<(), SlateDBError> {
         let persisted = self.segment_extractor_name.as_deref();
         let configured_name = configured.map(|e| e.name());
@@ -619,12 +621,10 @@ impl ManifestCore {
     /// no longer assign `p`-keys to the segment they currently live in.
     fn validate_segment_prefixes_recognized(
         &self,
-        extractor: &dyn crate::prefix_extractor::PrefixExtractor,
+        extractor: &dyn PrefixExtractor,
     ) -> Result<(), SlateDBError> {
         for segment in &self.segments {
-            let n = extractor.prefix_len(&crate::prefix_extractor::PrefixTarget::Prefix(
-                segment.prefix.clone(),
-            ));
+            let n = extractor.prefix_len(&PrefixTarget::Prefix(segment.prefix.clone()));
             if n != Some(segment.prefix.len()) {
                 return Err(SlateDBError::SegmentPrefixNotRecognized {
                     prefix: segment.prefix.clone(),
@@ -935,7 +935,7 @@ impl VersionedManifest {
         &self.manifest.core
     }
 
-    pub(crate) fn external_ssts(&self) -> HashMap<SsTableId, object_store::path::Path> {
+    pub(crate) fn external_ssts(&self) -> HashMap<SsTableId, Path> {
         self.manifest.external_ssts()
     }
 
@@ -1517,7 +1517,7 @@ pub struct ExternalDb {
 
 impl Manifest {
     /// Returns a map from SST ID to the external DB path for all external SSTs.
-    pub(crate) fn external_ssts(&self) -> HashMap<SsTableId, object_store::path::Path> {
+    pub(crate) fn external_ssts(&self) -> HashMap<SsTableId, Path> {
         let mut external_ssts = HashMap::new();
         for external_db in &self.external_dbs {
             for id in &external_db.sst_ids {

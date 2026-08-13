@@ -3,6 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use log::LevelFilter as LogLevelFilter;
+use tracing::dispatcher;
+use tracing::field::{Field, Visit};
+use tracing::subscriber;
 use tracing::{Event, Subscriber};
 use tracing_log::LogTracer;
 use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
@@ -132,7 +135,7 @@ pub fn init_logging(level: LogLevel, callback: Option<Arc<dyn LogCallback>>) -> 
         return Err(logging_already_initialized_error());
     }
 
-    if tracing::dispatcher::has_been_set() {
+    if dispatcher::has_been_set() {
         return Err(invalid_logging_error(
             "global tracing subscriber already initialized by another library",
         ));
@@ -160,7 +163,7 @@ fn install_subscriber(
     if let Some(callback) = callback {
         let subscriber =
             tracing_subscriber::registry().with(LogCallbackLayer { callback }.with_filter(filter));
-        tracing::subscriber::set_global_default(subscriber).map_err(|_| {
+        subscriber::set_global_default(subscriber).map_err(|_| {
             invalid_logging_error(
                 "global tracing subscriber already initialized by another library",
             )
@@ -170,7 +173,7 @@ fn install_subscriber(
             .with_writer(std::io::stderr)
             .with_max_level(filter)
             .finish();
-        tracing::subscriber::set_global_default(subscriber).map_err(|_| {
+        subscriber::set_global_default(subscriber).map_err(|_| {
             invalid_logging_error(
                 "global tracing subscriber already initialized by another library",
             )
@@ -198,13 +201,13 @@ struct EventFieldVisitor {
 }
 
 impl EventFieldVisitor {
-    fn field_name(field: &tracing::field::Field) -> &str {
+    fn field_name(field: &Field) -> &str {
         field.name()
     }
 }
 
-impl tracing::field::Visit for EventFieldVisitor {
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+impl Visit for EventFieldVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
         match Self::field_name(field) {
             "message" => {
                 self.message.clear();
@@ -217,19 +220,19 @@ impl tracing::field::Visit for EventFieldVisitor {
         }
     }
 
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         if Self::field_name(field) == "message" {
             self.message = format!("{value:?}");
         }
     }
 
-    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+    fn record_u64(&mut self, field: &Field, value: u64) {
         if Self::field_name(field) == "log.line" {
             self.line = u32::try_from(value).ok();
         }
     }
 
-    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+    fn record_i64(&mut self, field: &Field, value: i64) {
         if Self::field_name(field) == "log.line" {
             self.line = u32::try_from(value).ok();
         }

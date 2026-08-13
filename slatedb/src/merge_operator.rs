@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use slatedb_common::metrics::CounterFn;
 use thiserror::Error;
+use tokio::task::coop;
 
 use crate::{
     error::SlateDBError,
@@ -404,7 +405,7 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
 
                 next = self.delegate.next().await?;
                 // Keep cached operand scans cooperative.
-                tokio::task::coop::consume_budget().await;
+                coop::consume_budget().await;
             } else {
                 break None;
             }

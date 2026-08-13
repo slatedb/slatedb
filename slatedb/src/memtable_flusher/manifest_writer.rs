@@ -20,7 +20,9 @@ use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::db_state::{collect_touched_segments, DbState, SsTableId, SsTableView};
+use crate::db_status::{ClosedResultWriter, DbStatus};
 use crate::dispatcher::MessageHandler;
+use crate::dispatcher::{MessageHandlerExecutor, MessageTickerDef, Notifier};
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::manifest::Manifest;
@@ -107,8 +109,8 @@ impl ManifestWriter {
         db: Arc<DbInner>,
         manifest: FenceableManifest,
         manifest_poll_interval: Duration,
-        closed_result: &dyn crate::db_status::ClosedResultWriter,
-        executor: &crate::dispatcher::MessageHandlerExecutor,
+        closed_result: &dyn ClosedResultWriter,
+        executor: &MessageHandlerExecutor,
         tokio_handle: &Handle,
         tracker_tx: SafeSender<TrackerMessage>,
     ) -> Result<Self, SlateDBError> {
@@ -192,7 +194,7 @@ impl ManifestWriter {
         )
     }
 
-    pub(crate) async fn shutdown(executor: &crate::dispatcher::MessageHandlerExecutor) {
+    pub(crate) async fn shutdown(executor: &MessageHandlerExecutor) {
         if let Err(e) = executor.shutdown_task(MANIFEST_WRITER_TASK_NAME).await {
             log::warn!("failed to shutdown l0 manifest writer [error={:?}]", e);
         }
@@ -210,7 +212,7 @@ struct ManifestWriterHandler {
     durable_seq: u64,
     /// Watches the database status so the manifest write can wait for
     /// WAL durability without blocking uploads.
-    db_status_rx: watch::Receiver<crate::db_status::DbStatus>,
+    db_status_rx: watch::Receiver<DbStatus>,
     pending_flushes: Vec<PendingFlush>,
     pending_checkpoints: Vec<PendingCheckpoint>,
     pending_manifest_refreshes: Vec<oneshot::Sender<Result<(), SlateDBError>>>,
@@ -218,14 +220,14 @@ struct ManifestWriterHandler {
 
 #[async_trait]
 impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
-    fn tickers(&mut self) -> Vec<crate::dispatcher::MessageTickerDef<ManifestWriterCommand>> {
-        vec![crate::dispatcher::MessageTickerDef::new(
+    fn tickers(&mut self) -> Vec<MessageTickerDef<ManifestWriterCommand>> {
+        vec![MessageTickerDef::new(
             self.manifest_poll_interval,
             Box::new(|| ManifestWriterCommand::PollManifest { done: None }),
         )]
     }
 
-    fn notifiers(&mut self) -> Vec<Box<dyn crate::dispatcher::Notifier<ManifestWriterCommand>>> {
+    fn notifiers(&mut self) -> Vec<Box<dyn Notifier<ManifestWriterCommand>>> {
         vec![Box::new(DurableSeqNotifier {
             rx: self.db_status_rx.clone(),
         })]
@@ -869,11 +871,11 @@ struct PendingCheckpoint {
 /// that produces [ManifestWriterCommand::DurableSeqAdvanced] whenever the
 /// database status changes (which includes WAL durable sequence advances).
 struct DurableSeqNotifier {
-    rx: watch::Receiver<crate::db_status::DbStatus>,
+    rx: watch::Receiver<DbStatus>,
 }
 
 #[async_trait]
-impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
+impl Notifier<ManifestWriterCommand> for DurableSeqNotifier {
     async fn notify(&mut self) -> ManifestWriterCommand {
         // changed() returns Err only when the sender is dropped. In that case
         // the database is shutting down and the dispatcher's cancellation token

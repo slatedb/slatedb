@@ -10,8 +10,10 @@ use ulid::Ulid;
 
 use crate::db_state::{SortedRun, SsTableHandle, SsTableView};
 use crate::error::SlateDBError;
+use crate::manifest;
 use crate::manifest::{Manifest, ManifestCore};
 use crate::subcompaction::Subcompaction;
+use crate::utils;
 use slatedb_txn_obj::DirtyObject;
 
 /// Identifier for a compaction input source.
@@ -634,7 +636,7 @@ impl Display for Compaction {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.spec)?;
         if self.bytes_processed > 0 {
-            let human_bytes_processed = crate::utils::format_bytes_si(self.bytes_processed);
+            let human_bytes_processed = utils::format_bytes_si(self.bytes_processed);
             write!(f, " ({} processed)", human_bytes_processed)?;
         }
         // TODO: fix me by implementing Display for CompactionJob
@@ -979,7 +981,7 @@ impl CompactorState {
         let remote = &remote_manifest.value.core;
         let tree = my_db_state.tree.merge_from_writer(&remote.tree);
         let segments =
-            crate::manifest::merge_segments_from_writer(&my_db_state.segments, &remote.segments);
+            manifest::merge_segments_from_writer(&my_db_state.segments, &remote.segments);
         // Segment configuration is stable; the writer is the source of truth.
         let merged = ManifestCore {
             initialized: remote_manifest.value.core.initialized,
@@ -1804,7 +1806,7 @@ mod tests {
         let mut state = CompactorState::new(manifest, compactions);
         let stale_id = SsTableId::Compacted(Ulid::new());
         let mut remote = new_dirty_manifest();
-        remote.value.external_dbs = vec![crate::manifest::ExternalDb {
+        remote.value.external_dbs = vec![manifest::ExternalDb {
             path: "/parent/db".to_string(),
             source_checkpoint_id: uuid::Uuid::new_v4(),
             final_checkpoint_id: Some(uuid::Uuid::new_v4()),
@@ -2065,8 +2067,7 @@ mod tests {
                 compacted: vec![],
             }),
         }];
-        let v1_segments =
-            crate::manifest::merge_segments_from_writer(&compactor_post_drain, &writer_v0);
+        let v1_segments = manifest::merge_segments_from_writer(&compactor_post_drain, &writer_v0);
         assert_eq!(v1_segments.len(), 1);
 
         // V2: writer reads V1 (compactor's manifest). Writer's local view
@@ -2081,7 +2082,7 @@ mod tests {
         // V3: compactor reads writer's V2 (no segments). Compactor's local
         // still holds the marker from V1. The compactor-side merge follows
         // the writer's prune and drops the segment.
-        let v3_segments = crate::manifest::merge_segments_from_writer(&v1_segments, &v2_segments);
+        let v3_segments = manifest::merge_segments_from_writer(&v1_segments, &v2_segments);
         assert!(
             v3_segments.is_empty(),
             "compactor should follow the writer's prune"

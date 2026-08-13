@@ -7,6 +7,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures::future::{join, join_all};
 use parking_lot::Mutex;
+use tokio::runtime::Handle;
+use tokio::sync::mpsc;
+use tokio::task::coop;
 use tokio::task::JoinHandle;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -34,6 +37,7 @@ use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::subcompaction::{plan_subcompaction_ranges, Subcompaction};
 use crate::tablestore::TableStore;
+use crate::types::RowEntry;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
 
@@ -183,7 +187,7 @@ impl<T: RowEntryIterator> RowEntryIterator for ResumingIterator<T> {
         self.iterator.init().await
     }
 
-    async fn next(&mut self) -> Result<Option<crate::types::RowEntry>, SlateDBError> {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         self.iterator.next().await
     }
 
@@ -215,7 +219,7 @@ pub(crate) trait CompactionExecutor {
 
 /// Options for creating a [`TokioCompactionExecutor`].
 pub(crate) struct TokioCompactionExecutorOptions {
-    pub handle: tokio::runtime::Handle,
+    pub handle: Handle,
     pub options: Arc<CompactionWorkerOptions>,
     pub worker_tx: async_channel::Sender<WorkerMessage>,
     pub table_store: Arc<TableStore>,
@@ -300,7 +304,7 @@ enum SubcompactionEvent {
 
 pub(crate) struct TokioCompactionExecutorInner {
     options: Arc<CompactionWorkerOptions>,
-    handle: tokio::runtime::Handle,
+    handle: Handle,
     worker_tx: async_channel::Sender<WorkerMessage>,
     table_store: Arc<TableStore>,
     tasks: Arc<Mutex<BTreeMap<Ulid, TokioCompactionTask>>>,
@@ -638,7 +642,7 @@ impl TokioCompactionExecutorInner {
             self.send_compaction_progress(id, 0, ctx.clone());
         }
 
-        let (sub_tx, mut sub_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (sub_tx, mut sub_rx) = mpsc::unbounded_channel();
         let mut sub_tasks = Vec::new();
         for args in subcompaction_args {
             // Each range runs as its own task, resuming from the output already
@@ -860,7 +864,7 @@ impl TokioCompactionExecutorInner {
             }
 
             // Keep cached compaction work cooperative.
-            tokio::task::coop::consume_budget().await;
+            coop::consume_budget().await;
         }
 
         // Drain the in-flight close, then flush the final partial SST. Order
@@ -1456,7 +1460,7 @@ mod tests {
         #[case] merge_operator: Option<MergeOperatorType>,
         #[case] expected_rows: Vec<RowEntry>,
     ) {
-        let handle = tokio::runtime::Handle::current();
+        let handle = Handle::current();
         let options = Arc::new(CompactionWorkerOptions::default());
         let (tx, _rx) = async_channel::unbounded::<WorkerMessage>();
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -1675,7 +1679,7 @@ mod tests {
                     Some(0)
                 };
 
-                let handle = tokio::runtime::Handle::current();
+                let handle = Handle::current();
                 let options = CompactionWorkerOptions {
                     max_sst_size: MAX_SST_SIZE,
                     ..Default::default()
@@ -1936,7 +1940,7 @@ mod tests {
             .unwrap();
         let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
         let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
-            handle: tokio::runtime::Handle::current(),
+            handle: Handle::current(),
             options: Arc::new(CompactionWorkerOptions {
                 max_sst_size: SUBCOMPACTION_SST_SIZE,
                 ..CompactionWorkerOptions::default()
@@ -2469,7 +2473,7 @@ mod tests {
     async fn should_stop_single_compaction_job_without_stopping_executor() {
         // given: an executor writing through a gated object store, with a tiny
         // max_sst_size so the first compaction parks while flushing output.
-        let handle = tokio::runtime::Handle::current();
+        let handle = Handle::current();
         let options = Arc::new(CompactionWorkerOptions {
             max_sst_size: 1,
             ..CompactionWorkerOptions::default()
@@ -2603,7 +2607,7 @@ mod tests {
         // given: an executor writing through a gated object store, with a tiny
         // max_sst_size so each finished block rolls into a new output SST
         // (guaranteeing several SST boundaries, and thus background closes).
-        let handle = tokio::runtime::Handle::current();
+        let handle = Handle::current();
         let options = Arc::new(CompactionWorkerOptions {
             max_sst_size: 1,
             ..CompactionWorkerOptions::default()
@@ -2807,7 +2811,7 @@ mod tests {
         }
 
         async fn build(self) -> TestContext {
-            let handle = tokio::runtime::Handle::current();
+            let handle = Handle::current();
             let options = Arc::new(CompactionWorkerOptions::default());
             let (tx, rx) = async_channel::unbounded();
             let os = Arc::new(InMemory::new());

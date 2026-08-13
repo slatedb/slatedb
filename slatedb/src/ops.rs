@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::batch::WriteBatch;
@@ -621,7 +622,7 @@ pub trait DbMetadataOps {
     /// let status = rx.borrow();
     /// some_async_fn(status.durable_seq).await; // deadlock!
     /// ```
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus>;
+    fn subscribe(&self) -> watch::Receiver<DbStatus>;
 
     /// Returns the latest database status.
     ///

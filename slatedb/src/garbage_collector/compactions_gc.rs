@@ -23,6 +23,7 @@ use crate::{
     error::SlateDBError,
 };
 use chrono::{DateTime, Utc};
+use futures::stream;
 use futures::StreamExt;
 use log::error;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -93,7 +94,7 @@ impl CompactionsGcTask {
         }
 
         let deleted_count = AtomicU64::new(0);
-        futures::stream::iter(compactions_ids)
+        stream::iter(compactions_ids)
             .for_each_concurrent(GC_DELETE_CONCURRENCY, |id| {
                 let deleted_count = &deleted_count;
                 async move {

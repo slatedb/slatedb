@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
+use tokio::task::coop;
 
 use crate::db_common::extract_segment_prefix;
 use crate::error::SlateDBError;
@@ -213,7 +214,7 @@ impl RowEntryIterator for MemTableIterator {
             if front.is_some_and(|record| record.key < next_key) {
                 self.next_sync();
                 // Keep in-memory seeking cooperative.
-                tokio::task::coop::consume_budget().await;
+                coop::consume_budget().await;
             } else {
                 return Ok(());
             }

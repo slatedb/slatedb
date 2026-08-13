@@ -3,11 +3,15 @@ pub use crate::db::builder::CloneSourceSpec;
 use std::collections::BTreeSet;
 
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
+#[cfg(feature = "compaction_filters")]
+use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compactions_store::CompactionsStore;
 use crate::compactor::{Compaction, CompactionSpec, Compactor, CompactorStateView};
 use crate::compactor_state::VersionedCompactions;
 use crate::compactor_state_protocols::CompactorStateReader;
-use crate::config::{CheckpointOptions, GarbageCollectorOptions};
+use crate::config::{
+    CheckpointOptions, CompactionWorkerOptions, CompactorOptions, GarbageCollectorOptions,
+};
 use crate::db::builder::GarbageCollectorBuilder;
 use crate::error::SlateDBError;
 use crate::manifest::store::{ManifestStore, StoredManifest};
@@ -21,6 +25,14 @@ use crate::utils::IdGenerator;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
+#[cfg(feature = "aws")]
+use object_store::aws::AmazonS3Builder;
+#[cfg(feature = "azure")]
+use object_store::azure::MicrosoftAzureBuilder;
+#[cfg(feature = "gcp")]
+use object_store::gcp::GoogleCloudStorageBuilder;
+use object_store::local::LocalFileSystem;
+use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
 use rand::RngCore;
@@ -56,8 +68,7 @@ pub struct Admin {
     /// The retry policy applied to admin object-store operations.
     pub(crate) object_store_max_retries: Option<u32>,
     #[cfg(feature = "compaction_filters")]
-    pub(crate) compaction_filter_supplier:
-        Option<Arc<dyn crate::compaction_filter::CompactionFilterSupplier>>,
+    pub(crate) compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
     pub(crate) merge_operator: Option<MergeOperatorType>,
     pub(crate) wal_admin: Arc<dyn WalAdmin>,
 }
@@ -348,11 +359,8 @@ impl Admin {
         &self,
         cancellation_token: CancellationToken,
     ) -> Result<(), crate::Error> {
-        self.run_compactor_with_options(
-            cancellation_token,
-            crate::config::CompactorOptions::default(),
-        )
-        .await
+        self.run_compactor_with_options(cancellation_token, CompactorOptions::default())
+            .await
     }
 
     /// Like [`Admin::run_compactor`] but accepts explicit [`crate::config::CompactorOptions`].
@@ -362,7 +370,7 @@ impl Admin {
     pub async fn run_compactor_with_options(
         &self,
         cancellation_token: CancellationToken,
-        options: crate::config::CompactorOptions,
+        options: CompactorOptions,
     ) -> Result<(), crate::Error> {
         #[allow(unused_mut)]
         let mut builder = crate::CompactorBuilder::new(
@@ -413,7 +421,7 @@ impl Admin {
     ) -> Result<(), crate::Error> {
         self.run_compaction_worker_with_options(
             cancellation_token,
-            crate::config::CompactionWorkerOptions::default(),
+            CompactionWorkerOptions::default(),
         )
         .await
     }
@@ -423,7 +431,7 @@ impl Admin {
     pub async fn run_compaction_worker_with_options(
         &self,
         cancellation_token: CancellationToken,
-        options: crate::config::CompactionWorkerOptions,
+        options: CompactionWorkerOptions,
     ) -> Result<(), crate::Error> {
         #[allow(unused_mut)]
         let mut builder = crate::CompactionWorkerBuilder::new(
@@ -876,19 +884,18 @@ pub fn load_object_store_from_env(
 /// | LOCAL_PATH | The path to the local directory where all data will be stored | Yes |
 pub fn load_local() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let local_path = get_env_variable("LOCAL_PATH")?;
-    let lfs =
-        object_store::local::LocalFileSystem::new_with_prefix(local_path).map_err(|error| {
-            SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
-                store: "local",
-                source: Box::new(error),
-            }))
-        })?;
+    let lfs = LocalFileSystem::new_with_prefix(local_path).map_err(|error| {
+        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+            store: "local",
+            source: Box::new(error),
+        }))
+    })?;
     Ok(Arc::new(lfs) as Arc<dyn ObjectStore>)
 }
 
 /// Loads an in-memory object store instance.
 pub fn load_memory() -> Result<Arc<dyn ObjectStore>, crate::Error> {
-    Ok(Arc::new(object_store::memory::InMemory::new()) as Arc<dyn ObjectStore>)
+    Ok(Arc::new(InMemory::new()) as Arc<dyn ObjectStore>)
 }
 
 /// Loads an AWS S3 Object store instance. The environment variables consumed are
@@ -897,7 +904,7 @@ pub fn load_memory() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 /// <https://docs.rs/object_store/latest/object_store/aws/struct.AmazonS3Builder.html#method.with_config>
 #[cfg(feature = "aws")]
 pub fn load_aws() -> Result<Arc<dyn ObjectStore>, crate::Error> {
-    let builder = object_store::aws::AmazonS3Builder::from_env();
+    let builder = AmazonS3Builder::from_env();
 
     Ok(Arc::new(builder.build().map_err(|error| {
         SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
@@ -913,7 +920,7 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 /// <https://docs.rs/object_store/latest/object_store/azure/struct.MicrosoftAzureBuilder.html#method.with_config>
 #[cfg(feature = "azure")]
 pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
-    let builder = object_store::azure::MicrosoftAzureBuilder::from_env();
+    let builder = MicrosoftAzureBuilder::from_env();
     Ok(Arc::new(builder.build().map_err(|error| {
         SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
             store: "MicrosoftAzure",
@@ -928,7 +935,7 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 /// <https://docs.rs/object_store/latest/object_store/gcp/struct.GoogleCloudStorageBuilder.html#method.with_config>
 #[cfg(feature = "gcp")]
 pub fn load_gcp() -> Result<Arc<dyn ObjectStore>, crate::Error> {
-    let builder = object_store::gcp::GoogleCloudStorageBuilder::from_env();
+    let builder = GoogleCloudStorageBuilder::from_env();
     Ok(Arc::new(builder.build().map_err(|error| {
         SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
             store: "GoogleCloudStorage",

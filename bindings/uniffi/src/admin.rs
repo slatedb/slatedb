@@ -6,6 +6,7 @@ use crate::types::{
     CompactionSpec, CompactorStateView, VersionedCompactions, VersionedManifest,
 };
 use chrono::{DateTime, Utc};
+use slatedb::{admin, config};
 use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,7 +25,7 @@ fn into_u64_bounds(
 /// Administrative read/query handle for SlateDB.
 #[derive(uniffi::Object)]
 pub struct Admin {
-    pub(crate) inner: slatedb::admin::Admin,
+    pub(crate) inner: admin::Admin,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -110,10 +111,7 @@ impl Admin {
     ///
     /// When `options` is `None`, SlateDB's default garbage collector options are used.
     pub async fn run_gc_once(&self, options: Option<GarbageCollectorOptions>) -> Result<(), Error> {
-        let options = options.map_or_else(
-            slatedb::config::GarbageCollectorOptions::default,
-            Into::into,
-        );
+        let options = options.map_or_else(config::GarbageCollectorOptions::default, Into::into);
         self.inner.run_gc_once(options).await.map_err(Into::into)
     }
 
@@ -149,7 +147,7 @@ impl Admin {
     ) -> Result<CheckpointCreateResult, Error> {
         Ok(CheckpointCreateResult::from(
             self.inner
-                .create_detached_checkpoint(&slatedb::config::CheckpointOptions::try_from(options)?)
+                .create_detached_checkpoint(&config::CheckpointOptions::try_from(options)?)
                 .await?,
         ))
     }

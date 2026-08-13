@@ -5,6 +5,7 @@ use crate::tablestore::TableStore;
 use crate::wal::{WalError, WalFileRange, WalGc};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures::stream;
 use futures::StreamExt;
 use log::error;
 use slatedb_common::clock::SystemClock;
@@ -135,7 +136,7 @@ impl SlateDbWalGc {
             return;
         }
 
-        futures::stream::iter(sst_ids)
+        stream::iter(sst_ids)
             .for_each_concurrent(GC_DELETE_CONCURRENCY, |id| async move {
                 if let Err(e) = self.table_store.delete_sst(&id).await {
                     error!("error deleting WAL SST [id={:?}, error={}]", id, e);

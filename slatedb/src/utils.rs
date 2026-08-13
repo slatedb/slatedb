@@ -11,14 +11,19 @@ use crate::manifest::ManifestCore;
 use crate::paths::PathResolver;
 use crate::tablestore::TableStore;
 use bytes::{Buf, BufMut, Bytes};
+use futures::stream;
 use futures::FutureExt;
 use log::{error, warn};
+use object_store::path::Path;
 use rand::{Rng, RngCore};
 use slatedb_common::clock::SystemClock;
 use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use tokio::runtime::Handle;
+use tokio::sync::watch;
+use tokio::task::{JoinError, JoinHandle};
 use ulid::Ulid;
 use uuid::Uuid;
 
@@ -29,18 +34,18 @@ static EMPTY_KEY: Bytes = Bytes::new();
 
 #[derive(Clone, Debug)]
 pub(crate) struct WatchableOnceCell<T: Clone> {
-    rx: tokio::sync::watch::Receiver<Option<T>>,
-    tx: tokio::sync::watch::Sender<Option<T>>,
+    rx: watch::Receiver<Option<T>>,
+    tx: watch::Sender<Option<T>>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct WatchableOnceCellReader<T: Clone> {
-    rx: tokio::sync::watch::Receiver<Option<T>>,
+    rx: watch::Receiver<Option<T>>,
 }
 
 impl<T: Clone> WatchableOnceCell<T> {
     pub(crate) fn new() -> Self {
-        let (tx, rx) = tokio::sync::watch::channel(None);
+        let (tx, rx) = watch::channel(None);
         Self { rx, tx }
     }
 
@@ -83,10 +88,10 @@ impl<T: Clone> WatchableOnceCellReader<T> {
 /// result. If the task panics, the cleanup fn is called with Err(BackgroundTaskPanic).
 pub(crate) fn spawn_bg_task<F, T, C>(
     name: String,
-    handle: &tokio::runtime::Handle,
+    handle: &Handle,
     cleanup_fn: C,
     future: F,
-) -> tokio::task::JoinHandle<Result<T, SlateDBError>>
+) -> JoinHandle<Result<T, SlateDBError>>
 where
     F: Future<Output = Result<T, SlateDBError>> + Send + 'static,
     T: Send + 'static,
@@ -458,7 +463,7 @@ where
 {
     let mut out = VecDeque::new();
 
-    let results = futures::stream::iter(inputs.into_iter().map(move |it| f(it)))
+    let results = stream::iter(inputs.into_iter().map(move |it| f(it)))
         .buffer_unordered(max_parallel.max(1))
         .collect::<Vec<_>>()
         .await;
@@ -548,7 +553,7 @@ pub(crate) fn split_unwind_result(
 /// - (Err(SlateDBError::BackgroundTaskPanic), Some(payload)) if the task panicked
 pub(crate) fn split_join_result(
     name: String,
-    join_result: Result<Result<(), SlateDBError>, tokio::task::JoinError>,
+    join_result: Result<Result<(), SlateDBError>, JoinError>,
 ) -> (Result<(), SlateDBError>, Option<Box<dyn Any + Send>>) {
     match join_result {
         Ok(task_result) => (task_result, None),
@@ -654,7 +659,7 @@ pub(crate) async fn preload_cache_from_manifest(
 ) -> Result<(), SlateDBError> {
     match preload_level {
         Some(PreloadLevel::AllSst) => {
-            let all_sst_paths: Vec<object_store::path::Path> = core
+            let all_sst_paths: Vec<Path> = core
                 .all_sst_views()
                 .map(|view| path_resolver.sst_path(&view.sst.id))
                 .collect();
@@ -668,7 +673,7 @@ pub(crate) async fn preload_cache_from_manifest(
             }
         }
         Some(PreloadLevel::L0Sst) => {
-            let l0_sst_paths: Vec<object_store::path::Path> = core
+            let l0_sst_paths: Vec<Path> = core
                 .trees()
                 .flat_map(|tree| tree.l0.iter())
                 .map(|view| path_resolver.sst_path(&view.sst.id))

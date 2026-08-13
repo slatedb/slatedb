@@ -1,6 +1,7 @@
 use crate::error::{Error, SlateDbError};
 use crate::filter_policy::FilterContext;
 use crate::types::try_checkpoint_id_from_str;
+use slatedb::config;
 use std::time::Duration;
 
 /// Minimum durability level required for data returned by reads and scans.
@@ -13,7 +14,7 @@ pub enum DurabilityLevel {
     Memory,
 }
 
-impl From<DurabilityLevel> for slatedb::config::DurabilityLevel {
+impl From<DurabilityLevel> for config::DurabilityLevel {
     fn from(value: DurabilityLevel) -> Self {
         match value {
             DurabilityLevel::Remote => Self::Remote,
@@ -32,7 +33,7 @@ pub enum FlushType {
     Wal,
 }
 
-impl From<FlushType> for slatedb::config::FlushType {
+impl From<FlushType> for config::FlushType {
     fn from(value: FlushType) -> Self {
         match value {
             FlushType::MemTable => Self::MemTable,
@@ -108,7 +109,7 @@ pub enum Ttl {
     ExpireAtMillis(i64),
 }
 
-impl From<Ttl> for slatedb::config::Ttl {
+impl From<Ttl> for config::Ttl {
     fn from(value: Ttl) -> Self {
         match value {
             Ttl::Default => Self::Default,
@@ -146,9 +147,9 @@ impl Default for ReadOptions {
     }
 }
 
-impl From<ReadOptions> for slatedb::config::ReadOptions {
+impl From<ReadOptions> for config::ReadOptions {
     fn from(value: ReadOptions) -> Self {
-        slatedb::config::ReadOptions {
+        config::ReadOptions {
             durability_filter: value.durability_filter.into(),
             dirty: value.dirty,
             cache_blocks: value.cache_blocks,
@@ -214,9 +215,9 @@ impl Default for ReaderOptions {
     }
 }
 
-impl From<ReaderOptions> for slatedb::config::DbReaderOptions {
+impl From<ReaderOptions> for config::DbReaderOptions {
     fn from(value: ReaderOptions) -> Self {
-        slatedb::config::DbReaderOptions {
+        config::DbReaderOptions {
             manifest_poll_interval: Duration::from_millis(value.manifest_poll_interval_ms),
             checkpoint_lifetime: Duration::from_millis(value.checkpoint_lifetime_ms),
             max_memtable_bytes: value.max_memtable_bytes,
@@ -281,11 +282,11 @@ impl Default for ScanOptions {
     }
 }
 
-impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
+impl TryFrom<ScanOptions> for config::ScanOptions {
     type Error = Error;
 
     fn try_from(value: ScanOptions) -> Result<Self, Self::Error> {
-        Ok(slatedb::config::ScanOptions {
+        Ok(config::ScanOptions {
             durability_filter: value.durability_filter.into(),
             dirty: value.dirty,
             read_ahead_bytes: usize::try_from(value.read_ahead_bytes).map_err(|_| {
@@ -313,9 +314,9 @@ pub struct WriteOptions {
     pub seqnum: u64,
 }
 
-impl From<WriteOptions> for slatedb::config::WriteOptions {
+impl From<WriteOptions> for config::WriteOptions {
     fn from(value: WriteOptions) -> Self {
-        slatedb::config::WriteOptions {
+        config::WriteOptions {
             seqnum: value.seqnum,
         }
     }
@@ -328,9 +329,9 @@ pub struct PutOptions {
     pub ttl: Ttl,
 }
 
-impl From<PutOptions> for slatedb::config::PutOptions {
+impl From<PutOptions> for config::PutOptions {
     fn from(value: PutOptions) -> Self {
-        slatedb::config::PutOptions {
+        config::PutOptions {
             ttl: value.ttl.into(),
         }
     }
@@ -343,9 +344,9 @@ pub struct MergeOptions {
     pub ttl: Ttl,
 }
 
-impl From<MergeOptions> for slatedb::config::MergeOptions {
+impl From<MergeOptions> for config::MergeOptions {
     fn from(value: MergeOptions) -> Self {
-        slatedb::config::MergeOptions {
+        config::MergeOptions {
             ttl: value.ttl.into(),
         }
     }
@@ -358,9 +359,9 @@ pub struct FlushOptions {
     pub flush_type: FlushType,
 }
 
-impl From<FlushOptions> for slatedb::config::FlushOptions {
+impl From<FlushOptions> for config::FlushOptions {
     fn from(value: FlushOptions) -> Self {
-        slatedb::config::FlushOptions {
+        config::FlushOptions {
             flush_type: value.flush_type.into(),
         }
     }
@@ -382,9 +383,9 @@ impl Default for CloseOptions {
     }
 }
 
-impl From<CloseOptions> for slatedb::config::CloseOptions {
+impl From<CloseOptions> for config::CloseOptions {
     fn from(value: CloseOptions) -> Self {
-        slatedb::config::CloseOptions {
+        config::CloseOptions {
             flush_type: value.flush_type.map(Into::into),
         }
     }
@@ -407,7 +408,7 @@ pub struct GarbageCollectorDirectoryOptions {
 
 impl Default for GarbageCollectorDirectoryOptions {
     fn default() -> Self {
-        let core = slatedb::config::GarbageCollectorDirectoryOptions::default();
+        let core = config::GarbageCollectorDirectoryOptions::default();
         Self {
             interval_ms: core.interval.map(|duration| duration.as_millis() as u64),
             min_age_ms: core.min_age.as_millis() as u64,
@@ -416,7 +417,7 @@ impl Default for GarbageCollectorDirectoryOptions {
     }
 }
 
-impl From<GarbageCollectorDirectoryOptions> for slatedb::config::GarbageCollectorDirectoryOptions {
+impl From<GarbageCollectorDirectoryOptions> for config::GarbageCollectorDirectoryOptions {
     fn from(value: GarbageCollectorDirectoryOptions) -> Self {
         Self {
             interval: value.interval_ms.map(Duration::from_millis),
@@ -438,14 +439,14 @@ pub struct GarbageCollectorScheduleOptions {
 
 impl Default for GarbageCollectorScheduleOptions {
     fn default() -> Self {
-        let core = slatedb::config::GarbageCollectorScheduleOptions::default();
+        let core = config::GarbageCollectorScheduleOptions::default();
         Self {
             interval_ms: core.interval.map(|duration| duration.as_millis() as u64),
         }
     }
 }
 
-impl From<GarbageCollectorScheduleOptions> for slatedb::config::GarbageCollectorScheduleOptions {
+impl From<GarbageCollectorScheduleOptions> for config::GarbageCollectorScheduleOptions {
     fn from(value: GarbageCollectorScheduleOptions) -> Self {
         Self {
             interval: value.interval_ms.map(Duration::from_millis),
@@ -493,7 +494,7 @@ pub struct GarbageCollectorOptions {
 
 impl Default for GarbageCollectorOptions {
     fn default() -> Self {
-        let core = slatedb::config::GarbageCollectorOptions::default();
+        let core = config::GarbageCollectorOptions::default();
         Self {
             manifest_options: core.manifest_options.map(Into::into),
             wal_options: core.wal_options.map(Into::into),
@@ -507,8 +508,8 @@ impl Default for GarbageCollectorOptions {
     }
 }
 
-impl From<slatedb::config::GarbageCollectorDirectoryOptions> for GarbageCollectorDirectoryOptions {
-    fn from(value: slatedb::config::GarbageCollectorDirectoryOptions) -> Self {
+impl From<config::GarbageCollectorDirectoryOptions> for GarbageCollectorDirectoryOptions {
+    fn from(value: config::GarbageCollectorDirectoryOptions) -> Self {
         Self {
             interval_ms: value.interval.map(|duration| duration.as_millis() as u64),
             min_age_ms: value.min_age.as_millis() as u64,
@@ -517,15 +518,15 @@ impl From<slatedb::config::GarbageCollectorDirectoryOptions> for GarbageCollecto
     }
 }
 
-impl From<slatedb::config::GarbageCollectorScheduleOptions> for GarbageCollectorScheduleOptions {
-    fn from(value: slatedb::config::GarbageCollectorScheduleOptions) -> Self {
+impl From<config::GarbageCollectorScheduleOptions> for GarbageCollectorScheduleOptions {
+    fn from(value: config::GarbageCollectorScheduleOptions) -> Self {
         Self {
             interval_ms: value.interval.map(|duration| duration.as_millis() as u64),
         }
     }
 }
 
-impl From<GarbageCollectorOptions> for slatedb::config::GarbageCollectorOptions {
+impl From<GarbageCollectorOptions> for config::GarbageCollectorOptions {
     fn from(value: GarbageCollectorOptions) -> Self {
         Self {
             manifest_options: value.manifest_options.map(Into::into),
@@ -543,49 +544,47 @@ impl From<GarbageCollectorOptions> for slatedb::config::GarbageCollectorOptions 
 
 #[cfg(test)]
 mod tests {
+    use slatedb::config;
+
     use super::{CloseOptions, FlushType, GarbageCollectorOptions, ReaderOptions};
 
     #[test]
     fn close_options_default_flushes_memtable() {
-        let options: slatedb::config::CloseOptions = CloseOptions::default().into();
+        let options: config::CloseOptions = CloseOptions::default().into();
 
         assert!(matches!(
             options.flush_type,
-            Some(slatedb::config::FlushType::MemTable)
+            Some(config::FlushType::MemTable)
         ));
     }
 
     #[test]
     fn close_options_can_flush_wal_only() {
-        let options: slatedb::config::CloseOptions = CloseOptions {
+        let options: config::CloseOptions = CloseOptions {
             flush_type: Some(FlushType::Wal),
         }
         .into();
 
-        assert!(matches!(
-            options.flush_type,
-            Some(slatedb::config::FlushType::Wal)
-        ));
+        assert!(matches!(options.flush_type, Some(config::FlushType::Wal)));
     }
 
     #[test]
     fn close_options_can_skip_final_flush() {
-        let options: slatedb::config::CloseOptions = CloseOptions { flush_type: None }.into();
+        let options: config::CloseOptions = CloseOptions { flush_type: None }.into();
 
         assert!(options.flush_type.is_none());
     }
 
     #[test]
     fn boundary_files_are_enabled_by_default() {
-        let gc: slatedb::config::GarbageCollectorOptions =
-            GarbageCollectorOptions::default().into();
+        let gc: config::GarbageCollectorOptions = GarbageCollectorOptions::default().into();
 
         assert!(gc.boundary_files_enabled);
     }
 
     #[test]
     fn boundary_files_can_be_disabled() {
-        let gc: slatedb::config::GarbageCollectorOptions = GarbageCollectorOptions {
+        let gc: config::GarbageCollectorOptions = GarbageCollectorOptions {
             disable_boundary_files: true,
             ..GarbageCollectorOptions::default()
         }
@@ -596,15 +595,14 @@ mod tests {
 
     #[test]
     fn gc_object_store_max_retries_defaults_to_unbounded() {
-        let gc: slatedb::config::GarbageCollectorOptions =
-            GarbageCollectorOptions::default().into();
+        let gc: config::GarbageCollectorOptions = GarbageCollectorOptions::default().into();
 
         assert_eq!(gc.object_store_max_retries, None);
     }
 
     #[test]
     fn gc_object_store_max_retries_threads_through() {
-        let gc: slatedb::config::GarbageCollectorOptions = GarbageCollectorOptions {
+        let gc: config::GarbageCollectorOptions = GarbageCollectorOptions {
             object_store_max_retries: Some(3),
             ..GarbageCollectorOptions::default()
         }
@@ -615,14 +613,14 @@ mod tests {
 
     #[test]
     fn reader_object_store_max_retries_defaults_to_unbounded() {
-        let reader: slatedb::config::DbReaderOptions = ReaderOptions::default().into();
+        let reader: config::DbReaderOptions = ReaderOptions::default().into();
 
         assert_eq!(reader.object_store_max_retries, None);
     }
 
     #[test]
     fn reader_object_store_max_retries_threads_through() {
-        let reader: slatedb::config::DbReaderOptions = ReaderOptions {
+        let reader: config::DbReaderOptions = ReaderOptions {
             object_store_max_retries: Some(5),
             ..ReaderOptions::default()
         }
@@ -649,13 +647,11 @@ pub struct CheckpointOptions {
     pub name: Option<String>,
 }
 
-impl TryFrom<&CheckpointOptions> for slatedb::config::CheckpointOptions {
+impl TryFrom<&CheckpointOptions> for config::CheckpointOptions {
     type Error = Error;
 
-    fn try_from(
-        value: &CheckpointOptions,
-    ) -> Result<slatedb::config::CheckpointOptions, Self::Error> {
-        Ok(slatedb::config::CheckpointOptions {
+    fn try_from(value: &CheckpointOptions) -> Result<config::CheckpointOptions, Self::Error> {
+        Ok(config::CheckpointOptions {
             lifetime: value.lifetime_ms.map(Duration::from_millis),
             source: value
                 .source

@@ -4,9 +4,12 @@ use std::ops::Bound;
 use std::time::Duration;
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error as ThisError;
+use tokio::sync::oneshot::error::RecvError;
 use uuid::Uuid;
 
 use crate::bytes_range::BytesRange;
+#[cfg(feature = "compaction_filters")]
+use crate::compaction_filter::CompactionFilterError;
 use crate::error::SlateDBError::{
     LatestTransactionalObjectVersionMissing, TransactionalObjectVersionExists,
 };
@@ -156,7 +159,7 @@ pub(crate) enum SlateDBError {
     },
 
     #[error("read channel error")]
-    ReadChannelError(#[from] tokio::sync::oneshot::error::RecvError),
+    ReadChannelError(#[from] RecvError),
 
     #[error("background task panicked. name=`{0}`")]
     BackgroundTaskPanic(String),
@@ -290,7 +293,7 @@ pub(crate) enum SlateDBError {
 
     #[cfg(feature = "compaction_filters")]
     #[error("compaction filter error: {0}")]
-    CompactionFilterError(Arc<crate::compaction_filter::CompactionFilterError>),
+    CompactionFilterError(Arc<CompactionFilterError>),
 
     #[error("invalid sequence number ordering during merge. expected sequence numbers in descending order, but found {current_seq} followed by {next_seq}")]
     InvalidSequenceOrder { current_seq: u64, next_seq: u64 },
@@ -419,8 +422,8 @@ impl From<foyer::Error> for SlateDBError {
 }
 
 #[cfg(feature = "compaction_filters")]
-impl From<crate::compaction_filter::CompactionFilterError> for SlateDBError {
-    fn from(value: crate::compaction_filter::CompactionFilterError) -> Self {
+impl From<CompactionFilterError> for SlateDBError {
+    fn from(value: CompactionFilterError) -> Self {
         Self::CompactionFilterError(Arc::new(value))
     }
 }

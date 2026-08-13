@@ -17,6 +17,7 @@ use smallvec::{smallvec, SmallVec};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter::Peekable;
 use std::ops::RangeBounds;
+use tokio::task::coop;
 
 /// A batch of write operations (puts, deletes, and merges). All operations in
 /// the batch are applied atomically to the database. Put and delete operations
@@ -471,7 +472,7 @@ impl RowEntryIterator for WriteBatchIterator {
             } {
                 self.iter.next();
                 // Keep in-memory seeking cooperative.
-                tokio::task::coop::consume_budget().await;
+                coop::consume_budget().await;
             } else {
                 break;
             }

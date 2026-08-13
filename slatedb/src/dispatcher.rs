@@ -124,7 +124,7 @@ use crossbeam_skiplist::SkipMap;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{
     future::BoxFuture,
-    stream::{BoxStream, FuturesUnordered},
+    stream::{self, BoxStream, FuturesUnordered},
     FutureExt, StreamExt,
 };
 use log::error;
@@ -394,7 +394,7 @@ impl<T: Send + std::fmt::Debug> MessageDispatcher<T> {
             Err(SlateDBError::Fenced)
         });
         self.rx.close();
-        let messages = futures::stream::unfold(&mut self.rx, |rx| async move {
+        let messages = stream::unfold(&mut self.rx, |rx| async move {
             rx.recv().await.ok().map(|message| (message, rx))
         });
         self.handler.cleanup(Box::pin(messages), result).await

@@ -170,6 +170,8 @@ fn apply_dotted_json_path(root: &mut Value, key: &str, value: Value) -> Result<(
 
 #[cfg(test)]
 mod tests {
+    use slatedb::config::MetricLevel;
+
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
@@ -355,10 +357,7 @@ flush_interval = "1s"
                 settings.inner().flush_interval,
                 Some(Duration::from_secs(1))
             );
-            assert_eq!(
-                settings.inner().metric_level,
-                slatedb::config::MetricLevel::Debug
-            );
+            assert_eq!(settings.inner().metric_level, MetricLevel::Debug);
 
             Ok(())
         });

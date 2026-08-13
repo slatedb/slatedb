@@ -1,4 +1,5 @@
 use crate::error::Error;
+use slatedb::db_cache;
 use slatedb::db_cache::{foyer, moka, SplitCache};
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,7 +41,7 @@ impl From<MokaCacheOptions> for moka::MokaCacheOptions {
 /// Database cache used to store blocks in memory.
 #[derive(uniffi::Object)]
 pub struct DbCache {
-    pub(crate) inner: Arc<dyn slatedb::db_cache::DbCache>,
+    pub(crate) inner: Arc<dyn db_cache::DbCache>,
 }
 
 #[uniffi::export]
@@ -72,7 +73,7 @@ impl DbCache {
                 .with_block_cache(Some(block_cache.inner.clone()))
                 .with_meta_cache(Some(meta_cache.inner.clone()))
                 .build(),
-        ) as Arc<dyn slatedb::db_cache::DbCache>;
+        ) as Arc<dyn db_cache::DbCache>;
         Ok(Arc::new(Self { inner }))
     }
 }

@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::ops::RangeBounds;
+use tokio::task::coop;
 
 /// [`DbIteratorRangeTracker`] records the *requested* scan range of a
 /// [`DbIterator`] so that the transaction manager can detect read-write
@@ -284,7 +285,7 @@ impl DbIterator {
             let result = loop {
                 let next = self.iter.next().await;
                 // Keep cached iteration cooperative.
-                tokio::task::coop::consume_budget().await;
+                coop::consume_budget().await;
                 match next {
                     Ok(Some(entry)) => match entry.value {
                         ValueDeletable::Tombstone => continue,
@@ -425,7 +426,7 @@ impl DbRecencyIterator {
 
             let next = iter.next().await;
             // Keep cached iteration cooperative.
-            tokio::task::coop::consume_budget().await;
+            coop::consume_budget().await;
             match next {
                 Ok(Some(entry)) => return Ok(Some(entry)),
                 Ok(None) => {

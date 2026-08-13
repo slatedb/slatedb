@@ -17,6 +17,7 @@ use crate::settings::Settings;
 use crate::types::{CloneSourceSpec, KeyRange};
 use crate::MetricsRecorder;
 use parking_lot::Mutex;
+use slatedb::admin;
 
 /// Builder for opening a writable [`crate::Db`].
 ///
@@ -260,15 +261,13 @@ impl DbReaderBuilder {
 /// Builders are single-use: calling [`AdminBuilder::build`] consumes the builder.
 #[derive(uniffi::Object)]
 pub struct AdminBuilder {
-    builder: Mutex<Option<slatedb::admin::AdminBuilder<String>>>,
+    builder: Mutex<Option<admin::AdminBuilder<String>>>,
 }
 
 impl AdminBuilder {
     fn update_builder(
         &self,
-        update: impl FnOnce(
-            slatedb::admin::AdminBuilder<String>,
-        ) -> slatedb::admin::AdminBuilder<String>,
+        update: impl FnOnce(admin::AdminBuilder<String>) -> admin::AdminBuilder<String>,
     ) -> Result<(), SlateDbError> {
         let mut guard = self.builder.lock();
         let builder = guard.take().ok_or(SlateDbError::BuilderConsumed)?;
@@ -276,7 +275,7 @@ impl AdminBuilder {
         Ok(())
     }
 
-    fn take_builder(&self) -> Result<slatedb::admin::AdminBuilder<String>, SlateDbError> {
+    fn take_builder(&self) -> Result<admin::AdminBuilder<String>, SlateDbError> {
         let mut guard = self.builder.lock();
         guard.take().ok_or(SlateDbError::BuilderConsumed)
     }
@@ -288,7 +287,7 @@ impl AdminBuilder {
     #[uniffi::constructor]
     pub fn new(path: String, object_store: Arc<ObjectStore>) -> Arc<Self> {
         Arc::new(Self {
-            builder: Mutex::new(Some(slatedb::admin::Admin::builder(
+            builder: Mutex::new(Some(admin::Admin::builder(
                 path,
                 object_store.inner.clone(),
             ))),
@@ -317,11 +316,11 @@ impl AdminBuilder {
 
 #[derive(uniffi::Object)]
 pub struct CloneBuilder {
-    builder: Mutex<Option<slatedb::admin::CloneBuilder>>,
+    builder: Mutex<Option<admin::CloneBuilder>>,
 }
 
 impl CloneBuilder {
-    pub(crate) fn new(inner: slatedb::admin::CloneBuilder) -> Arc<Self> {
+    pub(crate) fn new(inner: admin::CloneBuilder) -> Arc<Self> {
         Arc::new(Self {
             builder: Mutex::new(Some(inner)),
         })
@@ -329,7 +328,7 @@ impl CloneBuilder {
 
     fn update_builder(
         &self,
-        update: impl FnOnce(slatedb::admin::CloneBuilder) -> slatedb::admin::CloneBuilder,
+        update: impl FnOnce(admin::CloneBuilder) -> admin::CloneBuilder,
     ) -> Result<(), Error> {
         let mut guard = self.builder.lock();
         let builder = guard.take().ok_or(SlateDbError::BuilderConsumed)?;
@@ -337,7 +336,7 @@ impl CloneBuilder {
         Ok(())
     }
 
-    fn take_builder(&self) -> Result<slatedb::admin::CloneBuilder, SlateDbError> {
+    fn take_builder(&self) -> Result<admin::CloneBuilder, SlateDbError> {
         let mut guard = self.builder.lock();
         guard.take().ok_or(SlateDbError::BuilderConsumed)
     }

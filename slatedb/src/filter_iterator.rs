@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use tokio::task::coop;
 
 use crate::error::SlateDBError;
 use crate::iter::RowEntryIterator;
@@ -42,7 +43,7 @@ impl<T: RowEntryIterator> RowEntryIterator for FilterIterator<T> {
                 return Ok(Some(entry));
             }
             // Keep filtered scans cooperative.
-            tokio::task::coop::consume_budget().await;
+            coop::consume_budget().await;
         }
         Ok(None)
     }

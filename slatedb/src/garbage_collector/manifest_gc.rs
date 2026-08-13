@@ -2,6 +2,7 @@ use crate::{
     config::GarbageCollectorDirectoryOptions, error::SlateDBError, manifest::store::ManifestStore,
 };
 use chrono::{DateTime, Utc};
+use futures::stream;
 use futures::StreamExt;
 use log::error;
 use std::collections::HashSet;
@@ -70,7 +71,7 @@ impl ManifestGcTask {
         }
 
         let deleted_count = AtomicU64::new(0);
-        futures::stream::iter(manifest_ids)
+        stream::iter(manifest_ids)
             .for_each_concurrent(GC_DELETE_CONCURRENCY, |id| {
                 let deleted_count = &deleted_count;
                 async move {

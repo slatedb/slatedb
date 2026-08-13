@@ -4,6 +4,7 @@ use {
         cached_object_store::CachedObjectStore,
         clock::MonotonicClock,
         config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions},
+        db::builder::DbReaderBuilder,
         db_cache::CacheTarget,
         db_cache_manager,
         db_common::extract_segment_prefix,
@@ -24,7 +25,8 @@ use {
         reader::{DbStateReader, Reader, ScanContext},
         tablestore::TableStore,
         types::KeyValue,
-        utils::IdGenerator,
+        utils::{self, IdGenerator},
+        wal::reader::SlateDbWalReader,
         wal::WalReader as WalReaderTrait,
         wal_replay::{WalReplayIterator, WalReplayOptions},
         Checkpoint, DbCacheManagerOps, DbIterator, DbMetadataOps, DbReadOps,
@@ -35,13 +37,13 @@ use {
     log::{info, warn},
     object_store::{path::Path, ObjectStore},
     parking_lot::RwLock,
-    slatedb_common::{clock::SystemClock, DbRand},
+    slatedb_common::{clock::SystemClock, metrics::MetricsRecorderHelper, DbRand},
     std::{
         collections::{BTreeSet, VecDeque},
         ops::Sub,
         sync::{Arc, LazyLock},
     },
-    tokio::runtime::Handle,
+    tokio::{runtime::Handle, sync::watch},
     uuid::Uuid,
 };
 
@@ -128,7 +130,7 @@ struct DbReaderInner {
     /// metric handles in `DbStats` (and other stats structs) are still in use.
     /// See: https://github.com/slatedb/slatedb/issues/1469
     #[allow(dead_code)]
-    recorder: slatedb_common::metrics::MetricsRecorderHelper,
+    recorder: MetricsRecorderHelper,
 }
 
 #[derive(Debug)]
@@ -179,14 +181,11 @@ impl DbReaderInner {
         segment_extractor: Option<Arc<dyn PrefixExtractor>>,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
-        recorder: slatedb_common::metrics::MetricsRecorderHelper,
+        recorder: MetricsRecorderHelper,
         mut manifest: StoredManifest,
     ) -> Result<Self, SlateDBError> {
-        let wal_reader = wal_reader.unwrap_or_else(|| {
-            Arc::new(crate::wal::reader::SlateDbWalReader::new(Arc::clone(
-                &table_store,
-            )))
-        });
+        let wal_reader =
+            wal_reader.unwrap_or_else(|| Arc::new(SlateDbWalReader::new(Arc::clone(&table_store))));
         let checkpoint =
             Self::get_or_create_checkpoint(&mut manifest, mode, &options, rand.clone()).await?;
         let (manifest_id, initial_manifest) = if let Some(checkpoint) = checkpoint.as_ref() {
@@ -877,7 +876,7 @@ impl DbReader {
         let external_ssts = state.manifest.external_ssts();
         let path_resolver = PathResolver::new_with_external_ssts(path, external_ssts);
         let cache_opts = &self.inner.options.object_store_cache_options;
-        crate::utils::preload_cache_from_manifest(
+        utils::preload_cache_from_manifest(
             &state.manifest.core,
             cached_obj_store,
             &path_resolver,
@@ -941,8 +940,8 @@ impl DbReader {
     pub fn builder<P: Into<Path>>(
         path: P,
         object_store: Arc<dyn ObjectStore>,
-    ) -> crate::db::builder::DbReaderBuilder<P> {
-        crate::db::builder::DbReaderBuilder::new(path, object_store)
+    ) -> DbReaderBuilder<P> {
+        DbReaderBuilder::new(path, object_store)
     }
 
     pub(crate) async fn open_internal(
@@ -955,7 +954,7 @@ impl DbReader {
         options: DbReaderOptions,
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
-        recorder: slatedb_common::metrics::MetricsRecorderHelper,
+        recorder: MetricsRecorderHelper,
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(mode, &options)?;
 
@@ -1412,7 +1411,7 @@ impl DbMetadataOps for DbReader {
         VersionedManifest::from(state.as_ref())
     }
 
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+    fn subscribe(&self) -> watch::Receiver<DbStatus> {
         self.inner.status_manager.subscribe()
     }
 
@@ -1428,7 +1427,7 @@ impl DbReader {
     }
 
     /// See [`DbMetadataOps::subscribe`].
-    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<DbStatus> {
+    pub fn subscribe(&self) -> watch::Receiver<DbStatus> {
         <Self as DbMetadataOps>::subscribe(self)
     }
 

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::db_state::SsTableId;
 use crate::db_state::SsTableId::{Compacted, Wal};
 use crate::error::SlateDBError;
+use crate::manifest::VersionedManifest;
 use object_store::path::Path;
 use ulid::Ulid;
 
@@ -32,7 +33,7 @@ impl PathResolver {
     /// Creates a resolver for the database rooted at `root_path`, resolving
     /// the external SSTs referenced by `manifest` to their owning database's
     /// path.
-    pub fn new<P: Into<Path>>(root_path: P, manifest: &crate::manifest::VersionedManifest) -> Self {
+    pub fn new<P: Into<Path>>(root_path: P, manifest: &VersionedManifest) -> Self {
         Self::new_with_external_ssts(root_path.into(), manifest.external_ssts())
     }
 

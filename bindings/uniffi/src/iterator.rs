@@ -66,6 +66,7 @@ mod tests {
     use slatedb::object_store::memory::InMemory;
 
     use super::DbIterator;
+    use crate::types::KeyValue;
 
     const ROWS: u32 = 6;
 
@@ -87,7 +88,7 @@ mod tests {
     }
 
     /// Drains an iterator one row at a time; the oracle for the batch results.
-    async fn drain_rows(iter: &DbIterator) -> Vec<crate::types::KeyValue> {
+    async fn drain_rows(iter: &DbIterator) -> Vec<KeyValue> {
         let mut rows = Vec::new();
         while let Some(row) = iter.next().await.expect("next() failed") {
             rows.push(row);

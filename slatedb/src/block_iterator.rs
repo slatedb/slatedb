@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+use crate::block_iterator_v2::BlockIteratorV2;
 use crate::format::block::Block;
 use crate::format::row::SstRowCodecV0;
 use crate::iter::IterationOrder;
@@ -48,12 +49,12 @@ impl BlockLike for Arc<Block> {
 /// Type alias for the latest block iterator version.
 /// Note: B is constrained to BlockLike by BlockIteratorV2's definition.
 #[cfg(test)]
-pub(crate) type BlockIteratorLatest<B> = crate::block_iterator_v2::BlockIteratorV2<B>;
+pub(crate) type BlockIteratorLatest<B> = BlockIteratorV2<B>;
 
 /// Block iterator that dispatches on the SST format version.
 pub(crate) enum DataBlockIterator<B: BlockLike> {
     V1(BlockIterator<B>),
-    V2(crate::block_iterator_v2::BlockIteratorV2<B>),
+    V2(BlockIteratorV2<B>),
 }
 
 impl<B: BlockLike> DataBlockIterator<B> {
@@ -65,9 +66,7 @@ impl<B: BlockLike> DataBlockIterator<B> {
         use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
         match sst_version {
             SST_FORMAT_VERSION => Ok(Self::V1(BlockIterator::new(block, order))),
-            SST_FORMAT_VERSION_V2 => Ok(Self::V2(crate::block_iterator_v2::BlockIteratorV2::new(
-                block, order,
-            ))),
+            SST_FORMAT_VERSION_V2 => Ok(Self::V2(BlockIteratorV2::new(block, order))),
             _ => Err(SlateDBError::InvalidVersion {
                 format_name: "SST",
                 supported_versions: vec![SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2],

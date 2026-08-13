@@ -21,6 +21,7 @@ use slatedb_common::metrics::{CounterFn, MetricsRecorderHelper};
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
+use crate::db_state;
 use crate::dispatcher::MessageHandler;
 use crate::error::SlateDBError;
 use crate::mem_table::ImmutableMemtable;
@@ -284,7 +285,7 @@ impl FlushTracker {
                 core.trees().fold((0_usize, 0_usize), |(len, peak), tree| {
                     (
                         len.max(tree.l0.len()),
-                        peak.max(crate::db_state::max_l0_overlap(&tree.l0)),
+                        peak.max(db_state::max_l0_overlap(&tree.l0)),
                     )
                 });
             let reserved = self.frontier.reserved_l0_slots();
@@ -310,7 +311,7 @@ impl FlushTracker {
                 match core.segments.binary_search_by(|s| s.prefix.cmp(prefix)) {
                     Ok(idx) => {
                         let tree = &core.segments[idx].tree;
-                        (tree.l0.len(), crate::db_state::max_l0_overlap(&tree.l0))
+                        (tree.l0.len(), db_state::max_l0_overlap(&tree.l0))
                     }
                     Err(_) => (0, 0),
                 };

@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
+use tokio::task::JoinError;
 use tokio::task::JoinHandle;
 
 use crate::block_iterator::DataBlockIterator;
@@ -1067,7 +1068,7 @@ impl RowEntryIterator for SstIterator<'_> {
 /// A fetch task is cancelled when the runtime it was spawned on shuts down,
 /// so the iterator reports the cancellation to its caller instead of panicking
 /// the task that is awaiting the fetch.
-fn block_fetch_join_error(join_err: tokio::task::JoinError, sst_id: SsTableId) -> SlateDBError {
+fn block_fetch_join_error(join_err: JoinError, sst_id: SsTableId) -> SlateDBError {
     let task_name = format!("sst_block_fetch[{:?}]", sst_id);
     match join_err.try_into_panic() {
         Ok(panic_err) => {

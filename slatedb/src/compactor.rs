@@ -71,9 +71,11 @@ use ulid::Ulid;
 
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
+use crate::compaction_worker;
 use crate::compaction_worker::CompactionWorkerHandler;
 use crate::compactions_store::{CompactionsStore, StoredCompactions};
 use crate::compactor::stats::CompactionStats;
+use crate::compactor_state::WorkerSpec;
 use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
 use crate::db_state::{SortedRun, SsTableView};
@@ -424,7 +426,7 @@ impl Compactor {
             );
             self.task_executor
                 .add_handler(
-                    crate::compaction_worker::COMPACTION_WORKER_TASK_NAME.to_string(),
+                    compaction_worker::COMPACTION_WORKER_TASK_NAME.to_string(),
                     Box::new(worker_handler),
                     worker_rx,
                     &Handle::current(),
@@ -443,7 +445,7 @@ impl Compactor {
             .map_err(Error::from)?;
         if self.options.worker.is_some() {
             self.task_executor
-                .join_task(crate::compaction_worker::COMPACTION_WORKER_TASK_NAME)
+                .join_task(compaction_worker::COMPACTION_WORKER_TASK_NAME)
                 .await
                 .map_err(Error::from)?;
         }
@@ -461,7 +463,7 @@ impl Compactor {
             .map_err(Error::from)?;
         if self.options.worker.is_some() {
             self.task_executor
-                .shutdown_task(crate::compaction_worker::COMPACTION_WORKER_TASK_NAME)
+                .shutdown_task(compaction_worker::COMPACTION_WORKER_TASK_NAME)
                 .await
                 .map_err(Error::from)?;
         }
@@ -806,7 +808,7 @@ impl CompactorEventHandler {
     fn update_distributed_compaction_metrics(&mut self) {
         use crate::compactor::stats::{WORKER_ID_LABEL, WORKER_LAST_HEARTBEAT_MS};
 
-        let claimed: Vec<(Ulid, crate::compactor_state::WorkerSpec)> = self
+        let claimed: Vec<(Ulid, WorkerSpec)> = self
             .state()
             .compactions_with_status(&[CompactionStatus::Running, CompactionStatus::Compacted])
             .filter_map(|c| c.worker().cloned().map(|w| (c.id(), w)))
@@ -1312,6 +1314,7 @@ pub mod stats {
     use crate::merge_operator::{
         MERGE_OPERATOR_COMPACT_PATH, MERGE_OPERATOR_OPERANDS_DESCRIPTION, MERGE_OPERATOR_PATH_LABEL,
     };
+    use crate::retention_iterator::RetentionMetrics;
 
     macro_rules! compactor_stat_name {
         ($suffix:expr) => {
@@ -1390,8 +1393,8 @@ pub mod stats {
             }
         }
 
-        pub(crate) fn retention_metrics(&self) -> crate::retention_iterator::RetentionMetrics {
-            crate::retention_iterator::RetentionMetrics {
+        pub(crate) fn retention_metrics(&self) -> RetentionMetrics {
+            RetentionMetrics {
                 expired_entries_purged_value: self.expired_entries_purged_value.clone(),
                 expired_entries_purged_merge: self.expired_entries_purged_merge.clone(),
             }

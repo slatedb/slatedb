@@ -1,6 +1,7 @@
 use crate::bytes_range::BytesRange;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
+use crate::manifest;
 use crate::manifest::{Manifest, ManifestCore};
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
@@ -823,7 +824,7 @@ impl<'a> StateModifier<'a> {
         let remote = &remote_manifest.value.core;
         let tree = my_db_state.tree.merge_from_compactor(&remote.tree);
         let segments =
-            crate::manifest::merge_segments_from_compactor(&my_db_state.segments, &remote.segments);
+            manifest::merge_segments_from_compactor(&my_db_state.segments, &remote.segments);
         remote_manifest.value.core = ManifestCore {
             initialized: my_db_state.initialized,
             tree: Arc::new(tree),

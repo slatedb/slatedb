@@ -73,6 +73,7 @@ use object_store::ObjectStore;
 
 use crate::block_cache_policy::BlockCachePolicy;
 use crate::db_state::SsTableId;
+use crate::error::SlateDBError;
 use crate::format::sst::SsTableFormat;
 use crate::iter::{EmptyIterator, RowEntryIterator};
 use crate::manifest::SsTableView;
@@ -142,7 +143,7 @@ impl WalFile {
     pub async fn iterator(&self) -> Result<WalFileIterator, crate::Error> {
         let sst = match self.table_store.open_sst(&SsTableId::Wal(self.id)).await {
             Ok(sst) => sst,
-            Err(crate::error::SlateDBError::EmptySSTable) => {
+            Err(SlateDBError::EmptySSTable) => {
                 // Zero-byte WAL files are fencing markers, not corrupt WALs.
                 return Ok(WalFileIterator::new(Box::new(EmptyIterator::new())));
             }

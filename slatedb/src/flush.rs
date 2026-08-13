@@ -11,6 +11,7 @@ use crate::reader::DbStateReader;
 use crate::retention_iterator::RetentionIterator;
 use bytes::Bytes;
 use std::sync::Arc;
+use tokio::task::coop;
 
 /// One encoded-but-not-yet-uploaded SST from a memtable flush, tagged with
 /// the segment it belongs to (RFC-0024). Mirrors the shape of post-upload
@@ -38,7 +39,7 @@ impl DbInner {
             sst_builder.add(entry).await?;
             any = true;
             // Keep cached flush work cooperative.
-            tokio::task::coop::consume_budget().await;
+            coop::consume_budget().await;
         }
         if !any {
             return Ok(None);
@@ -134,7 +135,7 @@ impl DbInner {
             current_builder.add(entry).await?;
             current_has_entry = true;
             // Keep cached flush work cooperative.
-            tokio::task::coop::consume_budget().await;
+            coop::consume_budget().await;
         }
         if current_has_entry {
             out.push(EncodedSegmentSst {

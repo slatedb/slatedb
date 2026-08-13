@@ -198,7 +198,8 @@
 use crate::filter_policy::FilterContext;
 use crate::iter::IterationOrder;
 use duration_str::{deserialize_duration, deserialize_option_duration};
-use figment::providers::{Env, Format, Json, Toml, Yaml};
+use figment::providers::{Env, Format, Json, Serialized, Toml, Yaml};
+use figment::value::{Dict, Map};
 use figment::{Figment, Metadata, Provider};
 use log::warn;
 use serde::{Deserialize, Serialize, Serializer};
@@ -1056,10 +1057,8 @@ impl Provider for Settings {
         Metadata::named("SlateDb configuration options")
     }
 
-    fn data(
-        &self,
-    ) -> Result<figment::value::Map<figment::Profile, figment::value::Dict>, figment::Error> {
-        figment::providers::Serialized::defaults(self.clone()).data()
+    fn data(&self) -> Result<Map<figment::Profile, Dict>, figment::Error> {
+        Serialized::defaults(self.clone()).data()
     }
 }
 

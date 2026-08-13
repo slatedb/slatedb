@@ -16,7 +16,12 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::fs;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{Mutex, OnceCell};
+use tokio::task;
+use tokio::task::JoinHandle;
 use walkdir::WalkDir;
 
 use crate::cached_object_store::storage::{LocalCacheEntry, LocalCacheHead, LocalCacheStorage};
@@ -252,7 +257,7 @@ impl FsCacheEntry {
         // see https://github.com/slatedb/slatedb/pull/1342
         let invalidate_path = path.clone();
         #[allow(clippy::disallowed_methods)]
-        tokio::task::spawn_blocking(move || {
+        task::spawn_blocking(move || {
             let tmp_path = tmp_path.as_path();
             // ensure the parent folder exists
             if let Some(folder_path) = tmp_path.parent() {
@@ -355,7 +360,7 @@ impl LocalCacheEntry for FsCacheEntry {
         let file_cache = self.file_handle_cache.clone();
         let this_part_path = part_path.clone();
         #[allow(clippy::disallowed_methods)]
-        let result = tokio::task::spawn_blocking(move || {
+        let result = task::spawn_blocking(move || {
             let file = match file_cache.get_or_open(&this_part_path) {
                 Ok(Some(f)) => f,
                 Ok(None) => return Ok(None),
@@ -395,7 +400,7 @@ impl LocalCacheEntry for FsCacheEntry {
         };
 
         #[allow(clippy::disallowed_methods)]
-        tokio::task::spawn_blocking(move || {
+        task::spawn_blocking(move || {
             let target_prefix = "_part";
 
             let entries = match std::fs::read_dir(&directory_path) {
@@ -473,7 +478,7 @@ impl LocalCacheEntry for FsCacheEntry {
         let file_cache = self.file_handle_cache.clone();
         let this_head_path = head_path.clone();
         #[allow(clippy::disallowed_methods)]
-        let result = tokio::task::spawn_blocking(move || {
+        let result = task::spawn_blocking(move || {
             let file = match file_cache.get_or_open(&this_head_path) {
                 Ok(Some(f)) => f,
                 Ok(None) => return Ok(None),
@@ -551,13 +556,13 @@ struct FsCacheEvictor {
     root_folder: std::path::PathBuf,
     max_cache_size_bytes: usize,
     scan_interval: Option<Duration>,
-    tx: tokio::sync::mpsc::Sender<FsCacheEvictorWork>,
-    rx: Mutex<Option<tokio::sync::mpsc::Receiver<FsCacheEvictorWork>>>,
+    tx: mpsc::Sender<FsCacheEvictorWork>,
+    rx: Mutex<Option<mpsc::Receiver<FsCacheEvictorWork>>>,
     started: AtomicBool,
     queue_full_count: AtomicU64,
     last_queue_full_log_ms: AtomicI64,
-    background_evict_handle: OnceCell<tokio::task::JoinHandle<()>>,
-    background_scan_handle: OnceCell<tokio::task::JoinHandle<()>>,
+    background_evict_handle: OnceCell<JoinHandle<()>>,
+    background_scan_handle: OnceCell<JoinHandle<()>>,
     stats: Arc<CachedObjectStoreStats>,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
@@ -574,7 +579,7 @@ impl FsCacheEvictor {
         rand: Arc<DbRand>,
         file_handle_cache: FileHandleCache,
     ) -> Self {
-        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(100);
         Self {
             root_folder,
             scan_interval,
@@ -633,7 +638,7 @@ impl FsCacheEvictor {
 
     async fn background_evict(
         inner: Arc<FsCacheEvictorInner>,
-        mut rx: tokio::sync::mpsc::Receiver<FsCacheEvictorWork>,
+        mut rx: mpsc::Receiver<FsCacheEvictorWork>,
         system_clock: Arc<dyn SystemClock>,
     ) {
         loop {
@@ -684,7 +689,7 @@ impl FsCacheEvictor {
 
         match self.tx.try_send((path, access)) {
             Ok(()) => true,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            Err(TrySendError::Full(_)) => {
                 self.queue_full_count.fetch_add(1, Ordering::AcqRel);
                 let now_ms = self.system_clock.now().timestamp_millis();
                 let last_log_ms = self.last_queue_full_log_ms.load(Ordering::Acquire);
@@ -702,7 +707,7 @@ impl FsCacheEvictor {
                 }
                 false
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+            Err(TrySendError::Closed(_)) => false,
         }
     }
 }
@@ -782,7 +787,7 @@ impl FsCacheEvictorInner {
         let root_folder = self.root_folder.clone();
 
         #[allow(clippy::disallowed_methods)]
-        let paths = tokio::task::spawn_blocking(move || {
+        let paths = task::spawn_blocking(move || {
             WalkDir::new(&root_folder)
                 .into_iter()
                 .filter_map(|e| e.ok())
@@ -794,7 +799,7 @@ impl FsCacheEvictorInner {
         .unwrap_or_default();
 
         for path in paths {
-            let metadata = match tokio::fs::metadata(&path).await {
+            let metadata = match fs::metadata(&path).await {
                 Ok(metadata) => metadata,
                 Err(err) => {
                     if err.kind() != std::io::ErrorKind::NotFound {
@@ -908,7 +913,7 @@ impl FsCacheEvictorInner {
             // if the file is not found, still try to remove it from the cache_entries, and decrease the cache_size_bytes.
             // this might happen when the file is removed by other processes, or due to a race between the background
             // scan (which collects paths then processes them) and eviction deleting files in between.
-            match tokio::fs::remove_file(&target).await {
+            match fs::remove_file(&target).await {
                 Ok(()) => {
                     debug!(
                         "evictor evicted cache file [path={:?}, bytes={}]",
@@ -1107,7 +1112,7 @@ async fn delete_cache_entry(
     // Run deletion as a single blocking task rather than jumping back and
     // forth to the same blocking thread pool tokio uses under the hood.
     #[allow(clippy::disallowed_methods)]
-    let result = tokio::task::spawn_blocking(move || {
+    let result = task::spawn_blocking(move || {
         let result = std::fs::read_dir(&path);
         match result {
             Ok(read_dir) => {

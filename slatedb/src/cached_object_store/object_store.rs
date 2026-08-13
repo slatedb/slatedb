@@ -8,7 +8,7 @@ use crate::cached_object_store::LocalCacheEntry;
 use crate::config::ObjectStoreCacheOptions;
 use crate::object_store_tag::ObjectStoreCallTag;
 use bytes::{Bytes, BytesMut};
-use futures::{future::BoxFuture, stream, stream::BoxStream, StreamExt};
+use futures::{future, future::BoxFuture, stream, stream::BoxStream, StreamExt};
 use object_store::{path::Path, GetOptions, GetResult, ObjectMeta, ObjectStore, ObjectStoreExt};
 use object_store::{
     Attributes, CopyOptions, Extensions, GetRange, GetResultPayload, PutMultipartOptions,
@@ -1075,7 +1075,7 @@ impl MultipartUpload for CachingMultipartUpload {
                     entry.save_part(part_number, chunk).await.ok();
                 }
             };
-            let (result, ()) = futures::future::join(inner_fut, cache_fut).await;
+            let (result, ()) = future::join(inner_fut, cache_fut).await;
             result
         })
     }

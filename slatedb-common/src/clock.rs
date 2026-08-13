@@ -13,9 +13,12 @@ use crate::DbRand;
 use chrono::{DateTime, Utc};
 use rand::Rng;
 use std::{fmt::Debug, future::Future, ops::Range, pin::Pin, sync::Arc, time::Duration};
+use tokio::time;
 
 #[cfg(feature = "test-util")]
 use std::sync::atomic::{AtomicI64, Ordering};
+#[cfg(feature = "test-util")]
+use tokio::task;
 
 /// Defines the physical clock used to measure wall-clock time.
 pub trait SystemClock: Debug + Send + Sync {
@@ -133,14 +136,14 @@ impl<'a> SystemClockTicker<'a> {
 #[derive(Debug)]
 pub struct DefaultSystemClock {
     initial_ts: DateTime<Utc>,
-    initial_instant: tokio::time::Instant,
+    initial_instant: time::Instant,
 }
 
 impl DefaultSystemClock {
     pub fn new() -> Self {
         Self {
             initial_ts: Utc::now(),
-            initial_instant: tokio::time::Instant::now(),
+            initial_instant: time::Instant::now(),
         }
     }
 }
@@ -153,17 +156,17 @@ impl Default for DefaultSystemClock {
 
 impl SystemClock for DefaultSystemClock {
     fn now(&self) -> DateTime<Utc> {
-        let elapsed = tokio::time::Instant::now().duration_since(self.initial_instant);
+        let elapsed = time::Instant::now().duration_since(self.initial_instant);
         self.initial_ts + elapsed
     }
 
     #[cfg(feature = "test-util")]
     fn advance<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(tokio::time::advance(duration))
+        Box::pin(time::advance(duration))
     }
 
     fn sleep<'a>(&'a self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(tokio::time::sleep(duration))
+        Box::pin(time::sleep(duration))
     }
 
     fn ticker<'a>(&'a self, duration: Duration) -> SystemClockTicker<'a> {
@@ -225,7 +228,7 @@ impl SystemClock for MockSystemClock {
             // the block can yield control to other tasks. Calling advance() in a tight loop
             // would prevent other tasks from running in this case. Yielding control to other
             // tasks explicitly so we avoid this issue.
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         })
     }
 
@@ -236,7 +239,7 @@ impl SystemClock for MockSystemClock {
         Box::pin(async move {
             #[allow(clippy::while_immutable_condition)]
             while self.current_ts.load(Ordering::SeqCst) < end_time {
-                tokio::task::yield_now().await;
+                task::yield_now().await;
             }
         })
     }

@@ -12,6 +12,7 @@ use ulid::Ulid;
 
 use crate::bytes_range::BytesRange;
 use crate::checkpoint;
+use crate::compactor_state;
 use crate::compactor_state::{
     Compaction as CompactorCompaction, CompactionContext as CompactorCompactionContext,
     CompactionSpec as CompactorCompactionSpec, CompactionStatus,
@@ -654,14 +655,12 @@ impl FlatBufferCompactionsCodec {
         CompactorSubcompaction::new(range).with_output_ssts(output_ssts)
     }
 
-    fn worker_spec(
-        worker: root_generated::WorkerSpec,
-    ) -> Option<crate::compactor_state::WorkerSpec> {
+    fn worker_spec(worker: root_generated::WorkerSpec) -> Option<compactor_state::WorkerSpec> {
         // worker_id is the discriminator for "claimed" vs "unclaimed"; treat a
         // missing string as unclaimed even if the table itself was emitted.
-        worker.worker_id().map(|id| {
-            crate::compactor_state::WorkerSpec::new(id.to_string(), worker.last_heartbeat_ms())
-        })
+        worker
+            .worker_id()
+            .map(|id| compactor_state::WorkerSpec::new(id.to_string(), worker.last_heartbeat_ms()))
     }
 
     fn compaction_spec(
@@ -1167,7 +1166,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
 
     fn add_worker_spec(
         &mut self,
-        worker: &crate::compactor_state::WorkerSpec,
+        worker: &compactor_state::WorkerSpec,
     ) -> WIPOffset<root_generated::WorkerSpec<'b>> {
         let worker_id = self.builder.create_string(&worker.worker_id);
         root_generated::WorkerSpec::create(

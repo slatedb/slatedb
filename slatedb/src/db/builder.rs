@@ -118,7 +118,9 @@ use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
 use crate::block_cache_policy::BlockCachePolicy;
+use crate::bytes_range::BytesRange;
 use crate::cached_object_store::CachedObjectStore;
+use crate::clone;
 use crate::clone::{SegmentFilterFn, SegmentProjectionFn};
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
@@ -138,6 +140,12 @@ use crate::config::{CompactionWorkerOptions, CompactorOptions};
 use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
+#[cfg(any(feature = "foyer", feature = "moka"))]
+use crate::db_cache;
+#[cfg(feature = "foyer")]
+use crate::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
+#[cfg(feature = "moka")]
+use crate::db_cache::moka::{MokaCache, MokaCacheOptions};
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheWrapper, UnownedDbCache};
 use crate::db_reader::{DbReader, DbReaderMode};
@@ -157,6 +165,7 @@ use crate::merge_operator::MergeOperatorType;
 use crate::object_stores::ObjectStoreType;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
+use crate::prefix_extractor::PrefixExtractor;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::SafeSender;
@@ -195,7 +204,7 @@ pub struct DbBuilder<P: Into<Path>> {
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
-    segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+    segment_extractor: Option<Arc<dyn PrefixExtractor>>,
     wal_writer_init: Option<Box<dyn wal::WriterInit>>,
 }
 
@@ -238,10 +247,7 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// routing for all existing key schemas and keeps segment prefixes across
     /// schema versions an antichain (no prefix may be a proper prefix of
     /// another).
-    pub fn with_segment_extractor(
-        mut self,
-        extractor: Arc<dyn crate::prefix_extractor::PrefixExtractor>,
-    ) -> Self {
+    pub fn with_segment_extractor(mut self, extractor: Arc<dyn PrefixExtractor>) -> Self {
         self.segment_extractor = Some(extractor);
         self
     }
@@ -1668,7 +1674,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
-    segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+    segment_extractor: Option<Arc<dyn PrefixExtractor>>,
     options: DbReaderOptions,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
@@ -1726,10 +1732,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// re-derives each WAL-replayed entry's segment prefix so that in-memory
     /// segments are reported via [`DbReader::subscribe`]. Must match the
     /// extractor the database was created with.
-    pub fn with_segment_extractor(
-        mut self,
-        extractor: Arc<dyn crate::prefix_extractor::PrefixExtractor>,
-    ) -> Self {
+    pub fn with_segment_extractor(mut self, extractor: Arc<dyn PrefixExtractor>) -> Self {
         self.segment_extractor = Some(extractor);
         self
     }
@@ -2093,13 +2096,11 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
     {
         self.segment_projection = Some(Arc::new(move |prefix| {
             let r = f(prefix);
-            crate::bytes_range::BytesRange::try_new(
-                r.start_bound().cloned(),
-                r.end_bound().cloned(),
-            )
-            .ok_or_else(|| SlateDBError::InvalidProjection {
-                prefix: Bytes::copy_from_slice(prefix),
-                reason: "empty range".into(),
+            BytesRange::try_new(r.start_bound().cloned(), r.end_bound().cloned()).ok_or_else(|| {
+                SlateDBError::InvalidProjection {
+                    prefix: Bytes::copy_from_slice(prefix),
+                    reason: "empty range".into(),
+                }
             })
         }));
         self
@@ -2126,7 +2127,7 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
                 fp_registry.clone(),
             ))
         };
-        crate::clone::create_clone(
+        clone::create_clone(
             self.sources,
             self.clone_path,
             self.object_store,
@@ -2171,22 +2172,18 @@ fn instrumented_retrying_object_store(
 pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
     #[cfg(feature = "foyer")]
     {
-        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
-            crate::db_cache::foyer::FoyerCacheOptions {
-                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
-                ..Default::default()
-            },
-        )));
+        return Some(Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
+            max_capacity: db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+            ..Default::default()
+        })));
     }
     #[cfg(feature = "moka")]
     {
-        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
-            crate::db_cache::moka::MokaCacheOptions {
-                max_capacity: crate::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
-                time_to_live: None,
-                time_to_idle: None,
-            },
-        )));
+        return Some(Arc::new(MokaCache::new_with_opts(MokaCacheOptions {
+            max_capacity: db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+            time_to_live: None,
+            time_to_idle: None,
+        })));
     }
     None
 }
@@ -2195,22 +2192,18 @@ pub(crate) fn default_block_cache() -> Option<Arc<dyn DbCache>> {
 pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
     #[cfg(feature = "foyer")]
     {
-        return Some(Arc::new(crate::db_cache::foyer::FoyerCache::new_with_opts(
-            crate::db_cache::foyer::FoyerCacheOptions {
-                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
-                ..Default::default()
-            },
-        )));
+        return Some(Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
+            max_capacity: db_cache::DEFAULT_META_CACHE_CAPACITY,
+            ..Default::default()
+        })));
     }
     #[cfg(feature = "moka")]
     {
-        return Some(Arc::new(crate::db_cache::moka::MokaCache::new_with_opts(
-            crate::db_cache::moka::MokaCacheOptions {
-                max_capacity: crate::db_cache::DEFAULT_META_CACHE_CAPACITY,
-                time_to_live: None,
-                time_to_idle: None,
-            },
-        )));
+        return Some(Arc::new(MokaCache::new_with_opts(MokaCacheOptions {
+            max_capacity: db_cache::DEFAULT_META_CACHE_CAPACITY,
+            time_to_live: None,
+            time_to_idle: None,
+        })));
     }
     None
 }

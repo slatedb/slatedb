@@ -1,6 +1,7 @@
 use crate::blob::ReadOnlyBlob;
 use crate::config::CompressionCodec;
 use crate::db_state::{FilterFormat, SsTableInfo, SsTableInfoCodec, SstType};
+use crate::error::Error;
 use crate::error::SlateDBError;
 use crate::filter_policy::{BloomFilterPolicy, FilterPolicy, NamedFilter};
 use crate::flatbuffer_types::{
@@ -9,12 +10,22 @@ use crate::flatbuffer_types::{
 use crate::format::block::{Block, BlockBuilderV1};
 use crate::format::block_v2::BlockBuilderV2;
 use crate::format::row;
+use crate::sst_builder::BlockFormat;
 use crate::sst_stats::{BlockStats, SstStats};
+use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::{Buf, BufMut, Bytes};
 use flatbuffers::DefaultAllocator;
+#[cfg(feature = "zlib")]
+use flate2::read::ZlibDecoder;
+#[cfg(feature = "zlib")]
+use flate2::write::ZlibEncoder;
 use futures::future::try_join_all;
 use log::warn;
+#[cfg(feature = "lz4")]
+use lz4_flex::block;
+#[cfg(feature = "snappy")]
+use snap::raw::{Decoder, Encoder};
 use std::collections::VecDeque;
 #[cfg(feature = "zlib")]
 use std::io::Read;
@@ -22,6 +33,11 @@ use std::io::Read;
 use std::io::Write;
 use std::ops::Range;
 use std::sync::Arc;
+use tokio::task::coop;
+#[cfg(feature = "zstd")]
+use zstd::bulk;
+#[cfg(feature = "zstd")]
+use zstd::stream;
 
 // 8 bytes for the metadata offset + 2 bytes for the version
 const NUM_FOOTER_BYTES: usize = 10;
@@ -62,14 +78,14 @@ impl BlockBuilder {
         ))
     }
 
-    pub(crate) fn would_fit(&self, entry: &crate::types::RowEntry) -> bool {
+    pub(crate) fn would_fit(&self, entry: &RowEntry) -> bool {
         match self {
             Self::V1(builder) => builder.would_fit(entry),
             Self::V2(builder) => builder.would_fit(entry),
         }
     }
 
-    pub(crate) fn add(&mut self, entry: crate::types::RowEntry) -> Result<bool, SlateDBError> {
+    pub(crate) fn add(&mut self, entry: RowEntry) -> Result<bool, SlateDBError> {
         match self {
             Self::V1(builder) => builder.add(entry),
             Self::V2(builder) => builder.add(entry),
@@ -118,15 +134,15 @@ impl BlockBuilderWithStats {
         }
     }
 
-    pub(crate) fn would_fit(&self, entry: &crate::types::RowEntry) -> bool {
+    pub(crate) fn would_fit(&self, entry: &RowEntry) -> bool {
         self.builder.would_fit(entry)
     }
 
-    pub(crate) fn add(&mut self, entry: crate::types::RowEntry) -> Result<bool, SlateDBError> {
+    pub(crate) fn add(&mut self, entry: RowEntry) -> Result<bool, SlateDBError> {
         match &entry.value {
-            crate::types::ValueDeletable::Value(_) => self.stats.num_puts += 1,
-            crate::types::ValueDeletable::Merge(_) => self.stats.num_merges += 1,
-            crate::types::ValueDeletable::Tombstone => self.stats.num_deletes += 1,
+            ValueDeletable::Value(_) => self.stats.num_puts += 1,
+            ValueDeletable::Merge(_) => self.stats.num_merges += 1,
+            ValueDeletable::Tombstone => self.stats.num_deletes += 1,
         }
         self.builder.add(entry)
     }
@@ -185,10 +201,10 @@ pub(crate) const VERSION_SIZE: usize = SIZEOF_U16;
 #[async_trait]
 pub trait BlockTransformer: Send + Sync {
     /// Encode (transform) block data before storage.
-    async fn encode(&self, data: Bytes) -> Result<Bytes, crate::error::Error>;
+    async fn encode(&self, data: Bytes) -> Result<Bytes, Error>;
 
     /// Decode (inverse transform) block data after retrieval.
-    async fn decode(&self, data: Bytes) -> Result<Bytes, crate::error::Error>;
+    async fn decode(&self, data: Bytes) -> Result<Bytes, Error>;
 }
 
 impl SsTableInfo {
@@ -533,7 +549,7 @@ pub(crate) async fn compress_and_transform(
         Some(c) => {
             let compressed = compress(data, c)?;
             // Account for CPU-only compression work.
-            tokio::task::coop::consume_budget().await;
+            coop::consume_budget().await;
             compressed
         }
     };
@@ -561,15 +577,14 @@ pub(crate) fn compress(
     match c {
         #[cfg(feature = "snappy")]
         CompressionCodec::Snappy => {
-            let compressed = snap::raw::Encoder::new()
+            let compressed = Encoder::new()
                 .compress_vec(&data)
                 .map_err(|_| SlateDBError::BlockCompressionError)?;
             Ok(Bytes::from(compressed))
         }
         #[cfg(feature = "zlib")]
         CompressionCodec::Zlib => {
-            let mut encoder =
-                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
             encoder
                 .write_all(&data)
                 .map_err(|_| SlateDBError::BlockCompressionError)?;
@@ -581,13 +596,13 @@ pub(crate) fn compress(
         }
         #[cfg(feature = "lz4")]
         CompressionCodec::Lz4 => {
-            let compressed = lz4_flex::block::compress_prepend_size(&data);
+            let compressed = block::compress_prepend_size(&data);
             Ok(Bytes::from(compressed))
         }
         #[cfg(feature = "zstd")]
         CompressionCodec::Zstd => {
             let compressed =
-                zstd::bulk::compress(&data, 3).map_err(|_| SlateDBError::BlockCompressionError)?;
+                bulk::compress(&data, 3).map_err(|_| SlateDBError::BlockCompressionError)?;
             Ok(Bytes::from(compressed))
         }
     }
@@ -605,7 +620,7 @@ pub(crate) async fn transform(
                 .await
                 .map_err(|_| SlateDBError::BlockTransformError)?;
             // Account for CPU-only transformation work.
-            tokio::task::coop::consume_budget().await;
+            coop::consume_budget().await;
             transformed
         }
         None => data,
@@ -625,7 +640,7 @@ pub(crate) struct SsTableFormat {
     pub(crate) filter_policies: Vec<Arc<dyn FilterPolicy>>,
     pub(crate) compression_codec: Option<CompressionCodec>,
     pub(crate) block_transformer: Option<Arc<dyn BlockTransformer>>,
-    pub(crate) block_format: Option<crate::sst_builder::BlockFormat>,
+    pub(crate) block_format: Option<BlockFormat>,
 }
 
 impl Default for SsTableFormat {
@@ -888,13 +903,13 @@ impl SsTableFormat {
         match compression_option {
             #[cfg(feature = "snappy")]
             CompressionCodec::Snappy => Ok(Bytes::from(
-                snap::raw::Decoder::new()
+                Decoder::new()
                     .decompress_vec(&compressed_data)
                     .map_err(|_| SlateDBError::BlockDecompressionError)?,
             )),
             #[cfg(feature = "zlib")]
             CompressionCodec::Zlib => {
-                let mut decoder = flate2::read::ZlibDecoder::new(&compressed_data[..]);
+                let mut decoder = ZlibDecoder::new(&compressed_data[..]);
                 let mut decompressed = Vec::new();
                 decoder
                     .read_to_end(&mut decompressed)
@@ -903,13 +918,13 @@ impl SsTableFormat {
             }
             #[cfg(feature = "lz4")]
             CompressionCodec::Lz4 => {
-                let decompressed = lz4_flex::block::decompress_size_prepended(&compressed_data)
+                let decompressed = block::decompress_size_prepended(&compressed_data)
                     .map_err(|_| SlateDBError::BlockDecompressionError)?;
                 Ok(Bytes::from(decompressed))
             }
             #[cfg(feature = "zstd")]
             CompressionCodec::Zstd => {
-                let decompressed = zstd::stream::decode_all(&compressed_data[..])
+                let decompressed = stream::decode_all(&compressed_data[..])
                     .map_err(|_| SlateDBError::BlockDecompressionError)?;
                 Ok(Bytes::from(decompressed))
             }
