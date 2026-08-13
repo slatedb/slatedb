@@ -1333,7 +1333,8 @@ mod tests {
     ) -> Result<u64, SlateDBError> {
         let mut writer = table_store.table_writer(SsTableId::Wal(wal_id));
         let mut next_seq = next_seq;
-        while next_seq < next_seq + (max_entries as u64) {
+        let end_seq = next_seq + (max_entries as u64);
+        while next_seq < end_seq {
             let Some((key, value)) = entries.next() else {
                 break;
             };
