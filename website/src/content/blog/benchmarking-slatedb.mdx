@@ -21,7 +21,7 @@ Yet we found ourselves rebuilding SlateDB's benchmark suite a few weeks back. In
 
 We have had benchmarks for quite a while: [Criterion microbenchmarks](https://github.com/bheisler/criterion.rs) and a [`benchmark-db.sh`](https://github.com/slatedb/slatedb/blob/f88be86d17ac53260d3684edbc8f82811d945b5c/slatedb-bencher/benchmark-db.sh) script early on in the project. We also built a nightly job that runs `benchmark-db.sh` against a [Tigris](https://www.tigrisdata.com/) object store bucket. (A special thanks to them for donating the bucket to us free of charge.)
 
-These benchmarks were laregly ignored. The output was buried in a [GitHub Actions](https://docs.github.com/actions) summary. It didn't alert when significant regressions occurred, either. If you managed to find it, the output was hard to read. We used [Mermaid charts](https://mermaid.js.org/) with enough data points that the labels only worked when rotated vertically.
+These benchmarks were largely ignored. The output was buried in a [GitHub Actions](https://docs.github.com/actions) summary. It didn't alert when significant regressions occurred, either. If you managed to find it, the output was hard to read. We used [Mermaid charts](https://mermaid.js.org/) with enough data points that the labels only worked when rotated vertically.
 
 Our goal was to make SlateDB's benchmarks easier to find and understand. We also wanted better diagnostic information so developers could visualize SlateDB's behavior under different workloads.
 
