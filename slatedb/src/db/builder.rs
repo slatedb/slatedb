@@ -1148,7 +1148,7 @@ pub(crate) struct CompactorHandlers {
     /// The embedded worker handler and its receiver, present when
     /// [`CompactorOptions::worker`] is `Some`.
     pub(crate) worker: Option<(
-        crate::compaction_worker::CompactionWorkerHandler,
+        CompactionWorkerHandler,
         async_channel::Receiver<WorkerMessage>,
     )>,
 }
@@ -2097,7 +2097,7 @@ impl<R: RangeBounds<Bytes> + Clone> CloneBuilder<R> {
                 r.start_bound().cloned(),
                 r.end_bound().cloned(),
             )
-            .ok_or_else(|| crate::error::SlateDBError::InvalidProjection {
+            .ok_or_else(|| SlateDBError::InvalidProjection {
                 prefix: Bytes::copy_from_slice(prefix),
                 reason: "empty range".into(),
             })

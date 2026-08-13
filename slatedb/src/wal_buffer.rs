@@ -502,7 +502,7 @@ impl WalFlushHandler {
                 warn!("outstanding references to wal id {} after flushing", wal_id);
             }
             drop(wal);
-            self.notify_listener(wal::WalEvent::WalFlushed(status));
+            self.notify_listener(WalEvent::WalFlushed(status));
         }
 
         Ok(())
@@ -526,7 +526,7 @@ impl WalFlushHandler {
         Ok(())
     }
 
-    fn notify_listener(&self, event: wal::WalEvent) {
+    fn notify_listener(&self, event: WalEvent) {
         if let Some(l) = self.listener.as_ref() {
             (*l)(event);
         }
@@ -863,7 +863,7 @@ mod tests {
         observer
             .subscribe(Arc::new(move |status| {
                 (*listener)(status.clone());
-                let wal::WalEvent::WalFlushed(status) = status else {
+                let WalEvent::WalFlushed(status) = status else {
                     return;
                 };
                 oracle.advance_durable_seq(status.last_flushed_seq.unwrap_or(0))
@@ -1011,8 +1011,8 @@ mod tests {
         );
     }
 
-    fn recording_listener() -> (wal::WalStatusListener, Arc<Mutex<Vec<wal::WalEvent>>>) {
-        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    fn recording_listener() -> (wal::WalStatusListener, Arc<Mutex<Vec<WalEvent>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
         let recorder = events.clone();
         let listener = Arc::new(move |event| {
             recorder.lock().unwrap().push(event);
@@ -1038,7 +1038,7 @@ mod tests {
         let mut flushed: Vec<_> = recorded
             .iter()
             .filter_map(|e| {
-                let wal::WalEvent::WalFlushed(status) = e else {
+                let WalEvent::WalFlushed(status) = e else {
                     return None;
                 };
                 Some(status)

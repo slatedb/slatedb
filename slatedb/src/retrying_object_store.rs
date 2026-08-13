@@ -592,7 +592,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_opts_retries_transient_until_success() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(inner, 1));
         let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), None);
 
@@ -663,7 +663,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_opts_retry_sleep_uses_system_clock() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(inner, 1));
         let clock = Arc::new(MockSystemClock::new());
         let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), clock.clone(), None);
@@ -707,7 +707,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_opts_does_not_retry_on_already_exists() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(inner, 0));
         let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), None);
         let path = Path::from("/data/obj");
@@ -743,7 +743,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_head_retries_transient_until_success() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/x");
         inner
             .put(&path, PutPayload::from_bytes(Bytes::from_static(b"data")))
@@ -760,7 +760,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_opts_does_not_retry_on_precondition() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let failing = Arc::new(FlakyObjectStore::new(inner, 0).with_put_precondition_always());
         let retrying = RetryingObjectStore::new(failing.clone(), test_rand(), test_clock(), None);
         let path = Path::from("/p");
@@ -783,7 +783,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_opts_does_not_retry_on_not_modified() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let retrying = RetryingObjectStore::new(inner.clone(), test_rand(), test_clock(), None);
         let path = Path::from("/data/obj");
 
@@ -812,7 +812,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_retries_transient_until_success() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let paths = [
             Path::from("/items/a"),
             Path::from("/items/b"),
@@ -847,7 +847,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_with_offset_retries_transient_until_success() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let paths = [
             Path::from("/items/a"),
             Path::from("/items/b"),
@@ -885,7 +885,7 @@ mod tests {
     async fn test_put_opts_succeeds_on_matching_ulid() {
         // Simulate: put succeeds but returns AlreadyExists error (timeout after write)
         // The ULID in the object's metadata should match, so we return success
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let flaky = Arc::new(
             FlakyObjectStore::new(inner, 0).with_put_succeeds_but_returns_already_exists(),
         );
@@ -910,7 +910,7 @@ mod tests {
     #[tokio::test]
     async fn test_put_opts_fails_on_mismatched_ulid() {
         // First write a file with different ULID (simulating another client's write)
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/data/obj");
 
         // Write directly to inner store (no ULID from RetryingObjectStore)
@@ -948,7 +948,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_range_retries_transient_until_success() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/data/obj");
         inner
             .put(
@@ -972,7 +972,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_ranges_retries_transient_until_success() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/data/obj");
         inner
             .put(
@@ -1001,7 +1001,7 @@ mod tests {
         use object_store::{Attribute, Attributes, GetOptions};
         use std::borrow::Cow;
 
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let retrying = RetryingObjectStore::new(inner.clone(), test_rand(), test_clock(), None);
         let path = Path::from("/data/obj");
 
@@ -1120,7 +1120,7 @@ mod tests {
     #[tokio::test]
     async fn test_bounded_max_retries_gives_up_instead_of_retrying_forever() {
         // Store fails more times (5) than the configured retry bound (2).
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(inner, 5));
         let retrying = RetryingObjectStore::new(flaky.clone(), test_rand(), test_clock(), Some(2));
 

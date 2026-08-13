@@ -321,9 +321,9 @@ mod tests {
         let policy = BloomFilterPolicy::new(10);
         let mut builder = policy.builder();
         for k in [b"foo", b"bar", b"baz"] {
-            builder.add_entry(&crate::types::RowEntry::new(
-                bytes::Bytes::copy_from_slice(k),
-                crate::types::ValueDeletable::Value(bytes::Bytes::new()),
+            builder.add_entry(&RowEntry::new(
+                Bytes::copy_from_slice(k),
+                crate::types::ValueDeletable::Value(Bytes::new()),
                 0,
                 None,
                 None,

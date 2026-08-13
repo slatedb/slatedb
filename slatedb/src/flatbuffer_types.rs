@@ -464,7 +464,7 @@ impl FlatBufferManifestCodec {
     }
 
     fn decode_sorted_runs_v2(
-        runs: flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRunV2<'_>>>,
+        runs: Vector<'_, ForwardsUOffset<SortedRunV2<'_>>>,
         sst_lookup: &std::collections::HashMap<Ulid, SsTableHandle>,
     ) -> Result<Vec<db_state::SortedRun>, Box<dyn std::error::Error + Send + Sync>> {
         runs.iter()
@@ -503,8 +503,8 @@ impl FlatBufferManifestCodec {
     /// and a sorted-runs vector.
     fn decode_lsm_tree_v2(
         last_compacted_l0_sst_view_id: Option<FbUlid>,
-        l0: flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTableView<'_>>>,
-        compacted: flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<SortedRunV2<'_>>>,
+        l0: Vector<'_, ForwardsUOffset<CompactedSsTableView<'_>>>,
+        compacted: Vector<'_, ForwardsUOffset<SortedRunV2<'_>>>,
         sst_lookup: &std::collections::HashMap<Ulid, SsTableHandle>,
     ) -> Result<LsmTreeState, Box<dyn std::error::Error + Send + Sync>> {
         let last_compacted_l0_sst_view_id = last_compacted_l0_sst_view_id.map(|id| id.ulid());
@@ -837,7 +837,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
             SsTableId::Wal(_) => {
                 unreachable!("cannot pass WAL SST handle to create compacted sst")
             }
-            SsTableId::Compacted(ulid) => ulid,
+            Compacted(ulid) => ulid,
         };
         let compacted_sst_id = self.add_compacted_sst_id(&ulid);
         let compacted_sst_info = self.add_sst_info(&handle.info);
@@ -872,7 +872,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
             SsTableId::Wal(_) => {
                 unreachable!("cannot pass WAL SST handle to create compacted sst from view")
             }
-            SsTableId::Compacted(ulid) => ulid,
+            Compacted(ulid) => ulid,
         };
         let compacted_sst_id = self.add_compacted_sst_id(&ulid);
         let compacted_sst_info = self.add_sst_info(&view.sst.info);
@@ -896,7 +896,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
             SsTableId::Wal(_) => {
                 unreachable!("cannot pass WAL SST handle to create compacted sst v2")
             }
-            SsTableId::Compacted(ulid) => ulid,
+            Compacted(ulid) => ulid,
         };
         let compacted_sst_id = self.add_compacted_sst_id(&ulid);
         let compacted_sst_info = self.add_sst_info(&handle.info);
@@ -918,7 +918,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
             SsTableId::Wal(_) => {
                 unreachable!("cannot pass WAL SST handle to create compacted sst view")
             }
-            SsTableId::Compacted(ulid) => ulid,
+            Compacted(ulid) => ulid,
         };
         let sst_id = self.add_compacted_sst_id(&ulid);
         let visible_range = view.visible_range.as_ref().map(|r| self.add_bytes_range(r));
@@ -1279,13 +1279,13 @@ impl<'b> DbFlatBufferBuilder<'b> {
             std::collections::BTreeMap::new();
         for tree in core.trees() {
             for view in tree.l0.iter() {
-                if let SsTableId::Compacted(ulid) = view.sst.id {
+                if let Compacted(ulid) = view.sst.id {
                     unique_ssts.entry(ulid).or_insert(&view.sst);
                 }
             }
             for sr in tree.compacted.iter() {
                 for view in sr.sst_views() {
-                    if let SsTableId::Compacted(ulid) = view.sst.id {
+                    if let Compacted(ulid) = view.sst.id {
                         unique_ssts.entry(ulid).or_insert(&view.sst);
                     }
                 }
@@ -2155,7 +2155,7 @@ mod tests {
         ];
 
         for status in statuses {
-            let fb_status = super::FbCompactionStatus::from(status);
+            let fb_status = FbCompactionStatus::from(status);
             let round_trip = CompactionStatus::from(fb_status);
             assert_eq!(round_trip, status);
         }
@@ -2167,7 +2167,7 @@ mod tests {
         let compactions = Compactions::new(1);
         let bytes = codec.encode(&compactions);
 
-        let invalid_version = super::COMPACTIONS_FORMAT_VERSION + 1;
+        let invalid_version = COMPACTIONS_FORMAT_VERSION + 1;
         let mut invalid_bytes = bytes.to_vec();
         invalid_bytes[0] = (invalid_version >> 8) as u8;
         invalid_bytes[1] = invalid_version as u8;
@@ -2359,9 +2359,9 @@ mod tests {
             },
         );
         let l0_ulid = ulid::Ulid::new();
-        let l0_id = super::root_generated::Ulid::create(
+        let l0_id = root_generated::Ulid::create(
             &mut fbb,
-            &super::root_generated::UlidArgs {
+            &root_generated::UlidArgs {
                 high: (l0_ulid.0 >> 64) as u64,
                 low: ((l0_ulid.0 << 64) >> 64) as u64,
             },
@@ -2386,9 +2386,9 @@ mod tests {
             },
         );
         let sr_ulid = ulid::Ulid::new();
-        let sr_id = super::root_generated::Ulid::create(
+        let sr_id = root_generated::Ulid::create(
             &mut fbb,
-            &super::root_generated::UlidArgs {
+            &root_generated::UlidArgs {
                 high: (sr_ulid.0 >> 64) as u64,
                 low: ((sr_ulid.0 << 64) >> 64) as u64,
             },
@@ -2411,8 +2411,8 @@ mod tests {
             },
         );
         let compacted_vec = fbb.create_vector(&[sorted_run]);
-        let checkpoints_vec = fbb
-            .create_vector::<flatbuffers::ForwardsUOffset<super::root_generated::Checkpoint>>(&[]);
+        let checkpoints_vec =
+            fbb.create_vector::<flatbuffers::ForwardsUOffset<root_generated::Checkpoint>>(&[]);
         let manifest = ManifestV1::create(
             &mut fbb,
             &ManifestV1Args {
@@ -2509,9 +2509,9 @@ mod tests {
             },
         );
         let sst_ulid = ulid::Ulid::new();
-        let sst_id = super::root_generated::Ulid::create(
+        let sst_id = root_generated::Ulid::create(
             &mut fbb,
-            &super::root_generated::UlidArgs {
+            &root_generated::UlidArgs {
                 high: (sst_ulid.0 >> 64) as u64,
                 low: ((sst_ulid.0 << 64) >> 64) as u64,
             },
@@ -2528,9 +2528,9 @@ mod tests {
         let output_ssts_vec = fbb.create_vector(&[output_sst]);
         // Build a compaction with a tiered spec
         let source_ulid = ulid::Ulid::new();
-        let source_id = super::root_generated::Ulid::create(
+        let source_id = root_generated::Ulid::create(
             &mut fbb,
-            &super::root_generated::UlidArgs {
+            &root_generated::UlidArgs {
                 high: (source_ulid.0 >> 64) as u64,
                 low: ((source_ulid.0 << 64) >> 64) as u64,
             },
@@ -2548,9 +2548,9 @@ mod tests {
             },
         );
         let compaction_ulid = ulid::Ulid::new();
-        let compaction_id = super::root_generated::Ulid::create(
+        let compaction_id = root_generated::Ulid::create(
             &mut fbb,
-            &super::root_generated::UlidArgs {
+            &root_generated::UlidArgs {
                 high: (compaction_ulid.0 >> 64) as u64,
                 low: ((compaction_ulid.0 << 64) >> 64) as u64,
             },
@@ -2564,7 +2564,7 @@ mod tests {
                 status: fb_status,
                 output_ssts: Some(output_ssts_vec),
                 worker: None,
-                ctx_type: super::root_generated::CompactionContext::NONE,
+                ctx_type: root_generated::CompactionContext::NONE,
                 ctx: None,
             },
         );
@@ -2605,9 +2605,9 @@ mod tests {
         };
         let mut fbb = flatbuffers::FlatBufferBuilder::new();
         let source_ulid = ulid::Ulid::new();
-        let source_id = super::root_generated::Ulid::create(
+        let source_id = root_generated::Ulid::create(
             &mut fbb,
-            &super::root_generated::UlidArgs {
+            &root_generated::UlidArgs {
                 high: (source_ulid.0 >> 64) as u64,
                 low: ((source_ulid.0 << 64) >> 64) as u64,
             },
@@ -2624,9 +2624,9 @@ mod tests {
             },
         );
         let compaction_ulid = ulid::Ulid::new();
-        let compaction_id = super::root_generated::Ulid::create(
+        let compaction_id = root_generated::Ulid::create(
             &mut fbb,
-            &super::root_generated::UlidArgs {
+            &root_generated::UlidArgs {
                 high: (compaction_ulid.0 >> 64) as u64,
                 low: ((compaction_ulid.0 << 64) >> 64) as u64,
             },
@@ -2640,7 +2640,7 @@ mod tests {
                 status: FbCompactionStatus::Running,
                 output_ssts: None,
                 worker: None,
-                ctx_type: super::root_generated::CompactionContext::NONE,
+                ctx_type: root_generated::CompactionContext::NONE,
                 ctx: None,
             },
         );
@@ -2692,9 +2692,9 @@ mod tests {
             },
         );
         let compaction_ulid = ulid::Ulid::new();
-        let compaction_id = super::root_generated::Ulid::create(
+        let compaction_id = root_generated::Ulid::create(
             &mut fbb,
-            &super::root_generated::UlidArgs {
+            &root_generated::UlidArgs {
                 high: (compaction_ulid.0 >> 64) as u64,
                 low: ((compaction_ulid.0 << 64) >> 64) as u64,
             },
@@ -2708,7 +2708,7 @@ mod tests {
                 status: FbCompactionStatus::Running,
                 output_ssts: None,
                 worker: None,
-                ctx_type: super::root_generated::CompactionContext::NONE,
+                ctx_type: root_generated::CompactionContext::NONE,
                 ctx: None,
             },
         );

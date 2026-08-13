@@ -1112,7 +1112,7 @@ mod tests {
 
         // Create an uninitialized manifest with an invalid checkpoint id
         let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
-        let non_existent_source_checkpoint_id = uuid::Uuid::new_v4();
+        let non_existent_source_checkpoint_id = Uuid::new_v4();
         StoredManifest::store_uninitialized_clone(
             clone_manifest_store,
             Manifest::cloned(
@@ -1226,7 +1226,7 @@ mod tests {
             Manifest::cloned(
                 &parent_manifest,
                 original_parent_path.to_string(),
-                uuid::Uuid::new_v4(),
+                Uuid::new_v4(),
                 rand.clone(),
             ),
             system_clock.clone(),

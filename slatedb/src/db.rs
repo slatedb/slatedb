@@ -133,7 +133,7 @@ impl DbInner {
         wal_observer: Box<dyn WalObserver>,
         recorder: MetricsRecorderHelper,
         fp_registry: Arc<FailPointRegistry>,
-        merge_operator: Option<crate::merge_operator::MergeOperatorType>,
+        merge_operator: Option<MergeOperatorType>,
         status_manager: Arc<DbStatusManager>,
         segment_extractor: Option<Arc<dyn PrefixExtractor>>,
     ) -> Result<Self, SlateDBError> {
@@ -2724,7 +2724,7 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
-    fn assert_value(entry: &crate::types::RowEntry, expected: &[u8]) {
+    fn assert_value(entry: &RowEntry, expected: &[u8]) {
         match &entry.value {
             crate::types::ValueDeletable::Value(v) => assert_eq!(v.as_ref(), expected),
             other => panic!("expected Value({expected:?}), got {other:?}"),
@@ -3349,7 +3349,7 @@ mod tests {
         // Simulate a failed state (e.g. fenced).
         db.inner
             .status_manager
-            .write_result(Err(crate::error::SlateDBError::Fenced));
+            .write_result(Err(SlateDBError::Fenced));
 
         // close() should succeed but not flush when failed.
         db.close().await.unwrap();
@@ -7625,9 +7625,7 @@ mod tests {
         // freeze the job after its first output SSTs upload. Manifest and
         // `.compactions` I/O use the ungated store passed to `Db::builder`,
         // so the worker's heartbeats keep flowing while the job is frozen.
-        let gated = Arc::new(crate::test_utils::GatedObjectStore::new(
-            object_store.clone(),
-        ));
+        let gated = Arc::new(GatedObjectStore::new(object_store.clone()));
         let gated_store: Arc<dyn ObjectStore> = gated.clone();
 
         let db = Db::builder(path, object_store.clone())
@@ -7791,19 +7789,13 @@ mod tests {
         }
 
         db.put(b"key1", b"value1").await.unwrap();
-        db.inner
-            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
-            .await
-            .unwrap();
+        db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let txn_seq = txn.seqnum();
 
         db.put(b"key2", b"value2").await.unwrap();
-        db.inner
-            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
-            .await
-            .unwrap();
+        db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         let min_active_seq = db.inner.txn_manager.min_active_seq();
         assert_eq!(min_active_seq, Some(txn_seq));
@@ -7820,10 +7812,7 @@ mod tests {
         drop(txn);
 
         db.put(b"key3", b"value3").await.unwrap();
-        db.inner
-            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
-            .await
-            .unwrap();
+        db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         {
             let state = db.inner.state.read();
@@ -7844,19 +7833,13 @@ mod tests {
         let db = Db::builder(path, object_store).build().await.unwrap();
 
         db.put(b"key1", b"value1").await.unwrap();
-        db.inner
-            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
-            .await
-            .unwrap();
+        db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         let snapshot = db.snapshot().await.unwrap();
         let snapshot_seq = snapshot.seq();
 
         db.put(b"key2", b"value2").await.unwrap();
-        db.inner
-            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
-            .await
-            .unwrap();
+        db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let txn_seq = txn.seqnum();
@@ -7869,10 +7852,7 @@ mod tests {
         assert!(snapshot_seq < txn_seq);
 
         db.put(b"key3", b"value3").await.unwrap();
-        db.inner
-            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
-            .await
-            .unwrap();
+        db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         {
             let state = db.inner.state.read();
@@ -7887,10 +7867,7 @@ mod tests {
         drop(snapshot);
 
         db.put(b"key4", b"value4").await.unwrap();
-        db.inner
-            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
-            .await
-            .unwrap();
+        db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         assert_eq!(db.inner.snapshot_manager.min_active_seq(), None);
         assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
@@ -7914,19 +7891,13 @@ mod tests {
         let db = Db::builder(path, object_store).build().await.unwrap();
 
         db.put(b"key1", b"value1").await.unwrap();
-        db.inner
-            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
-            .await
-            .unwrap();
+        db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
         let txn_seq = txn.seqnum();
 
         db.put(b"key2", b"value2").await.unwrap();
-        db.inner
-            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
-            .await
-            .unwrap();
+        db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         let snapshot = db.snapshot().await.unwrap();
         let snapshot_seq = snapshot.seq();
@@ -7939,10 +7910,7 @@ mod tests {
         assert!(txn_seq < snapshot_seq);
 
         db.put(b"key3", b"value3").await.unwrap();
-        db.inner
-            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
-            .await
-            .unwrap();
+        db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         {
             let state = db.inner.state.read();
@@ -7957,10 +7925,7 @@ mod tests {
         drop(txn);
 
         db.put(b"key4", b"value4").await.unwrap();
-        db.inner
-            .flush_memtables(crate::memtable_flusher::FlushTarget::All)
-            .await
-            .unwrap();
+        db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         assert_eq!(db.inner.txn_manager.min_active_seq(), None);
         assert_eq!(
@@ -9271,7 +9236,7 @@ mod tests {
         // When: the DB is fenced (simulated via closed_result)
         db.inner
             .status_manager
-            .write_result(Err(crate::error::SlateDBError::Fenced));
+            .write_result(Err(SlateDBError::Fenced));
 
         // Then: the watcher should report close_reason = Fenced
         let status = tokio::time::timeout(
@@ -10655,7 +10620,7 @@ mod tests {
     async fn test_wal_replay_rejects_empty_extractor_prefix() {
         #[derive(Debug)]
         struct AliasedAlwaysEmptyExtractor;
-        impl crate::PrefixExtractor for AliasedAlwaysEmptyExtractor {
+        impl PrefixExtractor for AliasedAlwaysEmptyExtractor {
             fn name(&self) -> &str {
                 "fixed-3"
             }
@@ -10874,10 +10839,10 @@ mod tests {
     }
 
     impl ExtractorConfig {
-        fn to_extractor(self) -> Option<Arc<dyn crate::PrefixExtractor>> {
+        fn to_extractor(self) -> Option<Arc<dyn PrefixExtractor>> {
             #[derive(Debug)]
             struct OtherExtractor;
-            impl crate::PrefixExtractor for OtherExtractor {
+            impl PrefixExtractor for OtherExtractor {
                 fn name(&self) -> &str {
                     "other"
                 }
@@ -11855,12 +11820,12 @@ mod tests {
             }
 
             /// A path under the db root, e.g. `sub_path("wal/00..002.sst")`.
-            fn sub_path(&self, suffix: &str) -> object_store::path::Path {
-                object_store::path::Path::from(format!("{}/{}", self.db_path, suffix))
+            fn sub_path(&self, suffix: &str) -> Path {
+                Path::from(format!("{}/{}", self.db_path, suffix))
             }
 
             /// Number of cached part files for an object.
-            fn cached_part_count(&self, path: &object_store::path::Path) -> usize {
+            fn cached_part_count(&self, path: &Path) -> usize {
                 let dir = self.cache_root.join(path.to_string());
                 let Ok(entries) = std::fs::read_dir(dir) else {
                     return 0;
@@ -11876,7 +11841,7 @@ mod tests {
                     .count()
             }
 
-            fn assert_cached(&self, path: &object_store::path::Path, expected_parts: usize) {
+            fn assert_cached(&self, path: &Path, expected_parts: usize) {
                 assert_eq!(
                     self.cached_part_count(path),
                     expected_parts,
@@ -11897,7 +11862,7 @@ mod tests {
             }
 
             /// Lists the compacted SSTs currently in the object store.
-            async fn compacted_locations(&self) -> Vec<object_store::path::Path> {
+            async fn compacted_locations(&self) -> Vec<Path> {
                 let prefix = self.sub_path("compacted");
                 self.upstream
                     .list(Some(&prefix))
@@ -11907,13 +11872,13 @@ mod tests {
             }
 
             /// The size of an object as stored upstream, in bytes.
-            async fn object_size(&self, path: &object_store::path::Path) -> u64 {
+            async fn object_size(&self, path: &Path) -> u64 {
                 self.upstream.head(path).await.unwrap().size
             }
 
             /// The upstream path of a compacted SST id.
-            fn compacted_sst_path(&self, id: &SsTableId) -> object_store::path::Path {
-                crate::paths::PathResolver::from_root(self.db_path.as_str()).sst_path(id)
+            fn compacted_sst_path(&self, id: &SsTableId) -> Path {
+                PathResolver::from_root(self.db_path.as_str()).sst_path(id)
             }
 
             fn l0_ids(&self) -> Vec<SsTableId> {

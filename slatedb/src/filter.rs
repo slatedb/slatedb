@@ -113,7 +113,7 @@ impl BloomFilter {
     /// checksum, which are accounted for at the SST level.
     pub(crate) fn estimate_encoded_size(num_keys: u32, filter_bits_per_key: u32) -> usize {
         let filter_bytes = BloomFilterBuilder::filter_size_bytes(num_keys, filter_bits_per_key);
-        let num_probes_size = std::mem::size_of::<u16>();
+        let num_probes_size = size_of::<u16>();
         filter_bytes + num_probes_size
     }
 

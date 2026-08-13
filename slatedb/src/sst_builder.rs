@@ -1389,7 +1389,7 @@ mod tests {
         let transformer = Arc::new(XorTransformer { key: 0xAB });
 
         #[cfg(feature = "snappy")]
-        let compression = Some(crate::config::CompressionCodec::Snappy);
+        let compression = Some(CompressionCodec::Snappy);
         #[cfg(not(feature = "snappy"))]
         let compression = None;
 
