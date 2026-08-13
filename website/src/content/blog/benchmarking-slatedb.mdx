@@ -71,7 +71,7 @@ Another result came from our new cost performance metrics. We recently added [di
 
 Most SlateDB deployments keep the writer, compactor, and garbage collector in one process, though. We were still using remote-style object store polling in that scenario. The benchmark showed that an idle database with default settings cost roughly $40 per-month in API polling fees. We made the local coordination path in-memory while preserving the state needed for remote compactors to participate. The idle cost fell to under $5. In practice, you would tune your compactor settings or close idle databases, but $40 per-month is clearly excessive.
 
-The benchmarks also changed how we think about disk caching. SlateDB has a block cache and an object-store cache. The block cache holds pieces such as data blocks, index blocks, filters, and metadata. The object-store cache works at a larger granularity; its default partition size was 4 MiB. That granularity is expensive when a cache miss occurs. A request for a small key can trigger a 4 MiB fetch from object storage. This appeared as significant latency spikes in our P99 metrics.
+The benchmarks also changed how we think about disk caching. SlateDB has a block cache and an object-store cache. The block cache holds pieces such as data blocks, index blocks, filters, and metadata. The object-store cache works at a larger granularity; its default partition size is 4 MiB. That granularity is expensive when a cache miss occurs. A request for a small key can trigger a 4 MiB fetch from object storage. This appeared as significant latency spikes in our P99 metrics.
 
 <ChartEmbed
 	src="/charts/benchmark-balanced-get-latency.html"
