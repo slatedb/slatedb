@@ -10,7 +10,7 @@ import ChartEmbed from '../../components/ChartEmbed.astro';
 
 SlateDB has been around for a few years now. We've begun to pay more attention to performance recently. As [Kent Beck](https://en.wikipedia.org/wiki/Kent_Beck) (purportedly) said, ["Make It Work, Make It Right, Make It Fast."](https://wiki.c2.com/?MakeItWorkMakeItRightMakeItFast) We feel we've earned the right to make SlateDB fast. Of course, before we improve things, we need to measure them. When it comes to performance, that means benchmarks.
 
-Benchmarks are tricky. It's easy to do something that is perceived as marketing, hyperbole, or outright dishonesty. It's questionable whether public benchmarks are even useful anymore. A max-effort LLM such as Fable or Sol is capable of building excellent bespoke benchmarks for each user.
+Benchmarks are tricky. It's easy to do something that is perceived as marketing, hyperbole, or outright dishonesty. It's questionable whether public benchmarks are even useful anymore. A frontier LLM is capable of building excellent bespoke benchmarks for each user.
 
 Yet we found ourselves rebuilding SlateDB's benchmark suite a few weeks back. In this post, we'll share the benchmarking philosophy we landed on, how we benchmarked SlateDB, and some things we learned along the way.
 
@@ -44,7 +44,7 @@ Both YCSB and db_bench contain more workloads than we wanted to publish. We're p
 
 The suite follows YCSB and DBBench workloads where possible, but SlateDB does not map perfectly to either. SlateDB is designed around object storage. That changes the cost and latency profile of a cache miss in ways that do not exist when the entire database sits on local NVMe.
 
-For many read benchmarks, we configured SlateDB’s cache to hold roughly a 10% of the database. The rest lives in object storage. A DBBench run of RocksDB may keep the entire database on local disk. This is clearly an apples to oranges comparison. They are, however, closer to the way many users would configure SlateDB than a fully local cache would be (though some of our users do that, too).
+For many read benchmarks, we configured SlateDB’s cache to hold roughly a 10% of the database. The rest lives in object storage. A DBBench run of RocksDB keeps the entire database on local disk. This is clearly an apples to oranges comparison. They are, however, closer to the way many users would configure SlateDB than a fully local cache would be (though some of our users do that, too).
 
 The same tradeoff applies to mixed workloads. A read that misses the cache can take tens or hundreds of milliseconds while data comes back from object storage. If one task does both reads and writes, those misses hold back its write throughput. We could separate readers and writers, add far more tasks, and report a stronger aggregate throughput number. We kept the configuration closer to the original workload instead.
 
