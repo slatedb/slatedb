@@ -16,6 +16,12 @@ path = "src/main.rs"
 # See https://bheisler.github.io/criterion.rs/book/faq.html
 bench = false
 
+[[bin]]
+name = "wal-bench"
+path = "src/wal.rs"
+# This is an executable benchmark driver, not a libtest benchmark target.
+bench = false
+
 [dependencies]
 bytes = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["derive"] }

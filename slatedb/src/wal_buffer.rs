@@ -108,6 +108,12 @@ struct WalBufferIterator {
 }
 
 impl WalBufferManager {
+    #[cfg(feature = "bencher")]
+    pub(crate) fn unflushed_wal_file_count(&self) -> usize {
+        let inner = self.inner.read();
+        inner.immutable_wals.len() + usize::from(!inner.current_wal.is_empty())
+    }
+
     pub(crate) async fn start_new(
         closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         recorder: &MetricsRecorderHelper,

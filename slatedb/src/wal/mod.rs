@@ -11,6 +11,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub(crate) mod admin;
+#[cfg(feature = "bencher")]
+mod bench;
+#[cfg(feature = "bencher")]
+pub use bench::{
+    run_bench, WalBenchMeasurement, WalBenchPhase, WalBenchResult,
+    DEFAULT_WAL_BENCH_DATA_SIZE_BYTES,
+};
 pub(crate) mod gc;
 pub(crate) mod reader;
 #[cfg(test)]
