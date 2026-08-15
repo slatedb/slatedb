@@ -812,8 +812,8 @@ benchmark tools that instantiate `DbBench` with a db configured to use a custom 
 
 ## Packaging
 
-The WAL traits and conformance tests will reside in a new crate called `slatedb-wal`. The native
-WAL implementation remains in `slatedb`.
+The WAL traits and conformance tests will all reside in the `wal` module. The native
+WAL implementation will move to a nested module `wal::slatedb`.
 
 ## Alternatives
 
@@ -853,6 +853,15 @@ reasonable/general.
 We could have `WalReader`/`WalIterator` iterate over WAL Files which in turn support row-based 
 iteration (similar to the CDC `WalReader`). I don't really see the benefit of imposing the extra 
 layering. It also forces implementations to map each write batch to a single WAL File.
+
+**Put WAL Trait Definitions in Separate Create**
+Initially this RFC proposed putting the WAL trait defs in a separate crate so that implementors
+only need to import that crate (vs all of slatedb). We opted not to go this route for a few reasons:
+- This requires moving core slatedb types out to either the new wal crate or to slatedb-common. In
+  particular, we'd need to move all the manifest definitions (`VersionedManifest`, `Manifest`) and
+  `RowEntry` as these are used by the writer init and reader/iterator, respectively.
+- A separate crate isn't that useful. Implementors will almost always have to import slatedb
+  anyway to run end-to-end tests. And users of custom WALs would be importing slatedb anyway.
 
 ## Open Questions
 
