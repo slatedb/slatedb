@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use crate::iter::IterationOrder;
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
-use crate::wal::slatedb::wal_iterator::{SlateDbWalIterator, SlateDbWalIteratorOptions};
+use crate::wal::slatedb::iterator::{SlateDbWalIterator, SlateDbWalIteratorOptions};
 use crate::wal::{WalError, WalFileRange, WalIterator, WalReader};
 
 pub(crate) struct SlateDbWalReader {

@@ -33,7 +33,7 @@ use crate::paths::PathResolver;
 use crate::sst_builder::EncodedSsTableBuilder;
 use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
-use crate::wal::slatedb::wal_sst_builder::EncodedWalSsTableBuilder;
+use crate::wal::slatedb::sst_builder::EncodedWalSsTableBuilder;
 
 pub(crate) struct TableStore {
     object_stores: ObjectStores,

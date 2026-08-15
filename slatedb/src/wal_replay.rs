@@ -3,7 +3,7 @@ use crate::manifest::ManifestCore;
 use crate::mem_table::WritableKVTable;
 use crate::tablestore::TableStore;
 #[cfg(test)]
-use crate::wal::slatedb::wal_iterator::{SlateDbWalIterator, SlateDbWalIteratorOptions};
+use crate::wal::slatedb::iterator::{SlateDbWalIterator, SlateDbWalIteratorOptions};
 use crate::wal::WalIterator as WalIteratorTrait;
 #[cfg(test)]
 use std::ops::Range;

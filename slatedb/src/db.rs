@@ -3760,7 +3760,7 @@ mod tests {
         tokio::time::timeout(
             Duration::from_secs(1),
             db.task_executor
-                .join_task(crate::wal::slatedb::wal_writer::WAL_BUFFER_TASK_NAME),
+                .join_task(crate::wal::slatedb::writer::WAL_BUFFER_TASK_NAME),
         )
         .await
         .expect("native WAL task should not run when the WAL is disabled")
