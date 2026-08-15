@@ -88,15 +88,15 @@ replays these WAL files into memtables, filtering out any rows with sequence num
 
 **Writes**
 
-Once it's recovered persisted writes, the db hands the WAL (`WalBufferManager`) off to the 
-Batch Writer task. This task serializes all writes and buffers them in `WalBufferManager`, 
-which periodically flushes the writes to a new WAL file. `WalBufferManager` notifies blocked 
+Once it's recovered persisted writes, the db hands the WAL (`SlateDbWalWriter`) off to the
+Batch Writer task. This task serializes all writes and buffers them in `SlateDbWalWriter`,
+which periodically flushes the writes to a new WAL file. `SlateDbWalWriter` notifies blocked
 write tasks when writes are durably flushed. 
 
 **Memtable/L0 Flushing**
 
 The Batch Writer task adds writes to the memtable once they've been buffered in 
-`WalBufferManager`. It "freezes" memtables once they cross the memtable size threshold and 
+`SlateDbWalWriter`. It "freezes" memtables once they cross the memtable size threshold and
 annotates the frozen memtable with a `replay_after_wal_id` which holds the ID of some WAL File 
 whose writes are fully covered by the memtable (in the current implementation this is the last 
 durably flushed WAL File). The frozen memtables are picked up by a separate Manifest Writer task,
@@ -112,7 +112,7 @@ described above depending on what the user requested.
 
 **Checkpoints**
 
-When `WalBufferManager` durably persists a WAL File, it notifies the db, which updates 
+When `SlateDbWalWriter` durably persists a WAL File, it notifies the db, which updates
 `last_seen_wal_id` in the manifest with the flushed WAL ID. `DbReader` uses this field to 
 determine the range of WAL Files that should be read for a checkpoint.
 
