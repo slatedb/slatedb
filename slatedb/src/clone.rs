@@ -605,7 +605,7 @@ mod tests {
     use crate::proptest_util::{rng, sample};
     use crate::test_utils;
     use crate::utils::IdGenerator;
-    use crate::wal::admin::SlateDbWalAdmin;
+    use crate::wal::slatedb::admin::SlateDbWalAdmin;
     use crate::wal::{WalAdmin, WalError, WalFileRange, WalGc};
     use async_trait::async_trait;
     use bytes::Bytes;

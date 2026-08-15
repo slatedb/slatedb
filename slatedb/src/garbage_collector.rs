@@ -24,7 +24,7 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
-use crate::wal::gc::{SlateDbWalGc, WalGcMode};
+use crate::wal::slatedb::gc::{SlateDbWalGc, WalGcMode};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;

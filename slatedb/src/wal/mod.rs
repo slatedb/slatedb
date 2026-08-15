@@ -10,14 +10,10 @@ use std::ops::{Bound, Range};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(crate) mod admin;
-pub(crate) mod gc;
-pub(crate) mod reader;
+pub(crate) mod slatedb;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub(crate) mod wal_disabled;
-pub(crate) mod wal_sst_builder;
-pub(crate) mod writer_init;
 
 /// A range of WAL File IDs
 #[derive(Clone, Debug, Eq, PartialEq)]
