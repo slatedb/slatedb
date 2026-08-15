@@ -15,6 +15,8 @@ pub(crate) mod slatedb;
 pub(crate) mod test_utils;
 pub(crate) mod wal_disabled;
 
+pub use crate::wal::slatedb::reader::SlateDbWalReader;
+
 /// A range of WAL File IDs
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WalFileRange(pub Bound<u64>, pub Bound<u64>);
