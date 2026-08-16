@@ -162,10 +162,20 @@ The PUT policy returns one of two actions for a tagged compacted SST:
 | `WriteBack` | The SST is durable locally | Background |
 
 The wrapper invokes the PUT policy only for tagged compacted SSTs. WAL and
-untagged PUTs bypass it. SlateDB currently writes every compacted SST through a
-tagged `BufWriter`, which uses the multipart object-store API. Multipart
-completion is therefore the commit point for both `WriteThrough` and
-`WriteBack`. WAL SSTs and fence objects use the conditional single-PUT path with
+untagged PUTs bypass it. SlateDB writes compacted SSTs through a tagged
+`BufWriter`. SSTs smaller than the writer's buffer use `put_opts`; larger SSTs
+use `put_multipart_opts`. The cache applies the same PUT policy and local
+durability requirements to both paths.
+
+For `WriteBack`, `put_opts` returns after the complete local file has been
+synced and queued for background upload. For multipart writes, the cache returns
+a multipart implementation that writes parts to the local file without waiting
+for remote part uploads. Its `complete()` returns after the complete local file
+has been synced and queued; the remote multipart upload may still be in flight.
+`WriteThrough` uses the same local and upload paths but waits for remote
+completion before returning.
+
+WAL SSTs and fence objects use the conditional single-PUT path with
 `PutMode::Create`; they bypass the cache and remain write-through so fencing
 errors are returned to the caller.
 
@@ -211,9 +221,9 @@ pub trait GetPolicy: Send + Sync + Debug + 'static {
 
 pub enum PutAction {
     /// Write the SST locally and remotely, returning only after the remote
-    /// multipart upload completes.
+    /// upload completes.
     WriteThrough,
-    /// Write the SST locally and complete the multipart upload in the
+    /// Write and sync the SST locally, then complete the remote upload in the
     /// background.
     ///
     /// Local writes will remain visible to the current process until the upload
@@ -228,10 +238,19 @@ pub trait PutPolicy: Send + Sync + Debug + 'static {
 }
 
 impl CachedObjectStore {
-    pub fn new(
+    pub fn builder(
         local_root_folder: impl Into<PathBuf>,
         object_store: Arc<dyn ObjectStore>,
-    ) -> Self;
+    ) -> CachedObjectStoreBuilder;
+    /// Populates the cache with compacted SSTs referenced by the latest
+    /// manifest.
+    pub async fn warm(
+        &self,
+        db_root: impl Into<object_store::path::Path>,
+    ) -> Result<(), Error>;
+}
+
+impl CachedObjectStoreBuilder {
     /// Sets the GET policy for tagged compacted SST reads. The default is
     /// `DefaultCacheGetPolicy::new(GetAction::ReadThrough)`.
     pub fn with_get_policy(self, policy: Arc<dyn GetPolicy>) -> Self;
@@ -254,12 +273,9 @@ impl CachedObjectStore {
         self,
         interval: Option<Duration>,
     ) -> Self;
-    /// Populates the cache with compacted SSTs referenced by the latest
-    /// manifest.
-    pub async fn warm(
-        &self,
-        db_root: impl Into<object_store::path::Path>,
-    ) -> Result<(), Error>;
+    /// Validates the configuration, prepares and cleans the local directories,
+    /// and starts background workers.
+    pub async fn build(self) -> Result<Arc<CachedObjectStore>, Error>;
 }
 
 #[async_trait]
@@ -276,7 +292,7 @@ let remote: Arc<dyn ObjectStore> = Arc::new(
         .with_bucket_name("my-bucket")
         .build()?,
 );
-let cache = CachedObjectStore::new("/var/lib/slatedb/cache", remote)
+let cache = CachedObjectStore::builder("/var/lib/slatedb/cache", remote)
     .with_get_policy(Arc::new(DefaultCacheGetPolicy::new(
         GetAction::ReadThrough,
     )))
@@ -285,7 +301,9 @@ let cache = CachedObjectStore::new("/var/lib/slatedb/cache", remote)
     )))
     .with_prefetch_concurrency(4)
     .with_upload_concurrency(4)
-    .with_reconciliation_interval(Some(Duration::from_secs(60)));
+    .with_reconciliation_interval(Some(Duration::from_secs(60)))
+    .build()
+    .await?;
 cache.warm("my-db").await?;
 let db = Db::builder(db_path, cache).build().await?;
 ```
@@ -398,15 +416,25 @@ responsible for populating the cache before database instantiation using
 
 ### Write Semantics
 
-The flow for a write is:
+The flow for either a single-PUT or multipart write is:
 
-1. Write the SST under `uploading/` while streaming it to the remote store.
-2. Flush the complete local file, register its path and operation sequence in
-   the pending-upload map, and atomically rename it into `objects/`.
-3. Complete the remote multipart upload.
+1. Write the SST under `uploading/`. A `WriteBack` multipart write does not wait
+   on remote I/O on the caller's part-write path.
+2. Call `sync_all` on the complete local file, register its path and operation
+   sequence in the pending-upload map, atomically rename it into `objects/`, and
+   sync the destination parent directory and any newly created ancestors. This
+   is the local durability point.
+3. Upload the complete local file to the remote store. The upload worker chooses
+   single-PUT or multipart upload as appropriate and owns remote retries.
 
-`WriteBack` returns after step 2. `WriteThrough` waits for step 3. In both cases,
-the path remains registered as pending until the remote upload completes.
+`WriteBack` returns after step 2, so the local file and its directory entry are
+durable before the write is acknowledged while the remote upload may still be
+in flight. `WriteThrough` waits for step 3. In both cases, the path remains
+registered as pending until the remote upload completes.
+
+A `WriteBack` call returns a `PutResult` without a remote ETag or version because
+those fields do not exist until the background upload completes. Current tagged
+compacted SST writers discard the `PutResult`; other calls bypass the PUT policy.
 
 `WriteBack` can move local files into `objects/` before the remote write
 completes. Before that rename, the cache registers the object path and its
@@ -497,14 +525,15 @@ prefix.
 
 ### Construction and Cleanup
 
-Building a `CachedObjectStore` removes files under `uploading/` and
-`downloading/` before starting background work. Deleting those incomplete files
-is safe. The cache does not forward a manifest or compactions PUT until every
-earlier asynchronous SST upload has completed remotely. A local SST left in
-`objects/` by an acknowledged write-back loses its pending-map entry after a
-crash, but it cannot be referenced by published remote metadata unless its
-remote upload completed. Reconciliation preserves it if it exists remotely and
-removes it otherwise.
+`CachedObjectStoreBuilder::build` validates its options, prepares the local
+directories, and removes files under `uploading/` and `downloading/` before
+starting background work. It returns an error if any of this setup fails.
+Deleting those incomplete files is safe. The cache does not forward a manifest
+or compactions PUT until every earlier asynchronous SST upload has completed
+remotely. A local SST left in `objects/` by an acknowledged write-back loses its
+pending-map entry after a crash, but it cannot be referenced by published remote
+metadata unless its remote upload completed. Reconciliation preserves it if it
+exists remotely and removes it otherwise.
 
 The built-in `ReadThrough` policy can start with an empty directory and populate
 it on demand. `LocalOnly` assumes required SSTs were written through this cache
