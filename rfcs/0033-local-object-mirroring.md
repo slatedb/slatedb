@@ -1,4 +1,4 @@
-# Replace the Object Store Cache with a Local Mirror
+# Rewrite CachedObjectStore
 
 Table of Contents:
 
@@ -22,7 +22,7 @@ Table of Contents:
   - [Delete Semantics](#delete-semantics)
   - [Reconciliation](#reconciliation)
   - [Failure and Restart](#failure-and-restart)
-  - [Removing CachedObjectStore](#removing-cachedobjectstore)
+  - [Replacing the Part Cache](#replacing-the-part-cache)
 - [Impact Analysis](#impact-analysis)
 - [Operations](#operations)
   - [Performance and Cost](#performance-and-cost)
@@ -50,10 +50,10 @@ Authors:
 evicts fixed-size parts like a best-effort cache, while some workloads expect it
 to keep every live SST on local disk. It does neither job particularly well.
 
-This RFC removes `CachedObjectStore`. Best-effort block caching belongs in
+This RFC rewrites `CachedObjectStore`. Best-effort block caching belongs in
 SlateDB's `DbCache`, where Foyer's `HybridCache` stores the blocks a read
-actually asks for. A new `MirroredObjectStore` stores whole compacted SSTs.
-Per-call GET and PUT policies control how the mirror routes I/O.
+actually asks for. The rewritten `CachedObjectStore` stores whole compacted
+SSTs. Per-call GET and PUT policies control how the cache routes I/O.
 
 The default GET action, `ReadThrough`, serves a missing range from remote
 storage and fetches the full SST in the background. `LocalOnly` instead treats
@@ -70,13 +70,13 @@ upload may still be pending.
 
 Write-back has a remote publication barrier: every earlier compacted SST write
 must reach object storage before a manifest or compactions record is published.
-The mirror implements this ordering inside the `ObjectStore` wrapper. SlateDB
-has no mirror-specific builder hooks. An optional public `warm_mirror` utility
+The cache implements this ordering inside the `ObjectStore` wrapper. SlateDB
+has no cache-specific builder hooks. An optional public `warm_cache` utility
 reads a database's latest manifest and populates every compacted SST it
 references.
 
-A remote DELETE that passes through the mirror removes the matching local SST
-immediately. By default, each mirror also reconciles its local `objects/` tree
+A remote DELETE that passes through the cache removes the matching local SST
+immediately. By default, each cache also reconciles its local `objects/` tree
 with remote storage every minute, so remote GC running on another machine
 eventually removes stale local SSTs as well. Operators may disable
 reconciliation.
@@ -126,15 +126,17 @@ The built-in policies divide as follows:
 Best-effort hot block caching is separate from both choices. It belongs in
 `DbCache`, backed by Foyer `HybridCache`.
 
-Foyer and the mirror may be layered. Foyer caches decoded blocks; the mirror
-stores whole SSTs. The GET policy determines whether a local miss falls through
-to remote storage or reports a broken invariant. The PUT policy determines when
-an SST write is acknowledged.
+Foyer and the rewritten cache may be layered. Foyer caches decoded blocks; the
+cache stores whole SSTs. The GET policy determines whether a local miss falls
+through to remote storage or reports a broken invariant. The PUT policy
+determines when an SST write is acknowledged.
 
 ## Goals
 
-- Remove the part-based `CachedObjectStore` and its eviction machinery.
-- Use Foyer for best-effort block caching and the mirror for whole-SST locality.
+- Replace `CachedObjectStore`'s part-based implementation and eviction
+  machinery with whole-SST storage.
+- Use Foyer for best-effort block caching and `CachedObjectStore` for whole-SST
+  locality.
 - Serve read-through misses without waiting for the background cache fill, and
   keep every newly written compacted SST local instead of dropping admission.
 - Let deployments reject local SST misses instead of silently reading
@@ -144,11 +146,11 @@ an SST write is acknowledged.
 - Preserve remote consistency by publishing data before metadata that references
   it.
 - Support removing local SSTs deleted by remote GC, whether the DELETE passes
-  through this mirror or occurs on another machine.
+  through this cache or occurs on another machine.
 - Provide an explicit utility for populating every compacted SST referenced by
   a database's latest manifest.
-- Keep the mirror behind the standard `ObjectStore` interface so SlateDB does
-  not need mirror-specific configuration or lifecycle code.
+- Keep the cache behind the standard `ObjectStore` interface so SlateDB does
+  not need cache-specific configuration or lifecycle code.
 
 ## Non-Goals
 
@@ -158,15 +160,15 @@ an SST write is acknowledged.
 - Automatically preload or validate a complete existing database under
   `LocalOnly`. Reconciliation only removes local SSTs confirmed absent
   remotely; a normal local miss remains an error. Applications may call
-  `warm_mirror` explicitly.
+  `warm_cache` explicitly.
 - Make local disk loss transparent to an in-flight local-only read.
 - Recover unpublished write-back work after a process crash. Queued staging
   files are safe to discard because the publication barrier prevents metadata
   from referencing them.
-- Coordinate multiple `MirroredObjectStore` instances through one mirror root.
+- Coordinate multiple `CachedObjectStore` instances through one cache root.
   A root belongs to one live wrapper.
 - Change the SlateDB manifest, compactions, WAL, or SST wire formats.
-- Mirror WAL SSTs, manifests, compactions records, GC boundaries, or arbitrary
+- Cache WAL SSTs, manifests, compactions records, GC boundaries, or arbitrary
   objects. WAL and untagged coordination traffic passes directly to the wrapped
   store.
 
@@ -174,15 +176,15 @@ an SST write is acknowledged.
 
 ### GET and PUT Policies
 
-The mirror borrows the per-call policy pattern from `CachedObjectStore`, but
-uses mirror-specific actions. A `MirrorGetPolicy` receives the compacted SST's
+The rewritten cache retains the per-call policy pattern from the current
+`CachedObjectStore`. A `CacheGetPolicy` receives the compacted SST's
 `ObjectStoreCallTag`, then returns one of three actions:
 
 | GET action | Local hit | Local miss |
 |---|---|---|
 | `Bypass` | Not checked | Forward the original GET to the wrapped store without local admission |
 | `ReadThrough` | Serve it | Forward the requested GET and schedule a full-SST background fill after the foreground GET succeeds |
-| `LocalOnly` | Serve it | Return `LocalMirrorError` without accessing remote storage |
+| `LocalOnly` | Serve it | Return `LocalCacheError` without accessing remote storage |
 
 `ReadThrough` keeps the full download off the foreground path. A custom policy
 can use `Bypass` for call sources such as compaction scans.
@@ -190,10 +192,10 @@ can use `Bypass` for call sources such as compaction scans.
 The wrapper invokes the policy only for calls carrying an
 `ObjectStoreCallTag` whose `sst_type` is `Compacted`. Tagged WAL calls and
 untagged calls bypass before policy dispatch. This is an implementation
-invariant, so a custom policy cannot accidentally mirror WALs, manifests, or
+invariant, so a custom policy cannot accidentally cache WALs, manifests, or
 other coordination objects.
 
-`DefaultMirrorGetPolicy` returns its configured action for every tagged
+`DefaultCacheGetPolicy` returns its configured action for every tagged
 compacted GET:
 
 | Request | Routing |
@@ -220,10 +222,10 @@ The wrapper invokes the PUT policy only for tagged compacted SSTs. WAL and
 untagged PUTs bypass it. SlateDB currently writes compacted SSTs unconditionally:
 buffered single PUTs use `PutMode::Overwrite`, while larger SSTs use multipart
 uploads. Both are eligible for `WriteBack`. WAL SSTs use `PutMode::Create` for
-fencing and bypass the mirror. If a future tagged compacted write is
+fencing and bypass the cache. If a future tagged compacted write is
 conditional, selecting `WriteBack` executes as `WriteThrough` so the caller
 receives the remote precondition result. There is no PUT `Bypass` action:
-storing every tagged compacted SST locally is part of the mirror's contract.
+storing every tagged compacted SST locally is part of the cache's contract.
 
 Any GET policy may be paired with any PUT policy. Both PUT actions store newly
 written compacted SSTs as whole local files and use the same upload queue. A
@@ -233,97 +235,93 @@ is available only after a queued SST has uploaded. Losing its queued staging
 file poisons the upload queue because no remote copy exists yet.
 
 Tagged WAL operations and untagged operations are never read from or written
-to the local mirror. They are forwarded to the wrapped store, although
+to the local cache. They are forwarded to the wrapped store, although
 write-back may hold a manifest or compactions PUT at the remote publication
 barrier described below.
 
 ### Public API
 
-`MirroredObjectStore` is a normal `ObjectStore` implementation. Users construct
+`CachedObjectStore` is a normal `ObjectStore` implementation. Users construct
 it around their remote store and pass it through the existing
 `DbBuilder::new`/`Db::builder` object-store parameter. SlateDB does not gain a
-mirror setting or a mirror-specific builder method.
+cache-specific `DbBuilder` method.
 
 ```rust
-pub enum MirrorGetAction {
+pub enum CacheGetAction {
     Bypass,
     ReadThrough,
     LocalOnly,
 }
 
-pub trait MirrorGetPolicy: Send + Sync + Debug + 'static {
-    fn get_action(&self, tag: &ObjectStoreCallTag) -> MirrorGetAction;
+pub trait CacheGetPolicy: Send + Sync + Debug + 'static {
+    fn get_action(&self, tag: &ObjectStoreCallTag) -> CacheGetAction;
 }
 
-pub enum MirrorPutAction {
+pub enum CachePutAction {
     WriteThrough,
     WriteBack,
 }
 
-pub trait MirrorPutPolicy: Send + Sync + Debug + 'static {
-    fn put_action(&self, tag: &ObjectStoreCallTag) -> MirrorPutAction;
+pub trait CachePutPolicy: Send + Sync + Debug + 'static {
+    fn put_action(&self, tag: &ObjectStoreCallTag) -> CachePutAction;
 }
 
-pub struct DefaultMirrorGetPolicy {
-    action: MirrorGetAction,
+pub struct DefaultCacheGetPolicy {
+    action: CacheGetAction,
 }
 
-impl DefaultMirrorGetPolicy {
-    pub fn new(action: MirrorGetAction) -> Self;
+impl DefaultCacheGetPolicy {
+    pub fn new(action: CacheGetAction) -> Self;
 }
 
-pub struct DefaultMirrorPutPolicy {
-    action: MirrorPutAction,
+pub struct DefaultCachePutPolicy {
+    action: CachePutAction,
 }
 
-impl DefaultMirrorPutPolicy {
-    pub fn new(action: MirrorPutAction) -> Self;
+impl DefaultCachePutPolicy {
+    pub fn new(action: CachePutAction) -> Self;
 }
 
-pub struct MirroredObjectStoreOptions {
-    pub root_folder: PathBuf,
-    pub get_policy: Arc<dyn MirrorGetPolicy>,
-    pub put_policy: Arc<dyn MirrorPutPolicy>,
-    pub prefetch_concurrency: usize,
-    pub upload_concurrency: usize,
-    pub reconciliation_interval: Option<Duration>,
+pub struct CachedObjectStoreBuilder {
+    // Private fields.
 }
 
-impl MirroredObjectStoreOptions {
-    pub fn new(root_folder: impl Into<PathBuf>) -> Self;
-    pub fn with_get_policy(self, policy: Arc<dyn MirrorGetPolicy>) -> Self;
-    pub fn with_put_policy(self, policy: Arc<dyn MirrorPutPolicy>) -> Self;
+impl CachedObjectStore {
+    pub fn builder(
+        root_folder: impl Into<PathBuf>,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> CachedObjectStoreBuilder;
+}
+
+impl CachedObjectStoreBuilder {
+    pub fn with_get_policy(self, policy: Arc<dyn CacheGetPolicy>) -> Self;
+    pub fn with_put_policy(self, policy: Arc<dyn CachePutPolicy>) -> Self;
     pub fn with_prefetch_concurrency(self, concurrency: usize) -> Self;
     pub fn with_upload_concurrency(self, concurrency: usize) -> Self;
     pub fn with_reconciliation_interval(self, interval: Option<Duration>) -> Self;
-}
-impl MirroredObjectStore {
-    pub async fn new(
-        remote: Arc<dyn ObjectStore>,
-        options: MirroredObjectStoreOptions,
-    ) -> Result<Self, Error>;
+    pub async fn build(self) -> Result<Arc<CachedObjectStore>, Error>;
 }
 
-pub struct WarmMirrorResult {
+pub struct WarmCacheResult {
     pub manifest_id: u64,
     pub populated_ssts: usize,
     pub already_present_ssts: usize,
     pub populated_bytes: u64,
 }
 
-pub async fn warm_mirror(
-    mirror: &MirroredObjectStore,
+pub async fn warm_cache(
+    cache: &CachedObjectStore,
     db_root: impl Into<object_store::path::Path>,
-) -> Result<WarmMirrorResult, Error>;
+) -> Result<WarmCacheResult, Error>;
 
 #[async_trait]
-impl ObjectStore for MirroredObjectStore {
+impl ObjectStore for CachedObjectStore {
     // Standard ObjectStore methods delegate to local and remote storage.
 }
 ```
 
-The defaults are `DefaultMirrorGetPolicy::new(MirrorGetAction::ReadThrough)` and
-`DefaultMirrorPutPolicy::new(MirrorPutAction::WriteThrough)`. Applications use
+The defaults are `DefaultCacheGetPolicy::new(CacheGetAction::ReadThrough)` and
+`DefaultCachePutPolicy::new(CachePutAction::WriteThrough)`. Applications use
 the policy setters to replace either default.
 
 The reconciliation interval defaults to `Some(Duration::from_secs(60))`.
@@ -336,24 +334,20 @@ let remote: Arc<dyn ObjectStore> = Arc::new(
         .with_bucket_name("my-bucket")
         .build()?,
 );
-let mirror = Arc::new(
-    MirroredObjectStore::new(
-        remote,
-        MirroredObjectStoreOptions::new("/var/lib/slatedb/my-db"),
-    )
-    .await?,
-);
-let warmed = warm_mirror(mirror.as_ref(), db_path.clone()).await?;
-let db = Db::builder(db_path, mirror).build().await?;
+let cache = CachedObjectStore::builder("/var/lib/slatedb/my-db", remote)
+    .build()
+    .await?;
+let warmed = warm_cache(cache.as_ref(), db_path.clone()).await?;
+let db = Db::builder(db_path, cache).build().await?;
 ```
 
-Calling `warm_mirror` is optional. The utility has no options: it warms every
-compacted SST in the latest manifest, uses the mirror's existing remote-read
+Calling `warm_cache` is optional. The utility has no options: it warms every
+compacted SST in the latest manifest, uses the cache's existing remote-read
 concurrency and retry policy, and returns an error if any SST cannot be
 populated. Callers that do not need eager population omit the call.
 
-`Db::close()` requires no mirror-specific follow-up. Its default close options
-perform a final memtable flush and publish the resulting metadata. The mirror's
+`Db::close()` requires no cache-specific follow-up. Its default close options
+perform a final memtable flush and publish the resulting metadata. The cache's
 publication barrier makes that metadata PUT wait for every earlier queued SST,
 so close returns only after every SST referenced by the closed database state
 has reached remote storage. `close_with_options()` can disable the final flush;
@@ -362,56 +356,56 @@ output may still be discarded after a crash.
 
 ### Architecture
 
-The user supplies the mirror as the main object store. SlateDB then applies its
+The user supplies the cache as the main object store. SlateDB then applies its
 existing internal wrappers. The base-to-outer construction order is:
 
 ```text
-S3ObjectStore -> MirroredObjectStore -> InstrumentedObjectStore -> RetryingObjectStore
+S3ObjectStore -> CachedObjectStore -> InstrumentedObjectStore -> RetryingObjectStore
 ```
 
 Requests travel in the opposite direction:
 
 ```text
-RetryingObjectStore -> InstrumentedObjectStore -> MirroredObjectStore -> S3ObjectStore
+RetryingObjectStore -> InstrumentedObjectStore -> CachedObjectStore -> S3ObjectStore
 ```
 
 This differs slightly from putting instrumentation outside retrying. SlateDB
 intentionally puts `InstrumentedObjectStore` inside `RetryingObjectStore` so
-each retry attempt is counted. Metrics record calls into the mirror, not the
-extra remote GET that a read-through miss starts in the background. The mirror
+each retry attempt is counted. Metrics record calls into the cache, not the
+extra remote GET that a read-through miss starts in the background. The cache
 therefore owns retries and metrics for background fills, uploads, and
 reconciliation.
 
-`LocalMirrorError` must map to a non-retryable `object_store::Error` variant.
+`LocalCacheError` must map to a non-retryable `object_store::Error` variant.
 Otherwise SlateDB's outer retry wrapper would turn a local-only miss or a
 permanent local-disk failure into an unbounded retry loop. This is a wrapper
-integration detail, not a mirror-specific branch in SlateDB.
+integration detail, not a cache-specific branch in SlateDB.
 
-The mirror applies the local data path only to calls carrying an
+The cache applies the local data path only to calls carrying an
 `ObjectStoreCallTag` whose `sst_type` is `Compacted`. It classifies calls before
 policy dispatch, so a custom policy cannot opt WAL or untagged traffic into the
-mirror. A retry after validation failure quarantines the local file before the
+cache. A retry after validation failure quarantines the local file before the
 GET policy runs.
 
 WAL operations, reads and writes of manifests, compactions records, and GC
 boundaries, along with LIST, untagged HEAD, copy, and other untagged operations,
 always go to the wrapped remote store. In particular, a GC boundary check can
-never be answered from the mirror, even if the mirror directory happens to
+never be answered from the cache, even if the cache directory happens to
 contain a file at the same local path. The wrapper uses the tag, not the
 object path, to decide which reads and writes are compacted SST operations.
 After that classification, it maps the object locally by placing its full
 canonical object-store path below `objects/`.
 
 Because the wrapper is supplied through the normal `ObjectStore` parameter,
-the same type works with `Db`, `DbReader`, and `Compactor`. A mirror root belongs
-to one live `MirroredObjectStore`. Components for the same database in the same
+the same type works with `Db`, `DbReader`, and `Compactor`. A cache root belongs
+to one live `CachedObjectStore`. Components for the same database in the same
 process may share the wrapper through `Arc`; separate wrappers, including
 wrappers in separate processes, must use separate roots. This ownership rule is
 a caller contract.
 
 ### Whole-SST Local Layout
 
-Each mirrored SST maps to one local file. The mirror uses the canonical
+Each cached SST maps to one local file. The cache uses the canonical
 `object_store::path::Path` directly as a relative path below `objects/`. It
 appends the path's existing components without percent-decoding or otherwise
 transforming them. `object_store::path::Path` has no leading or trailing
@@ -419,21 +413,21 @@ separator, empty component, `.` or `..` component, or ASCII control character,
 so a valid path is already relative and cannot lexically escape `objects/`.
 
 ```text
-<mirror-root>/
+<cache-root>/
   objects/<full-object-store-path>
   staging/<operation-id>
 ```
 
-Before accessing a local file, the mirror verifies that every object-store path
+Before accessing a local file, the cache verifies that every object-store path
 component maps to exactly one native filesystem component and that the result
 remains below `objects/`. A path that the local filesystem cannot represent
-losslessly returns `LocalMirrorError`. This includes an alias with an existing
+losslessly returns `LocalCacheError`. This includes an alias with an existing
 path on a case-insensitive filesystem.
 
 For example:
 
 ```text
-<mirror-root>/
+<cache-root>/
   objects/
     tenant1/foo/bar/baz/compacted/abc1234.sst
     tenant2/source-db/compacted/def5678.sst
@@ -441,7 +435,7 @@ For example:
 ```
 
 Clone and split SSTs arrive with their source database's full object-store
-path, so they naturally group below that source database path. The mirror does
+path, so they naturally group below that source database path. The cache does
 not need to know which database is current or classify an SST as owned versus
 external. It does not parse the path to find a database root. One representable
 canonical remote object path always maps to the same local path.
@@ -450,9 +444,9 @@ Each file stores the SST body followed by a compact footer containing the
 body length, checksum, attributes, and cached `ObjectMeta`. Keeping the body at
 offset zero makes range reads direct, while the footer lets tagged local GETs
 preserve object metadata without an in-memory index or a second sidecar file.
-On every local open, the mirror verifies that the requested remote path exactly
+On every local open, the cache verifies that the requested remote path exactly
 matches the footer's `ObjectMeta.location`. A mismatch reports
-`LocalMirrorError` rather than serving an aliased local file.
+`LocalCacheError` rather than serving an aliased local file.
 
 An SST becomes generally readable locally only after its complete body and
 footer are written to `staging/` and atomically renamed into `objects/`.
@@ -462,18 +456,18 @@ map and submitted to the upload queue. Reads through this wrapper can use that
 complete staging file while its upload is pending. Partial downloads and
 multipart uploads are never visible as live SSTs.
 
-After a queued SST uploads successfully, the mirror records the remote metadata
+After a queued SST uploads successfully, the cache records the remote metadata
 in its footer, renames the staging file into `objects/`, flushes the parent
 directory, and only then marks its sequence resolved. There is no durable
 metadata for the queue.
 
 ### Construction and Cleanup
 
-`MirroredObjectStore::new` removes abandoned files under `staging/` before
+Building a `CachedObjectStore` removes abandoned files under `staging/` before
 starting background work. It does not alter `objects/` or read or interpret a
 SlateDB manifest.
 
-Deleting all staging files at construction is safe. The mirror does not forward
+Deleting all staging files at construction is safe. The cache does not forward
 a manifest or compactions PUT until every earlier asynchronous SST upload has
 completed and its local file has moved into `objects/`. A file left under
 `staging/` after a crash therefore cannot be referenced by published remote
@@ -486,34 +480,34 @@ could delete active staging files or race local publication. The implementation
 does not attempt to detect that misuse.
 
 The built-in `ReadThrough` policy can start with an empty directory and populate
-it on demand. `LocalOnly` assumes required SSTs were written through this mirror
+it on demand. `LocalOnly` assumes required SSTs were written through this cache
 or populated explicitly. Opening an existing remote database with an empty
-mirror configured for `LocalOnly` will fail on the first missing SST.
+cache configured for `LocalOnly` will fail on the first missing SST.
 
 SlateDB does not coordinate publication barriers or root ownership on the
-mirror's behalf.
+cache's behalf.
 
 ### Explicit Warming
 
-There are three ways to populate the mirror:
+There are three ways to populate the cache:
 
 1. Any successful tagged compacted SST write installs the complete local SST.
 2. A tagged compacted `ReadThrough` miss schedules a full-SST background fill.
-3. An application can call `warm_mirror` to populate the compacted SSTs in a
+3. An application can call `warm_cache` to populate the compacted SSTs in a
    database's latest manifest and wait for atomic publication.
 
-`warm_mirror` is a public SlateDB utility rather than a method on
-`MirroredObjectStore`. This keeps manifest interpretation out of the wrapper's
-normal `ObjectStore` implementation while letting the utility use the mirror's
+`warm_cache` is a public SlateDB utility rather than a method on
+`CachedObjectStore`. This keeps manifest interpretation out of the wrapper's
+normal `ObjectStore` implementation while letting the utility use the cache's
 private population primitive. `CacheManager` remains responsible for decoded
 block-cache entries; this RFC does not add an object target or change
 `DbCacheManagerOps::warm_sst`.
 
-The utility takes the existing `MirroredObjectStore` and a database root in the
+The utility takes the existing `CachedObjectStore` and a database root in the
 wrapped store's logical namespace. It reads the latest manifest, constructs a
 `PathResolver` with the manifest's external SST mappings, enumerates every
 compacted SST referenced by L0, sorted runs, and segments, and deduplicates the
-resolved object paths. It then populates missing paths with the mirror's
+resolved object paths. It then populates missing paths with the cache's
 existing remote-read concurrency and retry policy. Each population is
 single-flight with concurrent read-through fills and warm calls for the same
 path.
@@ -524,10 +518,10 @@ length, and checksum validate. An invalid local file is quarantined and fetched
 again. Otherwise the utility downloads the full SST, writes and flushes a
 staging file, and atomically renames it into `objects/` before counting it as
 populated. A failure returns an error without removing SSTs already populated
-by the call. The utility bypasses `MirrorGetPolicy`, so it works when ordinary
+by the call. The utility bypasses `CacheGetPolicy`, so it works when ordinary
 reads use `LocalOnly` or `Bypass`.
 
-`WarmMirrorResult::manifest_id` defines the consistency boundary: success means
+`WarmCacheResult::manifest_id` defines the consistency boundary: success means
 every compacted SST referenced by that manifest was locally available when the
 utility completed. Another writer may publish a newer manifest concurrently,
 so the result does not guarantee that the warmed manifest is still latest.
@@ -536,10 +530,10 @@ utility again when it has advanced, but this does not eliminate the race.
 Preventing a newer manifest from becoming visible until its SSTs are local
 would require DB lifecycle integration and is outside this RFC.
 
-When the mirror wraps a `PrefixStore`, `db_root` is relative to the prefix
+When the cache wraps a `PrefixStore`, `db_root` is relative to the prefix
 store's logical namespace. For example, warming `foo` through a prefix store
 rooted at `tenant1` reads `foo/manifest/...` through the wrapper, which maps to
-`tenant1/foo/manifest/...` in the underlying bucket. The mirror stores
+`tenant1/foo/manifest/...` in the underlying bucket. The cache stores
 `objects/foo/compacted/...`; it does not include the hidden prefix. External
 SST paths must be reachable through the same wrapped namespace, as they must be
 for normal database reads.
@@ -550,10 +544,10 @@ Local hits honor `GetOptions` preconditions using the metadata stored with the
 local SST; immutable SSTs do not require remote revalidation. A tagged
 `get_opts` call with `head = true` can return metadata from the local footer.
 
-On a read-through miss, the mirror forwards the original `GetOptions` to the
+On a read-through miss, the cache forwards the original `GetOptions` to the
 remote store. The requested range is returned directly to the caller; the
 foreground request does not wait for a full-SST download. After the remote GET
-succeeds, the mirror schedules a separate full-SST GET. That download writes
+succeeds, the cache schedules a separate full-SST GET. That download writes
 to `staging/` and atomically renames the complete SST into place.
 
 Background fills are single-flight by SST path. Concurrent foreground misses
@@ -561,23 +555,23 @@ may each issue the range GET they need, but they share one full-SST download.
 The prefetch scheduler bounds active downloads by concurrency. Waiting for a
 permit happens in the background and never delays the range response.
 
-If a background download fails, the foreground read is unaffected. The mirror
+If a background download fails, the foreground read is unaffected. The cache
 records the failure and tries again on a later miss. A concurrent delete for
 the same path prevents the staging file from being published.
 
-The `LocalOnly` action returns `LocalMirrorError` on a miss without checking
+The `LocalOnly` action returns `LocalCacheError` on a miss without checking
 remote storage. The miss may mean that the database was not populated, another
 process published a new SST, or the local file is missing or corrupt.
-`warm_mirror` may still fetch and install SSTs explicitly because it invokes the
+`warm_cache` may still fetch and install SSTs explicitly because it invokes the
 private population primitive rather than routing a normal GET through the
 policy.
 
 ### Write-Through Semantics
 
-`WriteThrough` is the default PUT action. It makes the local mirror and remote
+`WriteThrough` is the default PUT action. It makes the local cache and remote
 storage part of the write contract while keeping remote storage authoritative.
 
-For a tagged compacted SST, the mirror uses the same staging file, upload queue,
+For a tagged compacted SST, the cache uses the same staging file, upload queue,
 and worker path as write-back. Once the complete local file is queued,
 write-through waits for that entry's upload result. It returns only after the
 remote write succeeds and the local file is promoted into `objects/`. This
@@ -588,7 +582,7 @@ If the upload fails permanently, write-through removes the unpublished staging
 file and returns the remote error, allowing SlateDB's outer retry wrapper to
 retry the PUT. Because the failed write was never acknowledged, its sequence is
 retired and does not block later publication barriers. If the remote write
-succeeds but local promotion fails, the wrapper returns `LocalMirrorError`; the
+succeeds but local promotion fails, the wrapper returns `LocalCacheError`; the
 remote SST remains as an unreferenced orphan.
 
 Tagged WAL and untagged writes pass through to remote storage. Manifest,
@@ -682,7 +676,7 @@ The barrier is conservative. It may wait for an unreferenced compaction output,
 but it never needs to decode a manifest in the object-store wrapper. The extra
 wait is preferable to duplicating manifest interpretation in the write queue.
 
-WAL reads and writes bypass the mirror even when the main and WAL paths use the
+WAL reads and writes bypass the cache even when the main and WAL paths use the
 same object store. They therefore do not enter the asynchronous queue or need a
 barrier shared across the main and WAL stores.
 
@@ -691,7 +685,7 @@ through. This preserves remote conditional-write and fencing semantics.
 
 ### Delete Semantics
 
-`ObjectStore::delete` does not carry `ObjectStoreCallTag`, so the mirror derives
+`ObjectStore::delete` does not carry `ObjectStoreCallTag`, so the cache derives
 a possible local file by placing the full canonical object-store path below
 `objects/`. A delete waits for any earlier upload of the same path, deletes the
 remote object, and then removes the local file if one exists and its footer
@@ -707,9 +701,9 @@ through because no matching local file exists.
 ### Reconciliation
 
 A DELETE issued on another machine does not pass through this wrapper. By
-default, `MirroredObjectStore` therefore runs a reconciliation task every minute
+default, `CachedObjectStore` therefore runs a reconciliation task every minute
 regardless of GET policy. `Some(interval)` enables the task and must be non-zero;
-`None` disables it. Each enabled mirror randomizes its initial delay to spread
+`None` disables it. Each enabled cache randomizes its initial delay to spread
 remote LIST requests across the fleet. Dropping the wrapper cancels its task;
 reconciliation does not delay `Db::close()`.
 
@@ -742,7 +736,7 @@ Remote storage remains authoritative under every GET policy. A confirmed remote
 absence therefore authorizes local deletion even for `LocalOnly`. If remote
 storage loses an SST that published metadata still references, reconciliation
 will remove the local copy and the next tagged read will return
-`LocalMirrorError`; preserving a private local copy would make the mirror an
+`LocalCacheError`; preserving a private local copy would make the cache an
 authoritative replica, which is outside this RFC. Reconciliation does not
 delete remote objects, decode manifests, or remove SSTs earlier than remote GC.
 
@@ -758,8 +752,8 @@ exposes a partial local file:
 | Remote write fails under `WriteThrough` | Remove the queued staging file and return the error so the outer wrapper can retry |
 | Remote upload fails under `WriteBack` | Retry, then poison the queue on a permanent failure |
 | Remote-durable compacted SST is missing under `ReadThrough` | Serve the requested remote range and schedule a full-SST fill |
-| Remote-durable compacted SST is missing under `LocalOnly` | Return `LocalMirrorError`; do not access remote storage |
-| Queued `WriteBack` staging file disappears while running | Return `LocalMirrorError` and poison the upload queue because the upload has lost its source |
+| Remote-durable compacted SST is missing under `LocalOnly` | Return `LocalCacheError`; do not access remote storage |
+| Queued `WriteBack` staging file disappears while running | Return `LocalCacheError` and poison the upload queue because the upload has lost its source |
 | Local SST fails validation | Quarantine it and dispatch the retry through the GET policy; poison the queue if it is pending upload |
 | Background full-SST GET fails | Keep the foreground result; retry on a later miss |
 | Reconciliation LIST or HEAD fails | Preserve the affected local files, record the failure, and retry on the next pass |
@@ -770,18 +764,18 @@ exposes a partial local file:
 | Machine and local disk are lost under `WriteThrough` | Rebuild from remote storage |
 | Machine and local disk are lost under `WriteBack` | Rebuild the last published state from remote storage; unpublished compaction work is discarded |
 
-Remote storage remains sufficient to repopulate a mirror using `WriteThrough`,
-either through `ReadThrough` or `warm_mirror`. The same is true for `WriteBack`:
+Remote storage remains sufficient to repopulate a cache using `WriteThrough`,
+either through `ReadThrough` or `warm_cache`. The same is true for `WriteBack`:
 the publication barrier makes queued staging files unnecessary for recovery,
 while remote metadata continues to describe a complete remote state.
 
-### Removing CachedObjectStore
+### Replacing the Part Cache
 
-The following code is removed:
+`CachedObjectStore` and its `builder(root_folder, object_store)` entry point
+remain public. The rewrite removes:
 
-- `slatedb::cached_object_store::CachedObjectStore`, its builder,
-  part-cache-specific policies, storage traits, part files, evictor, and
-  cache-specific metrics,
+- part-cache-specific policies, storage traits, part files, the in-memory part
+  index, the evictor, and part-cache metrics,
 - `ObjectStoreCacheOptions`,
 - `Settings::object_store_cache_options`,
 - `cache_on_flush`, `cache_on_compaction`, `part_size_bytes`,
@@ -789,13 +783,13 @@ The following code is removed:
   `max_open_file_handles`,
 - startup preload logic specific to the part cache.
 
-`ObjectStoreCallTag` remains public. It is useful to the mirror, prefetching
-stores, and user-supplied object-store policies independently of the removed
-cache.
+The rewritten builder replaces the part-cache knobs with the GET and PUT policy,
+concurrency, and reconciliation settings described above. `ObjectStoreCallTag`
+remains public for policy dispatch.
 
-The old cache layout is not migrated into the mirror. Part files cannot be
-published as complete local SSTs. Operators should allocate a new mirror
-root and delete the old cache directory after the migration.
+The old part-file layout is not migrated. Part files cannot be published as
+complete local SSTs. Operators should allocate a new cache root and delete the
+old cache directory after migration.
 
 ## Impact Analysis
 
@@ -809,7 +803,7 @@ SlateDB features and components that this RFC interacts with. Check all that app
 - [x] Error model, API errors
 
 KV semantics do not change. `ReadThrough` preserves remote fallback on a local
-miss. `LocalOnly` adds explicit mirror health and missing-object errors.
+miss. `LocalOnly` adds explicit cache health and missing-object errors.
 
 ### Consistency, Isolation, and Multi-Versioning
 
@@ -834,9 +828,9 @@ miss. `LocalOnly` adds explicit mirror health and missing-object errors.
 - [x] Multi-writer
 
 Formats are unchanged. Manifest, compactions, and GC boundary operations bypass
-the mirror, so multi-writer fencing, boundary checks, discovery, and conditional
+the cache, so multi-writer fencing, boundary checks, discovery, and conditional
 PUT errors are still observed remotely. GC deletes remove the matching local
-SST when they pass through this mirror. When enabled, periodic reconciliation
+SST when they pass through this cache. When enabled, periodic reconciliation
 removes the same SST when GC runs on another machine.
 
 ### Compaction
@@ -847,7 +841,7 @@ removes the same SST when GC runs on another machine.
 - [x] Distributed compaction
 - [x] Compactions format
 
-Compaction formats are unchanged. Outputs are mirrored as whole files and
+Compaction formats are unchanged. Outputs are cached as whole files and
 compactions metadata is published after the upload barrier.
 
 ### Storage Engine Internals
@@ -858,10 +852,10 @@ compactions metadata is published after the upload barrier.
 - [ ] Indexing (bloom filters, metadata)
 - [ ] SST format or block format
 
-The block cache remains the general-purpose best-effort cache. The mirror stores
+The block cache remains the general-purpose best-effort cache. The cache stores
 only tagged compacted SSTs as whole local files. WAL SSTs always use remote
 storage. `ReadThrough` population is best effort; applications using
-`LocalOnly` may populate the latest manifest explicitly with `warm_mirror`.
+`LocalOnly` may populate the latest manifest explicitly with `warm_cache`.
 
 ### Ecosystem & Operations
 
@@ -869,7 +863,7 @@ storage. `ReadThrough` population is best effort; applications using
 - [x] Language bindings (Go/Python/etc)
 - [x] Observability (metrics/logging/tracing)
 
-Bindings lose the old cache settings. The mirror is available only in APIs that
+Bindings lose the old cache settings. The cache is available only in APIs that
 can supply a custom `ObjectStore`; this RFC does not add binding-specific
 configuration or CLI commands.
 
@@ -884,7 +878,7 @@ remote bandwidth includes both requests. Later reads use the local file after
 the background download finishes.
 
 `LocalOnly` performs no remote fallback for tagged compacted SST reads.
-`warm_mirror` may still read remote storage explicitly. WAL and untagged
+`warm_cache` may still read remote storage explicitly. WAL and untagged
 coordination reads always use remote storage.
 
 `WriteThrough` adds local disk bandwidth to every tagged compacted SST write and
@@ -899,23 +893,23 @@ relative to a hot-block cache because completeness is the contract.
 With `ReadThrough`, warmup cost is highest because a miss produces a range GET
 plus a full GET. `LocalOnly` issues no remote fallback GET.
 
-One `warm_mirror` call reads the latest manifest and issues one full-object GET
+One `warm_cache` call reads the latest manifest and issues one full-object GET
 for each referenced SST not already local. It may therefore transfer the full
-live compacted data set when starting with an empty mirror. Existing local SSTs
-avoid those GETs. The utility shares the mirror's remote-read concurrency with
+live compacted data set when starting with an empty cache. Existing local SSTs
+avoid those GETs. The utility shares the cache's remote-read concurrency with
 read-through fills and returns only after every SST in its manifest snapshot is
 installed or one fails.
 
 Each reconciliation pass scans complete local objects, issues one remote LIST
 per distinct remote parent prefix represented locally, and issues HEAD only for
-paths missing from a LIST result. Mirrors randomize their initial delays to
+paths missing from a LIST result. Caches randomize their initial delays to
 spread this work across the fleet. Reconciliation never runs on the foreground
 read or write path.
 
 At the default one-minute interval, and using the S3 Standard rate of $0.005 per
 1,000 PUT, COPY, POST, or LIST requests, one listed prefix produces 43,200 LIST
-requests in a 30-day month and costs $0.216 per mirror per month. With `P`
-distinct parent prefixes and `M` mirrors, the monthly LIST cost is
+requests in a 30-day month and costs $0.216 per cache per month. With `P`
+distinct parent prefixes and `M` caches, the monthly LIST cost is
 `$0.216 * P * M`.
 Confirmatory HEAD requests for candidates missing from LIST, data transfer, and
 provider-specific charges are additional. Setting the reconciliation interval
@@ -923,78 +917,79 @@ to `None` eliminates this periodic LIST cost.
 
 ### Capacity
 
-The mirror has no maximum-size eviction setting in this proposal. Under
-`ReadThrough`, the mirror may remain partially populated if a fill runs out of
+The cache has no maximum-size eviction setting in this proposal. Under
+`ReadThrough`, the cache may remain partially populated if a fill runs out of
 space; the foreground read still succeeds remotely. `LocalOnly`
 cannot discard an SST and preserve its no-fallback contract.
 
-Operators size the volume for mirrored SSTs, temporary staging, and the
+Operators size the volume for cached SSTs, temporary staging, and the
 write-back backlog. The backlog has no separate byte limit, so disk capacity is
 the admission limit. Abandoned staging files consume space only until the next
 wrapper construction clears `staging/`. Complete SSTs deleted remotely on
 another machine may consume local space until the next successful
 reconciliation pass. If reconciliation is disabled, they remain until a DELETE
-passes through the mirror or the root is rebuilt.
+passes through the cache or the root is rebuilt.
 
 ### Observability
 
 The initial metric set is:
 
-- `slatedb.object_store_mirror.local_hits`
-- `slatedb.object_store_mirror.local_misses`
-- `slatedb.object_store_mirror.foreground_remote_gets`
-- `slatedb.object_store_mirror.prefetch_ssts`
-- `slatedb.object_store_mirror.prefetch_bytes`
-- `slatedb.object_store_mirror.prefetch_failures`
-- `slatedb.object_store_mirror.warm_runs`
-- `slatedb.object_store_mirror.warm_ssts`
-- `slatedb.object_store_mirror.warm_bytes`
-- `slatedb.object_store_mirror.warm_failures`
-- `slatedb.object_store_mirror.staging_bytes`
-- `slatedb.object_store_mirror.pending_upload_ssts`
-- `slatedb.object_store_mirror.pending_upload_bytes`
-- `slatedb.object_store_mirror.resolved_upload_sequence`
-- `slatedb.object_store_mirror.upload_failures`
-- `slatedb.object_store_mirror.local_delete_failures`
-- `slatedb.object_store_mirror.reconciliation_runs`
-- `slatedb.object_store_mirror.reconciliation_list_requests`
-- `slatedb.object_store_mirror.reconciliation_head_requests`
-- `slatedb.object_store_mirror.reconciliation_deleted_ssts`
-- `slatedb.object_store_mirror.reconciliation_failures`
-- `slatedb.object_store_mirror.missing_sst_errors`
-- `slatedb.object_store_mirror.health`
+- `slatedb.object_store_cache.local_hits`
+- `slatedb.object_store_cache.local_misses`
+- `slatedb.object_store_cache.foreground_remote_gets`
+- `slatedb.object_store_cache.prefetch_ssts`
+- `slatedb.object_store_cache.prefetch_bytes`
+- `slatedb.object_store_cache.prefetch_failures`
+- `slatedb.object_store_cache.warm_runs`
+- `slatedb.object_store_cache.warm_ssts`
+- `slatedb.object_store_cache.warm_bytes`
+- `slatedb.object_store_cache.warm_failures`
+- `slatedb.object_store_cache.staging_bytes`
+- `slatedb.object_store_cache.pending_upload_ssts`
+- `slatedb.object_store_cache.pending_upload_bytes`
+- `slatedb.object_store_cache.resolved_upload_sequence`
+- `slatedb.object_store_cache.upload_failures`
+- `slatedb.object_store_cache.local_delete_failures`
+- `slatedb.object_store_cache.reconciliation_runs`
+- `slatedb.object_store_cache.reconciliation_list_requests`
+- `slatedb.object_store_cache.reconciliation_head_requests`
+- `slatedb.object_store_cache.reconciliation_deleted_ssts`
+- `slatedb.object_store_cache.reconciliation_failures`
+- `slatedb.object_store_cache.missing_sst_errors`
+- `slatedb.object_store_cache.health`
 
-Logs include the mirror root, GET and PUT policies, warming and reconciliation
+Logs include the cache root, GET and PUT policies, warming and reconciliation
 summaries, upload barrier waits, poison errors, and failed local operations.
 They do not log one line per successfully warmed, filled, uploaded, or
-reconciled object at the default level. These metrics belong to the mirror
+reconciled object at the default level. These metrics belong to the cache
 itself: SlateDB's outer instrumentation cannot see background GETs, uploads, or
 reconciliation requests initiated inside the wrapper.
 
 ### Compatibility
 
 - **Object-store data.** Manifest, compactions, WAL, and SST formats are
-  unchanged. A database can move between mirrored and non-mirrored operation.
-- **Public API.** Removing `CachedObjectStore` and
-  `Settings::object_store_cache_options` is a breaking API and configuration
-  change. `MirroredObjectStore` is supplied through the existing object-store
-  parameter; no `DbBuilder` methods change. The optional `warm_mirror` utility
-  operates on the concrete wrapper before or after it is passed to the builder.
+  unchanged. A database can move between cached and non-cached operation.
+- **Public API.** `CachedObjectStore` and its
+  `builder(root_folder, object_store)` entry point remain. Its part-specific
+  builder methods and `Settings::object_store_cache_options` are removed, which
+  is a breaking API and configuration change. The optional `warm_cache` utility
+  operates on the concrete wrapper before or after it is passed to
+  `Db::builder`; no `DbBuilder` methods change.
 - **Local files.** The old part-cache layout is not compatible with the new
-  whole-SST mirror layout.
+  whole-SST cache layout.
 - **Rolling upgrades.** Mixed versions remain compatible through remote object
-  storage. Each live wrapper must use a distinct mirror root.
+  storage. Each live wrapper must use a distinct cache root.
 - **Bindings.** Generated Go, Python, Java, and Node settings lose the old cache
-  options. They do not gain mirror settings in this RFC.
+  options. They do not gain cache settings in this RFC.
 
 ## Testing
 
 - Unit tests:
   - canonical object-store paths are used directly below `objects/` and cannot
-    lexically escape the mirror root,
+    lexically escape the cache root,
   - percent-encoded path components remain unchanged rather than being decoded,
   - unrepresentable filesystem paths and footer-location aliases return
-    `LocalMirrorError`,
+    `LocalCacheError`,
   - local path mapping preserves the full compacted, clone, and split
     object-store paths without parsing their database roots,
   - staging-file publication and cleanup,
@@ -1025,7 +1020,7 @@ reconciliation requests initiated inside the wrapper.
   - publication barrier ordering for asynchronous compacted SST uploads,
   - WAL and fence PUTs bypass PUT policy dispatch.
 - Integration tests:
-  - pass the mirror through the normal `Db::builder` object-store parameter and
+  - pass the cache through the normal `Db::builder` object-store parameter and
     verify the effective wrapper order,
   - select `ReadThrough` and verify a miss returns the requested range before the
     background full-SST GET completes,
@@ -1044,25 +1039,25 @@ reconciliation requests initiated inside the wrapper.
   - verify a stale local SST cannot affect a GC boundary check,
   - exhaust local disk capacity and verify neither PUT action drops an
     acknowledged queue entry,
-  - open an existing database with an empty `LocalOnly` mirror and verify the
-    first tagged compacted SST miss returns `LocalMirrorError`,
+  - open an existing database with an empty `LocalOnly` cache and verify the
+    first tagged compacted SST miss returns `LocalCacheError`,
   - assert tagged compacted `LocalOnly` hits and misses issue no remote fallback
     GET,
-  - call `warm_mirror` without a `DbCache` and verify it reads the latest
+  - call `warm_cache` without a `DbCache` and verify it reads the latest
     manifest, resolves internal and external SST paths, and waits until every
     referenced compacted SST is atomically installed,
-  - call `warm_mirror` when ordinary GETs use `LocalOnly` or `Bypass` and verify
+  - call `warm_cache` when ordinary GETs use `LocalOnly` or `Bypass` and verify
     explicit warming still fetches remotely,
-  - verify `warm_mirror` returns the warmed manifest ID, counts already-present
+  - verify `warm_cache` returns the warmed manifest ID, counts already-present
     SSTs separately, and leaves successful population in place if another SST
     fails,
-  - corrupt an existing local SST and verify `warm_mirror` quarantines and
+  - corrupt an existing local SST and verify `warm_cache` quarantines and
     repopulates it rather than counting it as already present,
   - advance the latest manifest during warming and verify the result covers its
     returned manifest snapshot without claiming to cover the newer manifest,
   - wrap the remote store in a `PrefixStore`, warm a database root relative to
     that namespace, and verify local paths exclude the hidden prefix,
-  - run GC through the mirror and verify each remote SST delete removes its
+  - run GC through the cache and verify each remote SST delete removes its
     local file,
   - run GC on another machine's raw remote store, run reconciliation against
     the shared remote store, and verify the stale local SST is removed under
@@ -1073,7 +1068,7 @@ reconciliation requests initiated inside the wrapper.
     deletes them without changing published remote state,
   - call default `Db::close()` and verify its final metadata barrier drains all
     earlier queued SSTs; verify disabling the close flush removes that guarantee,
-  - rebuild a `WriteThrough` mirror through `ReadThrough` misses after deleting
+  - rebuild a `WriteThrough` cache through `ReadThrough` misses after deleting
     its local root.
 - Fault-injection/chaos tests:
   - crash before and after local enqueue, remote SST PUT, staging-to-objects
@@ -1095,7 +1090,7 @@ reconciliation requests initiated inside the wrapper.
   - verify `ReadThrough` never exposes a staging file or blocks a range
     response on a full-SST fill,
   - verify a tagged compacted `LocalOnly` miss never issues a remote GET while
-    `warm_mirror` may populate the same SST explicitly,
+    `warm_cache` may populate the same SST explicitly,
   - verify `published_remote_manifest_ssts ⊆ durable_remote_ssts` under
     `WriteBack`.
 - Formal methods verification:
@@ -1107,18 +1102,19 @@ reconciliation requests initiated inside the wrapper.
   - foreground range latency while background full-SST downloads run,
   - full-manifest warming throughput and memory use for large manifests,
   - flush and compaction throughput with `WriteThrough` and `WriteBack`,
-  - reconciliation LIST and confirmatory HEAD request cost for large mirrors,
+  - reconciliation LIST and confirmatory HEAD request cost for large caches,
   - local delete throughput and startup time versus the old part cache.
 
 ## Rollout
 
-1. Add `MirroredObjectStore` with GET and PUT policies defaulting to
-   `ReadThrough` and `WriteThrough`. Mark the API experimental.
+1. Rewrite `CachedObjectStore` to store whole SSTs, with GET and PUT policies
+   defaulting to `ReadThrough` and `WriteThrough`. Mark the new policy API
+   experimental.
 2. Verify `Db`, `DbReader`, and `Compactor` accept it through their existing
-   object-store parameters without mirror-specific builder code.
+   object-store parameters without cache-specific builder code.
 3. Add `LocalOnly` and custom GET/PUT policy tests, including classification
    gates, validation retries, and conditional PUTs.
-4. Add the public `warm_mirror` utility on top of the mirror's private
+4. Add the public `warm_cache` utility on top of the cache's private
    single-flight population primitive.
 5. Add metrics, startup staging cleanup, local cleanup on SST deletes, and
    periodic remote reconciliation.
@@ -1127,16 +1123,17 @@ reconciliation requests initiated inside the wrapper.
 7. Document the wrapper order, policy dispatch, warming snapshot contract,
    `PrefixStore` behavior, common upload queue, single-owner root contract,
    reconciliation cost, and WAL passthrough.
-8. Deprecate `CachedObjectStore` and its settings for one release if required by
-   compatibility policy, then remove the implementation and old metrics.
+8. Deprecate the part-cache-specific builder methods and settings for one
+   release if required by compatibility policy, then remove the old part-cache
+   implementation and metrics.
 
 ## Alternatives
 
-**Keep `CachedObjectStore`.** The current cache works for workloads with enough
-spatial locality and a tolerant latency budget. It still duplicates Foyer's
-job, amplifies misses to part boundaries, drops admission under pressure, and
-cannot promise completeness. We should remove it instead of adding another
-round of policy knobs.
+**Keep the current part-based `CachedObjectStore`.** The current cache works for
+workloads with enough spatial locality and a tolerant latency budget. It still
+duplicates Foyer's job, amplifies misses to part boundaries, drops admission
+under pressure, and cannot promise completeness. We should rewrite it instead
+of adding another round of part-cache policy knobs.
 
 **Tune the part size and parallelize eviction.** Smaller parts reduce miss
 amplification and parallel deletion makes eviction less painful. Neither change
@@ -1157,14 +1154,14 @@ entire SST. It makes the miss pay for bytes the caller did not request. The
 proposed `ReadThrough` action returns the requested range first and moves the full
 download to the background.
 
-**Extend `CacheManager` to populate mirrored objects.** A new object target
+**Extend `CacheManager` to populate cached objects.** A new object target
 could send a population hint through `GetOptions::extensions`. That mixes
-whole-object mirroring into an API designed for decoded block-cache entries,
+whole-object population into an API designed for decoded block-cache entries,
 and an arbitrary `ObjectStore` may ignore the hint without acknowledging that
-nothing was populated. The public `warm_mirror` utility operates on the
+nothing was populated. The public `warm_cache` utility operates on the
 concrete wrapper and uses the manifest to warm the complete database snapshot.
 
-**Put warming on `MirroredObjectStore`.** A `warm_db` method could accept the
+**Put warming on `CachedObjectStore`.** A `warm_db` method could accept the
 database root and provide the same behavior. The public utility keeps manifest
 decoding out of the wrapper's normal object-store responsibilities while still
 using its private population primitive.
@@ -1176,23 +1173,23 @@ deletes remote objects. The proposed design retains this fast path but also
 reconciles periodically by default.
 
 **Publish a remote deletion feed.** GC could publish durable SST tombstones for
-mirrors to consume. This avoids full prefix LISTs and distinguishes GC from
+caches to consume. This avoids full prefix LISTs and distinguishes GC from
 accidental remote loss, but it adds sequencing, retention, and consumer-progress
-protocols. LIST plus confirmatory HEAD keeps the mirror compatible with an
+protocols. LIST plus confirmatory HEAD keeps the cache compatible with an
 unmodified remote object-store layout.
 
-**Integrate the mirror into SlateDB's builders.** SlateDB could construct the
+**Integrate the cache into SlateDB's builders.** SlateDB could construct the
 wrapper, reconcile manifests before local-only reads, prune files from manifest
-reachability, and manage the mirror's lifecycle. That provides a stronger
+reachability, and manage the cache's lifecycle. That provides a stronger
 complete-local-set guarantee, but it turns an object-store policy into a DB
 lifecycle feature. The proposed design keeps `LocalOnly` narrow: it rejects a
-miss and leaves population to writes or an explicit `warm_mirror` call.
+miss and leaves population to writes or an explicit `warm_cache` call.
 
 **Prune from manifest reachability.** This could delete obsolete local SSTs
 before remote GC's `min_age`. It would require the wrapper to decode SlateDB
-manifests or SlateDB to manage the mirror explicitly. The standalone wrapper
-instead mirrors delete calls and reconciles local files with remote object
-existence, so it never prunes earlier than remote GC.
+manifests or SlateDB to manage the cache explicitly. The standalone wrapper
+instead removes local files for DELETE calls and reconciles local files with
+remote object existence, so it never prunes earlier than remote GC.
 
 **Make local disk authoritative and remote storage a periodic backup.** This is
 simple for one machine but changes SlateDB's coordination and recovery model.
@@ -1205,7 +1202,7 @@ outside this RFC.
 - Should `WriteBack` ship in the first implementation, or should the RFC accept
   its design while `WriteThrough` gets production experience first?
 - Should `ReadThrough` enforce a capacity limit, or should operators rebuild the
-  mirror when its volume fills?
+  cache when its volume fills?
 
 ## References
 
@@ -1219,9 +1216,10 @@ outside this RFC.
 
 ## Updates
 
+- Reframed the proposal as a rewrite of `CachedObjectStore`.
 - Replaced GET-extension-based object population with the public
-  manifest-aware `warm_mirror` utility. `CacheManager` remains block-cache-only.
-- Replaced fixed read and write modes with mirror-specific GET and PUT policies
+  manifest-aware `warm_cache` utility. `CacheManager` remains block-cache-only.
+- Replaced fixed read and write modes with cache-specific GET and PUT policies
   and documented their dispatch paths.
 - Added optional periodic remote reconciliation, enabled at a one-minute
   interval by default, while retaining DELETE passthrough as the immediate local
