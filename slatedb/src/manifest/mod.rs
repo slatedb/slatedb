@@ -66,6 +66,14 @@ impl LsmTreeState {
         self.l0.is_empty() && self.compacted.is_empty()
     }
 
+    /// Iterate every SST view referenced by this tree — L0 views followed by
+    /// the views of every sorted run.
+    pub(crate) fn sst_views(&self) -> impl Iterator<Item = &SsTableView> {
+        self.l0
+            .iter()
+            .chain(self.compacted.iter().flat_map(|sr| sr.sst_views().iter()))
+    }
+
     /// Total number of SST views referenced by this tree — L0 plus every
     /// SST in every sorted run. Used by the read path to size scan
     /// parallelism.
@@ -551,11 +559,7 @@ impl ManifestCore {
     /// Iterate every SST view referenced by this manifest — L0 views and
     /// sorted-run views across the unsegmented tree and every segment.
     pub(crate) fn all_sst_views(&self) -> impl Iterator<Item = &SsTableView> {
-        self.trees().flat_map(|tree| {
-            tree.l0
-                .iter()
-                .chain(tree.compacted.iter().flat_map(|sr| sr.sst_views().iter()))
-        })
+        self.trees().flat_map(|tree| tree.sst_views())
     }
 
     /// Compare a configured WAL-store URI against the manifest's
@@ -1485,9 +1489,15 @@ impl Manifest {
     }
 
     fn range(&self) -> Option<BytesRange> {
+        Self::bounding_range(self.core.all_sst_views())
+    }
+
+    /// Smallest range covering every view in `views`, or `None` when `views`
+    /// is empty.
+    fn bounding_range<'a>(views: impl Iterator<Item = &'a SsTableView>) -> Option<BytesRange> {
         let mut start_bound = None;
         let mut end_bound = None;
-        for sst in self.core.all_sst_views() {
+        for sst in views {
             let range = sst.compacted_effective_range();
             start_bound = start_bound
                 .map(|b| min(b, range.comparable_start_bound()))
