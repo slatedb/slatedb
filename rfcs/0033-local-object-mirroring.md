@@ -111,7 +111,7 @@ For `WriteBack` workloads, we currently offer no solution.
 
 The rewritten cache retains the per-call policy pattern from the current
 `CachedObjectStore`. A `GetPolicy` receives the compacted SST's
-`ObjectStoreCallTag`, then returns one of three actions:
+`ObjectStoreCallTag`, then returns one of four actions:
 
 | GET action | Local hit | Local miss |
 |---|---|---|
@@ -122,8 +122,10 @@ The rewritten cache retains the per-call policy pattern from the current
 
 `ReadThrough` keeps the full download off the foreground path. A custom policy
 can use `Bypass` for call sources such as compaction scans. `Refetch` is used
-when corruption is detected and the caller wants to refresh the object from
-remote storage.
+when corruption is detected. Before forwarding the GET, it deletes the
+existing local file so concurrent reads cannot continue serving the corrupt
+bytes. After the foreground GET succeeds, it schedules the same single-flight
+full-SST fill as `ReadThrough`.
 
 The wrapper invokes the policy only for calls carrying an
 `ObjectStoreCallTag` whose `sst_type` is `Compacted`. Tagged WAL calls and
@@ -131,16 +133,24 @@ untagged calls bypass before policy dispatch. This is an implementation
 invariant, so a custom policy cannot accidentally cache WALs, manifests, or
 other coordination objects.
 
-`DefaultCacheGetPolicy` returns its configured action for every tagged
-compacted GET:
+`DefaultCacheGetPolicy` handles validation retries before applying its normal
+read action:
 
 | Request | Routing |
 |---|---|
 | Untagged or tagged WAL | Bypass before policy dispatch |
-| Tagged compacted | `ReadThrough` |
+| Tagged compacted with `tag.retry.is_some()` | `Refetch` |
+| Other tagged compacted | Configured action; `ReadThrough` by default |
+
+SlateDB reissues a compacted SST read once with `tag.retry` set after a
+recoverable validation failure. Routing that call to `Refetch` is required: a
+normal `ReadThrough` lookup could otherwise return the same corrupt local file
+again.
 
 A custom GET policy may use `ObjectStoreCallTag::kind` to select different
-actions for `Main`, `Reader`, `Compactor`, and `GC` calls.
+actions for `Main`, `Reader`, `Compactor`, and `GC` calls. It must not return
+`ReadThrough` or `LocalOnly` for a retry-tagged call, because either action may
+serve the file that failed validation.
 
 ### PUT Policy
 
@@ -152,9 +162,12 @@ The PUT policy returns one of two actions for a tagged compacted SST:
 | `WriteBack` | The SST is durable locally | Background |
 
 The wrapper invokes the PUT policy only for tagged compacted SSTs. WAL and
-untagged PUTs bypass it. SlateDB currently writes compacted SSTs
-unconditionally: buffered single PUTs use `PutMode::Overwrite`, while larger
-SSTs use multipart uploads. Both are eligible for `WriteBack`.
+untagged PUTs bypass it. SlateDB currently writes every compacted SST through a
+tagged `BufWriter`, which uses the multipart object-store API. Multipart
+completion is therefore the commit point for both `WriteThrough` and
+`WriteBack`. WAL SSTs and fence objects use the conditional single-PUT path with
+`PutMode::Create`; they bypass the cache and remain write-through so fencing
+errors are returned to the caller.
 
 Any GET policy may be paired with any PUT policy. Both PUT actions store newly
 written compacted SSTs as whole local files and use the same upload queue. A
@@ -169,7 +182,7 @@ machine failure.
 ### Public API
 
 `CachedObjectStore` is a normal `ObjectStore` implementation. Users construct
-it around their remote store and pass it through the existing
+it with a local cache root and remote store, then pass it through the existing
 `DbBuilder::new`/`Db::builder` object-store parameter. We remove the old
 `object_store_cache_options` in `config.rs` and `builder.rs`.
 
@@ -197,11 +210,11 @@ pub trait GetPolicy: Send + Sync + Debug + 'static {
 }
 
 pub enum PutAction {
-    /// Do not check the local cache; forward the original PUT to the wrapped
-    /// store.
+    /// Write the SST locally and remotely, returning only after the remote
+    /// multipart upload completes.
     WriteThrough,
-    /// Do not check the local cache; write the SST locally and schedule a
-    /// background upload to the wrapped store.
+    /// Write the SST locally and complete the multipart upload in the
+    /// background.
     ///
     /// Local writes will remain visible to the current process until the upload
     /// completes. If the upload fails, the cache will enter a poisoned state
@@ -216,13 +229,14 @@ pub trait PutPolicy: Send + Sync + Debug + 'static {
 
 impl CachedObjectStore {
     pub fn new(
+        local_root_folder: impl Into<PathBuf>,
         object_store: Arc<dyn ObjectStore>,
     ) -> Self;
     /// Sets the GET policy for tagged compacted SST reads. The default is
-    /// `DefaultCacheGetPolicy::new(CacheGetAction::ReadThrough)`.
+    /// `DefaultCacheGetPolicy::new(GetAction::ReadThrough)`.
     pub fn with_get_policy(self, policy: Arc<dyn GetPolicy>) -> Self;
     /// Sets the PUT policy for tagged compacted SST writes. The default is
-    /// `DefaultCachePutPolicy::new(CachePutAction::WriteThrough)`.
+    /// `DefaultCachePutPolicy::new(PutAction::WriteThrough)`.
     pub fn with_put_policy(self, policy: Arc<dyn PutPolicy>) -> Self;
     /// Sets the maximum number of concurrent background prefetches. The
     /// default is 4.
@@ -235,18 +249,17 @@ impl CachedObjectStore {
     /// `Some(Duration::from_secs(60))`. Passing `None` disables reconciliation.
     ///
     /// Reconciliation only deletes local files that are confirmed to be
-    /// missing from the remote store. It does upload or download any files.
+    /// missing from the remote store. It does not upload or download files.
     pub fn with_reconciliation_interval(
         self,
         interval: Option<Duration>,
     ) -> Self;
-    /// Helper utility to populate the cache with compacted SSTs referenced by
-    /// the latest manifest.
-    // TODO: Might want &mut self here or &self...
+    /// Populates the cache with compacted SSTs referenced by the latest
+    /// manifest.
     pub async fn warm(
-        self,
+        &self,
         db_root: impl Into<object_store::path::Path>,
-    ) -> Result<Self, Error>;
+    ) -> Result<(), Error>;
 }
 
 #[async_trait]
@@ -254,6 +267,7 @@ impl ObjectStore for CachedObjectStore {
     // Standard ObjectStore methods delegate to local and remote storage.
 }
 ```
+
 A complete instantiation looks like this:
 
 ```rust
@@ -262,19 +276,17 @@ let remote: Arc<dyn ObjectStore> = Arc::new(
         .with_bucket_name("my-bucket")
         .build()?,
 );
-let cache = Arc::new(
-    CachedObjectStore::new(remote)
-        .with_get_policy(Arc::new(DefaultCacheGetPolicy::new(
-            GetAction::ReadThrough,
-        )))
-        .with_put_policy(Arc::new(DefaultCachePutPolicy::new(
-            PutAction::WriteThrough,
-        )))
-        .with_prefetch_concurrency(4)
-        .with_upload_concurrency(4)
-        .with_reconciliation_interval(Some(Duration::from_secs(60)))
-        .warm("my-db").await?
-);
+let cache = CachedObjectStore::new("/var/lib/slatedb/cache", remote)
+    .with_get_policy(Arc::new(DefaultCacheGetPolicy::new(
+        GetAction::ReadThrough,
+    )))
+    .with_put_policy(Arc::new(DefaultCachePutPolicy::new(
+        PutAction::WriteThrough,
+    )))
+    .with_prefetch_concurrency(4)
+    .with_upload_concurrency(4)
+    .with_reconciliation_interval(Some(Duration::from_secs(60)));
+cache.warm("my-db").await?;
 let db = Db::builder(db_path, cache).build().await?;
 ```
 
@@ -296,9 +308,12 @@ RetryingObjectStore -> InstrumentedObjectStore -> CachedObjectStore -> S3ObjectS
 The cache owns retries and metrics for background fills, uploads, and
 reconciliation because the `RetryingObjectStore` wrapper is outside the cache.
 
-`LocalCacheError` must map to a non-retryable `object_store::Error` variant.
-Otherwise SlateDB's outer retry wrapper would turn a local-only miss or a
-permanent local-disk failure into an unbounded retry loop.
+`LocalCacheError` is wrapped in `object_store::Error::Generic` with
+`store: "cached_object_store"`. SlateDB's `RetryingObjectStore::should_retry`
+must downcast the generic error's source and return `false` for
+`LocalCacheError`. Without this explicit check, the current retry classifier
+would retry the generic error indefinitely when `object_store_max_retries` is
+unset.
 
 WAL operations, reads and writes of manifests, compactions records, and GC
 boundaries, along with LIST, untagged HEAD, copy, and other untagged operations,
@@ -368,8 +383,10 @@ not wait for a full-SST download. In parallel, the cache schedules a separate
 full-SST GET. That download writes to `downloading/` and atomically renames the
 complete SST into `objects/` after the download completes.
 
-Multiple reads to the same SST path are coalesced. The first foreground miss
-schedules the background fill, while subsequent foreground misses are dropped.
+The background full-SST fill is single-flight by SST path. Concurrent
+foreground misses still forward their original GETs to the wrapped store and
+return their requested ranges independently. Only redundant scheduling of the
+background full-SST download is coalesced.
 
 If a background download fails, the foreground read is unaffected. The cache
 records the failure, removes the partially downloaded file, and tries again on
@@ -383,18 +400,27 @@ responsible for populating the cache before database instantiation using
 
 The flow for a write is:
 
-1. Write the SST under `uploading/`.
-2. Upload the file to the remote store.
-3. After the file is complete, atomically rename the file into `objects/`.
+1. Write the SST under `uploading/` while streaming it to the remote store.
+2. Flush the complete local file, register its path and operation sequence in
+   the pending-upload map, and atomically rename it into `objects/`.
+3. Complete the remote multipart upload.
 
-(1) and (2) may be done in parallel. `WriteBack` returns when (1) is complete.
-`WriteThrough` returns when (2) is complete.
+`WriteBack` returns after step 2. `WriteThrough` waits for step 3. In both cases,
+the path remains registered as pending until the remote upload completes.
 
 `WriteBack` can move local files into `objects/` before the remote write
-completes. To prevent corruption, we block the publication of any manifest or
-compactions record until every earlier write-back has completed. We can end up
-with orphaned SSTs in `objects/` if the remote write fails, but they are never
-referenced by published metadata. Reconciliation will remove them later.
+completes. Before that rename, the cache registers the object path and its
+operation sequence in an in-memory pending-upload map. Reads may serve the
+complete local file, but reconciliation excludes every path present in this
+map. The path remains pending until the remote upload succeeds. Only then does
+the cache remove it from the map and resolve its sequence.
+
+To prevent corruption, the cache blocks publication of any manifest or
+compactions record until every earlier write-back has completed remotely. A
+permanent upload failure poisons the queue and leaves the local file marked
+pending for the rest of the process lifetime. The file is never referenced by
+published metadata; after a restart, reconciliation may remove it if it is
+absent remotely.
 
 TODO: We should really move retries into `object_store`. Hussein mentioned this.
 
@@ -433,15 +459,15 @@ seq 43: manifest/9          +--> conditional PUT may begin
 seq 44: compacted/C.sst     ----> may remain queued
 ```
 
-A successful sequence is complete only after the remote upload succeeds and the
-local file has moved from `staging/` to `objects/`. A failed write-through
-sequence may also be retired after its waiting caller receives the failure,
-because no metadata operation can reference a write that did not return
-success. A failed write-back sequence cannot be retired because its caller was
-already acknowledged; it poisons the queue instead. Because a metadata PUT
-waits for every earlier sequence to complete or retire, a file left in
-`staging/` can never be referenced by published remote metadata and needs no
-crash recovery.
+A successful sequence is complete only after the remote upload succeeds. The
+complete local file may already be visible under `objects/`, but its path
+remains in the pending-upload map until remote completion. A failed
+write-through sequence may be retired after its waiting caller receives the
+failure, because no metadata operation can reference a write that did not
+return success. A failed write-back sequence cannot be retired because its
+caller was already acknowledged; it poisons the queue instead. Because a
+metadata PUT waits for every earlier sequence to complete or retire, a pending
+local file can never be referenced by published remote metadata.
 
 The barrier is conservative. It may wait for an unreferenced compaction output,
 but it never needs to decode a manifest in the object-store wrapper. The extra
@@ -458,7 +484,9 @@ delaying `Db::close()`.
 
 One reconciliation pass proceeds as follows:
 
-- List all files in `objects/`.
+- Snapshot all files in `objects/`, excluding every path currently registered
+  in the pending-upload map. A path added after the snapshot is not a candidate
+  in the current pass.
 - Group them by their remote parent prefix.
 - LIST each distinct parent prefix on the wrapped remote store.
 - Delete any local file whose path is absent from the remote LIST result.
@@ -470,11 +498,13 @@ prefix.
 ### Construction and Cleanup
 
 Building a `CachedObjectStore` removes files under `uploading/` and
-`downloading/` before starting background work. Deleting all uploading files at
-construction is safe. The cache does not forward a manifest or compactions PUT
-until every earlier asynchronous SST upload has completed and its local file
-has moved into `objects/`. A file left under `uploading/` after a crash
-therefore cannot be referenced by published remote metadata.
+`downloading/` before starting background work. Deleting those incomplete files
+is safe. The cache does not forward a manifest or compactions PUT until every
+earlier asynchronous SST upload has completed remotely. A local SST left in
+`objects/` by an acknowledged write-back loses its pending-map entry after a
+crash, but it cannot be referenced by published remote metadata unless its
+remote upload completed. Reconciliation preserves it if it exists remotely and
+removes it otherwise.
 
 The built-in `ReadThrough` policy can start with an empty directory and populate
 it on demand. `LocalOnly` assumes required SSTs were written through this cache
@@ -618,11 +648,11 @@ avoid those GETs. The utility shares the cache's remote-read concurrency with
 read-through fills and returns only after every SST in its manifest snapshot is
 installed or one fails.
 
-Each reconciliation pass scans complete local objects, issues one remote LIST
-per distinct remote parent prefix represented locally, and issues HEAD only for
-paths missing from a LIST result. Caches randomize their initial delays to
-spread this work across the fleet. Reconciliation never runs on the foreground
-read or write path.
+Each reconciliation pass scans complete local objects that are not registered
+as pending uploads, issues one remote LIST per distinct remote parent prefix
+represented locally, and issues HEAD only for paths missing from a LIST result.
+Caches randomize their initial delays to spread this work across the fleet.
+Reconciliation never runs on the foreground read or write path.
 
 At the default one-minute interval, and using the S3 Standard rate of $0.005 per
 1,000 PUT, COPY, POST, or LIST requests, one listed prefix produces 43,200 LIST
@@ -640,13 +670,14 @@ The cache has no maximum-size eviction setting in this proposal. Under
 space; the foreground read still succeeds remotely. `LocalOnly`
 cannot discard an SST and preserve its no-fallback contract.
 
-Operators size the volume for cached SSTs, temporary staging, and the
-write-back backlog. The backlog has no separate byte limit, so disk capacity is
-the admission limit. Abandoned staging files consume space only until the next
-wrapper construction clears `staging/`. Complete SSTs deleted remotely on
-another machine may consume local space until the next successful
-reconciliation pass. If reconciliation is disabled, they remain until a DELETE
-passes through the cache or the root is rebuilt.
+Operators size the volume for cached SSTs, temporary files under `uploading/`
+and `downloading/`, and the write-back backlog. The backlog has no separate byte
+limit, so disk capacity is the admission limit. Abandoned temporary files
+consume space only until the next wrapper construction clears those
+directories. Complete SSTs deleted remotely on another machine may consume
+local space until the next successful reconciliation pass. If reconciliation
+is disabled, they remain until a DELETE passes through the cache or the root is
+rebuilt.
 
 ### Observability
 
