@@ -325,8 +325,10 @@ WAL operations, reads and writes of manifests, compactions records, and GC
 boundaries, along with LIST, untagged HEAD, copy, and other untagged operations,
 always go to the wrapped remote store. In particular, a GC boundary check can
 never be answered from the mirror, even if the mirror directory happens to
-contain a file at the same encoded path. The wrapper uses the tag, not the
+contain a file at the same local path. The wrapper uses the tag, not the
 object path, to decide which reads and writes are compacted SST operations.
+After that classification, it maps the object locally by placing its full
+canonical object-store path below `objects/`.
 
 Because the wrapper is supplied through the normal `ObjectStore` parameter,
 the same type works with `Db`, `DbReader`, and `Compactor`. A mirror root belongs
@@ -337,25 +339,48 @@ a caller contract.
 
 ### Whole-SST Local Layout
 
-Each mirrored SST maps to one local file. The full object-store path is encoded
-below `objects/`; this preserves compacted, clone, and split namespaces without
-allowing a remote path to escape the local root.
+Each mirrored SST maps to one local file. The mirror uses the canonical
+`object_store::path::Path` directly as a relative path below `objects/`. It
+appends the path's existing components without percent-decoding or otherwise
+transforming them. `object_store::path::Path` has no leading or trailing
+separator, empty component, `.` or `..` component, or ASCII control character,
+so a valid path is already relative and cannot lexically escape `objects/`.
 
 ```text
 <mirror-root>/
-  objects/<encoded-object-store-path>
+  objects/<full-object-store-path>
   staging/<operation-id>
 ```
 
-For a database rooted at `tenant/db`, compacted SST paths decode to paths such
-as `tenant/db/compacted/<ulid>.sst`. Clone and split paths arrive as full
-object-store paths, so the mirror does not assume every physical SST belongs to
-the current database root.
+Before accessing a local file, the mirror verifies that every object-store path
+component maps to exactly one native filesystem component and that the result
+remains below `objects/`. A path that the local filesystem cannot represent
+losslessly returns `LocalMirrorError`. This includes an alias with an existing
+path on a case-insensitive filesystem.
+
+For example:
+
+```text
+<mirror-root>/
+  objects/
+    tenant1/foo/bar/baz/compacted/abc1234.sst
+    tenant2/source-db/compacted/def5678.sst
+  staging/
+```
+
+Clone and split SSTs arrive with their source database's full object-store
+path, so they naturally group below that source database path. The mirror does
+not need to know which database is current or classify an SST as owned versus
+external. It does not parse the path to find a database root. One representable
+canonical remote object path always maps to the same local path.
 
 Each file stores the SST body followed by a compact footer containing the
 body length, checksum, attributes, and cached `ObjectMeta`. Keeping the body at
 offset zero makes range reads direct, while the footer lets tagged local GETs
 preserve object metadata without an in-memory index or a second sidecar file.
+On every local open, the mirror verifies that the requested remote path exactly
+matches the footer's `ObjectMeta.location`. A mismatch reports
+`LocalMirrorError` rather than serving an aliased local file.
 
 An SST becomes generally readable locally only after its complete body and
 footer are written to `staging/` and atomically renamed into `objects/`.
@@ -614,11 +639,12 @@ through. This preserves remote conditional-write and fencing semantics.
 
 ### Delete Semantics
 
-`ObjectStore::delete` does not carry `ObjectStoreCallTag`, so the mirror maps
-the object path to a possible local compacted SST file. A delete waits for any
-earlier upload of the same path, deletes the remote object, and then removes the
-local file if one exists. A failed local unlink wastes disk but does not
-resurrect the remote object. Reconciliation retries it when enabled. An
+`ObjectStore::delete` does not carry `ObjectStoreCallTag`, so the mirror derives
+a possible local file by placing the full canonical object-store path below
+`objects/`. A delete waits for any earlier upload of the same path, deletes the
+remote object, and then removes the local file if one exists and its footer
+location matches the deleted path. A failed local unlink wastes disk but does
+not resurrect the remote object. Reconciliation retries it when enabled. An
 in-flight read keeps its file handle until the read ends.
 
 The wrapper does not interpret manifests or run a separate reachability
@@ -637,12 +663,16 @@ reconciliation does not delay `Db::close()`.
 
 One reconciliation pass proceeds as follows:
 
-1. Snapshot the decoded object-store paths of complete files currently under
-   `objects/`. Files created after this snapshot are not candidates in this
-   pass. Files under `staging/` are never candidates.
-2. Group the snapshot by remote parent prefix and LIST each distinct prefix on
-   the wrapped remote store. This avoids listing unrelated bucket contents and
-   covers compacted SSTs reached through clone and split paths.
+1. Snapshot the `ObjectMeta.location` values from the footers of complete files
+   currently under `objects/`, verifying that each location equals its full
+   local path relative to `objects/`. Files created after this snapshot are not
+   candidates in this pass. Files under `staging/` are never candidates. A file
+   whose footer location does not match is preserved and reported as a local
+   error.
+2. Group the snapshot by each location's remote parent and LIST each distinct
+   parent prefix on the wrapped remote store. This avoids listing unrelated
+   bucket contents and requires no knowledge of SlateDB's database path
+   structure.
 3. For each local path absent from its remote LIST result, issue a remote HEAD
    to confirm the object is missing. HEAD confirmations share the background
    remote-read concurrency limit with prefetches.
@@ -820,14 +850,16 @@ tagged compacted SST miss produces a range GET plus a full GET. Local-only mode
 issues no remote fallback GET on such a miss.
 
 Each reconciliation pass scans complete local objects, issues one remote LIST
-per distinct parent prefix, and issues HEAD only for paths missing from a LIST
-result. Mirrors randomize their initial delays to spread this work across the
-fleet. Reconciliation never runs on the foreground read or write path.
+per distinct remote parent prefix represented locally, and issues HEAD only for
+paths missing from a LIST result. Mirrors randomize their initial delays to
+spread this work across the fleet. Reconciliation never runs on the foreground
+read or write path.
 
 At the default one-minute interval, and using the S3 Standard rate of $0.005 per
 1,000 PUT, COPY, POST, or LIST requests, one listed prefix produces 43,200 LIST
 requests in a 30-day month and costs $0.216 per mirror per month. With `P`
-distinct prefixes and `M` mirrors, the monthly LIST cost is `$0.216 * P * M`.
+distinct parent prefixes and `M` mirrors, the monthly LIST cost is
+`$0.216 * P * M`.
 Confirmatory HEAD requests for candidates missing from LIST, data transfer, and
 provider-specific charges are additional. Setting the reconciliation interval
 to `None` eliminates this periodic LIST cost.
@@ -896,7 +928,13 @@ initiated inside the wrapper.
 ## Testing
 
 - Unit tests:
-  - local path mapping for compacted, clone, and split SSTs,
+  - canonical object-store paths are used directly below `objects/` and cannot
+    lexically escape the mirror root,
+  - percent-encoded path components remain unchanged rather than being decoded,
+  - unrepresentable filesystem paths and footer-location aliases return
+    `LocalMirrorError`,
+  - local path mapping preserves the full compacted, clone, and split
+    object-store paths without parsing their database roots,
   - staging-file publication and cleanup,
   - local file removal after an SST delete,
   - WAL and untagged GET, PUT, multipart, HEAD, LIST, and copy passthrough,
@@ -906,7 +944,7 @@ initiated inside the wrapper.
   - reconciliation defaults to one minute, `None` disables its background task,
     and a zero interval is rejected,
   - reconciliation snapshots only complete files under `objects/`, groups them
-    by decoded remote parent prefix, and ignores staging files,
+    by the parent of `ObjectMeta.location`, and ignores staging files,
   - reconciliation removes a local SST only when it is absent from LIST and a
     confirmatory HEAD returns `NotFound`,
   - a successful confirmatory HEAD preserves an SST omitted from LIST,
