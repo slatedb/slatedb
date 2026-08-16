@@ -9,6 +9,10 @@
 //! [`CheckpointScope::Durable`] before cloning. The same APIs work for
 //! segmented and non-segmented stores.
 //!
+//! Union requires its sources to be non-overlapping. For a segmented store
+//! that rule applies per segment, so the two shards below merge in one call
+//! even though each holds part of both segments.
+//!
 //! Clone construction uses:
 //! [`AdminBuilder::new`] → [`Admin::create_clone_builder_from_source`] →
 //! [`CloneBuilder::with_source`] → [`CloneBuilder::build`].
@@ -91,37 +95,6 @@ fn left_tenant_in_segment(prefix: &[u8]) -> ProjectionRange {
 fn right_tenant_in_segment(prefix: &[u8]) -> ProjectionRange {
     (
         Bound::Included(kind_tenant(prefix, SPLIT_TENANT)),
-        Bound::Unbounded,
-    )
-}
-
-/// Contiguous `data/…` / `idx/…` slices for union. A tenant shard that holds
-/// both segments has a bounding range spanning `data/…` through `idx/…`, so
-/// left and right overlap unless re-sliced before merge.
-fn data_left_range() -> ProjectionRange {
-    (
-        Bound::Unbounded,
-        Bound::Excluded(Bytes::from_static(b"idx")),
-    )
-}
-
-fn data_right_range() -> ProjectionRange {
-    (
-        Bound::Included(kind_tenant(b"data", SPLIT_TENANT)),
-        Bound::Excluded(Bytes::from_static(b"idx")),
-    )
-}
-
-fn idx_left_range() -> ProjectionRange {
-    (
-        Bound::Included(Bytes::from_static(b"idx")),
-        Bound::Excluded(kind_tenant(b"idx", SPLIT_TENANT)),
-    )
-}
-
-fn idx_right_range() -> ProjectionRange {
-    (
-        Bound::Included(kind_tenant(b"idx", SPLIT_TENANT)),
         Bound::Unbounded,
     )
 }
@@ -215,8 +188,6 @@ async fn rescale_segmented(object_store: Arc<InMemory>) -> anyhow::Result<()> {
     let root_path = "/tmp/slatedb_rescaling/segmented/root";
     let left_path = "/tmp/slatedb_rescaling/segmented/left";
     let right_path = "/tmp/slatedb_rescaling/segmented/right";
-    let merged_data_path = "/tmp/slatedb_rescaling/segmented/merged_data";
-    let merged_idx_path = "/tmp/slatedb_rescaling/segmented/merged_idx";
     let merged_path = "/tmp/slatedb_rescaling/segmented/merged";
 
     let db = Db::builder(root_path, object_store.clone())
@@ -289,31 +260,14 @@ async fn rescale_segmented(object_store: Arc<InMemory>) -> anyhow::Result<()> {
     left.close().await?;
     right.close().await?;
 
-    // Scale down: union needs non-overlapping bounding ranges, so re-slice each
-    // shard into contiguous `data/…` and `idx/…` halves, then union those.
-    create_clone(
-        merged_data_path,
-        vec![
-            CloneSourceSpec::new(left_path).with_projection_range(data_left_range()),
-            CloneSourceSpec::new(right_path).with_projection_range(data_right_range()),
-        ],
-        object_store.clone(),
-    )
-    .await?;
-    create_clone(
-        merged_idx_path,
-        vec![
-            CloneSourceSpec::new(left_path).with_projection_range(idx_left_range()),
-            CloneSourceSpec::new(right_path).with_projection_range(idx_right_range()),
-        ],
-        object_store.clone(),
-    )
-    .await?;
+    // Scale down: one union merges both shards. Union requires the sources to
+    // be non-overlapping per segment, not overall — each shard holds the lower
+    // or upper zoos of both `data` and `idx`, so no segment is claimed twice.
     create_clone(
         merged_path,
         vec![
-            CloneSourceSpec::new(merged_data_path),
-            CloneSourceSpec::new(merged_idx_path),
+            CloneSourceSpec::new(left_path),
+            CloneSourceSpec::new(right_path),
         ],
         object_store.clone(),
     )
