@@ -748,6 +748,8 @@ The union process works as follows:
    of all its L0 and compacted SSTs and optionally intersected with `visible_range`s for each manifest if they are 
    provided by the user. If any two manifests have intersecting key ranges, the operation fails.
    If the `visible_ranges` are explicitly provided then validate that they are adjacent.
+   Segmented manifests apply this check per segment rather than to the manifest as a whole; see
+   [RFC 0024](./0024-segment-oriented-compaction.md#interaction-with-projection-and-union).
 3. Merge the contents of all input manifests:
    - `external_dbs` entries from all input manifests are merged and deduplicated by
      `(path, source_checkpoint_id)`. `external_dbs` with the same `(path, source_checkpoint_id)` originated from the 
