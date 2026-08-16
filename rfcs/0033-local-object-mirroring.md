@@ -510,6 +510,20 @@ regardless of GET policy. `Some(interval)` enables the task and must be
 non-zero; `None` disables it. Dropping the wrapper cancels its task without
 delaying `Db::close()`.
 
+> [!IMPORTANT]
+> This design requires a bucket and endpoint with strongly consistent object
+> reads, writes, deletes, and listings. Reconciliation treats confirmed remote
+> absence as authoritative and may delete the only local copy, so it must be
+> disabled when these guarantees are unavailable. In particular:
+>
+> - Tigris global and dual-region buckets are strongly consistent for requests
+>   within one region but eventually consistent across regions. All writers and
+>   reconciling caches must access such a bucket from the same region; Tigris
+>   multi-region and single-region buckets provide strong consistency globally.
+> - Azure RA-GRS and RA-GZRS secondary endpoints are eventually consistent with
+>   the primary. Reconciliation must use the primary endpoint and remain
+>   disabled while reads are directed to a secondary endpoint.
+
 One reconciliation pass proceeds as follows:
 
 - Snapshot all files in `objects/`, excluding every path currently registered
