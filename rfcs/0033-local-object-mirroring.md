@@ -533,6 +533,10 @@ One reconciliation pass proceeds as follows:
 - LIST each distinct parent prefix on the wrapped remote store.
 - Delete any local file whose path is absent from the remote LIST result.
 
+Care must be taken not to delete files that still have an upload in flight.
+A pending-upload map tracks every path that has been promoted into `objects/`
+but has not yet completed.
+
 This will require one LIST per database prefix. A DB with no external DBs will
 have a single prefix. One additional LIST will be issued for each external DB
 prefix.
@@ -677,13 +681,6 @@ waits for the shared queue's upload result. `WriteBack` moves most remote
 latency off compacted SST writes, but manifest and compactions publication still
 wait at a remote barrier. WAL writes remain on the foreground remote path.
 
-Whole-SST storage removes the 4 MiB miss amplification, part metadata,
-per-part file handles, and per-part eviction work. It can increase local bytes
-relative to a hot-block cache because completeness is the contract.
-
-With `ReadThrough`, warmup cost is highest because a miss produces a range GET
-plus a full GET. `LocalOnly` issues no remote fallback GET.
-
 One `warm` call reads the latest manifest and issues one full-object GET
 for each referenced SST not already local. It may therefore transfer the full
 live compacted data set when starting with an empty cache. Existing local SSTs
@@ -693,18 +690,14 @@ installed or one fails.
 
 Each reconciliation pass scans complete local objects that are not registered
 as pending uploads, issues one remote LIST per distinct remote parent prefix
-represented locally, and issues HEAD only for paths missing from a LIST result.
-Caches randomize their initial delays to spread this work across the fleet.
-Reconciliation never runs on the foreground read or write path.
+represented locally, and issues DELETE only for paths missing from a LIST result.
 
 At the default one-minute interval, and using the S3 Standard rate of $0.005 per
 1,000 PUT, COPY, POST, or LIST requests, one listed prefix produces 43,200 LIST
 requests in a 30-day month and costs $0.216 per cache per month. With `P`
 distinct parent prefixes and `M` caches, the monthly LIST cost is
-`$0.216 * P * M`.
-Confirmatory HEAD requests for candidates missing from LIST, data transfer, and
-provider-specific charges are additional. Setting the reconciliation interval
-to `None` eliminates this periodic LIST cost.
+`$0.216 * P * M`. Setting the reconciliation interval to `None` eliminates this
+periodic LIST cost.
 
 ### Capacity
 
@@ -759,12 +752,4 @@ TODO
 
 ## Updates
 
-- Reframed the proposal as a rewrite of `CachedObjectStore`.
-- Replaced GET-extension-based object population with the public
-  manifest-aware `warm_cache` utility. `CacheManager` remains block-cache-only.
-- Replaced fixed read and write modes with cache-specific GET and PUT policies
-  and documented their dispatch paths.
-- Added optional periodic remote reconciliation, enabled at a one-minute
-  interval by default, while retaining DELETE passthrough as the immediate local
-  cleanup path.
 - Initial draft.
