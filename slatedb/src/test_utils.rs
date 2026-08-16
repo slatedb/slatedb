@@ -1395,6 +1395,35 @@ impl crate::prefix_extractor::PrefixExtractor for FixedThreeBytePrefixExtractor 
     }
 }
 
+/// Test extractor that segments on the leading `data` / `idx` path
+/// component, modelling a store that keeps bulky records in one segment and
+/// a smaller index over them in another. Tenants live in the *next*
+/// component (`data/{tenant}/…`), so a tenant's rows are split across both
+/// segments rather than forming one contiguous key range.
+// Only the union tests in `clone.rs` use this, and those need `wal_disable`.
+#[cfg(feature = "wal_disable")]
+#[derive(Debug)]
+pub(crate) struct DataIdxPrefixExtractor;
+
+#[cfg(feature = "wal_disable")]
+impl crate::prefix_extractor::PrefixExtractor for DataIdxPrefixExtractor {
+    fn name(&self) -> &str {
+        "data-idx"
+    }
+    fn prefix_len(&self, target: &crate::prefix_extractor::PrefixTarget) -> Option<usize> {
+        let key: &[u8] = match target {
+            crate::prefix_extractor::PrefixTarget::Point(b)
+            | crate::prefix_extractor::PrefixTarget::Prefix(b) => b.as_ref(),
+        };
+        for kind in [b"data".as_slice(), b"idx".as_slice()] {
+            if key == kind || key.starts_with(&[kind, b"/".as_slice()].concat()) {
+                return Some(kind.len());
+            }
+        }
+        None
+    }
+}
+
 /// Test extractor that deliberately violates the
 /// [`crate::prefix_extractor::PrefixExtractor`] `Point` invariant by
 /// returning different prefix lengths for keys that share a common

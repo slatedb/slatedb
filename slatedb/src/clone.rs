@@ -2139,6 +2139,112 @@ mod tests {
 
     #[cfg(feature = "wal_disable")]
     #[tokio::test]
+    async fn should_union_segmented_shards_that_each_span_every_segment() {
+        // Rescale-down of a store keyed `data/{tenant}/…` and
+        // `idx/{tenant}/…`, sharded by tenant. Each shard holds part of both
+        // segments, so the shards' overall key ranges overlap —
+        // `data/metro…` sorts below `idx/bronx…` — while neither segment
+        // does. One union call must merge them; no per-source projection and
+        // no staged re-slicing clones are needed.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path_a = Path::from("/tmp/test_parent_seg_interleaved_a");
+        let parent_path_b = Path::from("/tmp/test_parent_seg_interleaved_b");
+        let clone_path = Path::from("/tmp/test_clone_seg_interleaved");
+        let extractor = Arc::new(test_utils::DataIdxPrefixExtractor);
+        let settings = wal_disabled_settings();
+
+        fn shard(tenants: [&str; 2]) -> BTreeMap<Bytes, Bytes> {
+            let mut table = BTreeMap::new();
+            for tenant in tenants {
+                table.insert(
+                    Bytes::from(format!("data/{}/animal/lion-1", tenant)),
+                    Bytes::from(format!("{} lion", tenant)),
+                );
+                table.insert(
+                    Bytes::from(format!("idx/{}/owner/alice/lion-1", tenant)),
+                    Bytes::new(),
+                );
+            }
+            table
+        }
+        let table_a = shard(["bronx", "lincoln"]);
+        let table_b = shard(["metro", "oakland"]);
+
+        build_segmented_parent(
+            &parent_path_a,
+            object_store.clone(),
+            extractor.clone(),
+            settings.clone(),
+            &table_a,
+        )
+        .await;
+        build_segmented_parent(
+            &parent_path_b,
+            object_store.clone(),
+            extractor.clone(),
+            settings.clone(),
+            &table_b,
+        )
+        .await;
+
+        run_segmented_clone(
+            vec![
+                CloneSourceSpec::new(parent_path_a.clone()),
+                CloneSourceSpec::new(parent_path_b.clone()),
+            ],
+            &clone_path,
+            object_store.clone(),
+            None,
+        )
+        .await;
+
+        // Both shards contribute an L0 SST to each of the two segments.
+        let store = ManifestStore::new(&clone_path, object_store.clone());
+        let stored = store.read_latest_manifest().await.unwrap();
+        assert_eq!(
+            stored.manifest.core.segment_extractor_name.as_deref(),
+            Some("data-idx")
+        );
+        let segments: Vec<(Bytes, usize)> = stored
+            .manifest
+            .core
+            .segments
+            .iter()
+            .map(|s| (s.prefix.clone(), s.tree.l0.len()))
+            .collect();
+        assert_eq!(
+            segments,
+            vec![
+                (Bytes::from_static(b"data"), 2),
+                (Bytes::from_static(b"idx"), 2)
+            ]
+        );
+        assert_eq!(stored.manifest.external_dbs.len(), 2);
+
+        let mut expected: BTreeMap<Bytes, Bytes> = table_a.clone();
+        expected.extend(table_b.clone());
+
+        let clone_db =
+            open_segmented_clone(&clone_path, object_store.clone(), extractor, settings).await;
+        let mut full_iter = clone_db.scan(..).await.unwrap();
+        test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
+            .await;
+        // Each segment routes reads across both shards' contributions.
+        assert_segment_prefix_scan(&clone_db, &expected, b"data", b"datb").await;
+        assert_segment_prefix_scan(&clone_db, &expected, b"idx", b"idy").await;
+        for (key, value) in &expected {
+            assert_eq!(
+                clone_db.get(key).await.unwrap().as_ref(),
+                Some(value),
+                "key={:?}",
+                key
+            );
+        }
+        clone_db.close().await.unwrap();
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
     async fn should_union_projected_segmented_dbs() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let parent_path_a = Path::from("/tmp/test_parent_seg_proj_union_a");
