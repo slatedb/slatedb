@@ -10,8 +10,8 @@ import {
   LogLevel,
   ObjectStore,
   RowEntryKind,
+  SlateDbWalReader,
   Ttl,
-  WalReader,
 } from "../index.js";
 
 export const TEST_DB_PATH = "test-db";
@@ -175,8 +175,8 @@ export async function openReader(store, { path = TEST_DB_PATH, configure, cleanu
   }
 }
 
-export function openWalReader(store, { path = TEST_DB_PATH, cleanup } = {}) {
-  const reader = new WalReader(path, store);
+export function openSlateDbWalReader(store, { path = TEST_DB_PATH, cleanup } = {}) {
+  const reader = new SlateDbWalReader(path, store);
   return cleanup?.track(reader, { shutdown: false }) ?? reader;
 }
 
@@ -191,15 +191,14 @@ export async function drainIterator(iterator) {
   }
 }
 
-export async function drainWalIterator(iterator) {
-  const rows = [];
-  for (;;) {
-    const row = await iterator.next();
-    if (row == null) {
-      return rows;
-    }
-    rows.push(row);
+export async function readWalBatchesThrough(iterator, endWalFileId) {
+  const batches = [];
+  while (batches.length === 0 || BigInt(batches.at(-1).last_consumed_wal_file_id) < endWalFileId) {
+    const batch = await iterator.next();
+    assert.ok(batch != null, "live WAL iterator ended unexpectedly");
+    batches.push(batch);
   }
+  return batches;
 }
 
 export function requireRows(rows, wantKeys, wantValues) {
@@ -358,6 +357,21 @@ export async function seedWalFiles(store) {
       mergeOptions(),
       writeOptions(false),
     );
+    await db.flush_with_options({ flush_type: FlushType.Wal });
+  } finally {
+    await shutdownAndDispose(db);
+  }
+}
+
+export async function appendWalValue(store, key, value) {
+  const db = await openDb(store, {
+    configure(builder) {
+      builder.with_merge_operator(new ConcatMergeOperator());
+    },
+  });
+
+  try {
+    await db.put_with_options(bytes(key), bytes(value), putOptions(), writeOptions());
     await db.flush_with_options({ flush_type: FlushType.Wal });
   } finally {
     await shutdownAndDispose(db);

@@ -2250,8 +2250,7 @@ mod tests {
         OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
     };
     use crate::types::RowEntry;
-    use crate::wal::WalError;
-    use crate::wal_reader::WalReader;
+    use crate::wal::{SlateDbWalReader, SlateDbWalReaderOptions, WalError, WalReader as _};
     use crate::{proptest_util, test_utils, CloseReason, CompactorBuilder, KeyValue};
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
@@ -4819,7 +4818,7 @@ mod tests {
         let mut settings = test_db_options(0, 1024, None);
         settings.flush_interval = None;
 
-        let kv_store = Db::builder(path, main_object_store)
+        let kv_store = Db::builder(path, Arc::clone(&main_object_store))
             .with_settings(settings)
             .with_wal_object_store(wal_object_store.clone())
             .build()
@@ -4867,20 +4866,25 @@ mod tests {
             0
         );
 
-        let wal_reader = WalReader::new(path, wal_object_store);
-        let wal_files = wal_reader.list(..).await.unwrap();
-        assert_eq!(wal_files.len(), 2); // first file is the fencing operation
+        let wal_reader = SlateDbWalReader::new_for_db_with_wal_object_store(
+            main_object_store,
+            wal_object_store,
+            Path::from(path),
+            SlateDbWalReaderOptions::default(),
+        );
+        let tail = wal_reader.last_wal_file_id(0).await.unwrap();
+        assert_eq!(tail, 2); // first file is the fencing operation
         let mut rows = Vec::new();
-        let mut wal_iter = wal_files[1] // second file contains the actual write
-            .iterator()
+        let mut wal_iter = wal_reader
+            .iterator((1..tail.checked_add(1).unwrap()).into())
             .await
             .expect("expected successful WAL iterator call");
-        while let Some(entry) = wal_iter
+        while let Some(batch) = wal_iter
             .next()
             .await
             .expect("expected successful WAL rows read")
         {
-            rows.push(entry);
+            rows.extend(batch.rows);
         }
         assert_eq!(rows.len(), 1);
         let row = &rows[0];

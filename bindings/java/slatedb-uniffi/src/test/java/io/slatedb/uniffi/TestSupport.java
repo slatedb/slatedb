@@ -182,8 +182,8 @@ final class TestSupport {
         }
     }
 
-    static WalReader openWalReader(ObjectStore store) throws Exception {
-        return new WalReader(TEST_DB_PATH, store);
+    static SlateDbWalReader openSlateDbWalReader(ObjectStore store) throws Exception {
+        return new SlateDbWalReader(TEST_DB_PATH, store);
     }
 
     static void seedWalFiles(ObjectStore store) throws Exception {
@@ -197,6 +197,14 @@ final class TestSupport {
             await(db.flushWithOptions(new FlushOptions(FlushType.WAL)));
 
             await(db.merge(bytes("m"), bytes("x")));
+            await(db.flushWithOptions(new FlushOptions(FlushType.WAL)));
+        }
+    }
+
+    static void appendWalValue(ObjectStore store, String key, String value) throws Exception {
+        try (ManagedDb handle = openDb(store, builder -> builder.withMergeOperator(new ConcatMergeOperator()))) {
+            Db db = handle.db();
+            await(db.put(bytes(key), bytes(value)));
             await(db.flushWithOptions(new FlushOptions(FlushType.WAL)));
         }
     }
@@ -273,15 +281,18 @@ final class TestSupport {
         }
     }
 
-    static List<RowEntry> drainWalIterator(WalFileIterator iterator) throws Exception {
-        List<RowEntry> rows = new ArrayList<>();
-        while (true) {
-            RowEntry row = await(iterator.next());
-            if (row == null) {
-                return rows;
+    static List<WalRows> readWalBatchesThrough(
+            SlateDbWalIterator iterator, long endWalFileId) throws Exception {
+        List<WalRows> batches = new ArrayList<>();
+        while (batches.isEmpty()
+                || batches.get(batches.size() - 1).lastConsumedWalFileId() < endWalFileId) {
+            WalRows batch = await(iterator.next());
+            if (batch == null) {
+                throw new AssertionError("live WAL iterator ended unexpectedly");
             }
-            rows.add(row);
+            batches.add(batch);
         }
+        return batches;
     }
 
     static void closeAll(Iterable<? extends AutoCloseable> closeables) throws Exception {

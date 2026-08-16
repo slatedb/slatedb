@@ -1,108 +1,96 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ErrorData } from "../index.js";
 import {
   RowEntryKind,
+  appendWalValue,
   createCleanup,
-  drainWalIterator,
-  expectError,
   newMemoryStore,
-  openWalReader,
+  openSlateDbWalReader,
+  readWalBatchesThrough,
   requireWalRow,
   seedWalFiles,
 } from "./support.mjs";
 
-test("wal reader empty store listing", async (t) => {
-  const cleanup = createCleanup(t);
-  const store = cleanup.track(newMemoryStore());
-  const reader = openWalReader(store, { cleanup });
+function cursorOf(batch) {
+  return BigInt(batch.last_consumed_wal_file_id);
+}
 
-  assert.deepEqual(await reader.list(undefined, undefined), []);
-});
+function rowsOf(batches) {
+  return batches.flatMap((batch) => batch.rows);
+}
 
-test("wal reader listing bounds and navigation", async (t) => {
+test("wal reader reports no new files after the cursor", async (t) => {
   const cleanup = createCleanup(t);
   const store = cleanup.track(newMemoryStore());
   await seedWalFiles(store);
+  const reader = openSlateDbWalReader(store, { cleanup });
 
-  const reader = openWalReader(store, { cleanup });
-  const files = (await reader.list(undefined, undefined)).map((file) => cleanup.track(file));
-  assert.ok(files.length >= 3);
+  const cursor = BigInt(await reader.last_wal_file_id(0n));
+  assert.equal(BigInt(await reader.last_wal_file_id(cursor)), cursor);
+});
 
-  const ids = files.map((file) => BigInt(file.id()));
+test("wal reader streams new WALs through one iterator", async (t) => {
+  const cleanup = createCleanup(t);
+  const store = cleanup.track(newMemoryStore());
+  await seedWalFiles(store);
+  const reader = openSlateDbWalReader(store, { cleanup });
+
+  const firstTail = BigInt(await reader.last_wal_file_id(0n));
+  const iterator = cleanup.track(await reader.iterator(1n));
+  const firstBatches = await readWalBatchesThrough(iterator, firstTail);
+  assert.ok(firstBatches.length > 0);
+  assert.ok(firstBatches.some((batch) => batch.rows.length === 0));
+  const firstCursors = firstBatches.map(cursorOf);
+  assert.equal(firstCursors.at(-1), firstTail);
+  assert.ok(firstCursors.every((cursor, index) => index === 0 || cursor > firstCursors[index - 1]));
+  assert.equal(BigInt(await reader.last_wal_file_id(firstTail)), firstTail);
+
+  await appendWalValue(store, "next", "3");
+  const secondTail = BigInt(await reader.last_wal_file_id(firstTail));
+  assert.ok(secondTail > firstTail);
+  const secondBatches = await readWalBatchesThrough(iterator, secondTail);
+  assert.ok(secondBatches.length > 0);
+  assert.equal(cursorOf(secondBatches.at(-1)), secondTail);
   assert.deepEqual(
-    ids,
-    [...ids].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0)),
+    rowsOf(secondBatches).map((row) => Buffer.from(row.key).toString("utf8")),
+    ["next"],
   );
+  assert.equal(BigInt(await reader.last_wal_file_id(secondTail)), secondTail);
+});
 
-  const bounded = (await reader.list(ids[1], ids[2])).map((file) => cleanup.track(file));
+test("wal reader decodes value, tombstone, and merge rows", async (t) => {
+  const cleanup = createCleanup(t);
+  const store = cleanup.track(newMemoryStore());
+  await seedWalFiles(store);
+  const reader = openSlateDbWalReader(store, { cleanup });
+
+  const tail = BigInt(await reader.last_wal_file_id(0n));
+  const batches = await readWalBatchesThrough(cleanup.track(await reader.iterator(1n)), tail);
+  assert.equal(cursorOf(batches.at(-1)), tail);
+  const rows = rowsOf(batches);
+
+  assert.equal(rows.length, 4);
+  assert.ok(rows.every((row) => BigInt(row.seq) > 0n));
+  requireWalRow(rows[0], RowEntryKind.Value, "a", "1");
+  requireWalRow(rows[1], RowEntryKind.Value, "b", "2");
+  requireWalRow(rows[2], RowEntryKind.Tombstone, "a", undefined);
+  requireWalRow(rows[3], RowEntryKind.Merge, "m", "x");
+});
+
+test("wal reader can start at the next WAL", async (t) => {
+  const cleanup = createCleanup(t);
+  const store = cleanup.track(newMemoryStore());
+  await seedWalFiles(store);
+  const reader = openSlateDbWalReader(store, { cleanup });
+  const tail = BigInt(await reader.last_wal_file_id(0n));
+
+  const iterator = cleanup.track(await reader.iterator(tail + 1n));
+  await appendWalValue(store, "resumed", "4");
+  const newTail = BigInt(await reader.last_wal_file_id(tail));
+  const batches = await readWalBatchesThrough(iterator, newTail);
   assert.deepEqual(
-    bounded.map((file) => BigInt(file.id())),
-    [ids[1]],
+    rowsOf(batches).map((row) => Buffer.from(row.key).toString("utf8")),
+    ["resumed"],
   );
-
-  assert.deepEqual(await reader.list(ids.at(-1) + 1_000n, undefined), []);
-
-  const first = cleanup.track(reader.get(ids[0]));
-  assert.equal(BigInt(first.id()), ids[0]);
-  assert.equal(BigInt(first.next_id()), ids[1]);
-
-  const nextFile = cleanup.track(first.next_file());
-  assert.equal(BigInt(nextFile.id()), ids[1]);
-});
-
-test("wal reader metadata and row decoding", async (t) => {
-  const cleanup = createCleanup(t);
-  const store = cleanup.track(newMemoryStore());
-  await seedWalFiles(store);
-
-  const reader = openWalReader(store, { cleanup });
-  const files = (await reader.list(undefined, undefined)).map((file) => cleanup.track(file));
-  assert.ok(files.length >= 3);
-
-  const allRows = [];
-  let nonEmptyFiles = 0;
-  for (const walFile of files) {
-    const metadata = await walFile.metadata();
-    assert.equal(BigInt(metadata.id), BigInt(walFile.id()));
-    assert.notEqual(metadata.metadata.location, "");
-
-    const iterator = cleanup.track(await walFile.iterator());
-    const rows = await drainWalIterator(iterator);
-    if (BigInt(metadata.metadata.size) === 0n) {
-      assert.deepEqual(rows, []);
-      continue;
-    }
-
-    nonEmptyFiles += 1;
-    for (const row of rows) {
-      assert.ok(BigInt(row.seq) > 0n);
-    }
-    allRows.push(...rows);
-  }
-
-  assert.ok(nonEmptyFiles > 0);
-  assert.equal(allRows.length, 4);
-  requireWalRow(allRows[0], RowEntryKind.Value, "a", "1");
-  requireWalRow(allRows[1], RowEntryKind.Value, "b", "2");
-  requireWalRow(allRows[2], RowEntryKind.Tombstone, "a", undefined);
-  requireWalRow(allRows[3], RowEntryKind.Merge, "m", "x");
-});
-
-test("wal reader missing file metadata failure", async (t) => {
-  const cleanup = createCleanup(t);
-  const store = cleanup.track(newMemoryStore());
-  await seedWalFiles(store);
-
-  const reader = openWalReader(store, { cleanup });
-  const files = (await reader.list(undefined, undefined)).map((file) => cleanup.track(file));
-  assert.ok(files.length > 0);
-
-  const missingId = BigInt(files.at(-1).id()) + 1_000n;
-  const missing = cleanup.track(reader.get(missingId));
-  assert.equal(BigInt(missing.id()), missingId);
-
-  const error = await expectError(() => missing.metadata(), ErrorData);
-  assert.match(error.message, /not found/);
 });

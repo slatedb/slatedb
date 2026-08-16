@@ -135,13 +135,15 @@
 // interface. Rust-side logging can be forwarded into Go code with
 // [InitLogging] and a [LogCallback].
 //
-// # WAL Inspection
+// # Change Data Capture
 //
-// [NewWalReader] opens a [WalReader] for inspecting WAL files under a database
-// path. [WalReader.List] enumerates [WalFile] handles, [WalFile.Metadata]
-// returns object-store metadata, and [WalFile.Iterator] returns a
-// [WalFileIterator] that yields raw [RowEntry] values. This is primarily useful
-// for debugging, diagnostics, and low-level tooling.
+// [NewSlateDbWalReader] opens a [SlateDbWalReader] for live WAL streaming.
+// Call [SlateDbWalReader.Iterator] once with the first unconsumed WAL file ID,
+// then keep calling [SlateDbWalIterator.Next]. The iterator waits and polls
+// internally at the current tail. Persist every [WalRows.LastConsumedWalFileId],
+// including empty fence batches, and resume from the following ID after a
+// restart. [SlateDbWalReader.LastWalFileId] is available when a snapshot of the
+// current tail is useful, but is not needed to drive the stream.
 //
 // # Errors
 //
@@ -159,8 +161,8 @@
 //
 // Most exported handle types own a Rust-side resource and provide an explicit
 // `Destroy` method, including [ObjectStore], [DbBuilder], [Db], [DbReader],
-// [DbSnapshot], [DbTransaction], [DbIterator], [WalReader], [WalFile],
-// [WalFileIterator], [Settings], and [WriteBatch].
+// [DbSnapshot], [DbTransaction], [DbIterator], [SlateDbWalReader],
+// [SlateDbWalIterator], [Settings], and [WriteBatch].
 //
 // These handles install Go finalizers, but callers should not rely on garbage
 // collection for timely cleanup. Prefer calling `Destroy` explicitly when a
@@ -169,6 +171,7 @@
 // binding handle.
 //
 // Builders are single-use after `Build`. [WriteBatch] is single-use after
-// `Write`. Iterator `Next` methods return `nil` when exhausted, and transaction
-// commit methods may return `nil` when no write was emitted.
+// `Write`. Bounded iterator `Next` methods return `nil` when exhausted; the live
+// [SlateDbWalIterator] instead waits at the current tail. Transaction commit
+// methods may return `nil` when no write was emitted.
 package slatedb
