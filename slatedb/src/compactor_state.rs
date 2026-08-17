@@ -2120,7 +2120,7 @@ mod tests {
         let original_l0s = &state.db_state().clone().tree.l0;
         let original_srs = &state.db_state().clone().tree.compacted;
         // L0: from 4th onward (index > 2)
-        let l0_sources = original_l0s.iter().skip(3).map(|h| SourceId::SstView(h.id));
+        let l0_sources = original_l0s.iter().skip(3).map(|h| SstView(h.id));
 
         // SRs: first 3 (index < 3)
         let sr_sources = original_srs
@@ -2212,7 +2212,7 @@ mod tests {
     }
 
     fn build_l0_compaction(ssts: &VecDeque<SsTableView>, dst: u32) -> CompactionSpec {
-        let sources = ssts.iter().map(|h| SourceId::SstView(h.id)).collect();
+        let sources = ssts.iter().map(|h| SstView(h.id)).collect();
         CompactionSpec::new(sources, dst)
     }
 
@@ -2398,13 +2398,13 @@ mod tests {
         }];
 
         let first_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let first = CompactionSpec::drain_segment(prefix.clone(), vec![SourceId::SstView(l0_a.id)]);
+        let first = CompactionSpec::drain_segment(prefix.clone(), vec![SstView(l0_a.id)]);
         state
             .add_compaction(Compaction::new(first_id, first))
             .expect("first drain must register");
 
         let second_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let second = CompactionSpec::drain_segment(prefix, vec![SourceId::SstView(l0_b.id)]);
+        let second = CompactionSpec::drain_segment(prefix, vec![SstView(l0_b.id)]);
         let err = state
             .add_compaction(Compaction::new(second_id, second))
             .expect_err("second drain on same segment must be rejected");
@@ -2444,13 +2444,13 @@ mod tests {
         ];
 
         let first_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let first = CompactionSpec::drain_segment(prefix_a, vec![SourceId::SstView(l0_a.id)]);
+        let first = CompactionSpec::drain_segment(prefix_a, vec![SstView(l0_a.id)]);
         state
             .add_compaction(Compaction::new(first_id, first))
             .expect("first drain must register");
 
         let second_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let second = CompactionSpec::drain_segment(prefix_b, vec![SourceId::SstView(l0_b.id)]);
+        let second = CompactionSpec::drain_segment(prefix_b, vec![SstView(l0_b.id)]);
         state
             .add_compaction(Compaction::new(second_id, second))
             .expect("drain on a different segment must register");
@@ -2476,7 +2476,7 @@ mod tests {
         }];
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let spec = CompactionSpec::drain_segment(prefix, vec![SourceId::SstView(l0.id)]);
+        let spec = CompactionSpec::drain_segment(prefix, vec![SstView(l0.id)]);
         state
             .add_compaction(Compaction::new(compaction_id, spec))
             .expect("drain submission must register");
@@ -2531,8 +2531,8 @@ mod tests {
         let spec = CompactionSpec::drain_segment(
             prefix.clone(),
             vec![
-                SourceId::SstView(l0_newer.id),
-                SourceId::SstView(l0_older.id),
+                SstView(l0_newer.id),
+                SstView(l0_older.id),
                 SourceId::SortedRun(sr.id),
             ],
         );
@@ -2579,8 +2579,7 @@ mod tests {
         }];
 
         let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let spec =
-            CompactionSpec::drain_segment(prefix.clone(), vec![SourceId::SstView(l0_observed.id)]);
+        let spec = CompactionSpec::drain_segment(prefix.clone(), vec![SstView(l0_observed.id)]);
         state
             .add_compaction(Compaction::new(compaction_id, spec))
             .expect("drain compaction must register");

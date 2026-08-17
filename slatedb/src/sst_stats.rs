@@ -40,7 +40,7 @@ impl SstStats {
 
     /// Returns the in-memory size in bytes (struct + heap-allocated block_stats).
     pub(crate) fn size(&self) -> usize {
-        std::mem::size_of::<Self>() + self.block_stats.len() * std::mem::size_of::<BlockStats>()
+        size_of::<Self>() + self.block_stats.len() * size_of::<BlockStats>()
     }
 
     /// Returns a clone.

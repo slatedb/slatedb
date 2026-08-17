@@ -76,13 +76,13 @@ impl PathResolver {
                     .next()
                     .and_then(|s| s.as_ref().split('.').next().map(|s| s.parse::<u64>()))
                     .transpose()
-                    .map(|r| r.map(SsTableId::Wal))
+                    .map(|r| r.map(Wal))
                     .map_err(|_| SlateDBError::InvalidDBState),
                 Some(a) if a.as_ref() == COMPACTED_PATH => suffix_iter
                     .next()
                     .and_then(|s| s.as_ref().split('.').next().map(Ulid::from_string))
                     .transpose()
-                    .map(|r| r.map(SsTableId::Compacted))
+                    .map(|r| r.map(Compacted))
                     .map_err(|_| SlateDBError::InvalidDBState),
                 _ => Ok(None),
             }

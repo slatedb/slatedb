@@ -87,7 +87,7 @@ impl RandomKeyGenerator {
     pub fn new(key_bytes: usize) -> Self {
         Self {
             key_len_bytes: key_bytes,
-            rng: rand_xorshift::XorShiftRng::from_os_rng(),
+            rng: XorShiftRng::from_os_rng(),
             used_keys: Vec::new(),
         }
     }
@@ -134,7 +134,7 @@ impl FixedSetKeyGenerator {
         }
         Self {
             keys,
-            rng: rand_xorshift::XorShiftRng::from_os_rng(),
+            rng: XorShiftRng::from_os_rng(),
             used_keys: Vec::new(),
         }
     }
@@ -275,7 +275,7 @@ impl Task {
     /// This method runs a loop, generating a key (and value if needed), and
     /// then either puts the key/value pair or gets the key.
     async fn run(&mut self) {
-        let mut random = rand_xorshift::XorShiftRng::from_os_rng();
+        let mut random = XorShiftRng::from_os_rng();
         let mut puts = 0u64;
         let mut puts_bytes = 0u64;
         let mut gets = 0u64;

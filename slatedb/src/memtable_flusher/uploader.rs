@@ -426,12 +426,7 @@ mod tests {
         )
     }
 
-    fn freeze_imm(
-        db: &DbInner,
-        key: &[u8],
-        value: &[u8],
-        seq: u64,
-    ) -> Arc<crate::mem_table::ImmutableMemtable> {
+    fn freeze_imm(db: &DbInner, key: &[u8], value: &[u8], seq: u64) -> Arc<ImmutableMemtable> {
         let mut guard = db.state.write();
         guard.memtable().put(RowEntry::new_value(key, value, seq));
         guard.freeze_memtable(0);
@@ -653,11 +648,9 @@ mod tests {
         .await;
         {
             let mut guard = db.state.write();
-            guard.memtable().put(crate::types::RowEntry::new_merge(
-                b"key",
-                b"merge_operand",
-                1,
-            ));
+            guard
+                .memtable()
+                .put(RowEntry::new_merge(b"key", b"merge_operand", 1));
             guard.freeze_memtable(0);
         }
         let imm_memtable = db
@@ -731,7 +724,7 @@ mod tests {
             let mut guard = db.state.write();
             guard
                 .memtable()
-                .put(crate::types::RowEntry::new_merge(b"key", b"operand", 1));
+                .put(RowEntry::new_merge(b"key", b"operand", 1));
             guard.freeze_memtable(0);
         }
         let imm_memtable = db

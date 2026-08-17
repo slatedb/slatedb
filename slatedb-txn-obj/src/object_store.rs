@@ -7,7 +7,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use log::{debug, error, warn};
 use object_store::path::Path;
-use object_store::Error::AlreadyExists;
+use object_store::Error::{AlreadyExists, Precondition};
 use object_store::{
     Error, GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload, UpdateVersion,
 };
@@ -337,7 +337,7 @@ impl BoundaryObject for ObjectStoreBoundaryObject {
                     return Ok(());
                 }
                 // Try again if the boundary was concurrently updated by another process.
-                Err(Error::AlreadyExists { .. } | Error::Precondition { .. }) => {
+                Err(AlreadyExists { .. } | Precondition { .. }) => {
                     // Refresh the cache so re-attempts always use the fresh boundary.
                     self.read_boundary().await?;
                 }

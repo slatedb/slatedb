@@ -269,9 +269,7 @@ impl DbIterator {
         match entry_opt {
             Some(entry) => {
                 if entry.value.is_tombstone() {
-                    return Err(crate::Error::from(
-                        crate::error::SlateDBError::UnexpectedTombstone,
-                    ));
+                    return Err(crate::Error::from(SlateDBError::UnexpectedTombstone));
                 }
                 Ok(Some(KeyValue::from(entry)))
             }

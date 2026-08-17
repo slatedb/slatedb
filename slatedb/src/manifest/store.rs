@@ -584,7 +584,6 @@ pub(crate) mod test_utils {
 mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::config::CheckpointOptions;
-    use crate::error;
     use crate::error::SlateDBError;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
@@ -622,7 +621,7 @@ mod tests {
 
         assert!(matches!(
             result.unwrap_err(),
-            error::SlateDBError::TransactionalObjectVersionExists
+            SlateDBError::TransactionalObjectVersionExists
         ));
     }
 
@@ -755,7 +754,7 @@ mod tests {
             .unwrap();
 
         let result = writer1.refresh().await;
-        assert!(matches!(result, Err(error::SlateDBError::Fenced)));
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
     }
 
     #[tokio::test]
@@ -807,7 +806,7 @@ mod tests {
             .unwrap();
 
         let result = compactor1.refresh().await;
-        assert!(matches!(result, Err(error::SlateDBError::Fenced)));
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
     }
 
     #[tokio::test]
@@ -859,7 +858,7 @@ mod tests {
             .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
             .await;
 
-        assert!(matches!(result, Err(error::SlateDBError::Fenced)));
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
         assert_state_not_updated(&mut compactor2).await;
     }
 
@@ -1052,7 +1051,7 @@ mod tests {
         assert_eq!(manifests[1].id, 2);
 
         let result = ms.delete_manifest(2).await;
-        assert!(matches!(result, Err(error::SlateDBError::InvalidDeletion)));
+        assert!(matches!(result, Err(SlateDBError::InvalidDeletion)));
     }
 
     fn new_memory_manifest_store() -> Arc<ManifestStore> {

@@ -1,5 +1,6 @@
 pub use crate::db::builder::CloneBuilder;
 pub use crate::db::builder::CloneSourceSpec;
+use std::collections::BTreeSet;
 
 use crate::checkpoint::{Checkpoint, CheckpointCreateResult};
 use crate::compactions_store::CompactionsStore;
@@ -35,6 +36,7 @@ use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
 use crate::merge_operator::MergeOperatorType;
+use crate::wal::WalAdmin;
 use slatedb_txn_obj::TransactionalObject;
 
 /// An Admin struct for SlateDB administration operations.
@@ -57,6 +59,7 @@ pub struct Admin {
     pub(crate) compaction_filter_supplier:
         Option<Arc<dyn crate::compaction_filter::CompactionFilterSupplier>>,
     pub(crate) merge_operator: Option<MergeOperatorType>,
+    pub(crate) wal_admin: Arc<dyn WalAdmin>,
 }
 
 impl Admin {
@@ -284,6 +287,7 @@ impl Admin {
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         )
         .with_system_clock(self.system_clock.clone())
+        .with_wal_gc(self.wal_admin.garbage_collector(&self.path))
         .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
         .with_options(gc_opts)
         .with_seed(self.rand.rng().next_u64())
@@ -317,6 +321,7 @@ impl Admin {
             self.object_stores.store_of(ObjectStoreType::Main).clone(),
         )
         .with_system_clock(self.system_clock.clone())
+        .with_wal_gc(self.wal_admin.garbage_collector(&self.path))
         .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
         .with_options(gc_opts)
         .with_seed(self.rand.rng().next_u64())
@@ -573,7 +578,7 @@ impl Admin {
     /// job. A `confirm` delete of a dir with neither a manifest nor a marker is
     /// refused, so a fat-fingered `--path` can't wipe an unrelated directory.
     /// Idempotent.
-    pub async fn delete_db(&self, confirm: bool) -> Result<Vec<Path>, crate::Error> {
+    pub async fn delete_db(&self, confirm: bool) -> Result<Vec<String>, crate::Error> {
         let main = self.retrying_store(ObjectStoreType::Main);
 
         if !confirm {
@@ -631,26 +636,31 @@ impl Admin {
         // Delete everything but the marker, then the marker last, so a crash in
         // between leaves the marker to prove a rerun should finish.
         let mut deleted = self.delete_prefix(&main, Some(&marker)).await?;
-        if self.object_stores.has_wal_object_store() {
-            deleted.extend(
-                self.delete_prefix(&self.retrying_store(ObjectStoreType::Wal), None)
-                    .await?,
-            );
-        }
+        deleted.extend(
+            self.wal_admin
+                .delete_wal(&self.path, false)
+                .await
+                .map_err(SlateDBError::from)?,
+        );
         main.delete(&marker).await.map_err(SlateDBError::from)?;
-        deleted.push(marker);
+        deleted.push(marker.to_string());
         Ok(deleted)
     }
 
     /// Lists every object under this db's path prefix across the main and WAL stores.
-    async fn list_prefix(&self, main: &Arc<dyn ObjectStore>) -> Result<Vec<Path>, crate::Error> {
-        let mut paths = collect_prefix(main, &self.path).await?;
-        if self.object_stores.has_wal_object_store() {
-            paths.extend(
-                collect_prefix(&self.retrying_store(ObjectStoreType::Wal), &self.path).await?,
-            );
+    async fn list_prefix(&self, main: &Arc<dyn ObjectStore>) -> Result<Vec<String>, crate::Error> {
+        let paths = collect_prefix(main, &self.path).await?;
+        // track the dry run paths in a set since the WAL and db may overlap
+        let mut paths = paths.iter().map(Path::to_string).collect::<BTreeSet<_>>();
+        let wal_paths = self
+            .wal_admin
+            .delete_wal(&self.path, true)
+            .await
+            .map_err(SlateDBError::from)?;
+        for wp in wal_paths {
+            paths.insert(wp);
         }
-        Ok(paths)
+        Ok(paths.into_iter().collect())
     }
 
     /// Deletes every object under this db's path prefix in the given store,
@@ -659,7 +669,7 @@ impl Admin {
         &self,
         store: &Arc<dyn ObjectStore>,
         keep: Option<&Path>,
-    ) -> Result<Vec<Path>, crate::Error> {
+    ) -> Result<Vec<String>, crate::Error> {
         let mut deleted = Vec::new();
         for path in collect_prefix(store, &self.path).await? {
             if Some(&path) == keep {
@@ -668,7 +678,7 @@ impl Admin {
             store.delete(&path).await.map_err(SlateDBError::from)?;
             deleted.push(path);
         }
-        Ok(deleted)
+        Ok(deleted.into_iter().map(|p| p.to_string()).collect())
     }
 
     /// Returns the timestamp or sequence from the latest manifest's sequence tracker.
@@ -782,7 +792,7 @@ impl Admin {
             source,
             self.retrying_store(ObjectStoreType::Main),
         )
-        .with_wal_object_store(self.retrying_store(ObjectStoreType::Wal))
+        .with_wal_admin(self.wal_admin.clone())
     }
 
     /// Creates a new builder for an admin client at the given path.

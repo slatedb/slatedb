@@ -1052,7 +1052,7 @@ impl Settings {
 }
 
 impl Provider for Settings {
-    fn metadata(&self) -> figment::Metadata {
+    fn metadata(&self) -> Metadata {
         Metadata::named("SlateDb configuration options")
     }
 

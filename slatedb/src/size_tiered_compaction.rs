@@ -264,7 +264,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
         &self,
         state: &CompactorStateView,
         compaction: &CompactionSpec,
-    ) -> Result<(), crate::error::Error> {
+    ) -> Result<(), Error> {
         // Size-tiered does not propose drain specs and has no policy
         // opinions on them. Drain invariants belong to the compactor-level
         // validation.

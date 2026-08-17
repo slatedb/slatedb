@@ -1599,7 +1599,7 @@ mod tests {
         .await
         .unwrap();
         let checkpoint = parent_manifest
-            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
+            .write_checkpoint(Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -1741,7 +1741,7 @@ mod tests {
         .unwrap();
 
         let checkpoint = manifest
-            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
+            .write_checkpoint(Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -1990,7 +1990,7 @@ mod tests {
     fn test_union(#[case] test_case: UnionTestCase) {
         let mut sst_ids: HashMap<String, SsTableId> = HashMap::new();
         let rand = Arc::new(DbRand::default());
-        let sources: Vec<crate::clone::CloneSource> = test_case
+        let sources: Vec<CloneSource> = test_case
             .manifests
             .iter()
             .enumerate()
@@ -2755,7 +2755,7 @@ mod tests {
         );
 
         // Verify no duplicates
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         for id in &sr_ids {
             assert!(seen.insert(id), "Duplicate SR ID: {}", id);
         }
@@ -3702,14 +3702,14 @@ mod tests {
         );
     }
 
-    fn segment_with_prefix(prefix: &[u8], seed: u64) -> super::Segment {
+    fn segment_with_prefix(prefix: &[u8], seed: u64) -> Segment {
         let view_id = Ulid::from_parts(seed, 0);
         let handle = SsTableHandle::new(
             SsTableId::Compacted(Ulid::from_parts(seed, 1)),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo::default(),
         );
-        super::Segment {
+        Segment {
             prefix: Bytes::copy_from_slice(prefix),
             tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
@@ -3720,7 +3720,7 @@ mod tests {
         }
     }
 
-    fn collect_prefixes(segments: &[super::Segment]) -> Vec<Bytes> {
+    fn collect_prefixes(segments: &[Segment]) -> Vec<Bytes> {
         segments.iter().map(|s| s.prefix.clone()).collect()
     }
 

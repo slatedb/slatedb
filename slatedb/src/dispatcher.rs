@@ -983,7 +983,7 @@ mod test {
 
         async fn cleanup(
             &mut self,
-            mut messages: futures::stream::BoxStream<'async_trait, TestMessage>,
+            mut messages: BoxStream<'async_trait, TestMessage>,
             result: Result<(), SlateDBError>,
         ) -> Result<(), SlateDBError> {
             self.cleanup_called.write(result);

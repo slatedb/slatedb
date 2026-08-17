@@ -622,6 +622,7 @@ mod tests {
     use std::ops::Bound;
     use std::ops::RangeBounds;
     use std::sync::Arc;
+    use std::time::Duration;
     use uuid::Uuid;
 
     struct RemappingWalAdmin {
@@ -633,19 +634,24 @@ mod tests {
 
     #[async_trait]
     impl WalGc for NoopWalGc {
-        async fn collect(&self, _referenced_ranges: Vec<WalFileRange>) -> Result<(), WalError> {
+        async fn collect(
+            &self,
+            _referenced_ranges: Vec<WalFileRange>,
+            _min_age: Duration,
+            _dry_run: bool,
+        ) -> Result<(), WalError> {
             Ok(())
         }
     }
 
     #[async_trait]
     impl WalAdmin for RemappingWalAdmin {
-        fn garbage_collector(&self, _path: &Path) -> Box<dyn WalGc> {
-            Box::new(NoopWalGc)
+        fn garbage_collector(&self, _path: &Path) -> Arc<dyn WalGc> {
+            Arc::new(NoopWalGc)
         }
 
-        async fn delete_wal(&self, _path: &Path) -> Result<(), WalError> {
-            Ok(())
+        async fn delete_wal(&self, _path: &Path, _dry_run: bool) -> Result<Vec<String>, WalError> {
+            Ok(vec![])
         }
 
         async fn is_empty(
@@ -1106,7 +1112,7 @@ mod tests {
 
         // Create an uninitialized manifest with an invalid checkpoint id
         let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
-        let non_existent_source_checkpoint_id = uuid::Uuid::new_v4();
+        let non_existent_source_checkpoint_id = Uuid::new_v4();
         StoredManifest::store_uninitialized_clone(
             clone_manifest_store,
             Manifest::cloned(
@@ -1220,7 +1226,7 @@ mod tests {
             Manifest::cloned(
                 &parent_manifest,
                 original_parent_path.to_string(),
-                uuid::Uuid::new_v4(),
+                Uuid::new_v4(),
                 rand.clone(),
             ),
             system_clock.clone(),

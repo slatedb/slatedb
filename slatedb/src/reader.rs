@@ -1262,7 +1262,7 @@ mod tests {
         let write_batch = populate_db_state(&mut test_db_state, test_case.entries).await?;
 
         // Create Reader with test clock
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let recorder = MetricsRecorderHelper::noop();
         let db_stats = DbStats::new(&recorder);
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
@@ -1692,7 +1692,7 @@ mod tests {
         let write_batch = populate_db_state(&mut test_db_state, test_case.entries).await?;
 
         // Create Reader with test clock
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let recorder = MetricsRecorderHelper::noop();
         let db_stats = DbStats::new(&recorder);
         let test_clock = Arc::new(MockSystemClock::new());
         let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
@@ -1971,7 +1971,7 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let recorder = MetricsRecorderHelper::noop();
         let db_stats = DbStats::new(&recorder);
         let reader = build_reader(&test_db_state, db_stats, false).await;
 
@@ -2018,7 +2018,7 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let recorder = MetricsRecorderHelper::noop();
         let db_stats = DbStats::new(&recorder);
         let reader = build_reader(&test_db_state, db_stats, false).await;
 
@@ -2084,7 +2084,7 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let recorder = MetricsRecorderHelper::noop();
         let db_stats = DbStats::new(&recorder);
         let reader = build_reader(&test_db_state, db_stats, true).await;
 
@@ -2124,7 +2124,7 @@ mod tests {
         let mut test_db_state = TestDbState::new().await;
         let write_batch = populate_db_state(&mut test_db_state, entries).await?;
 
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let recorder = MetricsRecorderHelper::noop();
         let db_stats = DbStats::new(&recorder);
         let reader = build_reader(&test_db_state, db_stats, true).await;
 

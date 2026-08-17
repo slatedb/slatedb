@@ -21,69 +21,69 @@ pub trait ByteRangeBounds {
 
 fn bound_as_bytes<K: AsRef<[u8]>>(bound: Bound<&K>) -> Bound<&[u8]> {
     match bound {
-        Bound::Included(k) => Bound::Included(k.as_ref()),
-        Bound::Excluded(k) => Bound::Excluded(k.as_ref()),
-        Bound::Unbounded => Bound::Unbounded,
+        Included(k) => Included(k.as_ref()),
+        Excluded(k) => Excluded(k.as_ref()),
+        Unbounded => Unbounded,
     }
 }
 
 impl<K: AsRef<[u8]>> ByteRangeBounds for Range<K> {
     fn start_bound(&self) -> Bound<&[u8]> {
-        Bound::Included(self.start.as_ref())
+        Included(self.start.as_ref())
     }
 
     fn end_bound(&self) -> Bound<&[u8]> {
-        Bound::Excluded(self.end.as_ref())
+        Excluded(self.end.as_ref())
     }
 }
 
 impl<K: AsRef<[u8]>> ByteRangeBounds for RangeInclusive<K> {
     fn start_bound(&self) -> Bound<&[u8]> {
-        bound_as_bytes(std::ops::RangeBounds::start_bound(self))
+        bound_as_bytes(RangeBounds::start_bound(self))
     }
 
     fn end_bound(&self) -> Bound<&[u8]> {
-        bound_as_bytes(std::ops::RangeBounds::end_bound(self))
+        bound_as_bytes(RangeBounds::end_bound(self))
     }
 }
 
 impl<K: AsRef<[u8]>> ByteRangeBounds for RangeFrom<K> {
     fn start_bound(&self) -> Bound<&[u8]> {
-        Bound::Included(self.start.as_ref())
+        Included(self.start.as_ref())
     }
 
     fn end_bound(&self) -> Bound<&[u8]> {
-        Bound::Unbounded
+        Unbounded
     }
 }
 
 impl<K: AsRef<[u8]>> ByteRangeBounds for RangeTo<K> {
     fn start_bound(&self) -> Bound<&[u8]> {
-        Bound::Unbounded
+        Unbounded
     }
 
     fn end_bound(&self) -> Bound<&[u8]> {
-        Bound::Excluded(self.end.as_ref())
+        Excluded(self.end.as_ref())
     }
 }
 
 impl<K: AsRef<[u8]>> ByteRangeBounds for RangeToInclusive<K> {
     fn start_bound(&self) -> Bound<&[u8]> {
-        Bound::Unbounded
+        Unbounded
     }
 
     fn end_bound(&self) -> Bound<&[u8]> {
-        Bound::Included(self.end.as_ref())
+        Included(self.end.as_ref())
     }
 }
 
 impl ByteRangeBounds for RangeFull {
     fn start_bound(&self) -> Bound<&[u8]> {
-        Bound::Unbounded
+        Unbounded
     }
 
     fn end_bound(&self) -> Bound<&[u8]> {
-        Bound::Unbounded
+        Unbounded
     }
 }
 
@@ -100,17 +100,17 @@ impl ByteRangeBounds for BytesRange {
 impl<T: AsRef<[u8]>> ByteRangeBounds for (Bound<T>, Bound<T>) {
     fn start_bound(&self) -> Bound<&[u8]> {
         match &self.0 {
-            Bound::Included(v) => Bound::Included(v.as_ref()),
-            Bound::Excluded(v) => Bound::Excluded(v.as_ref()),
-            Bound::Unbounded => Bound::Unbounded,
+            Included(v) => Included(v.as_ref()),
+            Excluded(v) => Excluded(v.as_ref()),
+            Unbounded => Unbounded,
         }
     }
 
     fn end_bound(&self) -> Bound<&[u8]> {
         match &self.1 {
-            Bound::Included(v) => Bound::Included(v.as_ref()),
-            Bound::Excluded(v) => Bound::Excluded(v.as_ref()),
-            Bound::Unbounded => Bound::Unbounded,
+            Included(v) => Included(v.as_ref()),
+            Excluded(v) => Excluded(v.as_ref()),
+            Unbounded => Unbounded,
         }
     }
 }
@@ -301,7 +301,7 @@ impl BytesRange {
 
     pub(crate) fn as_point(&self) -> Option<&Bytes> {
         match (RangeBounds::start_bound(self), RangeBounds::end_bound(self)) {
-            (Bound::Included(start), Bound::Included(end)) if start == end => Some(start),
+            (Included(start), Included(end)) if start == end => Some(start),
             _ => None,
         }
     }
@@ -315,8 +315,7 @@ pub(crate) mod tests {
 
     use bytes::Bytes;
     use proptest::{prop_assert, prop_assert_eq, proptest};
-    use std::ops::Bound;
-    use std::ops::Bound::{Included, Unbounded};
+    use std::ops::Bound::{Excluded, Included, Unbounded};
     use std::ops::RangeBounds;
 
     #[test]
@@ -348,22 +347,17 @@ pub(crate) mod tests {
     fn test_byte_range_bounds_for_common_shapes() {
         let full = BytesRange::from_prefix_and_subrange(b"p", ..);
         assert_eq!(full.start_bound(), Included(&Bytes::from_static(b"p")));
-        assert_eq!(full.end_bound(), Bound::Excluded(&Bytes::from_static(b"q")));
+        assert_eq!(full.end_bound(), Excluded(&Bytes::from_static(b"q")));
 
         let range = BytesRange::from_prefix_and_subrange(b"", b"a".to_vec()..=b"b".to_vec());
         assert_eq!(range.start_bound(), Included(&Bytes::from_static(b"a")));
         assert_eq!(range.end_bound(), Included(&Bytes::from_static(b"b")));
 
-        let tuple = BytesRange::from_prefix_and_subrange(
-            b"ab",
-            (Bound::Excluded(&b"x"[..]), Bound::Included(&b"y"[..])),
-        );
+        let tuple =
+            BytesRange::from_prefix_and_subrange(b"ab", (Excluded(&b"x"[..]), Included(&b"y"[..])));
         assert_eq!(
             tuple,
-            BytesRange::from_prefix_and_subrange(
-                b"ab",
-                (Bound::Excluded(&b"x"[..]), Bound::Included(&b"y"[..]))
-            )
+            BytesRange::from_prefix_and_subrange(b"ab", (Excluded(&b"x"[..]), Included(&b"y"[..])))
         );
     }
 
@@ -372,8 +366,8 @@ pub(crate) mod tests {
         let range = BytesRange::from_prefix_and_subrange(b"user1:", &b"0005"[..]..&b"0042"[..]);
         let start = Bytes::from("user1:0005");
         let end = Bytes::from("user1:0042");
-        assert_eq!(range.start_bound(), Bound::Included(&start));
-        assert_eq!(range.end_bound(), Bound::Excluded(&end));
+        assert_eq!(range.start_bound(), Included(&start));
+        assert_eq!(range.end_bound(), Excluded(&end));
     }
 
     #[test]
@@ -381,8 +375,8 @@ pub(crate) mod tests {
         let range = BytesRange::from_prefix_and_subrange(b"ab", ..=&b"x"[..]);
         let start = Bytes::from("ab");
         let end = Bytes::from("abx");
-        assert_eq!(range.start_bound(), Bound::Included(&start));
-        assert_eq!(range.end_bound(), Bound::Included(&end));
+        assert_eq!(range.start_bound(), Included(&start));
+        assert_eq!(range.end_bound(), Included(&end));
     }
 
     #[test]
@@ -391,18 +385,15 @@ pub(crate) mod tests {
         let range = BytesRange::from_prefix_and_subrange(b"ab", &b"x"[..]..);
         let start = Bytes::from("abx");
         let end = Bytes::from("ac");
-        assert_eq!(range.start_bound(), Bound::Included(&start));
-        assert_eq!(range.end_bound(), Bound::Excluded(&end));
+        assert_eq!(range.start_bound(), Included(&start));
+        assert_eq!(range.end_bound(), Excluded(&end));
     }
 
     #[test]
     fn test_from_prefix_and_subrange_excluded_start() {
-        let range = BytesRange::from_prefix_and_subrange(
-            b"ab",
-            (Bound::Excluded(&b"x"[..]), Bound::Unbounded),
-        );
+        let range = BytesRange::from_prefix_and_subrange(b"ab", (Excluded(&b"x"[..]), Unbounded));
         let start = Bytes::from("abx");
-        assert_eq!(range.start_bound(), Bound::Excluded(&start));
+        assert_eq!(range.start_bound(), Excluded(&start));
     }
 
     #[test]
@@ -410,8 +401,8 @@ pub(crate) mod tests {
         let prefix = vec![0xff, 0xff];
         let range = BytesRange::from_prefix_and_subrange(&prefix, &b"a"[..]..);
         let start = Bytes::from(vec![0xff, 0xff, b'a']);
-        assert_eq!(range.start_bound(), Bound::Included(&start));
-        assert_eq!(range.end_bound(), Bound::Unbounded);
+        assert_eq!(range.start_bound(), Included(&start));
+        assert_eq!(range.end_bound(), Unbounded);
     }
 
     #[test]
@@ -453,8 +444,8 @@ pub(crate) mod tests {
         let range = BytesRange::from_prefix(b"ab");
         let start = Bytes::from("ab");
         let end = Bytes::from("ac");
-        assert_eq!(range.start_bound(), Bound::Included(&start));
-        assert_eq!(range.end_bound(), Bound::Excluded(&end));
+        assert_eq!(range.start_bound(), Included(&start));
+        assert_eq!(range.end_bound(), Excluded(&end));
     }
 
     #[test]
@@ -462,15 +453,15 @@ pub(crate) mod tests {
         let prefix = vec![0xff, 0xff];
         let range = BytesRange::from_prefix(&prefix);
         let start = Bytes::from(prefix);
-        assert_eq!(range.start_bound(), Bound::Included(&start));
-        assert_eq!(range.end_bound(), Bound::Unbounded);
+        assert_eq!(range.start_bound(), Included(&start));
+        assert_eq!(range.end_bound(), Unbounded);
     }
 
     #[test]
     fn test_from_prefix_allows_empty_prefix() {
         let range = BytesRange::from_prefix(b"");
-        assert_eq!(range.start_bound(), Bound::Unbounded);
-        assert_eq!(range.end_bound(), Bound::Unbounded);
+        assert_eq!(range.start_bound(), Unbounded);
+        assert_eq!(range.end_bound(), Unbounded);
     }
 
     #[test]
@@ -567,14 +558,14 @@ pub(crate) mod tests {
     #[test]
     #[should_panic(expected = "Range must be non-empty")]
     fn test_new_with_start_larger_than_end_panics() {
-        let start = Bound::Included(Bytes::from("z"));
-        let end = Bound::Included(Bytes::from("a"));
+        let start = Included(Bytes::from("z"));
+        let end = Included(Bytes::from("a"));
         BytesRange::new(start, end);
     }
 
     #[test]
     fn test_empty_included_start_bound_is_valid_and_contains_all_keys() {
-        let range = BytesRange::new(Bound::Included(Bytes::new()), Bound::Unbounded);
+        let range = BytesRange::new(Included(Bytes::new()), Unbounded);
         assert!(range.contains(&Bytes::new())); // b"" <= b"" holds for Included
         assert!(range.contains(&Bytes::from("a")));
         assert!(range.contains(&Bytes::from("z")));
@@ -582,7 +573,7 @@ pub(crate) mod tests {
 
     #[test]
     fn test_empty_excluded_start_bound_is_valid_and_contains_all_keys() {
-        let range = BytesRange::new(Bound::Excluded(Bytes::new()), Bound::Unbounded);
+        let range = BytesRange::new(Excluded(Bytes::new()), Unbounded);
         assert!(!range.contains(&Bytes::new())); // b"" < b"" is false for Excluded
         assert!(range.contains(&Bytes::from("a")));
         assert!(range.contains(&Bytes::from("z")));

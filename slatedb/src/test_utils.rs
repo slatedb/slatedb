@@ -725,7 +725,7 @@ impl ObjectStore for FlakyObjectStore {
         &self,
         location: &Path,
         options: GetOptions,
-    ) -> object_store::Result<object_store::GetResult> {
+    ) -> object_store::Result<GetResult> {
         if options.head {
             self.head_attempts.fetch_add(1, Ordering::SeqCst);
             if self
@@ -788,9 +788,9 @@ impl ObjectStore for FlakyObjectStore {
                 let extensions = result.extensions.clone();
                 let body = result.bytes().await?;
                 let truncated = body.slice(..truncate_bytes.min(body.len()));
-                return Ok(object_store::GetResult {
+                return Ok(GetResult {
                     payload: object_store::GetResultPayload::Stream(
-                        futures::stream::once(async { Ok(truncated) }).boxed(),
+                        stream::once(async { Ok(truncated) }).boxed(),
                     ),
                     meta,
                     range,
@@ -868,7 +868,7 @@ impl ObjectStore for FlakyObjectStore {
     async fn put_multipart_opts(
         &self,
         location: &Path,
-        opts: object_store::PutMultipartOptions,
+        opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         self.put_multipart_attempts.fetch_add(1, Ordering::SeqCst);
         self.inner.put_multipart_opts(location, opts).await
@@ -1148,7 +1148,7 @@ impl ObjectStore for GatedObjectStore {
         &self,
         location: &Path,
         options: GetOptions,
-    ) -> object_store::Result<object_store::GetResult> {
+    ) -> object_store::Result<GetResult> {
         if options.head {
             self.head_gate.wait().await?;
         } else {
@@ -1170,7 +1170,7 @@ impl ObjectStore for GatedObjectStore {
     async fn put_multipart_opts(
         &self,
         location: &Path,
-        opts: object_store::PutMultipartOptions,
+        opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         self.put_multipart_opts_gate.wait().await?;
         self.inner.put_multipart_opts(location, opts).await
@@ -1224,7 +1224,7 @@ impl ObjectStore for GatedObjectStore {
         &self,
         from: &Path,
         to: &Path,
-        options: object_store::RenameOptions,
+        options: RenameOptions,
     ) -> object_store::Result<()> {
         self.rename_gate.wait().await?;
         self.inner.rename_opts(from, to, options).await
@@ -1659,7 +1659,7 @@ impl ObjectStore for RecordingObjectStore {
         &self,
         location: &Path,
         options: GetOptions,
-    ) -> object_store::Result<object_store::GetResult> {
+    ) -> object_store::Result<GetResult> {
         let tag = ObjectStoreCallTag::from_extensions(&options.extensions);
         self.calls.lock().push(RecordedCall::Get {
             head: options.head,
@@ -1687,7 +1687,7 @@ impl ObjectStore for RecordingObjectStore {
     async fn put_multipart_opts(
         &self,
         location: &Path,
-        opts: object_store::PutMultipartOptions,
+        opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
         self.calls.lock().push(RecordedCall::PutMultipart {
