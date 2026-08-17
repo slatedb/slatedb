@@ -1,8 +1,10 @@
+use std::ops::Bound;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use log::error;
 use object_store::{path::Path, ObjectStore};
-use tokio::sync::watch;
 
 use crate::block_cache_policy::BlockCachePolicy;
 use crate::db_status::DbStatusManager;
@@ -13,28 +15,10 @@ use crate::manifest::store::ManifestStore;
 use crate::object_stores::ObjectStores;
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::{TableStore, TableStoreKind};
-use crate::wal::slatedb::iterator::{SlateDbWalIterator, SlateDbWalIteratorOptions};
+use crate::wal::slatedb::iterator::{
+    ManifestReader, SlateDbWalIterator, SlateDbWalIteratorOptions, WalIteratorEndBound,
+};
 use crate::wal::{WalError, WalFileRange, WalIterator, WalReader};
-use crate::{DbStatus, VersionedManifest};
-
-#[async_trait]
-trait ManifestReader: Send + Sync + 'static {
-    async fn manifest(&self) -> Result<VersionedManifest, SlateDBError>;
-}
-
-#[async_trait]
-impl ManifestReader for watch::Receiver<DbStatus> {
-    async fn manifest(&self) -> Result<VersionedManifest, SlateDBError> {
-        Ok(self.borrow().current_manifest.clone())
-    }
-}
-
-#[async_trait]
-impl ManifestReader for ManifestStore {
-    async fn manifest(&self) -> Result<VersionedManifest, SlateDBError> {
-        self.read_latest_manifest().await
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct SlateDbWalReaderOptions {
@@ -129,14 +113,42 @@ impl WalReader for SlateDbWalReader {
         &self,
         wal_file_id_range: WalFileRange,
     ) -> Result<Box<dyn WalIterator>, WalError> {
-        let wal_id_range = wal_file_id_range.try_into().map_err(|()| {
-            WalError::InternalError(Arc::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "native WAL reader requires an included start and excluded end",
-            )))
-        })?;
+        let from_wal_id = match wal_file_id_range.0 {
+            Bound::Included(wal_id) => wal_id,
+            Bound::Excluded(wal_id) => wal_id.checked_add(1).ok_or_else(|| {
+                error!(
+                    "WAL iterator start bound overflowed. [range={:?}]",
+                    wal_file_id_range
+                );
+                SlateDBError::InvalidDBState
+            })?,
+            Bound::Unbounded => {
+                error!(
+                    "WAL iterator range must have a bounded start. [range={:?}]",
+                    wal_file_id_range
+                );
+                return Err(SlateDBError::InvalidDBState.into());
+            }
+        };
+        let end_bound = match wal_file_id_range.1 {
+            Bound::Included(wal_id) => {
+                WalIteratorEndBound::Exclusive(wal_id.checked_add(1).ok_or_else(|| {
+                    error!(
+                        "WAL iterator end bound overflowed. [range={:?}]",
+                        wal_file_id_range
+                    );
+                    SlateDBError::InvalidDBState
+                })?)
+            }
+            Bound::Excluded(wal_id) => WalIteratorEndBound::Exclusive(wal_id),
+            Bound::Unbounded => WalIteratorEndBound::Unbounded {
+                manifest_reader: Arc::clone(&self.manifest_reader),
+                poll_interval: Duration::from_secs(1),
+            },
+        };
         let iterator = SlateDbWalIterator::range(
-            wal_id_range,
+            from_wal_id,
+            end_bound,
             self.options.clone().into(),
             Arc::clone(&self.table_store),
         )?;
@@ -158,6 +170,9 @@ impl WalReader for SlateDbWalReader {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Bound;
+    use std::time::Duration;
+
     use super::*;
     use crate::config::{FlushOptions, FlushType};
     use crate::db_state::SsTableId;
@@ -200,6 +215,62 @@ mod tests {
             &rows[0].value,
             ValueDeletable::Value(value) if value.as_ref() == b"value"
         ));
+    }
+
+    #[tokio::test]
+    async fn should_accept_an_unbounded_end_range() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/reader_accepts_an_unbounded_end_range");
+        let _db = Db::open(path.clone(), Arc::clone(&object_store))
+            .await
+            .unwrap();
+        let wal_reader =
+            SlateDbWalReader::new_for_db(object_store, path, SlateDbWalReaderOptions::default());
+        let mut iterator = wal_reader.iterator((1..).into()).await.unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), iterator.next())
+            .await
+            .expect("unbounded iterator did not observe the fence WAL")
+            .unwrap()
+            .expect("unbounded iterator returned None");
+        assert!(first.rows.is_empty());
+        assert_eq!(first.last_consumed_wal_file_id, 1);
+    }
+
+    #[tokio::test]
+    async fn should_reject_an_unbounded_start_range() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_reader = SlateDbWalReader::new_for_db(
+            object_store,
+            Path::from("/reader_rejects_an_unbounded_start_range"),
+            SlateDbWalReaderOptions::default(),
+        );
+
+        let result = wal_reader
+            .iterator(WalFileRange(Bound::Unbounded, Bound::Unbounded))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn should_normalize_excluded_start_and_included_end_bounds() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal_reader = SlateDbWalReader::new_for_db(
+            object_store,
+            Path::from("/reader_normalizes_range_bounds"),
+            SlateDbWalReaderOptions::default(),
+        );
+        wal_reader.table_store.write_wal_fence(1).await.unwrap();
+        wal_reader.table_store.write_wal_fence(2).await.unwrap();
+
+        let mut iterator = wal_reader
+            .iterator(WalFileRange(Bound::Excluded(1), Bound::Included(2)))
+            .await
+            .unwrap();
+        let batch = iterator.next().await.unwrap().unwrap();
+        assert_eq!(batch.last_consumed_wal_file_id, 2);
+        assert!(batch.rows.is_empty());
+        assert!(iterator.next().await.unwrap().is_none());
     }
 
     #[tokio::test]

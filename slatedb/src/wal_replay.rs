@@ -3,7 +3,9 @@ use crate::manifest::ManifestCore;
 use crate::mem_table::WritableKVTable;
 use crate::tablestore::TableStore;
 #[cfg(test)]
-use crate::wal::slatedb::iterator::{SlateDbWalIterator, SlateDbWalIteratorOptions};
+use crate::wal::slatedb::iterator::{
+    SlateDbWalIterator, SlateDbWalIteratorOptions, WalIteratorEndBound,
+};
 use crate::wal::WalIterator as WalIteratorTrait;
 #[cfg(test)]
 use std::ops::Range;
@@ -60,8 +62,12 @@ impl WalReplayIterator {
         replay_options: WalReplayOptions,
         table_store: Arc<TableStore>,
     ) -> Result<Self, SlateDBError> {
-        let wal_iter =
-            SlateDbWalIterator::range(wal_id_range, iterator_options, Arc::clone(&table_store))?;
+        let wal_iter = SlateDbWalIterator::range(
+            wal_id_range.start,
+            WalIteratorEndBound::Exclusive(wal_id_range.end),
+            iterator_options,
+            Arc::clone(&table_store),
+        )?;
         Self::for_wal_iterator(Box::new(wal_iter), db_state, replay_options, table_store)
     }
 

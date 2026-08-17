@@ -6,7 +6,7 @@ use futures::future::BoxFuture;
 use object_store::path::Path;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::ops::{Bound, Range};
+use std::ops::{Bound, Range, RangeFrom};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,6 +24,12 @@ pub struct WalFileRange(pub Bound<u64>, pub Bound<u64>);
 impl From<Range<u64>> for WalFileRange {
     fn from(range: Range<u64>) -> Self {
         WalFileRange(Bound::Included(range.start), Bound::Excluded(range.end))
+    }
+}
+
+impl From<RangeFrom<u64>> for WalFileRange {
+    fn from(range: RangeFrom<u64>) -> Self {
+        WalFileRange(Bound::Included(range.start), Bound::Unbounded)
     }
 }
 
