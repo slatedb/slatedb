@@ -65,6 +65,15 @@ impl From<SlateDbWalReaderOptions> for SlateDbWalIteratorOptions {
     }
 }
 
+/// Builder for a [`SlateDbWalReader`].
+///
+/// Callers must configure both the database path with [`Self::with_path`] and
+/// the primary object store with [`Self::with_object_store`]. By default, the
+/// primary object store is used for both the manifest and WAL files. Use
+/// [`Self::with_wal_object_store`] when WAL files are stored separately.
+///
+/// Reader options and the system clock use their defaults when they are not
+/// explicitly configured.
 pub struct SlateDbWalReaderBuilder {
     path: Option<Path>,
     table_store: Option<Arc<TableStore>>,
@@ -90,45 +99,64 @@ impl Default for SlateDbWalReaderBuilder {
 }
 
 impl SlateDbWalReaderBuilder {
+    /// Creates a builder with default reader options and system clock.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Sets the root path of the database to read.
     pub fn with_path(mut self, path: Path) -> Self {
         self.path = Some(path);
         self
     }
 
+    /// Sets an existing table store for internal construction.
     pub(crate) fn with_table_store(mut self, table_store: Arc<TableStore>) -> Self {
         self.table_store = Some(table_store);
         self
     }
 
+    /// Sets the primary object store used to read the manifest and, by
+    /// default, WAL files.
     pub fn with_object_store(mut self, object_store: Arc<dyn ObjectStore>) -> Self {
         self.object_store = Some(object_store);
         self
     }
 
+    /// Sets a dedicated object store from which WAL files are read.
+    ///
+    /// The primary object store configured by [`Self::with_object_store`]
+    /// remains the source for the database manifest.
     pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
         self.wal_object_store = Some(wal_object_store);
         self
     }
 
+    /// Sets the clock used to wait between polls by live WAL iterators.
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = system_clock;
         self
     }
 
+    /// Sets the options controlling how WAL files are read.
     pub fn with_options(mut self, options: SlateDbWalReaderOptions) -> Self {
         self.options = options;
         self
     }
 
+    /// Sets an existing manifest reader for internal construction.
     pub(crate) fn with_manifest_reader(mut self, manifest_reader: Arc<dyn ManifestReader>) -> Self {
         self.manifest_reader = Some(manifest_reader);
         self
     }
 
+    /// Builds a WAL reader from the configured state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-configuration error when the database path or
+    /// primary object store has not been configured. Internal callers may
+    /// instead provide both a table store and manifest reader.
     pub fn build(self) -> Result<SlateDbWalReader, crate::Error> {
         let manifest_reader = match self.manifest_reader {
             Some(manifest_reader) => manifest_reader,
