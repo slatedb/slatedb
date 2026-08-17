@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use log::error;
+use slatedb_common::clock::SystemClock;
 use tokio::sync::watch;
 use tokio::task;
 use tokio::task::JoinHandle;
@@ -173,6 +174,7 @@ pub(crate) enum WalIteratorEndBound {
     Unbounded {
         manifest_reader: Arc<dyn ManifestReader>,
         poll_interval: Duration,
+        system_clock: Arc<dyn SystemClock>,
     },
 }
 
@@ -288,6 +290,7 @@ impl SlateDbWalIterator {
                         let WalIteratorEndBound::Unbounded {
                             manifest_reader,
                             poll_interval,
+                            system_clock,
                         } = &end_bound
                         else {
                             return Err(WalError::WalTruncated(wal_id));
@@ -299,7 +302,7 @@ impl SlateDbWalIterator {
                             // so it must have been deleted by GC.
                             return Err(WalError::WalTruncated(wal_id));
                         }
-                        tokio::time::sleep(*poll_interval).await;
+                        system_clock.sleep(*poll_interval).await;
                     }
                     Err(err) => return Err(err.into()),
                 }
@@ -438,6 +441,7 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use slatedb_common::clock::DefaultSystemClock;
 
     use super::{SlateDbWalIterator, SlateDbWalIteratorOptions, WalIteratorEndBound};
     use crate::block_cache_policy::BlockCachePolicy;
@@ -528,6 +532,7 @@ mod tests {
             WalIteratorEndBound::Unbounded {
                 manifest_reader: Arc::new(status_manager.subscribe()),
                 poll_interval: Duration::from_millis(10),
+                system_clock: Arc::new(DefaultSystemClock::new()),
             },
             SlateDbWalIteratorOptions {
                 sst_batch_size: 2,
@@ -579,6 +584,7 @@ mod tests {
             WalIteratorEndBound::Unbounded {
                 manifest_reader: Arc::new(status_manager.subscribe()),
                 poll_interval: Duration::from_millis(10),
+                system_clock: Arc::new(DefaultSystemClock::new()),
             },
             SlateDbWalIteratorOptions::default(),
             table_store,

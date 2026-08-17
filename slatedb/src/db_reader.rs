@@ -203,6 +203,7 @@ impl DbReaderInner {
                 crate::wal::slatedb::reader::SlateDbWalReader::new_with_status_manager(
                     Arc::clone(&table_store),
                     &status_manager,
+                    Arc::clone(&system_clock),
                     SlateDbWalReaderOptions::default(),
                 ),
             )
@@ -3114,6 +3115,7 @@ mod tests {
         crate::wal::slatedb::reader::SlateDbWalReader::new_with_status_manager(
             Arc::clone(table_store),
             status_manager,
+            Arc::new(DefaultSystemClock::new()),
             SlateDbWalReaderOptions::default(),
         )
     }

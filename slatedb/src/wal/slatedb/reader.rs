@@ -5,6 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use log::error;
 use object_store::{path::Path, ObjectStore};
+use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
 use crate::block_cache_policy::BlockCachePolicy;
 use crate::db_status::DbStatusManager;
@@ -67,6 +68,7 @@ impl From<SlateDbWalReaderOptions> for SlateDbWalIteratorOptions {
 pub struct SlateDbWalReader {
     table_store: Arc<TableStore>,
     manifest_reader: Arc<dyn ManifestReader>,
+    system_clock: Arc<dyn SystemClock>,
     options: SlateDbWalReaderOptions,
 }
 
@@ -77,7 +79,13 @@ impl SlateDbWalReader {
         path: Path,
         options: SlateDbWalReaderOptions,
     ) -> Self {
-        Self::new_for_db_with_stores(object_store, None, path, options)
+        Self::new_for_db_with_stores(
+            object_store,
+            None,
+            path,
+            Arc::new(DefaultSystemClock::new()),
+            options,
+        )
     }
 
     /// Creates a reader for a database with a dedicated WAL object store.
@@ -90,13 +98,20 @@ impl SlateDbWalReader {
         path: Path,
         options: SlateDbWalReaderOptions,
     ) -> Self {
-        Self::new_for_db_with_stores(object_store, Some(wal_object_store), path, options)
+        Self::new_for_db_with_stores(
+            object_store,
+            Some(wal_object_store),
+            path,
+            Arc::new(DefaultSystemClock::new()),
+            options,
+        )
     }
 
     fn new_for_db_with_stores(
         object_store: Arc<dyn ObjectStore>,
         wal_object_store: Option<Arc<dyn ObjectStore>>,
         path: Path,
+        system_clock: Arc<dyn SystemClock>,
         options: SlateDbWalReaderOptions,
     ) -> Self {
         let table_store = Arc::new(TableStore::new(
@@ -112,6 +127,7 @@ impl SlateDbWalReader {
         Self {
             table_store,
             manifest_reader,
+            system_clock,
             options,
         }
     }
@@ -119,12 +135,14 @@ impl SlateDbWalReader {
     pub(crate) fn new_with_status_manager(
         table_store: Arc<TableStore>,
         db_status: &DbStatusManager,
+        system_clock: Arc<dyn SystemClock>,
         options: SlateDbWalReaderOptions,
     ) -> Self {
         let manifest_reader: Arc<dyn ManifestReader> = Arc::new(db_status.subscribe());
         Self {
             table_store,
             manifest_reader,
+            system_clock,
             options,
         }
     }
@@ -167,6 +185,7 @@ impl WalReader for SlateDbWalReader {
             Bound::Unbounded => WalIteratorEndBound::Unbounded {
                 manifest_reader: Arc::clone(&self.manifest_reader),
                 poll_interval: Duration::from_secs(1),
+                system_clock: Arc::clone(&self.system_clock),
             },
         };
         let iterator = SlateDbWalIterator::range(
@@ -208,8 +227,6 @@ mod tests {
     use crate::Db;
     use object_store::memory::InMemory;
     use object_store::ObjectStoreExt;
-    use slatedb_common::clock::DefaultSystemClock;
-
     fn end_after(wal_id: u64) -> u64 {
         wal_id.checked_add(1).expect("test WAL ID overflow")
     }
