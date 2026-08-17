@@ -1,6 +1,6 @@
 use slatedb::config::{FlushOptions, FlushType};
 use slatedb::object_store::{memory::InMemory, path::Path};
-use slatedb::wal::{SlateDbWalReader, SlateDbWalReaderOptions, WalReader as _, WalRows};
+use slatedb::wal::{SlateDbWalReaderBuilder, WalReader as _, WalRows};
 use slatedb::{Db, RowEntry, ValueDeletable};
 use std::sync::Arc;
 
@@ -15,11 +15,10 @@ async fn main() -> anyhow::Result<()> {
     db.delete(b"user:2").await?;
     flush_wal(&db).await?;
 
-    let wal_reader = SlateDbWalReader::new_for_db(
-        object_store,
-        Path::from(path),
-        SlateDbWalReaderOptions::default(),
-    );
+    let wal_reader = SlateDbWalReaderBuilder::new()
+        .with_object_store(object_store)
+        .with_path(Path::from(path))
+        .build()?;
     let mut cursor = 0_u64;
     let start_wal_id = cursor
         .checked_add(1)

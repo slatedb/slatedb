@@ -111,21 +111,14 @@ impl SlateDbWalReader {
     ) -> Result<Arc<Self>, Error> {
         let options = options.try_into()?;
         let path = slatedb::object_store::path::Path::from(path);
-        let inner = match wal_object_store {
-            Some(wal_object_store) => {
-                slatedb::wal::SlateDbWalReader::new_for_db_with_wal_object_store(
-                    Arc::clone(&object_store.inner),
-                    Arc::clone(&wal_object_store.inner),
-                    path,
-                    options,
-                )
-            }
-            None => slatedb::wal::SlateDbWalReader::new_for_db(
-                Arc::clone(&object_store.inner),
-                path,
-                options,
-            ),
-        };
+        let mut builder = slatedb::wal::SlateDbWalReaderBuilder::new()
+            .with_object_store(Arc::clone(&object_store.inner))
+            .with_path(path)
+            .with_options(options);
+        if let Some(wal_object_store) = wal_object_store {
+            builder = builder.with_wal_object_store(Arc::clone(&wal_object_store.inner));
+        }
+        let inner = builder.build()?;
         Ok(Arc::new(Self { inner }))
     }
 }

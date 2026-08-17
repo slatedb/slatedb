@@ -2250,7 +2250,7 @@ mod tests {
         OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
     };
     use crate::types::RowEntry;
-    use crate::wal::{SlateDbWalReader, SlateDbWalReaderOptions, WalError, WalReader as _};
+    use crate::wal::{SlateDbWalReaderBuilder, WalError, WalReader as _};
     use crate::{proptest_util, test_utils, CloseReason, CompactorBuilder, KeyValue};
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
@@ -4866,12 +4866,12 @@ mod tests {
             0
         );
 
-        let wal_reader = SlateDbWalReader::new_for_db_with_wal_object_store(
-            main_object_store,
-            wal_object_store,
-            Path::from(path),
-            SlateDbWalReaderOptions::default(),
-        );
+        let wal_reader = SlateDbWalReaderBuilder::new()
+            .with_object_store(main_object_store)
+            .with_wal_object_store(wal_object_store)
+            .with_path(Path::from(path))
+            .build()
+            .unwrap();
         let tail = wal_reader.last_wal_file_id(0).await.unwrap();
         assert_eq!(tail, 2); // first file is the fencing operation
         let mut rows = Vec::new();

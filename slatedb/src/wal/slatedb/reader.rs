@@ -65,6 +65,115 @@ impl From<SlateDbWalReaderOptions> for SlateDbWalIteratorOptions {
     }
 }
 
+pub struct SlateDbWalReaderBuilder {
+    path: Option<Path>,
+    table_store: Option<Arc<TableStore>>,
+    object_store: Option<Arc<dyn ObjectStore>>,
+    wal_object_store: Option<Arc<dyn ObjectStore>>,
+    manifest_reader: Option<Arc<dyn ManifestReader>>,
+    system_clock: Arc<dyn SystemClock>,
+    options: SlateDbWalReaderOptions,
+}
+
+impl Default for SlateDbWalReaderBuilder {
+    fn default() -> Self {
+        Self {
+            path: None,
+            table_store: None,
+            object_store: None,
+            wal_object_store: None,
+            manifest_reader: None,
+            system_clock: Arc::new(DefaultSystemClock::new()),
+            options: SlateDbWalReaderOptions::default(),
+        }
+    }
+}
+
+impl SlateDbWalReaderBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_path(mut self, path: Path) -> Self {
+        self.path = Some(path);
+        self
+    }
+
+    pub(crate) fn with_table_store(mut self, table_store: Arc<TableStore>) -> Self {
+        self.table_store = Some(table_store);
+        self
+    }
+
+    pub fn with_object_store(mut self, object_store: Arc<dyn ObjectStore>) -> Self {
+        self.object_store = Some(object_store);
+        self
+    }
+
+    pub fn with_wal_object_store(mut self, wal_object_store: Arc<dyn ObjectStore>) -> Self {
+        self.wal_object_store = Some(wal_object_store);
+        self
+    }
+
+    pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
+        self.system_clock = system_clock;
+        self
+    }
+
+    pub fn with_options(mut self, options: SlateDbWalReaderOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    pub(crate) fn with_manifest_reader(mut self, manifest_reader: Arc<dyn ManifestReader>) -> Self {
+        self.manifest_reader = Some(manifest_reader);
+        self
+    }
+
+    pub fn build(self) -> Result<SlateDbWalReader, crate::Error> {
+        let manifest_reader = match self.manifest_reader {
+            Some(manifest_reader) => manifest_reader,
+            None => {
+                let Some(object_store) = self.object_store.clone() else {
+                    return Err(crate::Error::invalid(
+                        "must specify object store".to_string(),
+                    ));
+                };
+                let Some(path) = self.path.clone() else {
+                    return Err(crate::Error::invalid("must specify db path".to_string()));
+                };
+                Arc::new(ManifestStore::new(&path, object_store))
+            }
+        };
+        let table_store = match self.table_store {
+            Some(table_store) => table_store,
+            None => {
+                let Some(object_store) = self.object_store.clone() else {
+                    return Err(crate::Error::invalid(
+                        "must specify object store".to_string(),
+                    ));
+                };
+                let Some(path) = self.path.clone() else {
+                    return Err(crate::Error::invalid("must specify db path".to_string()));
+                };
+                Arc::new(TableStore::new(
+                    ObjectStores::new(object_store, self.wal_object_store.clone()),
+                    SsTableFormat::default(),
+                    path.clone(),
+                    None,
+                    TableStoreKind::Reader,
+                    BlockCachePolicy::default(),
+                ))
+            }
+        };
+        Ok(SlateDbWalReader {
+            table_store,
+            manifest_reader,
+            system_clock: self.system_clock,
+            options: self.options,
+        })
+    }
+}
+
 pub struct SlateDbWalReader {
     table_store: Arc<TableStore>,
     manifest_reader: Arc<dyn ManifestReader>,
@@ -73,65 +182,6 @@ pub struct SlateDbWalReader {
 }
 
 impl SlateDbWalReader {
-    /// Creates a reader for a database whose manifest and WAL use the same object store.
-    pub fn new_for_db(
-        object_store: Arc<dyn ObjectStore>,
-        path: Path,
-        options: SlateDbWalReaderOptions,
-    ) -> Self {
-        Self::new_for_db_with_stores(
-            object_store,
-            None,
-            path,
-            Arc::new(DefaultSystemClock::new()),
-            options,
-        )
-    }
-
-    /// Creates a reader for a database with a dedicated WAL object store.
-    ///
-    /// The manifest is read from `object_store`, while WAL files are read from
-    /// `wal_object_store`.
-    pub fn new_for_db_with_wal_object_store(
-        object_store: Arc<dyn ObjectStore>,
-        wal_object_store: Arc<dyn ObjectStore>,
-        path: Path,
-        options: SlateDbWalReaderOptions,
-    ) -> Self {
-        Self::new_for_db_with_stores(
-            object_store,
-            Some(wal_object_store),
-            path,
-            Arc::new(DefaultSystemClock::new()),
-            options,
-        )
-    }
-
-    fn new_for_db_with_stores(
-        object_store: Arc<dyn ObjectStore>,
-        wal_object_store: Option<Arc<dyn ObjectStore>>,
-        path: Path,
-        system_clock: Arc<dyn SystemClock>,
-        options: SlateDbWalReaderOptions,
-    ) -> Self {
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(Arc::clone(&object_store), wal_object_store),
-            SsTableFormat::default(),
-            path.clone(),
-            None,
-            TableStoreKind::Reader,
-            BlockCachePolicy::default(),
-        ));
-        let manifest_reader: Arc<dyn ManifestReader> =
-            Arc::new(ManifestStore::new(&path, object_store));
-        Self {
-            table_store,
-            manifest_reader,
-            system_clock,
-            options,
-        }
-    }
-
     pub(crate) fn new_with_status_manager(
         table_store: Arc<TableStore>,
         db_status: &DbStatusManager,
@@ -139,12 +189,13 @@ impl SlateDbWalReader {
         options: SlateDbWalReaderOptions,
     ) -> Self {
         let manifest_reader: Arc<dyn ManifestReader> = Arc::new(db_status.subscribe());
-        Self {
-            table_store,
-            manifest_reader,
-            system_clock,
-            options,
-        }
+        SlateDbWalReaderBuilder::new()
+            .with_table_store(table_store)
+            .with_manifest_reader(manifest_reader)
+            .with_system_clock(system_clock)
+            .with_options(options)
+            .build()
+            .expect("table store and manifest reader initialize a WAL reader")
     }
 }
 
@@ -231,6 +282,87 @@ mod tests {
         wal_id.checked_add(1).expect("test WAL ID overflow")
     }
 
+    fn assert_invalid_build(builder: SlateDbWalReaderBuilder, expected_message: &str) {
+        let error = match builder.build() {
+            Ok(_) => panic!("expected WAL reader builder to reject incomplete state"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), crate::ErrorKind::Invalid);
+        assert!(
+            error.to_string().contains(expected_message),
+            "expected error containing {expected_message:?}, got {error}"
+        );
+    }
+
+    #[test]
+    fn builder_rejects_missing_object_store() {
+        assert_invalid_build(
+            SlateDbWalReaderBuilder::new().with_path(Path::from("/missing-object-store")),
+            "must specify object store",
+        );
+    }
+
+    #[test]
+    fn builder_rejects_missing_db_path() {
+        assert_invalid_build(
+            SlateDbWalReaderBuilder::new().with_object_store(Arc::new(InMemory::new())),
+            "must specify db path",
+        );
+    }
+
+    #[test]
+    fn builder_rejects_table_store_without_manifest_reader() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(object_store, None),
+            SsTableFormat::default(),
+            Path::from("/table-store-without-manifest-reader"),
+            None,
+            TableStoreKind::Reader,
+            BlockCachePolicy::default(),
+        ));
+
+        assert_invalid_build(
+            SlateDbWalReaderBuilder::new().with_table_store(table_store),
+            "must specify object store",
+        );
+    }
+
+    #[test]
+    fn builder_rejects_manifest_reader_without_table_store() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/manifest-reader-without-table-store");
+        let manifest_reader: Arc<dyn ManifestReader> =
+            Arc::new(ManifestStore::new(&path, object_store));
+
+        assert_invalid_build(
+            SlateDbWalReaderBuilder::new().with_manifest_reader(manifest_reader),
+            "must specify object store",
+        );
+    }
+
+    #[test]
+    fn builder_accepts_table_store_and_manifest_reader() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/table-store-and-manifest-reader");
+        let table_store = Arc::new(TableStore::new(
+            ObjectStores::new(Arc::clone(&object_store), None),
+            SsTableFormat::default(),
+            path.clone(),
+            None,
+            TableStoreKind::Reader,
+            BlockCachePolicy::default(),
+        ));
+        let manifest_reader: Arc<dyn ManifestReader> =
+            Arc::new(ManifestStore::new(&path, object_store));
+
+        assert!(SlateDbWalReaderBuilder::new()
+            .with_table_store(table_store)
+            .with_manifest_reader(manifest_reader)
+            .build()
+            .is_ok());
+    }
+
     async fn collect_batches(
         wal_reader: &SlateDbWalReader,
         start_wal_id: u64,
@@ -260,11 +392,11 @@ mod tests {
         .await
         .unwrap();
 
-        let wal_reader = SlateDbWalReader::new_for_db(
-            Arc::clone(&object_store),
-            path,
-            SlateDbWalReaderOptions::default(),
-        );
+        let wal_reader = SlateDbWalReaderBuilder::new()
+            .with_object_store(Arc::clone(&object_store))
+            .with_path(path)
+            .build()
+            .unwrap();
         let first_tail = wal_reader.last_wal_file_id(0).await.unwrap();
         let first_batches = collect_batches(&wal_reader, 1, end_after(first_tail))
             .await
@@ -342,8 +474,11 @@ mod tests {
         .await
         .unwrap();
 
-        let wal_reader =
-            SlateDbWalReader::new_for_db(object_store, path, SlateDbWalReaderOptions::default());
+        let wal_reader = SlateDbWalReaderBuilder::new()
+            .with_object_store(object_store)
+            .with_path(path)
+            .build()
+            .unwrap();
         let tail = wal_reader.last_wal_file_id(0).await.unwrap();
         let batches = collect_batches(&wal_reader, 1, end_after(tail))
             .await
@@ -379,8 +514,11 @@ mod tests {
             .await
             .unwrap();
 
-        let wal_reader =
-            SlateDbWalReader::new_for_db(object_store, path, SlateDbWalReaderOptions::default());
+        let wal_reader = SlateDbWalReaderBuilder::new()
+            .with_object_store(object_store)
+            .with_path(path)
+            .build()
+            .unwrap();
         let tail = wal_reader.last_wal_file_id(0).await.unwrap();
         let batches = collect_batches(&wal_reader, 1, end_after(tail))
             .await
@@ -399,8 +537,11 @@ mod tests {
         let _db = Db::open(path.clone(), Arc::clone(&object_store))
             .await
             .unwrap();
-        let wal_reader =
-            SlateDbWalReader::new_for_db(object_store, path, SlateDbWalReaderOptions::default());
+        let wal_reader = SlateDbWalReaderBuilder::new()
+            .with_object_store(object_store)
+            .with_path(path)
+            .build()
+            .unwrap();
         let mut iterator = wal_reader.iterator((1..).into()).await.unwrap();
 
         let first = tokio::time::timeout(Duration::from_secs(1), iterator.next())
@@ -415,11 +556,11 @@ mod tests {
     #[tokio::test]
     async fn should_reject_an_unbounded_start_range() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let wal_reader = SlateDbWalReader::new_for_db(
-            object_store,
-            Path::from("/reader_rejects_an_unbounded_start_range"),
-            SlateDbWalReaderOptions::default(),
-        );
+        let wal_reader = SlateDbWalReaderBuilder::new()
+            .with_object_store(object_store)
+            .with_path(Path::from("/reader_rejects_an_unbounded_start_range"))
+            .build()
+            .unwrap();
 
         let result = wal_reader
             .iterator(WalFileRange(Bound::Unbounded, Bound::Unbounded))
@@ -430,11 +571,11 @@ mod tests {
     #[tokio::test]
     async fn should_normalize_excluded_start_and_included_end_bounds() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let wal_reader = SlateDbWalReader::new_for_db(
-            object_store,
-            Path::from("/reader_normalizes_range_bounds"),
-            SlateDbWalReaderOptions::default(),
-        );
+        let wal_reader = SlateDbWalReaderBuilder::new()
+            .with_object_store(object_store)
+            .with_path(Path::from("/reader_normalizes_range_bounds"))
+            .build()
+            .unwrap();
         wal_reader.table_store.write_wal_fence(1).await.unwrap();
         wal_reader.table_store.write_wal_fence(2).await.unwrap();
 
@@ -465,12 +606,12 @@ mod tests {
         .await
         .unwrap();
 
-        let wal_reader = SlateDbWalReader::new_for_db_with_wal_object_store(
-            object_store,
-            wal_object_store,
-            path,
-            SlateDbWalReaderOptions::default(),
-        );
+        let wal_reader = SlateDbWalReaderBuilder::new()
+            .with_object_store(object_store)
+            .with_wal_object_store(wal_object_store)
+            .with_path(path)
+            .build()
+            .unwrap();
         let tail = wal_reader.last_wal_file_id(0).await.unwrap();
         let rows: Vec<_> = collect_batches(&wal_reader, 1, end_after(tail))
             .await
@@ -501,11 +642,11 @@ mod tests {
         .await
         .unwrap();
 
-        let wal_reader = SlateDbWalReader::new_for_db(
-            Arc::clone(&object_store),
-            path.clone(),
-            SlateDbWalReaderOptions::default(),
-        );
+        let wal_reader = SlateDbWalReaderBuilder::new()
+            .with_object_store(Arc::clone(&object_store))
+            .with_path(path.clone())
+            .build()
+            .unwrap();
         let tail = wal_reader.last_wal_file_id(0).await.unwrap();
         let wal_path = PathResolver::from_root(path).sst_path(&SsTableId::Wal(tail));
         object_store.delete(&wal_path).await.unwrap();
@@ -549,8 +690,11 @@ mod tests {
         .await
         .unwrap();
 
-        let wal_reader =
-            SlateDbWalReader::new_for_db(object_store, path, SlateDbWalReaderOptions::default());
+        let wal_reader = SlateDbWalReaderBuilder::new()
+            .with_object_store(object_store)
+            .with_path(path)
+            .build()
+            .unwrap();
         assert!(matches!(
             wal_reader.last_wal_file_id(0).await,
             Err(WalError::WalTruncated(1))
