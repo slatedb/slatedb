@@ -183,9 +183,9 @@ impl DbReaderInner {
         mut manifest: StoredManifest,
     ) -> Result<Self, SlateDBError> {
         let wal_reader = wal_reader.unwrap_or_else(|| {
-            Arc::new(crate::wal::slatedb::reader::SlateDbWalReader::new(Arc::clone(
-                &table_store,
-            )))
+            Arc::new(crate::wal::slatedb::reader::SlateDbWalReader::new(
+                Arc::clone(&table_store),
+            ))
         });
         let checkpoint =
             Self::get_or_create_checkpoint(&mut manifest, mode, &options, rand.clone()).await?;
