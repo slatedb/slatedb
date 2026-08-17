@@ -162,7 +162,7 @@ use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::SafeSender;
 use crate::utils::WatchableOnceCell;
 use crate::wal;
-use crate::wal::admin::SlateDbWalAdmin;
+use crate::wal::slatedb::admin::SlateDbWalAdmin;
 use crate::wal::wal_disabled::DisabledWalObserver;
 use crate::wal::{WalAdmin, WalGc, WalObserver};
 use slatedb_common::clock::DefaultSystemClock;

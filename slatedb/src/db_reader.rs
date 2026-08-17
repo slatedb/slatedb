@@ -183,9 +183,9 @@ impl DbReaderInner {
         mut manifest: StoredManifest,
     ) -> Result<Self, SlateDBError> {
         let wal_reader = wal_reader.unwrap_or_else(|| {
-            Arc::new(crate::wal::reader::SlateDbWalReader::new(Arc::clone(
-                &table_store,
-            )))
+            Arc::new(crate::wal::slatedb::reader::SlateDbWalReader::new(
+                Arc::clone(&table_store),
+            ))
         });
         let checkpoint =
             Self::get_or_create_checkpoint(&mut manifest, mode, &options, rand.clone()).await?;
@@ -3079,8 +3079,10 @@ mod tests {
         }
     }
 
-    fn native_wal_reader(table_store: &Arc<TableStore>) -> crate::wal::reader::SlateDbWalReader {
-        crate::wal::reader::SlateDbWalReader::new(Arc::clone(table_store))
+    fn native_wal_reader(
+        table_store: &Arc<TableStore>,
+    ) -> crate::wal::slatedb::reader::SlateDbWalReader {
+        crate::wal::slatedb::reader::SlateDbWalReader::new(Arc::clone(table_store))
     }
 
     fn immutable_memtable(

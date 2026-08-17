@@ -5,7 +5,7 @@ use crate::garbage_collector::stats::GcStats;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::tablestore::{TableStore, TableStoreKind};
-use crate::wal::gc::{SlateDbWalGc, WalGcMode};
+use crate::wal::slatedb::gc::{SlateDbWalGc, WalGcMode};
 use crate::wal::{WalAdmin, WalError, WalGc};
 use crate::VersionedManifest;
 use async_trait::async_trait;

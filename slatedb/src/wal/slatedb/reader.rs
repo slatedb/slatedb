@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use crate::iter::IterationOrder;
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
+use crate::wal::slatedb::iterator::{SlateDbWalIterator, SlateDbWalIteratorOptions};
 use crate::wal::{WalError, WalFileRange, WalIterator, WalReader};
-use crate::wal_replay::{WalIterator as WalReplayIterator, WalIteratorOptions};
 
 pub(crate) struct SlateDbWalReader {
     table_store: Arc<TableStore>,
@@ -30,9 +30,9 @@ impl WalReader for SlateDbWalReader {
                 "native WAL reader requires an included start and excluded end",
             )))
         })?;
-        let iterator = WalReplayIterator::range(
+        let iterator = SlateDbWalIterator::range(
             wal_id_range,
-            WalIteratorOptions {
+            SlateDbWalIteratorOptions {
                 sst_batch_size: 4,
                 sst_iter_options: SstIteratorOptions {
                     max_fetch_tasks: 1,

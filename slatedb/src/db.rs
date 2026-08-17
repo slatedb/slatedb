@@ -2137,7 +2137,7 @@ impl WriteHandle {
     }
 }
 
-/// Wraps [`WalObserver`] and injects a [`crate::wal_buffer::WalStatusListener`]
+/// Wraps [`WalObserver`] and injects a [`crate::wal::WalStatusListener`]
 /// that updates the oracle and manifest, and drives cross-task notifications about wal events
 /// via a [`tokio::sync::watch`] channel.
 #[derive(Clone)]
@@ -3262,7 +3262,7 @@ mod tests {
         assert_eq!(
             lookup_metric(
                 &metrics_recorder,
-                crate::wal_buffer::stats::WAL_BUFFER_FLUSHES
+                crate::wal_buffer_stats::WAL_BUFFER_FLUSHES
             )
             .unwrap(),
             0
@@ -3283,7 +3283,7 @@ mod tests {
         assert_eq!(
             lookup_metric(
                 &metrics_recorder,
-                crate::wal_buffer::stats::WAL_BUFFER_FLUSHES
+                crate::wal_buffer_stats::WAL_BUFFER_FLUSHES
             )
             .unwrap(),
             1
@@ -3340,7 +3340,7 @@ mod tests {
         assert_eq!(
             lookup_metric(
                 &metrics_recorder,
-                crate::wal_buffer::stats::WAL_BUFFER_FLUSHES
+                crate::wal_buffer_stats::WAL_BUFFER_FLUSHES
             )
             .unwrap(),
             0
@@ -3360,7 +3360,7 @@ mod tests {
         assert_eq!(
             lookup_metric(
                 &metrics_recorder,
-                crate::wal_buffer::stats::WAL_BUFFER_FLUSHES
+                crate::wal_buffer_stats::WAL_BUFFER_FLUSHES
             )
             .unwrap(),
             0
@@ -3404,7 +3404,7 @@ mod tests {
         assert_eq!(
             lookup_metric(
                 &metrics_recorder,
-                crate::wal_buffer::stats::WAL_BUFFER_FLUSHES
+                crate::wal_buffer_stats::WAL_BUFFER_FLUSHES
             )
             .unwrap(),
             0
@@ -3418,7 +3418,7 @@ mod tests {
         assert_eq!(
             lookup_metric(
                 &metrics_recorder,
-                crate::wal_buffer::stats::WAL_BUFFER_FLUSHES
+                crate::wal_buffer_stats::WAL_BUFFER_FLUSHES
             )
             .unwrap(),
             1
@@ -3565,7 +3565,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            lookup_metric(&metrics_recorder, crate::wal_buffer::stats::WAL_FLUSH_BYTES)
+            lookup_metric(&metrics_recorder, crate::wal_buffer_stats::WAL_FLUSH_BYTES,)
                 .unwrap_or(0),
             0
         );
@@ -3726,7 +3726,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            lookup_metric(&metrics_recorder, crate::wal_buffer::stats::WAL_FLUSH_BYTES)
+            lookup_metric(&metrics_recorder, crate::wal_buffer_stats::WAL_FLUSH_BYTES,)
                 .unwrap_or(0),
             0,
         );
@@ -3734,7 +3734,7 @@ mod tests {
         db.flush().await.unwrap();
 
         let wal_bytes =
-            lookup_metric(&metrics_recorder, crate::wal_buffer::stats::WAL_FLUSH_BYTES).unwrap();
+            lookup_metric(&metrics_recorder, crate::wal_buffer_stats::WAL_FLUSH_BYTES).unwrap();
         let memtable_bytes =
             lookup_metric(&metrics_recorder, crate::db_stats::MEMTABLE_WRITE_BYTES).unwrap();
         // WAL SST framing/footer makes the encoded payload at least as large as
@@ -3760,7 +3760,7 @@ mod tests {
         tokio::time::timeout(
             Duration::from_secs(1),
             db.task_executor
-                .join_task(crate::wal_buffer::WAL_BUFFER_TASK_NAME),
+                .join_task(crate::wal::slatedb::writer::WAL_BUFFER_TASK_NAME),
         )
         .await
         .expect("native WAL task should not run when the WAL is disabled")
@@ -10068,7 +10068,7 @@ mod tests {
         // then:
         let estimated = lookup_metric(
             &metrics_recorder,
-            crate::wal_buffer::stats::WAL_BUFFER_ESTIMATED_BYTES,
+            crate::wal_buffer_stats::WAL_BUFFER_ESTIMATED_BYTES,
         );
         assert!(
             estimated.is_some_and(|v| v > 0),

@@ -5,9 +5,9 @@ use crate::manifest::Manifest;
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCellReader;
+use crate::wal::slatedb::iterator::{SlateDbWalIterator, SlateDbWalIteratorOptions};
+use crate::wal::slatedb::writer::SlateDbWalWriter;
 use crate::wal::{WalError, WriterInitResult, WriterManifest};
-use crate::wal_buffer::WalBufferManager;
-use crate::wal_replay::{WalIterator, WalIteratorOptions};
 use crate::{wal, Settings};
 use async_trait::async_trait;
 use fail_parallel::{fail_point_send, FailPointTx};
@@ -16,13 +16,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone, Copy)]
-pub(crate) struct WalWriterInitOptions {
+pub(crate) struct SlateDbWalWriterInitOptions {
     max_wal_bytes_size: usize,
     max_wal_flushes_before_l0_flush: u64,
     max_flush_interval: Option<Duration>,
 }
 
-impl From<&Settings> for WalWriterInitOptions {
+impl From<&Settings> for SlateDbWalWriterInitOptions {
     fn from(settings: &Settings) -> Self {
         Self {
             max_wal_bytes_size: settings.l0_sst_size_bytes,
@@ -32,7 +32,7 @@ impl From<&Settings> for WalWriterInitOptions {
     }
 }
 
-pub(crate) struct WalWriterInit {
+pub(crate) struct SlateDbWalWriterInit {
     closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
     recorder: MetricsRecorderHelper,
     table_store: Arc<TableStore>,
@@ -45,12 +45,12 @@ pub(crate) struct WalWriterInit {
     fp_tx: FailPointTx,
 }
 
-impl WalWriterInit {
+impl SlateDbWalWriterInit {
     pub(crate) async fn load(
         closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         recorder: MetricsRecorderHelper,
         table_store: Arc<TableStore>,
-        options: WalWriterInitOptions,
+        options: SlateDbWalWriterInitOptions,
         manifest: &Manifest,
         task_executor: Arc<MessageHandlerExecutor>,
         fp_tx: FailPointTx,
@@ -74,7 +74,7 @@ impl WalWriterInit {
 }
 
 #[async_trait]
-impl wal::WriterInit for WalWriterInit {
+impl wal::WriterInit for SlateDbWalWriterInit {
     async fn fence_and_init(
         &self,
         writer_manifest: &mut WriterManifest,
@@ -116,9 +116,9 @@ impl wal::WriterInit for WalWriterInit {
                 // older writers would have failed with a stale epoch
                 let replay_after_wal_id = manifest.core().replay_after_wal_id;
                 assert!(empty_wal_id > replay_after_wal_id);
-                let replay_iterator = WalIterator::range(
+                let replay_iterator = SlateDbWalIterator::range(
                     replay_after_wal_id + 1..empty_wal_id + 1,
-                    WalIteratorOptions {
+                    SlateDbWalIteratorOptions {
                         sst_batch_size: 4,
                         sst_iter_options: SstIteratorOptions {
                             max_fetch_tasks: 1,
@@ -133,7 +133,7 @@ impl wal::WriterInit for WalWriterInit {
                     },
                     self.table_store.clone(),
                 )?;
-                let wal_writer = WalBufferManager::start_new(
+                let wal_writer = SlateDbWalWriter::start_new(
                     self.closed_result_reader.clone(),
                     &self.recorder,
                     empty_wal_id,

@@ -88,15 +88,15 @@ replays these WAL files into memtables, filtering out any rows with sequence num
 
 **Writes**
 
-Once it's recovered persisted writes, the db hands the WAL (`WalBufferManager`) off to the 
-Batch Writer task. This task serializes all writes and buffers them in `WalBufferManager`, 
-which periodically flushes the writes to a new WAL file. `WalBufferManager` notifies blocked 
+Once it's recovered persisted writes, the db hands the WAL (`SlateDbWalWriter`) off to the
+Batch Writer task. This task serializes all writes and buffers them in `SlateDbWalWriter`,
+which periodically flushes the writes to a new WAL file. `SlateDbWalWriter` notifies blocked
 write tasks when writes are durably flushed. 
 
 **Memtable/L0 Flushing**
 
 The Batch Writer task adds writes to the memtable once they've been buffered in 
-`WalBufferManager`. It "freezes" memtables once they cross the memtable size threshold and 
+`SlateDbWalWriter`. It "freezes" memtables once they cross the memtable size threshold and
 annotates the frozen memtable with a `replay_after_wal_id` which holds the ID of some WAL File 
 whose writes are fully covered by the memtable (in the current implementation this is the last 
 durably flushed WAL File). The frozen memtables are picked up by a separate Manifest Writer task,
@@ -112,7 +112,7 @@ described above depending on what the user requested.
 
 **Checkpoints**
 
-When `WalBufferManager` durably persists a WAL File, it notifies the db, which updates 
+When `SlateDbWalWriter` durably persists a WAL File, it notifies the db, which updates
 `last_seen_wal_id` in the manifest with the flushed WAL ID. `DbReader` uses this field to 
 determine the range of WAL Files that should be read for a checkpoint.
 
@@ -812,8 +812,8 @@ benchmark tools that instantiate `DbBench` with a db configured to use a custom 
 
 ## Packaging
 
-The WAL traits and conformance tests will reside in a new crate called `slatedb-wal`. The native
-WAL implementation remains in `slatedb`.
+The WAL traits and conformance tests will all reside in the `wal` module. The native
+WAL implementation will move to a nested module `wal::slatedb`.
 
 ## Alternatives
 
@@ -853,6 +853,15 @@ reasonable/general.
 We could have `WalReader`/`WalIterator` iterate over WAL Files which in turn support row-based 
 iteration (similar to the CDC `WalReader`). I don't really see the benefit of imposing the extra 
 layering. It also forces implementations to map each write batch to a single WAL File.
+
+**Put WAL Trait Definitions in Separate Create**
+Initially this RFC proposed putting the WAL trait defs in a separate crate so that implementors
+only need to import that crate (vs all of slatedb). We opted not to go this route for a few reasons:
+- This requires moving core slatedb types out to either the new wal crate or to slatedb-common. In
+  particular, we'd need to move all the manifest definitions (`VersionedManifest`, `Manifest`) and
+  `RowEntry` as these are used by the writer init and reader/iterator, respectively.
+- A separate crate isn't that useful. Implementors will almost always have to import slatedb
+  anyway to run end-to-end tests. And users of custom WALs would be importing slatedb anyway.
 
 ## Open Questions
 
