@@ -720,9 +720,8 @@ signals add *writer-side* stalls on infrastructure that already existed (the
 flush-dispatch gate, and the `l0_stall_count` metric).
 
 1. **Byte budget** (`write_buffer_manager.at_capacity()`) — *new.* Allocation
-   has reached the budget (`allocated >= high_watermark`, which is `capacity` by
-   default). Relief comes from flushes releasing permits; the writer waits on
-   `await_capacity()` until allocation drains back below the watermark.
+   has reached the budget (`allocated >= capacity`). Relief comes from flushes releasing permits; 
+   the writer waits on `await_capacity()` until allocation drains back below the watermark (which is `capacity` by default).
 2. **L0 SST count** (`l0_at_capacity()`) — *new writer-side stall on an existing
    signal.* `l0_max_ssts` was already enforced per tree by the flush-dispatch
    gate (`FlushTracker::can_dispatch`), which stops *dispatching* flushes to a
@@ -815,7 +814,9 @@ When the permit-allocation wait exceeds the timeout, the write is cancelled
 before dispatch and a dedicated error variant is returned that **hands the
 `WriteBatch` back to the caller** rather than dropping it, so the caller can
 retry, back off, or shed the write without having to reconstruct it. A write
-with no timeout set retains the existing DB-level-bounded behavior.
+with no timeout set retains the existing DB-level-bounded behavior. A timeout of
+`0` indicates an immediate error return (`WriteTimeout`) if there is no capacity
+to allocate a permit, without waiting at all.
 
 ```rust
 pub struct WriteOptions {
@@ -823,8 +824,9 @@ pub struct WriteOptions {
 
     /// Maximum time this write will wait for write-buffer permit allocation
     /// (the pre-dispatch backpressure wait). `None` keeps the existing
-    /// DB-level-bounded behavior. Does not bound time spent in the write queue
-    /// after the batch has been accepted.
+    /// DB-level-bounded behavior. A value of `0` returns `WriteTimeout`
+    /// immediately when no permit can be allocated, without waiting. Does not
+    /// bound time spent in the write queue after the batch has been accepted.
     pub backpressure_timeout: Option<Duration>,
 }
 
