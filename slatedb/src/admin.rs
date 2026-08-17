@@ -761,6 +761,8 @@ impl Admin {
     /// [`CloneBuilder::with_source`]: each source must carry its own per-source range so that
     /// [`crate::manifest::Manifest::cloned_from_union`] sees non-overlapping effective ranges.
     ///
+    /// Segmented sources only have to be non-overlapping within each segment that they share.
+    ///
     /// # Examples
     ///
     /// ```
