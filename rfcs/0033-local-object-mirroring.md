@@ -17,7 +17,7 @@ Table of Contents:
   - [Read Semantics](#read-semantics)
   - [Write Semantics](#write-semantics)
   - [Delete Semantics](#delete-semantics)
-  - [Reconciliation](#reconciliation)
+  - [Reclamation](#reclamation)
   - [Compactor Checkpoint Retention](#compactor-checkpoint-retention)
   - [Construction and Cleanup](#construction-and-cleanup)
   - [Cache Warming](#cache-warming)
@@ -39,8 +39,8 @@ Table of Contents:
 - [Testing](#testing)
 - [Rollout](#rollout)
 - [Alternatives](#alternatives)
-  - [Remote-Only Reconciliation](#remote-only-reconciliation)
-  - [GC-Rule Reconciliation](#gc-rule-reconciliation)
+  - [Remote-Only Reclamation](#remote-only-reclamation)
+  - [GC-Rule Reclamation](#gc-rule-reclamation)
   - [Write-Back](#write-back)
 - [Open Questions](#open-questions)
 - [References](#references)
@@ -172,14 +172,14 @@ impl ObjectStoreMirrorBuilder {
     /// Sets the maximum number of concurrent downloads used by `warm` and
     /// background refetches. The default is 4.
     pub fn with_download_concurrency(self, concurrency: usize) -> Self;
-    /// Sets the interval at which the cache will reconcile its local state
-    /// with the remote object store. The default is
+    /// Sets the interval at which the cache will reclaim obsolete local state
+    /// using the remote object store. The default is
     /// `Some(Duration::from_secs(600))`. Passing `None` disables periodic
-    /// reconciliation but not metadata-driven reclamation.
+    /// reclamation but not metadata-driven reclamation.
     ///
-    /// Periodic reconciliation only deletes local files confirmed missing
+    /// Periodic reclamation only deletes local files confirmed missing
     /// from remote storage. Metadata-driven reclamation remains enabled.
-    pub fn with_reconciliation_interval(
+    pub fn with_reclamation_interval(
         self,
         interval: Option<Duration>,
     ) -> Self;
@@ -204,7 +204,7 @@ let remote: Arc<dyn ObjectStore> = Arc::new(
 );
 let cache = ObjectStoreMirror::builder("/var/lib/slatedb/cache", remote)
     .with_download_concurrency(4)
-    .with_reconciliation_interval(Some(Duration::from_secs(600)))
+    .with_reclamation_interval(Some(Duration::from_secs(600)))
     .build()
     .await?;
 cache.warm("my-db").await?;
@@ -244,7 +244,7 @@ RetryingObjectStore -> InstrumentedObjectStore -> ObjectStoreMirror -> S3ObjectS
 ```
 
 The cache owns retries and metrics for background refetches, warming, and
-reconciliation because the `RetryingObjectStore` wrapper is outside the cache.
+reclamation because the `RetryingObjectStore` wrapper is outside the cache.
 
 `LocalCacheError` is wrapped in `object_store::Error::Generic` with
 `store: "object_store_mirror"`. SlateDB's `RetryingObjectStore::should_retry`
@@ -345,9 +345,9 @@ Delete operations pass through to the wrapped store. Local files in `objects/`
 that match the deleted path are removed if they exist. Local and remote
 deletions are done in parallel, and a failure in one does not affect the other.
 
-### Reconciliation
+### Reclamation
 
-Reconciliation is the process of removing local SSTs that are no longer
+Reclamation is the process of removing local SSTs that are no longer
 referenced in the database. `ObjectStoreMirror` has two phases: an immediate
 metadata-driven phase and a periodic exhaustive remote scan.
 
@@ -356,15 +356,15 @@ workloads. Without an active deletion mechanism, even a minute of writes and
 compaction churn can generate hundreds of hundreds of abandoned data. This is
 not a concern for object storage, but is for local disks.
 
-Pessimistic reconciliation is required to handle the case where a local SST is
+Pessimistic reclamation is required to handle the case where a local SST is
 written successfully and then lost before it is recorded in `.compactions` or a
 manifest. This can be caused by a crash, a process restart, a failed compaction
 job with SST output that never reached the `.compactions` file, and so on. These
 are rare cases, but they can leave a local SST that is no longer referenced and
-should be deleted. Pessimistic reconciliation is effectively a cheap way to
+should be deleted. Pessimistic reclamation is effectively a cheap way to
 copy the garbage collector's logic without running it in two places.
 
-#### Optimistic Reconciliation
+#### Optimistic Reclamation
 
 `ObjectStoreMirror` uses `.manifest` transitions to detect when a local SST is
 no longer referenced. If an old `.manifest` references an SST and a new one no
@@ -383,14 +383,14 @@ applies this rule:
 This is done asynchronously while the manifest object store write occurs. The
 return is blocked until both are complete.
 
-_The hope here is that the the reconciliation and deletion will take fewer
+_The hope here is that the the reclamation and deletion will take fewer
 milliseconds than the network round-trip. If it does not, and the deletion
 proves to be a bottleneck, we might need to move it to an asynchronous task and
 implement some form of eviction if/when the queue becomes overloaded. This
 needs experimentation. The goal with the sync approach is to keep the
 implementation simple._
 
-#### Pessimistic Reconciliation
+#### Pessimistic Reclamation
 
 An SST can be written successfully and then lost before it is recorded in
 `.compactions` or a manifest. Metadata diffs cannot discover such files. They
@@ -404,21 +404,22 @@ runs every ten minutes by default to collect these cases:
   generation and current references.
 
 The periodic scan only deletes files after remote GC has removed them. This
-implies that local pessimistic reconciliation will not delete anything younger
+implies that local pessimistic reclamation will not delete anything younger
 than the GC's compacted SST `min_age` setting.
 
 > [!IMPORTANT]
 > This design requires a bucket and endpoint with strongly consistent object
-> reads, writes, deletes, and listings. Reconciliation treats confirmed remote
+> reads, writes, deletes, and listings. Reclamation treats confirmed remote
 > absence as authoritative and may delete the only local copy, so it must be
 > disabled when these guarantees are unavailable. In particular:
 >
 > - Tigris global and dual-region buckets are strongly consistent for requests
 >   within one region but eventually consistent across regions. All writers and
->   reconciling caches must access such a bucket from the same region; Tigris
+>   caches performing reclamation must access such a bucket from the same
+>   region; Tigris
 >   multi-region and single-region buckets provide strong consistency globally.
 > - Azure RA-GRS and RA-GZRS secondary endpoints are eventually consistent with
->   the primary. Reconciliation must use the primary endpoint and remain
+>   the primary. Reclamation must use the primary endpoint and remain
 >   disabled while reads are directed to a secondary endpoint.
 
 ### Compactor Checkpoint Retention
@@ -587,7 +588,7 @@ is installed or one fails.
 
 Metadata transitions reclaim normal compaction churn without remote SST LISTs.
 Every ten minutes by default, the fallback issues one LIST per distinct remote
-parent prefix represented locally. Setting the reconciliation interval to
+parent prefix represented locally. Setting the reclamation interval to
 `None` eliminates these periodic LISTs.
 
 ### Capacity
@@ -623,7 +624,7 @@ release removes `CachedObjectStore`, its module, configuration, and bindings.
 - Successful completion, compaction trimming, and initialization after restart
   do not delete SSTs.
 - Queued deletion rechecks references and file generation.
-- Periodic reconciliation removes local files only after remote absence.
+- Periodic reclamation removes local files only after remote absence.
 
 ## Rollout
 
@@ -632,13 +633,13 @@ Release `ObjectStoreMirror` and deprecate `CachedObjectStore`. Remove
 
 ## Alternatives
 
-### Remote-Only Reconciliation
+### Remote-Only Reclamation
 
 We considered relying only on periodic remote LIST. This is simple, but all
 normal compaction churn then waits for remote GC and the next mirror scan. The
 metadata fast path reclaims that volume once its checkpoint references expire.
 
-### GC-Rule Reconciliation
+### GC-Rule Reclamation
 
 We considered running compacted-GC eligibility directly against local files.
 This would duplicate or tightly couple the mirror to compaction watermarks and
@@ -671,7 +672,7 @@ TODO
 
 ## Updates
 
-- Added metadata-driven reclamation with a periodic remote reconciliation
+- Added metadata-driven reclamation with a periodic remote reclamation
   backstop and configurable compactor checkpoint retention.
 - Added `with_vfs` and a minimal virtual filesystem abstraction.
 - Removed the GET policy; routing is fixed by `ObjectStoreCallTag`.
