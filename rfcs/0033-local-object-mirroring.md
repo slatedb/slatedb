@@ -11,6 +11,7 @@ Table of Contents:
 - [Design](#design)
   - [GET Routing](#get-routing)
   - [Public API](#public-api)
+  - [Virtual Filesystem](#virtual-filesystem)
   - [Architecture](#architecture)
   - [Filesystem Layout](#filesystem-layout)
   - [Read Semantics](#read-semantics)
@@ -157,6 +158,9 @@ impl ObjectStoreMirror {
 }
 
 impl ObjectStoreMirrorBuilder {
+    /// Sets the virtual filesystem used for local I/O. The default is
+    /// `StdVfs`.
+    pub fn with_vfs(self, vfs: Arc<dyn Vfs>) -> Self;
     /// Sets the maximum number of concurrent downloads used by `warm` and
     /// background refetches. The default is 4.
     pub fn with_download_concurrency(self, concurrency: usize) -> Self;
@@ -197,6 +201,23 @@ let cache = ObjectStoreMirror::builder("/var/lib/slatedb/cache", remote)
 cache.warm("my-db").await?;
 let db = Db::builder(db_path, cache).build().await?;
 ```
+
+### Virtual Filesystem
+
+`ObjectStoreMirror` performs all local I/O through a small asynchronous `Vfs`
+trait. The interface is limited to the operations the mirror needs: range
+reads, streamed temporary-file writes, directory creation, rename, remove, and
+listing. `ObjectStoreMirrorBuilder::with_vfs` replaces the default
+implementation.
+
+The design supports three implementations:
+
+1. `StdVfs`, the default implementation based on standard filesystem I/O.
+2. `IoUringVfs`, a future Linux implementation based on io_uring.
+3. `SimulatedVfs`, a deterministic implementation for simulation tests.
+
+The VFS does not provide caching, eviction, or object-store semantics. It only
+abstracts the local filesystem operations used by the mirror.
 
 ### Architecture
 
@@ -548,6 +569,7 @@ TODO
 
 ## Updates
 
+- Added `with_vfs` and a minimal virtual filesystem abstraction.
 - Removed the GET policy; routing is fixed by `ObjectStoreCallTag`.
 - Added the `CachedObjectStore` deprecation and removal schedule.
 - Made `LocalOnly` the default and cache population explicit.
