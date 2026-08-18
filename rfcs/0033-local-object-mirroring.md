@@ -380,19 +380,15 @@ applies this rule:
   under each external database path. Queue paths present in the old reference
   set but absent from the new one.
 
-This is done asynchronously. Manifests are queued in order. A single deletion
-task drains all manifests, diffing from one to the next, until the queue is
-drained or a hard-coded threshold is reached. It then deletes what it has and
-starts again. If the manifest queue is full, the oldest manifest is dropped
-when a new manifest is added. This can cause SSTs to leak if an SST is added
-and then removed between two manifest writes that are both dropped. Pessimistic
-reconciliation handles these cases.
+This is done asynchronously while the manifest object store write occurs. The
+return is blocked until both are complete.
 
-_The hope here is that there will be less queue pressure than we saw in the
-CachedObjectStore eviction algorithm since there should be ~64x fewer files to
-track and delete (256MiB vs. 4MiB, roughly). This will need to be tested. If
-it can't keep up, we can probably split the deletion queue across multiple
-cores._
+_The hope here is that the the reconciliation and deletion will take fewer
+milliseconds than the network round-trip. If it does not, and the deletion
+proves to be a bottleneck, we might need to move it to an asynchronous task and
+implement some form of eviction if/when the queue becomes overloaded. This
+needs experimentation. The goal with the sync approach is to keep the
+implementation simple._
 
 #### Pessimistic Reconciliation
 
@@ -407,9 +403,9 @@ runs every ten minutes by default to collect these cases:
 - Delete any local file absent from the remote result after rechecking its
   generation and current references.
 
-The periodic scan only deletes files after remote GC has removed them.
-`Some(interval)` enables it and must be non-zero; `None` disables only this
-backstop. Dropping the wrapper cancels the task without delaying `Db::close()`.
+The periodic scan only deletes files after remote GC has removed them. This
+implies that local pessimistic reconciliation will not delete anything younger
+than the GC's compacted SST `min_age` setting.
 
 > [!IMPORTANT]
 > This design requires a bucket and endpoint with strongly consistent object
@@ -427,14 +423,17 @@ backstop. Dropping the wrapper cancels the task without delaying `Db::close()`.
 
 ### Compactor Checkpoint Retention
 
-`CompactorOptions::checkpoint_lifetime` configures the checkpoint written
-before compaction inputs are removed from the manifest. The default remains 15
-minutes. Manifest-driven reclamation keeps SSTs referenced by these checkpoints.
+We add a new `CompactorOptions::checkpoint_lifetime` configuration that sets
+the (currently hardcoded) checkpoint written before compaction inputs are
+removed from the manifest. The default stays 15 minutes (the currently
+hardcoded value). Manifest-driven reclamation keeps SSTs referenced by these
+checkpoints.
 
 The checkpoint protects scans, gets, snapshots, and transactions that began
-before the manifest update. Shortening it reduces the mirror's disk requirement
-but increases the risk that a long-running read loses an SST. Operators should
-set it at least as long as the longest expected in-flight read.
+before the compaction's manifest update. Shortening it reduces the mirror's
+disk requirement but increases the risk that a long-running read loses an SST.
+Operators should set it at least as long as the longest expected in-flight
+read.
 
 The default 15 minutes means the operator will need 15 minutes worth of disk
 for both ingestion and compaction. If a workload is running at 1 GiB/s, the
