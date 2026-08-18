@@ -1,4 +1,4 @@
-# Add ObjectStoreCache
+# Add ObjectStoreMirror
 
 Table of Contents:
 
@@ -52,13 +52,13 @@ Authors:
 
 ## Summary
 
-This RFC adds `ObjectStoreCache`, a whole-file local mirror for compacted SSTs.
+This RFC adds `ObjectStoreMirror`, a whole-file local mirror for compacted SSTs.
 It is separate from the existing part-based `CachedObjectStore`. Compacted SST
 reads are `LocalOnly` by default, so a missing local SST is an error. `Refetch`
 repairs a local SST after a validation failure.
 
 Compacted SST writes are mirrored to local and remote storage and return after
-both copies are durable.
+the remote write succeeds and the local file is installed.
 
 A cache warming mechanism is also provided for `LocalOnly` readers that want to
 ensure that every compacted SST is available locally on startup.
@@ -99,8 +99,9 @@ For `LocalOnly` workloads, the `FoyerHybridCache` is not a good fit.
   to one file unlink.
 
 Rather than change the existing cache in place, this RFC adds
-`ObjectStoreCache` under `slatedb/src/object_store_cache`. The name follows
-`DbCache`; `CachedObjectStore` remains unchanged and can be removed separately.
+`ObjectStoreMirror` under `slatedb/src/object_store_mirror`. The name
+distinguishes the local mirror from `DbCache`; `CachedObjectStore` remains
+unchanged and can be removed separately.
 
 ## Goals
 
@@ -157,8 +158,8 @@ actions for `Main`, `Reader`, `Compactor`, and `GC` calls. It must return
 
 ### Public API
 
-`ObjectStoreCache` is a normal `ObjectStore` implementation in
-`slatedb/src/object_store_cache`. Users construct it with a local cache root and
+`ObjectStoreMirror` is a normal `ObjectStore` implementation in
+`slatedb/src/object_store_mirror`. Users construct it with a local cache root and
 remote store, then pass it through the existing `DbBuilder::new`/`Db::builder`
 object-store parameter. The existing `CachedObjectStore` and
 `object_store_cache_options` remain unchanged.
@@ -179,11 +180,11 @@ pub trait GetPolicy: Send + Sync + Debug + 'static {
     fn get_action(&self, tag: &ObjectStoreCallTag) -> GetAction;
 }
 
-impl ObjectStoreCache {
+impl ObjectStoreMirror {
     pub fn builder(
         local_root_folder: impl Into<PathBuf>,
         object_store: Arc<dyn ObjectStore>,
-    ) -> ObjectStoreCacheBuilder;
+    ) -> ObjectStoreMirrorBuilder;
     /// Populates the cache with compacted SSTs referenced by the latest
     /// manifest.
     pub async fn warm(
@@ -192,7 +193,7 @@ impl ObjectStoreCache {
     ) -> Result<(), Error>;
 }
 
-impl ObjectStoreCacheBuilder {
+impl ObjectStoreMirrorBuilder {
     /// Sets the GET policy for tagged compacted SST reads. The default is
     /// `DefaultCacheGetPolicy::new(GetAction::LocalOnly)`.
     pub fn with_get_policy(self, policy: Arc<dyn GetPolicy>) -> Self;
@@ -211,11 +212,11 @@ impl ObjectStoreCacheBuilder {
     ) -> Self;
     /// Validates the configuration, prepares and cleans the local directories,
     /// and starts background workers.
-    pub async fn build(self) -> Result<Arc<ObjectStoreCache>, Error>;
+    pub async fn build(self) -> Result<Arc<ObjectStoreMirror>, Error>;
 }
 
 #[async_trait]
-impl ObjectStore for ObjectStoreCache {
+impl ObjectStore for ObjectStoreMirror {
     // Standard ObjectStore methods delegate to local and remote storage.
 }
 ```
@@ -228,7 +229,7 @@ let remote: Arc<dyn ObjectStore> = Arc::new(
         .with_bucket_name("my-bucket")
         .build()?,
 );
-let cache = ObjectStoreCache::builder("/var/lib/slatedb/cache", remote)
+let cache = ObjectStoreMirror::builder("/var/lib/slatedb/cache", remote)
     .with_download_concurrency(4)
     .with_reconciliation_interval(Some(Duration::from_secs(60)))
     .build()
@@ -243,20 +244,20 @@ The user supplies the cache as the main object store. SlateDB then applies its
 existing internal wrappers. The base-to-outer construction order is:
 
 ```text
-S3ObjectStore -> ObjectStoreCache -> InstrumentedObjectStore -> RetryingObjectStore
+S3ObjectStore -> ObjectStoreMirror -> InstrumentedObjectStore -> RetryingObjectStore
 ```
 
 Requests travel in the opposite direction:
 
 ```text
-RetryingObjectStore -> InstrumentedObjectStore -> ObjectStoreCache -> S3ObjectStore
+RetryingObjectStore -> InstrumentedObjectStore -> ObjectStoreMirror -> S3ObjectStore
 ```
 
 The cache owns retries and metrics for background refetches, warming, and
 reconciliation because the `RetryingObjectStore` wrapper is outside the cache.
 
 `LocalCacheError` is wrapped in `object_store::Error::Generic` with
-`store: "object_store_cache"`. SlateDB's `RetryingObjectStore::should_retry`
+`store: "object_store_mirror"`. SlateDB's `RetryingObjectStore::should_retry`
 must downcast the generic error's source and return `false` for
 `LocalCacheError`. Without this explicit check, the current retry classifier
 would retry the generic error indefinitely when `object_store_max_retries` is
@@ -268,7 +269,7 @@ always go to the wrapped remote store.
 
 Because the wrapper is supplied through the normal `ObjectStore` parameter,
 the same type works with `Db`, `DbReader`, and `Compactor`. A cache local
-filesystem root belongs to one live `ObjectStoreCache`. Separate wrappers,
+filesystem root belongs to one live `ObjectStoreMirror`. Separate wrappers,
 including wrappers in separate processes, must use separate local filesystem
 roots.
 
@@ -333,11 +334,12 @@ Tagged compacted SST writes are write-through. Single-PUT and multipart writes
 tee bytes to the remote store and a temporary file under `uploading/`. Multipart
 parts continue streaming remotely as they are produced.
 
-The write returns only after the remote upload succeeds, the complete local file
-is synced, and the file is atomically renamed into `objects/` with its parent
-directories synced. A remote failure removes the temporary file and returns the
-remote error. A local failure returns `LocalCacheError`; a remote SST that
-already completed is left unreferenced for garbage collection.
+The write returns only after the remote upload succeeds and the complete local
+file is atomically renamed into `objects/`. A remote failure removes the
+temporary file and returns the remote error. A local failure returns
+`LocalCacheError`; a remote SST that already completed is left unreferenced for
+garbage collection. The local copy is recoverable cache state; validation
+failures use `Refetch` to replace it.
 
 Tagged WAL and untagged writes pass through to remote storage. Manifest,
 compactions, WAL, and GC boundary PUTs retain their existing conditional-write,
@@ -353,7 +355,7 @@ deletions are done in parallel, and a failure in one does not affect the other.
 
 A DELETE issued on another machine--such as a remote garbage collector--does
 not pass through this wrapper. By
-default, `ObjectStoreCache` therefore runs a reconciliation task every minute
+default, `ObjectStoreMirror` therefore runs a reconciliation task every minute
 regardless of GET policy. `Some(interval)` enables the task and must be
 non-zero; `None` disables it. Dropping the wrapper cancels its task without
 delaying `Db::close()`.
@@ -385,7 +387,7 @@ prefix.
 
 ### Construction and Cleanup
 
-`ObjectStoreCacheBuilder::build` validates its options, prepares the local
+`ObjectStoreMirrorBuilder::build` validates its options, prepares the local
 directories, and removes files under `uploading/` and `downloading/` before
 starting background work. It returns an error if any of this setup fails.
 Deleting those incomplete files is safe because files enter `objects/` only
@@ -492,7 +494,7 @@ or manually copy or download the required SSTs.
 - [x] Observability (metrics/logging/tracing)
 
 Existing binding cache settings continue to configure `CachedObjectStore`.
-`ObjectStoreCache` is initially available only in APIs that can supply a custom
+`ObjectStoreMirror` is initially available only in APIs that can supply a custom
 `ObjectStore`; this RFC does not add binding-specific configuration or CLI
 commands.
 
@@ -506,7 +508,8 @@ Local hits perform range reads from one whole SST file. A local miss returns
 always use remote storage.
 
 Compacted SST writes stream to local and remote storage concurrently and return
-after both copies are durable. WAL writes remain on the remote path.
+after the remote write succeeds and the local file is installed. WAL writes
+remain on the remote path.
 
 One `warm` call reads the latest manifest and issues one full-object GET
 for each referenced SST not already local. It may therefore transfer the full
@@ -546,8 +549,8 @@ TODO
 ### Compatibility
 
 This change is additive. `CachedObjectStore`, its module, configuration, and
-bindings remain unchanged. `ObjectStoreCache` is a new public type under
-`slatedb/src/object_store_cache`.
+bindings remain unchanged. `ObjectStoreMirror` is a new public type under
+`slatedb/src/object_store_mirror`.
 
 ## Testing
 
@@ -561,8 +564,8 @@ TODO
 
 ### Write-Back
 
-We considered acknowledging compacted SST writes after the local copy became
-durable and uploading them remotely in the background. Manifest and
+We considered acknowledging compacted SST writes after the local copy was
+installed and uploading them remotely in the background. Manifest and
 `.compactions` publication would still have to wait for remote durability, while
 SlateDB already parallelizes L0 flushes, multipart uploads, compactions, and
 subcompactions. The limited benefit did not justify an upload queue, publication
@@ -586,7 +589,7 @@ TODO
 ## Updates
 
 - Made `LocalOnly` the default and cache population explicit.
-- Made the proposal additive by introducing `ObjectStoreCache` alongside
+- Made the proposal additive by introducing `ObjectStoreMirror` alongside
   `CachedObjectStore`.
 - Dropped write-back after comparing its publication barrier with SlateDB's
   existing upload parallelism.
