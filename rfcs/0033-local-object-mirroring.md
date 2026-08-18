@@ -53,12 +53,9 @@ Authors:
 ## Summary
 
 This RFC adds `ObjectStoreCache`, a whole-file local mirror for compacted SSTs.
-It is separate from the existing part-based `CachedObjectStore`. Two read modes
-are supported:
-
-- `ReadThrough` fetches a missing range from remote storage and schedules a full
-  SST download in the background.
-- `LocalOnly` treats a missing local SST as an error.
+It is separate from the existing part-based `CachedObjectStore`. Compacted SST
+reads are `LocalOnly` by default, so a missing local SST is an error. `Refetch`
+repairs a local SST after a validation failure.
 
 Compacted SST writes are mirrored to local and remote storage and return after
 both copies are durable.
@@ -108,8 +105,7 @@ Rather than change the existing cache in place, this RFC adds
 ## Goals
 
 - Add a whole-SST local mirror for compacted SSTs.
-- Support read-through and local-only reads, write-through mirroring, and cache
-  warming.
+- Support local-only reads, write-through mirroring, and cache warming.
 - Make the new cache additive so existing users are unaffected.
 
 ## Non-Goals
@@ -124,46 +120,40 @@ Rather than change the existing cache in place, this RFC adds
 
 The new cache retains the per-call policy pattern from the current
 `CachedObjectStore`. A `GetPolicy` receives the compacted SST's
-`ObjectStoreCallTag`, then returns one of four actions:
+`ObjectStoreCallTag`, then returns one of two actions:
 
 | GET action | Local hit | Local miss |
 |---|---|---|
-| `Bypass` | Not checked | Forward the original GET to the wrapped store without local admission |
 | `Refetch` | Not checked | Forward the requested GET and schedule a full-SST background fill after the foreground GET succeeds |
-| `ReadThrough` | Serve it | Forward the requested GET and schedule a full-SST background fill after the foreground GET succeeds |
 | `LocalOnly` | Serve it | Return `LocalCacheError` without accessing remote storage |
 
-`ReadThrough` keeps the full download off the foreground path. A custom policy
-can use `Bypass` for call sources such as compaction scans. `Refetch` is used
-when corruption is detected. Before forwarding the GET, it deletes the
-existing local file so concurrent reads cannot continue serving the corrupt
-bytes. After the foreground GET succeeds, it schedules the same single-flight
-full-SST fill as `ReadThrough`.
+`Refetch` is used when corruption is detected. Before forwarding the GET, it
+deletes the existing local file so concurrent reads cannot continue serving the
+corrupt bytes. After the foreground GET succeeds, it schedules a single-flight
+full-SST download to repair the local copy.
 
 The wrapper invokes the policy only for calls carrying an
 `ObjectStoreCallTag` whose `sst_type` is `Compacted`. Tagged WAL calls and
-untagged calls bypass before policy dispatch. This is an implementation
-invariant, so a custom policy cannot accidentally cache WALs, manifests, or
-other coordination objects.
+untagged calls go directly to the wrapped store before policy dispatch. This
+implementation invariant prevents a custom policy from caching WALs, manifests,
+or other coordination objects.
 
 `DefaultCacheGetPolicy` handles validation retries before applying its normal
 read action:
 
 | Request | Routing |
 |---|---|
-| Untagged or tagged WAL | Bypass before policy dispatch |
+| Untagged or tagged WAL | Forward to the wrapped store before policy dispatch |
 | Tagged compacted with `tag.retry.is_some()` | `Refetch` |
-| Other tagged compacted | Configured action; `ReadThrough` by default |
+| Other tagged compacted | Configured action; `LocalOnly` by default |
 
 SlateDB reissues a compacted SST read once with `tag.retry` set after a
 recoverable validation failure. Routing that call to `Refetch` is required: a
-normal `ReadThrough` lookup could otherwise return the same corrupt local file
-again.
+`LocalOnly` lookup could otherwise return the same corrupt local file again.
 
 A custom GET policy may use `ObjectStoreCallTag::kind` to select different
-actions for `Main`, `Reader`, `Compactor`, and `GC` calls. It must not return
-`ReadThrough` or `LocalOnly` for a retry-tagged call, because either action may
-serve the file that failed validation.
+actions for `Main`, `Reader`, `Compactor`, and `GC` calls. It must return
+`Refetch` for a retry-tagged call so the failed local file is not served again.
 
 ### Public API
 
@@ -175,17 +165,10 @@ object-store parameter. The existing `CachedObjectStore` and
 
 ```rust
 pub enum GetAction {
-    /// Do not check the local cache; forward the original GET to the wrapped
-    /// store.
-    Bypass,
     /// Do not check the local cache; forward the requested GET to the wrapped
     /// store and schedule a full-SST background fill after the foreground GET
     /// succeeds.
     Refetch,
-    /// Check the local cache; if the SST is present, serve it. If it is
-    /// missing, forward the requested GET to the wrapped store and schedule a
-    /// full-SST background fill.
-    ReadThrough,
     /// Check the local cache; if the SST is present, serve it. If it is
     /// missing, return `LocalCacheError` without accessing remote storage.
     LocalOnly,
@@ -211,11 +194,11 @@ impl ObjectStoreCache {
 
 impl ObjectStoreCacheBuilder {
     /// Sets the GET policy for tagged compacted SST reads. The default is
-    /// `DefaultCacheGetPolicy::new(GetAction::ReadThrough)`.
+    /// `DefaultCacheGetPolicy::new(GetAction::LocalOnly)`.
     pub fn with_get_policy(self, policy: Arc<dyn GetPolicy>) -> Self;
-    /// Sets the maximum number of concurrent background prefetches. The
-    /// default is 4.
-    pub fn with_prefetch_concurrency(self, concurrency: usize) -> Self;
+    /// Sets the maximum number of concurrent downloads used by `warm` and
+    /// background refetches. The default is 4.
+    pub fn with_download_concurrency(self, concurrency: usize) -> Self;
     /// Sets the interval at which the cache will reconcile its local state
     /// with the remote object store. The default is
     /// `Some(Duration::from_secs(60))`. Passing `None` disables reconciliation.
@@ -246,10 +229,7 @@ let remote: Arc<dyn ObjectStore> = Arc::new(
         .build()?,
 );
 let cache = ObjectStoreCache::builder("/var/lib/slatedb/cache", remote)
-    .with_get_policy(Arc::new(DefaultCacheGetPolicy::new(
-        GetAction::ReadThrough,
-    )))
-    .with_prefetch_concurrency(4)
+    .with_download_concurrency(4)
     .with_reconciliation_interval(Some(Duration::from_secs(60)))
     .build()
     .await?;
@@ -272,8 +252,8 @@ Requests travel in the opposite direction:
 RetryingObjectStore -> InstrumentedObjectStore -> ObjectStoreCache -> S3ObjectStore
 ```
 
-The cache owns retries and metrics for background fills and reconciliation
-because the `RetryingObjectStore` wrapper is outside the cache.
+The cache owns retries and metrics for background refetches, warming, and
+reconciliation because the `RetryingObjectStore` wrapper is outside the cache.
 
 `LocalCacheError` is wrapped in `object_store::Error::Generic` with
 `store: "object_store_cache"`. SlateDB's `RetryingObjectStore::should_retry`
@@ -331,36 +311,21 @@ Files are byte-for-byte identical with their remote counterparts.
 
 ### Read Semantics
 
-The flow for a read is:
+For a normal tagged compacted SST read, the cache serves the file from
+`objects/`. If the file is missing, it returns `LocalCacheError` without
+accessing remote storage.
 
-1. If the SST is present under `objects/`, serve it.
-2. If the SST is missing..
-  - `ReadThrough`: forward the requested GET to the wrapped store and schedule a
-    full-SST background fill.
-  - `LocalOnly`: return `LocalCacheError` without accessing remote storage.
+A tagged `get_opts` call with `head = true` goes directly to the wrapped store.
 
-`GetOptions` preconditions pass through to the wrapped store. A tagged
-`get_opts` call with `head = true` similarly passes through to the wrapped
-store.
+For `Refetch`, the requested range is returned directly from the wrapped store.
+The foreground request does not wait for the separate full-SST download, which
+writes to `downloading/` and atomically renames the complete SST into `objects/`.
+Full-SST refetches are single-flight by SST path. If the download fails, the
+foreground retry is unaffected; the cache records the failure and removes the
+partial file.
 
-On a read-through miss, the cache forwards the call to the wrapped store. The
-requested range is returned directly to the caller; the foreground request does
-not wait for a full-SST download. In parallel, the cache schedules a separate
-full-SST GET. That download writes to `downloading/` and atomically renames the
-complete SST into `objects/` after the download completes.
-
-The background full-SST fill is single-flight by SST path. Concurrent
-foreground misses still forward their original GETs to the wrapped store and
-return their requested ranges independently. Only redundant scheduling of the
-background full-SST download is coalesced.
-
-If a background download fails, the foreground read is unaffected. The cache
-records the failure, removes the partially downloaded file, and tries again on
-a later miss.
-
-`LocalOnly` reads return `LocalCacheError` on a local miss. The caller is
-responsible for populating the cache before database instantiation using
-`warm` or a custom filesystem copy.
+The caller must populate the cache before database instantiation using `warm`
+or by manually copying or downloading complete SSTs into `objects/`.
 
 ### Write Semantics
 
@@ -426,9 +391,8 @@ starting background work. It returns an error if any of this setup fails.
 Deleting those incomplete files is safe because files enter `objects/` only
 after the corresponding remote upload succeeds.
 
-The built-in `ReadThrough` policy can start with an empty directory and populate
-it on demand. `LocalOnly` assumes required SSTs were written through this cache
-or populated explicitly using `warm` or via a filesystem copy.
+Before database instantiation, required SSTs must already have been written
+through this cache or populated using `warm` or a manual filesystem copy.
 
 `Db::close()` requires no cache-specific follow-up. Existing metadata
 publication ordering applies because each compacted SST PUT returns only after
@@ -439,16 +403,16 @@ the SST is durable remotely.
 There are three ways to populate the cache:
 
 1. Any successful tagged compacted SST write installs the complete local SST.
-2. A tagged compacted `ReadThrough` miss schedules a full-SST background fill.
-3. An application can call `warm` to populate the compacted SSTs in a
+2. An application can call `warm` to populate the compacted SSTs in a
    database's latest manifest and wait. This must be done before database
    instantiation if the caller wants to avoid `LocalCacheError` on a `LocalOnly`
    read.
+3. An operator can manually copy or download complete SSTs into `objects/`.
 
-Calling `warm` is optional. The utility has no options: it warms every
-compacted SST in the latest manifest, uses the cache's existing remote-read
-concurrency and retry policy, and returns an error if any SST cannot be
-populated. Callers that do not need eager population omit the call.
+Calling `warm` is optional only when the required SSTs are already local. The
+utility has no options: it warms every compacted SST in the latest manifest,
+uses the cache's existing remote-read concurrency and retry policy, and returns
+an error if any SST cannot be populated.
 
 ### Prefix Store Support
 
@@ -518,8 +482,8 @@ apply.
 
 The block cache remains the general-purpose best-effort cache. The cache stores
 only tagged compacted SSTs as whole local files. WAL SSTs always use remote
-storage. `ReadThrough` population is best effort. Applications using
-`LocalOnly` may populate the latest manifest explicitly with `warm`.
+storage. Applications must populate the latest manifest explicitly with `warm`
+or manually copy or download the required SSTs.
 
 ### Ecosystem & Operations
 
@@ -536,15 +500,10 @@ commands.
 
 ### Performance and Cost
 
-Local hits perform range reads from one whole SST file. A read-through miss
-issues the requested range GET on the foreground path and a separate full-SST
-GET in the background. Foreground latency waits only for the requested range,
-while remote bandwidth includes both requests. Later reads use the local file
-after the background download finishes.
-
-`LocalOnly` performs no remote fallback for tagged compacted SST reads.
-`warm` may still read remote storage explicitly. WAL and untagged
-coordination reads always use remote storage.
+Local hits perform range reads from one whole SST file. A local miss returns
+`LocalCacheError` without remote fallback. `Refetch` validation retries and
+`warm` may read remote storage explicitly. WAL and untagged coordination reads
+always use remote storage.
 
 Compacted SST writes stream to local and remote storage concurrently and return
 after both copies are durable. WAL writes remain on the remote path.
@@ -553,8 +512,8 @@ One `warm` call reads the latest manifest and issues one full-object GET
 for each referenced SST not already local. It may therefore transfer the full
 live compacted data set when starting with an empty cache. Existing local SSTs
 avoid those GETs. The utility shares the cache's remote-read concurrency with
-read-through fills and returns only after every SST in its manifest snapshot is
-installed or one fails.
+background refetches and returns only after every SST in its manifest snapshot
+is installed or one fails.
 
 Each reconciliation pass scans complete local objects, issues one remote LIST
 per distinct remote parent prefix represented locally, and issues DELETE only
@@ -569,10 +528,9 @@ periodic LIST cost.
 
 ### Capacity
 
-The cache has no maximum-size eviction setting in this proposal. Under
-`ReadThrough`, the cache may remain partially populated if a fill runs out of
-space; the foreground read still succeeds remotely. `LocalOnly`
-cannot discard an SST and preserve its no-fallback contract.
+The cache has no maximum-size eviction setting in this proposal. It cannot
+discard an SST and preserve its `LocalOnly` contract, so operators must size the
+volume for the required working set.
 
 Operators size the volume for cached SSTs and temporary files under `uploading/`
 and `downloading/`. Abandoned temporary files consume space only until the next
@@ -627,6 +585,7 @@ TODO
 
 ## Updates
 
+- Made `LocalOnly` the default and cache population explicit.
 - Made the proposal additive by introducing `ObjectStoreCache` alongside
   `CachedObjectStore`.
 - Dropped write-back after comparing its publication barrier with SlateDB's
