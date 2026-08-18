@@ -18,6 +18,7 @@ Table of Contents:
   - [Write Semantics](#write-semantics)
   - [Delete Semantics](#delete-semantics)
   - [Reconciliation](#reconciliation)
+  - [Compactor Checkpoint Retention](#compactor-checkpoint-retention)
   - [Construction and Cleanup](#construction-and-cleanup)
   - [Cache Warming](#cache-warming)
   - [Prefix Store Support](#prefix-store-support)
@@ -38,6 +39,8 @@ Table of Contents:
 - [Testing](#testing)
 - [Rollout](#rollout)
 - [Alternatives](#alternatives)
+  - [Remote-Only Reconciliation](#remote-only-reconciliation)
+  - [GC-Rule Reconciliation](#gc-rule-reconciliation)
   - [Write-Back](#write-back)
 - [Open Questions](#open-questions)
 - [References](#references)
@@ -63,6 +66,10 @@ the remote write succeeds and the local file is installed.
 
 A cache warming mechanism is also provided for `LocalOnly` readers that want to
 ensure that every compacted SST is available locally on startup.
+
+Normal compaction churn is reclaimed from manifest and `.compactions`
+transitions. A periodic remote scan removes files missed because of restart,
+cross-process updates, or SSTs that never reached metadata.
 
 ## Motivation
 
@@ -108,6 +115,7 @@ available for one deprecation cycle.
 
 - Add a whole-SST local mirror for compacted SSTs.
 - Support local-only reads, write-through mirroring, and cache warming.
+- Reclaim obsolete local SSTs promptly without duplicating GC eligibility.
 - Make the new cache additive so existing users are unaffected.
 
 ## Non-Goals
@@ -166,10 +174,11 @@ impl ObjectStoreMirrorBuilder {
     pub fn with_download_concurrency(self, concurrency: usize) -> Self;
     /// Sets the interval at which the cache will reconcile its local state
     /// with the remote object store. The default is
-    /// `Some(Duration::from_secs(60))`. Passing `None` disables reconciliation.
+    /// `Some(Duration::from_secs(600))`. Passing `None` disables periodic
+    /// reconciliation but not metadata-driven reclamation.
     ///
-    /// Reconciliation only deletes local files that are confirmed to be
-    /// missing from the remote store. It does not upload or download files.
+    /// Periodic reconciliation only deletes local files confirmed missing
+    /// from remote storage. Metadata-driven reclamation remains enabled.
     pub fn with_reconciliation_interval(
         self,
         interval: Option<Duration>,
@@ -195,7 +204,7 @@ let remote: Arc<dyn ObjectStore> = Arc::new(
 );
 let cache = ObjectStoreMirror::builder("/var/lib/slatedb/cache", remote)
     .with_download_concurrency(4)
-    .with_reconciliation_interval(Some(Duration::from_secs(60)))
+    .with_reconciliation_interval(Some(Duration::from_secs(600)))
     .build()
     .await?;
 cache.warm("my-db").await?;
@@ -247,6 +256,10 @@ unset.
 WAL operations, reads and writes of manifests, compactions records, and GC
 boundaries, along with LIST, untagged HEAD, copy, and other untagged operations,
 always go to the wrapped remote store.
+
+The mirror observes successful manifest and `.compactions` reads and writes to
+maintain in-memory reference state. These objects are never served from the
+mirror; the state is used only for local reclamation.
 
 Because the wrapper is supplied through the normal `ObjectStore` parameter,
 the same type works with `Db`, `DbReader`, and `Compactor`. A cache local
@@ -334,11 +347,69 @@ deletions are done in parallel, and a failure in one does not affect the other.
 
 ### Reconciliation
 
-A DELETE issued on another machine--such as a remote garbage collector--does
-not pass through this wrapper. `ObjectStoreMirror` therefore runs a
-reconciliation task every minute by default. `Some(interval)` enables the task
-and must be non-zero; `None` disables it. Dropping the wrapper cancels its task
-without delaying `Db::close()`.
+Reconciliation is the process of removing local SSTs that are no longer
+referenced in the database. `ObjectStoreMirror` has two phases: an immediate
+metadata-driven phase and a periodic exhaustive remote scan.
+
+The optimistic approach is required to keep disk usage low in high-throughput
+workloads. Without an active deletion mechanism, even a minute of writes and
+compaction churn can generate hundreds of hundreds of abandoned data. This is
+not a concern for object storage, but is for local disks.
+
+Pessimistic reconciliation is required to handle the case where a local SST is
+written successfully and then lost before it is recorded in `.compactions` or a
+manifest. This can be caused by a crash, a process restart, a failed compaction
+job with SST output that never reached the `.compactions` file, and so on. These
+are rare cases, but they can leave a local SST that is no longer referenced and
+should be deleted. Pessimistic reconciliation is effectively a cheap way to
+copy the garbage collector's logic without running it in two places.
+
+#### Optimistic Reconciliation
+
+`ObjectStoreMirror` uses `.manifest` transitions to detect when a local SST is
+no longer referenced. If an old `.manifest` references an SST and a new one no
+longer does, that SST is safe for deletion. It queues these SSTs for deletion
+and removes them in the background.
+
+The mirror keeps the newest `.manifest` state it observes. Reads initialize this
+state. After a successful write, the mirror updates the corresponding state and
+applies this rule:
+
+- Build full object paths for every SST referenced by the latest manifest and
+  its active checkpoint manifests. This includes `ExternalDb.sst_ids`, resolved
+  under each external database path. Queue paths present in the old reference
+  set but absent from the new one.
+
+This is done asynchronously. Manifests are queued in order. A single deletion
+task drains all manifests, diffing from one to the next, until the queue is
+drained or a hard-coded threshold is reached. It then deletes what it has and
+starts again. If the manifest queue is full, the oldest manifest is dropped
+when a new manifest is added. This can cause SSTs to leak if an SST is added
+and then removed between two manifest writes that are both dropped. Pessimistic
+reconciliation handles these cases.
+
+_The hope here is that there will be less queue pressure than we saw in the
+CachedObjectStore eviction algorithm since there should be ~64x fewer files to
+track and delete (256MiB vs. 4MiB, roughly). This will need to be tested. If
+it can't keep up, we can probably split the deletion queue across multiple
+cores._
+
+#### Pessimistic Reconciliation
+
+An SST can be written successfully and then lost before it is recorded in
+`.compactions` or a manifest. Metadata diffs cannot discover such files. They
+also cannot reconstruct transitions missed across restart. A full remote scan
+runs every ten minutes by default to collect these cases:
+
+- Snapshot all files in `objects/`.
+- Group them by their remote parent prefix.
+- LIST each distinct parent prefix on the wrapped remote store.
+- Delete any local file absent from the remote result after rechecking its
+  generation and current references.
+
+The periodic scan only deletes files after remote GC has removed them.
+`Some(interval)` enables it and must be non-zero; `None` disables only this
+backstop. Dropping the wrapper cancels the task without delaying `Db::close()`.
 
 > [!IMPORTANT]
 > This design requires a bucket and endpoint with strongly consistent object
@@ -354,16 +425,21 @@ without delaying `Db::close()`.
 >   the primary. Reconciliation must use the primary endpoint and remain
 >   disabled while reads are directed to a secondary endpoint.
 
-One reconciliation pass proceeds as follows:
+### Compactor Checkpoint Retention
 
-- Snapshot all files in `objects/`.
-- Group them by their remote parent prefix.
-- LIST each distinct parent prefix on the wrapped remote store.
-- Delete any local file whose path is absent from the remote LIST result.
+`CompactorOptions::checkpoint_lifetime` configures the checkpoint written
+before compaction inputs are removed from the manifest. The default remains 15
+minutes. Manifest-driven reclamation keeps SSTs referenced by these checkpoints.
 
-This will require one LIST per database prefix. A DB with no external DBs will
-have a single prefix. One additional LIST will be issued for each external DB
-prefix.
+The checkpoint protects scans, gets, snapshots, and transactions that began
+before the manifest update. Shortening it reduces the mirror's disk requirement
+but increases the risk that a long-running read loses an SST. Operators should
+set it at least as long as the longest expected in-flight read.
+
+The default 15 minutes means the operator will need 15 minutes worth of disk
+for both ingestion and compaction. If a workload is running at 1 GiB/s, the
+operator will need 900 GiB of disk for the mirror. A 1 minute checkpoint
+lifetime reduces that to roughly 60 GiB.
 
 ### Construction and Cleanup
 
@@ -393,8 +469,9 @@ There are three ways to populate the cache:
 
 Calling `warm` is optional only when the required SSTs are already local. The
 utility has no options: it warms every compacted SST in the latest manifest,
-uses the cache's existing remote-read concurrency and retry policy, and returns
-an error if any SST cannot be populated.
+including SSTs resolved through `ExternalDb.sst_ids`, uses the cache's existing
+remote-read concurrency and retry policy, and returns an error if any SST cannot
+be populated.
 
 ### Prefix Store Support
 
@@ -408,7 +485,11 @@ for normal database reads.
 
 ### Failure and Restart
 
-TODO
+Complete files under `objects/` survive restart; incomplete uploads and
+downloads are removed during construction. In-memory metadata state is rebuilt
+from subsequent reads and writes, which initialize state without producing
+deletions. After remote GC, the periodic scan removes SSTs from transitions
+missed before restart and SSTs that never reached metadata.
 
 ## Impact Analysis
 
@@ -418,11 +499,12 @@ apply.
 ### Core API & Query Semantics
 
 - [ ] Basic KV API (`get`/`put`/`delete`)
-- [ ] Range queries, iterators, seek semantics
+- [x] Range queries, iterators, seek semantics
 - [ ] Range deletions
 - [x] Error model, API errors
 
-`LocalOnly` adds explicit missing-object errors.
+`LocalOnly` adds explicit missing-object errors. Compactor checkpoints protect
+superseded SSTs used by in-flight iterators.
 
 ### Consistency, Isolation, and Multi-Versioning
 
@@ -440,19 +522,25 @@ apply.
 ### Metadata, Coordination, and Lifecycles
 
 - [ ] Manifest format
-- [ ] Checkpoints
-- [ ] Clones
-- [ ] Garbage collection
+- [x] Checkpoints
+- [x] Clones
+- [x] Garbage collection
 - [ ] Database splitting and merging
 - [ ] Multi-writer
 
+No metadata format changes are required. The mirror observes manifests,
+checkpoint references, `ExternalDb.sst_ids`, and failed compaction outputs.
+
 ### Compaction
 
-- [ ] Compaction state persistence
+- [x] Compaction state persistence
 - [ ] Compaction filters
 - [ ] Compaction strategies
-- [ ] Distributed compaction
-- [ ] Compactions format
+- [x] Distributed compaction
+- [x] Compactions format
+
+The compactor checkpoint lifetime becomes configurable. The `.compactions`
+format does not change.
 
 ### Storage Engine Internals
 
@@ -498,16 +586,10 @@ avoid those GETs. The utility shares the cache's remote-read concurrency with
 background refetches and returns only after every SST in its manifest snapshot
 is installed or one fails.
 
-Each reconciliation pass scans complete local objects, issues one remote LIST
-per distinct remote parent prefix represented locally, and issues DELETE only
-for paths missing from a LIST result.
-
-At the default one-minute interval, and using the S3 Standard rate of $0.005 per
-1,000 PUT, COPY, POST, or LIST requests, one listed prefix produces 43,200 LIST
-requests in a 30-day month and costs $0.216 per cache per month. With `P`
-distinct parent prefixes and `M` caches, the monthly LIST cost is
-`$0.216 * P * M`. Setting the reconciliation interval to `None` eliminates this
-periodic LIST cost.
+Metadata transitions reclaim normal compaction churn without remote SST LISTs.
+Every ten minutes by default, the fallback issues one LIST per distinct remote
+parent prefix represented locally. Setting the reconciliation interval to
+`None` eliminates these periodic LISTs.
 
 ### Capacity
 
@@ -515,11 +597,13 @@ The cache has no maximum-size eviction setting in this proposal. It cannot
 discard an SST and preserve its `LocalOnly` contract, so operators must size the
 volume for the required working set.
 
-Operators size the volume for cached SSTs and temporary files under `uploading/`
-and `downloading/`. Abandoned temporary files consume space only until the next
-wrapper construction clears those directories. Complete SSTs deleted remotely
-on another machine may consume local space until the next successful
-reconciliation pass. If reconciliation is disabled, they remain until a DELETE
+Operators size the volume for the live SST set, temporary files under
+`uploading/` and `downloading/`, and SSTs retained by active compactor
+checkpoints. Retained data follows compaction churn rather than logical ingest
+and may be larger due to write amplification.
+
+Never-published SSTs and missed metadata transitions remain until remote GC and
+the next periodic scan. If the scan is disabled, they remain until a DELETE
 passes through the cache or the root is rebuilt.
 
 ### Observability
@@ -534,7 +618,13 @@ release removes `CachedObjectStore`, its module, configuration, and bindings.
 
 ## Testing
 
-TODO
+- Manifest diffs retain latest, checkpointed, and external SST paths.
+- `Running` and `Compacted` outputs remain protected; transitions to `Failed`
+  remove partial and final outputs not referenced by a manifest.
+- Successful completion, compaction trimming, and initialization after restart
+  do not delete SSTs.
+- Queued deletion rechecks references and file generation.
+- Periodic reconciliation removes local files only after remote absence.
 
 ## Rollout
 
@@ -542,6 +632,19 @@ Release `ObjectStoreMirror` and deprecate `CachedObjectStore`. Remove
 `CachedObjectStore` in the following release.
 
 ## Alternatives
+
+### Remote-Only Reconciliation
+
+We considered relying only on periodic remote LIST. This is simple, but all
+normal compaction churn then waits for remote GC and the next mirror scan. The
+metadata fast path reclaims that volume once its checkpoint references expire.
+
+### GC-Rule Reconciliation
+
+We considered running compacted-GC eligibility directly against local files.
+This would duplicate or tightly couple the mirror to compaction watermarks and
+publication rules. Reference transitions handle files that were previously
+published; the remote scan handles files that never reached metadata.
 
 ### Write-Back
 
@@ -569,6 +672,8 @@ TODO
 
 ## Updates
 
+- Added metadata-driven reclamation with a periodic remote reconciliation
+  backstop and configurable compactor checkpoint retention.
 - Added `with_vfs` and a minimal virtual filesystem abstraction.
 - Removed the GET policy; routing is fixed by `ObjectStoreCallTag`.
 - Added the `CachedObjectStore` deprecation and removal schedule.
