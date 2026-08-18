@@ -9,7 +9,7 @@ Table of Contents:
 - [Goals](#goals)
 - [Non-Goals](#non-goals)
 - [Design](#design)
-  - [GET Policy](#get-policy)
+  - [GET Routing](#get-routing)
   - [Public API](#public-api)
   - [Architecture](#architecture)
   - [Filesystem Layout](#filesystem-layout)
@@ -113,48 +113,26 @@ available for one deprecation cycle.
 
 - Changing the runtime behavior of `CachedObjectStore`.
 - Caching WALs, manifests, or other coordination objects.
-- Providing size-based eviction or a best-effort block cache.
+- Providing size-based eviction, write-back, or a best-effort caching.
 
 ## Design
 
-### GET Policy
+### GET Routing
 
-The new cache retains the per-call policy pattern from the current
-`CachedObjectStore`. A `GetPolicy` receives the compacted SST's
-`ObjectStoreCallTag`, then returns one of two actions:
-
-| GET action | Local hit | Local miss |
-|---|---|---|
-| `Refetch` | Not checked | Forward the requested GET and schedule a full-SST background fill after the foreground GET succeeds |
-| `LocalOnly` | Serve it | Return `LocalCacheError` without accessing remote storage |
-
-`Refetch` is used when corruption is detected. Before forwarding the GET, it
-deletes the existing local file so concurrent reads cannot continue serving the
-corrupt bytes. After the foreground GET succeeds, it schedules a single-flight
-full-SST download to repair the local copy.
-
-The wrapper invokes the policy only for calls carrying an
-`ObjectStoreCallTag` whose `sst_type` is `Compacted`. Tagged WAL calls and
-untagged calls go directly to the wrapped store before policy dispatch. This
-implementation invariant prevents a custom policy from caching WALs, manifests,
-or other coordination objects.
-
-`DefaultCacheGetPolicy` handles validation retries before applying its normal
-read action:
+GET routing is fixed by the call's `ObjectStoreCallTag`:
 
 | Request | Routing |
 |---|---|
-| Untagged or tagged WAL | Forward to the wrapped store before policy dispatch |
+| Untagged or tagged WAL | Forward to the wrapped store |
+| Tagged compacted with `head = true` | Forward to the wrapped store |
 | Tagged compacted with `tag.retry.is_some()` | `Refetch` |
-| Other tagged compacted | Configured action; `LocalOnly` by default |
+| Other tagged compacted | `LocalOnly` |
 
 SlateDB reissues a compacted SST read once with `tag.retry` set after a
-recoverable validation failure. Routing that call to `Refetch` is required: a
-`LocalOnly` lookup could otherwise return the same corrupt local file again.
-
-A custom GET policy may use `ObjectStoreCallTag::kind` to select different
-actions for `Main`, `Reader`, `Compactor`, and `GC` calls. It must return
-`Refetch` for a retry-tagged call so the failed local file is not served again.
+recoverable validation failure. The mirror checks `tag.retry.is_some()`
+directly. For `Refetch`, it deletes the existing local file, forwards the GET to
+the wrapped store, and schedules a single-flight full-SST download to repair the
+local copy. All other tagged compacted SST reads are local-only.
 
 ### Public API
 
@@ -165,21 +143,6 @@ object-store parameter. The existing `CachedObjectStore` and
 `object_store_cache_options` remain available in this release.
 
 ```rust
-pub enum GetAction {
-    /// Do not check the local cache; forward the requested GET to the wrapped
-    /// store and schedule a full-SST background fill after the foreground GET
-    /// succeeds.
-    Refetch,
-    /// Check the local cache; if the SST is present, serve it. If it is
-    /// missing, return `LocalCacheError` without accessing remote storage.
-    LocalOnly,
-}
-
-pub trait GetPolicy: Send + Sync + Debug + 'static {
-    /// Returns the action to take for the given object store call tag.
-    fn get_action(&self, tag: &ObjectStoreCallTag) -> GetAction;
-}
-
 impl ObjectStoreMirror {
     pub fn builder(
         local_root_folder: impl Into<PathBuf>,
@@ -194,9 +157,6 @@ impl ObjectStoreMirror {
 }
 
 impl ObjectStoreMirrorBuilder {
-    /// Sets the GET policy for tagged compacted SST reads. The default is
-    /// `DefaultCacheGetPolicy::new(GetAction::LocalOnly)`.
-    pub fn with_get_policy(self, policy: Arc<dyn GetPolicy>) -> Self;
     /// Sets the maximum number of concurrent downloads used by `warm` and
     /// background refetches. The default is 4.
     pub fn with_download_concurrency(self, concurrency: usize) -> Self;
@@ -354,11 +314,10 @@ deletions are done in parallel, and a failure in one does not affect the other.
 ### Reconciliation
 
 A DELETE issued on another machine--such as a remote garbage collector--does
-not pass through this wrapper. By
-default, `ObjectStoreMirror` therefore runs a reconciliation task every minute
-regardless of GET policy. `Some(interval)` enables the task and must be
-non-zero; `None` disables it. Dropping the wrapper cancels its task without
-delaying `Db::close()`.
+not pass through this wrapper. `ObjectStoreMirror` therefore runs a
+reconciliation task every minute by default. `Some(interval)` enables the task
+and must be non-zero; `None` disables it. Dropping the wrapper cancels its task
+without delaying `Db::close()`.
 
 > [!IMPORTANT]
 > This design requires a bucket and endpoint with strongly consistent object
@@ -589,6 +548,7 @@ TODO
 
 ## Updates
 
+- Removed the GET policy; routing is fixed by `ObjectStoreCallTag`.
 - Added the `CachedObjectStore` deprecation and removal schedule.
 - Made `LocalOnly` the default and cache population explicit.
 - Made the proposal additive by introducing `ObjectStoreMirror` alongside
