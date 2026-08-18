@@ -101,7 +101,7 @@ For `LocalOnly` workloads, the `FoyerHybridCache` is not a good fit.
 Rather than change the existing cache in place, this RFC adds
 `ObjectStoreMirror` under `slatedb/src/object_store_mirror`. The name
 distinguishes the local mirror from `DbCache`; `CachedObjectStore` remains
-unchanged and can be removed separately.
+available for one deprecation cycle.
 
 ## Goals
 
@@ -111,7 +111,7 @@ unchanged and can be removed separately.
 
 ## Non-Goals
 
-- Removing or changing `CachedObjectStore`, its configuration, or its bindings.
+- Changing the runtime behavior of `CachedObjectStore`.
 - Caching WALs, manifests, or other coordination objects.
 - Providing size-based eviction or a best-effort block cache.
 
@@ -162,7 +162,7 @@ actions for `Main`, `Reader`, `Compactor`, and `GC` calls. It must return
 `slatedb/src/object_store_mirror`. Users construct it with a local cache root and
 remote store, then pass it through the existing `DbBuilder::new`/`Db::builder`
 object-store parameter. The existing `CachedObjectStore` and
-`object_store_cache_options` remain unchanged.
+`object_store_cache_options` remain available in this release.
 
 ```rust
 pub enum GetAction {
@@ -548,9 +548,9 @@ TODO
 
 ### Compatibility
 
-This change is additive. `CachedObjectStore`, its module, configuration, and
-bindings remain unchanged. `ObjectStoreMirror` is a new public type under
-`slatedb/src/object_store_mirror`.
+The release that introduces `ObjectStoreMirror` also deprecates
+`CachedObjectStore` without changing its runtime behavior. The following
+release removes `CachedObjectStore`, its module, configuration, and bindings.
 
 ## Testing
 
@@ -558,7 +558,8 @@ TODO
 
 ## Rollout
 
-TODO
+Release `ObjectStoreMirror` and deprecate `CachedObjectStore`. Remove
+`CachedObjectStore` in the following release.
 
 ## Alternatives
 
@@ -588,6 +589,7 @@ TODO
 
 ## Updates
 
+- Added the `CachedObjectStore` deprecation and removal schedule.
 - Made `LocalOnly` the default and cache population explicit.
 - Made the proposal additive by introducing `ObjectStoreMirror` alongside
   `CachedObjectStore`.
