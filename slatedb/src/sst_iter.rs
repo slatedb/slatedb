@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use log::error;
 use slatedb_common::metrics::CounterFn;
-use std::cmp::min;
 use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
@@ -34,7 +33,7 @@ enum FetchTask {
 #[derive(Clone, Debug)]
 pub(crate) struct SstIteratorOptions {
     pub(crate) max_fetch_tasks: usize,
-    pub(crate) blocks_to_fetch: usize,
+    pub(crate) target_bytes_to_fetch: usize,
     pub(crate) cache_blocks: bool,
     pub(crate) cache_metadata: bool,
     pub(crate) eager_spawn: bool,
@@ -47,7 +46,7 @@ impl Default for SstIteratorOptions {
     fn default() -> Self {
         SstIteratorOptions {
             max_fetch_tasks: 1,
-            blocks_to_fetch: 1,
+            target_bytes_to_fetch: 1,
             cache_blocks: true,
             cache_metadata: true,
             eager_spawn: false,
@@ -293,7 +292,7 @@ impl<'a> InternalSstIterator<'a> {
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
         assert!(options.max_fetch_tasks > 0);
-        assert!(options.blocks_to_fetch > 0);
+        assert!(options.target_bytes_to_fetch > 0);
 
         let descending_buffer = match options.order {
             IterationOrder::Descending => Some(VecDeque::new()),
@@ -381,25 +380,23 @@ impl<'a> InternalSstIterator<'a> {
                 while self.fetch_tasks.len() < self.options.max_fetch_tasks
                     && self.block_idx_range.contains(&self.next_block_idx_to_fetch)
                 {
-                    let blocks_to_fetch = min(
-                        self.options.blocks_to_fetch,
-                        self.block_idx_range.end - self.next_block_idx_to_fetch,
-                    );
                     let table = self.view.table_as_ref().sst.clone();
+                    let mut blocks = self.table_store.block_range_for_target_bytes(
+                        &table,
+                        index,
+                        self.next_block_idx_to_fetch,
+                        self.options.target_bytes_to_fetch,
+                        IterationOrder::Ascending,
+                    );
+                    blocks.end = blocks.end.min(self.block_idx_range.end);
                     let table_store = self.table_store.clone();
-                    let blocks_start = self.next_block_idx_to_fetch;
-                    let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
                     let index = index.clone();
                     let cache_blocks = self.options.cache_blocks;
+                    let blocks_end = blocks.end;
                     self.fetch_tasks
                         .push_back(FetchTask::InFlight(tokio::spawn(async move {
                             table_store
-                                .read_blocks_using_index(
-                                    &table,
-                                    index,
-                                    blocks_start..blocks_end,
-                                    cache_blocks,
-                                )
+                                .read_blocks_using_index(&table, index, blocks, cache_blocks)
                                 .await
                         })));
                     self.next_block_idx_to_fetch = blocks_end;
@@ -410,25 +407,23 @@ impl<'a> InternalSstIterator<'a> {
                 while self.fetch_tasks.len() < self.options.max_fetch_tasks
                     && self.next_block_idx_to_fetch > self.block_idx_range.start
                 {
-                    let blocks_to_fetch = min(
-                        self.options.blocks_to_fetch,
-                        self.next_block_idx_to_fetch - self.block_idx_range.start,
-                    );
                     let table = self.view.table_as_ref().sst.clone();
+                    let mut blocks = self.table_store.block_range_for_target_bytes(
+                        &table,
+                        index,
+                        self.next_block_idx_to_fetch - 1,
+                        self.options.target_bytes_to_fetch,
+                        IterationOrder::Descending,
+                    );
+                    blocks.start = blocks.start.max(self.block_idx_range.start);
                     let table_store = self.table_store.clone();
-                    let blocks_end = self.next_block_idx_to_fetch;
-                    let blocks_start = blocks_end - blocks_to_fetch;
                     let index = index.clone();
                     let cache_blocks = self.options.cache_blocks;
+                    let blocks_start = blocks.start;
                     self.fetch_tasks
                         .push_back(FetchTask::InFlight(tokio::spawn(async move {
                             table_store
-                                .read_blocks_using_index(
-                                    &table,
-                                    index,
-                                    blocks_start..blocks_end,
-                                    cache_blocks,
-                                )
+                                .read_blocks_using_index(&table, index, blocks, cache_blocks)
                                 .await
                         })));
                     self.next_block_idx_to_fetch = blocks_start;
@@ -1616,7 +1611,7 @@ mod tests {
 
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 3,
-            blocks_to_fetch: 3,
+            target_bytes_to_fetch: 3 * 4096,
             cache_blocks: true,
             order,
             ..SstIteratorOptions::default()
@@ -1900,7 +1895,7 @@ mod tests {
             table_store.clone(),
             SstIteratorOptions {
                 max_fetch_tasks: 32,
-                blocks_to_fetch: 256,
+                target_bytes_to_fetch: 256 * 128,
                 cache_blocks: true,
                 cache_metadata: true,
                 eager_spawn: false,
@@ -1919,7 +1914,7 @@ mod tests {
             table_store.clone(),
             SstIteratorOptions {
                 max_fetch_tasks: 1,
-                blocks_to_fetch: 1,
+                target_bytes_to_fetch: 1,
                 cache_blocks: true,
                 cache_metadata: true,
                 eager_spawn: false,
@@ -2506,7 +2501,7 @@ mod tests {
 
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 3,
-            blocks_to_fetch: 3,
+            target_bytes_to_fetch: 3 * 128,
             cache_blocks: true,
             cache_metadata: true,
             eager_spawn: false,
@@ -2799,7 +2794,7 @@ mod tests {
             table_store.clone(),
             SstIteratorOptions {
                 max_fetch_tasks: 1,
-                blocks_to_fetch: 1,
+                target_bytes_to_fetch: 1,
                 cache_blocks: true,
                 cache_metadata: true,
                 eager_spawn: false,

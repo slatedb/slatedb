@@ -47,13 +47,11 @@ impl Default for SlateDbWalReaderOptions {
 
 impl From<SlateDbWalReaderOptions> for SlateDbWalIteratorOptions {
     fn from(options: SlateDbWalReaderOptions) -> Self {
-        let format = SsTableFormat::default();
-        let blocks_to_fetch = options.read_ahead_bytes.div_ceil(format.block_size);
         Self {
             sst_batch_size: options.sst_batch_size,
             sst_iter_options: SstIteratorOptions {
                 max_fetch_tasks: options.max_fetch_tasks,
-                blocks_to_fetch,
+                target_bytes_to_fetch: options.read_ahead_bytes,
                 cache_blocks: false,
                 cache_metadata: false,
                 eager_spawn: true,

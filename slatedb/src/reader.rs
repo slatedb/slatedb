@@ -280,11 +280,10 @@ impl Reader {
     ) -> Result<DbIterator, SlateDBError> {
         self.db_stats.scan_requests.increment(1);
         let max_seq = self.prepare_max_seq(ctx.max_seq, options.durability_filter, options.dirty);
-        let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: options.max_fetch_tasks,
-            blocks_to_fetch: read_ahead_blocks,
+            target_bytes_to_fetch: options.read_ahead_bytes,
             cache_blocks: options.cache_blocks,
             cache_metadata: true,
             eager_spawn: true,
@@ -342,12 +341,11 @@ impl Reader {
     ) -> Result<DbRecencyIterator, SlateDBError> {
         self.db_stats.scan_requests.increment(1);
         let max_seq = self.prepare_max_seq(None, options.durability_filter, options.dirty);
-        let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
         let range = BytesRange::from_prefix(prefix.as_ref());
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: options.max_fetch_tasks,
-            blocks_to_fetch: read_ahead_blocks,
+            target_bytes_to_fetch: options.read_ahead_bytes,
             cache_blocks: options.cache_blocks,
             cache_metadata: true,
             // Recency scans are designed for early-stop. Eager spawning would
