@@ -1280,13 +1280,23 @@ impl MultipartUpload for MirroringMultipartUpload {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bytes_range::BytesRange;
+    use crate::checkpoint::Checkpoint;
+    use crate::compactions_store::StoredCompactions;
+    use crate::compactor_state::{Compaction, CompactionContext, CompactionSpec, CompactionStatus};
     use crate::db::Db;
+    use crate::db_state::{SsTableHandle, SsTableInfo, SsTableView};
     use crate::error::RetryReason;
+    use crate::format::sst::SST_FORMAT_VERSION_LATEST;
+    use crate::manifest::ManifestCore;
     use crate::object_store_tag::TableStoreKind;
+    use crate::subcompaction::Subcompaction;
     use object_store::memory::InMemory;
     use object_store::GetRange;
     use slatedb_common::clock::MockSystemClock;
     use tempfile::TempDir;
+    use ulid::Ulid;
+    use uuid::Uuid;
 
     fn compacted_tag() -> ObjectStoreCallTag {
         ObjectStoreCallTag::new(TableStoreKind::Main, crate::db_state::SstType::Compacted)
@@ -1311,6 +1321,44 @@ mod tests {
             extensions: compacted_tag().into(),
             ..PutMultipartOptions::default()
         }
+    }
+
+    fn test_sst(id: u64) -> SsTableHandle {
+        SsTableHandle::new(
+            SsTableId::Compacted(Ulid::from_parts(id, 0)),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo {
+                first_entry: Some(Bytes::from_static(b"key")),
+                ..SsTableInfo::default()
+            },
+        )
+    }
+
+    fn test_manifest(ssts: &[SsTableHandle]) -> Manifest {
+        let mut core = ManifestCore::new();
+        Arc::make_mut(&mut core.tree).l0 =
+            ssts.iter().cloned().map(SsTableView::identity).collect();
+        Manifest::initial(core)
+    }
+
+    async fn put_test_manifest(
+        remote: &Arc<dyn ObjectStore>,
+        root: &Path,
+        id: u64,
+        manifest: &Manifest,
+    ) -> Path {
+        let location = root
+            .clone()
+            .join("manifest")
+            .join(format!("{id:020}.manifest"));
+        remote
+            .put(
+                &location,
+                PutPayload::from_bytes(FlatBufferManifestCodec {}.encode(manifest)),
+            )
+            .await
+            .unwrap();
+        location
     }
 
     #[tokio::test]
@@ -1550,6 +1598,266 @@ mod tests {
         );
         let bytes = result.bytes().await.unwrap();
         assert_eq!(bytes, Bytes::from_static(b"firstsecond"));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_references_retain_local_ssts() {
+        let remote: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let root = Path::from("checkpoint-retention");
+        let checkpoint_sst = test_sst(1);
+        let current_sst = test_sst(2);
+        let resolver = PathResolver::from_root(root.clone());
+        let checkpoint_path = resolver.sst_path(&checkpoint_sst.id);
+        let current_path = resolver.sst_path(&current_sst.id);
+        remote
+            .put(&checkpoint_path, PutPayload::from_static(b"checkpoint"))
+            .await
+            .unwrap();
+        remote
+            .put(&current_path, PutPayload::from_static(b"current"))
+            .await
+            .unwrap();
+
+        let checkpoint_manifest = test_manifest(&[checkpoint_sst]);
+        let checkpoint_manifest_path =
+            put_test_manifest(&remote, &root, 1, &checkpoint_manifest).await;
+        let mut current_manifest = test_manifest(&[current_sst]);
+        current_manifest.core.checkpoints.push(Checkpoint {
+            id: Uuid::nil(),
+            manifest_id: 1,
+            expire_time: None,
+            create_time: DateTime::<Utc>::UNIX_EPOCH,
+            name: None,
+        });
+        let current_manifest_path = put_test_manifest(&remote, &root, 2, &current_manifest).await;
+
+        let local = TempDir::new().unwrap();
+        let mirror = ObjectStoreMirror::builder(local.path(), Arc::clone(&remote))
+            .with_gc_interval(None)
+            .build()
+            .await
+            .unwrap();
+        mirror
+            .get(&checkpoint_manifest_path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        remote.delete(&checkpoint_path).await.unwrap();
+        mirror
+            .get(&current_manifest_path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+
+        {
+            let latest = mirror.state.latest_manifest.lock();
+            let references = &latest.as_ref().unwrap().references;
+            assert!(references.contains(&checkpoint_path));
+            assert!(references.contains(&current_path));
+        }
+        remote.delete(&current_path).await.unwrap();
+        assert_eq!(
+            mirror
+                .get_opts(&checkpoint_path, compacted_get_options())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from_static(b"checkpoint")
+        );
+        assert_eq!(
+            mirror
+                .get_opts(&current_path, compacted_get_options())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from_static(b"current")
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_reference_diff_reclaims_local_ssts() {
+        let remote: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let root = Path::from("manifest-reclamation");
+        let old_sst = test_sst(3);
+        let new_sst = test_sst(4);
+        let resolver = PathResolver::from_root(root.clone());
+        let old_path = resolver.sst_path(&old_sst.id);
+        let new_path = resolver.sst_path(&new_sst.id);
+        remote
+            .put(&old_path, PutPayload::from_static(b"old"))
+            .await
+            .unwrap();
+        remote
+            .put(&new_path, PutPayload::from_static(b"new"))
+            .await
+            .unwrap();
+        let old_manifest_path =
+            put_test_manifest(&remote, &root, 1, &test_manifest(&[old_sst])).await;
+        let new_manifest_path =
+            put_test_manifest(&remote, &root, 2, &test_manifest(&[new_sst])).await;
+
+        let local = TempDir::new().unwrap();
+        let mirror = ObjectStoreMirror::builder(local.path(), Arc::clone(&remote))
+            .with_gc_interval(None)
+            .build()
+            .await
+            .unwrap();
+        mirror
+            .get(&old_manifest_path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        mirror
+            .get(&new_manifest_path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while mirror.state.metadata.lock().contains_key(&old_path) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(remote.head(&old_path).await.is_ok());
+        assert!(mirror
+            .get_opts(&old_path, compacted_get_options())
+            .await
+            .is_err());
+        remote.delete(&new_path).await.unwrap();
+        assert_eq!(
+            mirror
+                .get_opts(&new_path, compacted_get_options())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from_static(b"new")
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_absence_gc_reclaims_local_ssts() {
+        let remote: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let local = TempDir::new().unwrap();
+        let removed = Path::from("gc/compacted/01J79C21YKR31J2BS1EFXJZ7MR.sst");
+        let retained = Path::from("gc/compacted/01J79C21YKR31J2BS1EFXJZ7MS.sst");
+        let mirror = ObjectStoreMirror::builder(local.path(), Arc::clone(&remote))
+            .with_gc_interval(None)
+            .build()
+            .await
+            .unwrap();
+        for location in [&removed, &retained] {
+            mirror
+                .put_opts(
+                    location,
+                    PutPayload::from_static(b"sst"),
+                    compacted_put_options(),
+                )
+                .await
+                .unwrap();
+        }
+
+        remote.delete(&removed).await.unwrap();
+        mirror.state.reclaim_remote_absent().await.unwrap();
+
+        assert!(mirror
+            .get_opts(&removed, compacted_get_options())
+            .await
+            .is_err());
+        assert_eq!(
+            mirror
+                .get_opts(&retained, compacted_get_options())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from_static(b"sst")
+        );
+    }
+
+    #[tokio::test]
+    async fn compactions_prefetch_warms_output_ssts() {
+        let remote: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let root = Path::from("compactions-prefetch");
+        let output_sst = test_sst(5);
+        let subcompaction_sst = test_sst(6);
+        let resolver = PathResolver::from_root(root.clone());
+        let output_path = resolver.sst_path(&output_sst.id);
+        let subcompaction_path = resolver.sst_path(&subcompaction_sst.id);
+        remote
+            .put(&output_path, PutPayload::from_static(b"output"))
+            .await
+            .unwrap();
+        remote
+            .put(
+                &subcompaction_path,
+                PutPayload::from_static(b"subcompaction"),
+            )
+            .await
+            .unwrap();
+
+        let store = Arc::new(CompactionsStore::new(&root, Arc::clone(&remote)));
+        let mut stored = StoredCompactions::create(store, 0).await.unwrap();
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.insert(
+            Compaction::new(Ulid::from_parts(1, 0), CompactionSpec::new(Vec::new(), 0))
+                .with_status(CompactionStatus::Compacted)
+                .with_output_ssts(vec![output_sst])
+                .with_ctx(Some(CompactionContext::new(
+                    vec![Subcompaction::new(BytesRange::unbounded())
+                        .with_output_ssts(vec![subcompaction_sst])],
+                    None,
+                ))),
+        );
+        stored.update(dirty).await.unwrap();
+
+        let local = TempDir::new().unwrap();
+        let mirror = ObjectStoreMirror::builder(local.path(), Arc::clone(&remote))
+            .with_gc_interval(None)
+            .build()
+            .await
+            .unwrap();
+        mirror.state.root.lock().replace(root);
+        mirror.state.prefetch_compactions().await.unwrap();
+
+        remote.delete(&output_path).await.unwrap();
+        remote.delete(&subcompaction_path).await.unwrap();
+        assert_eq!(
+            mirror
+                .get_opts(&output_path, compacted_get_options())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from_static(b"output")
+        );
+        assert_eq!(
+            mirror
+                .get_opts(&subcompaction_path, compacted_get_options())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from_static(b"subcompaction")
+        );
     }
 
     #[tokio::test]
