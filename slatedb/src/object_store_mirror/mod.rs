@@ -43,7 +43,7 @@ use crate::single_flight::SingleFlight;
 
 const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 8;
 const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(600);
-const COMPACTIONS_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const COMPACTIONS_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const LOCK_FILE: &str = "LOCK";
 
 type BackgroundFuture = Pin<Box<dyn Future<Output = object_store::Result<()>> + Send>>;
@@ -552,19 +552,21 @@ impl MirrorState {
         result
     }
 
-    async fn install_bytes(
+    async fn write_payload_at(
         &self,
-        location: &Path,
-        bytes: Bytes,
-        cached: CachedMetadata,
+        path: &FsPath,
+        mut offset: u64,
+        payload: PutPayload,
     ) -> object_store::Result<()> {
-        let paths = self.local_paths(location)?;
-        let temp = self.temp_path(&paths.data);
-        self.vfs
-            .write(&temp, bytes)
-            .await
-            .map_err(|e| local_io_error("write temporary SST", &temp, e))?;
-        self.install_temp(location, &temp, cached).await
+        for bytes in payload {
+            let len = bytes.len() as u64;
+            self.vfs
+                .write_at(path, offset, bytes)
+                .await
+                .map_err(|e| local_io_error("write temporary SST", path, e))?;
+            offset += len;
+        }
+        Ok(())
     }
 
     async fn download(&self, location: &Path, force: bool) -> object_store::Result<()> {
@@ -582,20 +584,41 @@ impl MirrorState {
                 let result = self.object_store.get(&location).await?;
                 let mut meta = result.meta.clone();
                 let attributes = result.attributes.clone();
-                let bytes = result.bytes().await?;
-                if bytes.len() as u64 != meta.size {
-                    return Err(mirror_error(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        format!(
-                            "downloaded {} bytes for {location}, expected {}",
-                            bytes.len(),
-                            meta.size
-                        ),
-                    )));
-                }
-                meta.location = location.clone();
-                self.install_bytes(&location, bytes, CachedMetadata { meta, attributes })
+                let paths = self.local_paths(&location)?;
+                let temp = self.temp_path(&paths.data);
+                self.vfs
+                    .write(&temp, Bytes::new())
                     .await
+                    .map_err(|e| local_io_error("create temporary SST", &temp, e))?;
+                let mut stream = result.into_stream();
+                let download = async {
+                    let mut len = 0;
+                    while let Some(bytes) = stream.try_next().await? {
+                        let chunk_len = bytes.len() as u64;
+                        self.vfs
+                            .write_at(&temp, len, bytes)
+                            .await
+                            .map_err(|e| local_io_error("write temporary SST", &temp, e))?;
+                        len += chunk_len;
+                    }
+                    if len != meta.size {
+                        return Err(mirror_error(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            format!(
+                                "downloaded {len} bytes for {location}, expected {}",
+                                meta.size
+                            ),
+                        )));
+                    }
+                    meta.location = location.clone();
+                    self.install_temp(&location, &temp, CachedMetadata { meta, attributes })
+                        .await
+                }
+                .await;
+                if download.is_err() {
+                    let _ = self.remove_if_exists(&temp).await;
+                }
+                download
             })
             .await
     }
@@ -839,10 +862,14 @@ impl MirrorState {
     ) -> object_store::Result<PutResult> {
         let paths = self.local_paths(location)?;
         let temp = self.temp_path(&paths.data);
-        let local_bytes = payload_to_bytes(&payload);
+        self.vfs
+            .write(&temp, Bytes::new())
+            .await
+            .map_err(|e| local_io_error("create temporary SST", &temp, e))?;
+        let local_payload = payload.clone();
         let (remote, local) = futures::future::join(
             self.object_store.put_opts(location, payload, opts),
-            self.vfs.write(&temp, local_bytes),
+            self.write_payload_at(&temp, 0, local_payload),
         )
         .await;
         let result = match remote {
@@ -854,7 +881,7 @@ impl MirrorState {
         };
         if let Err(error) = local {
             let _ = self.remove_if_exists(&temp).await;
-            return Err(local_io_error("write temporary SST", &temp, error));
+            return Err(error);
         }
         let cached = match self.remote_head(location).await {
             Ok(cached) => cached,
@@ -1187,15 +1214,16 @@ impl MultipartUpload for MirroringMultipartUpload {
     fn put_part(&mut self, data: PutPayload) -> object_store::UploadPart {
         let offset = self.len;
         self.len += data.content_length() as u64;
-        let bytes = payload_to_bytes(&data);
+        let local_data = data.clone();
         let remote = self.inner.put_part(data);
-        let vfs = Arc::clone(&self.state.vfs);
+        let state = Arc::clone(&self.state);
         let temp = self.temp.clone();
         Box::pin(async move {
             let (remote, local) =
-                futures::future::join(remote, vfs.write_at(&temp, offset, bytes)).await;
+                futures::future::join(remote, state.write_payload_at(&temp, offset, local_data))
+                    .await;
             remote?;
-            local.map_err(|e| local_io_error("write multipart SST", &temp, e))?;
+            local?;
             Ok(())
         })
     }
@@ -1279,7 +1307,7 @@ mod tests {
         mirror
             .put_opts(
                 &location,
-                PutPayload::from_static(b"mirrored"),
+                PutPayload::from_iter([Bytes::from_static(b"mir"), Bytes::from_static(b"rored")]),
                 compacted_put_options(),
             )
             .await
@@ -1449,11 +1477,17 @@ mod tests {
             .await
             .unwrap();
         upload
-            .put_part(PutPayload::from_static(b"first"))
+            .put_part(PutPayload::from_iter([
+                Bytes::from_static(b"fir"),
+                Bytes::from_static(b"st"),
+            ]))
             .await
             .unwrap();
         upload
-            .put_part(PutPayload::from_static(b"second"))
+            .put_part(PutPayload::from_iter([
+                Bytes::from_static(b"sec"),
+                Bytes::from_static(b"ond"),
+            ]))
             .await
             .unwrap();
         upload.complete().await.unwrap();

@@ -220,9 +220,10 @@ A large compaction job can finish and update the `.manifest` with gigabytes,
 or even terabytes of new SSTs. Blocking the manifest update to download the
 entire set could take minutes or even hours. To prevent large stalls, once the
 database root is detected, `ObjectStoreMirror` derives its
-`.compactions` path and periodically polls it for in-flight job output. It downloads any missing SSTs in the
-background. The `.manifest` blocking is therefore a final true-up rather than a
-complete download of all output from completed compaction jobs.
+`.compactions` path and polls it once per minute for in-flight job output. It
+downloads any missing SSTs in the background. The `.manifest` blocking is
+therefore a final true-up rather than a complete download of all output from
+completed compaction jobs.
 
 This behavior implicitly warms a database when it is first opened. Builders
 always read and write manifests in their `build` function. `DbReader`s also
