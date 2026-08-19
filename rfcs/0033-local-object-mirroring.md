@@ -105,22 +105,22 @@ impl ObjectStoreMirrorBuilder {
     /// Sets the virtual filesystem used for local I/O. The default is
     /// `StdVfs`.
     pub fn with_vfs(self, vfs: Arc<dyn Vfs>) -> Self;
-    /// Sets the maximum number of concurrent downloads used by `warm` and
-    /// background refetches. The default is 4.
+
+    /// Sets the maximum number of concurrent downloads used for manifest
+    /// warming, `.compactions` prefetching, and refetches. The default is 8.
     pub fn with_download_concurrency(self, concurrency: usize) -> Self;
-    /// Sets the interval at which the cache will reclaim obsolete local state
-    /// using the remote object store. The default is
-    /// `Some(Duration::from_secs(600))`. Passing `None` disables periodic
-    /// reclamation but not metadata-driven reclamation.
-    ///
-    /// Periodic reclamation only deletes local files confirmed missing
-    /// from remote storage. Metadata-driven reclamation remains enabled.
-    pub fn with_reclamation_interval(
+
+    /// Sets the interval at which the mirror scans remote storage to GC
+    /// obsolete local SSTs. The default is `Some(Duration::from_secs(600))`.
+    /// Passing `None` disables periodic GC but not metadata-driven GC.
+    pub fn with_gc_interval(
         self,
         interval: Option<Duration>,
     ) -> Self;
-    /// Validates the configuration, prepares and cleans the local directories,
-    /// and starts background workers.
+
+    /// Validates the configuration, acquires the cache-directory lock, cleans
+    /// invalid local entries, and starts background workers. The database root
+    /// is detected from the first `.manifest` read or write.
     pub async fn build(self) -> Result<Arc<ObjectStoreMirror>, Error>;
 }
 
