@@ -40,6 +40,7 @@ use crate::manifest::Manifest;
 use crate::object_store_tag::ObjectStoreCallTag;
 use crate::paths::PathResolver;
 use crate::single_flight::SingleFlight;
+use crate::utils::spawn_bg_task;
 
 const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 8;
 const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(600);
@@ -972,38 +973,52 @@ impl MirrorState {
     }
 
     fn start_background_tasks(self: &Arc<Self>) {
-        Self::spawn_periodic(Arc::downgrade(self), COMPACTIONS_POLL_INTERVAL, |state| {
-            Box::pin(async move { state.prefetch_compactions().await })
-        });
+        Self::spawn_periodic(
+            "object_store_mirror_compactions",
+            Arc::downgrade(self),
+            COMPACTIONS_POLL_INTERVAL,
+            |state| Box::pin(async move { state.prefetch_compactions().await }),
+        );
         if let Some(interval) = self.gc_interval {
-            Self::spawn_periodic(Arc::downgrade(self), interval, |state| {
-                Box::pin(async move { state.reclaim_remote_absent().await })
-            });
+            Self::spawn_periodic(
+                "object_store_mirror_gc",
+                Arc::downgrade(self),
+                interval,
+                |state| Box::pin(async move { state.reclaim_remote_absent().await }),
+            );
         }
     }
 
     fn spawn_periodic(
+        name: &str,
         state: Weak<Self>,
         duration: Duration,
         operation: fn(Arc<Self>) -> BackgroundFuture,
     ) {
-        tokio::spawn(async move {
-            let Some(system_clock) = state.upgrade().map(|state| Arc::clone(&state.system_clock))
-            else {
-                return;
-            };
-            let mut ticker = system_clock.ticker(duration);
-            ticker.tick().await;
-            loop {
-                ticker.tick().await;
-                let Some(state) = state.upgrade() else {
-                    break;
+        let _task = spawn_bg_task(
+            name.to_string(),
+            &tokio::runtime::Handle::current(),
+            |_| {},
+            async move {
+                let Some(system_clock) =
+                    state.upgrade().map(|state| Arc::clone(&state.system_clock))
+                else {
+                    return Ok(());
                 };
-                if let Err(error) = operation(state).await {
-                    log::warn!("object-store mirror background task failed [error={error:?}]");
+                let mut ticker = system_clock.ticker(duration);
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    let Some(state) = state.upgrade() else {
+                        break;
+                    };
+                    if let Err(error) = operation(state).await {
+                        log::warn!("object-store mirror background task failed [error={error:?}]");
+                    }
                 }
-            }
-        });
+                Ok(())
+            },
+        );
     }
 }
 

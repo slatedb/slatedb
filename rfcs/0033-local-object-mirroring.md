@@ -224,7 +224,8 @@ database root is detected, `ObjectStoreMirror` derives its
 `.compactions` path and polls it once per minute for in-flight job output. It
 downloads any missing SSTs in the background. The `.manifest` blocking is
 therefore a final true-up rather than a complete download of all output from
-completed compaction jobs.
+completed compaction jobs. Periodic work uses the injected `SystemClock` and
+the crate's supervised background-task helper.
 
 This behavior implicitly warms a database when it is first opened. Builders
 always read and write manifests in their `build` function. `DbReader`s also
