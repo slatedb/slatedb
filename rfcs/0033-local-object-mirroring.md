@@ -178,8 +178,8 @@ A directory might look like this:
   754128269b532c9827ffa09d3afb6118.01M05WR6EZ6ZF44TGFNN5HFTDD.sst
   754128269b532c9827ffa09d3afb6118.01M05WR6EZ6ZF44TGFNN5HFTDD.sst.meta
   754128269b532c9827ffa09d3afb6118.01M05WR997G22470E93PBPVAA2.sst.3
-  4e7dc5d27c63e00966170758c2ff14bf.01M05WRE0MG8EZY9HJEY36JE4B.sst.5
-  4e7dc5d27c63e00966170758c2ff14bf.01M05WRE0MG8EZY9HJEY36JE4B.sst.meta
+  4e7dc5d27c63e00966170758c2ff14bf.01M05WRF0MG8EZY9HJEY36JE4B.sst.5
+  4e7dc5d27c63e00966170758c2ff14bf.01M05WRF0MG8EZY9HJEY36JE4B.sst.meta
 ```
 
 This directory contains files for two directories:
@@ -192,7 +192,7 @@ The `754128269b532c9827ffa09d3afb6118` prefix has one fully downloaded SST
 (`01M05WR997G22470E93PBPVAA2.sst.3`).
 
 The `4e7dc5d27c63e00966170758c2ff14bf` prefix has one partially downloaded SST
-(`01M05WRE0MG8EZY9HJEY36JE4B.sst.5`) and its metadata. The SST has not yet been
+(`01M05WRF0MG8EZY9HJEY36JE4B.sst.5`) and its metadata. The SST has not yet been
 fully downloaded and renamed.
 
 Upload and download files are undifferentiated. No collision is possible
