@@ -24,9 +24,10 @@ local files and all writes are durable to object storage before returning
 success.
 
 Each `ObjectStoreMirror` serves one database root. The root is detected from
-the first `.manifest` read or write. Subsequent `.manifest` operations for a
-different root are rejected. External SSTs referenced by the database remain
-supported and may reside under other roots.
+the first `.manifest` read or write. Subsequent `.manifest` operations for that
+root update the mirror; operations for other roots pass through without mirror
+processing. External SSTs referenced by the database remain supported and may
+reside under other roots.
 
 ## Motivation
 
@@ -205,12 +206,13 @@ another mirror owns the cache directory, `build()` fails.
 
 ### Warming
 
-The mirror is warmed continuously as new `.manifest` files are read and
-written. `ObjectStoreMirror` inspects the path for each object and looks for
-`.manifest` files. When it sees one, it decodes the manifest and compares its
-referenced SSTs with its own local state. Any missing SSTs are downloaded
-synchronously. This happens after the `.manifest` call is forwarded to the
-wrapped store, but before returning to the caller.
+The mirror is warmed continuously as new `.manifest` files for the detected
+database root are read and written. `ObjectStoreMirror` inspects the path for
+each object and looks for `.manifest` files. When it sees one under that root,
+it decodes the manifest and compares its referenced SSTs with its own local
+state. Any missing SSTs are downloaded synchronously. This happens after the
+`.manifest` call is forwarded to the wrapped store, but before returning to the
+caller. Manifest operations for other roots pass through unchanged.
 
 A large compaction job can finish and update the `.manifest` with gigabytes,
 or even terabytes of new SSTs. Blocking the manifest update to download the

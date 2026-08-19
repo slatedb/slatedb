@@ -7,8 +7,10 @@ pub use vfs::{StdVfs, Vfs, VfsLock};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
+use std::future::Future;
 use std::io;
 use std::path::{Path as FsPath, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -27,6 +29,7 @@ use object_store::{
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 use slatedb_txn_obj::ObjectCodec;
 use tokio::sync::Semaphore;
 
@@ -42,6 +45,8 @@ const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 8;
 const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(600);
 const COMPACTIONS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const LOCK_FILE: &str = "LOCK";
+
+type BackgroundFuture = Pin<Box<dyn Future<Output = object_store::Result<()>> + Send>>;
 
 /// An error caused by the local side of [`ObjectStoreMirror`].
 ///
@@ -102,6 +107,7 @@ pub struct ObjectStoreMirrorBuilder {
     local_dir: PathBuf,
     object_store: Arc<dyn ObjectStore>,
     vfs: Arc<dyn Vfs>,
+    system_clock: Arc<dyn SystemClock>,
     download_concurrency: usize,
     gc_interval: Option<Duration>,
 }
@@ -110,6 +116,12 @@ impl ObjectStoreMirrorBuilder {
     /// Replaces the default [`StdVfs`].
     pub fn with_vfs(mut self, vfs: Arc<dyn Vfs>) -> Self {
         self.vfs = vfs;
+        self
+    }
+
+    /// Replaces the default [`DefaultSystemClock`].
+    pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
+        self.system_clock = system_clock;
         self
     }
 
@@ -160,6 +172,7 @@ impl ObjectStoreMirrorBuilder {
             local_dir: self.local_dir,
             object_store: self.object_store,
             vfs: self.vfs,
+            system_clock: self.system_clock,
             _lock: lock,
             download_concurrency: self.download_concurrency,
             download_semaphore: Arc::new(Semaphore::new(self.download_concurrency)),
@@ -197,6 +210,7 @@ impl ObjectStoreMirror {
             local_dir: local_dir.into(),
             object_store,
             vfs: Arc::new(StdVfs),
+            system_clock: Arc::new(DefaultSystemClock::new()),
             download_concurrency: DEFAULT_DOWNLOAD_CONCURRENCY,
             gc_interval: Some(DEFAULT_GC_INTERVAL),
         }
@@ -329,6 +343,7 @@ struct MirrorState {
     local_dir: PathBuf,
     object_store: Arc<dyn ObjectStore>,
     vfs: Arc<dyn Vfs>,
+    system_clock: Arc<dyn SystemClock>,
     _lock: Box<dyn VfsLock>,
     download_concurrency: usize,
     download_semaphore: Arc<Semaphore>,
@@ -606,17 +621,14 @@ impl MirrorState {
             .map_err(|_| local_error(format!("invalid manifest path: {location}")))
     }
 
-    fn establish_root(&self, location: &Path) -> object_store::Result<Path> {
+    fn should_process_manifest(&self, location: &Path) -> object_store::Result<bool> {
         let root = Self::manifest_root(location)?;
         let mut known = self.root.lock();
         match known.as_ref() {
-            Some(existing) if existing != &root => Err(local_error(format!(
-                "mirror already serves database root {existing}, not {root}"
-            ))),
-            Some(_) => Ok(root),
+            Some(existing) => Ok(existing == &root),
             None => {
-                *known = Some(root.clone());
-                Ok(root)
+                *known = Some(root);
+                Ok(true)
             }
         }
     }
@@ -654,7 +666,7 @@ impl MirrorState {
         location: &Path,
         bytes: &Bytes,
     ) -> object_store::Result<()> {
-        let root = self.establish_root(location)?;
+        let root = Self::manifest_root(location)?;
         let id = Self::manifest_id(location)?;
         let manifest = FlatBufferManifestCodec {}
             .decode(bytes)
@@ -673,7 +685,7 @@ impl MirrorState {
             return Ok(());
         }
 
-        let now = Utc::now();
+        let now = self.system_clock.now();
         let checkpoint_ids = manifest
             .core
             .checkpoints
@@ -923,17 +935,17 @@ impl MirrorState {
     fn spawn_periodic(
         state: Weak<Self>,
         duration: Duration,
-        operation: fn(
-            Arc<Self>,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = object_store::Result<()>> + Send>,
-        >,
+        operation: fn(Arc<Self>) -> BackgroundFuture,
     ) {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(duration);
-            interval.tick().await;
+            let Some(system_clock) = state.upgrade().map(|state| Arc::clone(&state.system_clock))
+            else {
+                return;
+            };
+            let mut ticker = system_clock.ticker(duration);
+            ticker.tick().await;
             loop {
-                interval.tick().await;
+                ticker.tick().await;
                 let Some(state) = state.upgrade() else {
                     break;
                 };
@@ -972,8 +984,9 @@ impl ObjectStore for ObjectStoreMirror {
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
         if is_manifest(location) {
-            self.state.establish_root(location)?;
-            let should_process = !options.head && options.range.is_none();
+            let should_process = self.state.should_process_manifest(location)?
+                && !options.head
+                && options.range.is_none();
             let result = self.state.object_store.get_opts(location, options).await?;
             if !should_process {
                 return Ok(result);
@@ -1010,16 +1023,18 @@ impl ObjectStore for ObjectStoreMirror {
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
         if is_manifest(location) {
-            self.state.establish_root(location)?;
-            let manifest_bytes = payload_to_bytes(&payload);
+            let should_process = self.state.should_process_manifest(location)?;
+            let manifest_bytes = should_process.then(|| payload_to_bytes(&payload));
             let result = self
                 .state
                 .object_store
                 .put_opts(location, payload, opts)
                 .await?;
-            self.state
-                .process_manifest(location, &manifest_bytes)
-                .await?;
+            if let Some(manifest_bytes) = manifest_bytes {
+                self.state
+                    .process_manifest(location, &manifest_bytes)
+                    .await?;
+            }
             return Ok(result);
         }
         let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
@@ -1418,6 +1433,34 @@ mod tests {
             .await
             .unwrap();
         assert!(!incomplete.exists());
+    }
+
+    #[tokio::test]
+    async fn manifests_from_other_roots_pass_through() {
+        let remote: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let local = TempDir::new().unwrap();
+        let primary = Path::from("primary/manifest/00000000000000000001.manifest");
+        let other = Path::from("other/manifest/00000000000000000001.manifest");
+        remote
+            .put(&primary, PutPayload::from_static(b"primary"))
+            .await
+            .unwrap();
+        let mirror = ObjectStoreMirror::builder(local.path(), remote)
+            .with_gc_interval(None)
+            .build()
+            .await
+            .unwrap();
+
+        mirror.head(&primary).await.unwrap();
+        mirror
+            .put(&other, PutPayload::from_static(b"other"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            mirror.get(&other).await.unwrap().bytes().await.unwrap(),
+            Bytes::from_static(b"other")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

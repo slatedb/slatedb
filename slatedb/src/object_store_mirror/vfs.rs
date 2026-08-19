@@ -88,6 +88,7 @@ impl Vfs for StdVfs {
     async fn try_lock(&self, path: &Path) -> io::Result<Box<dyn VfsLock>> {
         let file = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(path)?;
