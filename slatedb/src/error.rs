@@ -642,7 +642,9 @@ impl From<SlateDBError> for Error {
             // Unavailable errors
             SlateDBError::IoError(err) => Error::unavailable(msg).with_source(Box::new(err)),
             SlateDBError::ObjectStoreError(err) => {
-                let error = if matches!(err.as_ref(), object_store::Error::NotFound { .. }) {
+                let error = if matches!(err.as_ref(), object_store::Error::NotFound { .. })
+                    || crate::object_store_mirror::is_local_cache_error(err.as_ref())
+                {
                     Error::data(msg)
                 } else {
                     Error::unavailable(msg)
@@ -782,5 +784,18 @@ mod tests {
         let public_err = Error::from(err);
 
         assert_eq!(public_err.kind(), ErrorKind::Unavailable);
+    }
+
+    #[test]
+    fn local_cache_error_maps_to_data() {
+        let err = SlateDBError::from(object_store::Error::Generic {
+            store: "object_store_mirror",
+            source: Box::new(crate::object_store_mirror::LocalCacheError::new(
+                "disk full",
+            )),
+        });
+        let public_err = Error::from(err);
+
+        assert_eq!(public_err.kind(), ErrorKind::Data);
     }
 }

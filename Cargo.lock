@@ -3239,6 +3239,7 @@ dependencies = [
  "log",
  "lru",
  "lz4_flex",
+ "md-5",
  "moka",
  "object_store",
  "ouroboros",

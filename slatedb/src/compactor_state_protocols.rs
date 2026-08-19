@@ -112,6 +112,7 @@ pub(crate) struct CompactorStateWriter {
     compactions: FenceableCompactions,
     /// RNG for checkpoint ids.
     rand: Arc<DbRand>,
+    checkpoint_lifetime: Duration,
 }
 
 impl CompactorStateWriter {
@@ -171,6 +172,7 @@ impl CompactorStateWriter {
             manifest,
             compactions,
             rand,
+            checkpoint_lifetime: options.checkpoint_lifetime,
         })
     }
 
@@ -240,10 +242,9 @@ impl CompactorStateWriter {
 
     /// Persists the updated manifest after a compaction finishes.
     ///
-    /// A checkpoint with a 15-minute lifetime is written first to prevent GC from
-    /// deleting SSTs that are about to be removed. This is to keep them around for a
-    /// while in case any in-flight operations (such as iterator scans) are still using
-    /// them.
+    /// A checkpoint with the configured lifetime is written first to prevent GC
+    /// from deleting SSTs that are about to be removed while an in-flight read
+    /// may still use them.
     async fn write_manifest(&mut self) -> Result<(), SlateDBError> {
         // write the checkpoint first so that it points to the manifest with the ssts
         // being removed
@@ -252,13 +253,7 @@ impl CompactorStateWriter {
             .write_checkpoint(
                 checkpoint_id,
                 &CheckpointOptions {
-                    // TODO(rohan): for now, just write a checkpoint with 15-minute expiry
-                    //              so that it's extremely unlikely for the gc to delete ssts
-                    //              out from underneath the writer. In a follow up, we'll write
-                    //              a checkpoint with no expiry and with metadata indicating its
-                    //              a compactor checkpoint. Then, the gc will delete the checkpoint
-                    //              based on a configurable timeout
-                    lifetime: Some(Duration::from_secs(900)),
+                    lifetime: Some(self.checkpoint_lifetime),
                     ..CheckpointOptions::default()
                 },
             )

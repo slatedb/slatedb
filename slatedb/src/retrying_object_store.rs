@@ -105,6 +105,10 @@ impl RetryingObjectStore {
 
     #[inline]
     fn should_retry(err: &object_store::Error) -> bool {
+        if crate::object_store_mirror::is_local_cache_error(err) {
+            debug!("not retrying local cache error [error={:?}]", err);
+            return false;
+        }
         let retry = !matches!(
             err,
             object_store::Error::AlreadyExists { .. }
@@ -576,11 +580,23 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload};
+
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use slatedb_common::DbRand;
     use slatedb_common::MockSystemClock;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn test_does_not_retry_local_cache_errors() {
+        let error = object_store::Error::Generic {
+            store: "object_store_mirror",
+            source: Box::new(crate::object_store_mirror::LocalCacheError::new(
+                "disk full",
+            )),
+        };
+        assert!(!RetryingObjectStore::should_retry(&error));
+    }
 
     fn test_rand() -> Arc<DbRand> {
         Arc::new(DbRand::default())

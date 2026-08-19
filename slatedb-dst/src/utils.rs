@@ -123,6 +123,7 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
         poll_interval: rng.random_range(Duration::from_millis(1)..Duration::from_secs(5)),
         manifest_update_timeout: rng
             .random_range(Duration::from_millis(100)..Duration::from_secs(60)),
+        checkpoint_lifetime: Duration::from_secs(15 * 60),
         max_concurrent_compactions: rng.random_range(1..=4),
         enable_trivial_move: rng.random_bool(0.5),
         scheduler_options: SizeTieredCompactionSchedulerOptions {

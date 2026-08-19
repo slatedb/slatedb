@@ -2,6 +2,7 @@
 #![warn(clippy::panic)]
 #![cfg_attr(test, allow(clippy::panic))]
 #![allow(clippy::result_large_err, clippy::too_many_arguments)]
+#![allow(deprecated)]
 // Disallow non-approved non-deterministic types and functions in production code
 #![deny(clippy::disallowed_types, clippy::disallowed_methods)]
 #![cfg_attr(
@@ -91,6 +92,7 @@ pub mod config;
 pub mod db_cache;
 pub mod db_stats;
 pub mod manifest;
+pub mod object_store_mirror;
 pub mod object_store_tag;
 pub mod prefix_extractor;
 pub mod seq_tracker;

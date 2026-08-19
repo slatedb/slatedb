@@ -1200,6 +1200,12 @@ pub struct CompactorOptions {
     #[serde(serialize_with = "serialize_duration")]
     pub manifest_update_timeout: Duration,
 
+    /// How long compaction input SSTs remain checkpoint-protected after a
+    /// compaction updates the manifest. Defaults to 15 minutes.
+    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(serialize_with = "serialize_duration")]
+    pub checkpoint_lifetime: Duration,
+
     /// The maximum number of concurrent compactions to execute at once
     pub max_concurrent_compactions: usize,
 
@@ -1264,6 +1270,7 @@ impl Default for CompactorOptions {
         Self {
             poll_interval: Duration::from_secs(5),
             manifest_update_timeout: Duration::from_secs(300),
+            checkpoint_lifetime: Duration::from_secs(15 * 60),
             max_concurrent_compactions: 4,
             enable_trivial_move: false,
             scheduler_options: HashMap::new(),
@@ -1282,6 +1289,7 @@ impl std::fmt::Debug for CompactorOptions {
         f.debug_struct("CompactorOptions")
             .field("poll_interval", &self.poll_interval)
             .field("manifest_update_timeout", &self.manifest_update_timeout)
+            .field("checkpoint_lifetime", &self.checkpoint_lifetime)
             .field(
                 "max_concurrent_compactions",
                 &self.max_concurrent_compactions,

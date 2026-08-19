@@ -33,6 +33,7 @@ futures = { workspace = true }
 log = { workspace = true }
 lru = { workspace = true }
 lz4_flex = { workspace = true, optional = true }
+md-5 = { workspace = true }
 moka = { workspace = true, features = ["future"], optional = true }
 object_store = { workspace = true }
 ouroboros = { workspace = true }
@@ -49,6 +50,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = [
     "fs",
     "macros",
+    "io-util",
     "sync",
     "rt",
     "rt-multi-thread",

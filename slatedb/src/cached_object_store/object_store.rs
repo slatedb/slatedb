@@ -54,6 +54,7 @@ use slatedb_common::metrics::{
 /// let db = Db::builder(path, cache).build().await?;
 /// ```
 #[derive(Debug, Clone)]
+#[deprecated(note = "use ObjectStoreMirror or a DbCache implementation instead")]
 pub struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,
     part_size_bytes: usize, // expected to be aligned with mb or kb
@@ -717,6 +718,7 @@ impl CachedObjectStore {
 }
 
 /// Builder for [`CachedObjectStore`]. Created by [`CachedObjectStore::builder`].
+#[deprecated(note = "use ObjectStoreMirror::builder instead")]
 pub struct CachedObjectStoreBuilder {
     object_store: Arc<dyn ObjectStore>,
     options: ObjectStoreCacheOptions,
