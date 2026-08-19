@@ -557,7 +557,11 @@ ungarbage-collected SSTs.
 
 ### Observability
 
-TODO
+The mirror logs startup cache recovery and database-root detection at `info`.
+SST downloads, manifest transitions, compaction prefetches, and reclamation
+summaries are logged at `debug`. Invalid local cache entries, remote GC scan
+failures, and background task failures are logged at `warn`. Ordinary object
+store requests and individual streamed chunks are not logged.
 
 ### Compatibility
 

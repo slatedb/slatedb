@@ -190,6 +190,13 @@ impl ObjectStoreMirrorBuilder {
             .load_local_state()
             .await
             .map_err(crate::error::SlateDBError::from)?;
+        log::info!(
+            "opened object-store mirror [local_dir={}, cached_ssts={}, download_concurrency={}, gc_interval={:?}]",
+            state.local_dir.display(),
+            state.metadata.lock().len(),
+            state.download_concurrency,
+            state.gc_interval,
+        );
         state.start_background_tasks();
 
         Ok(Arc::new(ObjectStoreMirror { state }))
@@ -448,6 +455,7 @@ impl MirrorState {
             }
             if let Some((base, suffix)) = name.rsplit_once('.') {
                 if base.ends_with(".sst") && suffix.parse::<u64>().is_ok() {
+                    log::debug!("removing incomplete mirrored SST [path={}]", path.display());
                     self.remove_if_exists(&path).await?;
                 }
             }
@@ -464,6 +472,7 @@ impl MirrorState {
             let data = data_files.get(&base);
             let meta = meta_files.get(&base);
             let (Some(data), Some(meta)) = (data, meta) else {
+                log::debug!("removing incomplete mirrored SST [file={base}]");
                 if let Some(data) = data {
                     self.remove_if_exists(data).await?;
                 }
@@ -512,7 +521,11 @@ impl MirrorState {
                 Ok(cached) => {
                     metadata.insert(cached.meta.location.clone(), cached);
                 }
-                Err(_) => {
+                Err(error) => {
+                    log::warn!(
+                        "removing invalid mirrored SST [path={}, error={error:?}]",
+                        data.display()
+                    );
                     self.remove_if_exists(data).await?;
                     self.remove_if_exists(meta).await?;
                 }
@@ -582,8 +595,10 @@ impl MirrorState {
                     .acquire()
                     .await
                     .map_err(|_| local_error("download semaphore closed"))?;
+                log::debug!("downloading mirrored SST [path={location}, force={force}]");
                 let result = self.object_store.get(&location).await?;
                 let mut meta = result.meta.clone();
+                let expected_size = meta.size;
                 let attributes = result.attributes.clone();
                 let paths = self.local_paths(&location)?;
                 let temp = self.temp_path(&paths.data);
@@ -618,6 +633,10 @@ impl MirrorState {
                 .await;
                 if download.is_err() {
                     let _ = self.remove_if_exists(&temp).await;
+                } else {
+                    log::debug!(
+                        "downloaded mirrored SST [path={location}, size={expected_size}, force={force}]"
+                    );
                 }
                 download
             })
@@ -655,6 +674,7 @@ impl MirrorState {
         match known.as_ref() {
             Some(existing) => Ok(existing == &root),
             None => {
+                log::info!("detected object-store mirror database root [root={root}]");
                 *known = Some(root);
                 Ok(true)
             }
@@ -752,6 +772,8 @@ impl MirrorState {
             mut checkpoint_ids,
             references,
         } = prepared;
+        let reference_count = references.len();
+        let checkpoint_count = checkpoint_ids.len();
 
         let removed = {
             let mut latest = self.latest_manifest.lock();
@@ -776,6 +798,11 @@ impl MirrorState {
         self.manifest_cache
             .lock()
             .retain(|manifest_id, _| checkpoint_ids.contains(manifest_id));
+
+        log::debug!(
+            "processed mirrored manifest [id={id}, referenced_ssts={reference_count}, active_checkpoints={checkpoint_count}, scheduled_reclaims={}]",
+            removed.len()
+        );
 
         if !removed.is_empty() {
             let state = Arc::clone(self);
@@ -942,17 +969,33 @@ impl MirrorState {
                 }
             }
         }
-        self.warm_paths(paths).await
+        let output_count = paths.len();
+        let missing_count = {
+            let metadata = self.metadata.lock();
+            paths
+                .iter()
+                .filter(|path| !metadata.contains_key(*path))
+                .count()
+        };
+        self.warm_paths(paths).await?;
+        log::debug!(
+            "prefetched compaction outputs [compactions_id={}, output_ssts={output_count}, missing_ssts={missing_count}]",
+            compactions.id()
+        );
+        Ok(())
     }
 
     async fn reclaim_remote_absent(&self) -> object_store::Result<()> {
         let snapshot = self.metadata.lock().keys().cloned().collect::<Vec<_>>();
+        let scanned_count = snapshot.len();
         let mut groups: HashMap<Path, Vec<Path>> = HashMap::new();
         for path in snapshot {
             if let Some(parent) = path.parent() {
                 groups.entry(parent).or_default().push(path);
             }
         }
+        let prefix_count = groups.len();
+        let mut reclaimed_count = 0;
         for (parent, local_paths) in groups {
             let remote = self
                 .object_store
@@ -960,15 +1003,25 @@ impl MirrorState {
                 .map_ok(|meta| meta.location)
                 .try_collect::<HashSet<_>>()
                 .await;
-            let Ok(remote) = remote else {
-                continue;
+            let remote = match remote {
+                Ok(remote) => remote,
+                Err(error) => {
+                    log::warn!(
+                        "failed to scan remote SSTs for mirror GC [prefix={parent}, error={error:?}]"
+                    );
+                    continue;
+                }
             };
             for path in local_paths {
                 if !remote.contains(&path) {
                     self.remove_local(&path).await?;
+                    reclaimed_count += 1;
                 }
             }
         }
+        log::debug!(
+            "completed object-store mirror GC [scanned_ssts={scanned_count}, prefixes={prefix_count}, reclaimed_ssts={reclaimed_count}]"
+        );
         Ok(())
     }
 
@@ -995,8 +1048,9 @@ impl MirrorState {
         duration: Duration,
         operation: fn(Arc<Self>) -> BackgroundFuture,
     ) {
+        let task_name = name.to_string();
         let _task = spawn_bg_task(
-            name.to_string(),
+            task_name.clone(),
             &tokio::runtime::Handle::current(),
             |_| {},
             async move {
@@ -1013,7 +1067,9 @@ impl MirrorState {
                         break;
                     };
                     if let Err(error) = operation(state).await {
-                        log::warn!("object-store mirror background task failed [error={error:?}]");
+                        log::warn!(
+                            "object-store mirror background task failed [task={task_name}, error={error:?}]"
+                        );
                     }
                 }
                 Ok(())
