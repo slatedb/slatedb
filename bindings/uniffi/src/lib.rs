@@ -53,7 +53,7 @@ pub use types::{
     SegmentPrefix, SortedRun, SourceId, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
     SstType, VersionedCompactions, VersionedManifest,
 };
-pub use wal_reader::{WalFile, WalFileIterator, WalReader};
+pub use wal_reader::{SlateDbWalIterator, SlateDbWalReader, SlateDbWalReaderOptions, WalRows};
 pub use write_batch::WriteBatch;
 pub use write_handle::WriteHandle;
 

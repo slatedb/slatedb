@@ -1,7 +1,7 @@
 package io.slatedb.uniffi;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
@@ -9,137 +9,101 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class SlateDbWalReaderTest {
+    private static List<RowEntry> rowsOf(List<WalRows> batches) {
+        List<RowEntry> rows = new ArrayList<>();
+        for (WalRows batch : batches) {
+            rows.addAll(batch.rows());
+        }
+        return rows;
+    }
+
     @Test
-    void walReaderEmptyStore() throws Exception {
-        try (ObjectStore store = TestSupport.newMemoryStore();
-                WalReader reader = TestSupport.openWalReader(store)) {
-            List<WalFile> files = TestSupport.await(reader.list(null, null));
-            try {
-                assertEquals(0, files.size());
-            } finally {
-                TestSupport.closeAll(files);
+    void walReaderReportsNoNewFilesAfterCursor() throws Exception {
+        try (ObjectStore store = TestSupport.newMemoryStore()) {
+            TestSupport.seedWalFiles(store);
+            try (SlateDbWalReader reader = TestSupport.openSlateDbWalReader(store)) {
+                long cursor = TestSupport.await(reader.lastWalFileId(0L));
+                assertEquals(cursor, TestSupport.await(reader.lastWalFileId(cursor)));
             }
         }
     }
 
     @Test
-    void walReaderListingAndNavigation() throws Exception {
+    void walReaderStreamsNewWalsThroughOneIterator() throws Exception {
         try (ObjectStore store = TestSupport.newMemoryStore()) {
             TestSupport.seedWalFiles(store);
-
-            try (WalReader reader = TestSupport.openWalReader(store)) {
-                List<WalFile> files = TestSupport.await(reader.list(null, null));
-                try {
-                    assertTrue(files.size() >= 3);
-
-                    List<Long> ids = new ArrayList<>();
-                    for (int i = 0; i < files.size(); i++) {
-                        long id = files.get(i).id();
-                        ids.add(id);
-                        if (i > 0) {
-                            assertTrue(id > ids.get(i - 1));
-                        }
+            try (SlateDbWalReader reader = TestSupport.openSlateDbWalReader(store)) {
+                long firstTail = TestSupport.await(reader.lastWalFileId(0L));
+                try (SlateDbWalIterator iterator = TestSupport.await(reader.iterator(1L))) {
+                    List<WalRows> firstBatches =
+                            TestSupport.readWalBatchesThrough(iterator, firstTail);
+                    assertFalse(firstBatches.isEmpty());
+                    assertTrue(firstBatches.stream().anyMatch(batch -> batch.rows().isEmpty()));
+                    long previous = 0L;
+                    for (WalRows batch : firstBatches) {
+                        assertTrue(batch.lastConsumedWalFileId() > previous);
+                        previous = batch.lastConsumedWalFileId();
                     }
+                    assertEquals(firstTail, previous);
+                    assertEquals(firstTail, TestSupport.await(reader.lastWalFileId(firstTail)));
 
-                    List<WalFile> bounded = TestSupport.await(reader.list(ids.get(1), ids.get(2)));
-                    try {
-                        assertEquals(1, bounded.size());
-                        assertEquals(ids.get(1), bounded.get(0).id());
-                    } finally {
-                        TestSupport.closeAll(bounded);
-                    }
-
-                    List<WalFile> empty = TestSupport.await(reader.list(ids.get(ids.size() - 1) + 1000L, null));
-                    try {
-                        assertEquals(0, empty.size());
-                    } finally {
-                        TestSupport.closeAll(empty);
-                    }
-
-                    try (WalFile first = reader.get(ids.get(0))) {
-                        assertEquals(ids.get(0), first.id());
-                        assertEquals(ids.get(1), first.nextId());
-
-                        try (WalFile next = first.nextFile()) {
-                            assertEquals(ids.get(1), next.id());
-                        }
-                    }
-                } finally {
-                    TestSupport.closeAll(files);
+                    TestSupport.appendWalValue(store, "next", "3");
+                    long secondTail = TestSupport.await(reader.lastWalFileId(firstTail));
+                    assertTrue(secondTail > firstTail);
+                    List<WalRows> secondBatches =
+                            TestSupport.readWalBatchesThrough(iterator, secondTail);
+                    assertFalse(secondBatches.isEmpty());
+                    assertEquals(
+                            secondTail,
+                            secondBatches.get(secondBatches.size() - 1).lastConsumedWalFileId());
+                    List<RowEntry> secondRows = rowsOf(secondBatches);
+                    assertEquals(1, secondRows.size());
+                    TestSupport.assertWalRow(secondRows.get(0), RowEntryKind.VALUE, "next", "3");
+                    assertEquals(secondTail, TestSupport.await(reader.lastWalFileId(secondTail)));
                 }
             }
         }
     }
 
     @Test
-    void walReaderMetadataAndRows() throws Exception {
+    void walReaderDecodesValueTombstoneAndMergeRows() throws Exception {
         try (ObjectStore store = TestSupport.newMemoryStore()) {
             TestSupport.seedWalFiles(store);
-
-            try (WalReader reader = TestSupport.openWalReader(store)) {
-                List<WalFile> files = TestSupport.await(reader.list(null, null));
-                try {
-                    assertTrue(files.size() >= 3);
-
-                    List<RowEntry> allRows = new ArrayList<>();
-                    int nonEmptyFiles = 0;
-                    for (WalFile file : files) {
-                        IdentifiedObjectMetadata metadata = TestSupport.await(file.metadata());
-                        assertNotNull(metadata);
-                        assertEquals(file.id(), metadata.id());
-                        assertFalse(metadata.metadata().location().isEmpty());
-
-                        try (WalFileIterator iterator = TestSupport.await(file.iterator())) {
-                            List<RowEntry> rows = TestSupport.drainWalIterator(iterator);
-                            if (metadata.metadata().size() == 0) {
-                                assertTrue(rows.isEmpty());
-                                continue;
-                            }
-
-                            nonEmptyFiles++;
-                            for (RowEntry row : rows) {
-                                assertTrue(row.seq() > 0);
-                            }
-                            allRows.addAll(rows);
-                        }
-                    }
-
-                    assertTrue(nonEmptyFiles > 0);
-                    assertEquals(4, allRows.size());
-                    TestSupport.assertWalRow(allRows.get(0), RowEntryKind.VALUE, "a", "1");
-                    TestSupport.assertWalRow(allRows.get(1), RowEntryKind.VALUE, "b", "2");
-                    TestSupport.assertWalRow(allRows.get(2), RowEntryKind.TOMBSTONE, "a", null);
-                    TestSupport.assertWalRow(allRows.get(3), RowEntryKind.MERGE, "m", "x");
-                } finally {
-                    TestSupport.closeAll(files);
+            try (SlateDbWalReader reader = TestSupport.openSlateDbWalReader(store)) {
+                long tail = TestSupport.await(reader.lastWalFileId(0L));
+                List<WalRows> batches;
+                try (SlateDbWalIterator iterator = TestSupport.await(reader.iterator(1L))) {
+                    batches = TestSupport.readWalBatchesThrough(iterator, tail);
+                    assertEquals(tail, batches.get(batches.size() - 1).lastConsumedWalFileId());
                 }
+
+                List<RowEntry> rows = rowsOf(batches);
+                assertEquals(4, rows.size());
+                assertTrue(rows.stream().allMatch(row -> row.seq() > 0L));
+                TestSupport.assertWalRow(rows.get(0), RowEntryKind.VALUE, "a", "1");
+                TestSupport.assertWalRow(rows.get(1), RowEntryKind.VALUE, "b", "2");
+                TestSupport.assertWalRow(rows.get(2), RowEntryKind.TOMBSTONE, "a", null);
+                TestSupport.assertWalRow(rows.get(3), RowEntryKind.MERGE, "m", "x");
             }
         }
     }
 
     @Test
-    void walReaderMissingFile() throws Exception {
+    void walReaderCanStartAtTheNextWal() throws Exception {
         try (ObjectStore store = TestSupport.newMemoryStore()) {
             TestSupport.seedWalFiles(store);
-
-            try (WalReader reader = TestSupport.openWalReader(store)) {
-                List<WalFile> files = TestSupport.await(reader.list(null, null));
-                try {
-                    assertFalse(files.isEmpty());
-                    long missingId = files.get(files.size() - 1).id() + 1000L;
-
-                    try (WalFile missing = reader.get(missingId)) {
-                        assertEquals(missingId, missing.id());
-                        TestSupport.awaitFailure(Error.class, missing.metadata());
-                    }
-                } finally {
-                    TestSupport.closeAll(files);
+            try (SlateDbWalReader reader = TestSupport.openSlateDbWalReader(store)) {
+                long tail = TestSupport.await(reader.lastWalFileId(0L));
+                try (SlateDbWalIterator iterator =
+                        TestSupport.await(reader.iterator(Math.addExact(tail, 1L)))) {
+                    TestSupport.appendWalValue(store, "resumed", "4");
+                    long newTail = TestSupport.await(reader.lastWalFileId(tail));
+                    List<RowEntry> rows = rowsOf(
+                            TestSupport.readWalBatchesThrough(iterator, newTail));
+                    assertEquals(1, rows.size());
+                    TestSupport.assertWalRow(rows.get(0), RowEntryKind.VALUE, "resumed", "4");
                 }
             }
         }
-    }
-
-    private static void assertFalse(boolean condition) {
-        org.junit.jupiter.api.Assertions.assertFalse(condition);
     }
 }

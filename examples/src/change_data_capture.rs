@@ -1,13 +1,8 @@
 use slatedb::config::{FlushOptions, FlushType};
-use slatedb::object_store::memory::InMemory;
-use slatedb::{Db, RowEntry, ValueDeletable, WalFile, WalReader};
+use slatedb::object_store::{memory::InMemory, path::Path};
+use slatedb::wal::{SlateDbWalReaderBuilder, WalReader as _, WalRows};
+use slatedb::{Db, RowEntry, ValueDeletable};
 use std::sync::Arc;
-
-#[derive(Debug, Default)]
-struct CdcCursor {
-    wal_id: u64,
-    last_seq: u64,
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -18,41 +13,62 @@ async fn main() -> anyhow::Result<()> {
     db.put(b"user:1", b"alice").await?;
     db.put(b"user:2", b"bob").await?;
     db.delete(b"user:2").await?;
-    db.flush_with_options(FlushOptions {
-        flush_type: FlushType::Wal,
-    })
-    .await?;
+    flush_wal(&db).await?;
 
-    let wal_reader = WalReader::new(path, object_store);
-    let mut cursor = CdcCursor::default();
+    let wal_reader = SlateDbWalReaderBuilder::new()
+        .with_object_store(object_store)
+        .with_path(Path::from(path))
+        .build()?;
+    let mut cursor = 0_u64;
+    let start_wal_id = cursor
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("WAL cursor cannot advance"))?;
+    let mut iterator = wal_reader.iterator((start_wal_id..).into()).await?;
 
-    // Use list() once for discovery (or after a long outage).
-    for wal_file in wal_reader.list(cursor.wal_id..).await? {
-        emit_wal_file(&wal_file, &mut cursor).await?;
+    // Drain the writes that already exist. Empty fence WALs still advance the
+    // cursor, so stop based on emitted rows only after persisting every batch.
+    let mut emitted_rows = 0;
+    while emitted_rows < 3 {
+        let batch = iterator
+            .next()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("live WAL iterator ended unexpectedly"))?;
+        emitted_rows += emit_batch(&batch, &mut cursor);
     }
 
-    // Poll by ID to avoid repeated full prefix listings.
-    let next_file = wal_reader.get(cursor.wal_id + 1);
-    emit_wal_file(&next_file, &mut cursor).await?;
-    println!("Persist cursor periodically: {:?}", cursor);
+    // Keep the same iterator alive. Its next call observes this later WAL;
+    // callers do not need to discover a new tail or create another iterator.
+    db.put(b"user:3", b"carol").await?;
+    flush_wal(&db).await?;
+    while emitted_rows < 4 {
+        let batch = iterator
+            .next()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("live WAL iterator ended unexpectedly"))?;
+        emitted_rows += emit_batch(&batch, &mut cursor);
+    }
 
     db.close().await?;
     Ok(())
 }
 
-async fn emit_wal_file(wal_file: &WalFile, cursor: &mut CdcCursor) -> anyhow::Result<()> {
-    let mut iter = wal_file.iterator().await?;
-    while let Some(row) = iter.next().await? {
-        if wal_file.id == cursor.wal_id && row.seq <= cursor.last_seq {
-            continue;
-        }
+async fn flush_wal(db: &Db) -> Result<(), slatedb::Error> {
+    db.flush_with_options(FlushOptions {
+        flush_type: FlushType::Wal,
+    })
+    .await
+}
 
-        emit_row(wal_file.id, &row);
-        cursor.wal_id = wal_file.id;
-        cursor.last_seq = row.seq;
+fn emit_batch(batch: &WalRows, cursor: &mut u64) -> usize {
+    for row in &batch.rows {
+        emit_row(batch.last_consumed_wal_file_id, row);
     }
 
-    Ok(())
+    // Persist only after every row in this WAL file has been emitted. This
+    // also advances across empty fence WALs.
+    *cursor = batch.last_consumed_wal_file_id;
+    println!("persist cursor={cursor}");
+    batch.rows.len()
 }
 
 fn emit_row(wal_id: u64, row: &RowEntry) {

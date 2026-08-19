@@ -5,7 +5,9 @@ use crate::manifest::Manifest;
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCellReader;
-use crate::wal::slatedb::iterator::{SlateDbWalIterator, SlateDbWalIteratorOptions};
+use crate::wal::slatedb::iterator::{
+    SlateDbWalIterator, SlateDbWalIteratorOptions, WalIteratorEndBound,
+};
 use crate::wal::slatedb::writer::SlateDbWalWriter;
 use crate::wal::{WalError, WriterInitResult, WriterManifest};
 use crate::{wal, Settings};
@@ -117,11 +119,12 @@ impl wal::WriterInit for SlateDbWalWriterInit {
                 let replay_after_wal_id = manifest.core().replay_after_wal_id;
                 assert!(empty_wal_id > replay_after_wal_id);
                 let replay_iterator = SlateDbWalIterator::range(
-                    replay_after_wal_id + 1..empty_wal_id + 1,
+                    replay_after_wal_id + 1,
+                    WalIteratorEndBound::Exclusive(empty_wal_id + 1),
                     SlateDbWalIteratorOptions {
                         sst_batch_size: 4,
                         sst_iter_options: SstIteratorOptions {
-                            max_fetch_tasks: 1,
+                            max_fetch_tasks: 2,
                             blocks_to_fetch: 256,
                             cache_blocks: false,
                             cache_metadata: false,

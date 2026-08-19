@@ -137,12 +137,15 @@ func openTestReader(t *testing.T, store *slatedb.ObjectStore, configure func(*te
 	return handle
 }
 
-func openTestWalReader(t *testing.T, store *slatedb.ObjectStore) *slatedb.WalReader {
+func openTestSlateDbWalReader(t *testing.T, store *slatedb.ObjectStore) *slatedb.SlateDbWalReader {
 	t.Helper()
 
-	reader := slatedb.NewWalReader(testDBPath, store)
+	reader, err := slatedb.NewSlateDbWalReader(testDBPath, store)
+	if err != nil {
+		t.Fatalf("NewSlateDbWalReader(): %v", err)
+	}
 	if reader == nil {
-		t.Fatal("NewWalReader(): got nil reader")
+		t.Fatal("NewSlateDbWalReader(): got nil reader")
 	}
 
 	t.Cleanup(reader.Destroy)
@@ -190,20 +193,25 @@ func drainIterator(t *testing.T, iter *slatedb.DbIterator) []slatedb.KeyValue {
 	}
 }
 
-func drainWalIterator(t *testing.T, iter *slatedb.WalFileIterator) []slatedb.RowEntry {
+func readWalBatchesThrough(
+	t *testing.T,
+	iter *slatedb.SlateDbWalIterator,
+	endWalFileID uint64,
+) []slatedb.WalRows {
 	t.Helper()
 
-	var rows []slatedb.RowEntry
-	for {
-		row, err := iter.Next()
+	var batches []slatedb.WalRows
+	for len(batches) == 0 || batches[len(batches)-1].LastConsumedWalFileId < endWalFileID {
+		batch, err := iter.Next()
 		if err != nil {
 			t.Fatalf("wal iterator Next(): %v", err)
 		}
-		if row == nil {
-			return rows
+		if batch == nil {
+			t.Fatal("live WAL iterator ended unexpectedly")
 		}
-		rows = append(rows, *row)
+		batches = append(batches, *batch)
 	}
+	return batches
 }
 
 func requireRows(t *testing.T, got []slatedb.KeyValue, wantKeys []string, wantValues []string) {
@@ -467,6 +475,32 @@ func seedWalFiles(t *testing.T, store *slatedb.ObjectStore) {
 	if err := handle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeWal}); err != nil {
 		t.Fatalf("FlushWithOptions(Wal) for merge row: %v", err)
 	}
+	if err := handle.db.Shutdown(); err != nil {
+		t.Fatalf("Shutdown() after seeding WAL files: %v", err)
+	}
+	handle.open = false
+}
+
+func appendWalValue(t *testing.T, store *slatedb.ObjectStore, key, value string) {
+	t.Helper()
+
+	handle := openTestDB(t, store, func(t *testing.T, builder *slatedb.DbBuilder) {
+		t.Helper()
+		if err := builder.WithMergeOperator(concatMergeOperator{}); err != nil {
+			t.Fatalf("WithMergeOperator(): %v", err)
+		}
+	})
+
+	if _, err := handle.db.Put([]byte(key), []byte(value)); err != nil {
+		t.Fatalf("Put(%s): %v", key, err)
+	}
+	if err := handle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeWal}); err != nil {
+		t.Fatalf("FlushWithOptions(Wal) for %s: %v", key, err)
+	}
+	if err := handle.db.Shutdown(); err != nil {
+		t.Fatalf("Shutdown() after appending %s: %v", key, err)
+	}
+	handle.open = false
 }
 
 func TestDbLifecycleAndStatus(t *testing.T) {
@@ -2724,207 +2758,166 @@ func TestAdminDeleteMultipleCheckpoints(t *testing.T) {
 	})
 }
 
-func TestWalReaderEmptyStore(t *testing.T) {
+func flattenWalRows(batches []slatedb.WalRows) []slatedb.RowEntry {
+	var rows []slatedb.RowEntry
+	for _, batch := range batches {
+		rows = append(rows, batch.Rows...)
+	}
+	return rows
+}
+
+func TestWalReaderReportsNoNewFilesAfterCursor(t *testing.T) {
 	store := newMemoryStore(t)
-	reader := openTestWalReader(t, store)
+	seedWalFiles(t, store)
+	reader := openTestSlateDbWalReader(t, store)
 
-	files, err := reader.List(nil, nil)
+	cursor, err := reader.LastWalFileId(0)
 	if err != nil {
-		t.Fatalf("WalReader.List(nil, nil): %v", err)
+		t.Fatalf("LastWalFileId(0): %v", err)
 	}
-	for _, file := range files {
-		defer file.Destroy()
+	tail, err := reader.LastWalFileId(cursor)
+	if err != nil {
+		t.Fatalf("LastWalFileId(cursor): %v", err)
 	}
-
-	if len(files) != 0 {
-		t.Fatalf("WalReader.List(nil, nil): got %d files, want 0", len(files))
+	if tail != cursor {
+		t.Fatalf("LastWalFileId(cursor): got %d, want %d", tail, cursor)
 	}
 }
 
-func TestWalReaderListingAndNavigation(t *testing.T) {
+func TestWalReaderStreamsNewWalsThroughOneIterator(t *testing.T) {
 	store := newMemoryStore(t)
 	seedWalFiles(t, store)
+	reader := openTestSlateDbWalReader(t, store)
 
-	reader := openTestWalReader(t, store)
-
-	files, err := reader.List(nil, nil)
+	firstTail, err := reader.LastWalFileId(0)
 	if err != nil {
-		t.Fatalf("WalReader.List(nil, nil): %v", err)
+		t.Fatalf("LastWalFileId(0): %v", err)
+	}
+	iter, err := reader.Iterator(1)
+	if err != nil {
+		t.Fatalf("SlateDbWalReader.Iterator(1): %v", err)
+	}
+	t.Cleanup(iter.Destroy)
+	firstBatches := readWalBatchesThrough(t, iter, firstTail)
+	if len(firstBatches) == 0 {
+		t.Fatal("initial WAL stream returned no batches")
 	}
 
-	if len(files) < 3 {
-		t.Fatalf("WalReader.List(nil, nil): got %d files, want at least 3", len(files))
-	}
-
-	ids := make([]uint64, len(files))
-	for i, file := range files {
-		ids[i] = file.Id()
-		if i > 0 && ids[i] <= ids[i-1] {
-			t.Fatalf("WalReader.List(nil, nil): ids not ascending: %v", ids)
+	var previous uint64
+	foundEmptyFence := false
+	for i, batch := range firstBatches {
+		foundEmptyFence = foundEmptyFence || len(batch.Rows) == 0
+		if i > 0 && batch.LastConsumedWalFileId <= previous {
+			t.Fatalf("WAL cursors did not increase: previous=%d current=%d", previous, batch.LastConsumedWalFileId)
 		}
+		previous = batch.LastConsumedWalFileId
+	}
+	if !foundEmptyFence {
+		t.Fatal("initial WAL stream did not return the empty fence WAL batch")
+	}
+	if previous != firstTail {
+		t.Fatalf("initial WAL stream ended at %d, want %d", previous, firstTail)
+	}
+	if tail, err := reader.LastWalFileId(firstTail); err != nil || tail != firstTail {
+		t.Fatalf("LastWalFileId(firstTail): got tail=%d err=%v, want %d", tail, err, firstTail)
 	}
 
-	startID := ids[1]
-	endID := ids[2]
-	bounded, err := reader.List(&startID, &endID)
+	appendWalValue(t, store, "next", "3")
+	secondTail, err := reader.LastWalFileId(firstTail)
 	if err != nil {
-		t.Fatalf("WalReader.List(start, end): %v", err)
+		t.Fatalf("LastWalFileId(firstTail) after append: %v", err)
 	}
-	for _, file := range bounded {
-		defer file.Destroy()
+	if secondTail <= firstTail {
+		t.Fatalf("second tail did not advance: first=%d second=%d", firstTail, secondTail)
 	}
-
-	if len(bounded) != 1 || bounded[0].Id() != ids[1] {
-		t.Fatalf("WalReader.List(start, end): got ids [%d], want [%d]", len(bounded), ids[1])
+	secondBatches := readWalBatchesThrough(t, iter, secondTail)
+	if len(secondBatches) == 0 {
+		t.Fatal("continued WAL stream returned no batches")
 	}
-
-	pastHighID := ids[len(ids)-1] + 1000
-	empty, err := reader.List(&pastHighID, nil)
-	if err != nil {
-		t.Fatalf("WalReader.List(pastHigh, nil): %v", err)
+	if got := secondBatches[len(secondBatches)-1].LastConsumedWalFileId; got != secondTail {
+		t.Fatalf("continued WAL stream ended at %d, want %d", got, secondTail)
 	}
-
-	if len(empty) != 0 {
-		t.Fatalf("WalReader.List(pastHigh, nil): got %d files, want 0", len(empty))
+	secondRows := flattenWalRows(secondBatches)
+	if len(secondRows) != 1 || string(secondRows[0].Key) != "next" {
+		t.Fatalf("continued WAL stream returned rows=%v, want one next row", secondRows)
 	}
-
-	first := reader.Get(ids[0])
-	defer first.Destroy()
-	if first.Id() != ids[0] {
-		t.Fatalf("WalReader.Get(first): got id %d, want %d", first.Id(), ids[0])
-	}
-	if first.NextId() != ids[1] {
-		t.Fatalf("WalFile.NextId(): got %d, want %d", first.NextId(), ids[1])
-	}
-
-	next := first.NextFile()
-	defer next.Destroy()
-	if next.Id() != ids[1] {
-		t.Fatalf("WalFile.NextFile().Id(): got %d, want %d", next.Id(), ids[1])
+	if tail, err := reader.LastWalFileId(secondTail); err != nil || tail != secondTail {
+		t.Fatalf("LastWalFileId(secondTail): got tail=%d err=%v, want %d", tail, err, secondTail)
 	}
 }
 
-func TestWalReaderMetadataAndRows(t *testing.T) {
+func TestWalReaderDecodesValueTombstoneAndMergeRows(t *testing.T) {
 	store := newMemoryStore(t)
 	seedWalFiles(t, store)
+	reader := openTestSlateDbWalReader(t, store)
 
-	reader := openTestWalReader(t, store)
-
-	files, err := reader.List(nil, nil)
+	tail, err := reader.LastWalFileId(0)
 	if err != nil {
-		t.Fatalf("WalReader.List(nil, nil): %v", err)
+		t.Fatalf("LastWalFileId(0): %v", err)
 	}
-	for _, file := range files {
-		defer file.Destroy()
+	iter, err := reader.Iterator(1)
+	if err != nil {
+		t.Fatalf("SlateDbWalReader.Iterator(1): %v", err)
 	}
-
-	if len(files) < 3 {
-		t.Fatalf("WalReader.List(nil, nil): got %d files, want at least 3", len(files))
+	t.Cleanup(iter.Destroy)
+	batches := readWalBatchesThrough(t, iter, tail)
+	if got := batches[len(batches)-1].LastConsumedWalFileId; got != tail {
+		t.Fatalf("WAL stream ended at %d, want %d", got, tail)
 	}
-
-	var allRows []slatedb.RowEntry
-	nonEmptyFiles := 0
-
-	for i, file := range files {
-		metadata, err := file.Metadata()
-		if err != nil {
-			t.Fatalf("WalFile.Metadata() for file %d: %v", i, err)
-		}
-		if metadata.Id != file.Id() {
-			t.Fatalf("WalFile.Metadata() for file %d: Id = %d, want %d", i, metadata.Id, file.Id())
-		}
-		if metadata.Metadata.Location == "" {
-			t.Fatalf("WalFile.Metadata() for file %d: Location is empty", i)
-		}
-
-		iter, err := file.Iterator()
-		if err != nil {
-			t.Fatalf("WalFile.Iterator() for file %d: %v", i, err)
-		}
-		t.Cleanup(iter.Destroy)
-
-		rows := drainWalIterator(t, iter)
-		if metadata.Metadata.Size == 0 {
-			if len(rows) != 0 {
-				t.Fatalf("zero-byte WAL file %d returned %d rows, want 0", i, len(rows))
-			}
-			continue
-		}
-		nonEmptyFiles++
-
-		for j, row := range rows {
-			if row.Seq == 0 {
-				t.Fatalf("row %d in file %d: Seq = 0", j, i)
-			}
-		}
-		allRows = append(allRows, rows...)
+	rows := flattenWalRows(batches)
+	if len(rows) != 4 {
+		t.Fatalf("unexpected total WAL row count: got %d, want 4", len(rows))
 	}
 
-	if nonEmptyFiles == 0 {
-		t.Fatal("no non-empty WAL files found")
+	if rows[0].Kind != slatedb.RowEntryKindValue || string(rows[0].Key) != "a" {
+		t.Fatalf("row 0: got kind=%v key=%q, want value/a", rows[0].Kind, rows[0].Key)
 	}
-
-	if len(allRows) != 4 {
-		t.Fatalf("unexpected total WAL row count: got %d, want 4", len(allRows))
+	if rows[0].Value == nil || !bytes.Equal(*rows[0].Value, []byte("1")) {
+		t.Fatalf("row 0: got value %v, want %q", rows[0].Value, "1")
 	}
-
-	if allRows[0].Kind != slatedb.RowEntryKindValue || string(allRows[0].Key) != "a" {
-		t.Fatalf("row 0: got kind=%v key=%q, want value/a", allRows[0].Kind, allRows[0].Key)
+	if rows[1].Kind != slatedb.RowEntryKindValue || string(rows[1].Key) != "b" {
+		t.Fatalf("row 1: got kind=%v key=%q, want value/b", rows[1].Kind, rows[1].Key)
 	}
-	if allRows[0].Value == nil || !bytes.Equal(*allRows[0].Value, []byte("1")) {
-		t.Fatalf("row 0: got value %v, want %q", allRows[0].Value, "1")
+	if rows[1].Value == nil || !bytes.Equal(*rows[1].Value, []byte("2")) {
+		t.Fatalf("row 1: got value %v, want %q", rows[1].Value, "2")
 	}
-
-	if allRows[1].Kind != slatedb.RowEntryKindValue || string(allRows[1].Key) != "b" {
-		t.Fatalf("row 1: got kind=%v key=%q, want value/b", allRows[1].Kind, allRows[1].Key)
+	if rows[2].Kind != slatedb.RowEntryKindTombstone || string(rows[2].Key) != "a" {
+		t.Fatalf("row 2: got kind=%v key=%q, want tombstone/a", rows[2].Kind, rows[2].Key)
 	}
-	if allRows[1].Value == nil || !bytes.Equal(*allRows[1].Value, []byte("2")) {
-		t.Fatalf("row 1: got value %v, want %q", allRows[1].Value, "2")
+	if rows[2].Value != nil {
+		t.Fatalf("row 2: got value %q, want nil", *rows[2].Value)
 	}
-
-	if allRows[2].Kind != slatedb.RowEntryKindTombstone || string(allRows[2].Key) != "a" {
-		t.Fatalf("row 2: got kind=%v key=%q, want tombstone/a", allRows[2].Kind, allRows[2].Key)
+	if rows[3].Kind != slatedb.RowEntryKindMerge || string(rows[3].Key) != "m" {
+		t.Fatalf("row 3: got kind=%v key=%q, want merge/m", rows[3].Kind, rows[3].Key)
 	}
-	if allRows[2].Value != nil {
-		t.Fatalf("row 2: got value %q, want nil", *allRows[2].Value)
-	}
-
-	if allRows[3].Kind != slatedb.RowEntryKindMerge || string(allRows[3].Key) != "m" {
-		t.Fatalf("row 3: got kind=%v key=%q, want merge/m", allRows[3].Kind, allRows[3].Key)
-	}
-	if allRows[3].Value == nil || !bytes.Equal(*allRows[3].Value, []byte("x")) {
-		t.Fatalf("row 3: got value %v, want %q", allRows[3].Value, "x")
+	if rows[3].Value == nil || !bytes.Equal(*rows[3].Value, []byte("x")) {
+		t.Fatalf("row 3: got value %v, want %q", rows[3].Value, "x")
 	}
 }
 
-func TestWalReaderMissingFile(t *testing.T) {
+func TestWalReaderCanStartAtTheNextWal(t *testing.T) {
 	store := newMemoryStore(t)
 	seedWalFiles(t, store)
+	reader := openTestSlateDbWalReader(t, store)
 
-	reader := openTestWalReader(t, store)
-
-	files, err := reader.List(nil, nil)
+	tail, err := reader.LastWalFileId(0)
 	if err != nil {
-		t.Fatalf("WalReader.List(nil, nil): %v", err)
+		t.Fatalf("LastWalFileId(0): %v", err)
 	}
-	for _, file := range files {
-		defer file.Destroy()
+	iter, err := reader.Iterator(tail + 1)
+	if err != nil {
+		t.Fatalf("Iterator(next WAL): %v", err)
 	}
+	t.Cleanup(iter.Destroy)
 
-	if len(files) == 0 {
-		t.Fatal("WalReader.List(nil, nil): got 0 files, want at least 1")
+	appendWalValue(t, store, "resumed", "4")
+	newTail, err := reader.LastWalFileId(tail)
+	if err != nil {
+		t.Fatalf("LastWalFileId(tail) after append: %v", err)
 	}
-
-	missingID := files[len(files)-1].Id() + 1000
-	missing := reader.Get(missingID)
-	defer missing.Destroy()
-
-	if missing.Id() != missingID {
-		t.Fatalf("WalReader.Get(missing): got id %d, want %d", missing.Id(), missingID)
-	}
-
-	if _, err := missing.Metadata(); err == nil {
-		t.Fatal("WalFile.Metadata() for missing file: got nil error, want non-nil error")
+	rows := flattenWalRows(readWalBatchesThrough(t, iter, newTail))
+	if len(rows) != 1 || string(rows[0].Key) != "resumed" {
+		t.Fatalf("resumed WAL stream returned rows=%v, want one resumed row", rows)
 	}
 }
 

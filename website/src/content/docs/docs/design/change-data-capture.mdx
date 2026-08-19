@@ -1,118 +1,102 @@
 ---
 title: Change Data Capture
-description: Implement CDC by streaming write-ahead log (WAL) SSTs with WalReader
+description: Stream SlateDB WAL files with a live SlateDbWalReader iterator
 ---
 
 import { Code } from '@astrojs/starlight/components';
 import cdcExample from '/../examples/src/change_data_capture.rs?raw';
 
-Change data capture (CDC) turns writes in SlateDB into a durable change stream that external systems can consume. SlateDB exposes CDC through the `WalReader`, which reads write-ahead log (WAL) SST files from object storage and returns the same row entries that were written by the database.
+Change data capture (CDC) turns writes in SlateDB into a durable change stream that external systems can consume. SlateDB exposes native-WAL CDC through **slatedb::wal::SlateDbWalReader**.
 
-This page explains how to build a CDC pipeline with `WalReader`, including ordering, durability, deletes, and resume semantics.
+The reader opens a live iterator from the first unconsumed WAL file ID. The iterator owns polling and waits internally when it reaches the current WAL tail; the caller owns durable cursor storage.
 
 ## When to use WAL-based CDC
 
 Use WAL-based CDC when you need:
 
 - A low-latency stream of inserts, updates, and deletes.
-- A simple, append-only feed that can be replayed.
-- Integration with downstream systems like Kafka, Pulsar, or data lakes.
+- A durable append-only feed that can be replayed.
+- Integration with downstream systems such as Kafka, Pulsar, or data lakes.
 
-WAL-based CDC is not a bootstrap or backfill API. If you need an initial full copy of data, combine a backfill with WAL tailing as described below.
+WAL-based CDC is not a bootstrap or backfill API. Combine a database backfill with WAL streaming when an initial full copy is required.
 
-## What WalReader reads
+## Streaming model
 
-SlateDB stores WAL SSTs under the `wal/` directory in the object store. Each WAL file has a monotonically increasing ID and is written in insertion order by sequence number. `WalReader` lists these files in ID order and exposes a `WalFile` for each file in object storage.
+Keep a durable cursor containing the last fully consumed WAL file ID. Use zero when starting from the beginning unless you have a more appropriate manifest-derived cursor.
 
-Each `WalFile` exposes an `iterator()` that yields `RowEntry` values in order. The iterator is optional because the underlying object might have been deleted between listing and reading (for example, due to GC).
+To consume the stream:
 
-Each row returned by the iterator is a `RowEntry` with:
+1. Compute **cursor + 1**, checking for overflow, and create one iterator with an unbounded end range beginning at that WAL file ID.
+2. Repeatedly call **next()**. When the iterator reaches the current tail, the call waits and polls internally for the next WAL file.
+3. Emit every row in each **WalRows** batch.
+4. After the whole batch succeeds, persist its **last_consumed_wal_file_id** as the new cursor.
+5. After a restart, create a new unbounded iterator beginning at the persisted cursor plus one.
 
-- `key`: the key bytes
-- `value`: a `ValueDeletable` variant (`Value`, `Merge`, or `Tombstone`)
-- `seq`: a globally increasing sequence number
-- `create_ts` and `expire_ts`: optional timestamps
+The live iterator does not report exhaustion at the current tail; **next()** remains pending until a new WAL file is visible or an error occurs. **last_wal_file_id** remains available when an application needs a point-in-time tail snapshot, but it is not part of the streaming loop.
 
-Deletes appear as `Tombstone`s. If your database uses merge operators, you will see `Merge` values and must apply the merge logic yourself if your sink requires materialized values.
+## Batches and cursor progress
 
-:::note
+One **WalRows** batch represents one fully consumed WAL file and contains:
 
-The database must have a write-ahead log in order to use WAL-based CDC. The write-ahead log is controlled with `Settings::wal_enabled`. `wal_enabled` defaults to `true`, and is feature-gated behind a `wal_disable` feature in Rust. Databases have a WAL unless you have deliberaly disabled it.
+- **rows**: the file's row entries, in sequence order
+- **last_consumed_wal_file_id**: the durable cursor after that file
 
-:::
+Empty fence WAL files produce a batch with no rows. The cursor still advances, so consumers must process the batch rather than flattening batches into rows and losing progress information.
+
+Each row is a **RowEntry** with:
+
+- **key**: key bytes
+- **value**: a **ValueDeletable** value, merge operand, or tombstone
+- **seq**: the globally increasing sequence number
+- **create_ts** and **expire_ts**: optional timestamps
+
+Deletes appear as tombstones. Merge operands remain raw merge values; downstream consumers must apply the merge logic themselves when materialized values are required.
 
 ## Visibility and durability
 
-`WalReader` only sees WAL SSTs that have been flushed to object storage. WAL flushes occur when:
+SlateDbWalReader only sees WAL SSTs flushed to object storage. WAL flushes occur when:
 
-- The WAL buffer reaches its size threshold ([`l0_sst_size_bytes`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.l0_sst_size_bytes) is used to limit WAL SST file sizes as well).
-- The configured [`flush_interval`](https://docs.rs/slatedb/latest/slatedb/config/struct.Settings.html#structfield.flush_interval) elapses.
-- You explicitly call a WAL or MemTable flush with [`Db::flush_with_options`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html#method.flush_with_options).
+- The WAL buffer reaches its size threshold.
+- The configured flush interval elapses.
+- The caller explicitly requests a WAL or memtable flush.
 
-Note that a memtable flush also forces any pending WAL data to be flushed first, which guarantees the WAL is durable before L0 data is written.
+A memtable flush first forces pending WAL data to durable storage.
 
-## CDC architecture
+The database must have its WAL enabled. WAL support is enabled by default.
 
-```mermaid
-flowchart LR
-    A[Writer] --> B[WAL buffer]
-    B --> C[WAL SSTs in object store]
-    C --> D[WalReader]
-    D --> E[CDC sink]
-```
+## Basic live stream
 
-`WalReader` does not interpret or compact data. It simply provides a durable, ordered feed of row-level changes.
-
-## Basic tailer loop
-
-This example tails all WAL files, emits row entries, and records a cursor so the stream can resume after restarts.
+This example creates one unbounded iterator, emits both existing and later writes through it, and advances a durable file cursor.
 
 <Code code={cdcExample} lang="rust" title="main.rs" />
 
-This pattern is safe and idempotent as long as you persist the cursor after each emitted row and skip any rows with `seq <= last_seq` when resuming.
+Persisting the cursor only after a complete batch gives at-least-once delivery if a process fails while emitting that WAL file. Make the sink idempotent or transactionally couple sink writes with cursor persistence when duplicates are unacceptable.
+
+## Ordering and resumability
+
+WAL file IDs increase monotonically, and entries within each file are returned in sequence order. The minimal cursor is therefore the last fully consumed WAL file ID.
+
+Do not advance the cursor per row. Doing so can lose progress for empty fence WALs and can incorrectly mark a partially emitted WAL file as complete.
+
+If a requested file has already been garbage collected, iteration reports a truncation/data error. The consumer must not silently skip the gap.
 
 ## Backfills plus streaming
 
-If you need a full backfill of data not in the WAL along with the WAL change stream:
+For a full backfill:
 
-1. Tail the WAL, buffering changes.
-2. Checkpoint the database using `Admin::create_detached_checkpoint`.
-3. Range scan (`Db::scan`) over the cloned database to read old data.
-4. Apply the buffered WAL changes in sequence order, filtering rows whose sequence number was in the range scan in (3).
-5. Delete the checkpoint using `Admin::delete_checkpoint`.
-6. Continue tailing WALs from the stored cursor.
+1. Begin live WAL streaming and buffer changes.
+2. Create a detached database checkpoint.
+3. Scan the checkpoint or a clone for existing data.
+4. Apply buffered WAL changes in sequence order.
+5. Delete the checkpoint.
+6. Continue streaming from the persisted WAL cursor.
 
-This avoids gaps between the backfill and the live stream. Your sink should be idempotent if the backfill and WAL stream can overlap.
-
-## Resumability and ordering
-
-`WalReader` lists files in wal ID order, and each WAL file stores entries in increasing sequence order. This gives you a total order that is stable across restarts. A minimal cursor includes:
-
-- `wal_id`: the WAL file currently being processed
-- `last_seq`: the highest sequence number processed in that file
-
-If you need to fan out to multiple workers, partition by key and keep one cursor per partition. Ensure your sink can handle replays or duplicates. Since WAL files can be deleted between `list` and `iterator` calls, handle `None` by skipping that file or re-listing from a newer cursor.
-
-## Listing costs and polling strategy
-
-The `list()` API can become expensive when WAL retention is high or GC is not keeping up. If the GC is not running, listings can grow without bound. Even with GC, CDC often needs higher retention. Retaining WAL files for just 1 hour can yield tens of thousands of files, which is expensive to list in both cost (object-store listing calls) and time.
-
-If you plan to poll frequently:
-
-1. Use `list()` once to get an initial view (or to recover after a long outage).
-2. Track the highest WAL ID you have successfully processed.
-3. From then on, poll using `WalReader::get(latest_id + 1)`.
-
-## Deletes, merges, and TTL
-
-- Deletes appear as `ValueDeletable::Tombstone`. Emit a delete event in your CDC sink.
-- Merge operands appear as `ValueDeletable::Merge`. If you use merge operators, downstream consumers must either apply the merge or store the operand as-is.
-- TTL is represented by `expire_ts`. If your downstream system enforces TTL, honor this field.
+The sink should tolerate overlap between the backfill and WAL stream.
 
 ## WAL retention and GC
 
-WAL SSTs are garbage collected based on the GC configuration. If your CDC consumer falls behind, the WAL files it needs may be deleted. Set the WAL GC `min_age` option to retain files long enough for your slowest consumer and implement monitoring. Slow consumers should copy the WAL files elsewhere for processing. See [Garbage Collection](/docs/design/gc) for details.
+WAL SSTs are garbage collected according to the configured retention policy. Set WAL GC minimum age long enough for the slowest consumer and monitor cursor lag. A consumer that requests a deleted WAL receives a truncation error instead of silently continuing.
 
-## Using a separate WAL object store
+## Dedicated WAL object stores
 
-If your database uses a dedicated WAL object store, pass that store to `WalReader::new` rather than the main store.
+When a database uses a dedicated WAL object store, construct the reader with both stores: the main object store is used for manifest and GC-cutoff state, and the dedicated WAL object store is used for WAL SSTs. In Rust, use **SlateDbWalReader::new_for_db_with_wal_object_store**.

@@ -648,39 +648,22 @@ then deletes them.
 `DbReaderBuilder` initializes `DbReader` with a `WalReader` that it uses to construct iterators 
 for replaying the WAL when loading a checkpoint.
 
-`DbReader` will now also continually stream WAL updates when configured to track the latest 
-writes. It does this by creating its `WalIterator` with an unbounded end range and blocking on 
-`next` from its background polling task. If the reader observes a `WalError::WalTruncated` then it
+`DbReader` continually discovers WAL updates when configured to track the latest writes. It
+resolves the current tail, creates a bounded `WalIterator`, drains it to completion, and then
+refreshes the manifest before the next pass. If the reader observes a `WalError::WalTruncated`, it
 immediately refreshes the manifest.
 
 #### CDC
 
-We'll deprecate/remove the current CDC API. Users can use the `WalReader`/`WalIterator` proposed
-in this RFC. SlateDB's native `WalReader` will take a buffer size and a poll interval to use when
-tailing the current WAL:
+We'll deprecate/remove the file-listing CDC API. CDC users can use SlateDB's native
+`SlateDbWalReader`, which implements the `WalReader`/`WalIterator` traits proposed in this RFC.
 
-```rust
-struct ObjectStoreWalReader {
-    // ...
-}
-
-impl ObjectStoreWalReader {
-    pub fn new<P: Into<Path>>(
-        path: P,
-        object_store: Arc<dyn ObjectStore>,
-        /// The number of WAL Files to prefetch and buffer when streaming the WAL
-        buffered_files: usize,
-        /// The interval at which the next WAL file will be polled when streaming the latest updates
-        poll_interval: Duration
-    ) {
-        todo!()
-    }
-}
-
-impl WalReader for ObjectStoreWalReader {
-    // ...
-}
-```
+CDC uses an iterator with an unbounded end range. A consumer keeps the last fully consumed WAL
+file ID, creates one iterator over `(cursor + 1)..`, and persists each
+`WalRows.last_consumed_wal_file_id`. At the current tail, `WalIterator::next` polls the manifest and
+waits for the next WAL file rather than ending, so the caller does not alternate between tail
+discovery and iterator creation. Empty fence WALs return an empty batch that still advances the
+cursor. After a restart, the consumer creates a new iterator from the persisted cursor plus one.
 
 #### Clones
 
