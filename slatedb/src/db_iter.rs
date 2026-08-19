@@ -13,6 +13,8 @@ use crate::types::{KeyValue, RowEntry, ValueDeletable};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::stream::{self, BoxStream, StreamExt};
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::ops::RangeBounds;
 
@@ -45,13 +47,63 @@ impl DbIteratorRangeTracker {
     }
 }
 
+/// Sources of a point lookup, in newest-first order, each with its `init`
+/// already driven before it is yielded.
+///
+/// `Mutex` is only here to satisfy the `Sync` half of [`RowEntryIterator`]:
+/// the boxed `init` futures the stream drives are `Send` but not `Sync`. It is
+/// always reached through `get_mut`, so it never locks.
+type InitializedSources =
+    Mutex<BoxStream<'static, Result<Box<dyn RowEntryIterator + 'static>, SlateDBError>>>;
+
 pub(crate) struct GetIterator {
     key: Bytes,
-    iters: Vec<Box<dyn RowEntryIterator + 'static>>,
-    idx: usize,
+    sources: InitializedSources,
+    current: Option<Box<dyn RowEntryIterator + 'static>>,
 }
 
 impl GetIterator {
+    /// Wrap `iters` in a stream that yields each source with its `init`
+    /// already driven.
+    ///
+    /// The newest source is probed alone; only if it does not answer the
+    /// query are the remaining ones initialized `lookahead` at a time. That
+    /// keeps a hit in the newest source exactly as cheap as a strictly serial
+    /// walk, and still collapses the round trips needed to prove a key absent.
+    ///
+    /// Order is preserved across the concurrent tail: the walk returns the
+    /// first entry it finds, so sources must be consumed newest-first however
+    /// their `init`s interleave.
+    fn with_lookahead(
+        key: Bytes,
+        iters: Vec<Box<dyn RowEntryIterator + 'static>>,
+        lookahead: usize,
+    ) -> Self {
+        async fn init_source(
+            mut iter: Box<dyn RowEntryIterator + 'static>,
+        ) -> Result<Box<dyn RowEntryIterator + 'static>, SlateDBError> {
+            iter.init().await.map(|()| iter)
+        }
+
+        let mut iters = iters.into_iter();
+        let newest = iters.next();
+        let sources = stream::iter(newest)
+            .map(init_source)
+            .buffered(1)
+            .chain(
+                stream::iter(iters)
+                    .map(init_source)
+                    .buffered(lookahead.max(1)),
+            )
+            .boxed();
+
+        Self {
+            key,
+            sources: Mutex::new(sources),
+            current: None,
+        }
+    }
+
     pub(crate) fn new(
         key: Bytes,
         write_batch_iter: Box<dyn RowEntryIterator + 'static>,
@@ -64,14 +116,26 @@ impl GetIterator {
             .chain(std::iter::once(segment_iter))
             .collect();
 
-        Self { key, iters, idx: 0 }
+        // Every source here is either in memory or the segment chain itself,
+        // so there is no metadata fetch to overlap: walk them one at a time.
+        Self::with_lookahead(key, iters, 1)
     }
 
     /// Build a per-tree `GetIterator` over the L0 + sorted-run iterators
     /// produced by `tree`. The chain stays flat (no `MergeIterator`) so a
-    /// bloom-positive hit in the newest L0 SST short-circuits without
-    /// opening any older SSTs — the same laziness the pre-segment GET path
-    /// had, scoped to one segment.
+    /// bloom-positive hit short-circuits the walk rather than opening every
+    /// older SST.
+    ///
+    /// After the newest source, up to `ctx.max_parallel` sources are
+    /// initialized concurrently so their metadata fetches overlap. Proving a
+    /// key absent costs `1 + ceil((sources - 1) / max_parallel)` round trips
+    /// instead of one per source.
+    ///
+    /// A hit past the newest source overshoots by up to `max_parallel - 1`
+    /// sources. A speculatively initialized source costs a filter read, and if
+    /// its filter is positive an index read and one data block read as well.
+    /// Dropping the walk drops the pending `init`s, but block fetches they
+    /// already spawned are detached and still run to completion.
     ///
     /// `max_seq` is applied per leaf via `FilterIterator` so above-bound
     /// tombstones are dropped before the outer flat-walk encounters them
@@ -85,7 +149,7 @@ impl GetIterator {
         let l0 = build_l0_point_iters(&tree.l0, ctx)?;
         let sr = build_sr_point_iters(&key, &tree.compacted, ctx)?;
         let iters = apply_filters(l0.into_iter().chain(sr), max_seq);
-        Ok(Self { key, iters, idx: 0 })
+        Ok(Self::with_lookahead(key, iters, ctx.max_parallel))
     }
 }
 
@@ -93,18 +157,23 @@ impl GetIterator {
 impl RowEntryIterator for GetIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         // GetIterator departs from the normal convention for RowEntryIterator
-        // in that it lazily initializes the iterators only when necessary -
-        // this is because it is used in a way that will early exit before all
-        // iterators are used.
+        // in that it lazily initializes the sources only when necessary - this
+        // is because it is used in a way that will early exit before all
+        // sources are used.
         Ok(())
     }
 
     async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        while self.idx < self.iters.len() {
-            // initialization is idempotent, so we can call it multiple times
-            self.iters[self.idx].init().await?;
-            let result = self.iters[self.idx].next().await?;
-            if let Some(entry) = result {
+        loop {
+            if self.current.is_none() {
+                match self.sources.get_mut().next().await {
+                    Some(source) => self.current = Some(source?),
+                    None => return Ok(None),
+                }
+            }
+            let iter = self.current.as_mut().expect("source set above");
+
+            if let Some(entry) = iter.next().await? {
                 // Note: The Get iterator should not advance past tombstones, which is
                 // why we filter them out here. When a tombstone is encountered, we return None
                 // so the iterator stops without advancing to the next iterator in the chain.
@@ -117,10 +186,8 @@ impl RowEntryIterator for GetIterator {
                     }
                 }
             }
-            self.idx += 1;
+            self.current = None;
         }
-
-        Ok(None)
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
@@ -445,12 +512,143 @@ impl DbRecencyIterator {
 mod tests {
     use crate::batch::{WriteBatch, WriteBatchIterator};
     use crate::bytes_range::BytesRange;
-    use crate::db_iter::DbIterator;
+    use crate::db_iter::{DbIterator, GetIterator};
     use crate::error::SlateDBError;
     use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
     use crate::test_utils::TestIterator;
+    use crate::types::RowEntry;
+    use async_trait::async_trait;
     use bytes::Bytes;
+    use parking_lot::Mutex;
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Shared record of how the get walk probed its sources.
+    #[derive(Default)]
+    struct ProbeRecord {
+        in_flight: AtomicUsize,
+        peak: AtomicUsize,
+        initialized: Mutex<Vec<usize>>,
+    }
+
+    /// Source that reports its own `init` overlapping with its siblings',
+    /// making the walk's probe concurrency observable without object storage.
+    struct ProbeIterator {
+        id: usize,
+        entry: Option<RowEntry>,
+        record: Arc<ProbeRecord>,
+    }
+
+    #[async_trait]
+    impl RowEntryIterator for ProbeIterator {
+        async fn init(&mut self) -> Result<(), SlateDBError> {
+            self.record.initialized.lock().push(self.id);
+            let in_flight = self.record.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.record.peak.fetch_max(in_flight, Ordering::SeqCst);
+            // Stand in for the filter fetch: give siblings started in the same
+            // window a chance to enter `init` before this one completes.
+            tokio::task::yield_now().await;
+            self.record.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+            Ok(self.entry.take())
+        }
+
+        async fn seek(&mut self, _next_key: &[u8]) -> Result<(), SlateDBError> {
+            Ok(())
+        }
+    }
+
+    /// `sources` many probes, those listed in `hits` holding the key. Each
+    /// stores its own id as the value so the walk's choice is identifiable.
+    fn probe_sources(
+        sources: usize,
+        hits: &[usize],
+    ) -> (Arc<ProbeRecord>, Vec<Box<dyn RowEntryIterator + 'static>>) {
+        let record = Arc::new(ProbeRecord::default());
+        let iters = (0..sources)
+            .map(|id| {
+                Box::new(ProbeIterator {
+                    id,
+                    entry: hits
+                        .contains(&id)
+                        .then(|| RowEntry::new_value(b"key", id.to_string().as_bytes(), 1)),
+                    record: record.clone(),
+                }) as Box<dyn RowEntryIterator + 'static>
+            })
+            .collect();
+        (record, iters)
+    }
+
+    #[tokio::test]
+    async fn test_get_probes_absent_sources_concurrently() {
+        let (record, iters) = probe_sources(8, &[]);
+        let mut iter = GetIterator::with_lookahead(Bytes::from_static(b"key"), iters, 4);
+
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        // Proving the key absent must consult every source, but in windows of
+        // `lookahead` rather than one at a time.
+        assert_eq!(record.initialized.lock().len(), 8);
+        assert_eq!(record.peak.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn test_get_returns_newest_matching_source() {
+        let (_, iters) = probe_sources(8, &[2, 3, 5]);
+        let mut iter = GetIterator::with_lookahead(Bytes::from_static(b"key"), iters, 4);
+
+        // 3 and 5 are initialized in the same window as 2, so the answer must
+        // come from source order and not from whichever `init` finished first.
+        let entry = iter
+            .next()
+            .await
+            .unwrap()
+            .expect("sources 2, 3, 5 hold key");
+        assert_eq!(entry.value.as_bytes(), Some(Bytes::from_static(b"2")));
+    }
+
+    #[tokio::test]
+    async fn test_get_hit_in_newest_source_probes_nothing_else() {
+        let (record, iters) = probe_sources(8, &[0]);
+        let mut iter = GetIterator::with_lookahead(Bytes::from_static(b"key"), iters, 4);
+
+        let entry = iter.next().await.unwrap().expect("newest source holds key");
+        assert_eq!(entry.value.as_bytes(), Some(Bytes::from_static(b"0")));
+
+        // The newest source is probed alone, so answering from it costs no
+        // speculative reads at all.
+        assert_eq!(*record.initialized.lock(), vec![0]);
+    }
+
+    #[tokio::test]
+    async fn test_get_hit_past_the_newest_source_bounds_overshoot() {
+        let (record, iters) = probe_sources(8, &[1]);
+        let mut iter = GetIterator::with_lookahead(Bytes::from_static(b"key"), iters, 4);
+
+        iter.next().await.unwrap().expect("source 1 holds key");
+
+        // Sources past the newest one are probed in windows, so a hit inside
+        // the first window never reaches the rest of the chain.
+        let initialized = record.initialized.lock();
+        assert!(
+            initialized.iter().all(|id| *id < 5),
+            "probed past the lookahead window: {initialized:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_with_unit_lookahead_probes_one_source_at_a_time() {
+        let (record, iters) = probe_sources(4, &[]);
+        let mut iter = GetIterator::with_lookahead(Bytes::from_static(b"key"), iters, 1);
+
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        assert_eq!(record.peak.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn test_invalidated_iterator() {
