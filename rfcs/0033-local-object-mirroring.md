@@ -142,15 +142,18 @@ let db = Db::builder(db_path, cache).build().await?;
 
 ### Filesystem layout
 
-Three types of files exist under the cache root:
+Four types of files exist under the cache root:
 
+- `LOCK`: A persistent lock file held exclusively for the lifetime of the
+  mirror.
 - `01M05WR6EZ6ZF44TGFNN5HFTDD.sst`: The complete SST file, which is byte-for
   byte identical to the remote object.
 - `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.1234567890`: A temporary file that is being
   written to either for uploading or downloading purposes. The suffix is an
   atomic counter unique to the process.
-- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.meta`: Metadata for the SST, including ETag,
-  version, and attributes.
+- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.meta`: Metadata for the SST, including its
+  canonical object path, ETag, version, and attributes. The path is used to
+  recover the remote location after restart and verify the filename hash.
 
 Each file is prefixed with an MD5-encoding of its object path with the filename
 stripped. This protects against filename collisions between external databases
@@ -160,6 +163,7 @@ A directory might look like this:
 
 ```text
 <cache-root>/
+  LOCK
   754128269b532c9827ffa09d3afb6118.01M05WR6EZ6ZF44TGFNN5HFTDD.sst
   754128269b532c9827ffa09d3afb6118.01M05WR6EZ6ZF44TGFNN5HFTDD.sst.meta
   754128269b532c9827ffa09d3afb6118.01M05WR997G22470E93PBPVAA2.sst.3
@@ -183,6 +187,10 @@ fully downloaded and renamed.
 Upload and download files are undifferentiated. No collision is possible
 because the temporary file suffix is unique to the process. Multiple operations
 for the same SST should never be in flight.
+
+`build()` takes an exclusive operating-system lock on `LOCK` and holds it until
+the mirror is dropped. The file is not removed when the lock is released. If
+another mirror owns the cache directory, `build()` fails.
 
 ### Warming
 
@@ -338,7 +346,8 @@ An SST can be written successfully and then lost before it is recorded in
 A full remote scan runs every ten minutes by default to collect these cases:
 
 - Snapshot the local `.sst` file list.
-- Group them by their remote parent prefix (their MD5-encoded directory).
+- Read their canonical object paths from `.meta` and group them by remote parent
+  prefix.
 - LIST each distinct parent prefix on the wrapped remote store.
 - Delete any local file absent from the remote result.
 
@@ -391,8 +400,8 @@ lifetime reduces that to roughly 60 GiB.
 `ObjectStoreMirror` performs all local I/O through a small asynchronous `Vfs`
 trait. The interface is limited to the operations the mirror needs: range
 reads, streamed temporary-file writes, directory creation, rename, remove, and
-listing. `ObjectStoreMirrorBuilder::with_vfs` replaces the default
-implementation.
+listing and file locking. `ObjectStoreMirrorBuilder::with_vfs` replaces the
+default implementation.
 
 The design supports three implementations:
 
@@ -428,10 +437,12 @@ On startup, `ObjectStoreMirrorBuilder::build` :
 
 1. Validates options
 2. Makes the local directory if it does not exist
-3. Removes all `.meta` files without a corresponding `.sst`
-4. Removes any `.sst.[tmp_num]` files (incomplete uploads or downloads)
-5. Reconstructs in-memory metadata state from existing `.sst` and `.meta` files
-6. Starts background workers
+3. Acquires the exclusive `LOCK` file lock
+4. Removes all `.meta` files without a corresponding `.sst`
+5. Removes any `.sst.[tmp_num]` files (incomplete uploads or downloads)
+6. Validates each `.meta` path against its filename hash and reconstructs
+   in-memory metadata state
+7. Starts background workers
 
 ## Impact Analysis
 
