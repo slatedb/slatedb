@@ -136,7 +136,7 @@ let cache = ObjectStoreMirror::builder("/var/lib/slatedb/cache", remote)
     .with_download_concurrency(8)
     .with_reclamation_interval(Some(Duration::from_secs(600)))
     .build()
-    .await?;()
+    .await?;
 let db = Db::builder(db_path, cache).build().await?;
 ```
 
@@ -243,15 +243,14 @@ All downloads use `single_flight.rs` to avoid duplicate downloads.
 
 ### Reads
 
-`ObjectStoreMirror` has two internal read modes:
+`ObjectStoreMirror` has three internal read modes:
 
 - `Bypass` reads directly from the wrapped store and does not use the local
   mirror.
 - `Local` reads SSTs from the local filesystem mirror and returns an error
   if any are missing.
 - `Refetch` forces a synchronous remote read of the full SST, overwriting the
-  local copy if it exists. This is used to repair corrupt or missing local
-  files.
+  local copy if it exists. This is used to repair corrupt files.
 
 `ObjectStoreCallTag` is inspected to determine which mode to use.
 
@@ -315,6 +314,8 @@ update the state and apply this rule:
 - Build full object paths for every SST referenced by the latest manifest and
   its active checkpoint manifests. Queue (for deletion) paths present in the
   old reference set but absent from the new one.
+- Remove any in-memory manifests that are no longer referenced by the latest
+  manifest or its active checkpoints.
 
 "Reference" here means:
 
@@ -324,9 +325,11 @@ update the state and apply this rule:
 - Compacted SSTs in the manifest's checkpoints `compacted` and
   `ExternalDb.sst_ids` lists.
 
-On write, this is done in parallel with the manifest object store write. On
-read, it is done synchronously after the `.manifest` is read but before it is
-returned. The return is blocked until both are complete.
+Missing checkpoint manifests are fetched from the remote store.
+
+On both reads and writes, this it is done synchronously after the `.manifest`
+is read/written but before it is returned. The return is blocked until both are
+complete.
 
 #### Pessimistic garbage collection
 
@@ -415,7 +418,7 @@ Requests travel in the opposite direction:
 RetryingObjectStore -> InstrumentedObjectStore -> ObjectStoreMirror -> S3ObjectStore
 ```
 
-Almost all mirror requests are synchronous. The one exception is `.compaction`
+Almost all mirror requests are synchronous. The one exception is `.compactions`
 pre-fetching. This is done best effort. Failed downloads are simply retried in
 subsequent `.compactions` reads.
 
@@ -426,7 +429,7 @@ On startup, `ObjectStoreMirrorBuilder::build` :
 1. Validates options
 2. Makes the local directory if it does not exist
 3. Removes all `.meta` files without a corresponding `.sst`
-4. Removes any `.sst.*` files (incomplete uploads or downloads)
+4. Removes any `.sst.[tmp_num]` files (incomplete uploads or downloads)
 5. Reconstructs in-memory metadata state from existing `.sst` and `.meta` files
 6. Starts background workers
 
@@ -501,7 +504,7 @@ Compacted SST writes stream to local and remote storage concurrently and return
 after the remote write succeeds and the local file is installed. WAL writes
 remain on the remote path.
 
-One `warm` call reads the latest manifest and issues one full-object GET
+Cache warming reads the latest manifest and issues one full-object GET
 for each referenced SST not already local. It may therefore transfer the full
 live compacted data set when starting with an empty cache. Existing local SSTs
 avoid those GETs. The utility shares the cache's remote-read concurrency with
