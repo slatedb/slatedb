@@ -19,8 +19,14 @@ It is separate from the existing part-based `CachedObjectStore`, which we will
 deprecate and remove.
 
 `ObjectStoreMirror` supports local-only reads, write-through mirroring, cache
-warming, and garbage collection. It guarantees all reads are from local files
-and all writes are durable to object storage before returning success.
+warming, and garbage collection. It guarantees all compacted SST reads are from
+local files and all writes are durable to object storage before returning
+success.
+
+Each `ObjectStoreMirror` serves one database root. The root is detected from
+the first `.manifest` read or write. Subsequent `.manifest` operations for a
+different root are rejected. External SSTs referenced by the database remain
+supported and may reside under other roots.
 
 ## Motivation
 
@@ -203,12 +209,11 @@ wrapped store, but before returning to the caller.
 
 A large compaction job can finish and update the `.manifest` with gigabytes,
 or even terabytes of new SSTs. Blocking the manifest update to download the
-entire set could take minutes or even hours. To prevent large stalls,
-`ObjectStoreMirror` periodically polls `.compactions` files for in-flight job
-output that has not yet been published to the manifest. It downloads any
-missing SSTs in the background. The `.manifest` blocking is therefore a final
-true-up rather than a complete download of all output from completed compaction
-jobs.
+entire set could take minutes or even hours. To prevent large stalls, once the
+database root is detected, `ObjectStoreMirror` derives its
+`.compactions` path and periodically polls it for in-flight job output. It downloads any missing SSTs in the
+background. The `.manifest` blocking is therefore a final true-up rather than a
+complete download of all output from completed compaction jobs.
 
 This behavior implicitly warms a database when it is first opened. Builders
 always read and write manifests in their `build` function. `DbReader`s also
@@ -258,7 +263,8 @@ All downloads use `single_flight.rs` to avoid duplicate downloads.
 - `Local` reads SSTs from the local filesystem mirror and returns an error
   if any are missing.
 - `Refetch` forces a synchronous remote read of the full SST, overwriting the
-  local copy if it exists. This is used to repair corrupt files.
+  local copy if it exists. Returns only the requested range to the caller. This
+  is used to repair corrupt files.
 
 `ObjectStoreCallTag` is inspected to determine which mode to use.
 
@@ -335,7 +341,7 @@ update the state and apply this rule:
 
 Missing checkpoint manifests are fetched from the remote store.
 
-On both reads and writes, this it is done synchronously after the `.manifest`
+On both reads and writes, this is done synchronously after the `.manifest`
 is read/written but before it is returned. The return is blocked until both are
 complete.
 
@@ -428,8 +434,9 @@ RetryingObjectStore -> InstrumentedObjectStore -> ObjectStoreMirror -> S3ObjectS
 ```
 
 Almost all mirror requests are synchronous. The one exception is `.compactions`
-pre-fetching. This is done best effort. Failed downloads are simply retried in
-subsequent `.compactions` reads.
+pre-fetching. This is done best effort. Failed downloads are simply ignored and
+triggered again in subsequent `.compactions` reads or the next `.manifest` update
+they appear in.
 
 ### Startup
 
@@ -599,7 +606,7 @@ TODO
 - Added `with_vfs` and a minimal virtual filesystem abstraction.
 - Removed the GET policy; routing is fixed by `ObjectStoreCallTag`.
 - Added the `CachedObjectStore` deprecation and removal schedule.
-- Made `LocalOnly` the default and cache population explicit.
+- Made `Local` the default and cache population explicit.
 - Made the proposal additive by introducing `ObjectStoreMirror` alongside
   `CachedObjectStore`.
 - Dropped write-back after comparing its publication barrier with SlateDB's
