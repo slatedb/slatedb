@@ -692,9 +692,17 @@ impl MirrorState {
         &self,
         location: &Path,
         bytes: &Bytes,
-    ) -> object_store::Result<PreparedManifest> {
+    ) -> object_store::Result<Option<PreparedManifest>> {
         let root = Self::manifest_root(location)?;
         let id = Self::manifest_id(location)?;
+        if self
+            .latest_manifest
+            .lock()
+            .as_ref()
+            .is_some_and(|latest| id <= latest.id)
+        {
+            return Ok(None);
+        }
         let manifest = FlatBufferManifestCodec {}
             .decode(bytes)
             .map_err(boxed_mirror_error)?;
@@ -706,14 +714,9 @@ impl MirrorState {
             .latest_manifest
             .lock()
             .as_ref()
-            .is_some_and(|latest| id < latest.id)
+            .is_some_and(|latest| id <= latest.id)
         {
-            return Ok(PreparedManifest {
-                id,
-                manifest,
-                checkpoint_ids: HashSet::new(),
-                references,
-            });
+            return Ok(None);
         }
 
         let now = self.system_clock.now();
@@ -733,12 +736,12 @@ impl MirrorState {
             references.extend(Self::referenced_ssts(&root, &checkpoint));
         }
 
-        Ok(PreparedManifest {
+        Ok(Some(PreparedManifest {
             id,
             manifest,
             checkpoint_ids,
             references,
-        })
+        }))
     }
 
     fn apply_manifest(self: &Arc<Self>, prepared: PreparedManifest) {
@@ -751,7 +754,7 @@ impl MirrorState {
 
         let removed = {
             let mut latest = self.latest_manifest.lock();
-            if latest.as_ref().is_some_and(|latest| id < latest.id) {
+            if latest.as_ref().is_some_and(|latest| id <= latest.id) {
                 return;
             }
             let removed = latest
@@ -1044,7 +1047,9 @@ impl ObjectStore for ObjectStoreMirror {
             let extensions = result.extensions.clone();
             let bytes = result.bytes().await?;
             let prepared = self.state.prepare_manifest(location, &bytes).await?;
-            self.state.apply_manifest(prepared);
+            if let Some(prepared) = prepared {
+                self.state.apply_manifest(prepared);
+            }
             return Ok(GetResult {
                 payload: GetResultPayload::Stream(stream::once(async move { Ok(bytes) }).boxed()),
                 meta,
@@ -1074,11 +1079,9 @@ impl ObjectStore for ObjectStoreMirror {
             let should_process = self.state.should_process_manifest(location)?;
             let prepared = if should_process {
                 let manifest_bytes = payload_to_bytes(&payload);
-                Some(
-                    self.state
-                        .prepare_manifest(location, &manifest_bytes)
-                        .await?,
-                )
+                self.state
+                    .prepare_manifest(location, &manifest_bytes)
+                    .await?
             } else {
                 None
             };
@@ -1601,6 +1604,36 @@ mod tests {
             mirror.get(&other).await.unwrap().bytes().await.unwrap(),
             Bytes::from_static(b"other")
         );
+    }
+
+    #[tokio::test]
+    async fn older_and_equal_manifests_are_not_reprocessed() {
+        let remote: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let older = Path::from("db/manifest/00000000000000000001.manifest");
+        let equal = Path::from("db/manifest/00000000000000000002.manifest");
+        for location in [&older, &equal] {
+            remote
+                .put(location, PutPayload::from_static(b"not a manifest"))
+                .await
+                .unwrap();
+        }
+        let local = TempDir::new().unwrap();
+        let mirror = ObjectStoreMirror::builder(local.path(), remote)
+            .with_gc_interval(None)
+            .build()
+            .await
+            .unwrap();
+        mirror.state.latest_manifest.lock().replace(ManifestState {
+            id: 2,
+            references: HashSet::new(),
+        });
+
+        for location in [&equal, &older] {
+            assert_eq!(
+                mirror.get(location).await.unwrap().bytes().await.unwrap(),
+                Bytes::from_static(b"not a manifest")
+            );
+        }
     }
 
     #[tokio::test]

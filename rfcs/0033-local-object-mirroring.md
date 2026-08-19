@@ -214,7 +214,8 @@ state. Any missing SSTs are downloaded synchronously. For reads, this happens
 after the remote `.manifest` read but before returning to the caller. For
 writes, fallible warming happens before the remote conditional write so a
 committed manifest is never reported as failed. Manifest operations for other
-roots pass through unchanged.
+roots pass through unchanged. Manifest IDs at or below the latest one already
+processed are not decoded or warmed again.
 
 A large compaction job can finish and update the `.manifest` with gigabytes,
 or even terabytes of new SSTs. Blocking the manifest update to download the
