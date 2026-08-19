@@ -286,10 +286,13 @@ All downloads use `single_flight.rs` to avoid duplicate downloads.
 
 Object metadata (ETag, version, attributes, and so on) are cached as part of
 the local SST data so `GetResult` and `PutResult` always contain accurate data.
-On cache warm, object metadata is loaded from disk (or the remote store if the
-SST is missing) and stored in memory. As new `.meta` files are written, the
-mirror updates its in-memory metadata cache.  Metadata-only reads are served
-from the in-memory cache.
+Mirrored writes build this metadata without an extra remote HEAD: location,
+size, and attributes come from the write; ETag and version come from
+`PutResult`; and last-modified comes from the injected clock. On cache warm,
+object metadata is loaded from disk (or the remote store if the SST is missing)
+and stored in memory. As new `.meta` files are written, the mirror updates its
+in-memory metadata cache. Metadata-only reads are served from the in-memory
+cache.
 
 ### Deletes
 

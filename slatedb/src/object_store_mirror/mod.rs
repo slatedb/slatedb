@@ -860,6 +860,8 @@ impl MirrorState {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
+        let size = payload.content_length() as u64;
+        let attributes = opts.attributes.clone();
         let paths = self.local_paths(location)?;
         let temp = self.temp_path(&paths.data);
         self.vfs
@@ -883,32 +885,28 @@ impl MirrorState {
             let _ = self.remove_if_exists(&temp).await;
             return Err(error);
         }
-        let cached = match self.remote_head(location).await {
-            Ok(cached) => cached,
-            Err(error) => {
-                let _ = self.remove_if_exists(&temp).await;
-                return Err(error);
-            }
-        };
+        let cached = self.cached_metadata(location, size, attributes, &result);
         self.install_temp(location, &temp, cached).await?;
         Ok(result)
     }
 
-    async fn remote_head(&self, location: &Path) -> object_store::Result<CachedMetadata> {
-        let result = self
-            .object_store
-            .get_opts(
-                location,
-                GetOptions {
-                    head: true,
-                    ..GetOptions::default()
-                },
-            )
-            .await?;
-        Ok(CachedMetadata {
-            meta: result.meta,
-            attributes: result.attributes,
-        })
+    fn cached_metadata(
+        &self,
+        location: &Path,
+        size: u64,
+        attributes: Attributes,
+        result: &PutResult,
+    ) -> CachedMetadata {
+        CachedMetadata {
+            meta: ObjectMeta {
+                location: location.clone(),
+                last_modified: self.system_clock.now(),
+                size,
+                e_tag: result.e_tag.clone(),
+                version: result.version.clone(),
+            },
+            attributes,
+        }
     }
 
     async fn prefetch_compactions(&self) -> object_store::Result<()> {
@@ -1111,14 +1109,19 @@ impl ObjectStore for ObjectStoreMirror {
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
+        if !is_compacted(tag) {
+            return self
+                .state
+                .object_store
+                .put_multipart_opts(location, opts)
+                .await;
+        }
+        let attributes = opts.attributes.clone();
         let inner = self
             .state
             .object_store
             .put_multipart_opts(location, opts)
             .await?;
-        if !is_compacted(tag) {
-            return Ok(inner);
-        }
         let paths = self.state.local_paths(location)?;
         let temp = self.state.temp_path(&paths.data);
         self.state
@@ -1132,6 +1135,7 @@ impl ObjectStore for ObjectStoreMirror {
             location: location.clone(),
             temp,
             len: 0,
+            attributes,
         }))
     }
 
@@ -1199,6 +1203,7 @@ struct MirroringMultipartUpload {
     location: Path,
     temp: PathBuf,
     len: u64,
+    attributes: Attributes,
 }
 
 impl Debug for MirroringMultipartUpload {
@@ -1236,13 +1241,9 @@ impl MultipartUpload for MirroringMultipartUpload {
                 return Err(error);
             }
         };
-        let cached = match self.state.remote_head(&self.location).await {
-            Ok(cached) => cached,
-            Err(error) => {
-                let _ = self.state.remove_if_exists(&self.temp).await;
-                return Err(error);
-            }
-        };
+        let cached =
+            self.state
+                .cached_metadata(&self.location, self.len, self.attributes.clone(), &result);
         self.state
             .install_temp(&self.location, &self.temp, cached)
             .await?;
@@ -1266,6 +1267,7 @@ mod tests {
     use crate::object_store_tag::TableStoreKind;
     use object_store::memory::InMemory;
     use object_store::GetRange;
+    use slatedb_common::clock::MockSystemClock;
     use tempfile::TempDir;
 
     fn compacted_tag() -> ObjectStoreCallTag {
@@ -1300,18 +1302,35 @@ mod tests {
         let location = Path::from("db/compacted/01J79C21YKR31J2BS1EFXJZ7MR.sst");
         let mirror = ObjectStoreMirror::builder(local.path(), Arc::clone(&remote))
             .with_gc_interval(None)
+            .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
             .unwrap();
+        let mut put_options = compacted_put_options();
+        put_options.attributes.insert(
+            Attribute::ContentType,
+            AttributeValue::from("application/octet-stream"),
+        );
 
-        mirror
+        let put_result = mirror
             .put_opts(
                 &location,
                 PutPayload::from_iter([Bytes::from_static(b"mir"), Bytes::from_static(b"rored")]),
-                compacted_put_options(),
+                put_options,
             )
             .await
             .unwrap();
+        let mut head_options = compacted_get_options();
+        head_options.head = true;
+        let head = mirror.get_opts(&location, head_options).await.unwrap();
+        assert_eq!(head.meta.last_modified, DateTime::<Utc>::UNIX_EPOCH);
+        assert_eq!(head.meta.size, 8);
+        assert_eq!(head.meta.e_tag, put_result.e_tag);
+        assert_eq!(head.meta.version, put_result.version);
+        assert_eq!(
+            head.attributes.get(&Attribute::ContentType),
+            Some(&AttributeValue::from("application/octet-stream"))
+        );
         remote.delete(&location).await.unwrap();
 
         let bytes = mirror
@@ -1469,11 +1488,17 @@ mod tests {
         let location = Path::from("db/compacted/01J79C21YKR31J2BS1EFXJZ7MR.sst");
         let mirror = ObjectStoreMirror::builder(local.path(), Arc::clone(&remote))
             .with_gc_interval(None)
+            .with_system_clock(Arc::new(MockSystemClock::new()))
             .build()
             .await
             .unwrap();
+        let mut multipart_options = compacted_multipart_options();
+        multipart_options.attributes.insert(
+            Attribute::ContentType,
+            AttributeValue::from("application/octet-stream"),
+        );
         let mut upload = mirror
-            .put_multipart_opts(&location, compacted_multipart_options())
+            .put_multipart_opts(&location, multipart_options)
             .await
             .unwrap();
         upload
@@ -1490,16 +1515,22 @@ mod tests {
             ]))
             .await
             .unwrap();
-        upload.complete().await.unwrap();
+        let put_result = upload.complete().await.unwrap();
         remote.delete(&location).await.unwrap();
 
-        let bytes = mirror
+        let result = mirror
             .get_opts(&location, compacted_get_options())
             .await
-            .unwrap()
-            .bytes()
-            .await
             .unwrap();
+        assert_eq!(result.meta.last_modified, DateTime::<Utc>::UNIX_EPOCH);
+        assert_eq!(result.meta.size, 11);
+        assert_eq!(result.meta.e_tag, put_result.e_tag);
+        assert_eq!(result.meta.version, put_result.version);
+        assert_eq!(
+            result.attributes.get(&Attribute::ContentType),
+            Some(&AttributeValue::from("application/octet-stream"))
+        );
+        let bytes = result.bytes().await.unwrap();
         assert_eq!(bytes, Bytes::from_static(b"firstsecond"));
     }
 
