@@ -4,48 +4,6 @@ Table of Contents:
 
 <!-- TOC start (generate with https://bitdowntoc.derlin.ch) -->
 
-- [Summary](#summary)
-- [Motivation](#motivation)
-- [Goals](#goals)
-- [Non-Goals](#non-goals)
-- [Design](#design)
-  - [GET Routing](#get-routing)
-  - [Public API](#public-api)
-  - [Virtual Filesystem](#virtual-filesystem)
-  - [Architecture](#architecture)
-  - [Filesystem Layout](#filesystem-layout)
-  - [Read Semantics](#read-semantics)
-  - [Write Semantics](#write-semantics)
-  - [Delete Semantics](#delete-semantics)
-  - [Reclamation](#reclamation)
-  - [Compactor Checkpoint Retention](#compactor-checkpoint-retention)
-  - [Construction and Cleanup](#construction-and-cleanup)
-  - [Cache Warming](#cache-warming)
-  - [Prefix Store Support](#prefix-store-support)
-  - [Failure and Restart](#failure-and-restart)
-- [Impact Analysis](#impact-analysis)
-  - [Core API & Query Semantics](#core-api-query-semantics)
-  - [Consistency, Isolation, and Multi-Versioning](#consistency-isolation-and-multi-versioning)
-  - [Time, Retention, and Derived State](#time-retention-and-derived-state)
-  - [Metadata, Coordination, and Lifecycles](#metadata-coordination-and-lifecycles)
-  - [Compaction](#compaction)
-  - [Storage Engine Internals](#storage-engine-internals)
-  - [Ecosystem & Operations](#ecosystem-operations)
-- [Operations](#operations)
-  - [Performance and Cost](#performance-and-cost)
-  - [Capacity](#capacity)
-  - [Observability](#observability)
-  - [Compatibility](#compatibility)
-- [Testing](#testing)
-- [Rollout](#rollout)
-- [Alternatives](#alternatives)
-  - [Remote-Only Reclamation](#remote-only-reclamation)
-  - [GC-Rule Reclamation](#gc-rule-reclamation)
-  - [Write-Back](#write-back)
-- [Open Questions](#open-questions)
-- [References](#references)
-- [Updates](#updates)
-
 <!-- TOC end -->
 
 Status: Draft
@@ -57,19 +15,12 @@ Authors:
 ## Summary
 
 This RFC adds `ObjectStoreMirror`, a whole-file local mirror for compacted SSTs.
-It is separate from the existing part-based `CachedObjectStore`. Compacted SST
-reads are `LocalOnly` by default, so a missing local SST is an error. `Refetch`
-repairs a local SST after a validation failure.
+It is separate from the existing part-based `CachedObjectStore`, which we will
+deprecate and remove.
 
-Compacted SST writes are mirrored to local and remote storage and return after
-the remote write succeeds and the local file is installed.
-
-A cache warming mechanism is also provided for `LocalOnly` readers that want to
-ensure that every compacted SST is available locally on startup.
-
-Normal compaction churn is reclaimed from manifest and `.compactions`
-transitions. A periodic remote scan removes files missed because of restart,
-cross-process updates, or SSTs that never reached metadata.
+`ObjectStoreMirror` supports local-only reads, write-through mirroring, cache
+warming, and garbage collection. It guarantees all reads are from local files
+and all writes are durable to object storage before returning success.
 
 ## Motivation
 
@@ -80,7 +31,7 @@ best-effort cache and a full local replica, but it does neither job well.
 - It splits objects into fixed-size 4MiB (default) parts. This adds latency to
   small reads and creates many files for large writes.
 - A single 256MiB SST becomes 64 part files plus metadata. This creates
-  eviction pressure and startup scans that rebuild the in-memory index.
+  eviction pressure and slows startup scans that rebuild the in-memory index.
 - It drops admission events on writes when the evictor is overwhelmed. This can
   leave the newest SSTs uncached.
 - It does not provide a mechanism to guarantee local reads for those that want a
@@ -96,7 +47,9 @@ block read. Users can also implement a prefetching object store similar to
 ZeroFS's [prefetching object store](https://github.com/Barre/ZeroFS/blob/main/zerofs/src/object_store_prefetch.rs)
 if their workload has spatial locality.
 
-For `LocalOnly` workloads, the `FoyerHybridCache` is not a good fit.
+Some workloads wish to fully cache database SSTs locally to avoid network
+latency and bandwidth. `FoyerHybridCache` is not a good fit for these use
+cases:
 
 - It's best effort caching, so under load it can drop blocks.
 - The in memory index is costly to build at startup and consumes high memory.
@@ -106,16 +59,16 @@ For `LocalOnly` workloads, the `FoyerHybridCache` is not a good fit.
 - GC has more cost because you need to delete every block from Foyer as opposed
   to one file unlink.
 
-Rather than change the existing cache in place, this RFC adds
-`ObjectStoreMirror` under `slatedb/src/object_store_mirror`. The name
-distinguishes the local mirror from `DbCache`; `CachedObjectStore` remains
-available for one deprecation cycle.
+Rather than change the existing `CachedObjectStore` in place, this RFC adds
+`ObjectStoreMirror` under `slatedb/src/object_store_mirror` to address these
+issues.
 
 ## Goals
 
 - Add a whole-SST local mirror for compacted SSTs.
 - Support local-only reads, write-through mirroring, and cache warming.
-- Reclaim obsolete local SSTs promptly without duplicating GC eligibility.
+- Garbage collect obsolete local SSTs promptly without duplicating GC
+  eligibility.
 - Make the new cache additive so existing users are unaffected.
 
 ## Non-Goals
@@ -126,43 +79,20 @@ available for one deprecation cycle.
 
 ## Design
 
-### GET Routing
-
-GET routing is fixed by the call's `ObjectStoreCallTag`:
-
-| Request | Routing |
-|---|---|
-| Untagged or tagged WAL | Forward to the wrapped store |
-| Tagged compacted with `head = true` | Forward to the wrapped store |
-| Tagged compacted with `tag.retry.is_some()` | `Refetch` |
-| Other tagged compacted | `LocalOnly` |
-
-SlateDB reissues a compacted SST read once with `tag.retry` set after a
-recoverable validation failure. The mirror checks `tag.retry.is_some()`
-directly. For `Refetch`, it deletes the existing local file, forwards the GET to
-the wrapped store, and schedules a single-flight full-SST download to repair the
-local copy. All other tagged compacted SST reads are local-only.
-
 ### Public API
 
 `ObjectStoreMirror` is a normal `ObjectStore` implementation in
-`slatedb/src/object_store_mirror`. Users construct it with a local cache root and
-remote store, then pass it through the existing `DbBuilder::new`/`Db::builder`
-object-store parameter. The existing `CachedObjectStore` and
-`object_store_cache_options` remain available in this release.
+`slatedb/src/object_store_mirror`. Users construct it with a local cache root
+and remote store, then pass it through the existing
+`DbBuilder::new`/`Db::builder`/`DbReaderBuilder::builder` object store
+parameter.
 
 ```rust
 impl ObjectStoreMirror {
     pub fn builder(
-        local_root_folder: impl Into<PathBuf>,
+        local_dir: impl Into<PathBuf>,
         object_store: Arc<dyn ObjectStore>,
     ) -> ObjectStoreMirrorBuilder;
-    /// Populates the cache with compacted SSTs referenced by the latest
-    /// manifest.
-    pub async fn warm(
-        &self,
-        db_root: impl Into<object_store::path::Path>,
-    ) -> Result<(), Error>;
 }
 
 impl ObjectStoreMirrorBuilder {
@@ -203,223 +133,235 @@ let remote: Arc<dyn ObjectStore> = Arc::new(
         .build()?,
 );
 let cache = ObjectStoreMirror::builder("/var/lib/slatedb/cache", remote)
-    .with_download_concurrency(4)
+    .with_download_concurrency(8)
     .with_reclamation_interval(Some(Duration::from_secs(600)))
     .build()
-    .await?;
-cache.warm("my-db").await?;
+    .await?;()
 let db = Db::builder(db_path, cache).build().await?;
 ```
 
-### Virtual Filesystem
+### Filesystem layout
 
-`ObjectStoreMirror` performs all local I/O through a small asynchronous `Vfs`
-trait. The interface is limited to the operations the mirror needs: range
-reads, streamed temporary-file writes, directory creation, rename, remove, and
-listing. `ObjectStoreMirrorBuilder::with_vfs` replaces the default
-implementation.
+Three types of files exist under the cache root:
 
-The design supports three implementations:
+- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst`: The complete SST file, which is byte-for
+  byte identical to the remote object.
+- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.1234567890`: A temporary file that is being
+  written to either for uploading or downloading purposes. The suffix is an
+  atomic counter unique to the process.
+- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.meta`: Metadata for the SST, including ETag,
+  version, and attributes.
 
-1. `StdVfs`, the default implementation based on standard filesystem I/O.
-2. `IoUringVfs`, a future Linux implementation based on io_uring.
-3. `SimulatedVfs`, a deterministic implementation for simulation tests.
+Each file is prefixed with an MD5-encoding of its object path with the filename
+stripped. This protects against filename collisions between external databases
+and keeps the cache root flat.
 
-The VFS does not provide caching, eviction, or object-store semantics. It only
-abstracts the local filesystem operations used by the mirror.
-
-### Architecture
-
-The user supplies the cache as the main object store. SlateDB then applies its
-existing internal wrappers. The base-to-outer construction order is:
-
-```text
-S3ObjectStore -> ObjectStoreMirror -> InstrumentedObjectStore -> RetryingObjectStore
-```
-
-Requests travel in the opposite direction:
-
-```text
-RetryingObjectStore -> InstrumentedObjectStore -> ObjectStoreMirror -> S3ObjectStore
-```
-
-The cache owns retries and metrics for background refetches, warming, and
-reclamation because the `RetryingObjectStore` wrapper is outside the cache.
-
-`LocalCacheError` is wrapped in `object_store::Error::Generic` with
-`store: "object_store_mirror"`. SlateDB's `RetryingObjectStore::should_retry`
-must downcast the generic error's source and return `false` for
-`LocalCacheError`. Without this explicit check, the current retry classifier
-would retry the generic error indefinitely when `object_store_max_retries` is
-unset.
-
-WAL operations, reads and writes of manifests, compactions records, and GC
-boundaries, along with LIST, untagged HEAD, copy, and other untagged operations,
-always go to the wrapped remote store.
-
-The mirror observes successful manifest and `.compactions` reads and writes to
-maintain in-memory reference state. These objects are never served from the
-mirror; the state is used only for local reclamation.
-
-Because the wrapper is supplied through the normal `ObjectStore` parameter,
-the same type works with `Db`, `DbReader`, and `Compactor`. A cache local
-filesystem root belongs to one live `ObjectStoreMirror`. Separate wrappers,
-including wrappers in separate processes, must use separate local filesystem
-roots.
-
-### Filesystem Layout
-
-Each cached SST maps to one local file. There are two folders under the cache
-root:
-
-- `objects/` contains complete local SSTs. Each file is named with its full
-  object-store path relative to `objects/`.
-- `uploading/` contains incomplete local SST writes.
+A directory might look like this:
 
 ```text
 <cache-root>/
-  objects/<full-object-store-path>
-  uploading/<filename>
-  downloading/<full-object-store-path>
+  754128269b532c9827ffa09d3afb6118.01M05WR6EZ6ZF44TGFNN5HFTDD.sst
+  754128269b532c9827ffa09d3afb6118.01M05WR6EZ6ZF44TGFNN5HFTDD.sst.meta
+  754128269b532c9827ffa09d3afb6118.01M05WR997G22470E93PBPVAA2.sst.3
+  4e7dc5d27c63e00966170758c2ff14bf.01M05WRE0MG8EZY9HJEY36JE4B.sst.5
+  4e7dc5d27c63e00966170758c2ff14bf.01M05WRE0MG8EZY9HJEY36JE4B.sst.meta
 ```
 
-For example:
+This directory contains files for two directories:
 
-```text
-<cache-root>/
-  objects/tenant1/foo/compacted/AB12C01M05WQZSVG1YFZECTMTTTA3EE.sst
-  objects/tenant2/foo/compacted/01M05WR6EZ6ZF44TGFNN5HFTDD.sst
-  uploading/tenant1/foo/compacted/01M05WR997G22470E93PBPVAA2.sst
-  downloading/tenant1/foo/compacted/01M05WRE0MG8EZY9HJEY36JE4B.sst
-```
+- /path/to/db/compacted (754128269b532c9827ffa09d3afb6118)
+- /path/to/other/db/compacted (4e7dc5d27c63e00966170758c2ff14bf)
 
-The cache uses the canonical `object_store::path::Path` directly as a relative
-path below `objects/`. It appends the path's existing components without
-percent-decoding or otherwise transforming them. `object_store::path::Path` has
-no leading or trailing separator, empty component, `.` or `..` component, or
-ASCII control character, so a valid path is already relative and cannot
-lexically escape `objects/`. External SSTs arrive with their source database's
-full object-store path, so they naturally group below that source database path.
+The `754128269b532c9827ffa09d3afb6118` prefix has one fully downloaded SST
+(`01M05WR6EZ6ZF44TGFNN5HFTDD.sst`) and one in-flight SST
+(`01M05WR997G22470E93PBPVAA2.sst.3`).
 
-No body length, checksum, attributes, or other metadata are stored locally.
-Files are byte-for-byte identical with their remote counterparts.
+The `4e7dc5d27c63e00966170758c2ff14bf` prefix has one partially downloaded SST
+(`01M05WRE0MG8EZY9HJEY36JE4B.sst.5`) and its metadata. The SST has not yet been
+fully downloaded and renamed.
 
-### Read Semantics
+Upload and download files are undifferentiated. No collision is possible
+because the temporary file suffix is unique to the process. Multiple operations
+for the same SST should never be in flight.
 
-For a normal tagged compacted SST read, the cache serves the file from
-`objects/`. If the file is missing, it returns `LocalCacheError` without
-accessing remote storage.
+### Warming
 
-A tagged `get_opts` call with `head = true` goes directly to the wrapped store.
+The mirror is warmed continuously as new `.manifest` files are read and
+written. `ObjectStoreMirror` inspects the path for each object and looks for
+`.manifest` files. When it sees one, it decodes the manifest and compares its
+referenced SSTs with its own local state. Any missing SSTs are downloaded
+synchronously. This happens after the `.manifest` call is forwarded to the
+wrapped store, but before returning to the caller.
 
-For `Refetch`, the requested range is returned directly from the wrapped store.
-The foreground request does not wait for the separate full-SST download, which
-writes to `downloading/` and atomically renames the complete SST into `objects/`.
-Full-SST refetches are single-flight by SST path. If the download fails, the
-foreground retry is unaffected; the cache records the failure and removes the
-partial file.
+A large compaction job can finish and update the `.manifest` with gigabytes,
+or even terabytes of new SSTs. Blocking the manifest update to download the
+entire set could take minutes or even hours. To prevent large stalls,
+`ObjectStoreMirror` periodically polls `.compactions` files for in-flight job
+output that has not yet been published to the manifest. It downloads any
+missing SSTs in the background. The `.manifest` blocking is therefore a final
+true-up rather than a complete download of all output from completed compaction
+jobs.
 
-The caller must populate the cache before database instantiation using `warm`
-or by manually copying or downloading complete SSTs into `objects/`.
+This behavior implicitly warms a database when it is first opened. Builders
+always read and write manifests in their `build` function. `DbReader`s also
+benefit from this approach. As new manifests are polled, the mirror will
+download any missing SSTs before forwarding the manifest read. This guarantees
+that all reads will come from local disk.
 
-### Write Semantics
+Referenced SSTs include:
+
+- Compacted SSTs in the manifest's `compacted` list.
+- Compacted SSTs in the manifest's `ExternalDb.sst_ids` list, resolved
+  under the external database's path.
+
+SSTs referenced by the manifest's checkpoints are not considered referenced
+since readers only need read SSTs from the current manifest. (Mirror garbage
+collection still retains checkpointed SSTs until the checkpoint expires.)
+
+### Writes
 
 Tagged compacted SST writes are write-through. Single-PUT and multipart writes
-tee bytes to the remote store and a temporary file under `uploading/`. Multipart
-parts continue streaming remotely as they are produced.
+tee bytes to the remote store and its temporary file.
 
-The write returns only after the remote upload succeeds and the complete local
-file is atomically renamed into `objects/`. A remote failure removes the
-temporary file and returns the remote error. A local failure returns
-`LocalCacheError`; a remote SST that already completed is left unreferenced for
-garbage collection. The local copy is recoverable cache state; validation
-failures use `Refetch` to replace it.
+The write returns only after the remote upload succeeds, its `.meta` file is
+written, and the complete local file is atomically renamed. A remote failure
+removes the temporary file and returns the remote error. A local failure returns
+`LocalCacheError`. Remote SSTs that already completed are left unreferenced for
+garbage collection. `RetryingObjectStore` is updated to avoid retrying
+`LocalCacheError`. Disk errors are treated as terminal. `Db`'s closed status
+will be set with a `Data` error.
 
 Tagged WAL and untagged writes pass through to remote storage. Manifest,
 compactions, WAL, and GC boundary PUTs retain their existing conditional-write,
 fencing, and publication ordering.
 
-### Delete Semantics
+`ObjectStoreMirror` will watch for `.manifest` writes. When it sees an object
+with a `.manifest` extension, it will decode the manifest and synchronously
+download any compacted SSTs missing from the local cache.
 
-Delete operations pass through to the wrapped store. Local files in `objects/`
-that match the deleted path are removed if they exist. Local and remote
-deletions are done in parallel, and a failure in one does not affect the other.
+All downloads use `single_flight.rs` to avoid duplicate downloads.
 
-### Reclamation
+### Reads
 
-Reclamation is the process of removing local SSTs that are no longer
-referenced in the database. `ObjectStoreMirror` has two phases: an immediate
-metadata-driven phase and a periodic exhaustive remote scan.
+`ObjectStoreMirror` has two internal read modes:
+
+- `Bypass` reads directly from the wrapped store and does not use the local
+  mirror.
+- `Local` reads SSTs from the local filesystem mirror and returns an error
+  if any are missing.
+- `Refetch` forces a synchronous remote read of the full SST, overwriting the
+  local copy if it exists. This is used to repair corrupt or missing local
+  files.
+
+`ObjectStoreCallTag` is inspected to determine which mode to use.
+
+| Request | Routing |
+|---|---|
+| Untagged or tagged WAL | `Bypass` |
+| Tagged compacted with `tag.retry.is_some()` | `Refetch` |
+| Other tagged compacted | `Local` |
+
+Object metadata (ETag, version, attributes, and so on) are cached as part of
+the local SST data so `GetResult` and `PutResult` always contain accurate data.
+On cache warm, object metadata is loaded from disk (or the remote store if the
+SST is missing) and stored in memory. As new `.meta` files are written, the
+mirror updates its in-memory metadata cache.  Metadata-only reads are served
+from the in-memory cache.
+
+### Deletes
+
+Delete operations pass through to the wrapped store. Local files that match the
+deleted path are removed if they exist. Local and remote deletions are done in
+parallel, and a failure in one does not affect the other.
+
+This means a client running a local garbage collector inherits the GC's delete
+calls locally. Garbage collectors that run remotely do not directly remove
+local files, though. To support remote garbage collection, the mirror needs to
+periodically scan the remote store for files that are no longer present.
+
+Deletions also remove any in-memory cache state for the deleted object.
+
+### Garbage collection
+
+`ObjectStoreMirror` has two garbage collection phases: an optimistic immediate
+metadata-driven phase and a pessimistic periodic exhaustive remote scan.
 
 The optimistic approach is required to keep disk usage low in high-throughput
 workloads. Without an active deletion mechanism, even a minute of writes and
-compaction churn can generate hundreds of hundreds of abandoned data. This is
-not a concern for object storage, but is for local disks.
+compaction churn can generate hundreds of outdated files. This is not a concern
+for object storage, but is for local disks.
 
-Pessimistic reclamation is required to handle the case where a local SST is
-written successfully and then lost before it is recorded in `.compactions` or a
-manifest. This can be caused by a crash, a process restart, a failed compaction
-job with SST output that never reached the `.compactions` file, and so on. These
-are rare cases, but they can leave a local SST that is no longer referenced and
-should be deleted. Pessimistic reclamation is effectively a cheap way to
-copy the garbage collector's logic without running it in two places.
+Pessimistic GC is required to handle the case where a local SST is
+written successfully and then lost before it is recorded in metadata. This can
+be caused by a crash, a process restart, a failed compaction job, and so on.
+These are rare cases, but they can leave a local SST that is no longer
+referenced and should be deleted. Pessimistic GC is effectively a
+cheap way to copy the garbage collector's logic without running it in two
+places.
 
-#### Optimistic Reclamation
+Garbage collection also removes any in-memory cache state for the deleted
+object.
+
+#### Optimistic garbage collection
 
 `ObjectStoreMirror` uses `.manifest` transitions to detect when a local SST is
 no longer referenced. If an old `.manifest` references an SST and a new one no
 longer does, that SST is safe for deletion. It queues these SSTs for deletion
 and removes them in the background.
 
-The mirror keeps the newest `.manifest` state it observes. Reads initialize this
-state. After a successful write, the mirror updates the corresponding state and
-applies this rule:
+The mirror keeps the newest `.manifest` state it observes. Reads and writes
+update the state and apply this rule:
 
 - Build full object paths for every SST referenced by the latest manifest and
-  its active checkpoint manifests. This includes `ExternalDb.sst_ids`, resolved
-  under each external database path. Queue paths present in the old reference
-  set but absent from the new one.
+  its active checkpoint manifests. Queue (for deletion) paths present in the
+  old reference set but absent from the new one.
 
-This is done asynchronously while the manifest object store write occurs. The
-return is blocked until both are complete.
+"Reference" here means:
 
-_The hope here is that the the reclamation and deletion will take fewer
-milliseconds than the network round-trip. If it does not, and the deletion
-proves to be a bottleneck, we might need to move it to an asynchronous task and
-implement some form of eviction if/when the queue becomes overloaded. This
-needs experimentation. The goal with the sync approach is to keep the
-implementation simple._
+- Compacted SSTs in the manifest's `compacted` list.
+- Compacted SSTs in the manifest's `ExternalDb.sst_ids` list, resolved
+  under the external database's path.
+- Compacted SSTs in the manifest's checkpoints `compacted` and
+  `ExternalDb.sst_ids` lists.
 
-#### Pessimistic Reclamation
+On write, this is done in parallel with the manifest object store write. On
+read, it is done synchronously after the `.manifest` is read but before it is
+returned. The return is blocked until both are complete.
+
+#### Pessimistic garbage collection
 
 An SST can be written successfully and then lost before it is recorded in
-`.compactions` or a manifest. Metadata diffs cannot discover such files. They
-also cannot reconstruct transitions missed across restart. A full remote scan
-runs every ten minutes by default to collect these cases:
+`.compactions` or `.manifest` files. Metadata diffs cannot discover such files.
+A full remote scan runs every ten minutes by default to collect these cases:
 
-- Snapshot all files in `objects/`.
-- Group them by their remote parent prefix.
+- Snapshot the local `.sst` file list.
+- Group them by their remote parent prefix (their MD5-encoded directory).
 - LIST each distinct parent prefix on the wrapped remote store.
-- Delete any local file absent from the remote result after rechecking its
-  generation and current references.
+- Delete any local file absent from the remote result.
 
 The periodic scan only deletes files after remote GC has removed them. This
-implies that local pessimistic reclamation will not delete anything younger
-than the GC's compacted SST `min_age` setting.
+implies that local pessimistic garbage collection will not delete anything younger
+than the GC's compacted SST `min_age` setting. It also means the
+ `ObjectStoreMirror` will inherit all of the GC's rules.
+
+Pessimistic garbage collection is not necessary if the garbage collector is running
+in the same process. The GC's delete calls will remove local files directly
+(see Delete Semantics, above). Users may disable the periodic scan by passing `None` to
+`ObjectStoreMirrorBuilder::with_reclamation_interval`.
 
 > [!IMPORTANT]
 > This design requires a bucket and endpoint with strongly consistent object
-> reads, writes, deletes, and listings. Reclamation treats confirmed remote
+> reads, writes, deletes, and listings. Garbage collection treats confirmed remote
 > absence as authoritative and may delete the only local copy, so it must be
 > disabled when these guarantees are unavailable. In particular:
 >
 > - Tigris global and dual-region buckets are strongly consistent for requests
 >   within one region but eventually consistent across regions. All writers and
->   caches performing reclamation must access such a bucket from the same
+>   caches performing garbage collection must access such a bucket from the same
 >   region; Tigris
 >   multi-region and single-region buckets provide strong consistency globally.
 > - Azure RA-GRS and RA-GZRS secondary endpoints are eventually consistent with
->   the primary. Reclamation must use the primary endpoint and remain
+>   the primary. Garbage collection must use the primary endpoint and remain
 >   disabled while reads are directed to a secondary endpoint.
 
 ### Compactor Checkpoint Retention
@@ -441,55 +383,52 @@ for both ingestion and compaction. If a workload is running at 1 GiB/s, the
 operator will need 900 GiB of disk for the mirror. A 1 minute checkpoint
 lifetime reduces that to roughly 60 GiB.
 
-### Construction and Cleanup
+### Virtual Filesystem
 
-`ObjectStoreMirrorBuilder::build` validates its options, prepares the local
-directories, and removes files under `uploading/` and `downloading/` before
-starting background work. It returns an error if any of this setup fails.
-Deleting those incomplete files is safe because files enter `objects/` only
-after the corresponding remote upload succeeds.
+`ObjectStoreMirror` performs all local I/O through a small asynchronous `Vfs`
+trait. The interface is limited to the operations the mirror needs: range
+reads, streamed temporary-file writes, directory creation, rename, remove, and
+listing. `ObjectStoreMirrorBuilder::with_vfs` replaces the default
+implementation.
 
-Before database instantiation, required SSTs must already have been written
-through this cache or populated using `warm` or a manual filesystem copy.
+The design supports three implementations:
 
-`Db::close()` requires no cache-specific follow-up. Existing metadata
-publication ordering applies because each compacted SST PUT returns only after
-the SST is durable remotely.
+1. `StdVfs`, the default implementation based on standard filesystem I/O.
+2. `IoUringVfs`, a future Linux implementation based on io_uring.
+3. `SimulatedVfs`, a deterministic implementation for simulation tests.
 
-### Cache Warming
+The VFS does not provide caching, eviction, or object-store semantics. It only
+abstracts the local filesystem operations used by the mirror.
 
-There are three ways to populate the cache:
+### Retries and metrics
 
-1. Any successful tagged compacted SST write installs the complete local SST.
-2. An application can call `warm` to populate the compacted SSTs in a
-   database's latest manifest and wait. This must be done before database
-   instantiation if the caller wants to avoid `LocalCacheError` on a `LocalOnly`
-   read.
-3. An operator can manually copy or download complete SSTs into `objects/`.
+The user supplies the cache as the main object store. SlateDB then applies its
+existing internal wrappers. The base-to-outer construction order is:
 
-Calling `warm` is optional only when the required SSTs are already local. The
-utility has no options: it warms every compacted SST in the latest manifest,
-including SSTs resolved through `ExternalDb.sst_ids`, uses the cache's existing
-remote-read concurrency and retry policy, and returns an error if any SST cannot
-be populated.
+```text
+S3ObjectStore -> ObjectStoreMirror -> InstrumentedObjectStore -> RetryingObjectStore
+```
 
-### Prefix Store Support
+Requests travel in the opposite direction:
 
-When the cache wraps a `PrefixStore`, `db_root` is relative to the prefix
-store's logical namespace. For example, warming `foo` through a prefix store
-rooted at `tenant1` reads `foo/manifest/...` through the wrapper, which maps to
-`tenant1/foo/manifest/...` in the underlying bucket. The cache stores
-`objects/foo/compacted/...`; it does not include the hidden prefix. External
-SST paths must be reachable through the same wrapped namespace, as they must be
-for normal database reads.
+```text
+RetryingObjectStore -> InstrumentedObjectStore -> ObjectStoreMirror -> S3ObjectStore
+```
 
-### Failure and Restart
+Almost all mirror requests are synchronous. The one exception is `.compaction`
+pre-fetching. This is done best effort. Failed downloads are simply retried in
+subsequent `.compactions` reads.
 
-Complete files under `objects/` survive restart; incomplete uploads and
-downloads are removed during construction. In-memory metadata state is rebuilt
-from subsequent reads and writes, which initialize state without producing
-deletions. After remote GC, the periodic scan removes SSTs from transitions
-missed before restart and SSTs that never reached metadata.
+### Startup
+
+On startup, `ObjectStoreMirrorBuilder::build` :
+
+1. Validates options
+2. Makes the local directory if it does not exist
+3. Removes all `.meta` files without a corresponding `.sst`
+4. Removes any `.sst.*` files (incomplete uploads or downloads)
+5. Reconstructs in-memory metadata state from existing `.sst` and `.meta` files
+6. Starts background workers
 
 ## Impact Analysis
 
@@ -499,17 +438,14 @@ apply.
 ### Core API & Query Semantics
 
 - [ ] Basic KV API (`get`/`put`/`delete`)
-- [x] Range queries, iterators, seek semantics
+- [ ] Range queries, iterators, seek semantics
 - [ ] Range deletions
 - [x] Error model, API errors
 
-`LocalOnly` adds explicit missing-object errors. Compactor checkpoints protect
-superseded SSTs used by in-flight iterators.
-
 ### Consistency, Isolation, and Multi-Versioning
 
-- [ ] Transactions
-- [ ] Snapshots
+- [x] Transactions
+- [x] Snapshots
 - [ ] Sequence numbers
 
 ### Time, Retention, and Derived State
@@ -528,19 +464,13 @@ superseded SSTs used by in-flight iterators.
 - [ ] Database splitting and merging
 - [ ] Multi-writer
 
-No metadata format changes are required. The mirror observes manifests,
-checkpoint references, `ExternalDb.sst_ids`, and failed compaction outputs.
-
 ### Compaction
 
-- [x] Compaction state persistence
+- [ ] Compaction state persistence
 - [ ] Compaction filters
 - [ ] Compaction strategies
-- [x] Distributed compaction
-- [x] Compactions format
-
-The compactor checkpoint lifetime becomes configurable. The `.compactions`
-format does not change.
+- [ ] Distributed compaction
+- [ ] Compactions format
 
 ### Storage Engine Internals
 
@@ -550,21 +480,13 @@ format does not change.
 - [ ] Indexing (bloom filters, metadata)
 - [ ] SST format or block format
 
-The block cache remains the general-purpose best-effort cache. The cache stores
-only tagged compacted SSTs as whole local files. WAL SSTs always use remote
-storage. Applications must populate the latest manifest explicitly with `warm`
-or manually copy or download the required SSTs.
-
 ### Ecosystem & Operations
 
 - [ ] CLI tools
-- [ ] Language bindings (Go/Python/etc)
-- [x] Observability (metrics/logging/tracing)
+- [x] Language bindings (Go/Python/etc)
+- [ ] Observability (metrics/logging/tracing)
 
-Existing binding cache settings continue to configure `CachedObjectStore`.
-`ObjectStoreMirror` is initially available only in APIs that can supply a custom
-`ObjectStore`; this RFC does not add binding-specific configuration or CLI
-commands.
+A binding wrapper will be provided for `ObjectStoreMirror`.
 
 ## Operations
 
@@ -572,7 +494,7 @@ commands.
 
 Local hits perform range reads from one whole SST file. A local miss returns
 `LocalCacheError` without remote fallback. `Refetch` validation retries and
-`warm` may read remote storage explicitly. WAL and untagged coordination reads
+warming reads remote storage explicitly. WAL and untagged coordination reads
 always use remote storage.
 
 Compacted SST writes stream to local and remote storage concurrently and return
@@ -594,17 +516,9 @@ parent prefix represented locally. Setting the reclamation interval to
 ### Capacity
 
 The cache has no maximum-size eviction setting in this proposal. It cannot
-discard an SST and preserve its `LocalOnly` contract, so operators must size the
-volume for the required working set.
-
-Operators size the volume for the live SST set, temporary files under
-`uploading/` and `downloading/`, and SSTs retained by active compactor
-checkpoints. Retained data follows compaction churn rather than logical ingest
-and may be larger due to write amplification.
-
-Never-published SSTs and missed metadata transitions remain until remote GC and
-the next periodic scan. If the scan is disabled, they remain until a DELETE
-passes through the cache or the root is rebuilt.
+discard an SST and preserve its `Local` contract, so operators must size the
+volume to store the entire database, including in-flight compaction SSTs and
+ungarbage-collected SSTs.
 
 ### Observability
 
@@ -618,13 +532,7 @@ release removes `CachedObjectStore`, its module, configuration, and bindings.
 
 ## Testing
 
-- Manifest diffs retain latest, checkpointed, and external SST paths.
-- `Running` and `Compacted` outputs remain protected; transitions to `Failed`
-  remove partial and final outputs not referenced by a manifest.
-- Successful completion, compaction trimming, and initialization after restart
-  do not delete SSTs.
-- Queued deletion rechecks references and file generation.
-- Periodic reclamation removes local files only after remote absence.
+TODO
 
 ## Rollout
 
