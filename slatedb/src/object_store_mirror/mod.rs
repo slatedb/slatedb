@@ -339,6 +339,13 @@ struct ManifestState {
     references: HashSet<Path>,
 }
 
+struct PreparedManifest {
+    id: u64,
+    manifest: Manifest,
+    checkpoint_ids: HashSet<u64>,
+    references: HashSet<Path>,
+}
+
 struct MirrorState {
     local_dir: PathBuf,
     object_store: Arc<dyn ObjectStore>,
@@ -661,20 +668,19 @@ impl MirrorState {
         Ok(manifest)
     }
 
-    async fn process_manifest(
-        self: &Arc<Self>,
+    async fn prepare_manifest(
+        &self,
         location: &Path,
         bytes: &Bytes,
-    ) -> object_store::Result<()> {
+    ) -> object_store::Result<PreparedManifest> {
         let root = Self::manifest_root(location)?;
         let id = Self::manifest_id(location)?;
         let manifest = FlatBufferManifestCodec {}
             .decode(bytes)
             .map_err(boxed_mirror_error)?;
-        self.manifest_cache.lock().insert(id, manifest.clone());
 
-        self.warm_paths(Self::referenced_ssts(&root, &manifest))
-            .await?;
+        let mut references = Self::referenced_ssts(&root, &manifest);
+        self.warm_paths(references.clone()).await?;
 
         if self
             .latest_manifest
@@ -682,7 +688,12 @@ impl MirrorState {
             .as_ref()
             .is_some_and(|latest| id < latest.id)
         {
-            return Ok(());
+            return Ok(PreparedManifest {
+                id,
+                manifest,
+                checkpoint_ids: HashSet::new(),
+                references,
+            });
         }
 
         let now = self.system_clock.now();
@@ -693,7 +704,6 @@ impl MirrorState {
             .filter(|checkpoint| checkpoint.expire_time.is_none_or(|expires| expires > now))
             .map(|checkpoint| checkpoint.manifest_id)
             .collect::<HashSet<_>>();
-        let mut references = Self::referenced_ssts(&root, &manifest);
         for checkpoint_id in &checkpoint_ids {
             let checkpoint = if *checkpoint_id == id {
                 manifest.clone()
@@ -703,10 +713,26 @@ impl MirrorState {
             references.extend(Self::referenced_ssts(&root, &checkpoint));
         }
 
+        Ok(PreparedManifest {
+            id,
+            manifest,
+            checkpoint_ids,
+            references,
+        })
+    }
+
+    fn apply_manifest(self: &Arc<Self>, prepared: PreparedManifest) {
+        let PreparedManifest {
+            id,
+            manifest,
+            mut checkpoint_ids,
+            references,
+        } = prepared;
+
         let removed = {
             let mut latest = self.latest_manifest.lock();
             if latest.as_ref().is_some_and(|latest| id < latest.id) {
-                return Ok(());
+                return;
             }
             let removed = latest
                 .as_ref()
@@ -721,11 +747,11 @@ impl MirrorState {
             removed
         };
 
-        let mut keep = checkpoint_ids;
-        keep.insert(id);
+        self.manifest_cache.lock().insert(id, manifest);
+        checkpoint_ids.insert(id);
         self.manifest_cache
             .lock()
-            .retain(|manifest_id, _| keep.contains(manifest_id));
+            .retain(|manifest_id, _| checkpoint_ids.contains(manifest_id));
 
         if !removed.is_empty() {
             let state = Arc::clone(self);
@@ -741,7 +767,6 @@ impl MirrorState {
                 }
             });
         }
-        Ok(())
     }
 
     async fn remove_local(&self, location: &Path) -> object_store::Result<()> {
@@ -996,7 +1021,8 @@ impl ObjectStore for ObjectStoreMirror {
             let attributes = result.attributes.clone();
             let extensions = result.extensions.clone();
             let bytes = result.bytes().await?;
-            self.state.process_manifest(location, &bytes).await?;
+            let prepared = self.state.prepare_manifest(location, &bytes).await?;
+            self.state.apply_manifest(prepared);
             return Ok(GetResult {
                 payload: GetResultPayload::Stream(stream::once(async move { Ok(bytes) }).boxed()),
                 meta,
@@ -1024,16 +1050,23 @@ impl ObjectStore for ObjectStoreMirror {
     ) -> object_store::Result<PutResult> {
         if is_manifest(location) {
             let should_process = self.state.should_process_manifest(location)?;
-            let manifest_bytes = should_process.then(|| payload_to_bytes(&payload));
+            let prepared = if should_process {
+                let manifest_bytes = payload_to_bytes(&payload);
+                Some(
+                    self.state
+                        .prepare_manifest(location, &manifest_bytes)
+                        .await?,
+                )
+            } else {
+                None
+            };
             let result = self
                 .state
                 .object_store
                 .put_opts(location, payload, opts)
                 .await?;
-            if let Some(manifest_bytes) = manifest_bytes {
-                self.state
-                    .process_manifest(location, &manifest_bytes)
-                    .await?;
+            if let Some(prepared) = prepared {
+                self.state.apply_manifest(prepared);
             }
             return Ok(result);
         }
@@ -1461,6 +1494,56 @@ mod tests {
             mirror.get(&other).await.unwrap().bytes().await.unwrap(),
             Bytes::from_static(b"other")
         );
+    }
+
+    #[tokio::test]
+    async fn manifest_put_does_not_commit_when_warming_fails() {
+        let remote: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let source_root = Path::from("source");
+        let db = Db::open(source_root.clone(), Arc::clone(&remote))
+            .await
+            .unwrap();
+        db.put(b"key", b"value").await.unwrap();
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        let source_manifest_dir = source_root.clone().join("manifest");
+        let source_manifest = remote
+            .list(Some(&source_manifest_dir))
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .max_by_key(|meta| meta.location.clone())
+            .unwrap()
+            .location;
+        let manifest_bytes = remote
+            .get(&source_manifest)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let target_manifest = Path::from("target/manifest/00000000000000000001.manifest");
+        let local = TempDir::new().unwrap();
+        let mirror = ObjectStoreMirror::builder(local.path(), Arc::clone(&remote))
+            .with_gc_interval(None)
+            .build()
+            .await
+            .unwrap();
+
+        assert!(mirror
+            .put_opts(
+                &target_manifest,
+                PutPayload::from_bytes(manifest_bytes),
+                PutOptions::from(object_store::PutMode::Create),
+            )
+            .await
+            .is_err());
+        assert!(matches!(
+            remote.head(&target_manifest).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

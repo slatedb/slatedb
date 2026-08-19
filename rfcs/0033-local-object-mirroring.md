@@ -210,9 +210,11 @@ The mirror is warmed continuously as new `.manifest` files for the detected
 database root are read and written. `ObjectStoreMirror` inspects the path for
 each object and looks for `.manifest` files. When it sees one under that root,
 it decodes the manifest and compares its referenced SSTs with its own local
-state. Any missing SSTs are downloaded synchronously. This happens after the
-`.manifest` call is forwarded to the wrapped store, but before returning to the
-caller. Manifest operations for other roots pass through unchanged.
+state. Any missing SSTs are downloaded synchronously. For reads, this happens
+after the remote `.manifest` read but before returning to the caller. For
+writes, fallible warming happens before the remote conditional write so a
+committed manifest is never reported as failed. Manifest operations for other
+roots pass through unchanged.
 
 A large compaction job can finish and update the `.manifest` with gigabytes,
 or even terabytes of new SSTs. Blocking the manifest update to download the
