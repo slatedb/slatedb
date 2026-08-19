@@ -356,7 +356,7 @@ struct MirrorState {
     download_semaphore: Arc<Semaphore>,
     gc_interval: Option<Duration>,
     next_temp: AtomicU64,
-    downloads: SingleFlight<Path, ()>,
+    downloads: SingleFlight<(Path, bool), ()>,
     metadata: Mutex<HashMap<Path, CachedMetadata>>,
     parents: Mutex<HashMap<String, String>>,
     root: Mutex<Option<Path>>,
@@ -569,11 +569,8 @@ impl MirrorState {
 
     async fn download(&self, location: &Path, force: bool) -> object_store::Result<()> {
         let location = location.clone();
-        if force {
-            self.remove_local(&location).await?;
-        }
         self.downloads
-            .call(location.clone(), || async move {
+            .call((location.clone(), force), || async move {
                 if !force && self.metadata.lock().contains_key(&location) {
                     return Ok(());
                 }
@@ -1390,6 +1387,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, Bytes::from_static(b"repaired"));
+    }
+
+    #[tokio::test]
+    async fn failed_retry_keeps_the_existing_local_sst() {
+        let remote: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let local = TempDir::new().unwrap();
+        let location = Path::from("db/compacted/01J79C21YKR31J2BS1EFXJZ7MR.sst");
+        let mirror = ObjectStoreMirror::builder(local.path(), Arc::clone(&remote))
+            .with_gc_interval(None)
+            .build()
+            .await
+            .unwrap();
+        mirror
+            .put_opts(
+                &location,
+                PutPayload::from_static(b"cached"),
+                compacted_put_options(),
+            )
+            .await
+            .unwrap();
+        remote.delete(&location).await.unwrap();
+
+        let mut tag = compacted_tag();
+        tag.retry = Some(RetryReason::CrcMismatch);
+        assert!(mirror
+            .get_opts(
+                &location,
+                GetOptions {
+                    extensions: tag.into(),
+                    ..GetOptions::default()
+                },
+            )
+            .await
+            .is_err());
+
+        assert_eq!(
+            mirror
+                .get_opts(&location, compacted_get_options())
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            Bytes::from_static(b"cached")
+        );
     }
 
     #[tokio::test]

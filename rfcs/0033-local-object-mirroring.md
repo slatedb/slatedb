@@ -272,7 +272,8 @@ All downloads use `single_flight.rs` to avoid duplicate downloads.
   if any are missing.
 - `Refetch` forces a synchronous remote read of the full SST, overwriting the
   local copy if it exists. Returns only the requested range to the caller. This
-  is used to repair corrupt files.
+  is used to repair corrupt files. The old local copy remains available until
+  its replacement is installed atomically.
 
 `ObjectStoreCallTag` is inspected to determine which mode to use.
 
