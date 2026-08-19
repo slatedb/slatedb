@@ -161,9 +161,14 @@ Four types of files exist under the cache root:
   canonical object path, ETag, version, and attributes. The path is used to
   recover the remote location after restart and verify the filename hash.
 
-Each file is prefixed with an MD5-encoding of its object path with the filename
-stripped. This protects against filename collisions between external databases
-and keeps the cache root flat.
+Each SST-related file is prefixed with an MD5-encoding of its object path with
+the filename stripped. This protects against filename collisions between
+external databases and keeps the cache root flat.
+
+The mirror maintains an in-memory map from each MD5 prefix to its canonical
+parent path. Startup reconstructs the map from `.meta` files. Each installation
+atomically checks or inserts the mapping before publishing the SST and rejects
+a conflicting path.
 
 A directory might look like this:
 
@@ -221,11 +226,10 @@ benefit from this approach. As new manifests are polled, the mirror will
 download any missing SSTs before forwarding the manifest read. This guarantees
 that all reads will come from local disk.
 
-Referenced SSTs include:
-
-- Compacted SSTs in the manifest's `compacted` list.
-- Compacted SSTs in the manifest's `ExternalDb.sst_ids` list, resolved
-  under the external database's path.
+Referenced SSTs are every SST returned by `ManifestCore::all_sst_views()`. This
+includes L0 and compacted SSTs in the root tree and all named segments. SST IDs
+found in `ExternalDb.sst_ids` are resolved under the external database's path;
+all others are resolved under the mirror's database root.
 
 SSTs referenced by the manifest's checkpoints are not considered referenced
 since readers only need read SSTs from the current manifest. (Mirror garbage
@@ -331,13 +335,11 @@ update the state and apply this rule:
 - Remove any in-memory manifests that are no longer referenced by the latest
   manifest or its active checkpoints.
 
-"Reference" here means:
-
-- Compacted SSTs in the manifest's `compacted` list.
-- Compacted SSTs in the manifest's `ExternalDb.sst_ids` list, resolved
-  under the external database's path.
-- Compacted SSTs in the manifest's checkpoints `compacted` and
-  `ExternalDb.sst_ids` lists.
+"Reference" here means every SST returned by `ManifestCore::all_sst_views()`
+for the latest manifest and each active checkpoint manifest. This includes L0
+and compacted SSTs in the root tree and all named segments. SST IDs found in
+`ExternalDb.sst_ids` are resolved under the external database's path; all
+others are resolved under the mirror's database root.
 
 Missing checkpoint manifests are fetched from the remote store.
 
@@ -445,10 +447,11 @@ On startup, `ObjectStoreMirrorBuilder::build` :
 1. Validates options
 2. Makes the local directory if it does not exist
 3. Acquires the exclusive `LOCK` file lock
-4. Removes all `.meta` files without a corresponding `.sst`
-5. Removes any `.sst.[tmp_num]` files (incomplete uploads or downloads)
-6. Validates each `.meta` path against its filename hash and reconstructs
-   in-memory metadata state
+4. Removes any `.sst.[tmp_num]` files (incomplete uploads or downloads)
+5. Scans `.sst` and `.meta` pairs, deleting entries with a missing partner,
+   malformed metadata, a canonical path that does not match the local filename,
+   or a conflicting MD5-to-parent-path mapping
+6. Reconstructs the in-memory path and object metadata maps from valid pairs
 7. Starts background workers
 
 ## Impact Analysis
