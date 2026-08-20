@@ -725,7 +725,7 @@ impl ObjectStore for FlakyObjectStore {
         &self,
         location: &Path,
         options: GetOptions,
-    ) -> object_store::Result<object_store::GetResult> {
+    ) -> object_store::Result<GetResult> {
         if options.head {
             self.head_attempts.fetch_add(1, Ordering::SeqCst);
             if self
@@ -788,9 +788,9 @@ impl ObjectStore for FlakyObjectStore {
                 let extensions = result.extensions.clone();
                 let body = result.bytes().await?;
                 let truncated = body.slice(..truncate_bytes.min(body.len()));
-                return Ok(object_store::GetResult {
+                return Ok(GetResult {
                     payload: object_store::GetResultPayload::Stream(
-                        futures::stream::once(async { Ok(truncated) }).boxed(),
+                        stream::once(async { Ok(truncated) }).boxed(),
                     ),
                     meta,
                     range,
@@ -868,7 +868,7 @@ impl ObjectStore for FlakyObjectStore {
     async fn put_multipart_opts(
         &self,
         location: &Path,
-        opts: object_store::PutMultipartOptions,
+        opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         self.put_multipart_attempts.fetch_add(1, Ordering::SeqCst);
         self.inner.put_multipart_opts(location, opts).await
@@ -1148,7 +1148,7 @@ impl ObjectStore for GatedObjectStore {
         &self,
         location: &Path,
         options: GetOptions,
-    ) -> object_store::Result<object_store::GetResult> {
+    ) -> object_store::Result<GetResult> {
         if options.head {
             self.head_gate.wait().await?;
         } else {
@@ -1170,7 +1170,7 @@ impl ObjectStore for GatedObjectStore {
     async fn put_multipart_opts(
         &self,
         location: &Path,
-        opts: object_store::PutMultipartOptions,
+        opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         self.put_multipart_opts_gate.wait().await?;
         self.inner.put_multipart_opts(location, opts).await
@@ -1224,7 +1224,7 @@ impl ObjectStore for GatedObjectStore {
         &self,
         from: &Path,
         to: &Path,
-        options: object_store::RenameOptions,
+        options: RenameOptions,
     ) -> object_store::Result<()> {
         self.rename_gate.wait().await?;
         self.inner.rename_opts(from, to, options).await
@@ -1392,6 +1392,35 @@ impl crate::prefix_extractor::PrefixExtractor for FixedThreeBytePrefixExtractor 
         } else {
             None
         }
+    }
+}
+
+/// Test extractor that segments on the leading `data` / `idx` path
+/// component, modelling a store that keeps bulky records in one segment and
+/// a smaller index over them in another. Tenants live in the *next*
+/// component (`data/{tenant}/…`), so a tenant's rows are split across both
+/// segments rather than forming one contiguous key range.
+// Only the union tests in `clone.rs` use this, and those need `wal_disable`.
+#[cfg(feature = "wal_disable")]
+#[derive(Debug)]
+pub(crate) struct DataIdxPrefixExtractor;
+
+#[cfg(feature = "wal_disable")]
+impl crate::prefix_extractor::PrefixExtractor for DataIdxPrefixExtractor {
+    fn name(&self) -> &str {
+        "data-idx"
+    }
+    fn prefix_len(&self, target: &crate::prefix_extractor::PrefixTarget) -> Option<usize> {
+        let key: &[u8] = match target {
+            crate::prefix_extractor::PrefixTarget::Point(b)
+            | crate::prefix_extractor::PrefixTarget::Prefix(b) => b.as_ref(),
+        };
+        for kind in [b"data".as_slice(), b"idx".as_slice()] {
+            if key == kind || key.starts_with(&[kind, b"/".as_slice()].concat()) {
+                return Some(kind.len());
+            }
+        }
+        None
     }
 }
 
@@ -1659,7 +1688,7 @@ impl ObjectStore for RecordingObjectStore {
         &self,
         location: &Path,
         options: GetOptions,
-    ) -> object_store::Result<object_store::GetResult> {
+    ) -> object_store::Result<GetResult> {
         let tag = ObjectStoreCallTag::from_extensions(&options.extensions);
         self.calls.lock().push(RecordedCall::Get {
             head: options.head,
@@ -1687,7 +1716,7 @@ impl ObjectStore for RecordingObjectStore {
     async fn put_multipart_opts(
         &self,
         location: &Path,
-        opts: object_store::PutMultipartOptions,
+        opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
         self.calls.lock().push(RecordedCall::PutMultipart {

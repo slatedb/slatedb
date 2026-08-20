@@ -529,13 +529,12 @@ impl KVTable {
         // because the monotonicity is enforced when generating the clock tick
         // (see [crate::utils::MonotonicClock::now])
         if let Some(create_ts) = row.create_ts {
-            self.last_tick
-                .fetch_max(create_ts, atomic::Ordering::SeqCst);
+            self.last_tick.fetch_max(create_ts, SeqCst);
         }
         // update the last seq number if it is greater than the current last seq
-        self.last_seq.fetch_max(row.seq, atomic::Ordering::SeqCst);
+        self.last_seq.fetch_max(row.seq, SeqCst);
         // update the first seq number if it is smaller than the current first seq
-        self.first_seq.fetch_min(row.seq, atomic::Ordering::SeqCst);
+        self.first_seq.fetch_min(row.seq, SeqCst);
 
         let row_size = row.estimated_size();
         self.map.compare_insert(internal_key, row, |previous_row| {

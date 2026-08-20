@@ -19,10 +19,11 @@ use super::uploader::UploadedMemtable;
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
-use crate::db_state::{collect_touched_segments, COWDbState, DbState, SsTableId, SsTableView};
+use crate::db_state::{collect_touched_segments, DbState, SsTableId, SsTableView};
 use crate::dispatcher::MessageHandler;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
+use crate::manifest::Manifest;
 use crate::oracle::Oracle;
 use crate::utils::IdGenerator;
 use crate::utils::SafeSender;
@@ -32,6 +33,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use parking_lot::RwLockWriteGuard;
+use slatedb_txn_obj::DirtyObject;
 use std::cmp;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
@@ -620,9 +622,7 @@ impl ManifestWriterHandler {
         Ok(())
     }
 
-    fn clone_local_manifest_for_write(
-        &self,
-    ) -> slatedb_txn_obj::DirtyObject<crate::manifest::Manifest> {
+    fn clone_local_manifest_for_write(&self) -> DirtyObject<Manifest> {
         let dirty = {
             let rguard_state = self.db.state.read();
             rguard_state.state().manifest.clone()
@@ -655,29 +655,23 @@ impl ManifestWriterHandler {
         result
     }
 
-    fn merge_remote_manifest(
-        &self,
-        remote_dirty: slatedb_txn_obj::DirtyObject<crate::manifest::Manifest>,
-    ) {
-        let dirty_manifest = {
+    fn merge_remote_manifest(&self, remote_dirty: DirtyObject<Manifest>) {
+        let manifest = {
             let mut wguard_state = self.db.state.write();
             wguard_state.merge_remote_manifest(remote_dirty);
-            let cow = wguard_state.state();
-            self.update_stats_for_manifest(&cow);
-            cow.manifest.clone()
+            wguard_state.state().manifest.clone()
         };
-        self.db
-            .status_manager
-            .report_manifest(dirty_manifest.into());
+        self.update_stats_for_manifest(&manifest);
+        self.db.status_manager.report_manifest(manifest.into());
     }
 
-    fn update_stats_for_manifest(&self, cow: &COWDbState) {
+    fn update_stats_for_manifest(&self, manifest: &DirtyObject<Manifest>) {
         let mut l0_ssts = 0usize;
         let mut segment_max_l0_ssts = 0usize;
         let mut sorted_runs = 0usize;
         let mut sst_views = 0usize;
         let mut distinct_ssts: HashSet<SsTableId> = HashSet::new();
-        for tree in cow.core().trees() {
+        for tree in manifest.value.core.trees() {
             l0_ssts += tree.l0.len();
             // Track the largest single tree: backpressure is driven by `segment_max_l0_sst_count`
             // because `l0_max_ssts` is enforced per-tree.
@@ -705,7 +699,7 @@ impl ManifestWriterHandler {
         self.db
             .db_stats
             .external_db_count
-            .set(cow.manifest.value.external_dbs.len() as i64);
+            .set(manifest.value.external_dbs.len() as i64);
     }
 
     async fn write_checkpoint_safely(
@@ -1371,7 +1365,7 @@ mod tests {
             Duration::from_secs(3600),
         );
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         started
             .send_checkpoint(None, CheckpointOptions::default(), tx)
             .unwrap();
@@ -1828,7 +1822,7 @@ mod tests {
             // manifest writer routes by `prefix` from the surrounding
             // `SegmentedSstHandle`, not by the SST's keys.
             let mut builder = inner.table_store.table_builder();
-            let row = crate::types::RowEntry::new_value(prefix, value, first_seq);
+            let row = RowEntry::new_value(prefix, value, first_seq);
             builder.add(row).await.unwrap();
             let encoded_sst = builder.build().await.unwrap();
             let id = crate::db_state::SsTableId::Compacted(

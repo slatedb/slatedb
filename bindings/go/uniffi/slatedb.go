@@ -1598,74 +1598,29 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walfile_id()
+			return C.uniffi_slatedb_uniffi_checksum_method_slatedbwaliterator_next()
 		})
-		if checksum != 62512 {
+		if checksum != 46461 {
 			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_id: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_slatedbwaliterator_next: UniFFI API checksum mismatch")
 		}
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walfile_iterator()
+			return C.uniffi_slatedb_uniffi_checksum_method_slatedbwalreader_iterator()
 		})
-		if checksum != 46880 {
+		if checksum != 10327 {
 			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_iterator: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_slatedbwalreader_iterator: UniFFI API checksum mismatch")
 		}
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walfile_metadata()
+			return C.uniffi_slatedb_uniffi_checksum_method_slatedbwalreader_last_wal_file_id()
 		})
-		if checksum != 45103 {
+		if checksum != 40190 {
 			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_metadata: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walfile_next_file()
-		})
-		if checksum != 56800 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_next_file: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walfile_next_id()
-		})
-		if checksum != 48353 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfile_next_id: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walfileiterator_next()
-		})
-		if checksum != 51490 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walfileiterator_next: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walreader_get()
-		})
-		if checksum != 11510 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walreader_get: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_walreader_list()
-		})
-		if checksum != 43661 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_walreader_list: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_slatedbwalreader_last_wal_file_id: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1895,11 +1850,38 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_constructor_walreader_new()
+			return C.uniffi_slatedb_uniffi_checksum_constructor_slatedbwalreader_new()
 		})
-		if checksum != 30537 {
+		if checksum != 59531 {
 			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_walreader_new: UniFFI API checksum mismatch")
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_slatedbwalreader_new: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_slatedbwalreader_with_options()
+		})
+		if checksum != 41949 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_slatedbwalreader_with_options: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_slatedbwalreader_with_wal_object_store()
+		})
+		if checksum != 35831 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_slatedbwalreader_with_wal_object_store: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_slatedbwalreader_with_wal_object_store_and_options()
+		})
+		if checksum != 28081 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_slatedbwalreader_with_wal_object_store_and_options: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -8246,6 +8228,302 @@ func (_ FfiDestroyerSettings) Destroy(value *Settings) {
 	value.Destroy()
 }
 
+// Live iterator over SlateDB WAL files starting at a required WAL file ID.
+type SlateDbWalIteratorInterface interface {
+	// Returns rows from the next fully consumed WAL file. When it reaches the
+	// current tail, this call waits for the next WAL file rather than ending.
+	Next() (*WalRows, error)
+}
+
+// Live iterator over SlateDB WAL files starting at a required WAL file ID.
+type SlateDbWalIterator struct {
+	ffiObject FfiObject
+}
+
+// Returns rows from the next fully consumed WAL file. When it reaches the
+// current tail, this call waits for the next WAL file rather than ending.
+func (_self *SlateDbWalIterator) Next() (*WalRows, error) {
+	_pointer := _self.ffiObject.incrementPointer("*SlateDbWalIterator")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *WalRows {
+			return FfiConverterOptionalWalRowsINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_slatedbwaliterator_next(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+func (object *SlateDbWalIterator) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterSlateDbWalIterator struct{}
+
+var FfiConverterSlateDbWalIteratorINSTANCE = FfiConverterSlateDbWalIterator{}
+
+func (c FfiConverterSlateDbWalIterator) Lift(handle C.uint64_t) *SlateDbWalIterator {
+	result := &SlateDbWalIterator{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_slatedbwaliterator(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_slatedbwaliterator(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*SlateDbWalIterator).Destroy)
+	return result
+}
+
+func (c FfiConverterSlateDbWalIterator) Read(reader io.Reader) *SlateDbWalIterator {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterSlateDbWalIterator) Lower(value *SlateDbWalIterator) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*SlateDbWalIterator")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterSlateDbWalIterator) Write(writer io.Writer, value *SlateDbWalIterator) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalSlateDbWalIterator(handle uint64) *SlateDbWalIterator {
+	return FfiConverterSlateDbWalIteratorINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalSlateDbWalIterator(value *SlateDbWalIterator) uint64 {
+	return uint64(FfiConverterSlateDbWalIteratorINSTANCE.Lower(value))
+}
+
+type FfiDestroyerSlateDbWalIterator struct{}
+
+func (_ FfiDestroyerSlateDbWalIterator) Destroy(value *SlateDbWalIterator) {
+	value.Destroy()
+}
+
+// CDC reader backed by SlateDB's native live WAL reader.
+type SlateDbWalReaderInterface interface {
+	// Opens a live iterator starting at start_wal_file_id. The iterator waits
+	// and polls internally when it reaches the current WAL tail.
+	Iterator(startWalFileId uint64) (*SlateDbWalIterator, error)
+	// Returns a snapshot of the current WAL tail after replay_after_wal_id, or
+	// the supplied ID when no later WAL file exists.
+	LastWalFileId(replayAfterWalId uint64) (uint64, error)
+}
+
+// CDC reader backed by SlateDB's native live WAL reader.
+type SlateDbWalReader struct {
+	ffiObject FfiObject
+}
+
+// Opens a reader when the manifest and WAL use the same object store.
+func NewSlateDbWalReader(path string, objectStore *ObjectStore) (*SlateDbWalReader, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_slatedbwalreader_new(FfiConverterStringINSTANCE.Lower(path), FfiConverterObjectStoreINSTANCE.Lower(objectStore), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *SlateDbWalReader
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterSlateDbWalReaderINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+// Opens a reader with explicit fetch options.
+func SlateDbWalReaderWithOptions(path string, objectStore *ObjectStore, options SlateDbWalReaderOptions) (*SlateDbWalReader, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_slatedbwalreader_with_options(FfiConverterStringINSTANCE.Lower(path), FfiConverterObjectStoreINSTANCE.Lower(objectStore), FfiConverterSlateDbWalReaderOptionsINSTANCE.Lower(options), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *SlateDbWalReader
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterSlateDbWalReaderINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+// Opens a reader for a database with a dedicated WAL object store.
+func SlateDbWalReaderWithWalObjectStore(path string, objectStore *ObjectStore, walObjectStore *ObjectStore) (*SlateDbWalReader, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_slatedbwalreader_with_wal_object_store(FfiConverterStringINSTANCE.Lower(path), FfiConverterObjectStoreINSTANCE.Lower(objectStore), FfiConverterObjectStoreINSTANCE.Lower(walObjectStore), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *SlateDbWalReader
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterSlateDbWalReaderINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+// Opens a reader for a dedicated WAL object store with explicit options.
+func SlateDbWalReaderWithWalObjectStoreAndOptions(path string, objectStore *ObjectStore, walObjectStore *ObjectStore, options SlateDbWalReaderOptions) (*SlateDbWalReader, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_slatedbwalreader_with_wal_object_store_and_options(FfiConverterStringINSTANCE.Lower(path), FfiConverterObjectStoreINSTANCE.Lower(objectStore), FfiConverterObjectStoreINSTANCE.Lower(walObjectStore), FfiConverterSlateDbWalReaderOptionsINSTANCE.Lower(options), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *SlateDbWalReader
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterSlateDbWalReaderINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+// Opens a live iterator starting at start_wal_file_id. The iterator waits
+// and polls internally when it reaches the current WAL tail.
+func (_self *SlateDbWalReader) Iterator(startWalFileId uint64) (*SlateDbWalIterator, error) {
+	_pointer := _self.ffiObject.incrementPointer("*SlateDbWalReader")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.uint64_t) *SlateDbWalIterator {
+			return FfiConverterSlateDbWalIteratorINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_slatedbwalreader_iterator(
+			_pointer, FfiConverterUint64INSTANCE.Lower(startWalFileId)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Returns a snapshot of the current WAL tail after replay_after_wal_id, or
+// the supplied ID when no later WAL file exists.
+func (_self *SlateDbWalReader) LastWalFileId(replayAfterWalId uint64) (uint64, error) {
+	_pointer := _self.ffiObject.incrementPointer("*SlateDbWalReader")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.uint64_t) uint64 {
+			return FfiConverterUint64INSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_slatedbwalreader_last_wal_file_id(
+			_pointer, FfiConverterUint64INSTANCE.Lower(replayAfterWalId)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+func (object *SlateDbWalReader) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterSlateDbWalReader struct{}
+
+var FfiConverterSlateDbWalReaderINSTANCE = FfiConverterSlateDbWalReader{}
+
+func (c FfiConverterSlateDbWalReader) Lift(handle C.uint64_t) *SlateDbWalReader {
+	result := &SlateDbWalReader{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_slatedbwalreader(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_slatedbwalreader(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*SlateDbWalReader).Destroy)
+	return result
+}
+
+func (c FfiConverterSlateDbWalReader) Read(reader io.Reader) *SlateDbWalReader {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterSlateDbWalReader) Lower(value *SlateDbWalReader) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*SlateDbWalReader")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterSlateDbWalReader) Write(writer io.Writer, value *SlateDbWalReader) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalSlateDbWalReader(handle uint64) *SlateDbWalReader {
+	return FfiConverterSlateDbWalReaderINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalSlateDbWalReader(value *SlateDbWalReader) uint64 {
+	return uint64(FfiConverterSlateDbWalReaderINSTANCE.Lower(value))
+}
+
+type FfiDestroyerSlateDbWalReader struct{}
+
+func (_ FfiDestroyerSlateDbWalReader) Destroy(value *SlateDbWalReader) {
+	value.Destroy()
+}
+
 // Handle for an up/down counter metric.
 type UpDownCounter interface {
 	// Adds `value` to the counter.
@@ -8382,407 +8660,6 @@ func slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterClone(hand
 
 func (c FfiConverterUpDownCounter) register() {
 	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_updowncounter(&UniffiVTableCallbackInterfaceUpDownCounterINSTANCE)
-}
-
-// Handle for a single WAL file.
-type WalFileInterface interface {
-	// Returns the WAL file ID.
-	Id() uint64
-	// Opens an iterator over raw row entries in this WAL file.
-	Iterator() (*WalFileIterator, error)
-	// Reads object-store metadata for this WAL file.
-	Metadata() (IdentifiedObjectMetadata, error)
-	// Returns a handle for the next WAL file ID without checking existence.
-	NextFile() *WalFile
-	// Returns the WAL ID immediately after this file.
-	NextId() uint64
-}
-
-// Handle for a single WAL file.
-type WalFile struct {
-	ffiObject FfiObject
-}
-
-// Returns the WAL file ID.
-func (_self *WalFile) Id() uint64 {
-	_pointer := _self.ffiObject.incrementPointer("*WalFile")
-	defer _self.ffiObject.decrementPointer()
-	return FfiConverterUint64INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_method_walfile_id(
-			_pointer, _uniffiStatus)
-	}))
-}
-
-// Opens an iterator over raw row entries in this WAL file.
-func (_self *WalFile) Iterator() (*WalFileIterator, error) {
-	_pointer := _self.ffiObject.incrementPointer("*WalFile")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
-			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
-			return res
-		},
-		// liftFn
-		func(ffi C.uint64_t) *WalFileIterator {
-			return FfiConverterWalFileIteratorINSTANCE.Lift(ffi)
-		},
-		C.uniffi_slatedb_uniffi_fn_method_walfile_iterator(
-			_pointer),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-
-// Reads object-store metadata for this WAL file.
-func (_self *WalFile) Metadata() (IdentifiedObjectMetadata, error) {
-	_pointer := _self.ffiObject.incrementPointer("*WalFile")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) IdentifiedObjectMetadata {
-			return FfiConverterIdentifiedObjectMetadataINSTANCE.Lift(ffi)
-		},
-		C.uniffi_slatedb_uniffi_fn_method_walfile_metadata(
-			_pointer),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-
-// Returns a handle for the next WAL file ID without checking existence.
-func (_self *WalFile) NextFile() *WalFile {
-	_pointer := _self.ffiObject.incrementPointer("*WalFile")
-	defer _self.ffiObject.decrementPointer()
-	return FfiConverterWalFileINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_method_walfile_next_file(
-			_pointer, _uniffiStatus)
-	}))
-}
-
-// Returns the WAL ID immediately after this file.
-func (_self *WalFile) NextId() uint64 {
-	_pointer := _self.ffiObject.incrementPointer("*WalFile")
-	defer _self.ffiObject.decrementPointer()
-	return FfiConverterUint64INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_method_walfile_next_id(
-			_pointer, _uniffiStatus)
-	}))
-}
-func (object *WalFile) Destroy() {
-	runtime.SetFinalizer(object, nil)
-	object.ffiObject.destroy()
-}
-
-type FfiConverterWalFile struct{}
-
-var FfiConverterWalFileINSTANCE = FfiConverterWalFile{}
-
-func (c FfiConverterWalFile) Lift(handle C.uint64_t) *WalFile {
-	result := &WalFile{
-		newFfiObject(
-			handle,
-			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
-				return C.uniffi_slatedb_uniffi_fn_clone_walfile(handle, status)
-			},
-			func(handle C.uint64_t, status *C.RustCallStatus) {
-				C.uniffi_slatedb_uniffi_fn_free_walfile(handle, status)
-			},
-		),
-	}
-	runtime.SetFinalizer(result, (*WalFile).Destroy)
-	return result
-}
-
-func (c FfiConverterWalFile) Read(reader io.Reader) *WalFile {
-	return c.Lift(C.uint64_t(readUint64(reader)))
-}
-
-func (c FfiConverterWalFile) Lower(value *WalFile) C.uint64_t {
-	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
-	// because the handle will be decremented immediately after this function returns,
-	// and someone will be left holding onto a non-locked handle.
-	handle := value.ffiObject.incrementPointer("*WalFile")
-	defer value.ffiObject.decrementPointer()
-	return handle
-}
-
-func (c FfiConverterWalFile) Write(writer io.Writer, value *WalFile) {
-	writeUint64(writer, uint64(c.Lower(value)))
-}
-
-func LiftFromExternalWalFile(handle uint64) *WalFile {
-	return FfiConverterWalFileINSTANCE.Lift(C.uint64_t(handle))
-}
-
-func LowerToExternalWalFile(value *WalFile) uint64 {
-	return uint64(FfiConverterWalFileINSTANCE.Lower(value))
-}
-
-type FfiDestroyerWalFile struct{}
-
-func (_ FfiDestroyerWalFile) Destroy(value *WalFile) {
-	value.Destroy()
-}
-
-// Iterator over raw row entries stored in a WAL file.
-type WalFileIteratorInterface interface {
-	// Returns the next raw row entry from the WAL file.
-	Next() (*RowEntry, error)
-}
-
-// Iterator over raw row entries stored in a WAL file.
-type WalFileIterator struct {
-	ffiObject FfiObject
-}
-
-// Returns the next raw row entry from the WAL file.
-func (_self *WalFileIterator) Next() (*RowEntry, error) {
-	_pointer := _self.ffiObject.incrementPointer("*WalFileIterator")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) *RowEntry {
-			return FfiConverterOptionalRowEntryINSTANCE.Lift(ffi)
-		},
-		C.uniffi_slatedb_uniffi_fn_method_walfileiterator_next(
-			_pointer),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-func (object *WalFileIterator) Destroy() {
-	runtime.SetFinalizer(object, nil)
-	object.ffiObject.destroy()
-}
-
-type FfiConverterWalFileIterator struct{}
-
-var FfiConverterWalFileIteratorINSTANCE = FfiConverterWalFileIterator{}
-
-func (c FfiConverterWalFileIterator) Lift(handle C.uint64_t) *WalFileIterator {
-	result := &WalFileIterator{
-		newFfiObject(
-			handle,
-			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
-				return C.uniffi_slatedb_uniffi_fn_clone_walfileiterator(handle, status)
-			},
-			func(handle C.uint64_t, status *C.RustCallStatus) {
-				C.uniffi_slatedb_uniffi_fn_free_walfileiterator(handle, status)
-			},
-		),
-	}
-	runtime.SetFinalizer(result, (*WalFileIterator).Destroy)
-	return result
-}
-
-func (c FfiConverterWalFileIterator) Read(reader io.Reader) *WalFileIterator {
-	return c.Lift(C.uint64_t(readUint64(reader)))
-}
-
-func (c FfiConverterWalFileIterator) Lower(value *WalFileIterator) C.uint64_t {
-	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
-	// because the handle will be decremented immediately after this function returns,
-	// and someone will be left holding onto a non-locked handle.
-	handle := value.ffiObject.incrementPointer("*WalFileIterator")
-	defer value.ffiObject.decrementPointer()
-	return handle
-}
-
-func (c FfiConverterWalFileIterator) Write(writer io.Writer, value *WalFileIterator) {
-	writeUint64(writer, uint64(c.Lower(value)))
-}
-
-func LiftFromExternalWalFileIterator(handle uint64) *WalFileIterator {
-	return FfiConverterWalFileIteratorINSTANCE.Lift(C.uint64_t(handle))
-}
-
-func LowerToExternalWalFileIterator(value *WalFileIterator) uint64 {
-	return uint64(FfiConverterWalFileIteratorINSTANCE.Lower(value))
-}
-
-type FfiDestroyerWalFileIterator struct{}
-
-func (_ FfiDestroyerWalFileIterator) Destroy(value *WalFileIterator) {
-	value.Destroy()
-}
-
-// Reader for WAL files stored under a database path.
-type WalReaderInterface interface {
-	// Returns a handle for the WAL file with the given ID.
-	Get(id uint64) *WalFile
-	// Lists WAL files in ascending ID order.
-	//
-	// `start_id` is inclusive and `end_id` is exclusive when provided.
-	List(startId *uint64, endId *uint64) ([]*WalFile, error)
-}
-
-// Reader for WAL files stored under a database path.
-type WalReader struct {
-	ffiObject FfiObject
-}
-
-// Creates a WAL reader for `path` in `object_store`.
-func NewWalReader(path string, objectStore *ObjectStore) *WalReader {
-	return FfiConverterWalReaderINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_constructor_walreader_new(FfiConverterStringINSTANCE.Lower(path), FfiConverterObjectStoreINSTANCE.Lower(objectStore), _uniffiStatus)
-	}))
-}
-
-// Returns a handle for the WAL file with the given ID.
-func (_self *WalReader) Get(id uint64) *WalFile {
-	_pointer := _self.ffiObject.incrementPointer("*WalReader")
-	defer _self.ffiObject.decrementPointer()
-	return FfiConverterWalFileINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
-		return C.uniffi_slatedb_uniffi_fn_method_walreader_get(
-			_pointer, FfiConverterUint64INSTANCE.Lower(id), _uniffiStatus)
-	}))
-}
-
-// Lists WAL files in ascending ID order.
-//
-// `start_id` is inclusive and `end_id` is exclusive when provided.
-func (_self *WalReader) List(startId *uint64, endId *uint64) ([]*WalFile, error) {
-	_pointer := _self.ffiObject.incrementPointer("*WalReader")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) []*WalFile {
-			return FfiConverterSequenceWalFileINSTANCE.Lift(ffi)
-		},
-		C.uniffi_slatedb_uniffi_fn_method_walreader_list(
-			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(startId), FfiConverterOptionalUint64INSTANCE.Lower(endId)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-func (object *WalReader) Destroy() {
-	runtime.SetFinalizer(object, nil)
-	object.ffiObject.destroy()
-}
-
-type FfiConverterWalReader struct{}
-
-var FfiConverterWalReaderINSTANCE = FfiConverterWalReader{}
-
-func (c FfiConverterWalReader) Lift(handle C.uint64_t) *WalReader {
-	result := &WalReader{
-		newFfiObject(
-			handle,
-			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
-				return C.uniffi_slatedb_uniffi_fn_clone_walreader(handle, status)
-			},
-			func(handle C.uint64_t, status *C.RustCallStatus) {
-				C.uniffi_slatedb_uniffi_fn_free_walreader(handle, status)
-			},
-		),
-	}
-	runtime.SetFinalizer(result, (*WalReader).Destroy)
-	return result
-}
-
-func (c FfiConverterWalReader) Read(reader io.Reader) *WalReader {
-	return c.Lift(C.uint64_t(readUint64(reader)))
-}
-
-func (c FfiConverterWalReader) Lower(value *WalReader) C.uint64_t {
-	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
-	// because the handle will be decremented immediately after this function returns,
-	// and someone will be left holding onto a non-locked handle.
-	handle := value.ffiObject.incrementPointer("*WalReader")
-	defer value.ffiObject.decrementPointer()
-	return handle
-}
-
-func (c FfiConverterWalReader) Write(writer io.Writer, value *WalReader) {
-	writeUint64(writer, uint64(c.Lower(value)))
-}
-
-func LiftFromExternalWalReader(handle uint64) *WalReader {
-	return FfiConverterWalReaderINSTANCE.Lift(C.uint64_t(handle))
-}
-
-func LowerToExternalWalReader(value *WalReader) uint64 {
-	return uint64(FfiConverterWalReaderINSTANCE.Lower(value))
-}
-
-type FfiDestroyerWalReader struct{}
-
-func (_ FfiDestroyerWalReader) Destroy(value *WalReader) {
-	value.Destroy()
 }
 
 // Mutable batch of write operations applied atomically by [`crate::Db::write`].
@@ -10831,6 +10708,58 @@ func (_ FfiDestroyerSegmentPrefix) Destroy(value SegmentPrefix) {
 	value.Destroy()
 }
 
+// Options controlling how the native SlateDB WAL reader fetches WAL SSTs.
+type SlateDbWalReaderOptions struct {
+	// Number of WAL SSTs to preload.
+	SstBatchSize uint64
+	// Number of concurrent fetch tasks per WAL SST.
+	MaxFetchTasks uint64
+	// Number of bytes to read ahead from each WAL SST.
+	ReadAheadBytes uint64
+}
+
+func (r *SlateDbWalReaderOptions) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.SstBatchSize)
+	FfiDestroyerUint64{}.Destroy(r.MaxFetchTasks)
+	FfiDestroyerUint64{}.Destroy(r.ReadAheadBytes)
+}
+
+type FfiConverterSlateDbWalReaderOptions struct{}
+
+var FfiConverterSlateDbWalReaderOptionsINSTANCE = FfiConverterSlateDbWalReaderOptions{}
+
+func (c FfiConverterSlateDbWalReaderOptions) Lift(rb RustBufferI) SlateDbWalReaderOptions {
+	return LiftFromRustBuffer[SlateDbWalReaderOptions](c, rb)
+}
+
+func (c FfiConverterSlateDbWalReaderOptions) Read(reader io.Reader) SlateDbWalReaderOptions {
+	return SlateDbWalReaderOptions{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterSlateDbWalReaderOptions) Lower(value SlateDbWalReaderOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[SlateDbWalReaderOptions](c, value)
+}
+
+func (c FfiConverterSlateDbWalReaderOptions) LowerExternal(value SlateDbWalReaderOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[SlateDbWalReaderOptions](c, value))
+}
+
+func (c FfiConverterSlateDbWalReaderOptions) Write(writer io.Writer, value SlateDbWalReaderOptions) {
+	FfiConverterUint64INSTANCE.Write(writer, value.SstBatchSize)
+	FfiConverterUint64INSTANCE.Write(writer, value.MaxFetchTasks)
+	FfiConverterUint64INSTANCE.Write(writer, value.ReadAheadBytes)
+}
+
+type FfiDestroyerSlateDbWalReaderOptions struct{}
+
+func (_ FfiDestroyerSlateDbWalReaderOptions) Destroy(value SlateDbWalReaderOptions) {
+	value.Destroy()
+}
+
 // A sorted run made up of one or more SST views.
 type SortedRun struct {
 	// Sorted run ID.
@@ -11255,6 +11184,53 @@ func (c FfiConverterVersionedManifest) Write(writer io.Writer, value VersionedMa
 type FfiDestroyerVersionedManifest struct{}
 
 func (_ FfiDestroyerVersionedManifest) Destroy(value VersionedManifest) {
+	value.Destroy()
+}
+
+// Rows from one fully consumed WAL file.
+type WalRows struct {
+	// Rows stored in the WAL file. Empty fence WALs produce an empty vector.
+	Rows []RowEntry
+	// Last WAL file ID fully consumed by this batch.
+	LastConsumedWalFileId uint64
+}
+
+func (r *WalRows) Destroy() {
+	FfiDestroyerSequenceRowEntry{}.Destroy(r.Rows)
+	FfiDestroyerUint64{}.Destroy(r.LastConsumedWalFileId)
+}
+
+type FfiConverterWalRows struct{}
+
+var FfiConverterWalRowsINSTANCE = FfiConverterWalRows{}
+
+func (c FfiConverterWalRows) Lift(rb RustBufferI) WalRows {
+	return LiftFromRustBuffer[WalRows](c, rb)
+}
+
+func (c FfiConverterWalRows) Read(reader io.Reader) WalRows {
+	return WalRows{
+		FfiConverterSequenceRowEntryINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterWalRows) Lower(value WalRows) C.RustBuffer {
+	return LowerIntoRustBuffer[WalRows](c, value)
+}
+
+func (c FfiConverterWalRows) LowerExternal(value WalRows) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[WalRows](c, value))
+}
+
+func (c FfiConverterWalRows) Write(writer io.Writer, value WalRows) {
+	FfiConverterSequenceRowEntryINSTANCE.Write(writer, value.Rows)
+	FfiConverterUint64INSTANCE.Write(writer, value.LastConsumedWalFileId)
+}
+
+type FfiDestroyerWalRows struct{}
+
+func (_ FfiDestroyerWalRows) Destroy(value WalRows) {
 	value.Destroy()
 }
 
@@ -13578,47 +13554,6 @@ func (_ FfiDestroyerOptionalMetric) Destroy(value *Metric) {
 	}
 }
 
-type FfiConverterOptionalRowEntry struct{}
-
-var FfiConverterOptionalRowEntryINSTANCE = FfiConverterOptionalRowEntry{}
-
-func (c FfiConverterOptionalRowEntry) Lift(rb RustBufferI) *RowEntry {
-	return LiftFromRustBuffer[*RowEntry](c, rb)
-}
-
-func (_ FfiConverterOptionalRowEntry) Read(reader io.Reader) *RowEntry {
-	if readInt8(reader) == 0 {
-		return nil
-	}
-	temp := FfiConverterRowEntryINSTANCE.Read(reader)
-	return &temp
-}
-
-func (c FfiConverterOptionalRowEntry) Lower(value *RowEntry) C.RustBuffer {
-	return LowerIntoRustBuffer[*RowEntry](c, value)
-}
-
-func (c FfiConverterOptionalRowEntry) LowerExternal(value *RowEntry) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[*RowEntry](c, value))
-}
-
-func (_ FfiConverterOptionalRowEntry) Write(writer io.Writer, value *RowEntry) {
-	if value == nil {
-		writeInt8(writer, 0)
-	} else {
-		writeInt8(writer, 1)
-		FfiConverterRowEntryINSTANCE.Write(writer, *value)
-	}
-}
-
-type FfiDestroyerOptionalRowEntry struct{}
-
-func (_ FfiDestroyerOptionalRowEntry) Destroy(value *RowEntry) {
-	if value != nil {
-		FfiDestroyerRowEntry{}.Destroy(*value)
-	}
-}
-
 type FfiConverterOptionalVersionedCompactions struct{}
 
 var FfiConverterOptionalVersionedCompactionsINSTANCE = FfiConverterOptionalVersionedCompactions{}
@@ -13698,6 +13633,47 @@ type FfiDestroyerOptionalVersionedManifest struct{}
 func (_ FfiDestroyerOptionalVersionedManifest) Destroy(value *VersionedManifest) {
 	if value != nil {
 		FfiDestroyerVersionedManifest{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalWalRows struct{}
+
+var FfiConverterOptionalWalRowsINSTANCE = FfiConverterOptionalWalRows{}
+
+func (c FfiConverterOptionalWalRows) Lift(rb RustBufferI) *WalRows {
+	return LiftFromRustBuffer[*WalRows](c, rb)
+}
+
+func (_ FfiConverterOptionalWalRows) Read(reader io.Reader) *WalRows {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterWalRowsINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalWalRows) Lower(value *WalRows) C.RustBuffer {
+	return LowerIntoRustBuffer[*WalRows](c, value)
+}
+
+func (c FfiConverterOptionalWalRows) LowerExternal(value *WalRows) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*WalRows](c, value))
+}
+
+func (_ FfiConverterOptionalWalRows) Write(writer io.Writer, value *WalRows) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterWalRowsINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalWalRows struct{}
+
+func (_ FfiDestroyerOptionalWalRows) Destroy(value *WalRows) {
+	if value != nil {
+		FfiDestroyerWalRows{}.Destroy(*value)
 	}
 }
 
@@ -14094,53 +14070,6 @@ func (FfiDestroyerSequenceFilterPolicy) Destroy(sequence []*FilterPolicy) {
 	}
 }
 
-type FfiConverterSequenceWalFile struct{}
-
-var FfiConverterSequenceWalFileINSTANCE = FfiConverterSequenceWalFile{}
-
-func (c FfiConverterSequenceWalFile) Lift(rb RustBufferI) []*WalFile {
-	return LiftFromRustBuffer[[]*WalFile](c, rb)
-}
-
-func (c FfiConverterSequenceWalFile) Read(reader io.Reader) []*WalFile {
-	length := readInt32(reader)
-	if length == 0 {
-		return nil
-	}
-	result := make([]*WalFile, 0, length)
-	for i := int32(0); i < length; i++ {
-		result = append(result, FfiConverterWalFileINSTANCE.Read(reader))
-	}
-	return result
-}
-
-func (c FfiConverterSequenceWalFile) Lower(value []*WalFile) C.RustBuffer {
-	return LowerIntoRustBuffer[[]*WalFile](c, value)
-}
-
-func (c FfiConverterSequenceWalFile) LowerExternal(value []*WalFile) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[[]*WalFile](c, value))
-}
-
-func (c FfiConverterSequenceWalFile) Write(writer io.Writer, value []*WalFile) {
-	if len(value) > math.MaxInt32 {
-		panic("[]*WalFile is too large to fit into Int32")
-	}
-
-	writeInt32(writer, int32(len(value)))
-	for _, item := range value {
-		FfiConverterWalFileINSTANCE.Write(writer, item)
-	}
-}
-
-type FfiDestroyerSequenceWalFile struct{}
-
-func (FfiDestroyerSequenceWalFile) Destroy(sequence []*WalFile) {
-	for _, value := range sequence {
-		FfiDestroyerWalFile{}.Destroy(value)
-	}
-}
-
 type FfiConverterSequenceCheckpoint struct{}
 
 var FfiConverterSequenceCheckpointINSTANCE = FfiConverterSequenceCheckpoint{}
@@ -14420,6 +14349,53 @@ type FfiDestroyerSequenceMetricLabel struct{}
 func (FfiDestroyerSequenceMetricLabel) Destroy(sequence []MetricLabel) {
 	for _, value := range sequence {
 		FfiDestroyerMetricLabel{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceRowEntry struct{}
+
+var FfiConverterSequenceRowEntryINSTANCE = FfiConverterSequenceRowEntry{}
+
+func (c FfiConverterSequenceRowEntry) Lift(rb RustBufferI) []RowEntry {
+	return LiftFromRustBuffer[[]RowEntry](c, rb)
+}
+
+func (c FfiConverterSequenceRowEntry) Read(reader io.Reader) []RowEntry {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]RowEntry, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterRowEntryINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceRowEntry) Lower(value []RowEntry) C.RustBuffer {
+	return LowerIntoRustBuffer[[]RowEntry](c, value)
+}
+
+func (c FfiConverterSequenceRowEntry) LowerExternal(value []RowEntry) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]RowEntry](c, value))
+}
+
+func (c FfiConverterSequenceRowEntry) Write(writer io.Writer, value []RowEntry) {
+	if len(value) > math.MaxInt32 {
+		panic("[]RowEntry is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterRowEntryINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceRowEntry struct{}
+
+func (FfiDestroyerSequenceRowEntry) Destroy(sequence []RowEntry) {
+	for _, value := range sequence {
+		FfiDestroyerRowEntry{}.Destroy(value)
 	}
 }
 

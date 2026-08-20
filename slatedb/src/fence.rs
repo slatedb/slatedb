@@ -3,7 +3,7 @@ use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, StoredManifest};
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCellReader;
-use crate::wal::writer_init::{WalWriterInit, WalWriterInitOptions};
+use crate::wal::slatedb::writer_init::{SlateDbWalWriterInit, SlateDbWalWriterInitOptions};
 use crate::wal::{WalIterator, WalWriter, WriterInit};
 use crate::Settings;
 use fail_parallel::{fail_point_send, FailPointTx};
@@ -15,11 +15,12 @@ use std::time::Duration;
 pub(crate) struct WriterFencer {
     closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
     recorder: MetricsRecorderHelper,
-    wal_writer_init_options: WalWriterInitOptions,
+    wal_writer_init_options: SlateDbWalWriterInitOptions,
     table_store: Arc<TableStore>,
     manifest_update_timeout: Duration,
     system_clock: Arc<dyn SystemClock>,
     task_executor: Arc<MessageHandlerExecutor>,
+    wal_writer_init: Option<Box<dyn WriterInit>>,
     #[cfg_attr(not(test), allow(dead_code))]
     fp_tx: FailPointTx,
 }
@@ -38,6 +39,7 @@ impl WriterFencer {
         settings: &Settings,
         system_clock: Arc<dyn SystemClock>,
         task_executor: Arc<MessageHandlerExecutor>,
+        wal_writer_init: Option<Box<dyn WriterInit>>,
     ) -> Self {
         Self::new_with_fp_handle(
             closed_result_reader,
@@ -46,6 +48,7 @@ impl WriterFencer {
             settings,
             system_clock,
             task_executor,
+            wal_writer_init,
             FailPointTx::dummy(),
         )
     }
@@ -57,6 +60,7 @@ impl WriterFencer {
         settings: &Settings,
         system_clock: Arc<dyn SystemClock>,
         task_executor: Arc<MessageHandlerExecutor>,
+        wal_writer_init: Option<Box<dyn WriterInit>>,
         fp_tx: FailPointTx,
     ) -> Self {
         Self {
@@ -67,6 +71,7 @@ impl WriterFencer {
             manifest_update_timeout: settings.manifest_update_timeout,
             system_clock,
             task_executor,
+            wal_writer_init,
             fp_tx,
         }
     }
@@ -76,24 +81,28 @@ impl WriterFencer {
     }
 
     /// Fences all writers with an older epoch than the provided `stored_manifest` by (1) writing
-    /// a new `FenceableManifest` with a bumped epoch, and (2) writing an empty WAL file that acts
-    /// as a barrier. Any parallel old writers will fail with `SlateDBError::Fenced` when trying
-    /// to "re-write" this file. Returns a `WriterFence` with the `FenceableManifest` and iterator
-    /// that must be replayed to recover up to the current epoch.
+    /// a new `FenceableManifest` with a bumped epoch, and (2) delegating WAL fencing and recovery
+    /// to the configured [`WriterInit`]. Returns the fenced manifest, the initialized WAL writer,
+    /// and the iterator that must be replayed to recover up to the current epoch.
     pub(crate) async fn fence(
-        self,
+        mut self,
         stored_manifest: StoredManifest,
     ) -> Result<WriterFenceResult, SlateDBError> {
-        let wal_writer_init = WalWriterInit::load(
-            self.closed_result_reader.clone(),
-            self.recorder.clone(),
-            self.table_store.clone(),
-            self.wal_writer_init_options,
-            stored_manifest.manifest(),
-            self.task_executor.clone(),
-            self.fp_tx.clone(),
-        )
-        .await?;
+        let wal_writer_init = match self.wal_writer_init.take() {
+            Some(wal_writer_init) => wal_writer_init,
+            None => Box::new(
+                SlateDbWalWriterInit::load(
+                    self.closed_result_reader.clone(),
+                    self.recorder.clone(),
+                    self.table_store.clone(),
+                    self.wal_writer_init_options,
+                    stored_manifest.manifest(),
+                    self.task_executor.clone(),
+                    self.fp_tx.clone(),
+                )
+                .await?,
+            ),
+        };
 
         let manifest = FenceableManifest::init_writer(
             stored_manifest,
@@ -205,6 +214,7 @@ mod tests {
                 &settings,
                 system_clock.clone(),
                 task_executor.clone(),
+                None,
                 fp_tx,
             );
             Self {
@@ -282,6 +292,7 @@ mod tests {
                 gc_opts,
                 &MetricsRecorderHelper::noop(),
                 Arc::new(DefaultSystemClock::new()),
+                None,
                 None,
             );
             gc.run_gc_once().await;

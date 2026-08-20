@@ -33,7 +33,7 @@ use crate::paths::PathResolver;
 use crate::sst_builder::EncodedSsTableBuilder;
 use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
-use crate::wal::wal_sst_builder::EncodedWalSsTableBuilder;
+use crate::wal::slatedb::sst_builder::EncodedWalSsTableBuilder;
 
 pub(crate) struct TableStore {
     object_stores: ObjectStores,
@@ -361,13 +361,13 @@ impl TableStore {
             self.fp_registry.clone(),
             "write-wal-sst-io-error",
             matches!(id, SsTableId::Wal(_)),
-            |_| Result::Err(slatedb_io_error())
+            |_| Err(slatedb_io_error())
         );
         fail_point!(
             self.fp_registry.clone(),
             "write-compacted-sst-io-error",
             matches!(id, SsTableId::Compacted(_)),
-            |_| Result::Err(slatedb_io_error())
+            |_| Err(slatedb_io_error())
         );
 
         let object_store = self.object_stores.store_for(id);
@@ -483,7 +483,7 @@ impl TableStore {
     pub(crate) async fn write_wal_fence(&self, wal_id: u64) -> Result<(), SlateDBError> {
         let id = SsTableId::Wal(wal_id);
         fail_point!(self.fp_registry.clone(), "write-wal-sst-io-error", |_| {
-            Result::Err(slatedb_io_error())
+            Err(slatedb_io_error())
         });
         write_sst_in_object_store(
             self.object_stores.store_for(&id),
@@ -2549,7 +2549,7 @@ mod tests {
         // Create id1, id2, and i3 as three random UUIDs that have been sorted ascending.
         // Need to do this because the Ulids are sometimes generated in the same millisecond
         // and the random suffix is used to break the tie, which might be out of order.
-        let mut ulids = (0..3).map(|_| ulid::Ulid::new()).collect::<Vec<Ulid>>();
+        let mut ulids = (0..3).map(|_| Ulid::new()).collect::<Vec<Ulid>>();
         ulids.sort();
         let (id1, id2, id3) = (
             SsTableId::Compacted(ulids[0]),

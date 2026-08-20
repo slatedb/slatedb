@@ -167,7 +167,7 @@ impl TransactionTask {
     ///
     /// This method runs a loop, executing transactions with multiple operations.
     async fn run(&mut self) {
-        let mut random = rand_xorshift::XorShiftRng::from_os_rng();
+        let mut random = XorShiftRng::from_os_rng();
         let mut commits = 0u64;
         let mut aborts = 0u64;
         let mut conflicts = 0u64;

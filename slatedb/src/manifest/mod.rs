@@ -22,6 +22,10 @@ pub(crate) mod store;
 
 pub use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
 
+/// The per-source trees a union merges into each segment, keyed by segment
+/// prefix and ordered within a segment by that segment's start key.
+type SegmentContributors<'a> = BTreeMap<Bytes, Vec<&'a LsmTreeState>>;
+
 /// Per-LSM-tree state. Shared shape between the unsegmented tree (held directly
 /// on `ManifestCore`) and each named segment held in `ManifestCore::segments`.
 #[derive(Clone, Default, PartialEq, Serialize, Debug)]
@@ -64,6 +68,14 @@ impl LsmTreeState {
     /// with a set watermark is a drain marker.
     pub(crate) fn is_empty(&self) -> bool {
         self.l0.is_empty() && self.compacted.is_empty()
+    }
+
+    /// Iterate every SST view referenced by this tree — L0 views followed by
+    /// the views of every sorted run.
+    pub(crate) fn sst_views(&self) -> impl Iterator<Item = &SsTableView> {
+        self.l0
+            .iter()
+            .chain(self.compacted.iter().flat_map(|sr| sr.sst_views().iter()))
     }
 
     /// Total number of SST views referenced by this tree — L0 plus every
@@ -551,11 +563,7 @@ impl ManifestCore {
     /// Iterate every SST view referenced by this manifest — L0 views and
     /// sorted-run views across the unsegmented tree and every segment.
     pub(crate) fn all_sst_views(&self) -> impl Iterator<Item = &SsTableView> {
-        self.trees().flat_map(|tree| {
-            tree.l0
-                .iter()
-                .chain(tree.compacted.iter().flat_map(|sr| sr.sst_views().iter()))
-        })
+        self.trees().flat_map(|tree| tree.sst_views())
     }
 
     /// Compare a configured WAL-store URI against the manifest's
@@ -1290,38 +1298,90 @@ impl Manifest {
         Ok(())
     }
 
-    /// Extractor-configured case. Build a per-prefix accumulator from
-    /// every source's `core.segments`, validate the antichain, and write
-    /// the result into `core.segments`. Empty entries (no L0, no compacted
-    /// runs) are dropped — the unioned manifest should not carry
-    /// placeholders. Watermarks are intentionally not carried over: the
-    /// unioned manifest is a fresh DB that begins compaction tracking from
-    /// scratch.
-    fn build_segmented_lsm_state(
-        core: &mut ManifestCore,
-        sources: &[&CloneSource],
-    ) -> Result<(), SlateDBError> {
-        let mut segments_by_prefix: BTreeMap<Bytes, LsmTreeState> = BTreeMap::new();
-        for source in sources {
-            for segment in &source.manifest.core.segments {
-                let entry = segments_by_prefix
-                    .entry(segment.prefix.clone())
-                    .or_default();
-                entry.l0.extend(segment.tree.l0.iter().cloned());
-                entry
-                    .compacted
-                    .extend(segment.tree.compacted.iter().cloned());
-            }
-        }
-        Self::ensure_union_prefix_antichain(segments_by_prefix.keys())?;
-        core.segments = segments_by_prefix
+    /// Extractor-configured case. Concatenate the per-source trees that
+    /// [`Self::group_segments_for_union`] collected for each prefix into one
+    /// tree per segment. Segments holding no SSTs are already absent from
+    /// `segments`, so the unioned manifest carries no placeholders.
+    /// Watermarks are intentionally not carried over: the unioned manifest is
+    /// a fresh DB that begins compaction tracking from scratch.
+    fn build_segmented_lsm_state(core: &mut ManifestCore, segments: SegmentContributors) {
+        core.segments = segments
             .into_iter()
-            .filter(|(_, tree)| !tree.is_empty())
-            .map(|(prefix, tree)| Segment {
-                prefix,
-                tree: Arc::new(tree),
+            .map(|(prefix, trees)| {
+                let mut merged = LsmTreeState::default();
+                for tree in trees {
+                    merged.l0.extend(tree.l0.iter().cloned());
+                    merged.compacted.extend(tree.compacted.iter().cloned());
+                }
+                Segment {
+                    prefix,
+                    tree: Arc::new(merged),
+                }
             })
             .collect();
+    }
+
+    /// Collect the trees that each source contributes to each segment. Within
+    /// a segment the trees are in key order, so the merged segment's `l0` and
+    /// `compacted` lists come out sorted — the same thing the manifest-wide
+    /// sort does for the unsegmented tree.
+    ///
+    /// Two things are rejected. If one segment prefix is a prefix of another,
+    /// the two segments cover some of the same keys. If two sources hold the
+    /// same keys inside one segment, the merged segment cannot say which
+    /// source owns them.
+    ///
+    /// A segment with no SSTs contributes nothing, so it is left out.
+    fn group_segments_for_union<'a>(
+        sources: &[&'a CloneSource],
+    ) -> Result<SegmentContributors<'a>, SlateDBError> {
+        let all_prefixes: BTreeSet<&Bytes> = sources
+            .iter()
+            .flat_map(|source| source.manifest.core.segments.iter().map(|seg| &seg.prefix))
+            .collect();
+        Self::ensure_union_prefix_antichain(all_prefixes)?;
+
+        let mut by_prefix: BTreeMap<Bytes, Vec<(BytesRange, &LsmTreeState)>> = BTreeMap::new();
+        for source in sources {
+            for segment in &source.manifest.core.segments {
+                if let Some(range) = Self::bounding_range(segment.tree.sst_views()) {
+                    by_prefix
+                        .entry(segment.prefix.clone())
+                        .or_default()
+                        .push((range, segment.tree.as_ref()));
+                }
+            }
+        }
+
+        let mut grouped = SegmentContributors::new();
+        for (prefix, mut members) in by_prefix {
+            members.sort_by_key(|(range, _)| range.comparable_start_bound().cloned());
+            let ranges: Vec<BytesRange> = members.iter().map(|(range, _)| range.clone()).collect();
+            Self::ensure_disjoint_ranges(Some(&prefix), &ranges)?;
+            grouped.insert(prefix, members.into_iter().map(|(_, tree)| tree).collect());
+        }
+        Ok(grouped)
+    }
+
+    /// Reject overlapping source ranges. `ranges` must be sorted by start
+    /// bound. `segment` names the segment under check and is omitted from the
+    /// message for the unsegmented tree.
+    fn ensure_disjoint_ranges(
+        segment: Option<&Bytes>,
+        ranges: &[BytesRange],
+    ) -> Result<(), SlateDBError> {
+        for pair in ranges.windows(2) {
+            if pair[1].intersect(&pair[0]).is_some() {
+                let scope = match segment {
+                    Some(prefix) => format!(" in segment `{:?}`", prefix),
+                    None => String::new(),
+                };
+                return Err(SlateDBError::InvalidUnion(format!(
+                    "clone sources have overlapping key ranges{}. ranges=`{:?}`",
+                    scope, ranges
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1401,30 +1461,17 @@ impl Manifest {
         }
         ranges.sort_by_key(|(_, range)| range.comparable_start_bound().cloned());
 
-        // Ensure source key ranges are non-overlapping. Surfaces as a typed
-        // error since the source set is user-supplied.
-        let mut previous_range = None;
-        for (_, range) in ranges.iter() {
-            if let Some(previous_range) = previous_range {
-                if range.intersect(previous_range).is_some() {
-                    let all: Vec<BytesRange> = ranges.iter().map(|(_, r)| (*r).clone()).collect();
-                    return Err(SlateDBError::InvalidUnion(format!(
-                        "clone sources have overlapping key ranges. ranges=`{:?}`",
-                        all
-                    )));
-                }
-            }
-            previous_range = Some(range);
-        }
-
         let ordered_sources: Vec<&CloneSource> = ranges.iter().map(|(s, _)| *s).collect();
         let mut core = ManifestCore::new();
         core.segment_extractor_name = Self::ensure_consistent_segment_extractor(&sources)?;
 
         if core.segment_extractor_name.is_none() {
+            let all: Vec<BytesRange> = ranges.iter().map(|(_, r)| (*r).clone()).collect();
+            Self::ensure_disjoint_ranges(None, &all)?;
             Self::build_unsegmented_lsm_state(&mut core, &ordered_sources)?;
         } else {
-            Self::build_segmented_lsm_state(&mut core, &ordered_sources)?;
+            let segments = Self::group_segments_for_union(&ordered_sources)?;
+            Self::build_segmented_lsm_state(&mut core, segments);
         }
         Self::renumber_union_sorted_runs(&mut core);
 
@@ -1485,9 +1532,15 @@ impl Manifest {
     }
 
     fn range(&self) -> Option<BytesRange> {
+        Self::bounding_range(self.core.all_sst_views())
+    }
+
+    /// Smallest range covering every view in `views`, or `None` when `views`
+    /// is empty.
+    fn bounding_range<'a>(views: impl Iterator<Item = &'a SsTableView>) -> Option<BytesRange> {
         let mut start_bound = None;
         let mut end_bound = None;
-        for sst in self.core.all_sst_views() {
+        for sst in views {
             let range = sst.compacted_effective_range();
             start_bound = start_bound
                 .map(|b| min(b, range.comparable_start_bound()))
@@ -1599,7 +1652,7 @@ mod tests {
         .await
         .unwrap();
         let checkpoint = parent_manifest
-            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
+            .write_checkpoint(Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -1741,7 +1794,7 @@ mod tests {
         .unwrap();
 
         let checkpoint = manifest
-            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
+            .write_checkpoint(Uuid::new_v4(), &CheckpointOptions::default())
             .await
             .unwrap();
 
@@ -1990,7 +2043,7 @@ mod tests {
     fn test_union(#[case] test_case: UnionTestCase) {
         let mut sst_ids: HashMap<String, SsTableId> = HashMap::new();
         let rand = Arc::new(DbRand::default());
-        let sources: Vec<crate::clone::CloneSource> = test_case
+        let sources: Vec<CloneSource> = test_case
             .manifests
             .iter()
             .enumerate()
@@ -2755,7 +2808,7 @@ mod tests {
         );
 
         // Verify no duplicates
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         for id in &sr_ids {
             assert!(seen.insert(id), "Duplicate SR ID: {}", id);
         }
@@ -3702,14 +3755,14 @@ mod tests {
         );
     }
 
-    fn segment_with_prefix(prefix: &[u8], seed: u64) -> super::Segment {
+    fn segment_with_prefix(prefix: &[u8], seed: u64) -> Segment {
         let view_id = Ulid::from_parts(seed, 0);
         let handle = SsTableHandle::new(
             SsTableId::Compacted(Ulid::from_parts(seed, 1)),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo::default(),
         );
-        super::Segment {
+        Segment {
             prefix: Bytes::copy_from_slice(prefix),
             tree: Arc::new(LsmTreeState {
                 last_compacted_l0_sst_view_id: None,
@@ -3720,7 +3773,7 @@ mod tests {
         }
     }
 
-    fn collect_prefixes(segments: &[super::Segment]) -> Vec<Bytes> {
+    fn collect_prefixes(segments: &[Segment]) -> Vec<Bytes> {
         segments.iter().map(|s| s.prefix.clone()).collect()
     }
 
@@ -4304,6 +4357,146 @@ mod tests {
         let sr_ids: Vec<u32> = seg.tree.compacted.iter().map(|sr| sr.id).collect();
         assert_eq!(sr_ids.len(), 2);
         assert_ne!(sr_ids[0], sr_ids[1]);
+    }
+
+    /// Build a segmented manifest whose segments each hold a single L0 view
+    /// over the given range. `segments` is `(prefix, first_entry, range)` and
+    /// must be ordered by prefix, as `ManifestCore::segments` is.
+    fn segmented_shard_manifest(
+        extractor_name: &str,
+        segments: Vec<(&'static [u8], &'static str, BytesRange)>,
+    ) -> Manifest {
+        let mut core = ManifestCore::new();
+        core.segment_extractor_name = Some(extractor_name.to_string());
+        core.segments = segments
+            .into_iter()
+            .map(|(prefix, first_entry, range)| {
+                let sst = SsTableId::Compacted(Ulid::new());
+                Segment {
+                    prefix: Bytes::from_static(prefix),
+                    tree: Arc::new(LsmTreeState {
+                        last_compacted_l0_sst_view_id: None,
+                        last_compacted_l0_sst_id: None,
+                        l0: VecDeque::from(vec![SsTableView::new_projected(
+                            sst.unwrap_compacted_id(),
+                            SsTableHandle::new(
+                                sst,
+                                SST_FORMAT_VERSION_LATEST,
+                                SsTableInfo {
+                                    first_entry: Some(Bytes::from_static(first_entry.as_bytes())),
+                                    ..SsTableInfo::default()
+                                },
+                            ),
+                            Some(range),
+                        )]),
+                        compacted: vec![],
+                    }),
+                }
+            })
+            .collect();
+        Manifest::initial(core)
+    }
+
+    fn union_of(manifests: Vec<Manifest>) -> Result<Manifest, SlateDBError> {
+        Manifest::cloned_from_union(
+            manifests
+                .into_iter()
+                .enumerate()
+                .map(|(i, manifest)| CloneSource {
+                    manifest,
+                    path: Path::from(format!("/tmp/db{}", i)),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                })
+                .collect(),
+            Arc::new(DbRand::default()),
+        )
+    }
+
+    /// Effective range of each L0 view in the named segment, in list order.
+    fn segment_l0_ranges(manifest: &Manifest, prefix: &[u8]) -> Vec<BytesRange> {
+        manifest
+            .core
+            .segments
+            .iter()
+            .find(|s| s.prefix == prefix)
+            .expect("segment present")
+            .tree
+            .l0
+            .iter()
+            .map(|view| view.compacted_effective_range().clone())
+            .collect()
+    }
+
+    #[test]
+    fn test_union_validates_key_ranges_per_segment() {
+        // Two tenant shards of a store keyed `data/{tenant}` and
+        // `idx/{tenant}`. Each shard holds part of both segments, so the
+        // shards' bounding ranges overlap — `data/metro` sorts below
+        // `idx/bronx` — while neither segment does. A read routes to exactly
+        // one segment, so the union is unambiguous and must be accepted.
+        //
+        // The shards also lead in different segments: `left` holds the lower
+        // `data` keys, `right` the lower `idx` keys. Each segment's list must
+        // follow its own key order rather than the manifest-wide source
+        // order, so a source's entries stay contiguous and ascending within
+        // the segment, as they do in the unsegmented case.
+        fn shard(data: BytesRange, idx: BytesRange) -> Manifest {
+            segmented_shard_manifest("kind", vec![(b"data", "data", data), (b"idx", "idx", idx)])
+        }
+        let left = shard(
+            BytesRange::from_ref("data/bronx".."data/metro"),
+            BytesRange::from_ref("idx/metro".."idx/zzz"),
+        );
+        let right = shard(
+            BytesRange::from_ref("data/metro".."data/zzz"),
+            BytesRange::from_ref("idx/bronx".."idx/metro"),
+        );
+
+        // The precondition the old manifest-wide check enforced is genuinely
+        // violated here; only the per-segment check makes this union legal.
+        let left_range = left.range().expect("left range");
+        assert!(left_range
+            .intersect(&right.range().expect("right range"))
+            .is_some());
+
+        let union = union_of(vec![left, right]).expect("union of disjoint segments");
+
+        assert_eq!(union.core.segment_extractor_name.as_deref(), Some("kind"));
+        assert_eq!(
+            segment_l0_ranges(&union, b"data"),
+            vec![
+                BytesRange::from_ref("data/bronx".."data/metro"),
+                BytesRange::from_ref("data/metro".."data/zzz"),
+            ]
+        );
+        assert_eq!(
+            segment_l0_ranges(&union, b"idx"),
+            vec![
+                BytesRange::from_ref("idx/bronx".."idx/metro"),
+                BytesRange::from_ref("idx/metro".."idx/zzz"),
+            ]
+        );
+
+        // Overlap *within* a shared segment is still rejected: the merged
+        // segment's read chain could not say which source owns the key.
+        let overlapping = shard(
+            BytesRange::from_ref("data/lincoln".."data/zzz"),
+            BytesRange::from_ref("idx/bronx".."idx/metro"),
+        );
+        let err = union_of(vec![
+            shard(
+                BytesRange::from_ref("data/bronx".."data/metro"),
+                BytesRange::from_ref("idx/metro".."idx/zzz"),
+            ),
+            overlapping,
+        ])
+        .expect_err("overlap within `data`");
+        let SlateDBError::InvalidUnion(msg) = err else {
+            panic!("expected InvalidUnion, got {:?}", err);
+        };
+        // The message names the offending segment, not just the ranges.
+        assert!(msg.contains("in segment"), "{}", msg);
+        assert!(msg.contains("data"), "{}", msg);
     }
 
     #[test]

@@ -47,8 +47,8 @@ pub(crate) enum FlushTarget {
 
 /// Parallel L0 memtable flusher subsystem.
 pub(crate) struct MemtableFlusher {
-    messages_tx: SafeSender<tracker::TrackerMessage>,
-    messages_rx: async_channel::Receiver<tracker::TrackerMessage>,
+    messages_tx: SafeSender<TrackerMessage>,
+    messages_rx: async_channel::Receiver<TrackerMessage>,
 }
 
 impl MemtableFlusher {
@@ -112,15 +112,14 @@ impl MemtableFlusher {
     pub(crate) async fn flush(&self, target: FlushTarget) -> Result<FlushResult, SlateDBError> {
         let (tx, rx) = oneshot::channel();
         self.messages_tx
-            .send(tracker::TrackerMessage::FlushRequest { target, sender: tx })?;
+            .send(TrackerMessage::FlushRequest { target, sender: tx })?;
         rx.await.map_err(SlateDBError::ReadChannelError)?
     }
 
     /// Notifies the flusher that a memtable may have been frozen.
     /// Triggers reconcile and dispatch without waiting for a result.
     pub(crate) fn notify_memtable_frozen(&self) -> Result<(), SlateDBError> {
-        self.messages_tx
-            .send(tracker::TrackerMessage::MemtableFrozen)
+        self.messages_tx.send(TrackerMessage::MemtableFrozen)
     }
 
     /// Creates a checkpoint using the memtable flusher's flush semantics.
@@ -130,12 +129,11 @@ impl MemtableFlusher {
         options: CheckpointOptions,
     ) -> Result<CheckpointCreateResult, SlateDBError> {
         let (tx, rx) = oneshot::channel();
-        self.messages_tx
-            .send(tracker::TrackerMessage::CheckpointRequest {
-                target,
-                options,
-                sender: tx,
-            })?;
+        self.messages_tx.send(TrackerMessage::CheckpointRequest {
+            target,
+            options,
+            sender: tx,
+        })?;
         rx.await.map_err(SlateDBError::ReadChannelError)?
     }
 

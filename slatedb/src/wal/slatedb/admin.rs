@@ -1,12 +1,11 @@
 use crate::block_cache_policy::BlockCachePolicy;
-use crate::config::GarbageCollectorDirectoryOptions;
 use crate::db_state::SsTableId;
 use crate::format::sst::SsTableFormat;
 use crate::garbage_collector::stats::GcStats;
 use crate::object_stores::ObjectStores;
 use crate::paths::PathResolver;
 use crate::tablestore::{TableStore, TableStoreKind};
-use crate::wal::gc::{SlateDbWalGc, WalGcMode};
+use crate::wal::slatedb::gc::{SlateDbWalGc, WalGcMode};
 use crate::wal::{WalAdmin, WalError, WalGc};
 use crate::VersionedManifest;
 use async_trait::async_trait;
@@ -69,7 +68,7 @@ impl SlateDbWalAdmin {
 
 #[async_trait]
 impl WalAdmin for SlateDbWalAdmin {
-    fn garbage_collector(&self, path: &Path) -> Box<dyn WalGc> {
+    fn garbage_collector(&self, path: &Path) -> Arc<dyn WalGc> {
         let table_store = Arc::new(TableStore::new(
             ObjectStores::new(self.object_store.clone(), None),
             SsTableFormat::default(),
@@ -78,26 +77,28 @@ impl WalAdmin for SlateDbWalAdmin {
             TableStoreKind::GC,
             BlockCachePolicy::default(),
         ));
-        Box::new(SlateDbWalGc::new(
+        Arc::new(SlateDbWalGc::new(
             table_store,
             Arc::new(GcStats::new(&MetricsRecorderHelper::noop())),
-            GarbageCollectorDirectoryOptions::default(),
             WalGcMode::Regular,
             None,
             Arc::new(DefaultSystemClock::new()),
         ))
     }
 
-    async fn delete_wal(&self, path: &Path) -> Result<(), WalError> {
+    async fn delete_wal(&self, path: &Path, dry_run: bool) -> Result<Vec<String>, WalError> {
         // Collect the paths first so listing is complete before objects are removed.
         let wal_path = PathResolver::from_root(path.clone()).wal_path();
-        for object_path in self.paths_under(&wal_path).await? {
-            self.object_store
-                .delete(&object_path)
-                .await
-                .map_err(|err| WalError::Unavailable(Arc::new(err)))?;
+        let paths = self.paths_under(&wal_path).await?;
+        if !dry_run {
+            for object_path in &paths {
+                self.object_store
+                    .delete(object_path)
+                    .await
+                    .map_err(|err| WalError::Unavailable(Arc::new(err)))?;
+            }
         }
-        Ok(())
+        Ok(paths.iter().map(Path::to_string).collect())
     }
 
     async fn is_empty(
@@ -190,7 +191,7 @@ mod tests {
             .await
             .unwrap();
 
-        wal_admin.delete_wal(&db_path).await.unwrap();
+        wal_admin.delete_wal(&db_path, false).await.unwrap();
 
         assert!(matches!(
             object_store.head(&wal_object).await,

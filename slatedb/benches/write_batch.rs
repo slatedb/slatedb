@@ -72,7 +72,7 @@ fn key(index: usize) -> Bytes {
 
 fn value(index: usize) -> Bytes {
     let mut value = vec![0; VALUE_SIZE];
-    value[..std::mem::size_of::<usize>()].copy_from_slice(&index.to_le_bytes());
+    value[..size_of::<usize>()].copy_from_slice(&index.to_le_bytes());
     Bytes::from(value)
 }
 

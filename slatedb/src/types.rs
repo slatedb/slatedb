@@ -48,13 +48,13 @@ impl RowEntry {
     pub(crate) fn estimated_size(&self) -> usize {
         let mut size = self.key.len() + self.value.len();
         // Add size for sequence number
-        size += std::mem::size_of::<u64>();
+        size += size_of::<u64>();
         // Add size for timestamps
         if self.create_ts.is_some() {
-            size += std::mem::size_of::<i64>();
+            size += size_of::<i64>();
         }
         if self.expire_ts.is_some() {
-            size += std::mem::size_of::<i64>();
+            size += size_of::<i64>();
         }
         size
     }
@@ -63,20 +63,20 @@ impl RowEntry {
     /// The `key_prefix_len` is the number of bytes shared with the block's first key.
     pub(crate) fn encoded_size(&self, key_prefix_len: usize) -> usize {
         let key_suffix_len = self.key.len() - key_prefix_len;
-        let mut size = std::mem::size_of::<u16>() // key_prefix_len
-            + std::mem::size_of::<u16>() // key_suffix_len
+        let mut size = size_of::<u16>() // key_prefix_len
+            + size_of::<u16>() // key_suffix_len
             + key_suffix_len
-            + std::mem::size_of::<u64>() // seq
-            + std::mem::size_of::<u8>(); // flags
+            + size_of::<u64>() // seq
+            + size_of::<u8>(); // flags
 
         if self.expire_ts.is_some() {
-            size += std::mem::size_of::<i64>();
+            size += size_of::<i64>();
         }
         if self.create_ts.is_some() {
-            size += std::mem::size_of::<i64>();
+            size += size_of::<i64>();
         }
         if !self.value.is_tombstone() {
-            size += std::mem::size_of::<u32>(); // value_len
+            size += size_of::<u32>(); // value_len
             size += self.value.len();
         }
         size

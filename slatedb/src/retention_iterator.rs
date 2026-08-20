@@ -1028,7 +1028,7 @@ mod tests {
         use slatedb_common::clock::MockSystemClock;
 
         // Test the apply_retention_filter function directly since TestIterator doesn't support create_ts
-        let mut versions = std::collections::BTreeMap::new();
+        let mut versions = BTreeMap::new();
         for entry in test_case.input_entries.iter() {
             versions.insert(Reverse(entry.seq), entry.clone());
         }
@@ -1238,7 +1238,7 @@ mod tests {
             assert_eq!(filtered.len(), 1);
             let only = filtered.values().next().unwrap();
             assert!(
-                matches!(only.value, ValueDeletable::Tombstone),
+                matches!(only.value, Tombstone),
                 "expired value should become a tombstone, got {:?}",
                 only.value
             );
@@ -1318,7 +1318,7 @@ mod tests {
             // merge dropped, value kept as tombstone
             assert_eq!(filtered.len(), 1);
             let kept = filtered.values().next().unwrap();
-            assert!(matches!(kept.value, ValueDeletable::Tombstone));
+            assert!(matches!(kept.value, Tombstone));
         }
     }
 }

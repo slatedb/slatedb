@@ -605,7 +605,7 @@ mod tests {
     use crate::proptest_util::{rng, sample};
     use crate::test_utils;
     use crate::utils::IdGenerator;
-    use crate::wal::admin::SlateDbWalAdmin;
+    use crate::wal::slatedb::admin::SlateDbWalAdmin;
     use crate::wal::{WalAdmin, WalError, WalFileRange, WalGc};
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -622,6 +622,7 @@ mod tests {
     use std::ops::Bound;
     use std::ops::RangeBounds;
     use std::sync::Arc;
+    use std::time::Duration;
     use uuid::Uuid;
 
     struct RemappingWalAdmin {
@@ -633,19 +634,24 @@ mod tests {
 
     #[async_trait]
     impl WalGc for NoopWalGc {
-        async fn collect(&self, _referenced_ranges: Vec<WalFileRange>) -> Result<(), WalError> {
+        async fn collect(
+            &self,
+            _referenced_ranges: Vec<WalFileRange>,
+            _min_age: Duration,
+            _dry_run: bool,
+        ) -> Result<(), WalError> {
             Ok(())
         }
     }
 
     #[async_trait]
     impl WalAdmin for RemappingWalAdmin {
-        fn garbage_collector(&self, _path: &Path) -> Box<dyn WalGc> {
-            Box::new(NoopWalGc)
+        fn garbage_collector(&self, _path: &Path) -> Arc<dyn WalGc> {
+            Arc::new(NoopWalGc)
         }
 
-        async fn delete_wal(&self, _path: &Path) -> Result<(), WalError> {
-            Ok(())
+        async fn delete_wal(&self, _path: &Path, _dry_run: bool) -> Result<Vec<String>, WalError> {
+            Ok(vec![])
         }
 
         async fn is_empty(
@@ -1106,7 +1112,7 @@ mod tests {
 
         // Create an uninitialized manifest with an invalid checkpoint id
         let clone_manifest_store = Arc::new(ManifestStore::new(&clone_path, object_store.clone()));
-        let non_existent_source_checkpoint_id = uuid::Uuid::new_v4();
+        let non_existent_source_checkpoint_id = Uuid::new_v4();
         StoredManifest::store_uninitialized_clone(
             clone_manifest_store,
             Manifest::cloned(
@@ -1220,7 +1226,7 @@ mod tests {
             Manifest::cloned(
                 &parent_manifest,
                 original_parent_path.to_string(),
-                uuid::Uuid::new_v4(),
+                Uuid::new_v4(),
                 rand.clone(),
             ),
             system_clock.clone(),
@@ -2128,6 +2134,112 @@ mod tests {
             .await;
         assert_segment_prefix_scan(&clone_db, &expected, b"bbb", b"bbc").await;
         assert_segment_prefix_scan(&clone_db, &expected, b"eee", b"eef").await;
+        clone_db.close().await.unwrap();
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn should_union_segmented_shards_that_each_span_every_segment() {
+        // Rescale-down of a store keyed `data/{tenant}/…` and
+        // `idx/{tenant}/…`, sharded by tenant. Each shard holds part of both
+        // segments, so the shards' overall key ranges overlap —
+        // `data/metro…` sorts below `idx/bronx…` — while neither segment
+        // does. One union call must merge them; no per-source projection and
+        // no staged re-slicing clones are needed.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let parent_path_a = Path::from("/tmp/test_parent_seg_interleaved_a");
+        let parent_path_b = Path::from("/tmp/test_parent_seg_interleaved_b");
+        let clone_path = Path::from("/tmp/test_clone_seg_interleaved");
+        let extractor = Arc::new(test_utils::DataIdxPrefixExtractor);
+        let settings = wal_disabled_settings();
+
+        fn shard(tenants: [&str; 2]) -> BTreeMap<Bytes, Bytes> {
+            let mut table = BTreeMap::new();
+            for tenant in tenants {
+                table.insert(
+                    Bytes::from(format!("data/{}/animal/lion-1", tenant)),
+                    Bytes::from(format!("{} lion", tenant)),
+                );
+                table.insert(
+                    Bytes::from(format!("idx/{}/owner/alice/lion-1", tenant)),
+                    Bytes::new(),
+                );
+            }
+            table
+        }
+        let table_a = shard(["bronx", "lincoln"]);
+        let table_b = shard(["metro", "oakland"]);
+
+        build_segmented_parent(
+            &parent_path_a,
+            object_store.clone(),
+            extractor.clone(),
+            settings.clone(),
+            &table_a,
+        )
+        .await;
+        build_segmented_parent(
+            &parent_path_b,
+            object_store.clone(),
+            extractor.clone(),
+            settings.clone(),
+            &table_b,
+        )
+        .await;
+
+        run_segmented_clone(
+            vec![
+                CloneSourceSpec::new(parent_path_a.clone()),
+                CloneSourceSpec::new(parent_path_b.clone()),
+            ],
+            &clone_path,
+            object_store.clone(),
+            None,
+        )
+        .await;
+
+        // Both shards contribute an L0 SST to each of the two segments.
+        let store = ManifestStore::new(&clone_path, object_store.clone());
+        let stored = store.read_latest_manifest().await.unwrap();
+        assert_eq!(
+            stored.manifest.core.segment_extractor_name.as_deref(),
+            Some("data-idx")
+        );
+        let segments: Vec<(Bytes, usize)> = stored
+            .manifest
+            .core
+            .segments
+            .iter()
+            .map(|s| (s.prefix.clone(), s.tree.l0.len()))
+            .collect();
+        assert_eq!(
+            segments,
+            vec![
+                (Bytes::from_static(b"data"), 2),
+                (Bytes::from_static(b"idx"), 2)
+            ]
+        );
+        assert_eq!(stored.manifest.external_dbs.len(), 2);
+
+        let mut expected: BTreeMap<Bytes, Bytes> = table_a.clone();
+        expected.extend(table_b.clone());
+
+        let clone_db =
+            open_segmented_clone(&clone_path, object_store.clone(), extractor, settings).await;
+        let mut full_iter = clone_db.scan(..).await.unwrap();
+        test_utils::assert_ranged_db_scan(&expected, .., IterationOrder::Ascending, &mut full_iter)
+            .await;
+        // Each segment routes reads across both shards' contributions.
+        assert_segment_prefix_scan(&clone_db, &expected, b"data", b"datb").await;
+        assert_segment_prefix_scan(&clone_db, &expected, b"idx", b"idy").await;
+        for (key, value) in &expected {
+            assert_eq!(
+                clone_db.get(key).await.unwrap().as_ref(),
+                Some(value),
+                "key={:?}",
+                key
+            );
+        }
         clone_db.close().await.unwrap();
     }
 

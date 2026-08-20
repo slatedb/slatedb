@@ -24,7 +24,7 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::Manifest;
 use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCell;
-use crate::wal::gc::{SlateDbWalGc, WalGcMode};
+use crate::wal::slatedb::gc::{SlateDbWalGc, WalGcMode};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compacted_gc::CompactedGcTask;
@@ -51,6 +51,7 @@ mod manifest_gc;
 pub mod stats;
 mod wal_gc;
 
+use crate::wal::WalGc;
 pub(crate) use filter::retain_allowed_by_gc_filter;
 pub use filter::GcFilter;
 
@@ -235,6 +236,7 @@ impl GarbageCollector {
         recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
         gc_filter: Option<Arc<dyn GcFilter>>,
+        wal_gc: Option<Arc<dyn WalGc>>,
     ) -> Self {
         let stats = Arc::new(GcStats::new(recorder));
         // The standalone GC lifecycle does not surface a closed result yet, so the
@@ -245,30 +247,38 @@ impl GarbageCollector {
             system_clock.clone(),
         ));
         let wal_gc_task = options.wal_options.map(|wal_options| {
-            let wal_gc = Arc::new(SlateDbWalGc::new(
-                table_store.clone(),
-                stats.clone(),
-                wal_options,
-                WalGcMode::Regular,
-                gc_filter.clone(),
-                system_clock.clone(),
-            ));
+            let wal_gc = wal_gc.unwrap_or_else(|| {
+                Arc::new(SlateDbWalGc::new(
+                    table_store.clone(),
+                    stats.clone(),
+                    WalGcMode::Regular,
+                    gc_filter.clone(),
+                    system_clock.clone(),
+                ))
+            });
             WalGcTask::new(
                 manifest_store.clone(),
                 wal_gc,
                 WalGcMode::Regular.resource(),
+                wal_options.min_age,
+                wal_options.dry_run,
             )
         });
         let wal_fence_gc_task = options.wal_fence_options.map(|wal_fence_options| {
             let wal_gc = Arc::new(SlateDbWalGc::new(
                 table_store.clone(),
                 stats.clone(),
-                wal_fence_options,
                 WalGcMode::Fence,
                 gc_filter.clone(),
                 system_clock.clone(),
             ));
-            WalGcTask::new(manifest_store.clone(), wal_gc, WalGcMode::Fence.resource())
+            WalGcTask::new(
+                manifest_store.clone(),
+                wal_gc,
+                WalGcMode::Fence.resource(),
+                wal_fence_options.min_age,
+                wal_fence_options.dry_run,
+            )
         });
         let compacted_gc_task = options.compacted_options.map(|compacted_options| {
             CompactedGcTask::new(
@@ -700,7 +710,7 @@ mod tests {
 
     fn new_checkpoint(manifest_id: u64, expire_time: Option<DateTime<Utc>>) -> Checkpoint {
         Checkpoint {
-            id: uuid::Uuid::new_v4(),
+            id: Uuid::new_v4(),
             manifest_id,
             expire_time,
             create_time: DefaultSystemClock::default().now(),
@@ -1190,6 +1200,7 @@ mod tests {
             &MetricsRecorderHelper::noop(),
             Arc::new(DefaultSystemClock::default()),
             None,
+            None,
         );
 
         gc.run_gc_once().await;
@@ -1260,6 +1271,7 @@ mod tests {
             &helper,
             Arc::new(DefaultSystemClock::default()),
             None,
+            None,
         );
 
         gc.run_gc_once().await;
@@ -1271,7 +1283,7 @@ mod tests {
         assert_eq!(
             lookup_metric_with_labels(
                 &recorder,
-                crate::garbage_collector::stats::DELETED_COUNT,
+                stats::DELETED_COUNT,
                 &[("resource", "wal_fence")]
             ),
             Some(2)
@@ -1324,6 +1336,7 @@ mod tests {
             gc_opts,
             &MetricsRecorderHelper::noop(),
             Arc::new(DefaultSystemClock::default()),
+            None,
             None,
         );
 
@@ -1404,6 +1417,7 @@ mod tests {
             gc_opts,
             &MetricsRecorderHelper::noop(),
             Arc::new(DefaultSystemClock::default()),
+            None,
             None,
         );
 
@@ -1834,23 +1848,23 @@ mod tests {
 
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
-            wal_options: Some(crate::config::GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+            wal_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
             wal_fence_options: None,
-            compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+            compacted_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
-            compactions_options: Some(crate::config::GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+            compactions_options: Some(GarbageCollectorDirectoryOptions {
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
@@ -1868,6 +1882,7 @@ mod tests {
             gc_opts,
             recorder,
             Arc::new(DefaultSystemClock::default()),
+            None,
             None,
         );
 
@@ -1911,23 +1926,23 @@ mod tests {
         let recorder = MetricsRecorderHelper::noop();
         let gc_opts = GarbageCollectorOptions {
             manifest_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
             wal_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
             wal_fence_options: None,
             compacted_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
             compactions_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
@@ -1945,6 +1960,7 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            None,
             None,
         );
 
@@ -1988,18 +2004,18 @@ mod tests {
         let gc_opts = GarbageCollectorOptions {
             manifest_options: None,
             wal_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
             wal_fence_options: None,
             compacted_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
             compactions_options: Some(GarbageCollectorDirectoryOptions {
-                min_age: std::time::Duration::from_secs(3600),
+                min_age: Duration::from_secs(3600),
                 interval: None,
                 dry_run: false,
             }),
@@ -2017,6 +2033,7 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            None,
             None,
         );
         gc.run_gc_once().await;
@@ -2069,6 +2086,7 @@ mod tests {
             &recorder,
             Arc::new(DefaultSystemClock::default()),
             None,
+            None,
         );
 
         let intervals: Vec<_> = gc.tickers().into_iter().map(|def| def.interval).collect();
@@ -2093,18 +2111,18 @@ mod tests {
                 interval: Some(Duration::from_secs(1)),
                 dry_run: false,
             }),
-            wal_options: Some(crate::config::GarbageCollectorDirectoryOptions {
+            wal_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
                 dry_run: false,
             }),
             wal_fence_options: None,
-            compacted_options: Some(crate::config::GarbageCollectorDirectoryOptions {
+            compacted_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
                 dry_run: false,
             }),
-            compactions_options: Some(crate::config::GarbageCollectorDirectoryOptions {
+            compactions_options: Some(GarbageCollectorDirectoryOptions {
                 min_age: Duration::from_secs(3600),
                 interval: Some(Duration::from_secs(1)),
                 dry_run: false,
@@ -2123,6 +2141,7 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            None,
             None,
         );
         gc.start().expect("failed to start garbage collector");
@@ -2165,11 +2184,7 @@ mod tests {
 
         // then:
         assert_eq!(
-            lookup_metric_with_labels(
-                &recorder,
-                crate::garbage_collector::stats::DELETED_COUNT,
-                &[("resource", "manifest")]
-            ),
+            lookup_metric_with_labels(&recorder, stats::DELETED_COUNT, &[("resource", "manifest")]),
             Some(1)
         );
     }
@@ -2210,11 +2225,7 @@ mod tests {
 
         // then:
         assert_eq!(
-            lookup_metric_with_labels(
-                &recorder,
-                crate::garbage_collector::stats::DELETED_COUNT,
-                &[("resource", "wal")]
-            ),
+            lookup_metric_with_labels(&recorder, stats::DELETED_COUNT, &[("resource", "wal")]),
             Some(1)
         );
     }
@@ -2271,7 +2282,7 @@ mod tests {
         assert_eq!(
             lookup_metric_with_labels(
                 &recorder,
-                crate::garbage_collector::stats::DELETED_COUNT,
+                stats::DELETED_COUNT,
                 &[("resource", "compacted")]
             ),
             Some(1)
@@ -2335,7 +2346,7 @@ mod tests {
         assert_eq!(
             lookup_metric_with_labels(
                 &recorder,
-                crate::garbage_collector::stats::DELETED_COUNT,
+                stats::DELETED_COUNT,
                 &[("resource", "compactions")]
             ),
             Some(2)
@@ -2457,6 +2468,7 @@ mod tests {
             Some(Arc::new(LocationGcFilter {
                 allowed_locations: HashSet::new(),
             })),
+            None,
         );
 
         // Run every directory GC task with candidates present for each task type.
@@ -2558,6 +2570,7 @@ mod tests {
             Some(Arc::new(LocationGcFilter {
                 allowed_locations: HashSet::from([path_resolver.sst_path(&allowed_wal_id)]),
             })),
+            None,
         );
 
         // Run WAL GC with a filter that permits only one of the eligible WALs.
@@ -2573,11 +2586,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(wal_ids, vec![rejected_before_wal_id, rejected_after_wal_id]);
         assert_eq!(
-            lookup_metric_with_labels(
-                &recorder,
-                crate::garbage_collector::stats::DELETED_COUNT,
-                &[("resource", "wal")]
-            ),
+            lookup_metric_with_labels(&recorder, stats::DELETED_COUNT, &[("resource", "wal")]),
             Some(1)
         );
     }
@@ -2689,6 +2698,7 @@ mod tests {
             gc_opts,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            None,
             None,
         );
 

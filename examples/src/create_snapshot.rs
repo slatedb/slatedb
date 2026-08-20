@@ -5,7 +5,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     // Initialize database
-    let object_store = Arc::new(slatedb::object_store::memory::InMemory::new());
+    let object_store = Arc::new(object_store::memory::InMemory::new());
     let db = Db::builder("my_db", object_store)
         .with_settings(Settings::default())
         .build()

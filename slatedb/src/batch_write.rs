@@ -391,7 +391,7 @@ impl DbInner {
         &self,
         freeze_memtable: bool,
     ) -> Result<(), SlateDBError> {
-        let (done, rx) = tokio::sync::oneshot::channel();
+        let (done, rx) = oneshot::channel();
         self.write_notifier
             .send(BatchWriterMessage::Flush(BatchWriterFlush {
                 freeze_memtable,
@@ -568,11 +568,8 @@ mod tests {
     fn test_message(
         batch: WriteBatch,
         options: WriteOptions,
-    ) -> (
-        BatchWriterMessage,
-        tokio::sync::oneshot::Receiver<WriteBatchResult>,
-    ) {
-        let (done, rx) = tokio::sync::oneshot::channel();
+    ) -> (BatchWriterMessage, oneshot::Receiver<WriteBatchResult>) {
+        let (done, rx) = oneshot::channel();
         (
             BatchWriterMessage::WriteBatch(WriteBatchRequest {
                 batch,
@@ -623,7 +620,7 @@ mod tests {
         .unwrap();
         let wal_writer = Box::new(FailingWalWriter::new(FailingWalOperation::Flush));
         let mut handler = WriteBatchEventHandler::new(db.inner.clone(), Some(wal_writer));
-        let (done, done_rx) = tokio::sync::oneshot::channel();
+        let (done, done_rx) = oneshot::channel();
         let msg = BatchWriterMessage::Flush(BatchWriterFlush {
             freeze_memtable: false,
             done,

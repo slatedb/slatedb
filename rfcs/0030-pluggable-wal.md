@@ -88,15 +88,15 @@ replays these WAL files into memtables, filtering out any rows with sequence num
 
 **Writes**
 
-Once it's recovered persisted writes, the db hands the WAL (`WalBufferManager`) off to the 
-Batch Writer task. This task serializes all writes and buffers them in `WalBufferManager`, 
-which periodically flushes the writes to a new WAL file. `WalBufferManager` notifies blocked 
+Once it's recovered persisted writes, the db hands the WAL (`SlateDbWalWriter`) off to the
+Batch Writer task. This task serializes all writes and buffers them in `SlateDbWalWriter`,
+which periodically flushes the writes to a new WAL file. `SlateDbWalWriter` notifies blocked
 write tasks when writes are durably flushed. 
 
 **Memtable/L0 Flushing**
 
 The Batch Writer task adds writes to the memtable once they've been buffered in 
-`WalBufferManager`. It "freezes" memtables once they cross the memtable size threshold and 
+`SlateDbWalWriter`. It "freezes" memtables once they cross the memtable size threshold and
 annotates the frozen memtable with a `replay_after_wal_id` which holds the ID of some WAL File 
 whose writes are fully covered by the memtable (in the current implementation this is the last 
 durably flushed WAL File). The frozen memtables are picked up by a separate Manifest Writer task,
@@ -112,7 +112,7 @@ described above depending on what the user requested.
 
 **Checkpoints**
 
-When `WalBufferManager` durably persists a WAL File, it notifies the db, which updates 
+When `SlateDbWalWriter` durably persists a WAL File, it notifies the db, which updates
 `last_seen_wal_id` in the manifest with the flushed WAL ID. `DbReader` uses this field to 
 determine the range of WAL Files that should be read for a checkpoint.
 
@@ -389,6 +389,11 @@ pub trait WalReader {
         &self,
         wal_file_id_range: WalFileRange,
     ) -> Result<Box<dyn WalIterator>, WalError>;
+
+    /// Returns the ID of the last WAL file currently present after `replay_after_wal_id`, or
+    /// `replay_after_wal_id` if no later WAL file is present. Implementations may use
+    /// `replay_after_wal_id` as a known lower bound when locating the end of the WAL.
+    async fn last_wal_file_id(&self, replay_after_wal_id: u64) -> Result<u64, WalError>;
 }
 
 /// API for plugging into WAL GC
@@ -643,39 +648,22 @@ then deletes them.
 `DbReaderBuilder` initializes `DbReader` with a `WalReader` that it uses to construct iterators 
 for replaying the WAL when loading a checkpoint.
 
-`DbReader` will now also continually stream WAL updates when configured to track the latest 
-writes. It does this by creating its `WalIterator` with an unbounded end range and blocking on 
-`next` from its background polling task. If the reader observes a `WalError::WalTruncated` then it
+`DbReader` continually discovers WAL updates when configured to track the latest writes. It
+resolves the current tail, creates a bounded `WalIterator`, drains it to completion, and then
+refreshes the manifest before the next pass. If the reader observes a `WalError::WalTruncated`, it
 immediately refreshes the manifest.
 
 #### CDC
 
-We'll deprecate/remove the current CDC API. Users can use the `WalReader`/`WalIterator` proposed
-in this RFC. SlateDB's native `WalReader` will take a buffer size and a poll interval to use when
-tailing the current WAL:
+We'll deprecate/remove the file-listing CDC API. CDC users can use SlateDB's native
+`SlateDbWalReader`, which implements the `WalReader`/`WalIterator` traits proposed in this RFC.
 
-```rust
-struct ObjectStoreWalReader {
-    // ...
-}
-
-impl ObjectStoreWalReader {
-    pub fn new<P: Into<Path>>(
-        path: P,
-        object_store: Arc<dyn ObjectStore>,
-        /// The number of WAL Files to prefetch and buffer when streaming the WAL
-        buffered_files: usize,
-        /// The interval at which the next WAL file will be polled when streaming the latest updates
-        poll_interval: Duration
-    ) {
-        todo!()
-    }
-}
-
-impl WalReader for ObjectStoreWalReader {
-    // ...
-}
-```
+CDC uses an iterator with an unbounded end range. A consumer keeps the last fully consumed WAL
+file ID, creates one iterator over `(cursor + 1)..`, and persists each
+`WalRows.last_consumed_wal_file_id`. At the current tail, `WalIterator::next` polls the manifest and
+waits for the next WAL file rather than ending, so the caller does not alternate between tail
+discovery and iterator creation. Empty fence WALs return an empty batch that still advances the
+cursor. After a restart, the consumer creates a new iterator from the persisted cursor plus one.
 
 #### Clones
 
@@ -807,8 +795,8 @@ benchmark tools that instantiate `DbBench` with a db configured to use a custom 
 
 ## Packaging
 
-The WAL traits and conformance tests will reside in a new crate called `slatedb-wal`. The native
-WAL implementation remains in `slatedb`.
+The WAL traits and conformance tests will all reside in the `wal` module. The native
+WAL implementation will move to a nested module `wal::slatedb`.
 
 ## Alternatives
 
@@ -848,6 +836,15 @@ reasonable/general.
 We could have `WalReader`/`WalIterator` iterate over WAL Files which in turn support row-based 
 iteration (similar to the CDC `WalReader`). I don't really see the benefit of imposing the extra 
 layering. It also forces implementations to map each write batch to a single WAL File.
+
+**Put WAL Trait Definitions in Separate Create**
+Initially this RFC proposed putting the WAL trait defs in a separate crate so that implementors
+only need to import that crate (vs all of slatedb). We opted not to go this route for a few reasons:
+- This requires moving core slatedb types out to either the new wal crate or to slatedb-common. In
+  particular, we'd need to move all the manifest definitions (`VersionedManifest`, `Manifest`) and
+  `RowEntry` as these are used by the writer init and reader/iterator, respectively.
+- A separate crate isn't that useful. Implementors will almost always have to import slatedb
+  anyway to run end-to-end tests. And users of custom WALs would be importing slatedb anyway.
 
 ## Open Questions
 

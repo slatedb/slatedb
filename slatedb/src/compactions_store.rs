@@ -276,7 +276,6 @@ impl CompactionsStore {
 mod tests {
     use super::*;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
-    use crate::error;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
     use object_store::memory::InMemory;
@@ -301,7 +300,7 @@ mod tests {
 
         assert!(matches!(
             result.unwrap_err(),
-            error::SlateDBError::TransactionalObjectVersionExists
+            SlateDBError::TransactionalObjectVersionExists
         ));
     }
 
@@ -395,7 +394,7 @@ mod tests {
             .unwrap();
 
         let result = compactor1.refresh().await;
-        assert!(matches!(result, Err(error::SlateDBError::Fenced)));
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
     }
 
     #[tokio::test]
