@@ -398,12 +398,9 @@ impl TableStore {
             }
         }
 
-        self.cache_on_sst_write(*id, encoded_sst).await;
-        Ok(SsTableHandle::new(
-            *id,
-            encoded_sst.format_version,
-            encoded_sst.info.clone(),
-        ))
+        let handle = SsTableHandle::new(*id, encoded_sst.format_version, encoded_sst.info.clone());
+        self.cache_on_sst_write(&handle, encoded_sst).await;
+        Ok(handle)
     }
 
     /// Targets a write of the SST inserts into the block cache.
@@ -422,17 +419,21 @@ impl TableStore {
         }
     }
 
-    /// Inserts the targets selected by the block cache policy for
-    /// `sst_table_id` into the block cache.
+    /// Inserts the targets selected by the block cache policy for `handle`'s
+    /// SST into the block cache.
     ///
     /// Data blocks come from `unconsumed_blocks`, so a caller that already
     /// streamed blocks out (the streaming writer) only has the blocks it has
     /// not drained yet, and caches the rest itself as it drains them.
-    async fn cache_on_sst_write(&self, sst_table_id: SsTableId, encoded_sst: &EncodedSsTable) {
+    async fn cache_on_sst_write(&self, handle: &SsTableHandle, encoded_sst: &EncodedSsTable) {
         let Some(cache) = &self.cache else {
             return;
         };
+        let sst_table_id = handle.id;
         let targets = self.targets_to_cache(&sst_table_id);
+        if targets.is_empty() {
+            return;
+        }
         for block in &encoded_sst.unconsumed_blocks {
             // Blocks without a tracked key span (WAL blocks) are never cached.
             let Some(key_span) = &block.key_span else {
@@ -651,13 +652,13 @@ impl TableStore {
             // always the smuggled loader error (so the direct retry will also fail),
             // and on the rare foyer-machinery error an insert would likely fail too.
             let entry = if cache_blocks {
-                cache
+                let result = cache
                     .fetch_filter(
                         cache_key.clone(),
                         self.read_loader(handle, CacheTarget::Filters),
                     )
-                    .await
-                    .ok()
+                    .await;
+                result.ok()
             } else {
                 cache.get_filter(&cache_key).await.unwrap_or(None)
             };
@@ -697,10 +698,10 @@ impl TableStore {
         if let Some(cache) = self.cache_for_reads() {
             // See `read_filters` for the rationale on the fall-through path.
             let entry = if cache_blocks {
-                cache
+                let result = cache
                     .fetch_stats(cache_key, self.read_loader(handle, CacheTarget::Stats))
-                    .await
-                    .ok()
+                    .await;
+                result.ok()
             } else {
                 cache.get_stats(&cache_key).await.unwrap_or(None)
             };
@@ -728,10 +729,10 @@ impl TableStore {
         if let Some(cache) = self.cache_for_reads() {
             // See `read_filters` for the rationale on the fall-through path.
             let entry = if cache_blocks {
-                cache
+                let result = cache
                     .fetch_index(cache_key, self.read_loader(handle, CacheTarget::Index))
-                    .await
-                    .ok()
+                    .await;
+                result.ok()
             } else {
                 cache.get_index(&cache_key).await.unwrap_or(None)
             };
@@ -1062,51 +1063,135 @@ impl TableStore {
         }
     }
 
+    /// Enumerate the block-cache keys for every cacheable component of the given SST:
+    /// each data block, the index, and (when present) the filters and stats block.
+    ///
+    /// Only includes filter/stats keys when those sections exist. Otherwise
+    /// `SsTableInfo`'s filter_offset collides with index_offset (filter_len
+    /// == 0) and stats_offset collides with the first data block
+    /// (stats_offset == 0).
+    async fn cache_keys_for_sst(
+        &self,
+        handle: &SsTableHandle,
+    ) -> Result<Vec<CachedKey>, SlateDBError> {
+        let index = self.read_index(handle, false).await?;
+        let mut keys = {
+            let index_borrow = index.borrow();
+            let meta = index_borrow.block_meta();
+            (0..meta.len())
+                .map(|block_num| (handle.id, meta.get(block_num).offset()).into())
+                .collect::<Vec<CachedKey>>()
+        };
+        keys.push((handle.id, handle.info.index_offset).into());
+        if handle.info.filter_len > 0 {
+            keys.push((handle.id, handle.info.filter_offset).into());
+        }
+        if handle.info.stats_len > 0 {
+            keys.push((handle.id, handle.info.stats_offset).into());
+        }
+        Ok(keys)
+    }
+
     /// Best-effort removal of all cache entries associated with the given SST:
-    /// data blocks, index, filters, and stats. Returns the offsets whose
-    /// cache removal was attempted.
+    /// data blocks, index, filters, and stats.
     pub(crate) async fn evict_sst_from_cache(&self, handle: &SsTableHandle) {
         let Some(ref cache) = self.cache else {
             return;
         };
+        let observed_generation = cache.touched_generation(handle.id);
         // Best effort: if we can't read the index we can't enumerate blocks,
         // so log and skip. Remaining entries will age out under normal pressure.
-        let index = match self.read_index(handle, false).await {
-            Ok(index) => index,
+        let keys = match self.cache_keys_for_sst(handle).await {
+            Ok(keys) => keys,
             Err(e) => {
                 warn!(
                     "evict_sst_from_cache: failed to read index for SST {:?}: {}",
                     handle.id, e
                 );
+                cache.clear_touched_if_unchanged(handle.id, observed_generation);
                 return;
             }
         };
-        {
-            let index_borrow = index.borrow();
-            let meta = index_borrow.block_meta();
-            for block_num in 0..meta.len() {
-                let offset = meta.get(block_num).offset();
-                cache.remove(&(handle.id, offset).into()).await;
+        for key in keys {
+            cache.remove(&key).await;
+        }
+        cache.clear_touched_if_unchanged(handle.id, observed_generation);
+    }
+
+    /// Best-effort spill-to-disk-then-evict-from-memory of every cache entry
+    /// associated with the given SST: data blocks, index, filters, and stats.
+    ///
+    /// Spills are enqueued in batches of [`SPILL_WAIT_BATCH_SIZE`] keys,
+    /// waiting for each batch to drain (via [`DbCache::wait_for_spills`])
+    /// before enqueueing the next. This bounds how much unawaited spill work
+    /// this call alone can have outstanding at once against a hybrid cache's
+    /// shared, typically much-smaller-than-a-whole-SST disk-write queue
+    /// admission ceiling — without this, a single large SST's worth of
+    /// unbounded, unawaited `spill_and_evict` calls can silently overflow
+    /// that queue and drop entries that were already unconditionally removed
+    /// from the memory tier. Callers that spill multiple SSTs should still
+    /// call [`DbCache::wait_for_spills`] once more after the whole batch, to
+    /// wait on any work enqueued by *other* callers sharing the same cache.
+    ///
+    /// A per-key `spill_and_evict` failure does not abort the remaining keys
+    /// for this SST: every key is attempted, and the first error (if any) is
+    /// returned once the SST has been fully walked. Returns
+    /// [`SpillOutcome::IndexUnavailable`] as a no-op if no cache is
+    /// configured, or if the SST's index can't be read (best-effort, matching
+    /// [`Self::evict_sst_from_cache`]).
+    pub(crate) async fn spill_sst_to_disk(
+        &self,
+        handle: &SsTableHandle,
+    ) -> Result<SpillOutcome, crate::Error> {
+        let Some(ref cache) = self.cache else {
+            return Ok(SpillOutcome::IndexUnavailable);
+        };
+        let observed_generation = cache.touched_generation(handle.id);
+        let keys = match self.cache_keys_for_sst(handle).await {
+            Ok(keys) => keys,
+            Err(e) => {
+                warn!(
+                    "spill_sst_to_disk: failed to read index for SST {:?}: {}",
+                    handle.id, e
+                );
+                cache.clear_touched_if_unchanged(handle.id, observed_generation);
+                return Ok(SpillOutcome::IndexUnavailable);
+            }
+        };
+        let mut first_err: Option<crate::Error> = None;
+        for chunk in keys.chunks(SPILL_WAIT_BATCH_SIZE) {
+            for key in chunk {
+                if let Err(e) = cache.spill_and_evict(key).await {
+                    first_err.get_or_insert(e);
+                }
+            }
+            if let Err(e) = cache.wait_for_spills().await {
+                first_err.get_or_insert(e);
             }
         }
-        cache
-            .remove(&(handle.id, handle.info.index_offset).into())
-            .await;
-        // Only evict filter/stats when those sections exist. Otherwise
-        // SsTableInfo's filter_offset collides with index_offset (filter_len
-        // == 0) and stats_offset collides with the first data block
-        // (stats_offset == 0).
-        if handle.info.filter_len > 0 {
-            cache
-                .remove(&(handle.id, handle.info.filter_offset).into())
-                .await;
-        }
-        if handle.info.stats_len > 0 {
-            cache
-                .remove(&(handle.id, handle.info.stats_offset).into())
-                .await;
+        cache.clear_touched_if_unchanged(handle.id, observed_generation);
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(SpillOutcome::Spilled),
         }
     }
+}
+
+/// Number of cache keys spilled per [`TableStore::spill_sst_to_disk`] batch
+/// before waiting for that batch to drain. Conservative relative to a hybrid
+/// cache's disk-write queue admission ceiling (foyer's default is 16 MiB,
+/// shared with every other `Db` on the same cache) — a heuristic margin, not
+/// a guarantee, per `FoyerHybridCache::spill_and_evict`'s doc comment.
+const SPILL_WAIT_BATCH_SIZE: usize = 128;
+
+/// Outcome of [`TableStore::spill_sst_to_disk`] for one SST.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpillOutcome {
+    /// Every cache key for the SST was walked and (best-effort) spilled.
+    Spilled,
+    /// The SST's index couldn't be read (or no cache is configured), so its
+    /// cache keys could not be enumerated; nothing was spilled.
+    IndexUnavailable,
 }
 
 async fn wal_object_exists(
@@ -1242,20 +1327,23 @@ impl EncodedSsTableWriter {
         self.writer.write_all(encoded_sst.footer.as_ref()).await?;
         self.writer.shutdown().await?;
 
+        let handle = SsTableHandle::new(
+            self.id,
+            encoded_sst.format_version,
+            encoded_sst.info.clone(),
+        );
         // Cache inserts happen after writer shutdown so an SST whose upload
         // fails contributes no metadata entries.
         //
         // Blocks drained while entries were added are cached by `write_block`,
         // so the only data block left for `cache_on_sst_write` is the tail
-        // block that `build` finished.
+        // block `build` finished. If nothing is targeted here (no data/index/
+        // filters/stats), it inserts nothing and marks nothing touched —
+        // touched-tracking only happens as a side effect of an actual insert.
         self.table_store
-            .cache_on_sst_write(self.id, &encoded_sst)
+            .cache_on_sst_write(&handle, &encoded_sst)
             .await;
-        Ok(SsTableHandle::new(
-            self.id,
-            encoded_sst.format_version,
-            encoded_sst.info,
-        ))
+        Ok(handle)
     }
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {
@@ -1306,6 +1394,7 @@ fn slatedb_io_error() -> SlateDBError {
 
 #[cfg(test)]
 mod tests {
+    use super::{SpillOutcome, SPILL_WAIT_BATCH_SIZE};
     use crate::types::KeyValue;
     use bytes::Bytes;
     use futures::future;
@@ -1314,7 +1403,7 @@ mod tests {
     use proptest::prelude::any;
     use proptest::proptest;
     use rstest::rstest;
-    use std::collections::VecDeque;
+    use std::collections::{HashSet, VecDeque};
     use std::sync::Arc;
 
     use crate::block_cache_policy::BlockCachePolicy;
@@ -1865,6 +1954,7 @@ mod tests {
             split_cache,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            1,
         ));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
@@ -1986,6 +2076,64 @@ mod tests {
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data[15..20]).await;
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "moka")]
+    async fn test_spill_sst_to_disk_untracks_an_sst_whose_index_is_unreadable() {
+        use crate::db_cache::{moka::MokaCache, SplitCache};
+
+        let os = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let split_cache = Arc::new(
+            SplitCache::new()
+                .with_block_cache(Some(Arc::new(MokaCache::new())))
+                .build(),
+        );
+        let wrapper = Arc::new(DbCacheWrapper::new(
+            split_cache,
+            &recorder,
+            Arc::new(DefaultSystemClock::default()),
+            1,
+        ));
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            format,
+            Path::from("/root"),
+            Some(wrapper.clone()),
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let mut writer = ts.table_writer(id);
+        writer
+            .add(RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0))
+            .await
+            .unwrap();
+        let handle = writer.close().await.unwrap();
+        assert!(
+            ts.cache().unwrap().touched_sst_ids().contains(&handle.id),
+            "the write should have marked the SST touched"
+        );
+
+        // Evict the cached index and delete the SST object so the index read
+        // that `spill_sst_to_disk` needs is unreadable, like a GC'd SST.
+        wrapper
+            .remove(&(handle.id, handle.info.index_offset).into())
+            .await;
+        os.delete(&ts.path(&id)).await.unwrap();
+
+        let outcome = ts.spill_sst_to_disk(&handle).await.unwrap();
+        assert!(matches!(outcome, SpillOutcome::IndexUnavailable));
+
+        assert!(
+            !ts.cache().unwrap().touched_sst_ids().contains(&handle.id),
+            "an SST whose index can't be read should stop being tracked"
+        );
     }
 
     #[tokio::test]
@@ -2192,6 +2340,7 @@ mod tests {
             split_cache,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            1,
         ));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
@@ -2239,6 +2388,7 @@ mod tests {
             cache.clone(),
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            1,
         ));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
@@ -2269,6 +2419,140 @@ mod tests {
                 .unwrap();
             assert!(cached_block.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn test_spill_sst_to_disk_drains_multiple_batches() {
+        // given: an SST with enough cacheable keys to span multiple
+        // SPILL_WAIT_BATCH_SIZE-sized batches, not just one.
+        let os = Arc::new(InMemory::new());
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let cache = Arc::new(TestCache::new());
+        let wrapper = Arc::new(DbCacheWrapper::new(
+            cache,
+            &recorder,
+            Arc::new(DefaultSystemClock::default()),
+            1,
+        ));
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            SsTableFormat::default(),
+            Path::from("/root"),
+            Some(wrapper),
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let sst = build_test_sst(&ts.sst_format, 300).await;
+        ts.write_sst(&id, &sst).await.unwrap();
+        let handle = ts.open_sst(&id).await.unwrap();
+        let keys = ts.cache_keys_for_sst(&handle).await.unwrap();
+        assert!(
+            keys.len() > SPILL_WAIT_BATCH_SIZE * 2,
+            "expected this SST's cache keys ({}) to span at least 3 batches of {}",
+            keys.len(),
+            SPILL_WAIT_BATCH_SIZE
+        );
+
+        // when: spilling the whole SST.
+        let outcome = ts.spill_sst_to_disk(&handle).await.unwrap();
+
+        // then: every batch actually drained — not just the first.
+        assert!(matches!(outcome, SpillOutcome::Spilled));
+        for key in &keys {
+            assert!(
+                ts.cache().unwrap().get_block(key).await.unwrap().is_none()
+                    && ts.cache().unwrap().get_index(key).await.unwrap().is_none(),
+                "every batch must be evicted from memory, not just the first"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_touched_sst_ids_tracks_only_ssts_with_cached_entries() {
+        // given: a store whose default policy caches on flush, with two SSTs written
+        let os = Arc::new(InMemory::new());
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let cache = Arc::new(TestCache::new());
+        let wrapper = Arc::new(DbCacheWrapper::new(
+            cache,
+            &recorder,
+            Arc::new(DefaultSystemClock::default()),
+            1,
+        ));
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            SsTableFormat::default(),
+            Path::from("/root"),
+            Some(wrapper),
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+
+        assert!(
+            ts.cache().unwrap().touched_sst_ids().is_empty(),
+            "a fresh store should have nothing touched"
+        );
+
+        let id_a = SsTableId::Compacted(ulid::Ulid::new());
+        let sst_a = build_test_sst(&ts.sst_format, 3).await;
+        ts.write_sst(&id_a, &sst_a).await.unwrap();
+
+        let id_b = SsTableId::Compacted(ulid::Ulid::new());
+        let sst_b = build_test_sst(&ts.sst_format, 3).await;
+        ts.write_sst(&id_b, &sst_b).await.unwrap();
+
+        // then: both flushed SSTs are tracked as touched
+        let touched: HashSet<SsTableId> =
+            ts.cache().unwrap().touched_sst_ids().into_iter().collect();
+        assert_eq!(touched, HashSet::from([id_a, id_b]));
+
+        // when: SST A is fully spilled to disk
+        let handle_a = ts.open_sst(&id_a).await.unwrap();
+        ts.spill_sst_to_disk(&handle_a).await.unwrap();
+
+        // then: only the untouched (still-resident) SST B remains tracked
+        let touched_after: HashSet<SsTableId> =
+            ts.cache().unwrap().touched_sst_ids().into_iter().collect();
+        assert_eq!(touched_after, HashSet::from([id_b]));
+
+        // when: SST B is evicted (not spilled) instead
+        let handle_b = ts.open_sst(&id_b).await.unwrap();
+        ts.evict_sst_from_cache(&handle_b).await;
+
+        // then: nothing remains tracked
+        assert!(ts.cache().unwrap().touched_sst_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_touched_sst_ids_empty_when_flush_caching_disabled() {
+        // given: a store whose policy caches nothing on flush
+        let os = Arc::new(InMemory::new());
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let cache = Arc::new(TestCache::new());
+        let wrapper = Arc::new(DbCacheWrapper::new(
+            cache,
+            &recorder,
+            Arc::new(DefaultSystemClock::default()),
+            1,
+        ));
+        let ts = Arc::new(TableStore::new(
+            ObjectStores::new(os.clone(), None),
+            SsTableFormat::default(),
+            Path::from("/root"),
+            Some(wrapper),
+            TableStoreKind::Main,
+            BlockCachePolicy::default().with_flush_targets(&[]),
+        ));
+
+        // when: an SST is written
+        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let sst = build_test_sst(&ts.sst_format, 3).await;
+        ts.write_sst(&id, &sst).await.unwrap();
+
+        // then: nothing was cached, so nothing is tracked as touched
+        assert!(ts.cache().unwrap().touched_sst_ids().is_empty());
     }
 
     #[rstest]

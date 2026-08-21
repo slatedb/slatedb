@@ -290,4 +290,14 @@ impl Db {
         self.inner.evict_cached_sst(sst_id).await?;
         Ok(())
     }
+
+    /// Flushes this Db's footprint from a shared block cache: spills resident
+    /// cache entries for every SST reachable from the current manifest to the
+    /// cache's disk tier and evicts them from the memory tier.
+    ///
+    /// A no-op for caches with no disk tier, and if no block cache is configured.
+    pub async fn flush_cache_to_disk(&self) -> Result<(), Error> {
+        self.inner.flush_cache_to_disk().await?;
+        Ok(())
+    }
 }

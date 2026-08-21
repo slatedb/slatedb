@@ -657,6 +657,65 @@ pub trait DbCacheManagerOps {
     /// Does not check whether the SST is still live in the current manifest —
     /// callers own that policy.
     async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), crate::Error>;
+
+    /// Flush this instance's footprint from a shared block cache: for every SST
+    /// this instance has cached at least one entry for, spill resident cache
+    /// entries (data blocks, index, filters, stats) to the cache's disk tier and
+    /// evict them from the memory tier, then wait for the spills to land.
+    ///
+    /// Bounded to SSTs this instance has actually touched, not every SST
+    /// reachable from the current manifest — a long-lived `Db` can have far more
+    /// live SSTs than it has ever read from, and reading each one's index just to
+    /// discover nothing is resident would add avoidable object-store GETs to the
+    /// stop path. This is a conservative over-approximation in the other
+    /// direction: it can include an SST whose only cached entries were already
+    /// evicted by ordinary cache pressure, in which case evacuating it is just a
+    /// fast no-op once its index is read.
+    ///
+    /// Intended for callers that share one block cache across many `Db`/`DbReader`
+    /// instances (for example one cache per process) and want to reclaim a
+    /// stopping instance's memory footprint immediately rather than waiting for
+    /// LRU, while keeping its hot blocks warm on disk for a future instance over
+    /// the same path to recover quickly.
+    ///
+    /// A no-op for caches with no disk tier (the default
+    /// [`DbCache::spill_and_evict`](crate::db_cache::DbCache::spill_and_evict) is a
+    /// no-op), and if no block cache is configured at all.
+    ///
+    /// ## Caveats
+    ///
+    /// - **Evacuates by scope, tracks by instance.** A `Db` and a `DbReader`
+    ///   configured with the same `scope_id` share one cache scope. This call
+    ///   evacuates, in full, every SST *this instance* has touched — including
+    ///   entries only the other, still-open handle inserted for that SST. But
+    ///   an SST only the other handle has read or written stays untouched,
+    ///   since touch-tracking is per instance, not per scope. Only call this
+    ///   when you intend to reclaim the whole scope.
+    /// - **This call's latency depends on the whole shared cache's I/O load, not
+    ///   just this instance's footprint.** Waiting for spills to land is a
+    ///   cache-wide barrier in the underlying hybrid-cache implementation (e.g.
+    ///   foyer): it resolves only once every in-flight disk write across *every*
+    ///   `Db`/`DbReader` sharing the cache has drained, not just the ones this
+    ///   call enqueued. Don't put this call on a tight, instance-local timeout
+    ///   budget (e.g. as part of a fixed-deadline shutdown path) when the cache is
+    ///   shared with busy siblings.
+    /// - **A concurrent re-populate is harmless.** A concurrent read on this
+    ///   scope can re-populate a key this call just evacuated — safe, since
+    ///   cache keys address immutable SST content, so a re-fetch only ever
+    ///   produces the same bytes — but it does mean less may end up reclaimed
+    ///   than expected.
+    /// - **A skipped SST stays resident.** An SST whose index can't be read is
+    ///   skipped rather than failing the whole call (a `warn!` line reports
+    ///   how many were skipped); its entries stay memory-resident until
+    ///   ordinary cache pressure reclaims them.
+    /// - **`Ok(())` isn't a durability guarantee.** The `foyer`-backed
+    ///   implementation has its own silent-drop paths under sustained
+    ///   shared-cache write pressure — see `FoyerHybridCache::spill_and_evict`'s
+    ///   doc comment for why and the two real mitigations it exposes.
+    /// - **Not synchronized with a concurrent `close()` on a cloned handle.**
+    ///   `Db`/`DbReader` are `Clone`; a different clone can close (and tear
+    ///   down an owned cache) while this call is still in progress.
+    async fn flush_cache_to_disk(&self) -> Result<(), crate::Error>;
 }
 
 #[cfg(test)]

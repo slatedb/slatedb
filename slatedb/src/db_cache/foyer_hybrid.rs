@@ -62,7 +62,7 @@
 //!         .unwrap();
 //!     let cache = Arc::new(FoyerHybridCache::new_with_cache(cache));
 //!     let db = Db::builder("path/to/db", object_store)
-//!         .with_db_cache(cache)
+//!         .with_db_cache(cache, 0)
 //!         .build()
 //!         .await
 //!         .unwrap();
@@ -147,6 +147,33 @@ impl DbCache for FoyerHybridCache {
             Err(e) => info!("foyer hybrid cache: close failed [error={e:?}]"),
         }
         result
+    }
+
+    /// Best-effort: `Ok(())` means handed off to foyer's disk-write queue, not
+    /// durably landed. `force = true` bypasses the admission filter but not
+    /// foyer 0.22.3's closed-engine or submit-queue-overflow drops — neither
+    /// surfaces as an error, and `enqueue` returns `()` so there's nothing
+    /// more this method can do. Two real mitigations for a deployment sharing
+    /// one cache across many `Db`s (this crate's own intended pattern):
+    /// `BlockEngineConfig::with_submit_queue_size_threshold` to size the
+    /// shared queue for that fan-in, and `HybridCacheBuilder::with_metrics_registry`
+    /// so the `channel_overflow` counter foyer increments on every drop is
+    /// observable instead of discarded (the default registry is a no-op).
+    async fn spill_and_evict(&self, key: &CachedKey) -> Result<(), crate::Error> {
+        // `memory().remove` returns the entry (holding the value) only if it was
+        // actually resident; a non-resident key is a no-op, so we never fabricate
+        // a disk entry for something we never had.
+        if let Some(entry) = self.inner.memory().remove(key) {
+            // `force = true` pushes the piece past the admission filter so a hot
+            // block reaches disk even if the filter would otherwise sample it out.
+            self.inner.storage().enqueue(entry.piece(), true);
+        }
+        Ok(())
+    }
+
+    async fn wait_for_spills(&self) -> Result<(), crate::Error> {
+        self.inner.storage().wait().await;
+        Ok(())
     }
 
     async fn fetch_block(
@@ -286,6 +313,70 @@ mod tests {
         FoyerHybridCache::new_with_cache(cache)
     }
 
+    /// Like `open_cache`, but with the submit-queue ceiling dropped to zero,
+    /// so a second `spill_and_evict` before the first drains is guaranteed
+    /// (not just probable) to hit foyer's queue-overflow gate.
+    async fn open_cache_with_zero_submit_queue(path: &std::path::Path) -> FoyerHybridCache {
+        let cache = HybridCacheBuilder::new()
+            .with_name("hybrid_cache_test_zero_submit_queue")
+            .memory(1024 * 1024)
+            .with_weighter(|_, v: &CachedEntry| v.size())
+            .storage()
+            .with_io_engine_config(PsyncIoEngineConfig::new())
+            .with_engine_config(
+                BlockEngineConfig::new(
+                    FsDeviceBuilder::new(path)
+                        .with_capacity(4 * 1024 * 1024)
+                        .build()
+                        .unwrap(),
+                )
+                .with_block_size(64 * 1024)
+                .with_submit_queue_size_threshold(0),
+            )
+            .build()
+            .await
+            .unwrap();
+        FoyerHybridCache::new_with_cache(cache)
+    }
+
+    #[tokio::test]
+    async fn should_silently_drop_a_spill_when_the_submit_queue_is_full() {
+        // given: a cache with no submit-queue headroom and two resident entries
+        let dir = tempdir().unwrap();
+        let cache = open_cache_with_zero_submit_queue(dir.path()).await;
+        let key1 = CachedKey::from((SST_ID, 1u64));
+        let key2 = CachedKey::from((SST_ID, 2u64));
+        cache.insert(key1.clone(), build_block()).await;
+        cache.insert(key2.clone(), build_block()).await;
+
+        // when: spilling both without waiting between them. foyer accounts
+        // for queue space synchronously on submit, so the second call is
+        // guaranteed to see the queue as full.
+        let first = cache.spill_and_evict(&key1).await;
+        let second = cache.spill_and_evict(&key2).await;
+        cache.wait_for_spills().await.unwrap();
+
+        // then: both report success (`enqueue` returns `()`, nothing to
+        // surface), despite key2 being silently dropped.
+        assert!(first.is_ok());
+        assert!(second.is_ok(), "Ok(()) despite the silent drop");
+        assert!(
+            cache.inner.memory().get(&key1).is_none() && cache.inner.memory().get(&key2).is_none(),
+            "spill_and_evict always removes from memory regardless of enqueue outcome"
+        );
+        let loaded1 = cache.inner.storage().load(&key1).await.unwrap();
+        assert!(
+            loaded1.entry().is_some(),
+            "the first spill had queue headroom and should have landed on disk"
+        );
+        let loaded2 = cache.inner.storage().load(&key2).await.unwrap();
+        assert!(
+            loaded2.entry().is_none(),
+            "the second spill was silently dropped by foyer's queue-overflow gate: \
+             gone from both tiers despite Ok(())"
+        );
+    }
+
     #[tokio::test]
     async fn should_persist_blocks_to_disk_on_close() {
         // given: a cache with entries
@@ -311,5 +402,80 @@ mod tests {
             }
         }
         assert_eq!(found, keys.len(), "all entries should survive close+reopen");
+    }
+
+    #[tokio::test]
+    async fn should_move_resident_key_from_memory_to_disk_on_spill() {
+        // given: a cache with one resident entry
+        let dir = tempdir().unwrap();
+        let cache = open_cache(dir.path()).await;
+        let key = CachedKey::from((SST_ID, 1u64));
+        cache.insert(key.clone(), build_block()).await;
+        assert!(
+            cache.inner.memory().get(&key).is_some(),
+            "entry should be resident in memory right after insert"
+        );
+
+        // when: spilling (without ever calling close())
+        cache.spill_and_evict(&key).await.unwrap();
+        cache.wait_for_spills().await.unwrap();
+
+        // then: gone from memory, landed on disk
+        assert!(
+            cache.inner.memory().get(&key).is_none(),
+            "entry should have been evicted from the memory tier"
+        );
+        let loaded = cache.inner.storage().load(&key).await.unwrap();
+        assert!(
+            loaded.entry().is_some(),
+            "entry should have been spilled to the disk tier"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_noop_spill_and_evict_for_non_resident_key() {
+        // given: an empty cache
+        let dir = tempdir().unwrap();
+        let cache = open_cache(dir.path()).await;
+        let key = CachedKey::from((SST_ID, 1u64));
+
+        // when: spilling a key that was never inserted
+        cache.spill_and_evict(&key).await.unwrap();
+        cache.wait_for_spills().await.unwrap();
+
+        // then: no entry is fabricated on disk
+        assert!(cache.inner.memory().get(&key).is_none());
+        let loaded = cache.inner.storage().load(&key).await.unwrap();
+        assert!(
+            loaded.is_miss(),
+            "spilling a non-resident key must not create a disk entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_leave_other_keys_untouched_when_spilling_one_key() {
+        // given: two resident entries
+        let dir = tempdir().unwrap();
+        let cache = open_cache(dir.path()).await;
+        let spilled_key = CachedKey::from((SST_ID, 1u64));
+        let kept_key = CachedKey::from((SST_ID, 2u64));
+        cache.insert(spilled_key.clone(), build_block()).await;
+        cache.insert(kept_key.clone(), build_block()).await;
+
+        // when: only one key is spilled
+        cache.spill_and_evict(&spilled_key).await.unwrap();
+        cache.wait_for_spills().await.unwrap();
+
+        // then: the other key is still resident in memory and was never
+        // written to disk
+        assert!(
+            cache.inner.memory().get(&kept_key).is_some(),
+            "untouched key should remain resident in memory"
+        );
+        let loaded = cache.inner.storage().load(&kept_key).await.unwrap();
+        assert!(
+            loaded.is_miss(),
+            "untouched key should not have been spilled to disk"
+        );
     }
 }

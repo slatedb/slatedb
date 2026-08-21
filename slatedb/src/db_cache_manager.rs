@@ -12,7 +12,7 @@ use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::manifest::VersionedManifest;
 use crate::partitioned_keyspace::partitions_covering_range;
-use crate::tablestore::TableStore;
+use crate::tablestore::{SpillOutcome, TableStore};
 
 pub(crate) async fn warm_sst_impl(
     table_store: &Arc<TableStore>,
@@ -85,6 +85,76 @@ pub(crate) async fn evict_cached_sst_impl(
     let handle = table_store.open_sst(&sst_id).await?;
     table_store.evict_sst_from_cache(&handle).await;
     Ok(())
+}
+
+pub(crate) async fn flush_cache_to_disk_impl(
+    table_store: &Arc<TableStore>,
+    manifest: &VersionedManifest,
+) -> Result<(), crate::Error> {
+    let Some(cache) = table_store.cache() else {
+        // debug!, not warn!: unlike warm_sst/evict_cached_sst, this is meant to
+        // be called unconditionally from a generic shutdown hook, cache or not.
+        debug!("flush_cache_to_disk called on a Db without a block cache configured");
+        return Ok(());
+    };
+    // Bounded to touched SSTs, not every SST reachable from the manifest — see
+    // `DbCacheManagerOps::flush_cache_to_disk`'s doc for why, and
+    // `DbCache::touched_sst_ids` for the over-approximation caveat.
+    let mut first_err: Option<crate::Error> = None;
+    let mut skipped = 0usize;
+    for sst_id in cache.touched_sst_ids() {
+        // Reuse the handle embedded in the manifest view instead of an
+        // `open_sst` GET, same as `warm_sst_impl`. Not found means the SST is
+        // no longer live (compacted/GC'd) — clear its tracking here, since
+        // nothing else will on this path.
+        let Some(view) = manifest
+            .core()
+            .all_sst_views()
+            .find(|view| view.sst.id == sst_id)
+        else {
+            cache.clear_touched_if_unchanged(sst_id, cache.touched_generation(sst_id));
+            skipped += 1;
+            continue;
+        };
+        match table_store.spill_sst_to_disk(&view.sst).await {
+            Ok(SpillOutcome::Spilled) => {}
+            Ok(SpillOutcome::IndexUnavailable) => skipped += 1,
+            // A per-SST failure doesn't abort the remaining SSTs: keep
+            // walking so a single bad SST doesn't strand every other SST's
+            // entries memory-resident, and surface the first error once the
+            // whole walk (and the final drain below) has finished. Every
+            // failure is logged here since only the first is visible via the
+            // returned Result.
+            Err(e) => {
+                warn!("flush_cache_to_disk: failed to spill SST {sst_id:?} [error={e}]");
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    if skipped > 0 {
+        warn!(
+            "flush_cache_to_disk: {} SST(s) skipped because they're no longer \
+             live or their index could not be read; their cache entries remain \
+             memory-resident and were not flushed",
+            skipped
+        );
+    }
+    // Always wait for whatever did get enqueued, even if a per-SST spill
+    // failed above: a caller shouldn't be left unable to tell whether
+    // anything that *did* succeed actually reached disk.
+    let wait_result = cache.wait_for_spills().await;
+    match (first_err, wait_result) {
+        (Some(e), Err(wait_err)) => {
+            warn!(
+                "flush_cache_to_disk: wait_for_spills also failed, but a \
+                 per-SST spill error took precedence [wait_error={wait_err}]"
+            );
+            Err(e)
+        }
+        (Some(e), Ok(())) => Err(e),
+        (None, Err(e)) => Err(e),
+        (None, Ok(())) => Ok(()),
+    }
 }
 
 /// Clamp a requested data range against the SST's visible views, returning the
@@ -469,6 +539,14 @@ mod tests {
             evict_err.kind(),
             crate::ErrorKind::Closed(crate::CloseReason::Clean),
         );
+        let flush_err = db
+            .flush_cache_to_disk()
+            .await
+            .expect_err("flush_cache_to_disk on closed db");
+        assert_eq!(
+            flush_err.kind(),
+            crate::ErrorKind::Closed(crate::CloseReason::Clean),
+        );
     }
 
     fn project_l0_view(manifest: &mut VersionedManifest, visible_range: BytesRange) {
@@ -780,6 +858,97 @@ mod tests {
             "expected no blocks cached after eviction, got {:?}",
             mask_after,
         );
+
+        db.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn should_noop_flush_cache_to_disk_for_non_hybrid_cache() {
+        // given: a warmed SST on the default (non-hybrid) cache
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = open_db_single_sst(os).await;
+        write_keys(&db, 64).await;
+        flush_to_l0(&db).await;
+        let sst_id = first_l0_sst_id(&db);
+        db.warm_sst(sst_id, &[CacheTarget::data::<&[u8], _>(..)])
+            .await
+            .expect("warm_sst");
+        let mask_before = cached_block_mask(&db.inner.table_store, sst_id).await;
+        assert!(
+            mask_before.iter().all(|&b| b),
+            "expected all blocks cached after warm"
+        );
+
+        // when: evacuating a cache with no disk tier to spill to
+        db.flush_cache_to_disk().await.expect("flush");
+
+        // then: `spill_and_evict`'s default no-op leaves entries exactly as
+        // they were; only a hybrid cache implements the spill.
+        let mask_after = cached_block_mask(&db.inner.table_store, sst_id).await;
+        assert_eq!(
+            mask_before, mask_after,
+            "non-hybrid cache should be untouched by flush_cache_to_disk"
+        );
+
+        db.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn should_untrack_an_sst_that_is_no_longer_reachable_from_the_manifest() {
+        // given: a cached SST that a manifest snapshot no longer references —
+        // simulating full GC with an empty manifest rather than running real
+        // compaction/GC.
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = open_db_single_sst(os.clone()).await;
+        write_keys(&db, 8).await;
+        flush_to_l0(&db).await;
+        let sst_id = first_l0_sst_id(&db);
+        assert!(
+            db.inner
+                .table_store
+                .cache()
+                .expect("cache configured")
+                .touched_sst_ids()
+                .contains(&sst_id),
+            "the flush should have marked the SST touched"
+        );
+
+        let empty_db = open_db_single_sst(Arc::new(InMemory::new())).await;
+        let empty_manifest = empty_db.manifest();
+
+        // when: flushing against a manifest that doesn't reach this SST.
+        flush_cache_to_disk_impl(&db.inner.table_store, &empty_manifest)
+            .await
+            .expect("flush_cache_to_disk_impl");
+
+        // then: the id must not be left tracked forever — every future call
+        // would otherwise repeat the same doomed lookup, indefinitely.
+        assert!(
+            !db.inner
+                .table_store
+                .cache()
+                .expect("cache configured")
+                .touched_sst_ids()
+                .contains(&sst_id),
+            "an SST no longer reachable from the manifest should stop being tracked"
+        );
+
+        db.close().await.expect("close");
+        empty_db.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn should_flush_cache_to_disk_ok_with_no_cache_configured() {
+        // given: a DB with the block cache disabled entirely
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(PATH, os)
+            .with_db_cache_disabled()
+            .build()
+            .await
+            .expect("failed to open db");
+
+        // when / then: no cache configured is a no-op, not an error
+        db.flush_cache_to_disk().await.expect("flush");
 
         db.close().await.expect("close");
     }
