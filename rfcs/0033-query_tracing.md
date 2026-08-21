@@ -50,12 +50,12 @@ tracks a complete `get` or `scan` operation (including calls on the returned ite
 stages of the read path. For example, looking up an entry in the memtable produces a child span. Another example is
 reading a filter of an SST.
 
-The instrumentation is disabled by default. It can be enabled per `get` or `scan` operation by setting a query ID in
-the options of the operation, i.e., in `ReadOptions` and in `ScanOptions`.
+The instrumentation is disabled by default. It can be enabled per `get` or `scan` operation by setting the tracing
+options in the options of the read operation, i.e., in `ReadOptions` and in `ScanOptions`.
 
 The generated spans contain fields with information about the span. Each span of a specific read
-operation contains the query ID set in the options. In addition, the spans contain the requested key or key range
-and information specific to the span, such as the ID of the SST if the span traces processing related to an SST.
+operation contains the trace ID set in the tracing options passed to the read operation. In addition, the spans contain
+information specific to the span, such as the ID of the SST if the span traces processing related to an SST.
 
 We do not propose any tracing subscriber. The produced spans can be processed by an existing tracing subscriber.
 For example, `tracing-chrome` can be used to visualize the spans.
@@ -99,24 +99,28 @@ Users today cannot:
 
 This proposal adds two concepts to the read path:
 
-1. An optional query ID to `ReadOptions` and `ScanOptions`. The default of the query ID is `None`, i.e., tracing is
-   disabled by default.
-2. `tracing` spans that are conditionally created when the options passed to `get*()` and `scan*()` carry a query ID
-   that is not `None`.
+1. Optional tracing options to `ReadOptions` and `ScanOptions`. The default of the tracing options
+   is `None`, i.e., tracing is disabled by default.
+2. `tracing` spans that are conditionally created when the options passed to `get*()` and `scan*()` carry tracing
+   options that is not `None`.
 
-### Query ID in `ReadOptions` and `ScanOptions`
+### Tracing options in `ReadOptions` and `ScanOptions`
 
-`ReadOptions` and `ScanOptions` are extended with an optional query ID.
-If the query ID is set, the read path is instrumented. Otherwise,
+`ReadOptions` and `ScanOptions` are extended with optional tracing options.
+If the tracing options are set, the read path is instrumented. Otherwise,
 SlateDB does not create any instrumentation on the read path.
 
 ```rust
+pub struct TracingOptions { // new
+  pub trace_id: String,
+}
+
 pub struct ReadOptions {
     pub durability_filter: DurabilityLevel,
     pub dirty: bool,
     pub cache_blocks: bool,
     pub filter_context: Option<FilterContext>,
-    pub query_id: Option<String>,  // new
+    pub tracing_options: Option<TracingOptions>,  // new
 }
 
 pub struct ScanOptions {
@@ -127,50 +131,50 @@ pub struct ScanOptions {
     pub max_fetch_tasks: usize,
     pub order: IterationOrder,
     pub filter_context: Option<FilterContext>,
-    pub query_id: Option<String>,  // new
+    pub tracing_options: Option<TracingOptions>,  // new
 }
 ```
 
-Both get a `with_query_id(String) -> Self` builder method. Default is
+Both get a `with_tracing_options(TracingOptions) -> Self` builder method. Default is
 `None`.
 
 ### Tracing spans
 
-| Span                            | Recorded fields                                                    |
-|---------------------------------|--------------------------------------------------------------------|
-| `slatedb.query`                 | `query_id`, `key`                                                  |
-| `slatedb.query.memtable`        | `query_id`, `key`                                                  |
-| `slatedb.query.read_filters`    | `query_id`, `key`, `sst_id`, `level`, `cached`                     |
-| `slatedb.query.evaluate_filter` | `query_id`, `key`, `sst_id`, `level`, `name`, `result`             |
-| `slatedb.query.read_index`      | `query_id`, `key`, `sst_id`, `level`, `cached`                     |
-| `slatedb.query.read_blocks`     | `query_id`, `key`, `sst_id`, `level`, `cache_hits`, `cache_misses` |
-| `slatedb.query.merge`           | `query_id`, `key`, `num_operands`                                  |
+| Span                           | Recorded fields                                             |
+|--------------------------------|-------------------------------------------------------------|
+| `slatedb.read`                 | `trace_id`                                                  |
+| `slatedb.read.memtable`        | `trace_id`                                                  |
+| `slatedb.read.read_filters`    | `trace_id`, `sst_id`, `level`, `cached`                     |
+| `slatedb.read.evaluate_filter` | `trace_id`, `sst_id`, `level`, `name`, `result`             |
+| `slatedb.read.read_index`      | `trace_id`, `sst_id`, `level`, `cached`                     |
+| `slatedb.read.read_blocks`     | `trace_id`, `sst_id`, `level`, `cache_hits`, `cache_misses` |
+| `slatedb.read.merge`           | `trace_id`, `num_operands`                                  |
 
-The read path spans are structured hierarchically. The root span for the read path is named `slatedb.query`.
-All others are direct children of `slatedb.query`. All spans carry the query ID
-(`query_id`) and the requested key or key range (`key`) as fields. The spans are all constructed at debug level.
+The read path spans are structured hierarchically. The root span for the read path is named `slatedb.read`.
+All others are direct children of `slatedb.read`. All spans carry the trace ID
+(`trace_id`) as field. The spans are all constructed at debug level.
 Spans instrumented on a future are entered each time the future is polled by the runtime.
 
-The root span `slatedb.query` traces the entire read operation, which includes all stages of the read path
+The root span `slatedb.read` traces the entire read operation, which includes all stages of the read path
 covered by the child spans and common operations over all sources needed for reading, such as setting up
 iterators. For scans, the span also covers the read operations triggered by calls on the returned lazy iterator.
 
-Span `slatedb.query.memtable` traces lookups on the active memtable and the immutable memtables.
+Span `slatedb.read.memtable` traces lookups on the active memtable and the immutable memtables.
 
-Spans `slatedb.query.read_filters` and `slatedb.query.read_index` trace the reading of filters and reading of the index
+Spans `slatedb.read.read_filters` and `slatedb.read.read_index` trace the reading of filters and reading of the index
 of an SST, respectively. The spans carry the ID of the SST (`sst_id`) the filters and the index belong to, the
 level on which the SST resides (`level=l0` or `level=sorted_run:{id}`), and field `cached`
 that records if the filters or index were found in the cache (`cached=true`) or not (`cached=false`). If the cache
 is disabled, `cached` will be `false`.
 
-The evaluation of a single filter is tracked by span `slatedb.query.evaluate_filter`. The span exposes fields for
+The evaluation of a single filter is tracked by span `slatedb.read.evaluate_filter`. The span exposes fields for
 the SST ID, the level of the SST, the name of the filter (`name`), and the result of the evaluation (`result`).
 For the built-in bloom filter, the `name` field will contain `_bf`.
 
-Span `slatedb.query.read_blocks` traces the reading of data blocks of an SST. The fields of the span hold the SST ID,
+Span `slatedb.read.read_blocks` traces the reading of data blocks of an SST. The fields of the span hold the SST ID,
 the level of the SST, and how many cache hits and misses were encountered while reading the blocks.
 
-Processing of the merge operator is traced by span `slatedb.query.merge`. Merging is performed in batches. For each
+Processing of the merge operator is traced by span `slatedb.read.merge`. Merging is performed in batches. For each
 batch a separate span is produced. Each span contains the number of merged operands as a field.
 
 ## Impact Analysis
@@ -232,9 +236,9 @@ SlateDB features and components that this RFC interacts with. Check all that app
 
 ### Performance & Cost
 
-The proposed instrumentation is disabled by default. Reads without a query ID should not change performance or cost.
-When the query ID is set but no tracing subscriber/layer is configured, performance should not be significantly affected.
-A query ID and a configured tracing subscriber/layer might negatively affect performance. The performance of
+The proposed instrumentation is disabled by default. Reads without tracing options should not change performance or cost.
+When tracing options are set but no tracing subscriber/layer is configured, performance should not be significantly affected.
+Set tracing options and a configured tracing subscriber/layer might negatively affect performance. The performance of
 writes and compactions should not be affected at all.
 
 ### Observability
@@ -244,8 +248,8 @@ traces at debug level and only if a tracing subscriber/layer is configured.
 
 ### Compatibility
 
-Field `query_id` is added to the public API `ReadOptions` and `ScanOptions`. The field is also exposed in the bindings.
-Since the default value of field `query_id` is `None`, read path tracing is disabled for existing queries.
+Field `tracing_options` is added to the public API `ReadOptions` and `ScanOptions`. The field is also exposed in the bindings.
+Since the default value of field `tracing_options` is `None`, read path tracing is disabled for existing queries.
 
 ## Testing
 
@@ -254,20 +258,20 @@ Since the default value of field `query_id` is `None`, read path tracing is disa
 - Integration tests:
   - With subscriber and different queries
 - Performance tests:
-  - With and without query ID,
+  - With and without tracing options,
   - With and without subscriber
   - At info and debug level
 
 ## Rollout
 
 - Milestones / phases:
-  - Adding root span `slatedb.query`.
-  - Adding span `slatedb.query.memtable`.
-  - Adding span `slatedb.query.read_filters`.
-  - Adding span `slatedb.query.evaluate_filter`.
-  - Adding span `slatedb.query.read_index`.
-  - Adding span `slatedb.query.read_blocks`.
-  - Adding span `slatedb.query.merge`.
+  - Adding root span `slatedb.read`.
+  - Adding span `slatedb.read.memtable`.
+  - Adding span `slatedb.read.read_filters`.
+  - Adding span `slatedb.read.evaluate_filter`.
+  - Adding span `slatedb.read.read_index`.
+  - Adding span `slatedb.read.read_blocks`.
+  - Adding span `slatedb.read.merge`.
   - Performance experiments.
 - Docs updates:
   - Documentation of spans
@@ -294,7 +298,6 @@ required.
 
 ## Open Questions
 
-- How should byte keys be represented in span fields, e.g., base64 or hex?
 - Should we add a field to the `read_filters` span that records how many filters are read from the SST?
 
 ## References
