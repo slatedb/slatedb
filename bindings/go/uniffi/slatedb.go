@@ -10766,7 +10766,9 @@ type SortedRun struct {
 	Id uint32
 	// SST views in this run.
 	SstViews []SsTableView
-	// Estimated total size in bytes.
+	// Estimated total size in bytes: the sum of each view's
+	// `estimated_size_bytes`, which may be a visible-share estimate rather
+	// than true on-disk size for projected views.
 	EstimatedSizeBytes uint64
 }
 
@@ -10964,7 +10966,9 @@ type SsTableView struct {
 	Sst SsTableHandle
 	// Optional projected visible key range.
 	VisibleRange *KeyRange
-	// Estimated on-disk size in bytes.
+	// Estimated size in bytes: on-disk size if unprojected, otherwise a
+	// heuristic estimate of the visible share of that on-disk size (see
+	// `SsTableHandle::estimated_size_bytes` for the true on-disk size).
 	EstimatedSizeBytes uint64
 }
 

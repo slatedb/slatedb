@@ -784,7 +784,9 @@ pub struct SsTableView {
     pub sst: SsTableHandle,
     /// Optional projected visible key range.
     pub visible_range: Option<KeyRange>,
-    /// Estimated on-disk size in bytes.
+    /// Estimated size in bytes: on-disk size if unprojected, otherwise a
+    /// heuristic estimate of the visible share of that on-disk size (see
+    /// `SsTableHandle::estimated_size_bytes` for the true on-disk size).
     pub estimated_size_bytes: u64,
 }
 
@@ -806,7 +808,9 @@ pub struct SortedRun {
     pub id: u32,
     /// SST views in this run.
     pub sst_views: Vec<SsTableView>,
-    /// Estimated total size in bytes.
+    /// Estimated total size in bytes: the sum of each view's
+    /// `estimated_size_bytes`, which may be a visible-share estimate rather
+    /// than true on-disk size for projected views.
     pub estimated_size_bytes: u64,
 }
 
