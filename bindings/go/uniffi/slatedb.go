@@ -628,7 +628,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache()
 		})
-		if checksum != 61829 {
+		if checksum != 55496 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache: UniFFI API checksum mismatch")
 		}
@@ -721,6 +721,24 @@ func uniffiCheckChecksums() {
 		if checksum != 11741 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_db_cache()
+		})
+		if checksum != 49692 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_db_cache: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_db_cache_disabled()
+		})
+		if checksum != 43175 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_db_cache_disabled: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -829,6 +847,15 @@ func uniffiCheckChecksums() {
 		if checksum != 42157 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_flush: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_db_flush_cache_to_disk()
+		})
+		if checksum != 43617 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_flush_cache_to_disk: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1018,6 +1045,15 @@ func uniffiCheckChecksums() {
 		if checksum != 31819 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_evict_cached_sst: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_flush_cache_to_disk()
+		})
+		if checksum != 7241 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_flush_cache_to_disk: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -3292,6 +3328,12 @@ type DbInterface interface {
 	EvictCachedSst(sstId SsTableId) error
 	// Flushes the default storage layer.
 	Flush() error
+	// Flushes this Db's footprint from a shared block cache: spills resident
+	// cache entries for every SST reachable from the current manifest to the
+	// cache's disk tier and evicts them from the memory tier.
+	//
+	// A no-op for caches with no disk tier, and if no block cache is configured.
+	FlushCacheToDisk() error
 	// Flushes according to the provided flush options.
 	FlushWithOptions(options FlushOptions) error
 	// Reads the current value for `key`.
@@ -3502,6 +3544,42 @@ func (_self *Db) Flush() error {
 		// liftFn
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_db_flush(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+// Flushes this Db's footprint from a shared block cache: spills resident
+// cache entries for every SST reachable from the current manifest to the
+// cache's disk tier and evicts them from the memory tier.
+//
+// A no-op for caches with no disk tier, and if no block cache is configured.
+func (_self *Db) FlushCacheToDisk() error {
+	_pointer := _self.ffiObject.incrementPointer("*Db")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_db_flush_cache_to_disk(
 			_pointer),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
@@ -4252,8 +4330,10 @@ func (_ FfiDestroyerDb) Destroy(value *Db) {
 type DbBuilderInterface interface {
 	// Opens the database and consumes this builder.
 	Build() (*Db, error)
-	// Sets DB cache.
-	WithDbCache(dbCache *DbCache) error
+	// Sets DB cache. `scope_id` isolates this database's entries from any other
+	// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
+	// uniqueness and stability across reopens.
+	WithDbCache(dbCache *DbCache, scopeId uint64) error
 	// Disables the SST block and metadata cache.
 	WithDbCacheDisabled() error
 	// Sets the filter policies used for SST filter construction and evaluation.
@@ -4331,13 +4411,15 @@ func (_self *DbBuilder) Build() (*Db, error) {
 	return res, err
 }
 
-// Sets DB cache.
-func (_self *DbBuilder) WithDbCache(dbCache *DbCache) error {
+// Sets DB cache. `scope_id` isolates this database's entries from any other
+// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
+// uniqueness and stability across reopens.
+func (_self *DbBuilder) WithDbCache(dbCache *DbCache, scopeId uint64) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
 	defer _self.ffiObject.decrementPointer()
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache(
-			_pointer, FfiConverterDbCacheINSTANCE.Lower(dbCache), _uniffiStatus)
+			_pointer, FfiConverterDbCacheINSTANCE.Lower(dbCache), FfiConverterUint64INSTANCE.Lower(scopeId), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -4815,6 +4897,12 @@ type DbReaderInterface interface {
 	//
 	// If no block cache is configured, returns `Ok(())`.
 	EvictCachedSst(sstId SsTableId) error
+	// Flushes this reader's footprint from a shared block cache: spills
+	// resident cache entries for every SST reachable from the current manifest
+	// to the cache's disk tier and evicts them from the memory tier.
+	//
+	// A no-op for caches with no disk tier, and if no block cache is configured.
+	FlushCacheToDisk() error
 	// Reads the current value for `key`.
 	Get(key []byte) (*[]byte, error)
 	// Reads the current row version for `key`, including metadata.
@@ -4866,6 +4954,42 @@ func (_self *DbReader) EvictCachedSst(sstId SsTableId) error {
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_dbreader_evict_cached_sst(
 			_pointer, FfiConverterSsTableIdINSTANCE.Lower(sstId)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+// Flushes this reader's footprint from a shared block cache: spills
+// resident cache entries for every SST reachable from the current manifest
+// to the cache's disk tier and evicts them from the memory tier.
+//
+// A no-op for caches with no disk tier, and if no block cache is configured.
+func (_self *DbReader) FlushCacheToDisk() error {
+	_pointer := _self.ffiObject.incrementPointer("*DbReader")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_dbreader_flush_cache_to_disk(
+			_pointer),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
@@ -5305,6 +5429,12 @@ func (_ FfiDestroyerDbReader) Destroy(value *DbReader) {
 type DbReaderBuilderInterface interface {
 	// Opens the reader and consumes this builder.
 	Build() (*DbReader, error)
+	// Sets DB cache. `scope_id` isolates this reader's entries from any other
+	// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
+	// uniqueness and stability across reopens.
+	WithDbCache(dbCache *DbCache, scopeId uint64) error
+	// Disables the SST block and metadata cache.
+	WithDbCacheDisabled() error
 	// Sets the filter policies used when decoding SST filter blocks.
 	//
 	// Must match (or be a superset of) the writer's policies so SST filter
@@ -5373,6 +5503,32 @@ func (_self *DbReaderBuilder) Build() (*DbReader, error) {
 	}
 
 	return res, err
+}
+
+// Sets DB cache. `scope_id` isolates this reader's entries from any other
+// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
+// uniqueness and stability across reopens.
+func (_self *DbReaderBuilder) WithDbCache(dbCache *DbCache, scopeId uint64) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_db_cache(
+			_pointer, FfiConverterDbCacheINSTANCE.Lower(dbCache), FfiConverterUint64INSTANCE.Lower(scopeId), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Disables the SST block and metadata cache.
+func (_self *DbReaderBuilder) WithDbCacheDisabled() error {
+	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_db_cache_disabled(
+			_pointer, _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
 }
 
 // Sets the filter policies used when decoding SST filter blocks.

@@ -11,6 +11,8 @@
 //!
 //! To use the cache, you need to configure the [DbOptions](crate::config::DbOptions) with the desired cache implementation.
 
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -43,9 +45,6 @@ mod serde;
 pub const DEFAULT_MAX_CAPACITY: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_BLOCK_CACHE_CAPACITY: u64 = 512 * 1024 * 1024;
 pub const DEFAULT_META_CACHE_CAPACITY: u64 = 128 * 1024 * 1024;
-
-/// Atomic counter to generate unique scope IDs for `DbCacheWrapper` instances.
-static NEXT_CACHE_SCOPE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// A `FnOnce` returning a future that produces a [`CachedEntry`] on cache miss.
 ///
@@ -143,7 +142,7 @@ pub type CacheLoader =
 ///     let object_store = Arc::new(InMemory::new());
 ///     let cache = Arc::new(MyCache::new(128u64 * 1024 * 1024));
 ///     let db = Db::builder("/path/to/db", object_store)
-///         .with_db_cache(cache)
+///         .with_db_cache(cache, 0)
 ///         .build()
 ///         .await;
 /// }
@@ -176,6 +175,65 @@ pub trait DbCache: Send + Sync {
     async fn close(&self) -> Result<(), crate::Error> {
         Ok(())
     }
+
+    /// Best-effort: if `key` is resident in a fast (memory) tier, move it to a slower
+    /// durable tier (e.g. disk) and drop it from the fast tier. A no-op for a
+    /// non-resident key.
+    ///
+    /// This lets a caller reclaim a hybrid cache's memory footprint for one key
+    /// without losing the warmth it provides, by relocating it rather than removing
+    /// it outright (contrast with [`remove`](Self::remove), which drops the entry
+    /// entirely). Used by [`DbCacheManagerOps::flush_cache_to_disk`](crate::DbCacheManagerOps::flush_cache_to_disk)
+    /// to shrink one `Db`'s footprint in a cache shared with other `Db`s, while
+    /// keeping the entries recoverable from disk.
+    ///
+    /// The default implementation is a no-op: caches with no slower tier to spill
+    /// to (or backed by a cache library without an explicit "move to disk"
+    /// primitive) have nothing useful to do here.
+    ///
+    /// `Ok(())` means handed off, not confirmed durable — an implementation's
+    /// cache library may have its own silent-drop paths under pressure that
+    /// don't surface as an error (see `foyer_hybrid`'s implementation).
+    ///
+    /// Implementations must remove `key` from the fast tier whether or not
+    /// this returns `Err` — callers clear touch-tracking after a failed spill
+    /// on that assumption.
+    async fn spill_and_evict(&self, _key: &CachedKey) -> Result<(), crate::Error> {
+        Ok(())
+    }
+
+    /// Wait for any disk writes enqueued by [`spill_and_evict`](Self::spill_and_evict)
+    /// to complete. The default implementation is a no-op.
+    async fn wait_for_spills(&self) -> Result<(), crate::Error> {
+        Ok(())
+    }
+
+    /// Returns the ids of SSTs this cache currently has a recorded entry for
+    /// (each cleared individually via [`Self::clear_touched_if_unchanged`], not
+    /// by a bulk operation). Lets a caller bound an evacuation walk to SSTs
+    /// that might have something resident, instead of walking every SST it
+    /// knows about. Over-approximates in one direction: an id can still appear
+    /// here after its entries were already evicted by ordinary cache pressure,
+    /// in which case evacuating it is just a fast no-op. The default
+    /// implementation returns an empty list.
+    fn touched_sst_ids(&self) -> Vec<SsTableId> {
+        Vec::new()
+    }
+
+    /// Returns `id`'s current touch generation, if tracked. The default
+    /// implementation returns `None`. See [`Self::clear_touched_if_unchanged`].
+    fn touched_generation(&self, _id: SsTableId) -> Option<u64> {
+        None
+    }
+
+    /// Clears `id` from [`Self::touched_sst_ids`] only if its generation is
+    /// still `observed_generation` — i.e. nothing recorded a fresh entry for
+    /// this SST since the caller snapshotted that generation via
+    /// [`Self::touched_generation`]. Lets a caller that walks an SST's
+    /// entries across multiple `.await` points safely clear its tracking
+    /// afterward without racing a concurrent insert for the same SST. The
+    /// default implementation is a no-op.
+    fn clear_touched_if_unchanged(&self, _id: SsTableId, _observed_generation: Option<u64>) {}
 
     /// Fetch a data-block entry, invoking `loader` on cache miss.
     ///
@@ -283,10 +341,10 @@ impl CacheTarget {
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CachedKey {
-    /// Scope identifier set per `DbCacheWrapper`. This ensures that multiple `Db` instances
-    /// sharing the same underlying cache do not collide on WAL or compacted file entries.
-    /// Scope `0` is reserved for legacy keys created before scoping existed; new wrappers
-    /// always receive unique scope IDs starting at `1`.
+    /// Scope identifier set per `DbCacheWrapper`, so multiple `Db` instances sharing
+    /// one cache don't collide on WAL or compacted entries. Caller-supplied (see
+    /// `DbBuilder::with_db_cache`), not derived by SlateDB. `0` is a valid choice,
+    /// not a reserved/legacy value.
     pub(crate) scope_id: u64,
     pub(crate) sst_id: SsTableId,
     pub(crate) block_id: u64,
@@ -576,6 +634,35 @@ impl DbCache for SplitCache {
         Ok(())
     }
 
+    async fn spill_and_evict(&self, key: &CachedKey) -> Result<(), crate::Error> {
+        // Attempt both sub-caches rather than `?`-chaining, matching the
+        // "try everything, surface the first error" pattern used elsewhere in
+        // this module (e.g. `TableStore::spill_sst_to_disk`): a given key
+        // lives in at most one of the two, but an error from one must not
+        // skip the other.
+        let block_result = match &self.block_cache {
+            Some(cache) => cache.spill_and_evict(key).await,
+            None => Ok(()),
+        };
+        let meta_result = match &self.meta_cache {
+            Some(cache) => cache.spill_and_evict(key).await,
+            None => Ok(()),
+        };
+        block_result.and(meta_result)
+    }
+
+    async fn wait_for_spills(&self) -> Result<(), crate::Error> {
+        let block_result = match &self.block_cache {
+            Some(cache) => cache.wait_for_spills().await,
+            None => Ok(()),
+        };
+        let meta_result = match &self.meta_cache {
+            Some(cache) => cache.wait_for_spills().await,
+            None => Ok(()),
+        };
+        block_result.and(meta_result)
+    }
+
     async fn fetch_block(
         &self,
         key: CachedKey,
@@ -625,38 +712,107 @@ impl DbCache for SplitCache {
     }
 }
 
-/// Wraps a [`DbCache`] to add statistics, error logging, and cache scoping.
+/// Wraps a [`DbCache`] to add statistics, error logging, cache scoping, and
+/// per-scope touched-SST tracking.
 ///
 /// ## Scoping
-/// When multiple `Db` instances share the same underlying cache object, this wrapper assigns a
-/// unique `scope_id` so their entries do not collide. All cache operations transparently rewrite
-/// keys to include the wrapper's `scope_id`, isolating WAL and compacted SST entries per wrapper.
+/// When multiple `Db`/`DbReader` instances share the same underlying cache object, this
+/// wrapper assigns a `scope_id` so their entries do not collide. All cache operations
+/// transparently rewrite keys to include the wrapper's `scope_id`, isolating WAL and
+/// compacted SST entries per wrapper.
+///
+/// `scope_id` is supplied by the caller at construction time (see [`Self::new`]),
+/// not derived by SlateDB: pass the same id across a legitimate reopen of the same
+/// logical database to recover its warm entries, and different ids for logically
+/// different databases sharing the cache.
 pub(crate) struct DbCacheWrapper {
     stats: DbCacheStats,
     system_clock: Arc<dyn SystemClock>,
     cache: Arc<dyn DbCache>,
-    /// Unique identifier applied to every key passed through this wrapper. This prevents different
-    /// `DbCacheWrapper` instances that share the same cache from clobbering each other's entries.
-    /// Legacy keys use scope `0`; new wrappers are assigned distinct, non-zero scopes.
+    /// Identifier applied to every key passed through this wrapper, supplied by
+    /// the caller of [`Self::new`]. This prevents different `DbCacheWrapper`
+    /// instances backed by different logical `Db`s from clobbering each other's entries
+    /// in a cache they share. `0` is a valid choice when only one instance will ever
+    /// use this cache.
     scope_id: u64,
     // Records the last time that the wrapper logged an error from the wrapped cache at error
     // level. Used to ensure we only log at error level once every ERROR_LOG_INTERVAL.
     last_err_log_time: Mutex<Option<DateTime<Utc>>>,
+    /// SSTs with at least one recorded cache entry, keyed to the
+    /// [`Self::touch_seq`] value at the time of the most recent touch. See
+    /// [`DbCache::touched_sst_ids`]. Cleared per-SST only via the opt-in
+    /// [`flush_cache_to_disk`](crate::DbCacheManagerOps::flush_cache_to_disk)/
+    /// [`evict_cached_sst`](crate::DbCacheManagerOps::evict_cached_sst) APIs;
+    /// bounded independently of those by [`evict_oldest_if_over_cap`] on every touch.
+    touched_ssts: Mutex<HashMap<SsTableId, u64>>,
+    /// Monotonic stamp source for [`Self::touched_ssts`], shared across all
+    /// SSTs rather than reset per-SST. A per-SST counter that resets to `0`
+    /// on removal is ABA-prone: two independent clearers (e.g.
+    /// `evict_cached_sst` racing `flush_cache_to_disk`) can each snapshot `0`,
+    /// and a fresh touch landing between their clears would reinsert at `0`
+    /// too, matching a stale snapshot. A never-repeating sequence makes that
+    /// collision impossible.
+    touch_seq: AtomicU64,
 }
 
 impl DbCacheWrapper {
+    /// See the struct-level "Scoping" section above for what `scope_id` does.
     pub(crate) fn new(
         cache: Arc<dyn DbCache>,
         recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
+        scope_id: u64,
     ) -> Self {
         Self {
             stats: DbCacheStats::new(recorder),
             cache,
-            scope_id: NEXT_CACHE_SCOPE_ID.fetch_add(1, Ordering::Relaxed),
+            scope_id,
             last_err_log_time: Mutex::new(None),
             system_clock,
+            touched_ssts: Mutex::new(HashMap::new()),
+            touch_seq: AtomicU64::new(0),
         }
+    }
+
+    /// Records that `sst_id` may now have a resident entry under this scope.
+    /// Excludes `SsTableId::Wal`: WAL entries are never spilled to a hybrid
+    /// cache's persistent disk tier by evacuation, so tracking them would
+    /// only let a stale, scope-colliding entry survive longer than ordinary
+    /// memory LRU pressure would allow.
+    fn record_touched(&self, sst_id: SsTableId) {
+        if matches!(sst_id, SsTableId::Wal(_)) {
+            return;
+        }
+        let seq = self.touch_seq.fetch_add(1, Ordering::Relaxed);
+        let mut touched = self.touched_ssts.lock();
+        touched.insert(sst_id, seq);
+        evict_oldest_if_over_cap(&mut touched, MAX_TOUCHED_SSTS, TOUCHED_SSTS_EVICT_SLACK);
+    }
+}
+
+/// Hard-ish cap on [`DbCacheWrapper::touched_ssts`]'s size: comfortably above what any
+/// real evacuation workflow needs to track live, while still bounding worst-case memory
+/// for a caller that never calls `flush_cache_to_disk`/`evict_cached_sst` at all.
+const MAX_TOUCHED_SSTS: usize = 100_000;
+
+/// Batch size for [`evict_oldest_if_over_cap`], so the O(n log n) eviction pass is
+/// amortized over this many new distinct SSTs rather than run on every touch once at
+/// the cap.
+const TOUCHED_SSTS_EVICT_SLACK: usize = 10_000;
+
+/// Evicts the `slack` least-recently-touched entries once `touched` exceeds `cap +
+/// slack`, bounding its size without scanning on every insert. Evicting the oldest
+/// only risks a missed future flush for an SST that's still resident — not a
+/// correctness issue — and is unlikely anyway: low recency also means ordinary LRU
+/// pressure has probably already evicted it from the real cache.
+fn evict_oldest_if_over_cap(touched: &mut HashMap<SsTableId, u64>, cap: usize, slack: usize) {
+    if touched.len() <= cap + slack {
+        return;
+    }
+    let mut by_seq: Vec<(SsTableId, u64)> = touched.iter().map(|(&id, &seq)| (id, seq)).collect();
+    by_seq.sort_unstable_by_key(|&(_, seq)| seq);
+    for (id, _) in by_seq.into_iter().take(slack) {
+        touched.remove(&id);
     }
 }
 
@@ -804,7 +960,8 @@ impl DbCache for DbCacheWrapper {
 
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
         let scoped_key = self.scoped_key(&key);
-        self.cache.insert(scoped_key, value).await
+        self.cache.insert(scoped_key, value).await;
+        self.record_touched(key.sst_id);
     }
 
     #[allow(dead_code)]
@@ -821,6 +978,15 @@ impl DbCache for DbCacheWrapper {
         self.cache.close().await
     }
 
+    async fn spill_and_evict(&self, key: &CachedKey) -> Result<(), crate::Error> {
+        let scoped_key = self.scoped_key(key);
+        self.cache.spill_and_evict(&scoped_key).await
+    }
+
+    async fn wait_for_spills(&self) -> Result<(), crate::Error> {
+        self.cache.wait_for_spills().await
+    }
+
     async fn fetch_block(
         &self,
         key: CachedKey,
@@ -830,6 +996,9 @@ impl DbCache for DbCacheWrapper {
         let (loader, loader_ran) = instrumented_loader(loader);
         let result = self.cache.fetch_block(scoped_key, loader).await;
         self.record_fetch_outcome("block", loader_ran.was_called(), &result);
+        if result.is_ok() {
+            self.record_touched(key.sst_id);
+        }
         result
     }
 
@@ -842,6 +1011,9 @@ impl DbCache for DbCacheWrapper {
         let (loader, loader_ran) = instrumented_loader(loader);
         let result = self.cache.fetch_index(scoped_key, loader).await;
         self.record_fetch_outcome("index", loader_ran.was_called(), &result);
+        if result.is_ok() {
+            self.record_touched(key.sst_id);
+        }
         result
     }
 
@@ -854,6 +1026,9 @@ impl DbCache for DbCacheWrapper {
         let (loader, loader_ran) = instrumented_loader(loader);
         let result = self.cache.fetch_filter(scoped_key, loader).await;
         self.record_fetch_outcome("filter", loader_ran.was_called(), &result);
+        if result.is_ok() {
+            self.record_touched(key.sst_id);
+        }
         result
     }
 
@@ -866,7 +1041,26 @@ impl DbCache for DbCacheWrapper {
         let (loader, loader_ran) = instrumented_loader(loader);
         let result = self.cache.fetch_stats(scoped_key, loader).await;
         self.record_fetch_outcome("stats", loader_ran.was_called(), &result);
+        if result.is_ok() {
+            self.record_touched(key.sst_id);
+        }
         result
+    }
+
+    fn touched_sst_ids(&self) -> Vec<SsTableId> {
+        self.touched_ssts.lock().keys().copied().collect()
+    }
+
+    fn touched_generation(&self, id: SsTableId) -> Option<u64> {
+        self.touched_ssts.lock().get(&id).copied()
+    }
+
+    fn clear_touched_if_unchanged(&self, id: SsTableId, observed_generation: Option<u64>) {
+        if let Entry::Occupied(e) = self.touched_ssts.lock().entry(id) {
+            if Some(*e.get()) == observed_generation {
+                e.remove();
+            }
+        }
     }
 }
 
@@ -923,6 +1117,27 @@ impl DbCache for UnownedDbCache {
     /// The point of this type: never propagate close to a cache we don't own.
     async fn close(&self) -> Result<(), crate::Error> {
         Ok(())
+    }
+
+    async fn spill_and_evict(&self, key: &CachedKey) -> Result<(), crate::Error> {
+        self.inner.spill_and_evict(key).await
+    }
+
+    async fn wait_for_spills(&self) -> Result<(), crate::Error> {
+        self.inner.wait_for_spills().await
+    }
+
+    fn touched_sst_ids(&self) -> Vec<SsTableId> {
+        self.inner.touched_sst_ids()
+    }
+
+    fn touched_generation(&self, id: SsTableId) -> Option<u64> {
+        self.inner.touched_generation(id)
+    }
+
+    fn clear_touched_if_unchanged(&self, id: SsTableId, observed_generation: Option<u64>) {
+        self.inner
+            .clear_touched_if_unchanged(id, observed_generation)
     }
 
     async fn fetch_block(
@@ -1087,21 +1302,42 @@ pub(crate) mod test_utils {
         fn entry_count(&self) -> u64 {
             0
         }
+        async fn spill_and_evict(&self, _: &CachedKey) -> Result<(), crate::Error> {
+            Err(
+                crate::error::SlateDBError::from(Arc::new(std::io::Error::other("injected error")))
+                    .into(),
+            )
+        }
+        async fn wait_for_spills(&self) -> Result<(), crate::Error> {
+            Err(
+                crate::error::SlateDBError::from(Arc::new(std::io::Error::other("injected error")))
+                    .into(),
+            )
+        }
     }
 
     pub(crate) struct TestCache {
         items: Mutex<HashMap<CachedKey, CachedEntry>>,
+        /// Keys "spilled" via `spill_and_evict`, simulating a disk tier. Kept separate
+        /// from `items` (the simulated memory tier) so tests can assert both that the
+        /// key left memory and that it landed in the (simulated) durable tier.
+        spilled: Mutex<HashMap<CachedKey, CachedEntry>>,
     }
 
     impl TestCache {
         pub(crate) fn new() -> Self {
             Self {
                 items: Mutex::new(HashMap::new()),
+                spilled: Mutex::new(HashMap::new()),
             }
         }
 
         pub(crate) fn keys(&self) -> Vec<CachedKey> {
             self.items.lock().unwrap().keys().cloned().collect()
+        }
+
+        pub(crate) fn spilled_keys(&self) -> Vec<CachedKey> {
+            self.spilled.lock().unwrap().keys().cloned().collect()
         }
     }
 
@@ -1141,6 +1377,14 @@ pub(crate) mod test_utils {
             let guard = self.items.lock().unwrap();
             guard.iter().count() as u64
         }
+
+        async fn spill_and_evict(&self, key: &CachedKey) -> Result<(), crate::Error> {
+            let removed = self.items.lock().unwrap().remove(key);
+            if let Some(value) = removed {
+                self.spilled.lock().unwrap().insert(key.clone(), value);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1163,6 +1407,7 @@ mod tests {
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
+    use std::collections::HashMap;
     use std::sync::Arc;
     use ulid::Ulid;
 
@@ -1482,6 +1727,7 @@ mod tests {
             failing_cache,
             &helper,
             Arc::new(DefaultSystemClock::default()),
+            1,
         );
         let key = CachedKey::from((SST_ID, 12345u64));
 
@@ -1504,8 +1750,9 @@ mod tests {
         let recorder_b = MetricsRecorderHelper::noop();
         let system_clock = Arc::new(DefaultSystemClock::default());
         let shared_cache: Arc<dyn DbCache> = Arc::new(TestCache::new());
-        let cache_a = DbCacheWrapper::new(shared_cache.clone(), &recorder_a, system_clock.clone());
-        let cache_b = DbCacheWrapper::new(shared_cache.clone(), &recorder_b, system_clock);
+        let cache_a =
+            DbCacheWrapper::new(shared_cache.clone(), &recorder_a, system_clock.clone(), 1);
+        let cache_b = DbCacheWrapper::new(shared_cache.clone(), &recorder_b, system_clock, 2);
         assert_ne!(cache_a.scope_id, cache_b.scope_id);
 
         let policy = BloomFilterPolicy::new(1);
@@ -1547,8 +1794,9 @@ mod tests {
         let recorder_b = MetricsRecorderHelper::noop();
         let system_clock = Arc::new(DefaultSystemClock::default());
         let shared_cache: Arc<dyn DbCache> = Arc::new(TestCache::new());
-        let cache_a = DbCacheWrapper::new(shared_cache.clone(), &recorder_a, system_clock.clone());
-        let cache_b = DbCacheWrapper::new(shared_cache.clone(), &recorder_b, system_clock);
+        let cache_a =
+            DbCacheWrapper::new(shared_cache.clone(), &recorder_a, system_clock.clone(), 1);
+        let cache_b = DbCacheWrapper::new(shared_cache.clone(), &recorder_b, system_clock, 2);
 
         let sst = build_test_sst(&SsTableFormat::default(), 1).await;
         let index = Arc::new(sst.index);
@@ -1574,8 +1822,9 @@ mod tests {
         let recorder_b = MetricsRecorderHelper::noop();
         let system_clock = Arc::new(DefaultSystemClock::default());
         let shared_cache: Arc<dyn DbCache> = Arc::new(TestCache::new());
-        let cache_a = DbCacheWrapper::new(shared_cache.clone(), &recorder_a, system_clock.clone());
-        let cache_b = DbCacheWrapper::new(shared_cache.clone(), &recorder_b, system_clock);
+        let cache_a =
+            DbCacheWrapper::new(shared_cache.clone(), &recorder_a, system_clock.clone(), 1);
+        let cache_b = DbCacheWrapper::new(shared_cache.clone(), &recorder_b, system_clock, 2);
 
         let mut builder = BlockBuilder::new_latest(4096);
         assert!(builder.add(RowEntry::new_value(b"k1", b"v1", 0)).unwrap());
@@ -1596,6 +1845,287 @@ mod tests {
         assert_eq!(2, shared_cache.entry_count());
     }
 
+    #[test]
+    fn test_evict_oldest_if_over_cap_is_a_noop_within_cap() {
+        let mut touched: HashMap<SsTableId, u64> = (0..15u64)
+            .map(|i| (SsTableId::Compacted(Ulid::from_parts(i, 0)), i))
+            .collect();
+
+        super::evict_oldest_if_over_cap(&mut touched, 10, 5);
+
+        assert_eq!(
+            15,
+            touched.len(),
+            "at cap + slack, nothing should be evicted"
+        );
+    }
+
+    #[test]
+    fn test_evict_oldest_if_over_cap_drops_the_oldest_by_touch_seq() {
+        // 16 entries with cap=10, slack=5: over the cap+slack threshold of 15, so
+        // one eviction pass runs and removes exactly the 5 oldest (seq 0..5),
+        // leaving 11 (not 10 — eviction removes `slack` entries, not down to `cap`).
+        let mut touched: HashMap<SsTableId, u64> = (0..16u64)
+            .map(|i| (SsTableId::Compacted(Ulid::from_parts(i, 0)), i))
+            .collect();
+
+        super::evict_oldest_if_over_cap(&mut touched, 10, 5);
+
+        assert_eq!(11, touched.len());
+        for i in 0..5u64 {
+            assert!(
+                !touched.contains_key(&SsTableId::Compacted(Ulid::from_parts(i, 0))),
+                "seq {i} is among the oldest and should have been evicted"
+            );
+        }
+        for i in 5..16u64 {
+            assert!(
+                touched.contains_key(&SsTableId::Compacted(Ulid::from_parts(i, 0))),
+                "seq {i} is recent and should have survived eviction"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cache_wrapper_scopes_spill_and_evict() {
+        let recorder_a = MetricsRecorderHelper::noop();
+        let recorder_b = MetricsRecorderHelper::noop();
+        let system_clock = Arc::new(DefaultSystemClock::default());
+        let shared_cache = Arc::new(TestCache::new());
+        let cache_a =
+            DbCacheWrapper::new(shared_cache.clone(), &recorder_a, system_clock.clone(), 1);
+        let cache_b = DbCacheWrapper::new(shared_cache.clone(), &recorder_b, system_clock, 2);
+
+        let mut builder = BlockBuilder::new_latest(4096);
+        assert!(builder.add(RowEntry::new_value(b"k1", b"v1", 0)).unwrap());
+        let block = Arc::new(builder.build().unwrap());
+        let key = CachedKey::from((SST_ID, 4u64));
+
+        // given: both wrappers insert an entry under what looks like the same
+        // unscoped key.
+        cache_a
+            .insert(key.clone(), CachedEntry::with_block(block.clone()))
+            .await;
+        cache_b
+            .insert(key.clone(), CachedEntry::with_block(block))
+            .await;
+        assert_eq!(2, shared_cache.entry_count());
+
+        // when: only wrapper A's copy is spilled.
+        cache_a.spill_and_evict(&key).await.unwrap();
+
+        // then: A's entry left the (simulated) memory tier and landed in the
+        // (simulated) disk tier; B's identically-shaped key was untouched.
+        assert!(cache_a.get_block(&key).await.unwrap().is_none());
+        assert!(cache_b.get_block(&key).await.unwrap().is_some());
+        assert_eq!(1, shared_cache.entry_count());
+        assert_eq!(1, shared_cache.spilled_keys().len());
+    }
+
+    #[tokio::test]
+    async fn test_split_cache_spill_and_evict_attempts_meta_cache_despite_block_cache_error() {
+        let meta = Arc::new(TestCache::new());
+        let split = SplitCache::new()
+            .with_block_cache(Some(Arc::new(super::test_utils::FailingCache)))
+            .with_meta_cache(Some(meta.clone()))
+            .build();
+        let key = CachedKey::from((SST_ID, 6u64));
+        meta.insert(
+            key.clone(),
+            CachedEntry::with_sst_stats(Arc::new(crate::sst_stats::SstStats::default())),
+        )
+        .await;
+
+        let result = split.spill_and_evict(&key).await;
+
+        assert!(result.is_err(), "block cache's error should surface");
+        assert!(
+            meta.spilled_keys().contains(&key),
+            "meta cache's spill should still run despite the block cache's error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_split_cache_wait_for_spills_attempts_meta_cache_despite_block_cache_error() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        /// Records whether `wait_for_spills` was called; every other method is an
+        /// unused-in-this-test stub.
+        struct SpyCache {
+            wait_called: AtomicBool,
+        }
+
+        #[async_trait::async_trait]
+        impl DbCache for SpyCache {
+            async fn get_block(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+                Ok(None)
+            }
+            async fn get_index(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+                Ok(None)
+            }
+            async fn get_filter(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+                Ok(None)
+            }
+            async fn get_stats(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+                Ok(None)
+            }
+            async fn insert(&self, _: CachedKey, _: CachedEntry) {}
+            async fn remove(&self, _: &CachedKey) {}
+            fn entry_count(&self) -> u64 {
+                0
+            }
+            async fn wait_for_spills(&self) -> Result<(), crate::Error> {
+                self.wait_called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let spy = Arc::new(SpyCache {
+            wait_called: AtomicBool::new(false),
+        });
+        let split = SplitCache::new()
+            .with_block_cache(Some(Arc::new(super::test_utils::FailingCache)))
+            .with_meta_cache(Some(spy.clone()))
+            .build();
+
+        let result = split.wait_for_spills().await;
+
+        assert!(result.is_err(), "block cache's error should surface");
+        assert!(
+            spy.wait_called.load(Ordering::SeqCst),
+            "meta cache's wait_for_spills should still run despite the block cache's error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cache_wrapper_recovers_same_scope_for_same_scope_id() {
+        let recorder_1 = MetricsRecorderHelper::noop();
+        let recorder_2 = MetricsRecorderHelper::noop();
+        let system_clock = Arc::new(DefaultSystemClock::default());
+        let shared_cache: Arc<dyn DbCache> = Arc::new(TestCache::new());
+
+        // given: a wrapper (simulating a `Db` reopen passed the same caller-supplied
+        // scope_id) populates an entry...
+        let first_open =
+            DbCacheWrapper::new(shared_cache.clone(), &recorder_1, system_clock.clone(), 1);
+        let key = CachedKey::from((SST_ID, 5u64));
+        let mut builder = BlockBuilder::new_latest(4096);
+        assert!(builder.add(RowEntry::new_value(b"k1", b"v1", 0)).unwrap());
+        let block = Arc::new(builder.build().unwrap());
+        first_open
+            .insert(key.clone(), CachedEntry::with_block(block))
+            .await;
+        drop(first_open); // simulates `Db::close()`
+
+        // when: a brand-new wrapper is constructed with the *same* scope_id...
+        let reopened = DbCacheWrapper::new(shared_cache, &recorder_2, system_clock, 1);
+
+        // then: it recovers the same scope, so it sees the earlier instance's entry —
+        // this is what lets a caller that reuses a scope_id across a `Db` reopen see
+        // disk entries an earlier instance evacuated there before closing.
+        assert!(
+            reopened.get_block(&key).await.unwrap().is_some(),
+            "reopening with the same scope_id should recover the previous instance's entries"
+        );
+    }
+
+    fn build_test_block() -> CachedEntry {
+        let mut builder = BlockBuilder::new_latest(4096);
+        assert!(builder.add(RowEntry::new_value(b"k1", b"v1", 0)).unwrap());
+        CachedEntry::with_block(Arc::new(builder.build().unwrap()))
+    }
+
+    #[tokio::test]
+    async fn test_touched_ssts_survives_a_concurrent_touch_during_a_walk() {
+        let recorder = MetricsRecorderHelper::noop();
+        let cache = DbCacheWrapper::new(
+            Arc::new(TestCache::new()),
+            &recorder,
+            Arc::new(DefaultSystemClock::default()),
+            1,
+        );
+        let key = CachedKey::from((SST_ID, 1u64));
+        cache.insert(key.clone(), build_test_block()).await;
+        let observed_generation = cache.touched_generation(SST_ID);
+        assert_eq!(
+            observed_generation,
+            Some(0),
+            "a fresh insert should mark the SST touched exactly once"
+        );
+
+        // Simulates a concurrent touch landing mid-walk, after this snapshot.
+        cache.insert(key, build_test_block()).await;
+
+        cache.clear_touched_if_unchanged(SST_ID, observed_generation);
+        assert!(
+            cache.touched_sst_ids().contains(&SST_ID),
+            "a concurrent touch during the walk must not be silently dropped"
+        );
+
+        // With nothing touching it since, the clear now takes effect.
+        let observed_generation = cache.touched_generation(SST_ID);
+        cache.clear_touched_if_unchanged(SST_ID, observed_generation);
+        assert!(
+            !cache.touched_sst_ids().contains(&SST_ID),
+            "an unchanged entry should be cleared once the walk finishes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_touched_ssts_survives_two_independent_concurrent_clearers() {
+        // Two independent callers (e.g. `evict_cached_sst` racing
+        // `flush_cache_to_disk`) can each snapshot the same generation and
+        // clear it once their own walk finishes — see `touch_seq`'s doc for
+        // the ABA hazard this must not allow.
+        let recorder = MetricsRecorderHelper::noop();
+        let cache = DbCacheWrapper::new(
+            Arc::new(TestCache::new()),
+            &recorder,
+            Arc::new(DefaultSystemClock::default()),
+            1,
+        );
+        let key = CachedKey::from((SST_ID, 1u64));
+        cache.insert(key.clone(), build_test_block()).await;
+
+        // Both A and C snapshot the same generation before either clears.
+        let observed_by_a = cache.touched_generation(SST_ID);
+        let observed_by_c = cache.touched_generation(SST_ID);
+        assert_eq!(observed_by_a, observed_by_c);
+
+        // C clears first — its walk was fast (e.g. a plain in-memory evict).
+        cache.clear_touched_if_unchanged(SST_ID, observed_by_c);
+        assert!(!cache.touched_sst_ids().contains(&SST_ID));
+
+        // A genuine concurrent reader re-touches the SST in the gap between
+        // C's clear and A's clear.
+        cache.insert(key, build_test_block()).await;
+
+        // A clears using its now-stale snapshot — must not erase the fresh touch above.
+        cache.clear_touched_if_unchanged(SST_ID, observed_by_a);
+        assert!(
+            cache.touched_sst_ids().contains(&SST_ID),
+            "a fresh touch racing two independent clearers must not be silently dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_touched_ssts_excludes_wal() {
+        let recorder = MetricsRecorderHelper::noop();
+        let cache = DbCacheWrapper::new(
+            Arc::new(TestCache::new()),
+            &recorder,
+            Arc::new(DefaultSystemClock::default()),
+            1,
+        );
+        let wal_id = SsTableId::Wal(7);
+        let key = CachedKey::from((wal_id, 1u64));
+        cache.insert(key, build_test_block()).await;
+        assert!(
+            cache.touched_sst_ids().is_empty(),
+            "WAL entries must never be tracked as touched"
+        );
+    }
+
     #[fixture]
     fn cache() -> (DbCacheWrapper, Arc<DefaultMetricsRecorder>) {
         let recorder = Arc::new(DefaultMetricsRecorder::new());
@@ -1609,6 +2139,7 @@ mod tests {
             Arc::new(cache),
             &helper,
             Arc::new(DefaultSystemClock::default()),
+            1,
         );
         (wrapper, recorder)
     }
@@ -1648,6 +2179,8 @@ mod tests {
         /// instead, the loader's entry comes back and the marker assertion fails.
         struct ProbeCache {
             close_called: AtomicBool,
+            spill_and_evict_called: AtomicBool,
+            wait_for_spills_called: AtomicBool,
             marker: CachedEntry,
         }
 
@@ -1672,6 +2205,14 @@ mod tests {
             }
             async fn close(&self) -> Result<(), crate::Error> {
                 self.close_called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn spill_and_evict(&self, _: &CachedKey) -> Result<(), crate::Error> {
+                self.spill_and_evict_called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn wait_for_spills(&self) -> Result<(), crate::Error> {
+                self.wait_for_spills_called.store(true, Ordering::SeqCst);
                 Ok(())
             }
             async fn fetch_block(
@@ -1707,6 +2248,8 @@ mod tests {
         let marker_block = build_block(b"marker");
         let probe = Arc::new(ProbeCache {
             close_called: AtomicBool::new(false),
+            spill_and_evict_called: AtomicBool::new(false),
+            wait_for_spills_called: AtomicBool::new(false),
             marker: CachedEntry::with_block(marker_block.clone()),
         });
         let unowned = UnownedDbCache::new(probe.clone());
@@ -1733,6 +2276,18 @@ mod tests {
         assert!(
             !probe.close_called.load(Ordering::SeqCst),
             "close() must not propagate to a cache slatedb does not own"
+        );
+
+        unowned.spill_and_evict(&key()).await.unwrap();
+        assert!(
+            probe.spill_and_evict_called.load(Ordering::SeqCst),
+            "spill_and_evict was not forwarded to the inner cache"
+        );
+
+        unowned.wait_for_spills().await.unwrap();
+        assert!(
+            probe.wait_for_spills_called.load(Ordering::SeqCst),
+            "wait_for_spills was not forwarded to the inner cache"
         );
     }
 }
