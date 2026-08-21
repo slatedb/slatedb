@@ -30,8 +30,9 @@ pub struct SlateDbWalReaderOptions {
     /// pending while the current data is being consumed.
     pub max_fetch_tasks: usize,
 
-    /// The number of bytes to read ahead in each sst. The value is rounded up to the nearest
-    /// block size when fetching from object storage. The default is 1MB
+    /// The target number of bytes to fetch in a single request while iterating over WAL SSTs.
+    /// Each fetch will read the minimum number of blocks such that the resulting read is at least
+    /// this size or reaches the end of the file. The default is 1MiB.
     pub read_ahead_bytes: usize,
 }
 
