@@ -808,7 +808,10 @@ pub struct Settings {
     /// Maximum number of wrapper-level retries for a single object-store
     /// operation, on top of the `object_store` client's own HTTP retries.
     /// Applies to both foreground (user API) and background-task operations,
-    /// since both share the same retrying object store.
+    /// since both share the same retrying object store. Multipart part
+    /// uploads are covered only when the store is provided via
+    /// `Db::builder_with_multipart` (or `CompactorBuilder::new_with_multipart`
+    /// for a standalone compactor).
     ///
     /// * `None` (default): retry transient errors indefinitely (historical behavior).
     /// * `Some(n)`: give up after `n` retries and return the underlying error.

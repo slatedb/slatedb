@@ -18,6 +18,7 @@ use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::flush::EncodedSegmentSst;
+use crate::format::sst::EncodedSsTable;
 use crate::mem_table::ImmutableMemtable;
 use crate::utils::SafeSender;
 use async_trait::async_trait;
@@ -243,7 +244,7 @@ impl UploadHandler {
     ) -> Result<SegmentedSstHandle, SlateDBError> {
         let written_bytes = sst.encoded.remaining_len() as u64;
         loop {
-            match self.db.upload_sst(&sst_id, &sst.encoded).await {
+            match self.upload_sst_unless_closed(&sst_id, &sst.encoded).await {
                 Ok(sst_handle) => {
                     self.db.db_stats.l0_flush_bytes.increment(written_bytes);
                     return Ok(SegmentedSstHandle {
@@ -265,6 +266,30 @@ impl UploadHandler {
                     self.db.system_clock.sleep(self.retry_backoff).await;
                 }
             }
+        }
+    }
+
+    /// Uploads one SST, abandoning the attempt if the database closes first.
+    ///
+    /// The object-store retry policy under `upload_sst` may be unbounded
+    /// (`object_store_max_retries = None`), so a persistently failing upload
+    /// never returns an error for the shutdown check above to act on. With the
+    /// WAL enabled the data is already durable, so racing the close signal
+    /// keeps shutdown bounded; without it this upload is the only durability
+    /// and must keep retrying.
+    async fn upload_sst_unless_closed(
+        &self,
+        sst_id: &SsTableId,
+        encoded: &EncodedSsTable,
+    ) -> Result<SsTableHandle, SlateDBError> {
+        if !self.db.wal_enabled {
+            return self.db.upload_sst(sst_id, encoded).await;
+        }
+        let mut closed = self.db.status_manager.result_reader();
+        tokio::select! {
+            biased;
+            result = self.db.upload_sst(sst_id, encoded) => result,
+            _ = closed.await_value() => Err(SlateDBError::Closed),
         }
     }
 }
@@ -315,7 +340,7 @@ mod tests {
     use crate::paths::PathResolver;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
-    use crate::test_utils::FixedThreeBytePrefixExtractor;
+    use crate::test_utils::{FixedThreeBytePrefixExtractor, GatedObjectStore};
     use crate::types::{RowEntry, ValueDeletable};
     use crate::utils::WatchableOnceCell;
 
@@ -374,7 +399,25 @@ mod tests {
         cache: Option<Arc<dyn DbCache>>,
         block_cache_policy: BlockCachePolicy,
     ) -> Arc<DbInner> {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        setup_db_with_object_store(
+            path,
+            fp_registry,
+            segment_extractor,
+            cache,
+            block_cache_policy,
+            Arc::new(InMemory::new()),
+        )
+        .await
+    }
+
+    async fn setup_db_with_object_store(
+        path: &str,
+        fp_registry: Arc<FailPointRegistry>,
+        segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+        cache: Option<Arc<dyn DbCache>>,
+        block_cache_policy: BlockCachePolicy,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> Arc<DbInner> {
         let settings = Settings::default();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand = Arc::new(DbRand::new(42));
@@ -785,6 +828,42 @@ mod tests {
             .await
             .expect("uploader should stop retrying on shutdown");
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn should_abandon_stalled_upload_on_shutdown_when_wal_enabled() {
+        // A stalled upload never returns an error, so the retry loop's
+        // shutdown check never runs. The upload itself must race the close
+        // signal, otherwise shutdown blocks for as long as the object store
+        // keeps retrying (potentially forever).
+        let gated = Arc::new(GatedObjectStore::new(Arc::new(InMemory::new())));
+        let db = setup_db_with_object_store(
+            "/tmp/test_parallel_l0_flush_uploader_stalled_upload",
+            Arc::new(FailPointRegistry::new()),
+            None,
+            None,
+            BlockCachePolicy::default(),
+            Arc::clone(&gated) as Arc<dyn ObjectStore>,
+        )
+        .await;
+        assert!(db.wal_enabled);
+
+        // Park every SST write inside the object store.
+        gated.put_opts_gate.close();
+        let job = next_upload_job(&db, b"key", b"value", 1);
+
+        let test = start_test_uploader(&db);
+        test.submit(job).unwrap();
+        gated.put_opts_gate.wait_for_arrivals(1).await;
+
+        // Mark the database as closed (simulates Db::close()) while the
+        // upload is still parked.
+        db.status_manager.write_result(Ok(()));
+
+        let result = timeout(Duration::from_secs(5), test.await_closed())
+            .await
+            .expect("uploader should abandon the stalled upload on shutdown");
+        assert!(matches!(result, Err(SlateDBError::Closed)), "{:?}", result);
     }
 
     #[tokio::test]
