@@ -30,8 +30,9 @@ pub struct SlateDbWalReaderOptions {
     /// pending while the current data is being consumed.
     pub max_fetch_tasks: usize,
 
-    /// The number of bytes to read ahead in each sst. The value is rounded up to the nearest
-    /// block size when fetching from object storage. The default is 1MB
+    /// The target number of bytes to fetch in a single request while iterating over WAL SSTs.
+    /// Each fetch will read the minimum number of blocks such that the resulting read is at least
+    /// this size or reaches the end of the file. The default is 1MiB.
     pub read_ahead_bytes: usize,
 }
 
@@ -47,13 +48,11 @@ impl Default for SlateDbWalReaderOptions {
 
 impl From<SlateDbWalReaderOptions> for SlateDbWalIteratorOptions {
     fn from(options: SlateDbWalReaderOptions) -> Self {
-        let format = SsTableFormat::default();
-        let blocks_to_fetch = options.read_ahead_bytes.div_ceil(format.block_size);
         Self {
             sst_batch_size: options.sst_batch_size,
             sst_iter_options: SstIteratorOptions {
                 max_fetch_tasks: options.max_fetch_tasks,
-                blocks_to_fetch,
+                target_bytes_to_fetch: options.read_ahead_bytes,
                 cache_blocks: false,
                 cache_metadata: false,
                 eager_spawn: true,

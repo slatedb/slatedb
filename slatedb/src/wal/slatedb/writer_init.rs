@@ -125,7 +125,7 @@ impl wal::WriterInit for SlateDbWalWriterInit {
                         sst_batch_size: 4,
                         sst_iter_options: SstIteratorOptions {
                             max_fetch_tasks: 2,
-                            blocks_to_fetch: 256,
+                            target_bytes_to_fetch: 1024 * 1024,
                             cache_blocks: false,
                             cache_metadata: false,
                             eager_spawn: true,

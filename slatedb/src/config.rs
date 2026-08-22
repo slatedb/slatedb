@@ -350,9 +350,10 @@ pub struct ScanOptions {
     /// Whether to include dirty data in the scan. "dirty" means that the data is not considered
     /// as "committed" yet, whose seq number is greater than the last committed seq number.
     pub dirty: bool,
-    /// The number of bytes to read ahead. The value is rounded up to the nearest
-    /// block size when fetching from object storage. The default is 1, which
-    /// rounds up to one block.
+    /// The target number of bytes to fetch in a single request while iterating over SSTs.
+    /// Each fetch will read the minimum number of blocks such that the resulting read is at least
+    /// this size or reaches the end of the file. The default is 1, which results in each fetch
+    /// reading one block.
     pub read_ahead_bytes: usize,
     /// Whether or not fetched data blocks should be cached. SST indexes,
     /// filters, and stats are cached independently of this setting.
@@ -1321,9 +1322,10 @@ pub struct CompactionWorkerOptions {
     /// compaction. Higher values can improve throughput but use more resources.
     pub max_fetch_tasks: usize,
 
-    /// Number of bytes to fetch in a single read-ahead request while iterating
-    /// over input SSTs during compaction. The value is rounded up to the nearest
-    /// block size when fetching from object storage. The default is 2MiB.
+    /// The target number of bytes to fetch in a single request while iterating over
+    /// input SSTs during compaction. Each fetch will read the minimum number of blocks
+    /// such that the resulting read is at least this size or reaches the end of the file.
+    /// The default is 2MiB.
     ///
     /// This pairs with [`CompactionWorkerOptions::max_fetch_tasks`]:
     /// `bytes_to_fetch` is the size of each read-ahead request while
