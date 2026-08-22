@@ -125,11 +125,16 @@ pub(crate) async fn plan_subcompaction_ranges(
         )
         .collect();
 
-    // Floor each range at the largest input SST's estimated on-disk size, so a
-    // subcompaction is never smaller than the biggest source SST. Tying the
+    // Floor each range at the largest input view's estimated size, so a
+    // subcompaction is never smaller than the biggest source. Tying the
     // floor to the inputs' granularity rather than the output `max_sst_size`
     // lets shallow compactions (e.g. L0, whose inputs are far below
     // `max_sst_size`) split rather than always running unsplit.
+    //
+    // For a projected/borrowed view, `estimate_size()` is now a heuristic
+    // *visible*-share estimate, not the physical SST's on-disk size — which
+    // matches this floor's intent, since sampling below already clips a
+    // projected input to its visible keys/bytes (see `sample_anchors`).
     let min_range_bytes = views
         .iter()
         .map(|view| view.estimate_size())
