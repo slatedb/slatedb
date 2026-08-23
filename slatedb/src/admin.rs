@@ -107,11 +107,21 @@ impl Admin {
             .map_err(crate::Error::from)?;
         let mut manifests = Vec::with_capacity(manifest_metadata.len());
         for metadata in manifest_metadata {
-            let manifest = manifest_store
-                .read_manifest(metadata.id)
+            match manifest_store
+                .try_read_manifest(metadata.id)
                 .await
-                .map_err(crate::Error::from)?;
-            manifests.push(VersionedManifest::from_manifest(metadata.id, manifest));
+                .map_err(crate::Error::from)?
+            {
+                Some(manifest) => {
+                    manifests.push(VersionedManifest::from_manifest(metadata.id, manifest))
+                }
+                // Deleted after LIST by a concurrent GC
+                // See https://github.com/slatedb/slatedb/issues/1215 for more details.
+                None => log::warn!(
+                    "listed manifest missing on read, skipping [id={}]",
+                    metadata.id
+                ),
+            }
         }
         Ok(manifests)
     }
@@ -1976,5 +1986,63 @@ mod tests {
                 "pinned checkpoint should be removed from every parent"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod gc_tolerant_list_manifests_tests {
+    use crate::admin::AdminBuilder;
+    use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::ManifestCore;
+    use crate::test_utils::FlakyObjectStore;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+    use slatedb_common::clock::DefaultSystemClock;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_list_manifests_skips_manifest_gced_between_list_and_read() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0));
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let path = Path::from("/tmp/test_gc_tolerant_list_manifests");
+
+        let manifest_store = Arc::new(ManifestStore::new(&path, store.clone()));
+        let mut sm = StoredManifest::create_new_db(
+            manifest_store,
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        sm.update(sm.prepare_dirty().unwrap()).await.unwrap();
+        sm.update(sm.prepare_dirty().unwrap()).await.unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), store.clone()).build();
+        let ids: Vec<u64> = admin
+            .list_manifests(..)
+            .await
+            .unwrap()
+            .iter()
+            .map(|vm| vm.id())
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+
+        // manifest 1 is listed, but missing on read
+        flaky.with_get_not_found_failures(1);
+
+        let ids: Vec<u64> = admin
+            .list_manifests(..)
+            .await
+            .unwrap()
+            .iter()
+            .map(|vm| vm.id())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![2, 3],
+            "a manifest GC'd mid-listing should be skipped, not fail the operation"
+        );
     }
 }
