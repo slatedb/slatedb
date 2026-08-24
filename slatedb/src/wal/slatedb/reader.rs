@@ -33,7 +33,7 @@ pub struct SlateDbWalReaderOptions {
     /// The target number of bytes to fetch in a single request while iterating over WAL SSTs.
     /// Each fetch reads the minimum number of blocks such that the resulting read is at least
     /// this size or reaches the end of the file. Callers size this to a whole WAL SST
-    /// (`l0_sst_size_bytes`) so replay reads each file in one request; the default is a fallback.
+    /// (`l0_sst_size_bytes`) so replay reads each file in one request.
     pub read_ahead_bytes: usize,
 }
 
