@@ -115,8 +115,6 @@ impl wal::WriterInit for SlateDbWalWriterInit {
                 // older writers would have failed with a stale epoch
                 let replay_after_wal_id = manifest.core().replay_after_wal_id;
                 assert!(empty_wal_id > replay_after_wal_id);
-                // Read a whole WAL SST per request. A WAL SST is bounded by
-                // max_wal_bytes_size (= l0_sst_size_bytes), so one window covers a file.
                 let replay_iterator = SlateDbWalIterator::range(
                     replay_after_wal_id + 1,
                     WalIteratorEndBound::Exclusive(empty_wal_id + 1),
