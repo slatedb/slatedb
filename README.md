@@ -152,6 +152,7 @@ SlateDB follows Semantic Versioning. We release new versions approximately every
 
 See who's using SlateDB.
 
+- [4og.io](https://4og.io)
 - [Dropbox](https://www.dropbox.com)
 - [Embucket](https://www.embucket.com)
 - [Gadget](https://gadget.dev)
@@ -164,7 +165,6 @@ See who's using SlateDB.
 - [Prisma](https://www.prisma.io)
 - [Responsive](https://responsive.dev)
 - [s2-lite](https://github.com/s2-streamstore/s2)
-- [SQLync](https://sqlync.com)
 - [Storrito](https://storrito.com)
 - [Taquba](https://github.com/micllam/taquba)
 - [Tensorlake](https://www.tensorlake.ai)
