@@ -204,8 +204,6 @@ impl DbReaderInner {
                     Arc::clone(&table_store),
                     &status_manager,
                     Arc::clone(&system_clock),
-                    // Read a whole WAL SST per request. A reader can't see the writer's
-                    // l0_sst_size_bytes, so use max_memtable_bytes as the equivalent budget.
                     SlateDbWalReaderOptions {
                         read_ahead_bytes: options.max_memtable_bytes as usize,
                         ..SlateDbWalReaderOptions::default()
