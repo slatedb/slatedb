@@ -18,6 +18,7 @@ pub(crate) mod wal_disabled;
 pub use crate::wal::slatedb::reader::{
     SlateDbWalReader, SlateDbWalReaderBuilder, SlateDbWalReaderOptions,
 };
+pub use crate::wal::slatedb::store::WalFileId;
 
 /// A range of WAL File IDs
 #[derive(Clone, Debug, Eq, PartialEq)]

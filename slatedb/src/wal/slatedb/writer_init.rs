@@ -56,8 +56,9 @@ impl SlateDbWalWriterInit {
         fp_tx: FailPointTx,
     ) -> Result<Self, SlateDBError> {
         let empty_wal_id = table_store
-            .next_wal_sst_id(manifest.core.replay_after_wal_id)
-            .await?;
+            .next_wal_sst_id(manifest.core.replay_after_wal_id.into())
+            .await?
+            .value();
         fail_point_send!(fp_tx, "LoadEmptyWalId");
         Ok(Self {
             closed_result_reader,
@@ -89,8 +90,9 @@ impl wal::WriterInit for SlateDbWalWriterInit {
             // the next wal id
             empty_wal_id = self
                 .table_store
-                .next_wal_sst_id(manifest.core().replay_after_wal_id)
-                .await?;
+                .next_wal_sst_id(manifest.core().replay_after_wal_id.into())
+                .await?
+                .value();
             writer_manifest.refresh().await?;
             manifest = writer_manifest.manifest();
             fail_point_send!(self.fp_tx, "ReloadEmptyWalId");
@@ -103,7 +105,7 @@ impl wal::WriterInit for SlateDbWalWriterInit {
         let mut _attempt = 0;
         loop {
             _attempt += 1;
-            let wrote_fence = match self.table_store.write_wal_fence(empty_wal_id).await {
+            let wrote_fence = match self.table_store.write_wal_fence(empty_wal_id.into()).await {
                 Ok(()) => true,
                 Err(SlateDBError::Fenced) => false,
                 Err(err) => return Err(err.into()),

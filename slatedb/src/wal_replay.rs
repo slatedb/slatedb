@@ -196,7 +196,6 @@ mod tests {
     use crate::iter::{IterationOrder, RowEntryIterator};
     use crate::manifest::ManifestCore;
     use crate::mem_table::WritableKVTable;
-    use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::RowEntry;
@@ -235,8 +234,9 @@ mod tests {
         ) -> Result<Self, SlateDBError> {
             let wal_id_start = db_state.replay_after_wal_id + 1;
             let wal_id_end = wal_store
-                .last_seen_wal_id(db_state.replay_after_wal_id)
-                .await?;
+                .last_seen_wal_id(db_state.replay_after_wal_id.into())
+                .await?
+                .value();
             let wal_id_range = wal_id_start..(wal_id_end + 1);
             Self::range(
                 wal_id_range,
@@ -390,7 +390,7 @@ mod tests {
     #[tokio::test]
     async fn should_replay_zero_byte_wal_fence() {
         let (table_store, wal_store) = test_stores();
-        wal_store.write_wal_fence(1).await.unwrap();
+        wal_store.write_wal_fence(1.into()).await.unwrap();
         let mut replay_iter = WalReplayIterator::all_wal_ids(
             &ManifestCore::new(),
             WalReplayOptions::default(),
@@ -414,13 +414,13 @@ mod tests {
     #[tokio::test]
     async fn should_replay_zero_byte_wal_fence_before_real_wal() {
         let (table_store, wal_store) = test_stores();
-        wal_store.write_wal_fence(1).await.unwrap();
+        wal_store.write_wal_fence(1.into()).await.unwrap();
 
         let row = RowEntry::new_value(b"key", b"value", 1);
         let mut builder = wal_store.table_builder();
         builder.add(row.clone()).await.unwrap();
         let encoded_sst = builder.build().await.unwrap();
-        wal_store.write_sst(2, &encoded_sst).await.unwrap();
+        wal_store.write_sst(2.into(), &encoded_sst).await.unwrap();
 
         let mut replay_iter = WalReplayIterator::all_wal_ids(
             &ManifestCore::new(),
@@ -553,7 +553,7 @@ mod tests {
             }
             let encoded_sst = builder.build().await.unwrap();
             wal_store
-                .write_sst(wal_id as u64 + 1, &encoded_sst)
+                .write_sst((wal_id as u64 + 1).into(), &encoded_sst)
                 .await
                 .unwrap();
         }
@@ -620,7 +620,7 @@ mod tests {
             builder.add(entry).await.unwrap();
         }
         let encoded_sst = builder.build().await.unwrap();
-        wal_store.write_sst(1, &encoded_sst).await.unwrap();
+        wal_store.write_sst(1.into(), &encoded_sst).await.unwrap();
 
         // Replay the single WAL SST into in-memory tables. If the replay code
         // can split a single commit sequence, it will do so here.
@@ -677,7 +677,7 @@ mod tests {
             builder.add(entry).await.unwrap();
         }
         let encoded_sst = builder.build().await.unwrap();
-        wal_store.write_sst(1, &encoded_sst).await.unwrap();
+        wal_store.write_sst(1.into(), &encoded_sst).await.unwrap();
 
         // Replay the single WAL SST into in-memory tables.
         let mut replay_iter = WalReplayIterator::all_wal_ids(
@@ -817,7 +817,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(Arc::clone(&object_store), None),
+            Arc::clone(&object_store),
             SsTableFormat::default(),
             path.clone(),
             None,
@@ -896,7 +896,7 @@ mod tests {
             next_seq += 1;
         }
         let encoded_sst = builder.build().await?;
-        wal_store.write_sst(wal_id, &encoded_sst).await?;
+        wal_store.write_sst(wal_id.into(), &encoded_sst).await?;
         Ok(next_seq)
     }
 }

@@ -995,7 +995,7 @@ mod tests {
             ..Default::default()
         };
         SsTableView::identity(SsTableHandle::new(
-            SsTableId::Compacted(ulid::Ulid::new()),
+            SsTableId::from(ulid::Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             info,
         ))

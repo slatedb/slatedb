@@ -264,7 +264,11 @@ impl WalReader for SlateDbWalReader {
     }
 
     async fn last_wal_file_id(&self, replay_after_wal_id: u64) -> Result<u64, WalError> {
-        let last = self.wal_store.last_seen_wal_id(replay_after_wal_id).await?;
+        let last = self
+            .wal_store
+            .last_seen_wal_id(replay_after_wal_id.into())
+            .await?
+            .value();
         let manifest = self.manifest_reader.manifest().await?;
         if last < manifest.core().replay_after_wal_id {
             return Err(WalError::WalTruncated(last));
@@ -280,7 +284,6 @@ mod tests {
 
     use super::*;
     use crate::config::{FlushOptions, FlushType};
-    use crate::db_state::SsTableId;
     use crate::manifest::store::StoredManifest;
     use crate::manifest::ManifestCore;
     use crate::paths::PathResolver;
@@ -584,8 +587,16 @@ mod tests {
             .with_path(Path::from("/reader_normalizes_range_bounds"))
             .build()
             .unwrap();
-        wal_reader.wal_store.write_wal_fence(1).await.unwrap();
-        wal_reader.wal_store.write_wal_fence(2).await.unwrap();
+        wal_reader
+            .wal_store
+            .write_wal_fence(1.into())
+            .await
+            .unwrap();
+        wal_reader
+            .wal_store
+            .write_wal_fence(2.into())
+            .await
+            .unwrap();
 
         let mut iterator = wal_reader
             .iterator(WalFileRange(Bound::Excluded(1), Bound::Included(2)))
@@ -656,7 +667,7 @@ mod tests {
             .build()
             .unwrap();
         let tail = wal_reader.last_wal_file_id(0).await.unwrap();
-        let wal_path = PathResolver::from_root(path).sst_path(&SsTableId::Wal(tail));
+        let wal_path = PathResolver::from_root(path).wal_sst_path(&tail.into());
         object_store.delete(&wal_path).await.unwrap();
 
         let mut iterator = wal_reader
@@ -680,7 +691,7 @@ mod tests {
             TableStoreKind::Reader,
         ));
         let encoded_sst = wal_store.table_builder().build().await.unwrap();
-        wal_store.write_sst(1, &encoded_sst).await.unwrap();
+        wal_store.write_sst(1.into(), &encoded_sst).await.unwrap();
 
         let mut core = ManifestCore::new();
         core.next_wal_sst_id = 3;

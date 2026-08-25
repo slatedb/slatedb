@@ -1503,7 +1503,6 @@ mod tests {
             },
             mem_table::{ImmutableMemtable, WritableKVTable},
             merge_operator::MergeOperatorType,
-            object_stores::ObjectStores,
             oracle::DbReaderOracle,
             paths::PathResolver,
             proptest_util::{rng::new_test_rng, sample},
@@ -3211,7 +3210,7 @@ mod tests {
             builder.add(entry).await?;
         }
         let encoded_sst = builder.build().await?;
-        wal_store.write_sst(wal_id, &encoded_sst).await?;
+        wal_store.write_sst(wal_id.into(), &encoded_sst).await?;
         Ok(())
     }
 
@@ -3511,7 +3510,7 @@ mod tests {
 
         fn view(seq: u64) -> SsTableView {
             SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(ulid::Ulid::from_parts(seq, 0)),
+                SsTableId::from(ulid::Ulid::from_parts(seq, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo::default(),
             ))
@@ -3692,7 +3691,7 @@ mod tests {
     impl TestProvider {
         fn table_store(&self) -> Arc<TableStore> {
             Arc::new(TableStore::new_with_fp_registry(
-                ObjectStores::new(Arc::clone(&self.object_store), None),
+                Arc::clone(&self.object_store),
                 SsTableFormat::default(),
                 PathResolver::from_root(self.path.clone()),
                 Arc::clone(&self.fp_registry),
