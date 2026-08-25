@@ -1,7 +1,6 @@
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::manifest::Manifest;
-use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCellReader;
 use crate::wal::slatedb::iterator::{SlateDbWalIterator, WalIteratorEndBound};
 use crate::wal::slatedb::reader::SlateDbWalReaderOptions;
@@ -13,6 +12,8 @@ use fail_parallel::{fail_point_send, FailPointTx};
 use slatedb_common::metrics::MetricsRecorderHelper;
 use std::sync::Arc;
 use std::time::Duration;
+
+use super::store::WalTableStore;
 
 #[derive(Clone, Copy)]
 pub(crate) struct SlateDbWalWriterInitOptions {
@@ -34,7 +35,7 @@ impl From<&Settings> for SlateDbWalWriterInitOptions {
 pub(crate) struct SlateDbWalWriterInit {
     closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
     recorder: MetricsRecorderHelper,
-    table_store: Arc<TableStore>,
+    table_store: Arc<WalTableStore>,
     max_wal_bytes_size: usize,
     max_wal_flushes_before_l0_flush: u64,
     max_flush_interval: Option<Duration>,
@@ -48,7 +49,7 @@ impl SlateDbWalWriterInit {
     pub(crate) async fn load(
         closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         recorder: MetricsRecorderHelper,
-        table_store: Arc<TableStore>,
+        table_store: Arc<WalTableStore>,
         options: SlateDbWalWriterInitOptions,
         manifest: &Manifest,
         task_executor: Arc<MessageHandlerExecutor>,

@@ -1,8 +1,8 @@
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, StoredManifest};
-use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCellReader;
+use crate::wal::slatedb::store::WalTableStore;
 use crate::wal::slatedb::writer_init::{SlateDbWalWriterInit, SlateDbWalWriterInitOptions};
 use crate::wal::{WalIterator, WalWriter, WriterInit};
 use crate::Settings;
@@ -16,7 +16,7 @@ pub(crate) struct WriterFencer {
     closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
     recorder: MetricsRecorderHelper,
     wal_writer_init_options: SlateDbWalWriterInitOptions,
-    table_store: Arc<TableStore>,
+    wal_store: Arc<WalTableStore>,
     manifest_update_timeout: Duration,
     system_clock: Arc<dyn SystemClock>,
     task_executor: Arc<MessageHandlerExecutor>,
@@ -35,7 +35,7 @@ impl WriterFencer {
     pub(crate) fn new(
         closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         recorder: MetricsRecorderHelper,
-        table_store: Arc<TableStore>,
+        wal_store: Arc<WalTableStore>,
         settings: &Settings,
         system_clock: Arc<dyn SystemClock>,
         task_executor: Arc<MessageHandlerExecutor>,
@@ -44,7 +44,7 @@ impl WriterFencer {
         Self::new_with_fp_handle(
             closed_result_reader,
             recorder,
-            table_store,
+            wal_store,
             settings,
             system_clock,
             task_executor,
@@ -56,7 +56,7 @@ impl WriterFencer {
     fn new_with_fp_handle(
         closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         recorder: MetricsRecorderHelper,
-        table_store: Arc<TableStore>,
+        wal_store: Arc<WalTableStore>,
         settings: &Settings,
         system_clock: Arc<dyn SystemClock>,
         task_executor: Arc<MessageHandlerExecutor>,
@@ -66,7 +66,7 @@ impl WriterFencer {
         Self {
             closed_result_reader,
             recorder,
-            table_store,
+            wal_store,
             wal_writer_init_options: settings.into(),
             manifest_update_timeout: settings.manifest_update_timeout,
             system_clock,
@@ -94,7 +94,7 @@ impl WriterFencer {
                 SlateDbWalWriterInit::load(
                     self.closed_result_reader.clone(),
                     self.recorder.clone(),
-                    self.table_store.clone(),
+                    self.wal_store.clone(),
                     self.wal_writer_init_options,
                     stored_manifest.manifest(),
                     self.task_executor.clone(),
@@ -144,8 +144,10 @@ mod tests {
     use crate::manifest::ManifestCore;
     use crate::memtable_flusher::MANIFEST_REFRESH_COUNT;
     use crate::object_stores::ObjectStores;
+    use crate::paths::PathResolver;
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::utils::WatchableOnceCell;
+    use crate::wal::slatedb::store::WalTableStore;
     use crate::{CloseReason, Db, ErrorKind, Settings};
     use bytes::Bytes;
     use fail_parallel::fail_point_channel;
@@ -179,6 +181,7 @@ mod tests {
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let settings = test_db_options();
             let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+            let fp_registry = Arc::new(FailPointRegistry::new());
             let manifest_store =
                 Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
             let table_store = Arc::new(TableStore::new(
@@ -189,6 +192,13 @@ mod tests {
                 TableStoreKind::Main,
                 BlockCachePolicy::default(),
             ));
+            let wal_store = Arc::new(WalTableStore::new_with_fp_registry(
+                Arc::clone(&object_store),
+                SsTableFormat::default(),
+                PathResolver::from_root(path),
+                Arc::clone(&fp_registry),
+                TableStoreKind::Main,
+            ));
             let stored_manifest = StoredManifest::create_new_db(
                 manifest_store.clone(),
                 ManifestCore::new(),
@@ -196,7 +206,6 @@ mod tests {
             )
             .await
             .unwrap();
-            let fp_registry = Arc::new(FailPointRegistry::new());
             let (fp_tx, event_rx) = fail_point_channel(fp_registry.clone());
             let cell = Arc::new(WatchableOnceCell::new());
             let recorder = MetricsRecorderHelper::new(
@@ -210,7 +219,7 @@ mod tests {
             let fencer = WriterFencer::new_with_fp_handle(
                 cell.reader(),
                 recorder,
-                table_store.clone(),
+                wal_store,
                 &settings,
                 system_clock.clone(),
                 task_executor.clone(),
