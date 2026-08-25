@@ -563,6 +563,20 @@ TODO
 Release `ObjectStoreMirror` and deprecate `CachedObjectStore`. Remove
 `CachedObjectStore` in the following release.
 
+## Future Work
+
+### Incremental Compaction
+
+The approach in this RFC requires up to 2x disk space when large sorted runs are compacted.
+Suppose we have a 100 GiB SR7. We compact SR7 into SR8, which grows to be 75 GiB. In the
+current design, warms the 75 GiB SR8 in the background as the job runs. SR7 remains active
+in the manifest. Thus, right before the manifest swap, we will have
+100 GiB (SR7) + 75 GiB (SR8) = 175 GiB of local disk usage. Once the manifest swap occurs,
+SR7 is dropped and disk usage shrinks to 75 GiB.
+
+ScyllaDB has a similar problem and solves it with [incremental compaction](https://www.scylladb.com/2020/01/16/maximizing-disk-utilization-with-incremental-compaction/). We could implement a similar
+design.
+
 ## Alternatives
 
 ### Remote-Only Reclamation
