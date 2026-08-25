@@ -8,15 +8,12 @@ use futures::{future::join_all, StreamExt};
 use log::{debug, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
-use object_store::{
-    Extensions, GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutMode, PutOptions,
-};
+use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions};
 use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_common::ObjectMetadata;
 use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
-use crate::blob::ReadOnlyBlob;
 use crate::block_cache_policy::{should_cache_data_block, BlockCachePolicy};
 use crate::db_cache::CacheTarget;
 use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
@@ -32,6 +29,9 @@ pub(crate) use crate::object_store_tag::TableStoreKind;
 use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::paths::PathResolver;
 use crate::sst_builder::EncodedSsTableBuilder;
+#[cfg(test)]
+use crate::sst_io::MAX_VALIDATION_RETRIES;
+use crate::sst_io::{read_obj as read_sst_obj, read_with_validation_retry, ReadOnlyObject};
 use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
 use crate::wal::slatedb::sst_builder::EncodedWalSsTableBuilder;
@@ -50,76 +50,15 @@ pub(crate) struct TableStore {
     kind: TableStoreKind,
 }
 
-struct ReadOnlyObject {
-    object_store: Arc<dyn ObjectStore>,
-    path: Path,
-    tag: ObjectStoreCallTag,
-}
-
-impl ReadOnlyObject {
-    fn extensions(&self) -> Extensions {
-        self.tag.into()
-    }
-}
-
-/// Reads from a [`ReadOnlyObject`] for an SST `$id`, with validation-retry.
-///
-/// It expands to the retry-wrapper future, so callers `.await` it.
-/// This is used instead of repeating the same retry logic for every individual
-/// read from an SST object.
 macro_rules! read_obj {
-    ($store:expr, $id:expr, |$obj:ident| $read:expr) => {{
-        let object_store = $store.object_stores.store_for($id);
-        let path = $store.path($id);
-        read_with_validation_retry(
+    ($store:expr, $id:expr, |$obj:ident| $read:expr) => {
+        read_sst_obj!(
+            $store.object_stores.store_for($id),
+            $store.path($id),
             ObjectStoreCallTag::new($store.kind, SstType::from($id)),
-            move |tag| {
-                let object_store = object_store.clone();
-                let path = path.clone();
-                async move {
-                    let $obj = ReadOnlyObject {
-                        object_store,
-                        path,
-                        tag,
-                    };
-                    $read.await.map_err(|e| e.with_path(&$obj.path))
-                }
-            },
+            |$obj| $read
         )
-    }};
-}
-
-impl ReadOnlyBlob for ReadOnlyObject {
-    async fn len(&self) -> Result<u64, SlateDBError> {
-        let opts = GetOptions {
-            head: true,
-            extensions: self.extensions(),
-            ..GetOptions::default()
-        };
-        let result = self.object_store.get_opts(&self.path, opts).await?;
-        Ok(result.meta.size)
-    }
-
-    async fn read_range(&self, range: Range<u64>) -> Result<Bytes, SlateDBError> {
-        let opts = GetOptions {
-            range: Some(GetRange::Bounded(range)),
-            extensions: self.extensions(),
-            ..GetOptions::default()
-        };
-        let result = self.object_store.get_opts(&self.path, opts).await?;
-        let bytes = result.bytes().await?;
-        Ok(bytes)
-    }
-
-    async fn read(&self) -> Result<Bytes, SlateDBError> {
-        let opts = GetOptions {
-            extensions: self.extensions(),
-            ..GetOptions::default()
-        };
-        let result = self.object_store.get_opts(&self.path, opts).await?;
-        let bytes = result.bytes().await?;
-        Ok(bytes)
-    }
+    };
 }
 
 impl TableStore {
@@ -1164,45 +1103,6 @@ async fn wal_object_exists(
         Err(object_store::Error::NotFound { .. }) => Ok(false),
         Err(e) => Err(SlateDBError::from(e)),
     }
-}
-
-/// Number of additional attempts after an SST read fails validation. The
-/// reissue carries a [`RetryReason`](crate::error::RetryReason) so a caching
-/// wrapper drops its local copy.
-const MAX_VALIDATION_RETRIES: usize = 1;
-
-/// Runs `read` with the source/type `tag`, reissuing it with a
-/// [`RetryReason`](crate::error::RetryReason) set on the tag when the result is
-/// a recoverable validation failure.
-///
-/// This is done to enable object store wrappers like a cache to know when
-/// to drop a cached entry that failed validation and retry the read from the
-/// source of truth (object store) instead of repeatedly returning the same
-/// invalid cached entry.
-async fn read_with_validation_retry<T, Fut>(
-    mut tag: ObjectStoreCallTag,
-    mut read: impl FnMut(ObjectStoreCallTag) -> Fut,
-) -> Result<T, SlateDBError>
-where
-    Fut: std::future::Future<Output = Result<T, SlateDBError>>,
-{
-    for _ in 0..MAX_VALIDATION_RETRIES {
-        let result = read(tag).await;
-        match result {
-            Err(ref err) => match err.maybe_validation_retry_reason() {
-                Some(reason) => {
-                    warn!(
-                        "retrying SST read after validation failure [reason={:?}, error={}]",
-                        reason, err
-                    );
-                    tag.retry = Some(reason);
-                }
-                None => return result,
-            },
-            Ok(_) => return result,
-        }
-    }
-    read(tag).await
 }
 
 /// Builds a [`BufWriter`] whose upload carries `tag` in its extensions.
