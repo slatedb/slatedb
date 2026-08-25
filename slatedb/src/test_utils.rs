@@ -573,6 +573,8 @@ pub(crate) struct FlakyObjectStore {
     // get_range: truncate response body to this many bytes on first N attempts (0 = no truncation)
     truncate_get_range_bytes: AtomicUsize,
     truncate_get_range_count: AtomicUsize,
+    // Get: return NotFound on the next N GETs
+    fail_first_get_not_found: AtomicUsize,
 }
 
 impl FlakyObjectStore {
@@ -598,7 +600,12 @@ impl FlakyObjectStore {
             get_range_attempts: AtomicUsize::new(0),
             truncate_get_range_bytes: AtomicUsize::new(0),
             truncate_get_range_count: AtomicUsize::new(0),
+            fail_first_get_not_found: AtomicUsize::new(0),
         }
+    }
+
+    pub(crate) fn with_get_not_found_failures(&self, n: usize) {
+        self.fail_first_get_not_found.store(n, Ordering::SeqCst);
     }
 
     pub(crate) fn with_put_precondition_always(self) -> Self {
@@ -726,6 +733,25 @@ impl ObjectStore for FlakyObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if self
+            .fail_first_get_not_found
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                if v > 0 {
+                    Some(v - 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+        {
+            return Err(object_store::Error::NotFound {
+                path: location.to_string(),
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "injected not-found (deleted between LIST and GET)",
+                )),
+            });
+        }
         if options.head {
             self.head_attempts.fetch_add(1, Ordering::SeqCst);
             if self
