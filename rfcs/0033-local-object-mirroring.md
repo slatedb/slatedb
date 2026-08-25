@@ -583,6 +583,25 @@ The current `ObjectStoreMirror` API is designed for SlateDB's use case. We could
 
 ## Alternatives
 
+### CachedObjectStore With Eviction Disabled
+
+We could theoretically use `CachedObjectStore` with eviction disabled. This would require:
+
+- Fully warming the cache before starting the database
+- Disabling eviction so no SSTs are removed after warming
+- Running garbage collection locally so the cache sees deletions and removes old SSTs
+
+This approach would then behave like `ObjectStoreMirror`. However, if you
+take that approach, you might as well...
+
+1. Remove .part files since they serve no purpose
+2. Optimistically GC to avoid disk pressure
+3. Make full SST warming easier
+4. Make local SST writes mandatory rather than best-effort
+5. Clean up incomplete writes during startup
+
+This is what `ObjectStoreMirror` does.
+
 ### Remote-Only Reclamation
 
 We considered relying only on periodic remote LIST. This is simple, but all
