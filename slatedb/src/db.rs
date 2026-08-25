@@ -6865,12 +6865,12 @@ mod tests {
         )
         .await;
 
-        let head_arrivals_before = gated_store.head_gate.arrivals();
-        gated_store.head_gate.close();
+        let get_arrivals_before = gated_store.get_opts_gate.arrivals();
+        gated_store.get_opts_gate.close();
         fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
         gated_store
-            .head_gate
-            .wait_for_arrivals(head_arrivals_before + 1)
+            .get_opts_gate
+            .wait_for_arrivals(get_arrivals_before + 1)
             .await;
 
         let db2 = Db::builder(path, base_store.clone())
@@ -6885,7 +6885,7 @@ mod tests {
         );
 
         probe_wal_store.delete_sst(1.into()).await.unwrap();
-        gated_store.head_gate.release();
+        gated_store.get_opts_gate.release();
 
         let err = match w1_handle.await.unwrap() {
             Ok(_) => panic!("expected W1 open to fail"),
@@ -6939,16 +6939,16 @@ mod tests {
         )
         .await;
 
-        let head_arrivals_before = gated_store.head_gate.arrivals();
-        gated_store.head_gate.close();
+        let get_arrivals_before = gated_store.get_opts_gate.arrivals();
+        gated_store.get_opts_gate.close();
         fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
         gated_store
-            .head_gate
-            .wait_for_arrivals(head_arrivals_before + 1)
+            .get_opts_gate
+            .wait_for_arrivals(get_arrivals_before + 1)
             .await;
 
         probe_wal_store.delete_sst(1.into()).await.unwrap();
-        gated_store.head_gate.release();
+        gated_store.get_opts_gate.release();
 
         let err = match w1_handle.await.unwrap() {
             Ok(_) => panic!("expected W1 open to fail"),

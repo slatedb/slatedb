@@ -73,7 +73,7 @@ use object_store::ObjectStore;
 
 use crate::format::sst::SsTableFormat;
 use crate::iter::{EmptyIterator, RowEntryIterator};
-use crate::object_store_tag::TableStoreKind;
+use crate::tablestore::TableStoreKind;
 use crate::types::RowEntry;
 use crate::wal::slatedb::sst_iterator::{WalSstIterator, WalSstIteratorOptions};
 use crate::wal::slatedb::store::{WalFileId, WalTableStore};

@@ -2,8 +2,9 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::manifest::Manifest;
 use crate::utils::WatchableOnceCellReader;
-use crate::wal::slatedb::iterator::{SlateDbWalIterator, WalIteratorEndBound};
-use crate::wal::slatedb::reader::SlateDbWalReaderOptions;
+use crate::wal::slatedb::iterator::{
+    SlateDbWalIterator, SlateDbWalIteratorOptions, WalIteratorEndBound,
+};
 use crate::wal::slatedb::writer::SlateDbWalWriter;
 use crate::wal::{WalError, WriterInitResult, WriterManifest};
 use crate::{wal, Settings};
@@ -121,11 +122,11 @@ impl wal::WriterInit for SlateDbWalWriterInit {
                 let replay_iterator = SlateDbWalIterator::range(
                     replay_after_wal_id + 1,
                     WalIteratorEndBound::Exclusive(empty_wal_id + 1),
-                    SlateDbWalReaderOptions {
-                        read_ahead_bytes: self.max_wal_bytes_size,
-                        ..SlateDbWalReaderOptions::default()
-                    }
-                    .into(),
+                    SlateDbWalIteratorOptions {
+                        target_bytes_to_fetch: 1024 * 1024,
+                        max_buffered_bytes: 4 * 1024,
+                        max_fetch_tasks: 2,
+                    },
                     self.table_store.clone(),
                 )?;
                 let wal_writer = SlateDbWalWriter::start_new(

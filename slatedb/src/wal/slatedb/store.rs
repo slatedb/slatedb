@@ -7,11 +7,12 @@ use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::join_all, StreamExt};
 use log::{debug, warn};
 use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions};
+use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutMode, PutOptions};
 use serde::Serialize;
 use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_common::ObjectMetadata;
 
+use crate::blob::ReadOnlyBlob;
 use crate::db_state::{SsTableInfo, SstType};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
@@ -19,8 +20,10 @@ use crate::format::block::Block;
 use crate::format::sst::{EncodedSsTable, SsTableFormat};
 use crate::object_store_tag::{ObjectStoreCallTag, TableStoreKind};
 use crate::paths::PathResolver;
-use crate::sst_io::{read_obj, read_with_validation_retry, ReadOnlyObject};
+use crate::sst_io::{read_with_validation_retry, ReadOnlyObject};
 use crate::wal::slatedb::sst_builder::EncodedWalSsTableBuilder;
+
+const WAL_SST_CACHED_FOOTER_SIZE: u64 = 128 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct WalFileId(u64);
@@ -43,11 +46,78 @@ impl From<WalFileId> for u64 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug)]
+struct CachedFooter {
+    offset: u64,
+    data: Bytes,
+}
+
+impl CachedFooter {
+    fn from_object_size(object_size: u64, data: Bytes) -> Result<Self, SlateDBError> {
+        let data_len = u64::try_from(data.len()).map_err(|_| SlateDBError::InvalidDBState)?;
+        let offset = object_size
+            .checked_sub(data_len)
+            .ok_or(SlateDBError::InvalidDBState)?;
+        Ok(Self { offset, data })
+    }
+
+    fn object_size(&self) -> u64 {
+        self.offset
+            .checked_add(u64::try_from(self.data.len()).expect("footer size must fit in u64"))
+            .expect("cached footer cannot extend beyond u64::MAX")
+    }
+
+    fn read_range(&self, range: &Range<u64>) -> Option<Bytes> {
+        if range.start < self.offset || range.end > self.object_size() {
+            return None;
+        }
+
+        let start = usize::try_from(range.start - self.offset).ok()?;
+        let end = usize::try_from(range.end - self.offset).ok()?;
+        Some(self.data.slice(start..end))
+    }
+}
+
+struct WalReadOnlyObject {
+    inner: ReadOnlyObject,
+    cached_footer: Option<CachedFooter>,
+}
+
+impl ReadOnlyBlob for WalReadOnlyObject {
+    async fn len(&self) -> Result<u64, SlateDBError> {
+        match &self.cached_footer {
+            Some(cached_footer) => Ok(cached_footer.object_size()),
+            None => self.inner.len().await,
+        }
+    }
+
+    async fn read_range(&self, range: Range<u64>) -> Result<Bytes, SlateDBError> {
+        if let Some(data) = self
+            .cached_footer
+            .as_ref()
+            .and_then(|cached_footer| cached_footer.read_range(&range))
+        {
+            return Ok(data);
+        }
+        self.inner.read_range(range).await
+    }
+
+    async fn read(&self) -> Result<Bytes, SlateDBError> {
+        if let Some(cached_footer) = &self.cached_footer {
+            if cached_footer.offset == 0 {
+                return Ok(cached_footer.data.clone());
+            }
+        }
+        self.inner.read().await
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct WalFileHandle {
     pub(crate) id: WalFileId,
     pub(crate) format_version: u16,
     pub(crate) info: SsTableInfo,
+    cached_footer: Option<CachedFooter>,
 }
 
 impl WalFileHandle {
@@ -56,14 +126,22 @@ impl WalFileHandle {
             id,
             format_version,
             info,
+            cached_footer: None,
         }
+    }
+
+    fn with_cached_footer(mut self, offset: u64, data: Bytes) -> Self {
+        self.cached_footer = Some(CachedFooter { offset, data });
+        self
     }
 }
 
-/// Cacheless storage adapter for SlateDB's object-store-backed WAL files.
+/// Storage adapter for SlateDB's object-store-backed WAL files.
 ///
 /// WALs continue to use the shared SST format and builders. This type owns only
 /// WAL object-store operations and deliberately has no `DbCache` integration.
+/// Its object store may be a [`CachedObjectStore`](crate::cached_object_store::CachedObjectStore);
+/// WAL calls carry [`SstType::Wal`] so that wrapper can apply its WAL policy.
 pub(crate) struct WalTableStore {
     object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,
@@ -162,14 +240,81 @@ impl WalTableStore {
     }
 
     pub(crate) async fn open_sst(&self, wal_id: WalFileId) -> Result<WalFileHandle, SlateDBError> {
-        let (info, version) = read_obj!(
-            Arc::clone(&self.object_store),
-            self.path(wal_id),
-            ObjectStoreCallTag::new(self.kind, SstType::Wal),
-            |obj| self.sst_format.read_info_and_version(&obj)
-        )
-        .await?;
-        Ok(WalFileHandle::new(wal_id, version, info))
+        let path = self.path(wal_id);
+        let (info, version, cached_footer) =
+            read_with_validation_retry(ObjectStoreCallTag::new(self.kind, SstType::Wal), |tag| {
+                let path = path.clone();
+                async move {
+                    let cached_footer = self.read_cached_footer(&path, tag).await?;
+                    let obj = WalReadOnlyObject {
+                        inner: ReadOnlyObject {
+                            object_store: Arc::clone(&self.object_store),
+                            path: path.clone(),
+                            tag,
+                        },
+                        cached_footer: Some(cached_footer.clone()),
+                    };
+                    let (info, version) = self
+                        .sst_format
+                        .read_info_and_version(&obj)
+                        .await
+                        .map_err(|error| error.with_path(&path))?;
+                    Ok((info, version, cached_footer))
+                }
+            })
+            .await?;
+        Ok(WalFileHandle::new(wal_id, version, info)
+            .with_cached_footer(cached_footer.offset, cached_footer.data))
+    }
+
+    async fn read_cached_footer(
+        &self,
+        path: &Path,
+        tag: ObjectStoreCallTag,
+    ) -> Result<CachedFooter, SlateDBError> {
+        // Determine the object size before requesting the footer instead of using a suffix
+        // range directly. S3 responds to a suffix-range request for a zero-byte object with
+        // HTTP 200 and no Content-Range header. object_store rejects that response as the
+        // private GetResultError::NotPartial, wraps it in Error::Generic, and SlateDB's object
+        // store retry layer retries Generic errors indefinitely by default. A HEAD lets us
+        // recognize zero-byte WAL fence files without issuing the problematic range request.
+        let head_options = GetOptions {
+            head: true,
+            extensions: tag.into(),
+            ..GetOptions::default()
+        };
+        let object_size = self
+            .object_store
+            .get_opts(path, head_options)
+            .await?
+            .meta
+            .size;
+        if object_size == 0 {
+            return CachedFooter::from_object_size(0, Bytes::new());
+        }
+
+        let offset = object_size.saturating_sub(WAL_SST_CACHED_FOOTER_SIZE);
+        let (returned_object_size, data) = self
+            .read_footer_range(path, GetRange::Bounded(offset..object_size), tag)
+            .await?;
+        CachedFooter::from_object_size(returned_object_size, data)
+    }
+
+    async fn read_footer_range(
+        &self,
+        path: &Path,
+        range: GetRange,
+        tag: ObjectStoreCallTag,
+    ) -> object_store::Result<(u64, Bytes)> {
+        let options = GetOptions {
+            range: Some(range),
+            extensions: tag.into(),
+            ..GetOptions::default()
+        };
+        let result = self.object_store.get_opts(path, options).await?;
+        let object_size = result.meta.size;
+        let data = result.bytes().await?;
+        Ok((object_size, data))
     }
 
     pub(crate) async fn list_wal_ssts<R: RangeBounds<WalFileId>>(
@@ -215,8 +360,14 @@ impl WalTableStore {
     }
 
     pub(crate) async fn metadata(&self, wal_id: WalFileId) -> Result<ObjectMetadata, SlateDBError> {
+        let path = self.path(wal_id);
+        let options = GetOptions {
+            head: true,
+            extensions: ObjectStoreCallTag::new(self.kind, SstType::Wal).into(),
+            ..GetOptions::default()
+        };
         Ok(ObjectMetadata::new(
-            self.object_store.head(&self.path(wal_id)).await?,
+            self.object_store.get_opts(&path, options).await?.meta,
         ))
     }
 
@@ -224,13 +375,29 @@ impl WalTableStore {
         &self,
         handle: &WalFileHandle,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
-        let index = read_obj!(
-            Arc::clone(&self.object_store),
-            self.path(handle.id),
-            ObjectStoreCallTag::new(self.kind, SstType::Wal),
-            |obj| self.sst_format.read_index(&handle.info, &obj)
-        )
-        .await?;
+        let path = self.path(handle.id);
+        let index =
+            read_with_validation_retry(ObjectStoreCallTag::new(self.kind, SstType::Wal), |tag| {
+                let obj = WalReadOnlyObject {
+                    inner: ReadOnlyObject {
+                        object_store: Arc::clone(&self.object_store),
+                        path: path.clone(),
+                        tag,
+                    },
+                    cached_footer: if tag.retry.is_none() {
+                        handle.cached_footer.clone()
+                    } else {
+                        None
+                    },
+                };
+                async move {
+                    self.sst_format
+                        .read_index(&handle.info, &obj)
+                        .await
+                        .map_err(|error| error.with_path(&obj.inner.path))
+                }
+            })
+            .await?;
         Ok(Arc::new(index))
     }
 
@@ -289,17 +456,24 @@ impl WalTableStore {
         let index = &index;
         let blocks =
             read_with_validation_retry(ObjectStoreCallTag::new(self.kind, SstType::Wal), |tag| {
-                let obj = ReadOnlyObject {
-                    object_store: Arc::clone(&object_store),
-                    path: path.clone(),
-                    tag,
+                let obj = WalReadOnlyObject {
+                    inner: ReadOnlyObject {
+                        object_store: Arc::clone(&object_store),
+                        path: path.clone(),
+                        tag,
+                    },
+                    cached_footer: if tag.retry.is_none() {
+                        handle.cached_footer.clone()
+                    } else {
+                        None
+                    },
                 };
                 let blocks = blocks.clone();
                 async move {
                     self.sst_format
                         .read_blocks(&handle.info, index, blocks, &obj)
                         .await
-                        .map_err(|error| error.with_path(&obj.path))
+                        .map_err(|error| error.with_path(&obj.inner.path))
                 }
             })
             .await?;
@@ -405,7 +579,9 @@ fn slatedb_io_error() -> SlateDBError {
 mod tests {
     use super::*;
     use crate::block_iterator::DataBlockIterator;
+    use crate::error::RetryReason;
     use crate::iter::IterationOrder;
+    use crate::test_utils::{FlakyObjectStore, RecordingObjectStore};
     use crate::types::RowEntry;
     use object_store::memory::InMemory;
     use object_store::ObjectStoreExt;
@@ -419,6 +595,148 @@ mod tests {
             Path::from("test-db"),
             TableStoreKind::Main,
         )
+    }
+
+    #[tokio::test]
+    async fn open_sst_caches_last_500kb() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let observed = Arc::new(FlakyObjectStore::new(inner, 0));
+        let recording = Arc::new(RecordingObjectStore::new(observed.clone()));
+        let object_store: Arc<dyn ObjectStore> = recording.clone();
+        let store = WalTableStore::new(
+            object_store,
+            SsTableFormat::default(),
+            Path::from("cached-footer"),
+            TableStoreKind::Main,
+        );
+
+        let value = vec![b'x'; 4096];
+        let mut builder =
+            EncodedWalSsTableBuilder::new(32 * 1024, store.sst_format.sst_codec.clone());
+        for seq in 0..300 {
+            builder
+                .add(RowEntry::new_value(b"key", &value, seq))
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        let encoded_bytes = encoded.remaining_as_bytes();
+        assert!(encoded_bytes.len() > WAL_SST_CACHED_FOOTER_SIZE as usize);
+        store.write_sst(1.into(), &encoded).await.unwrap();
+
+        let handle = store.open_sst(1.into()).await.unwrap();
+        let cached_footer = handle.cached_footer.as_ref().unwrap();
+        assert_eq!(
+            cached_footer.data.len(),
+            WAL_SST_CACHED_FOOTER_SIZE as usize
+        );
+        assert_eq!(
+            cached_footer.offset,
+            encoded_bytes.len() as u64 - WAL_SST_CACHED_FOOTER_SIZE
+        );
+        assert_eq!(
+            cached_footer.data,
+            encoded_bytes.slice(cached_footer.offset as usize..)
+        );
+        assert_eq!(observed.get_range_attempts(), 1);
+        assert_eq!(observed.head_attempts(), 1);
+        assert_eq!(
+            recording.recorded_get_ranges(false),
+            vec![Some(GetRange::Bounded(
+                encoded_bytes.len() as u64 - WAL_SST_CACHED_FOOTER_SIZE..encoded_bytes.len() as u64
+            ))]
+        );
+
+        let index = store.read_index(&handle).await.unwrap();
+        let last_block = index.borrow().block_meta().len() - 1;
+        store
+            .read_blocks_using_index(&handle, index, last_block..last_block + 1)
+            .await
+            .unwrap();
+
+        // The index and final data block are both covered by the cached tail.
+        assert_eq!(observed.get_range_attempts(), 1);
+        assert_eq!(observed.head_attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn open_sst_caches_entire_small_sst_with_bounded_range() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let observed = Arc::new(FlakyObjectStore::new(inner, 0));
+        let recording = Arc::new(RecordingObjectStore::new(observed.clone()));
+        let object_store: Arc<dyn ObjectStore> = recording.clone();
+        let store = WalTableStore::new(
+            object_store,
+            SsTableFormat::default(),
+            Path::from("cached-footer-fallback"),
+            TableStoreKind::Main,
+        );
+
+        let mut builder = store.table_builder();
+        builder
+            .add(RowEntry::new_value(b"key", b"value", 1))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
+        let encoded_bytes = encoded.remaining_as_bytes();
+        store.write_sst(1.into(), &encoded).await.unwrap();
+
+        let handle = store.open_sst(1.into()).await.unwrap();
+        let cached_footer = handle.cached_footer.as_ref().unwrap();
+        assert_eq!(cached_footer.offset, 0);
+        assert_eq!(cached_footer.data, encoded_bytes);
+        assert_eq!(observed.get_range_attempts(), 1);
+        assert_eq!(observed.head_attempts(), 1);
+        assert_eq!(
+            recording.recorded_get_ranges(false),
+            vec![Some(GetRange::Bounded(0..encoded_bytes.len() as u64))]
+        );
+
+        let index = store.read_index(&handle).await.unwrap();
+        store
+            .read_blocks_using_index(&handle, index, 0..1)
+            .await
+            .unwrap();
+
+        // One HEAD and one bounded GET were enough to open and read the small WAL SST.
+        assert_eq!(observed.get_range_attempts(), 1);
+        assert_eq!(observed.head_attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn validation_retry_bypasses_the_cached_footer() {
+        let recording = Arc::new(RecordingObjectStore::new(Arc::new(InMemory::new())));
+        let object_store: Arc<dyn ObjectStore> = recording.clone();
+        let store = WalTableStore::new(
+            object_store,
+            SsTableFormat::default(),
+            Path::from("cached-footer-validation-retry"),
+            TableStoreKind::Main,
+        );
+
+        let mut builder = store.table_builder();
+        builder
+            .add(RowEntry::new_value(b"key", b"value", 1))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
+        store.write_sst(1.into(), &encoded).await.unwrap();
+
+        let mut handle = store.open_sst(1.into()).await.unwrap();
+        recording.clear();
+
+        let cached_footer = handle.cached_footer.as_mut().unwrap();
+        let index_offset =
+            usize::try_from(handle.info.index_offset - cached_footer.offset).unwrap();
+        let mut corrupted = cached_footer.data.to_vec();
+        corrupted[index_offset] ^= 0xff;
+        cached_footer.data = Bytes::from(corrupted);
+
+        store.read_index(&handle).await.unwrap();
+        assert_eq!(
+            recording.get_retries(false),
+            vec![Some(RetryReason::CrcMismatch)]
+        );
     }
 
     #[tokio::test]
@@ -438,7 +756,9 @@ mod tests {
         let written = store.write_sst(1.into(), &encoded).await.unwrap();
         let opened = store.open_sst(1.into()).await.unwrap();
 
-        assert_eq!(written, opened);
+        assert_eq!(written.id, opened.id);
+        assert_eq!(written.info, opened.info);
+        assert_eq!(written.format_version, opened.format_version);
         assert_eq!(opened.id.value(), 1);
 
         let index = store.read_index(&opened).await.unwrap();
@@ -531,5 +851,56 @@ mod tests {
                 .value(),
             start_after + n_above
         );
+    }
+
+    #[tokio::test]
+    async fn object_store_calls_carry_wal_tag() {
+        let recording = Arc::new(RecordingObjectStore::new(Arc::new(InMemory::new())));
+        let object_store: Arc<dyn ObjectStore> = recording.clone();
+        let store = WalTableStore::new(
+            object_store,
+            SsTableFormat::default(),
+            Path::from("tagged-wal-store"),
+            TableStoreKind::Reader,
+        );
+
+        let mut builder = store.table_builder();
+        builder
+            .add(RowEntry::new_value(b"key", b"value", 1))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
+        store.write_sst(1.into(), &encoded).await.unwrap();
+
+        assert_eq!(recording.write_kinds(), vec![Some(TableStoreKind::Reader)]);
+        assert_eq!(recording.write_sst_types(), vec![Some(SstType::Wal)]);
+
+        recording.clear();
+        store.metadata(1.into()).await.unwrap();
+        let handle = store.open_sst(1.into()).await.unwrap();
+        let index = store.read_index(&handle).await.unwrap();
+        store
+            .read_blocks_using_index(&handle, index, 0..1)
+            .await
+            .unwrap();
+
+        let read_kinds = recording.get_kinds(false);
+        let read_sst_types = recording.get_sst_types(false);
+        let head_kinds = recording.get_kinds(true);
+        let head_sst_types = recording.get_sst_types(true);
+        assert!(!head_kinds.is_empty());
+        assert!(head_kinds
+            .iter()
+            .all(|kind| *kind == Some(TableStoreKind::Reader)));
+        assert!(head_sst_types
+            .iter()
+            .all(|sst_type| *sst_type == Some(SstType::Wal)));
+        assert!(!read_kinds.is_empty());
+        assert!(read_kinds
+            .iter()
+            .all(|kind| *kind == Some(TableStoreKind::Reader)));
+        assert!(read_sst_types
+            .iter()
+            .all(|sst_type| *sst_type == Some(SstType::Wal)));
     }
 }

@@ -358,8 +358,9 @@ pub struct ScanOptions {
     /// Whether or not fetched data blocks should be cached. SST indexes,
     /// filters, and stats are cached independently of this setting.
     pub cache_blocks: bool,
-    /// The maximum number of concurrent tasks for fetching blocks during scans.
-    /// Higher values can improve throughput but use more resources. The default is 1.
+    /// The shared budget for speculative block-fetch tasks during a scan. Higher values can
+    /// improve throughput but use more resources. An SST iterator may temporarily exceed this
+    /// budget when it must fetch a block to make progress. The default is 1.
     pub max_fetch_tasks: usize,
     /// The iteration order for the scan. Defaults to [`IterationOrder::Ascending`].
     pub order: IterationOrder,
@@ -1318,8 +1319,9 @@ pub struct CompactionWorkerOptions {
     /// Maximum size of an output SST before a new one is rolled.
     pub max_sst_size: usize,
 
-    /// Maximum number of concurrent tasks for fetching SST blocks during
-    /// compaction. Higher values can improve throughput but use more resources.
+    /// Shared budget for speculative SST block-fetch tasks within each subcompaction. Higher
+    /// values can improve throughput but use more resources. An input iterator may temporarily
+    /// exceed this budget when it must fetch a block to make progress.
     pub max_fetch_tasks: usize,
 
     /// The target number of bytes to fetch in a single request while iterating over
@@ -1329,11 +1331,7 @@ pub struct CompactionWorkerOptions {
     ///
     /// This pairs with [`CompactionWorkerOptions::max_fetch_tasks`]:
     /// `bytes_to_fetch` is the size of each read-ahead request while
-    /// `max_fetch_tasks` is how many run concurrently per input SST, so peak
-    /// outstanding read-ahead per SST iterator is roughly
-    /// `bytes_to_fetch * max_fetch_tasks`. With the defaults
-    /// (`bytes_to_fetch = 2MiB`, `max_fetch_tasks = 4`) that is ~8MiB prefetched
-    /// ahead of the cursor.
+    /// `max_fetch_tasks` is the speculative fetch budget shared by the input iterators.
     pub bytes_to_fetch: usize,
 
     /// The maximum number of subcompactions to split a single compaction into

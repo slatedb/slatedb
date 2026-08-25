@@ -906,6 +906,7 @@ mod tests {
         let table = table_store.open_sst(1.into()).await.unwrap();
         let mut iter =
             WalSstIterator::new(table, table_store.clone(), WalSstIteratorOptions::default());
+        iter.load_metadata().await.unwrap();
         iter.init().await.unwrap();
 
         let read_entry1 = iter.next().await.unwrap().unwrap();
