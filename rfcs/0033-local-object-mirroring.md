@@ -577,6 +577,10 @@ SR7 is dropped and disk usage shrinks to 75 GiB.
 ScyllaDB has a similar problem and solves it with [incremental compaction](https://www.scylladb.com/2020/01/16/maximizing-disk-utilization-with-incremental-compaction/). We could implement a similar
 design.
 
+### Generalized Public API
+
+The current `ObjectStoreMirror` API is designed for SlateDB's use case. We could generalize it to support other use cases. To do so, I think we'd need to make the warming and caching strategies pluggable. Perhaps we could use an event-based approach where the user can register callbacks for certain events (e.g., manifest read, SST write) and implement their own warming and caching logic. This is left to future work if we find demand for it.
+
 ## Alternatives
 
 ### Remote-Only Reclamation
