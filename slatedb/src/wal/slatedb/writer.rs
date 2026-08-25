@@ -903,8 +903,9 @@ mod tests {
         // Verify entries were written to storage
         let table = table_store.open_sst(1).await.unwrap();
         let mut iter =
-            WalSstIterator::new(table, table_store.clone(), WalSstIteratorOptions::default());
-        iter.init().await.unwrap();
+            WalSstIterator::new(table, table_store.clone(), WalSstIteratorOptions::default())
+                .await
+                .unwrap();
 
         let read_entry1 = iter.next().await.unwrap().unwrap();
         assert_eq!(read_entry1.key, entry1.key);

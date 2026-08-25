@@ -63,13 +63,6 @@ enum WalFileIterator {
 }
 
 impl WalFileIterator {
-    async fn init(&mut self) -> Result<(), SlateDBError> {
-        match self {
-            Self::Empty(iter) => iter.init().await,
-            Self::Sst(iter) => iter.init().await,
-        }
-    }
-
     async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         match self {
             Self::Empty(iter) => iter.next().await,
@@ -96,14 +89,6 @@ impl WalRowsCollector {
     }
 
     async fn collect(&mut self) -> Result<(), WalError> {
-        let wal_id = self.wal_id;
-        self.iter.init().await.map_err(|err| {
-            if err.has_object_store_not_found() {
-                WalError::WalTruncated(wal_id)
-            } else {
-                err.into()
-            }
-        })?;
         loop {
             match self.iter.next().await {
                 Ok(Some(row)) => self.rows.push(row),
@@ -283,7 +268,7 @@ impl SlateDbWalIterator {
                 }
                 Err(err) => return Err(err),
             };
-            let iter = WalSstIterator::new(sst, Arc::clone(&wal_store), sst_iter_options);
+            let iter = WalSstIterator::new(sst, Arc::clone(&wal_store), sst_iter_options).await?;
             Ok(WalRowsCollector::new(
                 wal_id,
                 WalFileIterator::Sst(Box::new(iter)),
@@ -326,7 +311,7 @@ impl SlateDbWalIterator {
 
         let handle = task::spawn(open_file_iter(
             next_wal_id,
-            self.options.sst_iter_options,
+            self.options.sst_iter_options.clone(),
             Arc::clone(&self.wal_store),
             self.end_bound.clone(),
         ));
@@ -365,13 +350,17 @@ impl SlateDbWalIterator {
             return Ok(());
         }
 
+        // Populate the pre-load queue first to handle the case where it's initially empty
         self.spawn_opens();
+        // await a mutable ref to the task so that next remains cancel-safe
+        // see https://docs.rs/tokio/latest/tokio/task/struct.JoinHandle.html#cancel-safety
         let Some(join_handle) = self.next_files.front_mut() else {
             self.current_file.finish();
             return Ok(());
         };
         let result = join_handle.await;
         self.next_files.pop_front();
+        // Refill the preload queue before returning so the iterator starts loading the next file
         self.spawn_opens();
         self.current_file
             .advance(Self::open_task_result(&self.end_bound, result)?);

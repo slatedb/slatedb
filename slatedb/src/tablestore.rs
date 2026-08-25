@@ -118,6 +118,7 @@ impl TableStore {
     /// Relies on the fencing protocol's contiguity invariant: "id exists" is
     /// monotone-decreasing in id, so binary search is sound. Total HEAD count
     /// is `O(log N)` for a gap of size N, vs `O(N)` for a windowed scan.
+    #[allow(unused)]
     pub(crate) async fn last_seen_wal_id(&self, start_after: u64) -> Result<u64, SlateDBError> {
         fail_point!(Arc::clone(&self.fp_registry), "probe-wal-ssts", |_| {
             Err(SlateDBError::from(std::io::Error::other("oops")))
@@ -254,6 +255,7 @@ impl TableStore {
         Ok(wal_list)
     }
 
+    #[allow(unused)]
     pub(crate) async fn next_wal_sst_id(
         &self,
         wal_id_last_compacted: u64,
@@ -282,6 +284,7 @@ impl TableStore {
         self.sst_format.table_builder()
     }
 
+    #[allow(unused)]
     pub(crate) fn wal_table_builder(&self) -> EncodedWalSsTableBuilder {
         self.sst_format.wal_table_builder()
     }
@@ -414,6 +417,7 @@ impl TableStore {
     ///
     /// Uses create-if-absent semantics so any existing WAL object at this ID
     /// fences the writer by returning [`SlateDBError::Fenced`].
+    #[allow(unused)]
     pub(crate) async fn write_wal_fence(&self, wal_id: u64) -> Result<(), SlateDBError> {
         let id = SsTableId::Wal(wal_id);
         fail_point!(self.fp_registry.clone(), "write-wal-sst-io-error", |_| {
@@ -1020,6 +1024,7 @@ impl TableStore {
             .estimate_encoded_size_compacted(num_entries, size_entries)
     }
 
+    #[allow(unused)]
     pub(crate) fn estimate_encoded_size_wal(
         &self,
         num_entries: usize,
@@ -1094,6 +1099,7 @@ impl TableStore {
     }
 }
 
+#[allow(unused)]
 async fn wal_object_exists(
     object_store: &Arc<dyn ObjectStore>,
     path: &Path,

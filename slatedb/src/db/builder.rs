@@ -499,13 +499,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             .wal_object_store
             .clone()
             .map(|s| wrap_object_store(s, ObjectStoreComponent::Db, ObjectStoreType::Wal));
-        let wal_object_store = retrying_wal_object_store.clone().unwrap_or_else(|| {
-            wrap_object_store(
-                self.main_object_store.clone(),
-                ObjectStoreComponent::Db,
-                ObjectStoreType::Wal,
-            )
-        });
+        let wal_object_store = retrying_wal_object_store
+            .clone()
+            .unwrap_or_else(|| retrying_main_object_store.clone());
 
         // Log the database opening
         if let Ok(settings_json) = self.settings.to_json_string() {
@@ -1844,7 +1840,6 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         // Set up the object store with optional caching from the reader
         // options, with the cache under the retry and instrumentation layers,
         // matching a caller-built [`CachedObjectStore`] passed to the reader.
-        let uncached_main_object_store = self.object_store.clone();
         let maybe_cached = CachedObjectStore::from_config(
             self.object_store.clone(),
             &self.options.object_store_cache_options,
@@ -1868,21 +1863,9 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             self.options.object_store_max_retries,
         );
 
-        let retrying_wal_object_store: Option<Arc<dyn ObjectStore>> =
-            self.wal_object_store.clone().map(|s| {
-                instrumented_retrying_object_store(
-                    s,
-                    &recorder,
-                    ObjectStoreComponent::Reader,
-                    ObjectStoreType::Wal,
-                    self.rand.clone(),
-                    self.system_clock.clone(),
-                    self.options.object_store_max_retries,
-                )
-            });
-        let wal_object_store = retrying_wal_object_store.clone().unwrap_or_else(|| {
+        let retrying_wal_object_store = self.wal_object_store.map(|wal_object_store| {
             instrumented_retrying_object_store(
-                uncached_main_object_store,
+                wal_object_store,
                 &recorder,
                 ObjectStoreComponent::Reader,
                 ObjectStoreType::Wal,
@@ -1891,6 +1874,9 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
                 self.options.object_store_max_retries,
             )
         });
+        let wal_object_store = retrying_wal_object_store
+            .clone()
+            .unwrap_or_else(|| retrying_object_store.clone());
 
         // Validate WAL object store configuration.
         let manifest_store = Arc::new(ManifestStore::new(&path, retrying_object_store.clone()));

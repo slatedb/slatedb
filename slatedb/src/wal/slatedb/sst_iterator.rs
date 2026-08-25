@@ -12,7 +12,7 @@ use crate::format::block::Block;
 use crate::iter::IterationOrder;
 use crate::types::RowEntry;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct WalSstIteratorOptions {
     /// Target encoded bytes per block-fetch request.
     pub(crate) target_bytes_to_fetch: usize,
@@ -26,12 +26,6 @@ impl Default for WalSstIteratorOptions {
     }
 }
 
-enum IteratorState {
-    Uninitialized,
-    Active(DataBlockIterator<Arc<Block>>),
-    Finished,
-}
-
 /// Iterates all rows in one WAL SST in ascending sequence order.
 ///
 /// WAL replay only performs whole-file scans, so this iterator deliberately has
@@ -39,8 +33,8 @@ enum IteratorState {
 /// or speculative fetch scheduling.
 pub(crate) struct WalSstIterator {
     table: WalFileHandle,
-    index: Option<Arc<SsTableIndexOwned>>,
-    state: IteratorState,
+    index: Arc<SsTableIndexOwned>,
+    block_iter: Option<DataBlockIterator<Arc<Block>>>,
     next_block_idx_to_fetch: usize,
     fetched_blocks: VecDeque<Arc<Block>>,
     table_store: Arc<WalTableStore>,
@@ -48,88 +42,70 @@ pub(crate) struct WalSstIterator {
 }
 
 impl WalSstIterator {
-    pub(crate) fn new(
+    pub(crate) async fn new(
         table: WalFileHandle,
         table_store: Arc<WalTableStore>,
         options: WalSstIteratorOptions,
-    ) -> Self {
+    ) -> Result<Self, SlateDBError> {
         assert!(options.target_bytes_to_fetch > 0);
-        Self {
+        let index = table_store.read_index(&table).await?;
+        Ok(Self {
             table,
-            index: None,
-            state: IteratorState::Uninitialized,
+            index,
+            block_iter: None,
             next_block_idx_to_fetch: 0,
             fetched_blocks: VecDeque::new(),
             table_store,
             options,
-        }
-    }
-
-    /// Initializes row iteration. This is idempotent.
-    pub(crate) async fn init(&mut self) -> Result<(), SlateDBError> {
-        if matches!(self.state, IteratorState::Uninitialized) {
-            self.load_metadata().await?;
-            self.advance_block().await?;
-        }
-        Ok(())
+        })
     }
 
     /// Returns the next WAL row in ascending sequence order.
     pub(crate) async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        if matches!(self.state, IteratorState::Uninitialized) {
-            return Err(SlateDBError::IteratorNotInitialized);
-        }
-
         loop {
-            match &mut self.state {
-                IteratorState::Uninitialized => unreachable!("initialization checked above"),
-                IteratorState::Finished => return Ok(None),
-                IteratorState::Active(iter) => {
-                    if let Some(row) = iter.next().await? {
-                        return Ok(Some(row));
-                    }
+            if let Some(iter) = &mut self.block_iter {
+                if let Some(row) = iter.next().await? {
+                    return Ok(Some(row));
                 }
             }
-            self.advance_block().await?;
+            if !self.load_next_block().await? {
+                return Ok(None);
+            }
         }
     }
 
-    async fn load_metadata(&mut self) -> Result<(), SlateDBError> {
-        if self.index.is_none() {
-            self.index = Some(self.table_store.read_index(&self.table).await?);
-        }
-        Ok(())
-    }
-
-    async fn advance_block(&mut self) -> Result<(), SlateDBError> {
+    async fn load_next_block(&mut self) -> Result<bool, SlateDBError> {
         loop {
             if let Some(block) = self.fetched_blocks.pop_front() {
-                self.state = IteratorState::Active(DataBlockIterator::new(
+                self.block_iter = Some(DataBlockIterator::new(
                     block,
                     self.table.format_version,
                     IterationOrder::Ascending,
                 )?);
-                return Ok(());
+                return Ok(true);
             }
 
-            let index = self.index.as_ref().expect("metadata must be loaded");
-            let num_blocks = index.borrow().block_meta().len();
+            let num_blocks = self.index.borrow().block_meta().len();
             if self.next_block_idx_to_fetch == num_blocks {
-                self.state = IteratorState::Finished;
-                return Ok(());
+                self.block_iter = None;
+                return Ok(false);
             }
 
             let blocks = self.table_store.block_range_for_target_bytes(
                 &self.table,
-                index,
+                &self.index,
                 self.next_block_idx_to_fetch,
                 self.options.target_bytes_to_fetch,
             );
-            self.next_block_idx_to_fetch = blocks.end;
-            self.fetched_blocks = self
+            let next_block_idx_to_fetch = blocks.end;
+            let fetched_blocks = self
                 .table_store
-                .read_blocks_using_index(&self.table, Arc::clone(index), blocks)
+                .read_blocks_using_index(&self.table, Arc::clone(&self.index), blocks)
                 .await?;
+            // Commit the cursor only after the read succeeds so cancelling the
+            // read future cannot cause the next call to skip these blocks.
+            self.next_block_idx_to_fetch = next_block_idx_to_fetch;
+            self.fetched_blocks = fetched_blocks;
         }
     }
 }
@@ -157,7 +133,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn iterates_the_whole_wal_sequentially() {
+    async fn should_iterate_the_whole_wal_sequentially() {
         let store = test_store();
         let rows: Vec<_> = (1..=6)
             .map(|seq| {
@@ -181,14 +157,9 @@ mod tests {
             WalSstIteratorOptions {
                 target_bytes_to_fetch: 1,
             },
-        );
-
-        assert!(matches!(
-            iter.next().await,
-            Err(SlateDBError::IteratorNotInitialized)
-        ));
-        iter.init().await.unwrap();
-        iter.init().await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let mut actual = Vec::new();
         while let Some(row) = iter.next().await.unwrap() {
