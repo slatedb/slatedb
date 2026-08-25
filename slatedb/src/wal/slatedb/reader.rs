@@ -20,10 +20,12 @@ use crate::wal::{WalError, WalFileRange, WalIterator, WalReader};
 
 #[derive(Clone, Debug)]
 pub struct SlateDbWalReaderOptions {
-    /// The number of WAL SST handles to preload while replaying.
-    pub sst_batch_size: usize,
+    /// The shared soft limit on bytes buffered across all WAL SST iterators. A fetch needed to
+    /// make forward progress may temporarily exceed this limit. The default is 4 KiB.
+    pub max_buffered_bytes: usize,
 
-    /// Retained for compatibility with the existing WAL reader configuration.
+    /// The speculative fetch-task limit shared by all WAL SST iterators. An SST may temporarily
+    /// exceed this budget when it must fetch a block to make progress. Defaults to 2.
     pub max_fetch_tasks: usize,
 
     /// The target number of bytes to fetch in a single request while iterating over WAL SSTs.
@@ -35,9 +37,9 @@ pub struct SlateDbWalReaderOptions {
 impl Default for SlateDbWalReaderOptions {
     fn default() -> Self {
         Self {
-            sst_batch_size: 4,
-            max_fetch_tasks: 2,
-            read_ahead_bytes: 64 * 1024 * 1024,
+            max_buffered_bytes: 128 * 1024 * 1024,
+            max_fetch_tasks: 128,
+            read_ahead_bytes: 4 * 1024 * 1024,
         }
     }
 }
@@ -45,10 +47,9 @@ impl Default for SlateDbWalReaderOptions {
 impl From<SlateDbWalReaderOptions> for SlateDbWalIteratorOptions {
     fn from(options: SlateDbWalReaderOptions) -> Self {
         Self {
-            sst_batch_size: options.sst_batch_size,
-            sst_iter_options: super::sst_iterator::WalSstIteratorOptions {
-                target_bytes_to_fetch: options.read_ahead_bytes,
-            },
+            target_bytes_to_fetch: options.read_ahead_bytes,
+            max_buffered_bytes: options.max_buffered_bytes,
+            max_fetch_tasks: options.max_fetch_tasks,
         }
     }
 }

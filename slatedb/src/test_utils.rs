@@ -16,8 +16,9 @@ use futures::stream::BoxStream;
 use futures::{stream, StreamExt};
 use object_store::path::Path;
 use object_store::{
-    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions as OS_PutOptions, PutPayload, PutResult, RenameOptions,
+    CopyOptions, GetOptions, GetRange, GetResult, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore, PutMultipartOptions, PutOptions as OS_PutOptions, PutPayload, PutResult,
+    RenameOptions,
 };
 use rand::{Rng, RngCore};
 use std::cmp::Ordering as CmpOrdering;
@@ -1731,6 +1732,7 @@ mod tests {
 pub(crate) enum RecordedCall {
     Get {
         head: bool,
+        range: Option<GetRange>,
         kind: Option<TableStoreKind>,
         sst_type: Option<SstType>,
         retry: Option<RetryReason>,
@@ -1811,6 +1813,20 @@ impl RecordingObjectStore {
                 RecordedCall::Get {
                     head: h, segment, ..
                 } if *h == head => Some(segment.clone()),
+            })
+            .collect()
+    }
+
+    pub(crate) fn recorded_get_ranges(&self, head: bool) -> Vec<Option<GetRange>> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|call| match call {
+                RecordedCall::Get {
+                    head: is_head,
+                    range,
+                    ..
+                } if *is_head == head => Some(range.clone()),
                 _ => None,
             })
             .collect()
@@ -1871,10 +1887,17 @@ impl ObjectStore for RecordingObjectStore {
         let tag = ObjectStoreCallTag::from_extensions(&options.extensions);
         self.calls.lock().push(RecordedCall::Get {
             head: options.head,
+<<<<<<< HEAD
             kind: tag.as_ref().map(|t| t.kind),
             sst_type: tag.as_ref().map(|t| t.sst_type),
             retry: tag.as_ref().and_then(|t| t.retry),
             segment: tag.as_ref().and_then(|t| t.segment.clone()),
+=======
+            range: options.range.clone(),
+            kind: tag.map(|t| t.kind),
+            sst_type: tag.map(|t| t.sst_type),
+            retry: tag.and_then(|t| t.retry),
+>>>>>>> 2b487a29 (perf(wal): pipeline replay reads with shared limits)
         });
         self.inner.get_opts(location, options).await
     }
