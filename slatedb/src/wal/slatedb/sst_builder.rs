@@ -306,6 +306,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_builder_keeps_v2_restart_offsets_in_range() {
+        let format = SsTableFormat::default();
+        let mut builder = format.wal_table_builder();
+        let value = [b'v'; 128];
+
+        for seq in 1u64..=1024 {
+            let key = seq.to_be_bytes();
+            builder
+                .add_value(&key, &value, seq, None, None)
+                .await
+                .unwrap();
+        }
+
+        let encoded = builder.build().await.unwrap();
+        assert!(
+            encoded.unconsumed_blocks.len() > 1,
+            "the configured WAL block size should split this workload"
+        );
+    }
+
+    #[tokio::test]
     async fn should_make_blocks_available_and_report_size() {
         // Given
         let mut builder =

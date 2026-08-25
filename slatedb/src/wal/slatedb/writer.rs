@@ -157,6 +157,12 @@ impl SlateDbWalWriter {
         })
     }
 
+    #[cfg(feature = "bencher")]
+    pub(crate) fn unflushed_wal_file_count(&self) -> usize {
+        let inner = self.inner.read();
+        inner.immutable_wals.len() + usize::from(!inner.current_wal.is_empty())
+    }
+
     /// Check if we need to flush the wal with considering max_wal_size. the checking over `max_wal_size`
     /// is not very strict, we have to ensure a write batch into a single WAL file.
     ///

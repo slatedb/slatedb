@@ -4,7 +4,7 @@ use crate::manifest::store::{FenceableManifest, StoredManifest};
 use crate::utils::WatchableOnceCellReader;
 use crate::wal::slatedb::store::WalTableStore;
 use crate::wal::slatedb::writer_init::{SlateDbWalWriterInit, SlateDbWalWriterInitOptions};
-use crate::wal::{WalIterator, WalWriter, WriterInit};
+use crate::wal::{SlateDbWalReaderOptions, WalIterator, WalWriter, WriterInit};
 use crate::Settings;
 use fail_parallel::{fail_point_send, FailPointTx};
 use slatedb_common::metrics::MetricsRecorderHelper;
@@ -37,6 +37,7 @@ impl WriterFencer {
         recorder: MetricsRecorderHelper,
         wal_store: Arc<WalTableStore>,
         settings: &Settings,
+        wal_replay_options: SlateDbWalReaderOptions,
         system_clock: Arc<dyn SystemClock>,
         task_executor: Arc<MessageHandlerExecutor>,
         wal_writer_init: Option<Box<dyn WriterInit>>,
@@ -46,6 +47,7 @@ impl WriterFencer {
             recorder,
             wal_store,
             settings,
+            wal_replay_options,
             system_clock,
             task_executor,
             wal_writer_init,
@@ -58,6 +60,7 @@ impl WriterFencer {
         recorder: MetricsRecorderHelper,
         wal_store: Arc<WalTableStore>,
         settings: &Settings,
+        wal_replay_options: SlateDbWalReaderOptions,
         system_clock: Arc<dyn SystemClock>,
         task_executor: Arc<MessageHandlerExecutor>,
         wal_writer_init: Option<Box<dyn WriterInit>>,
@@ -67,7 +70,7 @@ impl WriterFencer {
             closed_result_reader,
             recorder,
             wal_store,
-            wal_writer_init_options: settings.into(),
+            wal_writer_init_options: SlateDbWalWriterInitOptions::new(settings, wal_replay_options),
             manifest_update_timeout: settings.manifest_update_timeout,
             system_clock,
             task_executor,
@@ -147,6 +150,7 @@ mod tests {
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::utils::WatchableOnceCell;
     use crate::wal::slatedb::store::{WalFileId, WalTableStore};
+    use crate::wal::SlateDbWalReaderOptions;
     use crate::{CloseReason, Db, ErrorKind, Settings};
     use bytes::Bytes;
     use fail_parallel::fail_point_channel;
@@ -221,6 +225,7 @@ mod tests {
                 recorder,
                 wal_store.clone(),
                 &settings,
+                SlateDbWalReaderOptions::default(),
                 system_clock.clone(),
                 task_executor.clone(),
                 None,

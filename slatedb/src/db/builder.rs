@@ -164,7 +164,7 @@ use crate::wal;
 use crate::wal::slatedb::admin::SlateDbWalAdmin;
 use crate::wal::slatedb::store::WalTableStore;
 use crate::wal::wal_disabled::DisabledWalObserver;
-use crate::wal::{WalAdmin, WalGc, WalObserver};
+use crate::wal::{SlateDbWalReaderOptions, WalAdmin, WalGc, WalObserver};
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorder;
@@ -197,6 +197,7 @@ pub struct DbBuilder<P: Into<Path>> {
     metrics_recorder: Arc<dyn MetricsRecorder>,
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     wal_writer_init: Option<Box<dyn wal::WriterInit>>,
+    wal_replay_options: SlateDbWalReaderOptions,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -227,6 +228,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             segment_extractor: None,
             wal_writer_init: None,
+            wal_replay_options: SlateDbWalReaderOptions::default(),
         }
     }
 
@@ -273,6 +275,13 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// WAL is used by default.
     pub fn with_wal_writer(mut self, wal_writer_init: Box<dyn wal::WriterInit>) -> Self {
         self.wal_writer_init = Some(wal_writer_init);
+        self
+    }
+
+    /// Sets the options used to replay SlateDB's object-store-backed WAL when opening the
+    /// database. These options have no effect when a custom WAL writer initializer is supplied.
+    pub fn with_wal_replay_options(mut self, options: SlateDbWalReaderOptions) -> Self {
+        self.wal_replay_options = options;
         self
     }
 
@@ -637,6 +646,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             recorder.clone(),
             wal_store.clone(),
             &self.settings,
+            self.wal_replay_options,
             system_clock.clone(),
             task_executor.clone(),
             self.wal_writer_init,

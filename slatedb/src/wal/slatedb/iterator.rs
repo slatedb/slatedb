@@ -41,6 +41,7 @@ impl ManifestReader for ManifestStore {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct SlateDbWalIteratorOptions {
     /// Target bytes per block-fetch request.
     pub(crate) target_bytes_to_fetch: usize,
@@ -53,9 +54,9 @@ pub(crate) struct SlateDbWalIteratorOptions {
 impl Default for SlateDbWalIteratorOptions {
     fn default() -> Self {
         Self {
-            target_bytes_to_fetch: 1,
-            max_buffered_bytes: 4 * 1024,
-            max_fetch_tasks: 1,
+            target_bytes_to_fetch: 8 * 1024 * 1024,
+            max_buffered_bytes: 128 * 1024 * 1024,
+            max_fetch_tasks: 128,
         }
     }
 }

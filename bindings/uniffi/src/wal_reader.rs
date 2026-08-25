@@ -11,22 +11,22 @@ use crate::types::RowEntry;
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct SlateDbWalReaderOptions {
     /// Shared soft limit on bytes buffered across WAL SSTs.
-    #[uniffi(default = 4096)]
+    #[uniffi(default = 134217728)]
     pub max_buffered_bytes: u64,
     /// Shared limit on concurrent WAL SST fetch tasks.
-    #[uniffi(default = 2)]
+    #[uniffi(default = 128)]
     pub max_fetch_tasks: u64,
     /// Target number of bytes in each WAL SST fetch.
-    #[uniffi(default = 1048576)]
+    #[uniffi(default = 8388608)]
     pub read_ahead_bytes: u64,
 }
 
 impl Default for SlateDbWalReaderOptions {
     fn default() -> Self {
         Self {
-            max_buffered_bytes: 4 * 1024,
-            max_fetch_tasks: 2,
-            read_ahead_bytes: 1024 * 1024,
+            max_buffered_bytes: 128 * 1024 * 1024,
+            max_fetch_tasks: 128,
+            read_ahead_bytes: 8 * 1024 * 1024,
         }
     }
 }

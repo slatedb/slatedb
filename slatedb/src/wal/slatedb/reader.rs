@@ -21,25 +21,26 @@ use crate::wal::{WalError, WalFileRange, WalIterator, WalReader};
 #[derive(Clone, Debug)]
 pub struct SlateDbWalReaderOptions {
     /// The shared soft limit on bytes buffered across all WAL SST iterators. A fetch needed to
-    /// make forward progress may temporarily exceed this limit. The default is 4 KiB.
+    /// make forward progress may temporarily exceed this limit. The default is 128 MiB.
     pub max_buffered_bytes: usize,
 
     /// The speculative fetch-task limit shared by all WAL SST iterators. An SST may temporarily
-    /// exceed this budget when it must fetch a block to make progress. Defaults to 2.
+    /// exceed this budget when it must fetch a block to make progress. Defaults to 128.
     pub max_fetch_tasks: usize,
 
     /// The target number of bytes to fetch in a single request while iterating over WAL SSTs.
     /// Each fetch reads enough whole blocks to meet this target or reach the end of the file.
-    /// The default is 1 MiB.
+    /// The default is 8 MiB.
     pub read_ahead_bytes: usize,
 }
 
 impl Default for SlateDbWalReaderOptions {
     fn default() -> Self {
+        let iterator_options = SlateDbWalIteratorOptions::default();
         Self {
-            max_buffered_bytes: 4 * 1024,
-            max_fetch_tasks: 2,
-            read_ahead_bytes: 1024 * 1024,
+            max_buffered_bytes: iterator_options.max_buffered_bytes,
+            max_fetch_tasks: iterator_options.max_fetch_tasks,
+            read_ahead_bytes: iterator_options.target_bytes_to_fetch,
         }
     }
 }
@@ -316,6 +317,15 @@ mod tests {
             SlateDbWalReaderBuilder::new().with_path(Path::from("/missing-object-store")),
             "must specify object store",
         );
+    }
+
+    #[test]
+    fn default_options_match_production_replay_settings() {
+        let options = SlateDbWalReaderOptions::default();
+
+        assert_eq!(options.max_fetch_tasks, 128);
+        assert_eq!(options.max_buffered_bytes, 134_217_728);
+        assert_eq!(options.read_ahead_bytes, 8_388_608);
     }
 
     #[test]
