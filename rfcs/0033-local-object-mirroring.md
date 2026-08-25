@@ -603,7 +603,17 @@ barriers, and additional failure handling.
 
 ## Open Questions
 
-TODO
+### Nested Directory Structure
+
+This RFC used to propose a nested directory structure for the local mirror. The
+intent was to reflect the remote object store's directory structure and avoid
+collisions.
+
+This meant we might have empty directories floating around, or we need to walk backwards to clean them up. The flat design felt cleaner. It behaves more like an object store: when the last file in a directory disappears, the directory disappears on its own.
+
+The flat approach also side steps any path encoding oddities. I had Sol look into it, and it sounds like `object_store` `PathBuf` is compatible with all major filesystems. But apparently Windows is case insensitive. The flat approach felt a bit safer.
+
+There is, however, an open question around the CPU cost of computing the MD5 prefix for every SST path. The prefix is used to avoid collisions and keep the cache root flat. We could consider using a faster hash function or the nested path design if the CPU cost is significant. We should measure this in practice.
 
 ## References
 
