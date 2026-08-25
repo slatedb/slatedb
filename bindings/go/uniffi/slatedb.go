@@ -10354,6 +10354,8 @@ type ReadOptions struct {
 	// Optional context forwarded to custom filter policies; ignored by
 	// built-in filters.
 	FilterContext *FilterContext
+	// Optional caller-supplied tracing settings.
+	TracingOptions *TracingOptions
 }
 
 func (r *ReadOptions) Destroy() {
@@ -10361,6 +10363,7 @@ func (r *ReadOptions) Destroy() {
 	FfiDestroyerBool{}.Destroy(r.Dirty)
 	FfiDestroyerBool{}.Destroy(r.CacheBlocks)
 	FfiDestroyerOptionalFilterContext{}.Destroy(r.FilterContext)
+	FfiDestroyerOptionalTracingOptions{}.Destroy(r.TracingOptions)
 }
 
 type FfiConverterReadOptions struct{}
@@ -10377,6 +10380,7 @@ func (c FfiConverterReadOptions) Read(reader io.Reader) ReadOptions {
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterOptionalFilterContextINSTANCE.Read(reader),
+		FfiConverterOptionalTracingOptionsINSTANCE.Read(reader),
 	}
 }
 
@@ -10393,6 +10397,7 @@ func (c FfiConverterReadOptions) Write(writer io.Writer, value ReadOptions) {
 	FfiConverterBoolINSTANCE.Write(writer, value.Dirty)
 	FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks)
 	FfiConverterOptionalFilterContextINSTANCE.Write(writer, value.FilterContext)
+	FfiConverterOptionalTracingOptionsINSTANCE.Write(writer, value.TracingOptions)
 }
 
 type FfiDestroyerReadOptions struct{}
@@ -10551,6 +10556,8 @@ type ScanOptions struct {
 	// Optional context forwarded to custom filter policies; ignored by
 	// built-in filters. Only consulted for prefix scans.
 	FilterContext *FilterContext
+	// Optional caller-supplied tracing settings.
+	TracingOptions *TracingOptions
 }
 
 func (r *ScanOptions) Destroy() {
@@ -10561,6 +10568,7 @@ func (r *ScanOptions) Destroy() {
 	FfiDestroyerUint64{}.Destroy(r.MaxFetchTasks)
 	FfiDestroyerOptionalIterationOrder{}.Destroy(r.Order)
 	FfiDestroyerOptionalFilterContext{}.Destroy(r.FilterContext)
+	FfiDestroyerOptionalTracingOptions{}.Destroy(r.TracingOptions)
 }
 
 type FfiConverterScanOptions struct{}
@@ -10580,6 +10588,7 @@ func (c FfiConverterScanOptions) Read(reader io.Reader) ScanOptions {
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterOptionalIterationOrderINSTANCE.Read(reader),
 		FfiConverterOptionalFilterContextINSTANCE.Read(reader),
+		FfiConverterOptionalTracingOptionsINSTANCE.Read(reader),
 	}
 }
 
@@ -10599,6 +10608,7 @@ func (c FfiConverterScanOptions) Write(writer io.Writer, value ScanOptions) {
 	FfiConverterUint64INSTANCE.Write(writer, value.MaxFetchTasks)
 	FfiConverterOptionalIterationOrderINSTANCE.Write(writer, value.Order)
 	FfiConverterOptionalFilterContextINSTANCE.Write(writer, value.FilterContext)
+	FfiConverterOptionalTracingOptionsINSTANCE.Write(writer, value.TracingOptions)
 }
 
 type FfiDestroyerScanOptions struct{}
@@ -11010,6 +11020,47 @@ func (c FfiConverterSsTableView) Write(writer io.Writer, value SsTableView) {
 type FfiDestroyerSsTableView struct{}
 
 func (_ FfiDestroyerSsTableView) Destroy(value SsTableView) {
+	value.Destroy()
+}
+
+// Options for tracing a read operation.
+type TracingOptions struct {
+	TraceId string
+}
+
+func (r *TracingOptions) Destroy() {
+	FfiDestroyerString{}.Destroy(r.TraceId)
+}
+
+type FfiConverterTracingOptions struct{}
+
+var FfiConverterTracingOptionsINSTANCE = FfiConverterTracingOptions{}
+
+func (c FfiConverterTracingOptions) Lift(rb RustBufferI) TracingOptions {
+	return LiftFromRustBuffer[TracingOptions](c, rb)
+}
+
+func (c FfiConverterTracingOptions) Read(reader io.Reader) TracingOptions {
+	return TracingOptions{
+		FfiConverterStringINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterTracingOptions) Lower(value TracingOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[TracingOptions](c, value)
+}
+
+func (c FfiConverterTracingOptions) LowerExternal(value TracingOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[TracingOptions](c, value))
+}
+
+func (c FfiConverterTracingOptions) Write(writer io.Writer, value TracingOptions) {
+	FfiConverterStringINSTANCE.Write(writer, value.TraceId)
+}
+
+type FfiDestroyerTracingOptions struct{}
+
+func (_ FfiDestroyerTracingOptions) Destroy(value TracingOptions) {
 	value.Destroy()
 }
 
@@ -13551,6 +13602,47 @@ type FfiDestroyerOptionalMetric struct{}
 func (_ FfiDestroyerOptionalMetric) Destroy(value *Metric) {
 	if value != nil {
 		FfiDestroyerMetric{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalTracingOptions struct{}
+
+var FfiConverterOptionalTracingOptionsINSTANCE = FfiConverterOptionalTracingOptions{}
+
+func (c FfiConverterOptionalTracingOptions) Lift(rb RustBufferI) *TracingOptions {
+	return LiftFromRustBuffer[*TracingOptions](c, rb)
+}
+
+func (_ FfiConverterOptionalTracingOptions) Read(reader io.Reader) *TracingOptions {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterTracingOptionsINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalTracingOptions) Lower(value *TracingOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[*TracingOptions](c, value)
+}
+
+func (c FfiConverterOptionalTracingOptions) LowerExternal(value *TracingOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*TracingOptions](c, value))
+}
+
+func (_ FfiConverterOptionalTracingOptions) Write(writer io.Writer, value *TracingOptions) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterTracingOptionsINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalTracingOptions struct{}
+
+func (_ FfiDestroyerOptionalTracingOptions) Destroy(value *TracingOptions) {
+	if value != nil {
+		FfiDestroyerTracingOptions{}.Destroy(*value)
 	}
 }
 

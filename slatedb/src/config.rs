@@ -281,6 +281,20 @@ pub enum DurabilityLevel {
     Memory,
 }
 
+/// Options for tracing a read operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TracingOptions {
+    pub trace_id: String,
+}
+
+impl TracingOptions {
+    pub fn new(trace_id: impl Into<String>) -> Self {
+        Self {
+            trace_id: trace_id.into(),
+        }
+    }
+}
+
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
 #[derive(Clone, Debug)]
@@ -298,6 +312,8 @@ pub struct ReadOptions {
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters. See [`FilterContext`].
     pub filter_context: Option<FilterContext>,
+    /// Optional caller-provided tracing settings.
+    pub tracing_options: Option<TracingOptions>,
 }
 
 impl Default for ReadOptions {
@@ -307,6 +323,7 @@ impl Default for ReadOptions {
             dirty: false,
             cache_blocks: true,
             filter_context: None,
+            tracing_options: None,
         }
     }
 }
@@ -340,6 +357,13 @@ impl ReadOptions {
             ..self
         }
     }
+
+    pub fn with_tracing_options(self, tracing_options: Option<TracingOptions>) -> Self {
+        Self {
+            tracing_options,
+            ..self
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
@@ -369,6 +393,8 @@ pub struct ScanOptions {
     /// Only consulted for `scan_prefix` today. Plain range scans do not
     /// evaluate SST filters, so this field has no effect on `scan`.
     pub filter_context: Option<FilterContext>,
+    /// Optional caller-provided tracing settings.
+    pub tracing_options: Option<TracingOptions>,
 }
 
 impl Default for ScanOptions {
@@ -382,6 +408,7 @@ impl Default for ScanOptions {
             max_fetch_tasks: 1,
             order: IterationOrder::Ascending,
             filter_context: None,
+            tracing_options: None,
         }
     }
 }
@@ -430,6 +457,13 @@ impl ScanOptions {
     pub fn with_filter_context(self, filter_context: Option<FilterContext>) -> Self {
         Self {
             filter_context,
+            ..self
+        }
+    }
+
+    pub fn with_tracing_options(self, tracing_options: Option<TracingOptions>) -> Self {
+        Self {
+            tracing_options,
             ..self
         }
     }
@@ -1995,6 +2029,12 @@ object_store_cache_options:
     }
 
     #[test]
+    fn test_default_tracing_options_are_none() {
+        assert!(ReadOptions::default().tracing_options.is_none());
+        assert!(ScanOptions::default().tracing_options.is_none());
+    }
+
+    #[test]
     fn test_scan_options_with_max_fetch_tasks() {
         let options = ScanOptions::default().with_max_fetch_tasks(4);
         assert_eq!(options.max_fetch_tasks, 4);
@@ -2004,6 +2044,32 @@ object_store_cache_options:
         assert!(!options.dirty);
         assert_eq!(options.read_ahead_bytes, 1);
         assert!(!options.cache_blocks);
+    }
+
+    #[test]
+    fn test_read_options_with_tracing_options() {
+        let options =
+            ReadOptions::default().with_tracing_options(Some(TracingOptions::new("read-trace")));
+        assert_eq!(
+            options
+                .tracing_options
+                .as_ref()
+                .map(|tracing_options| tracing_options.trace_id.as_str()),
+            Some("read-trace")
+        );
+    }
+
+    #[test]
+    fn test_scan_options_with_tracing_options() {
+        let options =
+            ScanOptions::default().with_tracing_options(Some(TracingOptions::new("scan-trace")));
+        assert_eq!(
+            options
+                .tracing_options
+                .as_ref()
+                .map(|tracing_options| tracing_options.trace_id.as_str()),
+            Some("scan-trace")
+        );
     }
 
     #[test]
