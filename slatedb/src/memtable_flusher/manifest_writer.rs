@@ -897,7 +897,6 @@ mod tests {
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
     use crate::memtable_flusher::uploader::{SegmentedSstHandle, UploadedMemtable};
-    use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::RowEntry;
@@ -1055,7 +1054,7 @@ mod tests {
         .unwrap();
         let manifest_dirty = stored_manifest.prepare_dirty().unwrap();
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            ObjectStores::new(Arc::clone(&object_store), None),
+            Arc::clone(&object_store),
             SsTableFormat::default(),
             PathResolver::from_root(Path::from(path.clone())),
             Arc::clone(&fp_registry),
@@ -1825,7 +1824,7 @@ mod tests {
             let row = RowEntry::new_value(prefix, value, first_seq);
             builder.add(row).await.unwrap();
             let encoded_sst = builder.build().await.unwrap();
-            let id = crate::db_state::SsTableId::Compacted(
+            let id = crate::db_state::SsTableId::from(
                 inner.rand.rng().gen_ulid(inner.system_clock.as_ref()),
             );
             let sst_handle = inner.upload_sst(&id, &encoded_sst).await.unwrap();
@@ -1897,8 +1896,8 @@ mod tests {
         assert_eq!(core.segments[1].tree.l0[0].sst.id, bbb_id);
         // Newly flushed L0s are identity views: the view id equals the
         // physical SST ULID (RFC-0029).
-        assert_eq!(core.segments[0].tree.l0[0].id, aaa_id.unwrap_compacted_id());
-        assert_eq!(core.segments[1].tree.l0[0].id, bbb_id.unwrap_compacted_id());
+        assert_eq!(core.segments[0].tree.l0[0].id, aaa_id.value());
+        assert_eq!(core.segments[1].tree.l0[0].id, bbb_id.value());
 
         started.shutdown().await;
     }
@@ -1929,7 +1928,7 @@ mod tests {
         assert_eq!(core.tree.l0.len(), 1);
         let view = &core.tree.l0[0];
         assert_eq!(view.sst.id, physical_id);
-        assert_eq!(view.id, physical_id.unwrap_compacted_id());
+        assert_eq!(view.id, physical_id.value());
 
         started.shutdown().await;
     }

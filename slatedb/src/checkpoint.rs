@@ -61,7 +61,6 @@ mod tests {
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::ManifestStore;
     use crate::manifest::Manifest;
-    use crate::object_stores::ObjectStores;
     use crate::proptest_util::{rng, sample};
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
@@ -440,7 +439,7 @@ mod tests {
         kv: (&Bytes, &Bytes),
     ) {
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(Arc::clone(&object_store), None),
+            Arc::clone(&object_store),
             SsTableFormat::default(),
             path.clone(),
             None,

@@ -19,7 +19,7 @@ use crate::wal::{WalError, WalIterator as WalIteratorTrait, WalRows};
 use crate::RowEntry;
 
 use super::sst_iterator::{WalSstIterator, WalSstIteratorOptions};
-use super::store::WalTableStore;
+use super::store::{WalFileId, WalTableStore};
 
 #[async_trait]
 pub(crate) trait ManifestReader: Send + Sync + 'static {
@@ -256,7 +256,7 @@ impl SlateDbWalIterator {
             sst_iter_options: WalSstIteratorOptions,
             wal_store: Arc<WalTableStore>,
         ) -> Result<WalRowsCollector, SlateDBError> {
-            let sst = match wal_store.open_sst(wal_id).await {
+            let sst = match wal_store.open_sst(WalFileId::from(wal_id)).await {
                 Ok(sst) => sst,
                 Err(SlateDBError::EmptySSTable) => {
                     // Zero-byte WAL files are fence markers; replay them as empty WALs
@@ -513,8 +513,8 @@ mod tests {
     #[tokio::test]
     async fn should_honor_an_exclusive_end_bound() {
         let table_store = test_table_store();
-        table_store.write_wal_fence(1).await.unwrap();
-        table_store.write_wal_fence(2).await.unwrap();
+        table_store.write_wal_fence(1.into()).await.unwrap();
+        table_store.write_wal_fence(2.into()).await.unwrap();
         let mut wal_iter = SlateDbWalIterator::range(
             1,
             WalIteratorEndBound::Exclusive(2),
@@ -552,7 +552,7 @@ mod tests {
             "an unbounded iterator returned before WAL 1 existed"
         );
 
-        table_store.write_wal_fence(1).await.unwrap();
+        table_store.write_wal_fence(1.into()).await.unwrap();
         let first = tokio::time::timeout(Duration::from_millis(100), wal_iter.next())
             .await
             .expect("iterator did not observe WAL 1")
@@ -568,7 +568,7 @@ mod tests {
             "an unbounded iterator returned before WAL 2 existed"
         );
 
-        table_store.write_wal_fence(2).await.unwrap();
+        table_store.write_wal_fence(2.into()).await.unwrap();
         let second = tokio::time::timeout(Duration::from_millis(100), wal_iter.next())
             .await
             .expect("iterator did not observe WAL 2")
@@ -646,7 +646,7 @@ mod tests {
             }
             let encoded_sst = builder.build().await.unwrap();
             table_store
-                .write_sst(index as u64 + 1, &encoded_sst)
+                .write_sst((index as u64 + 1).into(), &encoded_sst)
                 .await
                 .unwrap();
         }

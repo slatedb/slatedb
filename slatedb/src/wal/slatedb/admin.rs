@@ -1,11 +1,9 @@
-use crate::block_cache_policy::BlockCachePolicy;
-use crate::db_state::SsTableId;
 use crate::format::sst::SsTableFormat;
 use crate::garbage_collector::stats::GcStats;
-use crate::object_stores::ObjectStores;
+use crate::object_store_tag::TableStoreKind;
 use crate::paths::PathResolver;
-use crate::tablestore::{TableStore, TableStoreKind};
 use crate::wal::slatedb::gc::{SlateDbWalGc, WalGcMode};
+use crate::wal::slatedb::store::{WalFileId, WalTableStore};
 use crate::wal::{WalAdmin, WalError, WalGc};
 use crate::VersionedManifest;
 use async_trait::async_trait;
@@ -69,16 +67,14 @@ impl SlateDbWalAdmin {
 #[async_trait]
 impl WalAdmin for SlateDbWalAdmin {
     fn garbage_collector(&self, path: &Path) -> Arc<dyn WalGc> {
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(self.object_store.clone(), None),
+        let wal_store = Arc::new(WalTableStore::new(
+            self.object_store.clone(),
             SsTableFormat::default(),
             path.clone(),
-            None,
             TableStoreKind::GC,
-            BlockCachePolicy::default(),
         ));
         Arc::new(SlateDbWalGc::new(
-            table_store,
+            wal_store,
             Arc::new(GcStats::new(&MetricsRecorderHelper::noop())),
             WalGcMode::Regular,
             None,
@@ -114,7 +110,7 @@ impl WalAdmin for SlateDbWalAdmin {
 
         let path_resolver = PathResolver::from_root(path.clone());
         for wal_id in (replay_after_wal_id + 1)..=wal_id_last_seen {
-            let path = path_resolver.sst_path(&SsTableId::Wal(wal_id));
+            let path = path_resolver.wal_sst_path(&WalFileId::from(wal_id));
             let metadata = self
                 .object_store
                 .head(&path)
@@ -145,9 +141,9 @@ impl WalAdmin for SlateDbWalAdmin {
                     WalError::Unavailable(Arc::new(std::io::Error::other("oops")))
                 ));
 
-                let id = SsTableId::Wal(wal_id);
-                let source = from_path_resolver.sst_path(&id);
-                let destination = to_path_resolver.sst_path(&id);
+                let id = WalFileId::from(wal_id);
+                let source = from_path_resolver.wal_sst_path(&id);
+                let destination = to_path_resolver.wal_sst_path(&id);
                 self.object_store
                     .as_ref()
                     .copy(&source, &destination)
@@ -172,7 +168,7 @@ mod tests {
         let wal_admin =
             SlateDbWalAdmin::new(object_store.clone(), Arc::new(FailPointRegistry::new()));
         let db_path = Path::from("db");
-        let wal_object = PathResolver::from_root(db_path.clone()).sst_path(&SsTableId::Wal(1));
+        let wal_object = PathResolver::from_root(db_path.clone()).wal_sst_path(&WalFileId::from(1));
         let non_wal_object = db_path
             .clone()
             .join("manifest")

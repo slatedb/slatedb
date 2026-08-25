@@ -23,21 +23,20 @@ enum SerializedSsTableId {
     Compacted(Ulid),
 }
 
-impl From<SerializedSsTableId> for SsTableId {
-    fn from(value: SerializedSsTableId) -> Self {
+impl TryFrom<SerializedSsTableId> for SsTableId {
+    type Error = &'static str;
+
+    fn try_from(value: SerializedSsTableId) -> Result<Self, Self::Error> {
         match value {
-            SerializedSsTableId::Wal(id) => SsTableId::Wal(id),
-            SerializedSsTableId::Compacted(id) => SsTableId::Compacted(id),
+            SerializedSsTableId::Wal(_) => Err("WAL entries are not valid in the SST cache"),
+            SerializedSsTableId::Compacted(id) => Ok(SsTableId::from(id)),
         }
     }
 }
 
 impl From<SsTableId> for SerializedSsTableId {
     fn from(value: SsTableId) -> Self {
-        match value {
-            SsTableId::Wal(id) => SerializedSsTableId::Wal(id),
-            SsTableId::Compacted(id) => SerializedSsTableId::Compacted(id),
-        }
+        SerializedSsTableId::Compacted(value.value())
     }
 }
 
@@ -47,20 +46,22 @@ enum SerializedCachedKey {
     V2(u64, SerializedSsTableId, u64),
 }
 
-impl From<SerializedCachedKey> for CachedKey {
-    fn from(value: SerializedCachedKey) -> Self {
-        match value {
+impl TryFrom<SerializedCachedKey> for CachedKey {
+    type Error = &'static str;
+
+    fn try_from(value: SerializedCachedKey) -> Result<Self, Self::Error> {
+        Ok(match value {
             SerializedCachedKey::V1(sst_id, block_id) => CachedKey {
                 scope_id: 0,
-                sst_id: sst_id.into(),
+                sst_id: sst_id.try_into()?,
                 block_id,
             },
             SerializedCachedKey::V2(scope_id, sst_id, block_id) => CachedKey {
                 scope_id,
-                sst_id: sst_id.into(),
+                sst_id: sst_id.try_into()?,
                 block_id,
             },
-        }
+        })
     }
 }
 
@@ -86,7 +87,7 @@ impl<'de> Deserialize<'de> for CachedKey {
         D: Deserializer<'de>,
     {
         let serialized_key = SerializedCachedKey::deserialize(deserializer)?;
-        Ok(serialized_key.into())
+        serialized_key.try_into().map_err(D::Error::custom)
     }
 }
 
@@ -252,7 +253,7 @@ mod tests {
     fn test_should_serialize_deserialize_compacted_sst_key() {
         let key = CachedKey {
             scope_id: 0,
-            sst_id: SsTableId::Compacted(Ulid::from((123, 456))),
+            sst_id: SsTableId::from(Ulid::from((123, 456))),
             block_id: 99,
         };
 
@@ -266,7 +267,7 @@ mod tests {
     fn test_should_serialize_deserialize_wal_sst_key() {
         let key = CachedKey {
             scope_id: 5,
-            sst_id: SsTableId::Wal(123),
+            sst_id: SsTableId::from(Ulid::from_parts(123, 0)),
             block_id: 99,
         };
 

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use log::error;
 use slatedb_common::metrics::CounterFn;
+use std::cmp::min;
 use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
@@ -33,7 +34,7 @@ enum FetchTask {
 #[derive(Clone, Debug)]
 pub(crate) struct SstIteratorOptions {
     pub(crate) max_fetch_tasks: usize,
-    pub(crate) target_bytes_to_fetch: usize,
+    pub(crate) blocks_to_fetch: usize,
     pub(crate) cache_blocks: bool,
     pub(crate) cache_metadata: bool,
     pub(crate) eager_spawn: bool,
@@ -46,7 +47,7 @@ impl Default for SstIteratorOptions {
     fn default() -> Self {
         SstIteratorOptions {
             max_fetch_tasks: 1,
-            target_bytes_to_fetch: 1,
+            blocks_to_fetch: 1,
             cache_blocks: true,
             cache_metadata: true,
             eager_spawn: false,
@@ -292,7 +293,7 @@ impl<'a> InternalSstIterator<'a> {
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
         assert!(options.max_fetch_tasks > 0);
-        assert!(options.target_bytes_to_fetch > 0);
+        assert!(options.blocks_to_fetch > 0);
 
         let descending_buffer = match options.order {
             IterationOrder::Descending => Some(VecDeque::new()),
@@ -380,23 +381,25 @@ impl<'a> InternalSstIterator<'a> {
                 while self.fetch_tasks.len() < self.options.max_fetch_tasks
                     && self.block_idx_range.contains(&self.next_block_idx_to_fetch)
                 {
-                    let table = self.view.table_as_ref().sst.clone();
-                    let mut blocks = self.table_store.block_range_for_target_bytes(
-                        &table,
-                        index,
-                        self.next_block_idx_to_fetch,
-                        self.options.target_bytes_to_fetch,
-                        IterationOrder::Ascending,
+                    let blocks_to_fetch = min(
+                        self.options.blocks_to_fetch,
+                        self.block_idx_range.end - self.next_block_idx_to_fetch,
                     );
-                    blocks.end = blocks.end.min(self.block_idx_range.end);
+                    let table = self.view.table_as_ref().sst.clone();
                     let table_store = self.table_store.clone();
+                    let blocks_start = self.next_block_idx_to_fetch;
+                    let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
                     let index = index.clone();
                     let cache_blocks = self.options.cache_blocks;
-                    let blocks_end = blocks.end;
                     self.fetch_tasks
                         .push_back(FetchTask::InFlight(tokio::spawn(async move {
                             table_store
-                                .read_blocks_using_index(&table, index, blocks, cache_blocks)
+                                .read_blocks_using_index(
+                                    &table,
+                                    index,
+                                    blocks_start..blocks_end,
+                                    cache_blocks,
+                                )
                                 .await
                         })));
                     self.next_block_idx_to_fetch = blocks_end;
@@ -407,23 +410,25 @@ impl<'a> InternalSstIterator<'a> {
                 while self.fetch_tasks.len() < self.options.max_fetch_tasks
                     && self.next_block_idx_to_fetch > self.block_idx_range.start
                 {
-                    let table = self.view.table_as_ref().sst.clone();
-                    let mut blocks = self.table_store.block_range_for_target_bytes(
-                        &table,
-                        index,
-                        self.next_block_idx_to_fetch - 1,
-                        self.options.target_bytes_to_fetch,
-                        IterationOrder::Descending,
+                    let blocks_to_fetch = min(
+                        self.options.blocks_to_fetch,
+                        self.next_block_idx_to_fetch - self.block_idx_range.start,
                     );
-                    blocks.start = blocks.start.max(self.block_idx_range.start);
+                    let table = self.view.table_as_ref().sst.clone();
                     let table_store = self.table_store.clone();
+                    let blocks_end = self.next_block_idx_to_fetch;
+                    let blocks_start = blocks_end - blocks_to_fetch;
                     let index = index.clone();
                     let cache_blocks = self.options.cache_blocks;
-                    let blocks_start = blocks.start;
                     self.fetch_tasks
                         .push_back(FetchTask::InFlight(tokio::spawn(async move {
                             table_store
-                                .read_blocks_using_index(&table, index, blocks, cache_blocks)
+                                .read_blocks_using_index(
+                                    &table,
+                                    index,
+                                    blocks_start..blocks_end,
+                                    cache_blocks,
+                                )
                                 .await
                         })));
                     self.next_block_idx_to_fetch = blocks_start;
@@ -902,6 +907,7 @@ impl<'a> SstIterator<'a> {
         Self::new_owned_with_stats(range, table, table_store, options, None)
     }
 
+    #[cfg(test)]
     pub(crate) async fn new_owned_initialized<T: RangeBounds<Bytes>>(
         range: T,
         table: SsTableView,
@@ -1089,7 +1095,6 @@ mod tests {
     use crate::db_stats::DbStats;
     use crate::filter_policy::{BloomFilterPolicy, FilterQuery};
     use crate::format::sst::SsTableFormat;
-    use crate::object_stores::ObjectStores;
     use crate::sst_builder::BlockFormat;
     use crate::tablestore::TableStoreKind;
     use crate::test_utils::assert_kv;
@@ -1100,6 +1105,10 @@ mod tests {
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
     use std::sync::Arc;
+
+    fn test_sst_id(id: u64) -> SsTableId {
+        SsTableId::from(ulid::Ulid::from_parts(id, 0))
+    }
 
     #[tokio::test]
     async fn test_one_block_sst_iter() {
@@ -1115,7 +1124,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -1141,10 +1150,10 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded)
             .await
             .unwrap();
-        let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
+        let sst_handle = table_store.open_sst(&test_sst_id(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 1);
 
@@ -1366,7 +1375,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let writer = TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+            object_store.clone(),
             format.clone(),
             root_path.clone(),
             None,
@@ -1384,7 +1393,7 @@ mod tests {
             .unwrap();
         let sst = writer
             .write_sst(
-                &SsTableId::Compacted(ulid::Ulid::new()),
+                &SsTableId::from(ulid::Ulid::new()),
                 &builder.build().await.unwrap(),
             )
             .await
@@ -1398,7 +1407,7 @@ mod tests {
                 .build(),
         );
         let reader = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             Some(cache),
@@ -1454,7 +1463,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let writer = TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+            object_store.clone(),
             format.clone(),
             root_path.clone(),
             None,
@@ -1472,7 +1481,7 @@ mod tests {
             .unwrap();
         let sst = writer
             .write_sst(
-                &SsTableId::Compacted(ulid::Ulid::new()),
+                &SsTableId::from(ulid::Ulid::new()),
                 &builder.build().await.unwrap(),
             )
             .await
@@ -1486,7 +1495,7 @@ mod tests {
                 .build(),
         );
         let reader = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             Some(cache),
@@ -1542,7 +1551,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             None,
@@ -1561,7 +1570,7 @@ mod tests {
                 .unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let id = SsTableId::from(ulid::Ulid::new());
         SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap())
     }
 
@@ -1579,7 +1588,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -1602,16 +1611,16 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded)
             .await
             .unwrap();
-        let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
+        let sst_handle = table_store.open_sst(&test_sst_id(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
         assert_eq!(index.borrow().block_meta().len(), 8);
 
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 3,
-            target_bytes_to_fetch: 3 * 4096,
+            blocks_to_fetch: 3,
             cache_blocks: true,
             order,
             ..SstIteratorOptions::default()
@@ -1657,7 +1666,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -1709,7 +1718,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -1755,7 +1764,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -1798,7 +1807,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -1827,7 +1836,7 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let id = SsTableId::from(ulid::Ulid::new());
         let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
 
         // Initialize iterator in descending order with full range
@@ -1875,7 +1884,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -1895,7 +1904,7 @@ mod tests {
             table_store.clone(),
             SstIteratorOptions {
                 max_fetch_tasks: 32,
-                target_bytes_to_fetch: 256 * 128,
+                blocks_to_fetch: 256,
                 cache_blocks: true,
                 cache_metadata: true,
                 eager_spawn: false,
@@ -1914,7 +1923,7 @@ mod tests {
             table_store.clone(),
             SstIteratorOptions {
                 max_fetch_tasks: 1,
-                target_bytes_to_fetch: 1,
+                blocks_to_fetch: 1,
                 cache_blocks: true,
                 cache_metadata: true,
                 eager_spawn: false,
@@ -1954,7 +1963,7 @@ mod tests {
         mut key_gen: OrderedBytesGenerator,
         mut val_gen: OrderedBytesGenerator,
     ) -> (SsTableView, usize) {
-        let mut writer = ts.table_writer(SsTableId::Wal(0));
+        let mut writer = ts.table_writer(test_sst_id(0));
         let mut nkeys = 0usize;
         while writer.blocks_written() < n {
             let entry = RowEntry::new_value(key_gen.next().as_ref(), val_gen.next().as_ref(), 0);
@@ -1987,7 +1996,7 @@ mod tests {
                 .build(),
         );
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             Some(split_cache.clone()),
@@ -2013,7 +2022,7 @@ mod tests {
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let id = SsTableId::from(ulid::Ulid::new());
         table_store.write_sst(&id, &encoded).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
@@ -2092,7 +2101,7 @@ mod tests {
             builder.add_value(key, value, Some(0), None).await.unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let id = SsTableId::from(ulid::Ulid::new());
         SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap())
     }
 
@@ -2106,7 +2115,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             None,
@@ -2156,7 +2165,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             None,
@@ -2208,7 +2217,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             None,
@@ -2232,7 +2241,7 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let id = SsTableId::from(ulid::Ulid::new());
         let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
 
         // when: iterating over all keys
@@ -2272,7 +2281,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             None,
@@ -2296,7 +2305,7 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let id = SsTableId::from(ulid::Ulid::new());
         let sst_handle = table_store.write_sst(&id, &encoded).await.unwrap();
 
         // Verify we have multiple blocks
@@ -2342,7 +2351,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             None,
@@ -2365,7 +2374,7 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let id = SsTableId::from(ulid::Ulid::new());
         let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
 
         // when: searching for a non-existent key (odd number)
@@ -2396,7 +2405,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             None,
@@ -2418,7 +2427,7 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let id = SsTableId::from(ulid::Ulid::new());
         let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
 
         // when: seeking past the last key
@@ -2456,7 +2465,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -2479,7 +2488,7 @@ mod tests {
                 .unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let id = SsTableId::from(ulid::Ulid::new());
         table_store.write_sst(&id, &encoded).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
@@ -2501,7 +2510,7 @@ mod tests {
 
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 3,
-            target_bytes_to_fetch: 3 * 128,
+            blocks_to_fetch: 3,
             cache_blocks: true,
             cache_metadata: true,
             eager_spawn: false,
@@ -2596,7 +2605,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -2618,7 +2627,7 @@ mod tests {
                 .unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let id = SsTableId::from(ulid::Ulid::new());
         table_store.write_sst(&id, &encoded).await.unwrap();
         let sst_handle = table_store.open_sst(&id).await.unwrap();
 
@@ -2667,7 +2676,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -2675,7 +2684,7 @@ mod tests {
             BlockCachePolicy::default(),
         ));
 
-        let mut writer = table_store.table_writer(SsTableId::Wal(0));
+        let mut writer = table_store.table_writer(test_sst_id(0));
         writer
             .add(RowEntry::new_value(b"key_a", b"value_100", 100))
             .await
@@ -2765,7 +2774,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -2775,7 +2784,7 @@ mod tests {
 
         // Keys spaced by 10: key_000, key_010, key_020, ..., key_190.
         // Gaps like key_035 don't exist.
-        let mut writer = table_store.table_writer(SsTableId::Wal(0));
+        let mut writer = table_store.table_writer(test_sst_id(0));
         for i in 0..20 {
             let key = format!("key_{:03}", i * 10);
             let val = format!("val_{:03}", i * 10);
@@ -2794,7 +2803,7 @@ mod tests {
             table_store.clone(),
             SstIteratorOptions {
                 max_fetch_tasks: 1,
-                target_bytes_to_fetch: 1,
+                blocks_to_fetch: 1,
                 cache_blocks: true,
                 cache_metadata: true,
                 eager_spawn: false,
@@ -2831,7 +2840,7 @@ mod tests {
     async fn test_next_iter_prefetch_task_cancelled() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             SsTableFormat::default(),
             Path::from(""),
             None,

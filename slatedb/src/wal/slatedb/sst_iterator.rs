@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Implemented ahead of migrating WAL replay to WalTableStore.
-
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -150,7 +148,7 @@ mod tests {
             builder.add(row).await.unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let table = store.write_sst(1, &encoded).await.unwrap();
+        let table = store.write_sst(1.into(), &encoded).await.unwrap();
         let mut iter = WalSstIterator::new(
             table,
             store,

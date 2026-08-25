@@ -519,7 +519,9 @@ impl WalFlushHandler {
 
         let encoded_sst = sst_builder.build().await?;
         let written_bytes = encoded_sst.remaining_len() as u64;
-        self.table_store.write_sst(wal_id, &encoded_sst).await?;
+        self.table_store
+            .write_sst(wal_id.into(), &encoded_sst)
+            .await?;
         self.stats.flush_bytes.increment(written_bytes);
         Ok(())
     }
@@ -901,7 +903,7 @@ mod tests {
         wal_buffer.flush().await.unwrap().await.unwrap();
 
         // Verify entries were written to storage
-        let table = table_store.open_sst(1).await.unwrap();
+        let table = table_store.open_sst(1.into()).await.unwrap();
         let mut iter =
             WalSstIterator::new(table, table_store.clone(), WalSstIteratorOptions::default())
                 .await

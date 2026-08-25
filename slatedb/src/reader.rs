@@ -280,10 +280,11 @@ impl Reader {
     ) -> Result<DbIterator, SlateDBError> {
         self.db_stats.scan_requests.increment(1);
         let max_seq = self.prepare_max_seq(ctx.max_seq, options.durability_filter, options.dirty);
+        let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: options.max_fetch_tasks,
-            target_bytes_to_fetch: options.read_ahead_bytes,
+            blocks_to_fetch: read_ahead_blocks,
             cache_blocks: options.cache_blocks,
             cache_metadata: true,
             eager_spawn: true,
@@ -341,11 +342,12 @@ impl Reader {
     ) -> Result<DbRecencyIterator, SlateDBError> {
         self.db_stats.scan_requests.increment(1);
         let max_seq = self.prepare_max_seq(None, options.durability_filter, options.dirty);
+        let read_ahead_blocks = self.table_store.bytes_to_blocks(options.read_ahead_bytes);
 
         let range = BytesRange::from_prefix(prefix.as_ref());
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: options.max_fetch_tasks,
-            target_bytes_to_fetch: options.read_ahead_bytes,
+            blocks_to_fetch: read_ahead_blocks,
             cache_blocks: options.cache_blocks,
             cache_metadata: true,
             // Recency scans are designed for early-stop. Eager spawning would
@@ -471,7 +473,6 @@ mod tests {
     use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::SsTableView;
-    use crate::object_stores::ObjectStores;
     use crate::oracle::DbReaderOracle;
     use crate::tablestore::{TableStore, TableStoreKind};
     use object_store::{memory::InMemory, path::Path, ObjectStore};
@@ -516,7 +517,7 @@ mod tests {
         async fn new() -> Self {
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let table_store = Arc::new(TableStore::new(
-                ObjectStores::new(object_store, None),
+                object_store,
                 SsTableFormat::default(),
                 Path::from("/test"),
                 None,
@@ -595,7 +596,7 @@ mod tests {
             }
 
             let encoded = builder.build().await?;
-            let id = SsTableId::Compacted(Ulid::new());
+            let id = SsTableId::from(Ulid::new());
             self.table_store.write_sst(&id, &encoded).await
         }
     }

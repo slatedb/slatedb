@@ -9,7 +9,6 @@ import {
   ErrorData,
   FlushType,
   ReaderMode,
-  SsTableId,
   WriteBatch,
 } from "../index.js";
 import {
@@ -430,7 +429,9 @@ test("reader warm_sst and evict_cached_sst", async (t) => {
   ]);
 
   // Unknown SST is a no-op, not an error.
-  await reader.warm_sst(SsTableId.Wal(999_999n), [CacheTarget.Index()]);
+  await reader.warm_sst({ value: "01ARZ3NDEKTSV4RRFFQ69G5FAV" }, [
+    CacheTarget.Index(),
+  ]);
 
   await reader.evict_cached_sst(sstId);
 });

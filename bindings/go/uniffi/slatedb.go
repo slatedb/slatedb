@@ -817,7 +817,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_db_evict_cached_sst()
 		})
-		if checksum != 60099 {
+		if checksum != 13615 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_evict_cached_sst: UniFFI API checksum mismatch")
 		}
@@ -988,7 +988,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_db_warm_sst()
 		})
-		if checksum != 8802 {
+		if checksum != 54684 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_warm_sst: UniFFI API checksum mismatch")
 		}
@@ -1015,7 +1015,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_evict_cached_sst()
 		})
-		if checksum != 31819 {
+		if checksum != 18747 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_evict_cached_sst: UniFFI API checksum mismatch")
 		}
@@ -1114,7 +1114,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_warm_sst()
 		})
-		if checksum != 26897 {
+		if checksum != 4708 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_warm_sst: UniFFI API checksum mismatch")
 		}
@@ -10874,6 +10874,48 @@ func (_ FfiDestroyerSsTableHandle) Destroy(value SsTableHandle) {
 	value.Destroy()
 }
 
+// Compacted SSTable identifier.
+type SsTableId struct {
+	// SST ULID string.
+	Value string
+}
+
+func (r *SsTableId) Destroy() {
+	FfiDestroyerString{}.Destroy(r.Value)
+}
+
+type FfiConverterSsTableId struct{}
+
+var FfiConverterSsTableIdINSTANCE = FfiConverterSsTableId{}
+
+func (c FfiConverterSsTableId) Lift(rb RustBufferI) SsTableId {
+	return LiftFromRustBuffer[SsTableId](c, rb)
+}
+
+func (c FfiConverterSsTableId) Read(reader io.Reader) SsTableId {
+	return SsTableId{
+		FfiConverterStringINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterSsTableId) Lower(value SsTableId) C.RustBuffer {
+	return LowerIntoRustBuffer[SsTableId](c, value)
+}
+
+func (c FfiConverterSsTableId) LowerExternal(value SsTableId) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[SsTableId](c, value))
+}
+
+func (c FfiConverterSsTableId) Write(writer io.Writer, value SsTableId) {
+	FfiConverterStringINSTANCE.Write(writer, value.Value)
+}
+
+type FfiDestroyerSsTableId struct{}
+
+func (_ FfiDestroyerSsTableId) Destroy(value SsTableId) {
+	value.Destroy()
+}
+
 // SSTable metadata.
 type SsTableInfo struct {
 	// First entry in the SSTable, if any.
@@ -12731,80 +12773,6 @@ func (FfiConverterSourceId) Write(writer io.Writer, value SourceId) {
 type FfiDestroyerSourceId struct{}
 
 func (_ FfiDestroyerSourceId) Destroy(value SourceId) {
-	value.Destroy()
-}
-
-// SSTable identifier.
-type SsTableId interface {
-	Destroy()
-}
-
-// WAL SST identified by numeric WAL ID.
-type SsTableIdWal struct {
-	Field0 uint64
-}
-
-func (e SsTableIdWal) Destroy() {
-	FfiDestroyerUint64{}.Destroy(e.Field0)
-}
-
-// Compacted SST identified by ULID string.
-type SsTableIdCompacted struct {
-	Field0 string
-}
-
-func (e SsTableIdCompacted) Destroy() {
-	FfiDestroyerString{}.Destroy(e.Field0)
-}
-
-type FfiConverterSsTableId struct{}
-
-var FfiConverterSsTableIdINSTANCE = FfiConverterSsTableId{}
-
-func (c FfiConverterSsTableId) Lift(rb RustBufferI) SsTableId {
-	return LiftFromRustBuffer[SsTableId](c, rb)
-}
-
-func (c FfiConverterSsTableId) Lower(value SsTableId) C.RustBuffer {
-	return LowerIntoRustBuffer[SsTableId](c, value)
-}
-
-func (c FfiConverterSsTableId) LowerExternal(value SsTableId) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[SsTableId](c, value))
-}
-func (FfiConverterSsTableId) Read(reader io.Reader) SsTableId {
-	id := readInt32(reader)
-	switch id {
-	case 1:
-		return SsTableIdWal{
-			FfiConverterUint64INSTANCE.Read(reader),
-		}
-	case 2:
-		return SsTableIdCompacted{
-			FfiConverterStringINSTANCE.Read(reader),
-		}
-	default:
-		panic(fmt.Sprintf("invalid enum value %v in FfiConverterSsTableId.Read()", id))
-	}
-}
-
-func (FfiConverterSsTableId) Write(writer io.Writer, value SsTableId) {
-	switch variant_value := value.(type) {
-	case SsTableIdWal:
-		writeInt32(writer, 1)
-		FfiConverterUint64INSTANCE.Write(writer, variant_value.Field0)
-	case SsTableIdCompacted:
-		writeInt32(writer, 2)
-		FfiConverterStringINSTANCE.Write(writer, variant_value.Field0)
-	default:
-		_ = variant_value
-		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterSsTableId.Write", value))
-	}
-}
-
-type FfiDestroyerSsTableId struct{}
-
-func (_ FfiDestroyerSsTableId) Destroy(value SsTableId) {
 	value.Destroy()
 }
 
@@ -14679,6 +14647,53 @@ func (FfiDestroyerSequenceSsTableHandle) Destroy(sequence []SsTableHandle) {
 	}
 }
 
+type FfiConverterSequenceSsTableId struct{}
+
+var FfiConverterSequenceSsTableIdINSTANCE = FfiConverterSequenceSsTableId{}
+
+func (c FfiConverterSequenceSsTableId) Lift(rb RustBufferI) []SsTableId {
+	return LiftFromRustBuffer[[]SsTableId](c, rb)
+}
+
+func (c FfiConverterSequenceSsTableId) Read(reader io.Reader) []SsTableId {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]SsTableId, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterSsTableIdINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceSsTableId) Lower(value []SsTableId) C.RustBuffer {
+	return LowerIntoRustBuffer[[]SsTableId](c, value)
+}
+
+func (c FfiConverterSequenceSsTableId) LowerExternal(value []SsTableId) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]SsTableId](c, value))
+}
+
+func (c FfiConverterSequenceSsTableId) Write(writer io.Writer, value []SsTableId) {
+	if len(value) > math.MaxInt32 {
+		panic("[]SsTableId is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterSsTableIdINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceSsTableId struct{}
+
+func (FfiDestroyerSequenceSsTableId) Destroy(sequence []SsTableId) {
+	for _, value := range sequence {
+		FfiDestroyerSsTableId{}.Destroy(value)
+	}
+}
+
 type FfiConverterSequenceSsTableView struct{}
 
 var FfiConverterSequenceSsTableViewINSTANCE = FfiConverterSequenceSsTableView{}
@@ -14911,53 +14926,6 @@ type FfiDestroyerSequenceSourceId struct{}
 func (FfiDestroyerSequenceSourceId) Destroy(sequence []SourceId) {
 	for _, value := range sequence {
 		FfiDestroyerSourceId{}.Destroy(value)
-	}
-}
-
-type FfiConverterSequenceSsTableId struct{}
-
-var FfiConverterSequenceSsTableIdINSTANCE = FfiConverterSequenceSsTableId{}
-
-func (c FfiConverterSequenceSsTableId) Lift(rb RustBufferI) []SsTableId {
-	return LiftFromRustBuffer[[]SsTableId](c, rb)
-}
-
-func (c FfiConverterSequenceSsTableId) Read(reader io.Reader) []SsTableId {
-	length := readInt32(reader)
-	if length == 0 {
-		return nil
-	}
-	result := make([]SsTableId, 0, length)
-	for i := int32(0); i < length; i++ {
-		result = append(result, FfiConverterSsTableIdINSTANCE.Read(reader))
-	}
-	return result
-}
-
-func (c FfiConverterSequenceSsTableId) Lower(value []SsTableId) C.RustBuffer {
-	return LowerIntoRustBuffer[[]SsTableId](c, value)
-}
-
-func (c FfiConverterSequenceSsTableId) LowerExternal(value []SsTableId) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[[]SsTableId](c, value))
-}
-
-func (c FfiConverterSequenceSsTableId) Write(writer io.Writer, value []SsTableId) {
-	if len(value) > math.MaxInt32 {
-		panic("[]SsTableId is too large to fit into Int32")
-	}
-
-	writeInt32(writer, int32(len(value)))
-	for _, item := range value {
-		FfiConverterSsTableIdINSTANCE.Write(writer, item)
-	}
-}
-
-type FfiDestroyerSequenceSsTableId struct{}
-
-func (FfiDestroyerSequenceSsTableId) Destroy(sequence []SsTableId) {
-	for _, value := range sequence {
-		FfiDestroyerSsTableId{}.Destroy(value)
 	}
 }
 

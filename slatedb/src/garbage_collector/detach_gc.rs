@@ -346,7 +346,7 @@ mod tests {
     async fn test_skips_entry_with_non_empty_sst_ids() {
         let (object_store, parent_store, clone_store) = build_setup().await;
         let final_id = Uuid::new_v4();
-        let live_sst = SsTableId::Compacted(Ulid::new());
+        let live_sst = SsTableId::from(Ulid::new());
         attach_clone_to_parent(&parent_store, &clone_store, final_id, vec![live_sst]).await;
 
         let task = make_task(clone_store.clone(), object_store);
@@ -370,7 +370,7 @@ mod tests {
         // version where sst_ids was non-empty — detach must NOT fire.
         let (object_store, parent_store, clone_store) = build_setup().await;
         let final_id = Uuid::new_v4();
-        let live_sst = SsTableId::Compacted(Ulid::new());
+        let live_sst = SsTableId::from(Ulid::new());
         attach_clone_to_parent(&parent_store, &clone_store, final_id, vec![live_sst]).await;
 
         // Pin this manifest version (with non-empty sst_ids) via a clone-side checkpoint.
@@ -442,7 +442,7 @@ mod tests {
         let (object_store, parent_store, clone_store) = build_setup().await;
         let detachable_id = Uuid::new_v4();
         let retained_id = Uuid::new_v4();
-        let live_sst = SsTableId::Compacted(Ulid::new());
+        let live_sst = SsTableId::from(Ulid::new());
         attach_clone_to_parent(&parent_store, &clone_store, detachable_id, vec![]).await;
         attach_clone_to_parent(&parent_store, &clone_store, retained_id, vec![live_sst]).await;
         assert_eq!(clone_external_dbs_len(&clone_store).await, 2);

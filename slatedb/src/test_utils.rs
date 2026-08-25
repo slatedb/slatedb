@@ -38,7 +38,7 @@ use ulid::Ulid;
 
 pub(crate) fn bounded_sst_view(id: u64, first: &'static [u8], last: &'static [u8]) -> SsTableView {
     SsTableView::identity(SsTableHandle::new(
-        SsTableId::Compacted(Ulid::from_parts(id, 0)),
+        SsTableId::from(Ulid::from_parts(id, 0)),
         SST_FORMAT_VERSION_LATEST,
         SsTableInfo {
             first_entry: Some(Bytes::from_static(first)),
@@ -428,7 +428,7 @@ pub(crate) async fn write_ssts(
     }
 
     let mut output_ssts = Vec::new();
-    let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+    let mut writer = table_store.table_writer(SsTableId::from(Ulid::new()));
     let mut bytes_written = 0usize;
 
     for (index, entry) in entries.iter().cloned().enumerate() {
@@ -441,7 +441,7 @@ pub(crate) async fn write_ssts(
             bytes_written = 0;
 
             if index + 1 < entries.len() {
-                writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+                writer = table_store.table_writer(SsTableId::from(Ulid::new()));
             } else {
                 return output_ssts;
             }
