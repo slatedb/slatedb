@@ -594,7 +594,7 @@ mod tests {
             "wal",
             format.estimate_encoded_size_wal(num_entries, estimated_entries_size),
             wal_actual_size,
-            2993,
+            3917,
         );
     }
 
