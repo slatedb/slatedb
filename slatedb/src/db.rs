@@ -3155,6 +3155,7 @@ mod tests {
                                         dirty: false,
                                         cache_blocks: true,
                                         filter_context: None,
+                                        tracing_options: None,
                                     }
                                 )
                                 .await

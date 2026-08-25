@@ -27,7 +27,7 @@ pub use config::{
     CloseOptions, DurabilityLevel, FlushOptions, FlushType, GarbageCollectorDirectoryOptions,
     GarbageCollectorOptions, GarbageCollectorScheduleOptions, IsolationLevel, IterationOrder,
     MergeOptions, PutOptions, ReadOptions, ReaderMode, ReaderOptions, ScanOptions, SstBlockSize,
-    Ttl, WriteOptions,
+    TracingOptions, Ttl, WriteOptions,
 };
 pub use db::Db;
 pub use db_reader::DbReader;
