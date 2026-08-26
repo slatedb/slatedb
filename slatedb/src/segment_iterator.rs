@@ -12,6 +12,7 @@ use crate::error::SlateDBError;
 use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
 use crate::manifest::{LsmTreeState, Segment};
 use crate::merge_iterator::MergeIterator;
+use crate::reader::SstTraceLevel;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
@@ -315,11 +316,15 @@ pub(crate) fn build_l0_point_iters(
 ) -> Result<VecDeque<Box<dyn RowEntryIterator>>, SlateDBError> {
     let mut iters = VecDeque::new();
     for sst in l0.iter().cloned() {
+        let sst_iter_options = ctx
+            .sst_iter_options
+            .clone()
+            .with_sst_level(SstTraceLevel::L0);
         let iter = SstIterator::new_owned_with_stats(
             ctx.range.clone(),
             sst,
             ctx.table_store.clone(),
-            ctx.sst_iter_options.clone(),
+            sst_iter_options,
             ctx.point_lookup_stats.clone(),
         )?;
         if let Some(iter) = iter {
@@ -337,11 +342,15 @@ pub(crate) fn build_sr_point_iters(
     let mut iters = VecDeque::new();
     for sr in compacted.iter() {
         for handle in sr.tables_covering_point_key(key.as_ref()) {
+            let sst_iter_options = ctx
+                .sst_iter_options
+                .clone()
+                .with_sst_level(SstTraceLevel::SortedRun(sr.id));
             let iter = SstIterator::new_owned_with_stats(
                 ctx.range.clone(),
                 handle.clone(),
                 ctx.table_store.clone(),
-                ctx.sst_iter_options.clone(),
+                sst_iter_options,
                 ctx.point_lookup_stats.clone(),
             )?;
             if let Some(iter) = iter {
@@ -358,7 +367,10 @@ async fn build_l0_range_iters(
 ) -> Result<VecDeque<Box<dyn RowEntryIterator>>, SlateDBError> {
     let table_store = ctx.table_store.clone();
     let range = ctx.range.clone();
-    let opts = ctx.sst_iter_options.clone();
+    let opts = ctx
+        .sst_iter_options
+        .clone()
+        .with_sst_level(SstTraceLevel::L0);
     let stats = ctx.db_stats.clone();
     build_concurrent(l0.iter().cloned(), ctx.max_parallel, move |sst| {
         let table_store = table_store.clone();
@@ -396,7 +408,7 @@ async fn build_sr_range_iters(
     build_concurrent(overlapping.into_iter(), ctx.max_parallel, move |sr| {
         let table_store = table_store.clone();
         let range = range.clone();
-        let opts = opts.clone();
+        let opts = opts.clone().with_sst_level(SstTraceLevel::SortedRun(sr.id));
         let stats = stats.clone();
         async move {
             SortedRunIterator::new_owned_initialized_with_stats(

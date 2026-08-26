@@ -17,6 +17,7 @@ use crate::filter_policy::{FilterContext, FilterQuery, NamedFilter};
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
 use crate::prefix_extractor::PrefixTarget;
+use crate::reader::{ReadTrace, SstTraceLevel};
 use crate::{
     iter::{IterationOrder, RowEntryIterator},
     partitioned_keyspace,
@@ -40,6 +41,8 @@ pub(crate) struct SstIteratorOptions {
     pub(crate) order: IterationOrder,
     pub(crate) prefix: Option<Bytes>,
     pub(crate) filter_context: Option<FilterContext>,
+    pub(crate) read_trace: ReadTrace,
+    pub(crate) sst_level: Option<SstTraceLevel>,
 }
 
 impl Default for SstIteratorOptions {
@@ -53,7 +56,16 @@ impl Default for SstIteratorOptions {
             order: IterationOrder::Ascending,
             prefix: None,
             filter_context: None,
+            read_trace: ReadTrace::new(None),
+            sst_level: None,
         }
+    }
+}
+
+impl SstIteratorOptions {
+    pub(crate) fn with_sst_level(mut self, sst_level: SstTraceLevel) -> Self {
+        self.sst_level = Some(sst_level);
+        self
     }
 }
 
@@ -198,7 +210,13 @@ impl FilterEvaluator {
     /// All filters must agree the query might match for the read to proceed.
     /// If any filter says the query is absent, the SST is skipped.
     /// If no filters are provided, the state is set to `NoFilter`.
-    async fn evaluate(&mut self, filters: &[NamedFilter]) {
+    fn evaluate(
+        &mut self,
+        filters: &[NamedFilter],
+        sst_id: SsTableId,
+        sst_level: Option<&SstTraceLevel>,
+        read_trace: &ReadTrace,
+    ) {
         if self.state != FilterState::NotChecked {
             return;
         }
@@ -211,7 +229,9 @@ impl FilterEvaluator {
         // AND logic: if any filter says the key is NOT present, filter it out.
         // All filters reaching here are decoded. TableStore::read_filters
         // resolves any raw cache entries before returning.
-        let might_match = filters.iter().all(|nf| nf.filter.might_match(&self.query));
+        let might_match = filters
+            .iter()
+            .all(|nf| self.filter_might_match(nf, sst_id, sst_level, read_trace));
 
         if might_match {
             if let Some(stats) = &self.db_stats {
@@ -224,6 +244,20 @@ impl FilterEvaluator {
             }
             self.state = FilterState::Negative;
         }
+    }
+
+    fn filter_might_match(
+        &self,
+        filter: &NamedFilter,
+        sst_id: SsTableId,
+        sst_level: Option<&SstTraceLevel>,
+        read_trace: &ReadTrace,
+    ) -> bool {
+        let span = read_trace.new_evaluate_filter_span(sst_id, sst_level, &filter.name);
+        let _guard = span.enter();
+        let result = filter.filter.might_match(&self.query);
+        span.record("result", result);
+        result
     }
 
     fn positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
@@ -780,21 +814,33 @@ impl<'a> FilterIterator<'a> {
     fn is_filtered_out(&self) -> bool {
         self.filter.is_filtered_out()
     }
+
+    async fn read_filters(&self) -> Result<Arc<[NamedFilter]>, SlateDBError> {
+        self.inner
+            .table_store()
+            .read_filters(
+                &self.inner.view().table_as_ref().sst,
+                self.inner.options.cache_metadata,
+                &self.inner.options.read_trace,
+                self.inner.options.sst_level.as_ref(),
+            )
+            .await
+    }
 }
 
 #[async_trait]
 impl RowEntryIterator for FilterIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized {
-            let filters = self
-                .inner
-                .table_store()
-                .read_filters(
-                    &self.inner.view().table_as_ref().sst,
-                    self.inner.options.cache_metadata,
-                )
-                .await?;
-            self.filter.evaluate(&filters).await;
+            let filters = self.read_filters().await?;
+            let sst_id = self.inner.view().table_as_ref().sst.id;
+            let sst_level = self.inner.options.sst_level.clone();
+            self.filter.evaluate(
+                &filters,
+                sst_id,
+                sst_level.as_ref(),
+                &self.inner.options.read_trace,
+            );
 
             if self.is_filtered_out() {
                 return Ok(());
@@ -1301,8 +1347,9 @@ mod tests {
         let existing_keys = [b"k1".as_slice(), b"k3".as_slice()];
         let sst_handle = build_single_block_sst(&table_store, &existing_keys).await;
 
+        let read_trace = ReadTrace::new(None);
         let filters = table_store
-            .read_filters(&sst_handle.sst, true)
+            .read_filters(&sst_handle.sst, true, &read_trace, None)
             .await
             .expect("filter read should succeed");
         assert!(!filters.is_empty(), "filter should exist");
@@ -1906,6 +1953,8 @@ mod tests {
                 order: IterationOrder::Ascending,
                 prefix: None,
                 filter_context: None,
+                read_trace: ReadTrace::new(None),
+                sst_level: None,
             },
         )
         .await
@@ -1925,6 +1974,8 @@ mod tests {
                 order: IterationOrder::Ascending,
                 prefix: None,
                 filter_context: None,
+                read_trace: ReadTrace::new(None),
+                sst_level: None,
             },
         )
         .await
@@ -2512,6 +2563,8 @@ mod tests {
             order,
             prefix: None,
             filter_context: None,
+            read_trace: ReadTrace::new(None),
+            sst_level: None,
         };
         let mut iter = SstIterator::new_owned_initialized(
             BytesRange::from_slice(start_key.as_ref()..=end_key.as_ref()),
@@ -2805,6 +2858,8 @@ mod tests {
                 order: IterationOrder::Ascending,
                 prefix: None,
                 filter_context: None,
+                read_trace: ReadTrace::new(None),
+                sst_level: None,
             },
         )
         .await
