@@ -1,12 +1,11 @@
+use slatedb::config::{ReadOptions, TracingOptions};
 use slatedb::{bytes::Bytes, object_store::memory::InMemory, Db};
 use std::sync::Arc;
 use tracing_chrome::{ChromeLayerBuilder, TraceStyle};
 use tracing_subscriber::layer::SubscriberExt;
-use slatedb::config::{ReadOptions, TracingOptions};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-
     // Setup
     let object_store = Arc::new(InMemory::new());
     let db = Db::open("/tmp/slatedb_tracing_subscriber", object_store).await?;
@@ -20,8 +19,7 @@ async fn main() -> anyhow::Result<()> {
     let tracing_options = TracingOptions::new("my-trace-id");
 
     // Pass it to the read operation
-    let read_options = ReadOptions::default()
-        .with_tracing_options(Some(tracing_options));
+    let read_options = ReadOptions::default().with_tracing_options(Some(tracing_options));
 
     // Register tracing-chrome subscriber.
     // Subscriber tracing-chrome outputs traces in Chrome’s trace viewer format.
