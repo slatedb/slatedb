@@ -262,7 +262,9 @@ pub trait DbCache: Send + Sync {
         Ok(CacheFetch::miss(entry))
     }
 
-    /// Fetch a filter entry, invoking `loader` on cache miss. See [`Self::fetch_block`].
+    /// Fetch a filter entry and whether it was already cached, invoking `loader` on cache miss.
+    /// The bool is true when the entry was served from cache and false when `loader` ran.
+    /// See [`Self::fetch_block`].
     async fn fetch_filter(
         &self,
         key: CachedKey,
@@ -773,6 +775,18 @@ impl DbCacheWrapper {
                 lookup: CacheLookup::Hit,
                 ..
             }) => self.record_hit(block_type),
+            Err(err) => self.record_get_err(block_type, err),
+        }
+    }
+
+    fn record_fetch_cached_outcome(
+        &self,
+        block_type: &str,
+        result: &Result<(CachedEntry, bool), crate::Error>,
+    ) {
+        match result {
+            Ok((_, true)) => self.record_hit(block_type),
+            Ok((_, false)) => self.record_miss(block_type),
             Err(err) => self.record_get_err(block_type, err),
         }
     }
@@ -1306,6 +1320,7 @@ mod tests {
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use ulid::Ulid;
 

@@ -15,7 +15,7 @@ use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 use crate::block_cache_policy::{should_cache_data_block, BlockCachePolicy};
-use crate::db_cache::CacheTarget;
+use crate::db_cache::{CacheFetch, CacheLookup, CacheTarget};
 use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
 use crate::db_state::{SsTableHandle, SsTableId, SstType};
 use crate::error::SlateDBError;
@@ -27,12 +27,14 @@ use crate::iter::IterationOrder;
 use crate::object_store_tag::ObjectStoreCallTag;
 pub(crate) use crate::object_store_tag::TableStoreKind;
 use crate::paths::PathResolver;
+use crate::reader::{ReadTrace, SstTraceLevel};
 use crate::sst_builder::EncodedSsTableBuilder;
 #[cfg(test)]
 use crate::sst_io::MAX_VALIDATION_RETRIES;
 use crate::sst_io::{read_obj, read_with_validation_retry, ReadOnlyObject};
 use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
+use tracing::Instrument;
 
 pub(crate) struct TableStore {
     object_store: Arc<dyn ObjectStore>,
@@ -46,6 +48,13 @@ pub(crate) struct TableStore {
     block_cache_policy: BlockCachePolicy,
     /// Which component owns this store. Tagged on compacted-SST calls.
     kind: TableStoreKind,
+}
+
+fn record_read_filter_cached(span: &tracing::Span, lookup: CacheLookup) {
+    match lookup {
+        CacheLookup::Hit => span.record("cached", true),
+        CacheLookup::Miss => span.record("cached", false),
+    };
 }
 
 impl TableStore {
@@ -389,6 +398,8 @@ impl TableStore {
         handle: &SsTableHandle,
         cache_blocks: bool,
         segment: Option<Bytes>,
+        trace: &ReadTrace,
+        sst_level: Option<&SstTraceLevel>,
     ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         // No filter exists for this SST (either no policies configured, or the
         // SST was built below `min_filter_keys`). Return an empty slice without
@@ -397,6 +408,18 @@ impl TableStore {
         if self.sst_format.filter_policies.is_empty() || handle.info.filter_len == 0 {
             return Ok(Arc::from([]));
         }
+        let span = trace.new_read_filter_span(handle.id, sst_level);
+        let read = self.read_filters_inner(handle, cache_blocks, segment, span.clone());
+        read.instrument(span).await
+    }
+
+    async fn read_filters_inner(
+        &self,
+        handle: &SsTableHandle,
+        cache_blocks: bool,
+        segment: Option<Bytes>,
+        span: tracing::Span,
+    ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         let cache_key: CachedKey = (handle.id, handle.info.filter_offset).into();
         if let Some(cache) = self.cache_for_reads() {
             // cache_blocks=true: dedup-aware fetch; concurrent callers collapse onto
@@ -405,7 +428,7 @@ impl TableStore {
             // we intentionally don't re-insert there — `fetch_X` errors are almost
             // always the smuggled loader error (so the direct retry will also fail),
             // and on the rare foyer-machinery error an insert would likely fail too.
-            let entry = if cache_blocks {
+            let fetch = if cache_blocks {
                 cache
                     .fetch_filter(
                         cache_key.clone(),
@@ -413,11 +436,15 @@ impl TableStore {
                     )
                     .await
                     .ok()
-                    .map(|fetch| fetch.entry)
             } else {
-                cache.get_filter(&cache_key).await.unwrap_or(None)
+                cache
+                    .get_filter(&cache_key)
+                    .await
+                    .unwrap_or(None)
+                    .map(|entry| CacheFetch::miss(entry))
             };
-            if let Some(entry) = entry {
+            if let Some(CacheFetch { entry, lookup }) = fetch {
+                record_read_filter_cached(&span, lookup);
                 // Already decoded.
                 if let Some(filters) = entry.filters() {
                     return Ok(filters);
@@ -431,6 +458,7 @@ impl TableStore {
                 }
             }
         }
+        record_read_filter_cached(&span, CacheLookup::Miss);
         read_obj!(
             &self.object_store,
             self.path(&handle.id),
@@ -1183,6 +1211,7 @@ mod tests {
     use crate::{block_iterator::BlockIteratorLatest, db_state::SsTableId, iter::RowEntryIterator};
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::DbRand;
+    use crate::reader::ReadTrace;
 
     const ROOT: &str = "/root";
 
@@ -1795,7 +1824,13 @@ mod tests {
         assert_eq!(meta_cache.entry_count(), 0);
 
         let filters = reader
-            .read_filters(&handle, false, Some(Bytes::new()))
+            .read_filters(
+                &handle,
+                false,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert!(!filters.is_empty());
@@ -1806,7 +1841,13 @@ mod tests {
             .is_none());
 
         let _ = reader
-            .read_filters(&handle, true, Some(Bytes::new()))
+            .read_filters(
+                &handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert!(meta_cache

@@ -12,18 +12,18 @@ use crate::error::SlateDBError;
 use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
 use crate::manifest::{LsmTreeState, Segment};
 use crate::merge_iterator::MergeIterator;
+use crate::reader::SstTraceLevel;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::utils::build_concurrent;
 
-/// Inputs needed to construct a per-segment iterator. The scan path's
-/// [`SegmentMergeIterator`] holds an unbound template and clones it with the
-/// selected segment in [`Self::for_segment`] before building each child. The
-/// get path binds its single selected segment before constructing its L0 and
-/// sorted-run point iterators.
-#[derive(Clone)]
+/// Shared inputs needed to construct a per-segment iterator. Used by
+/// the scan path's [`SegmentMergeIterator`] (one instance held by the
+/// chain, consulted on every promotion) and by the get path's
+/// [`crate::db_iter::GetIterator::from_lsm_tree`] (one instance per
+/// query, consumed when building L0 + sorted-run point iters).
 pub(crate) struct SegmentScanContext {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) range: BytesRange,
@@ -34,15 +34,6 @@ pub(crate) struct SegmentScanContext {
     pub(crate) point_lookup_stats: Option<DbStats>,
     /// Stats for range-query sorted runs.
     pub(crate) db_stats: DbStats,
-}
-
-impl SegmentScanContext {
-    /// Returns a context whose SST options carry the selected segment.
-    fn for_segment(&self, segment: &Bytes) -> Self {
-        let mut context = self.clone();
-        context.sst_iter_options.segment = Some(segment.clone());
-        context
-    }
 }
 
 /// Per-segment iterator bundle built from a single [`LsmTreeState`] for
@@ -217,8 +208,7 @@ impl SegmentMergeIterator {
                 .context
                 .as_ref()
                 .expect("Pending children require a SegmentScanContext");
-            let context = context.for_segment(&prefix);
-            let RangeTreeIterators { l0, sr } = RangeTreeIterators::build(&tree, &context).await?;
+            let RangeTreeIterators { l0, sr } = RangeTreeIterators::build(&tree, context).await?;
             let iters: VecDeque<Box<dyn RowEntryIterator>> = l0.into_iter().chain(sr).collect();
             let merge = MergeIterator::new_with_order(iters, context.sst_iter_options.order)?;
             // Per-segment merge runs with dedup disabled so the outer
@@ -307,15 +297,12 @@ pub(crate) fn build_segment_iter(
 ) -> Result<Box<dyn RowEntryIterator>, SlateDBError> {
     if let Some(point_key) = context.range.as_point() {
         match segments.last() {
-            Some(segment) => {
-                let context = context.for_segment(&segment.prefix);
-                Ok(Box::new(GetIterator::from_lsm_tree(
-                    point_key.clone(),
-                    &segment.tree,
-                    &context,
-                    max_seq,
-                )?))
-            }
+            Some(segment) => Ok(Box::new(GetIterator::from_lsm_tree(
+                point_key.clone(),
+                &segment.tree,
+                &context,
+                max_seq,
+            )?)),
             None => Ok(Box::new(EmptyIterator::new())),
         }
     } else {
@@ -330,11 +317,14 @@ pub(crate) fn build_l0_point_iters(
     let mut iters = VecDeque::new();
     let options = ctx.sst_iter_options.clone();
     for sst in l0.iter().cloned() {
+        let sst_iter_options = options
+            .clone()
+            .with_sst_level(SstTraceLevel::L0);
         let iter = SstIterator::new_owned_with_stats(
             ctx.range.clone(),
             sst,
             ctx.table_store.clone(),
-            options.clone(),
+            sst_iter_options,
             ctx.point_lookup_stats.clone(),
         )?;
         if let Some(iter) = iter {
@@ -353,11 +343,14 @@ pub(crate) fn build_sr_point_iters(
     let options = ctx.sst_iter_options.clone();
     for sr in compacted.iter() {
         for handle in sr.tables_covering_point_key(key.as_ref()) {
+            let sst_iter_options = options
+                .clone()
+                .with_sst_level(SstTraceLevel::SortedRun(sr.id));
             let iter = SstIterator::new_owned_with_stats(
                 ctx.range.clone(),
                 handle.clone(),
                 ctx.table_store.clone(),
-                options.clone(),
+                sst_iter_options,
                 ctx.point_lookup_stats.clone(),
             )?;
             if let Some(iter) = iter {
@@ -374,7 +367,10 @@ async fn build_l0_range_iters(
 ) -> Result<VecDeque<Box<dyn RowEntryIterator>>, SlateDBError> {
     let table_store = ctx.table_store.clone();
     let range = ctx.range.clone();
-    let opts = ctx.sst_iter_options.clone();
+    let opts = ctx
+        .sst_iter_options
+        .clone()
+        .with_sst_level(SstTraceLevel::L0);
     let stats = ctx.db_stats.clone();
     build_concurrent(l0.iter().cloned(), ctx.max_parallel, move |sst| {
         let table_store = table_store.clone();
@@ -412,7 +408,7 @@ async fn build_sr_range_iters(
     build_concurrent(overlapping.into_iter(), ctx.max_parallel, move |sr| {
         let table_store = table_store.clone();
         let range = range.clone();
-        let opts = opts.clone();
+        let opts = opts.clone().with_sst_level(SstTraceLevel::SortedRun(sr.id));
         let stats = stats.clone();
         async move {
             SortedRunIterator::new_owned_initialized_with_stats(
