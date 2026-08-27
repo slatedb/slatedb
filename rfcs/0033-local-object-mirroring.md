@@ -110,6 +110,16 @@ impl ObjectStoreMirrorBuilder {
     /// warming, `.compactions` prefetching, and refetches. The default is 8.
     pub fn with_download_concurrency(self, concurrency: usize) -> Self;
 
+    /// Sets the predicate used to select which segments are mirrored.
+    ///
+    /// The predicate receives the latest manifest and the segment prefix being
+    /// evaluated. An empty prefix identifies the root segment. The default
+    /// predicate selects every segment.
+    pub fn with_segment_predicate(
+        self,
+        predicate: impl Fn(&ManifestCore, &[u8]) -> bool + Send + Sync + 'static,
+    ) -> Self;
+
     /// Sets the interval at which the mirror scans remote storage to GC
     /// obsolete local SSTs. The default is `Some(Duration::from_secs(600))`.
     /// Passing `None` disables periodic GC but not metadata-driven GC.
@@ -383,6 +393,44 @@ in the same process. The GC's delete calls will remove local files directly
 > - Azure RA-GRS and RA-GZRS secondary endpoints are eventually consistent with
 >   the primary. Garbage collection must use the primary endpoint and remain
 >   disabled while reads are directed to a secondary endpoint.
+
+### Segment Support
+
+`ObjectStoreMirror` supports segment-based routing. This requires two changes:
+
+1. `ObjectStoreCallTag` needs a new `segment` field to indicate the segment prefix for routing.
+2. `ObjectStoreMirrorBuilder` needs a new `with_segment_predicate` method to allow users to specify which segments should be mirrored.
+
+The segment field is required because a new SST may not appear in the manifest yet. The `ObjectStoreMirror` needs to know the segment prefix to evaluate the predicate and decide whether to mirror the SST.
+
+```rs
+pub struct ObjectStoreCallTag {
+    // ...
+
+    // Optional segment prefix for routing.
+    pub segment: Option<Bytes>,
+}
+```
+
+`segment` will be set for all reads and writes. This changes `ObjectStoreCallTag` from a `Copy` type to a `Clone` type and changes to a heap allocation. We invoke SST read/writes infrequently enough that we believe this won't cause CPU performance to degrade.
+
+The `TableStore` must be updated to receive the field in its read and write SST functions. This touches a wide range of files, but the changes are mechanical and straightforward.
+
+`ObjectStoreMirrorBuilder` accepts an optional segment predicate:
+
+```rust
+Fn(&ManifestCore, &[u8]) -> bool + Send + Sync + 'static
+```
+
+The predicate receives the last seen manifest and the segment prefix being evaluated. It selects every segment by default. An empty prefix identifies the root segment.
+
+When processing a manifest, the mirror evaluates the predicate against the incoming `ManifestCore`. It warms newly selected SSTs before returning the manifest, publishes the new set of mirrored paths, then removes SSTs that are no longer selected as part of optimistic garbage collection (see above).
+
+For `.compactions` entries and writes, the predicate receives the last manifest observed by the mirror. The segment prefix is passed separately, so the predicate can select a new segment before it appears in the manifest. For example, a date-based predicate can recognize a new `YYYYMMDD` prefix when the day rolls over.
+
+Reads also run through the predicate. If the segment is selected, the read is routed to the local mirror. If it is not selected, the read is routed to the wrapped object store. A missing local mirror file is treated as a `LocalCacheError` and does not fall back to the wrapped store.
+
+Selected writes are written locally and remotely. Unselected writes go directly to the wrapped object store. Local garbage collection only retains SSTs referenced by selected segments.
 
 ### Compactor Checkpoint Retention
 
