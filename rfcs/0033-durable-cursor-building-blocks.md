@@ -169,6 +169,16 @@ The sequence watermark can be set explicitly if known by the application. There 
 
 ## Alternatives
 
+### Direct L0/SR Scan API
+
+The approach above adds a sequence number filter to `ScanOptions` so that delta scans run through the standard query path. Internally, SlateDb would filter L0s and SRs based on the provided sequence number. Alternatively, we could introduce a lower level API which allows a user to do the same filtering in their application and read from the corresponding L0/SR directly. To support this, we would introduce a new `scan` API which works at the level of an L0 or SR. It would still require the manifest changes above to track the sequence number in each L0 or SR so that a reader could efficiently locate the layer to read.
+
+The main benefit of the direct scan approach is that it stops short of suggesting a true API for subrange IVM, which means we could potentially punt the tombstone retention problem down the road. Users could still build their own IVM logic using the underlying primitives, but they would be on their own to address tombstone semantics. For append-only data structures which do not support deletion, such as LogDb as described below, it would be sufficient.  
+
+### L0 Following
+
+The tombstone retention problem occurs because a reader following incremental updates jumps between non-consecutive versions of the manifest without seeing either snapshot state completely. If the reader observed every manifest version, they could read every L0 that is created and no tombstones would be missed. This could be achieved, for example, by allowing a checkpoint to lock not only one version of the manifest, but an open-ended range of versions. As new manifest versions are created, the reader would update its checkpoint range and scan L0s from the new version. The main downside is that a lagging reader could prevent garbage collection over an arbitrary range of L0s. In the approach above, tombstone cleanup can be delayed by a lagging reader, but SST garbage collection proceeds the same as it does today.  
+
 ## References
 
 LogDb is a SlateDb-based system which exposes a Kafka-like log abstraction. Keys are structured as `<segment><key><sequence>`, where the key presents a single log stream. The `sequence` behaves similarly to Kafka's `offset`, but it is a global value. Every record has a unique global sequence. This structure optimizes locality at the level of each log key so that entries are efficient to fetch, particularly so as the compactor reorganize records. Note that the global sequence order of log entries across all keys cannot be reconstructed without reading all of the data. 
