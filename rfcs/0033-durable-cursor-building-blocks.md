@@ -37,18 +37,17 @@ A simple improvement is to extend the manifest so that sequence ranges can be in
 
 As a strawman, imagine our approach is to track our position in the database using the sequence number. We maintain our cursor as the highest sequence number N that we have processed. We can send a delta scan with a minimum sequence of N to get the next set of changes to process. We then advance the cursor to N', send the next delta scan, and so forth.
 
-This approach can work, but there are two problems. First, records returned from an L0 or SR are not returned in sequence order. While processing the records from a delta scan, we may see sequence N before we have seen all records with sequence M < N. In order to safely advance the cursor, we must first process all records in the scan. This , however, it means we cannot save our progress incrementally and hope to be able to resume after a failure.
+This approach can work, but it has a problem: the records returned from a scan are not returned in sequence order. While processing the records from a delta scan, we may see sequence N before we have seen all records with sequences M < N. In order to safely advance the cursor, we must first process all records in the scan and then advance based on the largest N' that the scan observed. This approach works in the context of a snapshot read because new writes will not be interleaved with older data. It also works with checkpoints, which provide the added benefit that we can resume the position after a failure.
 
-A second problem is that our cursor attempts to map a position within a moving target. A delta scan applied to the LSM at one point of time may return a different ordering of changes at another point of time. As new L0s are written and as the compactor creates new SRs, the data is restructured and the scan order changes. If we could fix our scan against a specific LSM state using a reader checkpoint, then the delta scan would be deterministic.
+In addition to locking the state of the LSM so that our scan can track a deterministic position, the checkpoint also provides the maxium sequence N' to advance the cursor. When we have finished scanning the range in the checkpoint, we can use `last_l0_seq` from the corresponding manifest to set the minimum sequence of the next scan after advancing the checkpoint
 
 This suggests that we can track a durable position in the database using the following tuple:
 
 - Checkpoint id which binds the scan to a specific manifest version
-- The minimum sequence M provided to the delta scan.
-- The maximum sequence N of records processed during the scan
+- The minimum sequence M provided to the delta scan
 - The last processed key from the scan
 
-This tuple can be persisted and resumed after a failure. We load the reader with the checkpoint ID so that we use the correct manifest version. We then send a delta scan using the lower bound sequence M and our target range with the lower bound set to the last processed key. The lower sequence M ensures that we do not see any data that we have not already processed. As we receive new records from the resumed scan, we update the maximum sequence N that we have processed. Once we have reached the end of the scan, N will become the lower-bound sequence number for the next delta scan.
+This tuple can be persisted and resumed after a failure. We load the reader with the checkpoint ID so that we use the correct manifest version. We then send a delta scan using the lower bound sequence M and our target range with the lower bound set to the last processed key. The lower sequence M ensures that we do not see any data that we have not already processed. Once we have reached the end of the scan, the minimum sequence for the next scan can be derived from the manifest as discussed above.
 
 This approach provides fairly weak semantics in the context of IVM. We are ensured that we see the changes to each key in the correct order, but there is no guarantee about the ordering between keys. We cannot guarantee snapshot consistency, which would require following the sequence numbers precisely as with CDC.
 
