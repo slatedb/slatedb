@@ -1079,10 +1079,12 @@ impl CompactorEventHandler {
 
     fn compactions_conflict(left: &CompactionSpec, right: &CompactionSpec) -> bool {
         let right_destination = right.destination().map(SourceId::SortedRun);
+        // A source cannot also be consumed or produced by the active compaction.
         left.sources()
             .iter()
             .copied()
             .any(|source| right.sources().contains(&source) || right_destination == Some(source))
+            // Likewise, the proposed destination cannot be an active source or destination.
             || left.destination().is_some_and(|destination| {
                 let destination = SourceId::SortedRun(destination);
                 right.sources().contains(&destination) || right_destination == Some(destination)

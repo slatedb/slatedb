@@ -279,7 +279,6 @@ impl CompactionExecutor for TokioCompactionExecutor {
 }
 
 struct TokioCompactionTask {
-    destination: u32,
     task: JoinHandle<Result<SortedRun, SlateDBError>>,
 }
 
@@ -891,8 +890,7 @@ impl TokioCompactionExecutorInner {
             return Ok(());
         }
         let id = args.id;
-        let dst = args.destination;
-        if tasks.contains_key(&id) || tasks.values().any(|task| task.destination == dst) {
+        if tasks.contains_key(&id) {
             return Err(SlateDBError::InvalidCompaction);
         }
         self.worker_stats.running_compactions.increment(1);
@@ -932,13 +930,7 @@ impl TokioCompactionExecutorInner {
             },
             async move { this.plan_and_execute_compaction_job(args).await },
         );
-        tasks.insert(
-            id,
-            TokioCompactionTask {
-                destination: dst,
-                task,
-            },
-        );
+        tasks.insert(id, TokioCompactionTask { task });
         Ok(())
     }
 
@@ -2560,11 +2552,10 @@ mod tests {
         .expect("a close() should reach the blocked put gate");
         assert!(executor.inner.tasks.lock().contains_key(&stopped_id));
 
-        let rejected_id = Ulid::new();
         let rejected = executor.start_compaction_job(StartCompactionJobArgs {
-            id: rejected_id,
-            compaction_id: rejected_id,
-            destination: 0,
+            id: stopped_id,
+            compaction_id: stopped_id,
+            destination: 1,
             l0_sst_views: l0_sst_views.clone(),
             sorted_runs: vec![],
             compaction_clock_tick: 0,
@@ -2576,7 +2567,7 @@ mod tests {
             )),
         });
         assert!(matches!(rejected, Err(SlateDBError::InvalidCompaction)));
-        assert!(!executor.inner.tasks.lock().contains_key(&rejected_id));
+        assert_eq!(executor.inner.tasks.lock().len(), 1);
 
         // then: stopping that job clears executor bookkeeping immediately.
         assert!(executor.stop_compaction_job(stopped_id));

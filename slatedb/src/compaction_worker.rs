@@ -310,7 +310,8 @@ impl CompactionWorkerHandler {
     /// Scans `.compactions` for `Scheduled` entries without a worker, claims up
     /// to remaining capacity via CAS, then validates each claim against a
     /// manifest read *after* the claim and dispatches it to the executor.
-    /// Claims that fail validation are released back to `Scheduled`.
+    /// Claims invalid against the manifest are released back to `Scheduled`;
+    /// executor rejections are marked `Failed`.
     async fn poll_and_claim(&mut self) -> Result<(), SlateDBError> {
         let capacity = self.capacity();
 
@@ -392,7 +393,7 @@ impl CompactionWorkerHandler {
 
         for compaction in claimed {
             match Self::build_job_args(&compaction, manifest.core(), &self.worker_id) {
-                Ok(args) => match Self::dispatch_to_executor(&self.executor, args) {
+                Ok(args) => match self.executor.start_compaction_job(args) {
                     Ok(()) => {
                         info!(
                             "claimed compaction [worker_id={}, id={}]",
@@ -510,13 +511,6 @@ impl CompactionWorkerHandler {
             // the persisted one
             ctx: compaction.ctx().cloned(),
         })
-    }
-
-    fn dispatch_to_executor(
-        executor: &Arc<dyn CompactionExecutor + Send + Sync>,
-        args: StartCompactionJobArgs,
-    ) -> Result<(), SlateDBError> {
-        executor.start_compaction_job(args)
     }
 
     /// Refreshes liveness for every active job this worker still owns,
