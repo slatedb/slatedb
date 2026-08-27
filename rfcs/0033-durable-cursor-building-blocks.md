@@ -96,7 +96,7 @@ pub struct ScanOptions {
 }
 ```
 
-When `min_seq` is set, scans apply SlateDB's normal merge and visibility semantics, but filter returned rows only above the minimum sequence. 
+When `min_seq` is set, scans apply SlateDB's normal merge and visibility semantics, but filter returned rows only above the minimum sequence. For merges specifically, only the merge records above `min_seq` will be taken into account in the returned merged value.
 
 
 ### Tombstone Retention
