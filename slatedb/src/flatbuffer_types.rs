@@ -42,12 +42,16 @@ use crate::flatbuffer_types::root_generated::{
     CompactedSsTableViewArgs, Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
     CompactionContext as FbCompactionContext, CompactionSpec as FbCompactionSpec,
     CompactionStatus as FbCompactionStatus, CompactionsV1, CompactionsV1Args, CompressionFormat,
-    DrainSegmentSpec, DrainSegmentSpecArgs, ManifestV1Args, Segment as FbSegment,
-    SegmentArgs as FbSegmentArgs, SortedRun as FbSortedRunV1, SortedRunArgs as FbSortedRunV1Args,
+    DrainSegmentSpec, DrainSegmentSpecArgs, Segment as FbSegment, SegmentArgs as FbSegmentArgs,
     SortedRunV2, SortedRunV2Args, SstType as FbSstType, Subcompaction as FbSubcompaction,
     SubcompactionArgs as FbSubcompactionArgs, TieredCompactionContext as FbTieredCompactionContext,
     TieredCompactionContextArgs as FbTieredCompactionContextArgs, TieredCompactionSpec,
     TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid, UuidArgs,
+};
+// V1-only manifest encoder types; only test fixtures build V1 manifests
+#[cfg(test)]
+use crate::flatbuffer_types::root_generated::{
+    ManifestV1Args, SortedRun as FbSortedRunV1, SortedRunArgs as FbSortedRunV1Args,
 };
 use crate::format::sst::SST_FORMAT_VERSION;
 use crate::manifest::{ExternalDb, LsmTreeState, Manifest, ManifestCore, Segment};
@@ -170,16 +174,10 @@ pub(crate) struct FlatBufferManifestCodec {}
 
 impl ObjectCodec<Manifest> for FlatBufferManifestCodec {
     fn encode(&self, manifest: &Manifest) -> Bytes {
-        // RFC-0024 lazy V2 bump: the V1 schema has no `segments` or
-        // `segment_extractor_name` fields, so writing segmented state
-        // through the V1 encoder would silently drop it. Pick V2 the
-        // moment any segmented state is present; databases that never
-        // configure an extractor keep writing V1.
-        if Self::requires_v2(manifest) {
-            Self::create_from_manifest(manifest)
-        } else {
-            Self::create_from_manifest_v1(manifest)
-        }
+        // RFC-0004 Phase 2 of the manifest V1->V2 rollout: write V2
+        // universally, read V1+V2. V1 read support (and the V1 encoder,
+        // retained below for tests) stays until no V1 manifests remain
+        Self::create_from_manifest(manifest)
     }
 
     fn decode(&self, bytes: &Bytes) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
@@ -523,6 +521,10 @@ impl FlatBufferManifestCodec {
         })
     }
 
+    /// Retained for tests that construct V1 manifest fixtures to verify
+    /// decode-side backward compatibility; production code always writes
+    /// V2 (see [`FlatBufferManifestCodec::encode`]).
+    #[cfg(test)]
     pub(crate) fn create_from_manifest_v1(manifest: &Manifest) -> Bytes {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
@@ -533,12 +535,6 @@ impl FlatBufferManifestCodec {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
         db_fb_builder.create_manifest(manifest)
-    }
-
-    /// Whether `manifest` carries state that V1 cannot represent:
-    /// a configured segment extractor, or any named segment.
-    fn requires_v2(manifest: &Manifest) -> bool {
-        manifest.core.segment_extractor_name.is_some() || !manifest.core.segments.is_empty()
     }
 }
 
@@ -864,6 +860,9 @@ impl<'b> DbFlatBufferBuilder<'b> {
         self.builder.create_vector(compacted_ssts.as_ref())
     }
 
+    /// V1-only; only test fixtures construct V1 manifests now that
+    /// `encode()` writes V2 universally (see [`FlatBufferManifestCodec::encode`]).
+    #[cfg(test)]
     fn add_compacted_sst_from_view(
         &mut self,
         view: &SsTableView,
@@ -1011,6 +1010,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         self.builder.create_vector(segment_offsets.as_ref())
     }
 
+    #[cfg(test)]
     fn add_sorted_run_v1(
         &mut self,
         sorted_run: &db_state::SortedRun,
@@ -1030,6 +1030,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         )
     }
 
+    #[cfg(test)]
     fn add_sorted_runs_v1(
         &mut self,
         sorted_runs: &[db_state::SortedRun],
@@ -1361,6 +1362,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         bytes.into()
     }
 
+    #[cfg(test)]
     fn create_manifest_v1(&mut self, manifest: &Manifest) -> Bytes {
         let core = &manifest.core;
 
@@ -1822,10 +1824,14 @@ mod tests {
         let v1_bytes = bytes.freeze();
         codec.decode(&v1_bytes).expect("Should decode V1 manifest");
 
-        // Test encode/decode round-trip (currently writes V1 for forward compatibility)
+        // Test encode/decode round-trip (writes V2 universally, per RFC-0004
+        // Phase 2 of the manifest V1->V2 rollout)
         let manifest = Manifest::initial(ManifestCore::new());
         let encoded = codec.encode(&manifest);
-        assert_eq!(u16::from_be_bytes([encoded[0], encoded[1]]), 1);
+        assert_eq!(
+            u16::from_be_bytes([encoded[0], encoded[1]]),
+            MANIFEST_FORMAT_VERSION
+        );
         codec
             .decode(&encoded)
             .expect("Should decode manifest round-trip");

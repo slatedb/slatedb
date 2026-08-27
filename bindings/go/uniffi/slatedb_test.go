@@ -1880,8 +1880,9 @@ func TestAdminQueries(t *testing.T) {
 	if latestManifest.LastL0Seq < 3 {
 		t.Fatalf("ReadManifest(nil): LastL0Seq = %d, want at least 3", latestManifest.LastL0Seq)
 	}
-	if latestManifest.WalObjectStoreUri == nil {
-		t.Fatal("ReadManifest(nil): WalObjectStoreUri = nil, want value for configured WAL store")
+	// ManifestV2 is now written universally and never persists wal_object_store_uri
+	if latestManifest.WalObjectStoreUri != nil {
+		t.Fatalf("ReadManifest(nil): WalObjectStoreUri = %v, want nil (dropped by ManifestV2)", *latestManifest.WalObjectStoreUri)
 	}
 
 	firstManifest, err := admin.ReadManifest(uint64Ptr(manifests[0].Id))
