@@ -7347,8 +7347,14 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
+    /// https://github.com/slatedb/slatedb/issues/2055: manifests are now
+    /// written as V2 universally (RFC-0004 Phase 2), which drops
+    /// `wal_object_store_uri` entirely (PR #1473). So a DB created with
+    /// `with_wal_object_store()` can be reopened without it configured;
+    /// the WAL-store reconfiguration check is a no-op once the persisted
+    /// manifest is V2.
     #[tokio::test]
-    async fn test_wal_store_reconfiguration_fails() {
+    async fn test_wal_store_reconfiguration_allowed_after_v2_manifest() {
         let object_store = Arc::new(InMemory::new());
         let wal_object_store = Arc::new(InMemory::new());
 
@@ -7360,16 +7366,12 @@ mod tests {
             .unwrap();
         kv_store.close().await.unwrap();
 
-        let result = Db::builder("/tmp/test_kv_store", object_store)
+        let reopened = Db::builder("/tmp/test_kv_store", object_store)
             .with_settings(test_db_options(0, 1024, None))
             .build()
-            .await;
-        match result {
-            Err(err) => {
-                assert!(err.to_string().contains("unsupported"));
-            }
-            _ => panic!("expected Unsupported error"),
-        }
+            .await
+            .unwrap();
+        reopened.close().await.unwrap();
     }
 
     #[tokio::test]
