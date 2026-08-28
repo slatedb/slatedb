@@ -185,7 +185,7 @@ pub struct DbIterator {
     iter: Box<dyn RowEntryIterator + 'static>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
-    read_span: Option<tracing::Span>,
+    read_span: tracing::Span,
 }
 
 impl DbIterator {
@@ -197,11 +197,9 @@ impl DbIterator {
         max_seq: Option<u64>,
         merge_operator: Option<MergeOperatorType>,
         order: IterationOrder,
-        read_trace: Option<ReadTrace>,
+        read_trace: ReadTrace,
     ) -> Result<Self, SlateDBError> {
-        let read_span = read_trace
-            .as_ref()
-            .map(|read_trace| read_trace.read_span().clone());
+        let read_span = read_trace.read_span();
 
         // The write_batch iterator is provided only when operating within a Transaction. It represents the uncommitted
         // writes made during the transaction. We do not need to apply the max_seq filter to them, because they do
@@ -254,11 +252,7 @@ impl DbIterator {
             iter = Box::new(MergeOperatorRequiredIterator::new(iter));
         }
 
-        if let Some(span) = read_span.clone() {
-            iter.init().instrument(span).await?;
-        } else {
-            iter.init().await?;
-        }
+        iter.init().instrument(read_span.clone()).await?;
 
         Ok(DbIterator {
             range,
@@ -292,11 +286,7 @@ impl DbIterator {
 
     pub(crate) async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         let read_span = self.read_span.clone();
-        if let Some(read_span) = read_span {
-            self.next_entry_inner().instrument(read_span).await
-        } else {
-            self.next_entry_inner().await
-        }
+        self.next_entry_inner().instrument(read_span).await
     }
 
     async fn next_entry_inner(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
@@ -412,13 +402,13 @@ pub struct DbRecencyIterator {
     /// returns it instead of advancing, since after a failure the
     /// iterator's underlying state is unsafe to keep using.
     invalidated_error: Option<SlateDBError>,
-    read_span: Option<tracing::Span>,
+    read_span: tracing::Span,
 }
 
 impl DbRecencyIterator {
     pub(crate) fn new(
         iters: VecDeque<Box<dyn RowEntryIterator + 'static>>,
-        read_span: Option<tracing::Span>,
+        read_span: tracing::Span,
     ) -> Self {
         Self {
             iters,
@@ -434,11 +424,7 @@ impl DbRecencyIterator {
     /// for the full contract.
     pub async fn next_entry(&mut self) -> Result<Option<RowEntry>, crate::Error> {
         let read_span = self.read_span.clone();
-        if let Some(read_span) = read_span {
-            self.next_entry_inner().instrument(read_span).await
-        } else {
-            self.next_entry_inner().await
-        }
+        self.next_entry_inner().instrument(read_span).await
     }
 
     async fn next_entry_inner(&mut self) -> Result<Option<RowEntry>, crate::Error> {
@@ -484,6 +470,7 @@ mod tests {
     use crate::db_iter::DbIterator;
     use crate::error::SlateDBError;
     use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
+    use crate::reader::ReadTrace;
     use crate::test_utils::TestIterator;
     use bytes::Bytes;
     use std::collections::VecDeque;
@@ -499,7 +486,7 @@ mod tests {
             None,
             None,
             IterationOrder::Ascending,
-            None,
+            ReadTrace::new(None),
         )
         .await
         .unwrap();
@@ -540,7 +527,7 @@ mod tests {
             Some(100),
             None,
             IterationOrder::Ascending,
-            None,
+            ReadTrace::new(None),
         )
         .await
         .unwrap();
@@ -571,7 +558,7 @@ mod tests {
             None,
             None,
             IterationOrder::Ascending,
-            None,
+            ReadTrace::new(None),
         )
         .await
         .unwrap();
@@ -621,7 +608,7 @@ mod tests {
             None,
             None,
             IterationOrder::Ascending,
-            None,
+            ReadTrace::new(None),
         )
         .await
         .unwrap();

@@ -39,34 +39,38 @@ struct IteratorSources {
 
 #[derive(Clone)]
 pub(crate) struct ReadTrace {
-    tracing_options: TracingOptions,
+    tracing_options: Option<TracingOptions>,
     read_span: tracing::Span,
 }
 
 impl ReadTrace {
-    pub(crate) fn new(tracing_options: TracingOptions) -> Self {
-        let read_span =
-            tracing::debug_span!("slatedb.read", trace_id = tracing_options.trace_id.as_str(),);
+    pub(crate) fn new(tracing_options: Option<TracingOptions>) -> Self {
+        let read_span = tracing_options
+            .as_ref()
+            .map(|tracing_options| {
+                tracing::debug_span!("slatedb.read", trace_id = tracing_options.trace_id.as_str(),)
+            })
+            .unwrap_or_else(tracing::Span::none);
         Self {
             tracing_options,
             read_span,
         }
     }
 
-    pub(crate) fn read_span(&self) -> &tracing::Span {
-        &self.read_span
-    }
-
-    fn trace_id(&self) -> &str {
-        self.tracing_options.trace_id.as_str()
+    pub(crate) fn read_span(&self) -> tracing::Span {
+        self.read_span.clone()
     }
 
     pub(crate) fn new_memtable_span(&self) -> tracing::Span {
-        tracing::debug_span!(
-            parent: &self.read_span,
-            "slatedb.read.memtable",
-            trace_id = self.trace_id(),
-        )
+        if let Some(tracing_options) = self.tracing_options.as_ref() {
+            tracing::debug_span!(
+                parent: &self.read_span,
+                "slatedb.read.memtable",
+                trace_id = tracing_options.trace_id.as_str(),
+            )
+        } else {
+            tracing::Span::none()
+        }
     }
 }
 
@@ -164,15 +168,15 @@ impl Reader {
         max_seq
     }
 
-    fn read_trace(tracing_options: Option<&TracingOptions>) -> Option<ReadTrace> {
-        tracing_options.map(|tracing_options| ReadTrace::new(tracing_options.clone()))
+    fn read_trace(tracing_options: Option<&TracingOptions>) -> ReadTrace {
+        ReadTrace::new(tracing_options.cloned())
     }
 
     fn build_memtable_iters(
         range: &BytesRange,
         db_state: &(dyn DbStateReader + Sync),
         order: IterationOrder,
-        read_trace: Option<ReadTrace>,
+        read_trace: ReadTrace,
     ) -> Vec<Box<dyn RowEntryIterator + 'static>> {
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());
@@ -197,7 +201,7 @@ impl Reader {
         sst_iter_options: &SstIteratorOptions,
         point_lookup_stats: Option<DbStats>,
         max_seq: Option<u64>,
-        read_trace: Option<ReadTrace>,
+        read_trace: ReadTrace,
     ) -> Result<IteratorSources, SlateDBError> {
         let mem_iters =
             Self::build_memtable_iters(range, db_state, sst_iter_options.order, read_trace);
@@ -267,11 +271,7 @@ impl Reader {
             max_seq,
             read_trace.clone(),
         );
-        if let Some(read_trace) = read_trace {
-            read.instrument(read_trace.read_span().clone()).await
-        } else {
-            read.await
-        }
+        read.instrument(read_trace.read_span()).await
     }
 
     async fn get_key_value_with_options_inner<K: AsRef<[u8]>>(
@@ -281,7 +281,7 @@ impl Reader {
         db_state: &(dyn DbStateReader + Sync + Send),
         write_batch_iter: Option<WriteBatchIterator>,
         max_seq: Option<u64>,
-        read_trace: Option<ReadTrace>,
+        read_trace: ReadTrace,
     ) -> Result<Option<KeyValue>, SlateDBError> {
         self.db_stats.get_requests.increment(1);
         let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
@@ -357,11 +357,7 @@ impl Reader {
     ) -> Result<DbIterator, SlateDBError> {
         let read_trace = Self::read_trace(options.tracing_options.as_ref());
         let read = self.scan_with_options_inner(range, options, ctx, read_trace.clone());
-        if let Some(read_trace) = read_trace {
-            read.instrument(read_trace.read_span().clone()).await
-        } else {
-            read.await
-        }
+        read.instrument(read_trace.read_span()).await
     }
 
     async fn scan_with_options_inner(
@@ -369,7 +365,7 @@ impl Reader {
         range: BytesRange,
         options: &ScanOptions,
         ctx: ScanContext<'_>,
-        read_trace: Option<ReadTrace>,
+        read_trace: ReadTrace,
     ) -> Result<DbIterator, SlateDBError> {
         self.db_stats.scan_requests.increment(1);
         let max_seq = self.prepare_max_seq(ctx.max_seq, options.durability_filter, options.dirty);
@@ -441,11 +437,7 @@ impl Reader {
             db_state,
             read_trace.clone(),
         );
-        if let Some(read_trace) = read_trace {
-            read.instrument(read_trace.read_span().clone()).await
-        } else {
-            read.await
-        }
+        read.instrument(read_trace.read_span()).await
     }
 
     async fn scan_prefix_by_recency_with_options_inner(
@@ -453,7 +445,7 @@ impl Reader {
         prefix: Bytes,
         options: &ScanOptions,
         db_state: &(dyn DbStateReader + Sync),
-        read_trace: Option<ReadTrace>,
+        read_trace: ReadTrace,
     ) -> Result<DbRecencyIterator, SlateDBError> {
         self.db_stats.scan_requests.increment(1);
         let max_seq = self.prepare_max_seq(None, options.durability_filter, options.dirty);
@@ -534,7 +526,7 @@ impl Reader {
         let filtered = apply_filters(all_iters, max_seq);
         Ok(DbRecencyIterator::new(
             VecDeque::from(filtered),
-            read_trace.map(|read_trace| read_trace.read_span().clone()),
+            read_trace.read_span(),
         ))
     }
 }
