@@ -118,7 +118,9 @@ table SequenceWatermark {
 
 ```
 
-The sequence watermark tells the compactor how far a checkpoint has progressed without needing to fetch the corresponding manifest metadata. In order to determine whether a tombstone can be deleted, the compactor will apply its current validation to ensure the tombstone's location in the final sorted run. It will then compare the sequence of the tombstone against the minimum watermark across all checkpoints. If the tombstone's sequence is higher than the minimum watermark, then it must be retained.
+The sequence watermark tells the compactor how far a checkpoint has progressed without needing to fetch the corresponding manifest metadata. It must match exactly the value from `last_l0_seq` in the manifest. Any lower value would be unsafe because tombstones may have already been removed.
+
+In order to determine whether a tombstone can be deleted, the compactor will apply its current validation to ensure the tombstone's location in the final sorted run. It will then compare the sequence of the tombstone against the minimum watermark across all checkpoints. If the tombstone's sequence is higher than the minimum watermark, then it must be retained.
 
 Over time, if a reader is not making progress, tombstones may accumulate. This can be mitigated by using checkpoint expiration. If no readers have set a watermark, then there is no additional restriction on tombstone retention.
 
