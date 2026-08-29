@@ -9,17 +9,17 @@ use tokio::sync::watch;
 use tokio::task;
 use tokio::task::JoinHandle;
 
-use crate::db_state::SsTableId;
 use crate::db_status::DbStatus;
 use crate::error::SlateDBError;
 use crate::iter::{EmptyIterator, RowEntryIterator};
 use crate::manifest::store::ManifestStore;
-use crate::manifest::{SsTableView, VersionedManifest};
-use crate::sst_iter::{SstIterator, SstIteratorOptions};
-use crate::tablestore::TableStore;
+use crate::manifest::VersionedManifest;
 use crate::utils::panic_string;
 use crate::wal::{WalError, WalIterator as WalIteratorTrait, WalRows};
 use crate::RowEntry;
+
+use super::sst_iterator::{WalSstIterator, WalSstIteratorOptions};
+use super::store::WalTableStore;
 
 #[async_trait]
 pub(crate) trait ManifestReader: Send + Sync + 'static {
@@ -41,31 +41,45 @@ impl ManifestReader for ManifestStore {
 }
 
 pub(crate) struct SlateDbWalIteratorOptions {
-    /// The number of SSTs to preload while replaying
+    /// The number of WAL SSTs to preload while replaying.
     pub(crate) sst_batch_size: usize,
 
-    /// Options to pass through to underlying SST iterators
-    pub(crate) sst_iter_options: SstIteratorOptions,
+    /// Options to pass through to the underlying WAL SST iterators.
+    pub(crate) sst_iter_options: WalSstIteratorOptions,
 }
 
 impl Default for SlateDbWalIteratorOptions {
     fn default() -> Self {
         Self {
             sst_batch_size: 4,
-            sst_iter_options: SstIteratorOptions::default(),
+            sst_iter_options: WalSstIteratorOptions::default(),
+        }
+    }
+}
+
+enum WalFileIterator {
+    Empty(EmptyIterator),
+    Sst(Box<WalSstIterator>),
+}
+
+impl WalFileIterator {
+    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        match self {
+            Self::Empty(iter) => iter.next().await,
+            Self::Sst(iter) => iter.next().await,
         }
     }
 }
 
 struct WalRowsCollector {
     wal_id: u64,
-    iter: Box<dyn RowEntryIterator + 'static>,
+    iter: WalFileIterator,
     rows: Vec<RowEntry>,
     drained: bool,
 }
 
 impl WalRowsCollector {
-    fn new(wal_id: u64, iter: Box<dyn RowEntryIterator + 'static>) -> Self {
+    fn new(wal_id: u64, iter: WalFileIterator) -> Self {
         Self {
             wal_id,
             iter,
@@ -144,19 +158,18 @@ impl CurrentWalFile {
 }
 
 /// Iterates over the writes in a range of WAL files, preloading up to
-/// `sst_batch_size` WAL SSTs concurrently. Returns the rows of one WAL file per
-/// [`WalRows`], and verifies that files carry strictly increasing seq
+/// `sst_batch_size` WAL SST handles concurrently. Returns the rows of one WAL
+/// file per [`WalRows`], and verifies that files carry strictly increasing seq
 /// ranges — the ordering callers rely on to split and tag memtables safely.
 ///
-/// Preloading only opens each WAL SST (footer, index, and any eagerly fetched
-/// blocks); a file's rows are read out only when it is returned from
+/// A file's rows are read sequentially only when it is returned from
 /// [`Self::next`], so at most one file's rows are materialized at a time. For an
 /// unbounded end, open tasks poll their assigned future WAL IDs until the files
 /// appear or the manifest proves that a missing file was truncated.
 pub(crate) struct SlateDbWalIterator {
     options: SlateDbWalIteratorOptions,
     end_bound: WalIteratorEndBound,
-    table_store: Arc<TableStore>,
+    wal_store: Arc<WalTableStore>,
     next_files: VecDeque<JoinHandle<Result<WalRowsCollector, WalError>>>,
     next_wal_id: Option<u64>,
     /// The greatest seq returned so far, used to verify that WAL files arrive
@@ -204,7 +217,7 @@ impl SlateDbWalIterator {
         from_wal_id: u64,
         to_bound: WalIteratorEndBound,
         options: SlateDbWalIteratorOptions,
-        table_store: Arc<TableStore>,
+        wal_store: Arc<WalTableStore>,
     ) -> Result<Self, SlateDBError> {
         if options.sst_batch_size < 1 {
             return Err(SlateDBError::InvalidSSTBatchSize(options.sst_batch_size));
@@ -213,7 +226,7 @@ impl SlateDbWalIterator {
         Ok(Self {
             options,
             end_bound: to_bound,
-            table_store,
+            wal_store,
             next_files: VecDeque::new(),
             next_wal_id: Some(from_wal_id),
             last_seq: None,
@@ -240,49 +253,36 @@ impl SlateDbWalIterator {
 
         async fn try_open_file_iter(
             wal_id: u64,
-            sst_iter_options: SstIteratorOptions,
-            table_store: Arc<TableStore>,
+            sst_iter_options: WalSstIteratorOptions,
+            wal_store: Arc<WalTableStore>,
         ) -> Result<WalRowsCollector, SlateDBError> {
-            let sst = match table_store.open_sst(&SsTableId::Wal(wal_id)).await {
+            let sst = match wal_store.open_sst(wal_id).await {
                 Ok(sst) => sst,
                 Err(SlateDBError::EmptySSTable) => {
                     // Zero-byte WAL files are fence markers; replay them as empty WALs
                     // so the last replayed WAL ID still advances past the marker.
                     return Ok(WalRowsCollector::new(
                         wal_id,
-                        Box::new(EmptyIterator::new()),
+                        WalFileIterator::Empty(EmptyIterator::new()),
                     ));
                 }
                 Err(err) => return Err(err),
             };
-            let iter = SstIterator::new_owned_initialized(
-                ..,
-                SsTableView::identity(sst),
-                Arc::clone(&table_store),
-                sst_iter_options,
-            )
-            .await?;
-            // An unbounded, unfiltered scan over a WAL SST always yields an
-            // iterator. `None` means the file cannot be read, and replay must
-            // fail rather than silently end early and drop the remaining WALs.
-            let Some(iter) = iter else {
-                error!(
-                    "could not construct row iterator over WAL SST. [wal_id={}]",
-                    wal_id
-                );
-                return Err(SlateDBError::InvalidDBState);
-            };
-            Ok(WalRowsCollector::new(wal_id, Box::new(iter)))
+            let iter = WalSstIterator::new(sst, Arc::clone(&wal_store), sst_iter_options).await?;
+            Ok(WalRowsCollector::new(
+                wal_id,
+                WalFileIterator::Sst(Box::new(iter)),
+            ))
         }
 
         async fn open_file_iter(
             wal_id: u64,
-            sst_iter_options: SstIteratorOptions,
-            table_store: Arc<TableStore>,
+            sst_iter_options: WalSstIteratorOptions,
+            wal_store: Arc<WalTableStore>,
             end_bound: WalIteratorEndBound,
         ) -> Result<WalRowsCollector, WalError> {
             loop {
-                match try_open_file_iter(wal_id, sst_iter_options.clone(), Arc::clone(&table_store))
+                match try_open_file_iter(wal_id, sst_iter_options.clone(), Arc::clone(&wal_store))
                     .await
                 {
                     Ok(iter) => return Ok(iter),
@@ -312,38 +312,21 @@ impl SlateDbWalIterator {
         let handle = task::spawn(open_file_iter(
             next_wal_id,
             self.options.sst_iter_options.clone(),
-            Arc::clone(&self.table_store),
+            Arc::clone(&self.wal_store),
             self.end_bound.clone(),
         ));
         self.next_files.push_back(handle);
         true
     }
 
-    /// Spawns file loading in the background and populates the iterator with the results of loading
-    /// the next wal file.
-    async fn load_next_file(&mut self) -> Result<(), WalError> {
-        if self.current_file.initialized() {
-            return Ok(());
-        }
-        // Populate the pre-load queue first to handle the case where it's initially empty
-        self.spawn_opens();
-        // await a mutable ref to the task so that next remains cancel-safe
-        // see https://docs.rs/tokio/latest/tokio/task/struct.JoinHandle.html#cancel-safety
-        let Some(join_handle) = self.next_files.front_mut() else {
-            self.current_file.finish();
-            return Ok(());
-        };
-        let result = join_handle.await;
-        self.next_files.pop_front();
-        // Refill the preload queue before returning so the iterator starts loading the next file
-        self.spawn_opens();
+    fn open_task_result(
+        end_bound: &WalIteratorEndBound,
+        result: Result<Result<WalRowsCollector, WalError>, task::JoinError>,
+    ) -> Result<WalRowsCollector, WalError> {
         match result {
-            Ok(result) => {
-                self.current_file.advance(result?);
-                Ok(())
-            }
+            Ok(result) => result,
             Err(join_err) => {
-                let task_name = format!("wal_replay[end_bound={:?}]", self.end_bound);
+                let task_name = format!("wal_replay[end_bound={end_bound:?}]");
                 let msg = if let Ok(panic_err) = join_err.try_into_panic() {
                     format!(
                         "wal_replay task panicked unexpectedly. [task_name={}, panic={}]",
@@ -360,6 +343,30 @@ impl SlateDbWalIterator {
         }
     }
 
+    /// Opens WAL handles in the background and promotes the oldest file when a
+    /// current file is needed.
+    async fn load_next_file(&mut self) -> Result<(), WalError> {
+        if self.current_file.initialized() {
+            return Ok(());
+        }
+
+        // Populate the pre-load queue first to handle the case where it's initially empty
+        self.spawn_opens();
+        // await a mutable ref to the task so that next remains cancel-safe
+        // see https://docs.rs/tokio/latest/tokio/task/struct.JoinHandle.html#cancel-safety
+        let Some(join_handle) = self.next_files.front_mut() else {
+            self.current_file.finish();
+            return Ok(());
+        };
+        let result = join_handle.await;
+        self.next_files.pop_front();
+        // Refill the preload queue before returning so the iterator starts loading the next file
+        self.spawn_opens();
+        self.current_file
+            .advance(Self::open_task_result(&self.end_bound, result)?);
+        Ok(())
+    }
+
     fn terminate(
         &mut self,
         result: Result<Option<WalRows>, WalError>,
@@ -368,6 +375,7 @@ impl SlateDbWalIterator {
         for task in self.next_files.drain(..) {
             task.abort();
         }
+        self.current_file.collector = None;
         result
     }
 }
@@ -444,14 +452,12 @@ mod tests {
     use slatedb_common::clock::DefaultSystemClock;
 
     use super::{SlateDbWalIterator, SlateDbWalIteratorOptions, WalIteratorEndBound};
-    use crate::block_cache_policy::BlockCachePolicy;
-    use crate::db_state::SsTableId;
     use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
-    use crate::object_stores::ObjectStores;
-    use crate::tablestore::{TableStore, TableStoreKind};
+    use crate::object_store_tag::TableStoreKind;
     use crate::types::RowEntry;
+    use crate::wal::slatedb::store::WalTableStore;
     use crate::wal::{WalError, WalIterator as _};
 
     fn versioned_manifest(id: u64, next_wal_id: u64) -> VersionedManifest {
@@ -534,10 +540,7 @@ mod tests {
                 poll_interval: Duration::from_millis(10),
                 system_clock: Arc::new(DefaultSystemClock::new()),
             },
-            SlateDbWalIteratorOptions {
-                sst_batch_size: 2,
-                ..SlateDbWalIteratorOptions::default()
-            },
+            SlateDbWalIteratorOptions::default(),
             Arc::clone(&table_store),
         )
         .unwrap();
@@ -637,13 +640,13 @@ mod tests {
             }
         }
         for (index, entries) in wal_entries.into_iter().enumerate() {
-            let mut builder = table_store.wal_table_builder();
+            let mut builder = table_store.table_builder();
             for entry in entries {
                 builder.add(entry).await.unwrap();
             }
             let encoded_sst = builder.build().await.unwrap();
             table_store
-                .write_sst(&SsTableId::Wal(index as u64 + 1), &encoded_sst)
+                .write_sst(index as u64 + 1, &encoded_sst)
                 .await
                 .unwrap();
         }
@@ -715,16 +718,14 @@ mod tests {
         assert_eq!(last_consumed_wal_file_id, wal_file_count);
     }
 
-    fn test_table_store() -> Arc<TableStore> {
+    fn test_table_store() -> Arc<WalTableStore> {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("/tmp/test_kv_store");
-        Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+        Arc::new(WalTableStore::new(
+            object_store,
             SsTableFormat::default(),
             path,
-            None,
             TableStoreKind::Main,
-            BlockCachePolicy::default(),
         ))
     }
 }
