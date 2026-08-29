@@ -266,7 +266,7 @@ impl ObjectStore for RetryingObjectStore {
 
             if options_range.is_none() {
                 // No range requested — don't buffer the body. The buffer size
-                // can't be validated wihtout buffering.
+                // can't be validated without buffering.
                 return Ok(result);
             }
 
