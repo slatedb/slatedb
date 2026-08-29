@@ -1,10 +1,10 @@
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, StoredManifest};
-use crate::tablestore::TableStore;
 use crate::utils::WatchableOnceCellReader;
+use crate::wal::slatedb::store::WalTableStore;
 use crate::wal::slatedb::writer_init::{SlateDbWalWriterInit, SlateDbWalWriterInitOptions};
-use crate::wal::{WalIterator, WalWriter, WriterInit};
+use crate::wal::{SlateDbWalReaderOptions, WalIterator, WalWriter, WriterInit};
 use crate::Settings;
 use fail_parallel::{fail_point_send, FailPointTx};
 use slatedb_common::metrics::MetricsRecorderHelper;
@@ -16,7 +16,7 @@ pub(crate) struct WriterFencer {
     closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
     recorder: MetricsRecorderHelper,
     wal_writer_init_options: SlateDbWalWriterInitOptions,
-    table_store: Arc<TableStore>,
+    wal_store: Arc<WalTableStore>,
     manifest_update_timeout: Duration,
     system_clock: Arc<dyn SystemClock>,
     task_executor: Arc<MessageHandlerExecutor>,
@@ -35,8 +35,9 @@ impl WriterFencer {
     pub(crate) fn new(
         closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         recorder: MetricsRecorderHelper,
-        table_store: Arc<TableStore>,
+        wal_store: Arc<WalTableStore>,
         settings: &Settings,
+        wal_replay_options: SlateDbWalReaderOptions,
         system_clock: Arc<dyn SystemClock>,
         task_executor: Arc<MessageHandlerExecutor>,
         wal_writer_init: Option<Box<dyn WriterInit>>,
@@ -44,8 +45,9 @@ impl WriterFencer {
         Self::new_with_fp_handle(
             closed_result_reader,
             recorder,
-            table_store,
+            wal_store,
             settings,
+            wal_replay_options,
             system_clock,
             task_executor,
             wal_writer_init,
@@ -56,8 +58,9 @@ impl WriterFencer {
     fn new_with_fp_handle(
         closed_result_reader: WatchableOnceCellReader<Result<(), SlateDBError>>,
         recorder: MetricsRecorderHelper,
-        table_store: Arc<TableStore>,
+        wal_store: Arc<WalTableStore>,
         settings: &Settings,
+        wal_replay_options: SlateDbWalReaderOptions,
         system_clock: Arc<dyn SystemClock>,
         task_executor: Arc<MessageHandlerExecutor>,
         wal_writer_init: Option<Box<dyn WriterInit>>,
@@ -66,8 +69,8 @@ impl WriterFencer {
         Self {
             closed_result_reader,
             recorder,
-            table_store,
-            wal_writer_init_options: settings.into(),
+            wal_store,
+            wal_writer_init_options: SlateDbWalWriterInitOptions::new(settings, wal_replay_options),
             manifest_update_timeout: settings.manifest_update_timeout,
             system_clock,
             task_executor,
@@ -94,7 +97,7 @@ impl WriterFencer {
                 SlateDbWalWriterInit::load(
                     self.closed_result_reader.clone(),
                     self.recorder.clone(),
-                    self.table_store.clone(),
+                    self.wal_store.clone(),
                     self.wal_writer_init_options,
                     stored_manifest.manifest(),
                     self.task_executor.clone(),
@@ -143,9 +146,11 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
     use crate::memtable_flusher::MANIFEST_REFRESH_COUNT;
-    use crate::object_stores::ObjectStores;
+    use crate::paths::PathResolver;
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::utils::WatchableOnceCell;
+    use crate::wal::slatedb::store::{WalFileId, WalTableStore};
+    use crate::wal::SlateDbWalReaderOptions;
     use crate::{CloseReason, Db, ErrorKind, Settings};
     use bytes::Bytes;
     use fail_parallel::fail_point_channel;
@@ -167,6 +172,7 @@ mod tests {
         path: String,
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
+        wal_store: Arc<WalTableStore>,
         fp_registry: Arc<FailPointRegistry>,
         event_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
         fencer: Option<WriterFencer>,
@@ -179,15 +185,23 @@ mod tests {
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let settings = test_db_options();
             let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+            let fp_registry = Arc::new(FailPointRegistry::new());
             let manifest_store =
                 Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
             let table_store = Arc::new(TableStore::new(
-                ObjectStores::new(object_store.clone(), None),
+                object_store.clone(),
                 SsTableFormat::default(),
                 path,
                 None,
                 TableStoreKind::Main,
                 BlockCachePolicy::default(),
+            ));
+            let wal_store = Arc::new(WalTableStore::new_with_fp_registry(
+                Arc::clone(&object_store),
+                SsTableFormat::default(),
+                PathResolver::from_root(path),
+                Arc::clone(&fp_registry),
+                TableStoreKind::Main,
             ));
             let stored_manifest = StoredManifest::create_new_db(
                 manifest_store.clone(),
@@ -196,7 +210,6 @@ mod tests {
             )
             .await
             .unwrap();
-            let fp_registry = Arc::new(FailPointRegistry::new());
             let (fp_tx, event_rx) = fail_point_channel(fp_registry.clone());
             let cell = Arc::new(WatchableOnceCell::new());
             let recorder = MetricsRecorderHelper::new(
@@ -210,8 +223,9 @@ mod tests {
             let fencer = WriterFencer::new_with_fp_handle(
                 cell.reader(),
                 recorder,
-                table_store.clone(),
+                wal_store.clone(),
                 &settings,
+                SlateDbWalReaderOptions::default(),
                 system_clock.clone(),
                 task_executor.clone(),
                 None,
@@ -222,6 +236,7 @@ mod tests {
                 path: path.to_string(),
                 manifest_store,
                 table_store,
+                wal_store,
                 fp_registry,
                 event_rx,
                 fencer: Some(fencer),
@@ -288,6 +303,7 @@ mod tests {
                 self.manifest_store.clone(),
                 compactions_store,
                 self.table_store.clone(),
+                self.wal_store.clone(),
                 self.object_store.clone(),
                 gc_opts,
                 &MetricsRecorderHelper::noop(),
@@ -300,8 +316,8 @@ mod tests {
             // at replay_after_wal_id is retained as the boundary; old fence wals
             // stay because we don't enable wal_fence_options).
             let remaining: Vec<_> = self
-                .table_store
-                .list_wal_ssts(..wal_id)
+                .wal_store
+                .list_wal_ssts(..WalFileId::from(wal_id))
                 .await
                 .unwrap()
                 .into_iter()
@@ -333,7 +349,7 @@ mod tests {
         }
 
         async fn assert_fencing_wal(&self) {
-            let wals = self.table_store.list_wal_ssts(..).await.unwrap();
+            let wals = self.wal_store.list_wal_ssts(..).await.unwrap();
             let last = wals.last().expect("wal list is empty");
             assert_eq!(last.metadata.size, 0, "last wal is not a fence wal");
         }
@@ -348,12 +364,12 @@ mod tests {
                 .core
                 .replay_after_wal_id;
             let wal_ids: Vec<u64> = self
-                .table_store
-                .list_wal_ssts(replay_after_wal_id + 1..)
+                .wal_store
+                .list_wal_ssts(WalFileId::from(replay_after_wal_id + 1)..)
                 .await
                 .unwrap()
                 .into_iter()
-                .map(|w| w.id.unwrap_wal_id())
+                .map(|w| w.id.value())
                 .collect();
             for (i, id) in wal_ids.iter().enumerate() {
                 let expected = replay_after_wal_id + 1 + i as u64;

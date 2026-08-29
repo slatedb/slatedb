@@ -10,6 +10,8 @@ use std::ops::{Bound, Range, RangeFrom};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "bencher")]
+mod bench;
 pub(crate) mod slatedb;
 #[cfg(test)]
 pub(crate) mod test_utils;
@@ -17,6 +19,13 @@ pub(crate) mod wal_disabled;
 
 pub use crate::wal::slatedb::reader::{
     SlateDbWalReader, SlateDbWalReaderBuilder, SlateDbWalReaderOptions,
+};
+pub use crate::wal::slatedb::store::WalFileId;
+#[cfg(feature = "bencher")]
+pub use bench::{
+    run_bench, WalBenchMeasurement, WalBenchPhase, WalBenchReplayOptions, WalBenchResult,
+    DEFAULT_WAL_BENCH_DATA_SIZE_BYTES, DEFAULT_WAL_BENCH_MAX_BUFFERED_BYTES,
+    DEFAULT_WAL_BENCH_MAX_FETCH_TASKS, DEFAULT_WAL_BENCH_TARGET_BYTES_TO_FETCH,
 };
 
 /// A range of WAL File IDs

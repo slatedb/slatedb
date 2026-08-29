@@ -13,12 +13,11 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 use ulid::Ulid;
-use SsTableId::{Compacted, Wal};
 
 /// A handle to an SSTable — the physical SST on storage.
 #[derive(Clone, PartialEq, Serialize)]
 pub struct SsTableHandle {
-    /// The unique identifier for this SSTable. The table can be either a WAL SST or a compacted SST.
+    /// The unique identifier for this compacted SSTable.
     pub id: SsTableId,
 
     /// The format version that this SSTable was serialized with.
@@ -88,14 +87,10 @@ impl Debug for SsTableView {
 
 impl SsTableView {
     /// Create a view using a deterministic id derived from the SST's own identity.
-    /// Use this only for ephemeral views (e.g. WAL iteration) or legacy migration
-    /// where no `DbRand` is available and the id is not stored in the manifest.
+    /// Use this only where no `DbRand` is available and the id is not stored in
+    /// the manifest.
     pub(crate) fn identity(sst: SsTableHandle) -> Self {
-        let id = match &sst.id {
-            Compacted(ulid) => *ulid,
-            Wal(wal_id) => Ulid::from_parts(*wal_id, 0),
-        };
-        Self::new(id, sst)
+        Self::new(sst.id.value(), sst)
     }
 
     /// Create a new view with no visible_range projection.
@@ -188,7 +183,6 @@ impl SsTableView {
     // memtable flushes, which should never produce empty SSTs. This method returns
     // the start bound after applying projections.
     pub(crate) fn compacted_effective_start_bound(&self) -> Bound<Bytes> {
-        assert!(matches!(self.sst.id, Compacted(_)));
         self.effective_range.start_bound().cloned()
     }
 
@@ -196,7 +190,6 @@ impl SsTableView {
     // memtable flushes, which should never produce empty SSTs. This method returns
     // the start key after applying projections.
     pub(crate) fn compacted_effective_start_key(&self) -> &Bytes {
-        assert!(matches!(self.sst.id, Compacted(_)));
         match self.effective_range.start_bound() {
             Included(k) => k,
             _ => unreachable!("Invalid start bound"),
@@ -212,7 +205,6 @@ impl SsTableView {
         next_view: Option<&SsTableView>,
         range: &BytesRange,
     ) -> Option<BytesRange> {
-        assert!(matches!(self.sst.id, Compacted(_)));
         if let Some(next_view) = next_view {
             BytesRange::new(
                 self.compacted_effective_start_bound(),
@@ -356,40 +348,29 @@ pub(crate) fn max_l0_overlap(l0: &VecDeque<SsTableView>) -> usize {
     peak as usize
 }
 
-/// An identifier for an SSTable, which can be either a WAL SST or a compacted SST.
+/// An identifier for a compacted SSTable.
 #[derive(Clone, PartialEq, PartialOrd, Ord, Hash, Eq, Copy, Serialize)]
-pub enum SsTableId {
-    /// A WAL SST identified by its unique WAL ID.
-    Wal(u64),
-
-    /// A compacted SST identified by its ULID.
-    Compacted(Ulid),
-}
+pub struct SsTableId(Ulid);
 
 impl SsTableId {
-    #[allow(clippy::panic)]
-    pub fn unwrap_wal_id(&self) -> u64 {
-        match self {
-            Wal(wal_id) => *wal_id,
-            Compacted(_) => panic!("found compacted id when unwrapping WAL ID"),
-        }
+    pub const fn new(value: Ulid) -> Self {
+        Self(value)
     }
 
-    #[allow(clippy::panic)]
-    pub fn unwrap_compacted_id(&self) -> Ulid {
-        match self {
-            Wal(_) => panic!("found WAL id when unwrapping compacted ID"),
-            Compacted(ulid) => *ulid,
-        }
+    pub fn value(&self) -> Ulid {
+        self.0
+    }
+}
+
+impl From<Ulid> for SsTableId {
+    fn from(value: Ulid) -> Self {
+        Self::new(value)
     }
 }
 
 impl Debug for SsTableId {
     fn fmt(&self, f: &mut Formatter) -> Result<(), std::fmt::Error> {
-        match self {
-            Wal(id) => write!(f, "SsTableId::Wal({})", id),
-            Compacted(id) => write!(f, "SsTableId::Compacted({})", id.to_string()),
-        }
+        write!(f, "SsTableId({})", self.0)
     }
 }
 
@@ -404,11 +385,8 @@ pub enum SstType {
 }
 
 impl From<&SsTableId> for SstType {
-    fn from(id: &SsTableId) -> Self {
-        match id {
-            Wal(_) => SstType::Wal,
-            Compacted(_) => SstType::Compacted,
-        }
+    fn from(_id: &SsTableId) -> Self {
+        SstType::Compacted
     }
 }
 
@@ -900,7 +878,7 @@ mod tests {
     #[test]
     fn test_merge_remote_manifest_reestablishes_external_sst_invariant() {
         let mut db_state = DbState::new(new_dirty_manifest());
-        let stale_id = SsTableId::Compacted(ulid::Ulid::new());
+        let stale_id = SsTableId::from(ulid::Ulid::new());
         let mut remote = new_dirty_manifest();
         remote.value.external_dbs = vec![crate::manifest::ExternalDb {
             path: "/parent/db".to_string(),
@@ -986,7 +964,7 @@ mod tests {
         fn view(seq: u64) -> SsTableView {
             let ulid = ulid::Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(ulid),
+                SsTableId::from(ulid),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo::default(),
             ))
@@ -1039,7 +1017,7 @@ mod tests {
         fn view(seq: u64) -> SsTableView {
             let ulid = ulid::Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(ulid),
+                SsTableId::from(ulid),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo::default(),
             ))
@@ -1133,7 +1111,7 @@ mod tests {
             db_state.freeze_memtable(i as u64);
             let imm = db_state.state.imm_memtable.back().unwrap().clone();
             let handle = SsTableHandle::new(
-                SsTableId::Compacted(ulid::Ulid::from_parts(i as u64, 0)),
+                SsTableId::from(ulid::Ulid::from_parts(i as u64, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 dummy_info.clone(),
             );
@@ -1247,7 +1225,7 @@ mod tests {
 
     fn create_compacted_sst_view(first_entry: Option<Bytes>) -> SsTableView {
         let sst_info = create_sst_info(first_entry);
-        let sst_id = SsTableId::Compacted(ulid::Ulid::from_parts(0, 0));
+        let sst_id = SsTableId::from(ulid::Ulid::from_parts(0, 0));
         let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
         SsTableView::identity(handle)
     }
@@ -1261,7 +1239,7 @@ mod tests {
             last_entry: last_entry.map(Bytes::copy_from_slice),
             ..Default::default()
         };
-        let sst_id = SsTableId::Compacted(ulid::Ulid::new());
+        let sst_id = SsTableId::from(ulid::Ulid::new());
         let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
         SsTableView::identity(handle)
     }

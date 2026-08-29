@@ -16,8 +16,9 @@ use futures::stream::BoxStream;
 use futures::{stream, StreamExt};
 use object_store::path::Path;
 use object_store::{
-    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions as OS_PutOptions, PutPayload, PutResult, RenameOptions,
+    CopyOptions, GetOptions, GetRange, GetResult, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore, PutMultipartOptions, PutOptions as OS_PutOptions, PutPayload, PutResult,
+    RenameOptions,
 };
 use rand::{Rng, RngCore};
 use std::cmp::Ordering as CmpOrdering;
@@ -38,7 +39,7 @@ use ulid::Ulid;
 
 pub(crate) fn bounded_sst_view(id: u64, first: &'static [u8], last: &'static [u8]) -> SsTableView {
     SsTableView::identity(SsTableHandle::new(
-        SsTableId::Compacted(Ulid::from_parts(id, 0)),
+        SsTableId::from(Ulid::from_parts(id, 0)),
         SST_FORMAT_VERSION_LATEST,
         SsTableInfo {
             first_entry: Some(Bytes::from_static(first)),
@@ -428,7 +429,7 @@ pub(crate) async fn write_ssts(
     }
 
     let mut output_ssts = Vec::new();
-    let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+    let mut writer = table_store.table_writer(SsTableId::from(Ulid::new()));
     let mut bytes_written = 0usize;
 
     for (index, entry) in entries.iter().cloned().enumerate() {
@@ -441,7 +442,7 @@ pub(crate) async fn write_ssts(
             bytes_written = 0;
 
             if index + 1 < entries.len() {
-                writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+                writer = table_store.table_writer(SsTableId::from(Ulid::new()));
             } else {
                 return output_ssts;
             }
@@ -1607,6 +1608,7 @@ mod tests {
 pub(crate) enum RecordedCall {
     Get {
         head: bool,
+        range: Option<GetRange>,
         kind: Option<TableStoreKind>,
         sst_type: Option<SstType>,
         retry: Option<RetryReason>,
@@ -1676,6 +1678,21 @@ impl RecordingObjectStore {
             .collect()
     }
 
+    pub(crate) fn recorded_get_ranges(&self, head: bool) -> Vec<Option<GetRange>> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|call| match call {
+                RecordedCall::Get {
+                    head: is_head,
+                    range,
+                    ..
+                } if *is_head == head => Some(range.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn write_kinds(&self) -> Vec<Option<TableStoreKind>> {
         self.calls
             .lock()
@@ -1718,6 +1735,7 @@ impl ObjectStore for RecordingObjectStore {
         let tag = ObjectStoreCallTag::from_extensions(&options.extensions);
         self.calls.lock().push(RecordedCall::Get {
             head: options.head,
+            range: options.range.clone(),
             kind: tag.map(|t| t.kind),
             sst_type: tag.map(|t| t.sst_type),
             retry: tag.and_then(|t| t.retry),

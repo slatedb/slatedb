@@ -258,7 +258,6 @@ mod tests {
     use crate::test_utils::assert_kv;
     use crate::types::KeyValue;
 
-    use crate::object_stores::ObjectStores;
     use bytes::{BufMut, BytesMut};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
@@ -277,7 +276,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -298,7 +297,7 @@ mod tests {
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
+        let id = SsTableId::from(ulid::Ulid::new());
         let handle = table_store.write_sst(&id, &encoded).await.unwrap();
         let sr = SortedRun::new(0, [SsTableView::identity(handle)]);
 
@@ -333,7 +332,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -350,7 +349,7 @@ mod tests {
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
-        let id1 = SsTableId::Compacted(ulid::Ulid::new());
+        let id1 = SsTableId::from(ulid::Ulid::new());
         let handle1 = table_store.write_sst(&id1, &encoded).await.unwrap();
         let mut builder = table_store.table_builder();
         builder
@@ -358,7 +357,7 @@ mod tests {
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
-        let id2 = SsTableId::Compacted(ulid::Ulid::new());
+        let id2 = SsTableId::from(ulid::Ulid::new());
         let handle2 = table_store.write_sst(&id2, &encoded).await.unwrap();
         let sr = SortedRun::new(
             0,
@@ -401,7 +400,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -418,7 +417,7 @@ mod tests {
                 .unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let id1 = SsTableId::Compacted(ulid::Ulid::new());
+        let id1 = SsTableId::from(ulid::Ulid::new());
         let handle1 = table_store.write_sst(&id1, &encoded).await.unwrap();
         let mut builder = table_store.table_builder();
         for i in 5..=8 {
@@ -430,7 +429,7 @@ mod tests {
                 .unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let id2 = SsTableId::Compacted(ulid::Ulid::new());
+        let id2 = SsTableId::from(ulid::Ulid::new());
         let handle2 = table_store.write_sst(&id2, &encoded).await.unwrap();
         let sr = SortedRun::new(
             0,
@@ -487,7 +486,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -533,7 +532,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -573,7 +572,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -601,7 +600,7 @@ mod tests {
         let root_path = Path::from("");
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             SsTableFormat::default(),
             root_path.clone(),
             None,
@@ -671,7 +670,7 @@ mod tests {
             }
 
             let encoded = builder.build().await.unwrap();
-            let id = SsTableId::Compacted(ulid::Ulid::new());
+            let id = SsTableId::from(ulid::Ulid::new());
             let handle = table_store.write_sst(&id, &encoded).await.unwrap();
             ssts.push(SsTableView::identity(handle));
         }
@@ -688,7 +687,7 @@ mod tests {
     ) -> SortedRun {
         let mut ssts = Vec::<SsTableView>::new();
         for _ in 0..n {
-            let mut writer = table_store.table_writer(SsTableId::Compacted(ulid::Ulid::new()));
+            let mut writer = table_store.table_writer(SsTableId::from(ulid::Ulid::new()));
             for _ in 0..keys_per_sst {
                 let entry =
                     RowEntry::new_value(key_gen.next().as_ref(), val_gen.next().as_ref(), 0);
@@ -715,7 +714,7 @@ mod tests {
                 builder.add_value(key, value, Some(0), None).await.unwrap();
             }
             let encoded = builder.build().await.unwrap();
-            let id = SsTableId::Compacted(ulid::Ulid::new());
+            let id = SsTableId::from(ulid::Ulid::new());
             table_store.write_sst(&id, &encoded).await.unwrap()
         }
 
@@ -729,7 +728,7 @@ mod tests {
                 builder.add_value(key, value, Some(0), None).await.unwrap();
             }
             let encoded = builder.build().await.unwrap();
-            let id = SsTableId::Compacted(ulid::Ulid::new());
+            let id = SsTableId::from(ulid::Ulid::new());
             table_store.write_sst(&id, &encoded).await.unwrap()
         }
 
@@ -743,7 +742,7 @@ mod tests {
                 ..SsTableFormat::default()
             };
             let table_store = Arc::new(TableStore::new(
-                ObjectStores::new(object_store, None),
+                object_store,
                 format,
                 root_path,
                 None,
@@ -816,7 +815,7 @@ mod tests {
                 ..SsTableFormat::default()
             };
             let table_store = Arc::new(TableStore::new(
-                ObjectStores::new(object_store, None),
+                object_store,
                 format,
                 root_path,
                 None,

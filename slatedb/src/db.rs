@@ -2239,7 +2239,6 @@ mod tests {
     use crate::merge_operator::{
         MERGE_OPERATOR_COMPACT_PATH, MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH,
     };
-    use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
     use crate::proptest_util::sample;
     use crate::seq_tracker::FindOption;
@@ -2250,6 +2249,7 @@ mod tests {
         OnDemandCompactionSchedulerSupplier, StringConcatMergeOperator,
     };
     use crate::types::RowEntry;
+    use crate::wal::slatedb::store::WalTableStore;
     use crate::wal::{SlateDbWalReaderBuilder, WalError, WalReader as _};
     use crate::{proptest_util, test_utils, CloseReason, CompactorBuilder, KeyValue};
     use async_trait::async_trait;
@@ -4395,7 +4395,7 @@ mod tests {
         let path = Path::from("/tmp/test_kv_store");
         let sst_format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+            object_store.clone(),
             sst_format,
             path.clone(),
             None,
@@ -4498,7 +4498,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+            object_store.clone(),
             sst_format,
             path,
             None,
@@ -4702,7 +4702,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+            object_store.clone(),
             sst_format,
             path,
             None,
@@ -6343,23 +6343,24 @@ mod tests {
         db.close().await.unwrap();
 
         let manifest_store = ManifestStore::new(&Path::from(path), object_store.clone());
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+        let wal_store = WalTableStore::new(
+            object_store.clone(),
             SsTableFormat::default(),
             path,
-            None,
             TableStoreKind::Main,
-            BlockCachePolicy::default(),
-        ));
+        );
 
         // Get the next WAL SST ID based on what's currently in the object store
-        let next_wal_sst_id = table_store.next_wal_sst_id(0).await.unwrap();
+        let next_wal_sst_id = wal_store.next_wal_sst_id(0.into()).await.unwrap();
 
         // Get the latest manifest
         let manifest = manifest_store.read_latest_manifest().await.unwrap();
 
         // Assert that the manifest reflects only the flushed WAL
-        assert_eq!(manifest.manifest.core.next_wal_sst_id, next_wal_sst_id);
+        assert_eq!(
+            manifest.manifest.core.next_wal_sst_id,
+            next_wal_sst_id.value()
+        );
     }
 
     #[tokio::test]
@@ -6662,7 +6663,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 2);
-        let wal_ssts = db.inner.table_store.list_wal_ssts(..).await.unwrap();
+        let wal_store = WalTableStore::new(
+            object_store.clone(),
+            SsTableFormat::default(),
+            path,
+            TableStoreKind::Main,
+        );
+        let wal_ssts = wal_store.list_wal_ssts(..).await.unwrap();
         assert_eq!(wal_ssts.len(), 1);
         assert_eq!(wal_ssts[0].metadata.size, 0);
         db.put(b"1", b"1").await.unwrap();
@@ -6752,17 +6759,15 @@ mod tests {
         // Wait for W1 to write its fence WAL — at that point W1 has finished
         // fence_writers and has either entered or is about to enter the paused
         // replay_wal call.
-        let probe_table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+        let probe_wal_store = WalTableStore::new(
+            object_store.clone(),
             SsTableFormat::default(),
             path,
-            None,
             TableStoreKind::Main,
-            BlockCachePolicy::default(),
-        ));
+        );
         let mut w1_paused = false;
         for _ in 0..600 {
-            let wals = probe_table_store.list_wal_ssts(..).await.unwrap();
+            let wals = probe_wal_store.list_wal_ssts(..).await.unwrap();
             if !wals.is_empty() {
                 w1_paused = true;
                 break;
@@ -6810,9 +6815,9 @@ mod tests {
         }
     }
 
-    async fn wait_for_wal_sst_count(table_store: &TableStore, min_count: usize, context: &str) {
+    async fn wait_for_wal_sst_count(wal_store: &WalTableStore, min_count: usize, context: &str) {
         for _ in 0..6000 {
-            let wals = table_store.list_wal_ssts(..).await.unwrap();
+            let wals = wal_store.list_wal_ssts(..).await.unwrap();
             if wals.len() >= min_count {
                 return;
             }
@@ -6848,27 +6853,25 @@ mod tests {
             })
         };
 
-        let probe_table_store = TableStore::new(
-            ObjectStores::new(base_store.clone(), None),
+        let probe_wal_store = WalTableStore::new(
+            base_store.clone(),
             SsTableFormat::default(),
             path,
-            None,
             TableStoreKind::Main,
-            BlockCachePolicy::default(),
         );
         wait_for_wal_sst_count(
-            &probe_table_store,
+            &probe_wal_store,
             1,
             "W1 did not write its fence WAL in time",
         )
         .await;
 
-        let head_arrivals_before = gated_store.head_gate.arrivals();
-        gated_store.head_gate.close();
+        let get_arrivals_before = gated_store.get_opts_gate.arrivals();
+        gated_store.get_opts_gate.close();
         fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
         gated_store
-            .head_gate
-            .wait_for_arrivals(head_arrivals_before + 1)
+            .get_opts_gate
+            .wait_for_arrivals(get_arrivals_before + 1)
             .await;
 
         let db2 = Db::builder(path, base_store.clone())
@@ -6882,11 +6885,8 @@ mod tests {
             2
         );
 
-        probe_table_store
-            .delete_sst(&SsTableId::Wal(1))
-            .await
-            .unwrap();
-        gated_store.head_gate.release();
+        probe_wal_store.delete_sst(1.into()).await.unwrap();
+        gated_store.get_opts_gate.release();
 
         let err = match w1_handle.await.unwrap() {
             Ok(_) => panic!("expected W1 open to fail"),
@@ -6927,34 +6927,29 @@ mod tests {
             })
         };
 
-        let probe_table_store = TableStore::new(
-            ObjectStores::new(base_store.clone(), None),
+        let probe_wal_store = WalTableStore::new(
+            base_store.clone(),
             SsTableFormat::default(),
             path,
-            None,
             TableStoreKind::Main,
-            BlockCachePolicy::default(),
         );
         wait_for_wal_sst_count(
-            &probe_table_store,
+            &probe_wal_store,
             1,
             "W1 did not write its fence WAL in time",
         )
         .await;
 
-        let head_arrivals_before = gated_store.head_gate.arrivals();
-        gated_store.head_gate.close();
+        let get_arrivals_before = gated_store.get_opts_gate.arrivals();
+        gated_store.get_opts_gate.close();
         fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
         gated_store
-            .head_gate
-            .wait_for_arrivals(head_arrivals_before + 1)
+            .get_opts_gate
+            .wait_for_arrivals(get_arrivals_before + 1)
             .await;
 
-        probe_table_store
-            .delete_sst(&SsTableId::Wal(1))
-            .await
-            .unwrap();
-        gated_store.head_gate.release();
+        probe_wal_store.delete_sst(1.into()).await.unwrap();
+        gated_store.get_opts_gate.release();
 
         let err = match w1_handle.await.unwrap() {
             Ok(_) => panic!("expected W1 open to fail"),
@@ -8321,7 +8316,7 @@ mod tests {
         // Build a read-only TableStore sharing the same underlying object store
         // and assert that the referenced L0 SST still exists.
         let table_store = TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+            object_store.clone(),
             SsTableFormat::default(),
             path.clone(),
             None,
@@ -11603,8 +11598,9 @@ mod tests {
         // cache, these entries could never reach disk: the disk engine drops
         // post-close writes and the final close below becomes a no-op.
         let mut keys = Vec::new();
+        let sst_id = SsTableId::from(ulid::Ulid::new());
         for b in 0u64..64 {
-            let k = CachedKey::from((SsTableId::Wal(u64::MAX - 2), b));
+            let k = CachedKey::from((sst_id, b));
             shared_cache.insert(k.clone(), probe_entry()).await;
             keys.push(k);
         }

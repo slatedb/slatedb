@@ -623,7 +623,7 @@ mod tests {
 
         let output_ssts = vec![
             SsTableHandle::new(
-                SsTableId::Compacted(Ulid::from_parts(10, 0)),
+                SsTableId::from(Ulid::from_parts(10, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::copy_from_slice(b"a")),
@@ -631,7 +631,7 @@ mod tests {
                 },
             ),
             SsTableHandle::new(
-                SsTableId::Compacted(Ulid::from_parts(11, 0)),
+                SsTableId::from(Ulid::from_parts(11, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::copy_from_slice(b"m")),
@@ -1082,7 +1082,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let stale_sst_id = SsTableId::Compacted(Ulid::new());
+        let stale_sst_id = SsTableId::from(Ulid::new());
         let source_checkpoint_id = uuid::Uuid::new_v4();
         let final_checkpoint_id = uuid::Uuid::new_v4();
         let mut dirty = stored_manifest.prepare_dirty().unwrap();

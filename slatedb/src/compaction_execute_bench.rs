@@ -27,7 +27,6 @@ use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::format::sst::SsTableFormat;
 use crate::manifest::store::{ManifestStore, StoredManifest};
-use crate::object_stores::ObjectStores;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::types::RowEntry;
 use crate::types::ValueDeletable;
@@ -58,7 +57,7 @@ impl CompactionExecuteBench {
     }
 
     fn sst_id(id: u32) -> SsTableId {
-        SsTableId::Compacted(Ulid::from((id as u64, id as u64)))
+        SsTableId::from(Ulid::from((id as u64, id as u64)))
     }
 
     pub async fn run_load(
@@ -74,7 +73,7 @@ impl CompactionExecuteBench {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(self.object_store.clone(), None),
+            self.object_store.clone(),
             sst_format,
             self.path.clone(),
             None,
@@ -327,7 +326,7 @@ impl CompactionExecuteBench {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(self.object_store.clone(), None),
+            self.object_store.clone(),
             sst_format,
             self.path.clone(),
             None,
@@ -418,13 +417,7 @@ impl CompactionExecuteBench {
         Ok(())
     }
 
-    #[allow(clippy::panic)]
     fn sst_path(id: &SsTableId, root_path: &Path) -> Path {
-        match id {
-            SsTableId::Compacted(ulid) => {
-                Path::from(format!("{}/compacted/{}.sst", root_path, ulid.to_string()))
-            }
-            _ => panic!("invalid sst type"),
-        }
+        Path::from(format!("{}/compacted/{}.sst", root_path, id.value()))
     }
 }

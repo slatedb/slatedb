@@ -162,6 +162,7 @@ mod single_flight;
 mod snapshot_manager;
 mod sorted_run_iterator;
 mod sst_builder;
+mod sst_io;
 mod sst_iter;
 mod sst_reader;
 mod sst_stats;
