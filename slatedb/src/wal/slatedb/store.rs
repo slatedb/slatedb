@@ -251,7 +251,23 @@ impl WalTableStore {
         Ok(blocks.into_iter().map(Arc::new).collect())
     }
 
-    /// Finds the highest contiguous WAL ID above `start_after`.
+    /// Find the highest WAL SST id present in the object store at or above
+    /// `start_after + 1`, returning `start_after` if none exist.
+    ///
+    /// `start_after` should be a known lower bound (e.g. `replay_after_wal_id`
+    /// from the manifest, or the highest already-replayed WAL id). Passing 0
+    /// scans the entire WAL id space.
+    ///
+    /// Two phases:
+    ///   1. Parallel exponential probe at offsets `2^0, 2^1, ..., 2^k` from
+    ///      `start_after`. One RTT per round of 8 exponents. Brackets the
+    ///      frontier between two adjacent powers of two.
+    ///   2. Sequential binary search inside the bracketed range to find the
+    ///      exact frontier.
+    ///
+    /// Relies on the fencing protocol's contiguity invariant: "id exists" is
+    /// monotone-decreasing in id, so binary search is sound. Total HEAD count
+    /// is `O(log N)` for a gap of size N, vs `O(N)` for a windowed scan.
     pub(crate) async fn last_seen_wal_id(&self, start_after: u64) -> Result<u64, SlateDBError> {
         fail_point!(Arc::clone(&self.fp_registry), "probe-wal-ssts", |_| {
             Err(SlateDBError::from(std::io::Error::other("oops")))

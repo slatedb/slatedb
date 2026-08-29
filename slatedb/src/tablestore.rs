@@ -50,17 +50,6 @@ pub(crate) struct TableStore {
     kind: TableStoreKind,
 }
 
-macro_rules! read_obj {
-    ($store:expr, $id:expr, |$obj:ident| $read:expr) => {
-        read_sst_obj!(
-            $store.object_stores.store_for($id),
-            $store.path($id),
-            ObjectStoreCallTag::new($store.kind, SstType::from($id)),
-            |$obj| $read
-        )
-    };
-}
-
 impl TableStore {
     pub(crate) fn new<P: Into<Path>>(
         object_stores: ObjectStores,
@@ -551,15 +540,25 @@ impl TableStore {
     }
 
     pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
-        let (info, version) =
-            read_obj!(self, id, |obj| self.sst_format.read_info_and_version(&obj)).await?;
+        let (info, version) = read_sst_obj!(
+            self.object_stores.store_for(id),
+            self.path(id),
+            ObjectStoreCallTag::new(self.kind, SstType::from(id)),
+            |obj| self.sst_format.read_info_and_version(&obj)
+        )
+        .await?;
         Ok(SsTableHandle::new(*id, version, info))
     }
 
     #[cfg(test)]
     pub(crate) async fn read_sst_version(&self, id: &SsTableId) -> Result<u16, SlateDBError> {
-        let (_, version) =
-            read_obj!(self, id, |obj| self.sst_format.read_info_and_version(&obj)).await?;
+        let (_, version) = read_sst_obj!(
+            self.object_stores.store_for(id),
+            self.path(id),
+            ObjectStoreCallTag::new(self.kind, SstType::from(id)),
+            |obj| self.sst_format.read_info_and_version(&obj)
+        )
+        .await?;
         Ok(version)
     }
 
@@ -613,9 +612,12 @@ impl TableStore {
                 }
             }
         }
-        read_obj!(self, &handle.id, |obj| self
-            .sst_format
-            .read_filters(&handle.info, &obj))
+        read_sst_obj!(
+            self.object_stores.store_for(&handle.id),
+            self.path(&handle.id),
+            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)),
+            |obj| self.sst_format.read_filters(&handle.info, &obj)
+        )
         .await
     }
 
@@ -646,9 +648,12 @@ impl TableStore {
                 return Ok(Some(stats.as_ref().clone()));
             }
         }
-        read_obj!(self, &handle.id, |obj| self
-            .sst_format
-            .read_stats(&handle.info, &obj))
+        read_sst_obj!(
+            self.object_stores.store_for(&handle.id),
+            self.path(&handle.id),
+            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)),
+            |obj| self.sst_format.read_stats(&handle.info, &obj)
+        )
         .await
     }
 
@@ -677,9 +682,12 @@ impl TableStore {
                 return Ok(index);
             }
         }
-        let index = read_obj!(self, &handle.id, |obj| self
-            .sst_format
-            .read_index(&handle.info, &obj))
+        let index = read_sst_obj!(
+            self.object_stores.store_for(&handle.id),
+            self.path(&handle.id),
+            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)),
+            |obj| self.sst_format.read_index(&handle.info, &obj)
+        )
         .await?;
         Ok(Arc::new(index))
     }
@@ -1002,12 +1010,17 @@ impl TableStore {
         handle: &SsTableHandle,
         block: usize,
     ) -> Result<Block, SlateDBError> {
-        read_obj!(self, &handle.id, |obj| async {
-            let index = self.sst_format.read_index(&handle.info, &obj).await?;
-            self.sst_format
-                .read_block(&handle.info, &index, block, &obj)
-                .await
-        })
+        read_sst_obj!(
+            self.object_stores.store_for(&handle.id),
+            self.path(&handle.id),
+            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)),
+            |obj| async {
+                let index = self.sst_format.read_index(&handle.info, &obj).await?;
+                self.sst_format
+                    .read_block(&handle.info, &index, block, &obj)
+                    .await
+            }
+        )
         .await
     }
 
