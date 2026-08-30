@@ -368,7 +368,7 @@ sequenceDiagram
 
     W->>DB: write_with_options(batch)
     DB->>DB: force_acquire(estimated_size)
-    Note over DB: non-blocking; may soft-overshoot capacity
+    Note over DB: non-blocking, may soft-overshoot capacity
     DB->>DB: batch.write_buffer_permit = Some(permit)
     DB->>BW: send WriteBatch
 
@@ -950,14 +950,13 @@ starts from them:
 
 - **Per-consumer Views (exclusive sub-budgets).** Rather than every consumer
   drawing from one flat pool, introduce a `View` (working name) type that owns
-  an exclusive slice of the shared budget — analogous to Flink's
-  `LocalBufferPool` carved out of a global `NetworkBufferPool`. Each DB instance
-  (or, later, each `DbReader`) acquires a `View` with a guaranteed minimum and
-  an elastic maximum; the manager arbitrates the shared remainder between Views.
-  This gives fairness and isolation without every write touching global state on
-  the hot path. The intent is to **define the `View` type as part of Phase 2
-  now** (so the shared-manager API is shaped for it) and implement the
-  arbitration policies incrementally.
+  an exclusive slice of the shared budget carved out of the global budget. Each
+  DB instance (or, later, each `DbReader`) acquires a `View` with a guaranteed
+  minimum and an elastic maximum; the manager arbitrates the shared remainder
+  between Views. This gives fairness and isolation without every write touching
+  global state on the hot path. The intent is to **define the `View` type as
+  part of Phase 2 now** (so the shared-manager API is shaped for it) and
+  implement the arbitration policies incrementally.
 - **Smoother / sawtooth-free backpressure.** Phase 1 backpressure is
   effectively binary (under capacity = free, over = stall), which can produce a
   sawtooth throughput pattern. A Phase 2 policy could ramp resistance as
@@ -1377,7 +1376,7 @@ retained specifically so a blocking variant can be built without new machinery.
   Added Alternatives/Open Questions for a
   strict error-or-block mode and reserving budget for the
   L0 SST a flush builds. Expanded Phase 2 with per-consumer `View`
-  sub-budgets (Flink `LocalBufferPool`/`NetworkBufferPool` style, type to be
+  sub-budgets (exclusive slices carved out of the shared budget, type to be
   defined now), smoother/sawtooth-free backpressure via rate-limiting, and
   `DbCache`-style consumer registration. Softened the Motivation wording
   ("concurrent writes can increase memory pressure").
