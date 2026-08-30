@@ -51,9 +51,7 @@ pub struct Admin {
     pub(crate) main_object_store: Arc<dyn ObjectStore>,
     /// The object store used for the WAL. This is the main object store when no
     /// dedicated WAL object store was configured.
-    pub(crate) wal_object_store: Arc<dyn ObjectStore>,
-    /// Whether the WAL store was configured separately from the main store.
-    pub(crate) has_dedicated_wal_object_store: bool,
+    pub(crate) wal_object_store: Option<Arc<dyn ObjectStore>>,
     /// The system clock to use for operations.
     pub(crate) system_clock: Arc<dyn SystemClock>,
     /// The random number generator to use for randomness.
@@ -511,7 +509,7 @@ impl Admin {
         let mut stored_manifest =
             StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
 
-        let configured_wal_uri = self.has_dedicated_wal_object_store.then(String::new);
+        let configured_wal_uri = self.wal_object_store.is_some().then(String::new);
         stored_manifest
             .db_state()
             .validate_wal_object_store_uri(configured_wal_uri.as_deref())?;
@@ -758,7 +756,10 @@ impl Admin {
     fn object_store(&self, store_type: ObjectStoreType) -> &Arc<dyn ObjectStore> {
         match store_type {
             ObjectStoreType::Main => &self.main_object_store,
-            ObjectStoreType::Wal => &self.wal_object_store,
+            ObjectStoreType::Wal => self
+                .wal_object_store
+                .as_ref()
+                .unwrap_or(&self.main_object_store)
         }
     }
 

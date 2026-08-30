@@ -17,33 +17,50 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::Arc;
 use ulid::Ulid;
 
+// V1/V2 encoded `SsTableId` when it could identify either a WAL or compacted
+// SST. Keep both variants, and their order, so existing cache keys remain
+// decodable by bincode.
 #[derive(Serialize, Deserialize)]
-enum SerializedSsTableId {
+enum SerializedSsTableOrWalId {
     Wal(u64),
     Compacted(Ulid),
 }
 
-impl TryFrom<SerializedSsTableId> for SsTableId {
+impl TryFrom<SerializedSsTableOrWalId> for SsTableId {
     type Error = &'static str;
 
-    fn try_from(value: SerializedSsTableId) -> Result<Self, Self::Error> {
+    fn try_from(value: SerializedSsTableOrWalId) -> Result<Self, Self::Error> {
         match value {
-            SerializedSsTableId::Wal(_) => Err("WAL entries are not valid in the SST cache"),
-            SerializedSsTableId::Compacted(id) => Ok(SsTableId::from(id)),
+            SerializedSsTableOrWalId::Wal(_) => Err("WAL entries are not valid in the SST cache"),
+            SerializedSsTableOrWalId::Compacted(id) => Ok(SsTableId::from(id)),
         }
     }
 }
 
+// Mirrors the current `SsTableId`, which only wraps the ULID of a compacted
+// SST.
+#[derive(Serialize, Deserialize)]
+struct SerializedSsTableId(Ulid);
+
 impl From<SsTableId> for SerializedSsTableId {
     fn from(value: SsTableId) -> Self {
-        SerializedSsTableId::Compacted(value.value())
+        Self(value.value())
     }
 }
 
+impl From<SerializedSsTableId> for SsTableId {
+    fn from(value: SerializedSsTableId) -> Self {
+        Self::from(value.0)
+    }
+}
+
+// Bincode identifies enum variants by their index. New versions must be
+// appended so the indices of existing cache-key formats remain stable.
 #[derive(Serialize, Deserialize)]
 enum SerializedCachedKey {
-    V1(SerializedSsTableId, u64),
-    V2(u64, SerializedSsTableId, u64),
+    V1(SerializedSsTableOrWalId, u64),
+    V2(u64, SerializedSsTableOrWalId, u64),
+    V3(u64, SerializedSsTableId, u64),
 }
 
 impl TryFrom<SerializedCachedKey> for CachedKey {
@@ -61,13 +78,18 @@ impl TryFrom<SerializedCachedKey> for CachedKey {
                 sst_id: sst_id.try_into()?,
                 block_id,
             },
+            SerializedCachedKey::V3(scope_id, sst_id, block_id) => CachedKey {
+                scope_id,
+                sst_id: sst_id.into(),
+                block_id,
+            },
         })
     }
 }
 
 impl From<CachedKey> for SerializedCachedKey {
     fn from(value: CachedKey) -> Self {
-        SerializedCachedKey::V2(value.scope_id, value.sst_id.into(), value.block_id)
+        SerializedCachedKey::V3(value.scope_id, value.sst_id.into(), value.block_id)
     }
 }
 
@@ -233,6 +255,7 @@ impl<'de> Deserialize<'de> for CachedEntry {
 
 #[cfg(test)]
 mod tests {
+    use super::{SerializedCachedKey, SerializedSsTableId};
     use crate::block_iterator::BlockIteratorLatest;
     use crate::db_cache::{CachedEntry, CachedItem, CachedKey};
     use crate::db_state::SsTableId;
@@ -249,6 +272,18 @@ mod tests {
     use std::sync::Arc;
     use ulid::Ulid;
 
+    #[derive(serde::Serialize)]
+    enum LegacySerializedSsTableOrWalId {
+        Wal(u64),
+        Compacted(Ulid),
+    }
+
+    #[derive(serde::Serialize)]
+    enum LegacySerializedCachedKey {
+        V1(LegacySerializedSsTableOrWalId, u64),
+        V2(u64, LegacySerializedSsTableOrWalId, u64),
+    }
+
     #[test]
     fn test_should_serialize_deserialize_compacted_sst_key() {
         let key = CachedKey {
@@ -264,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_serialize_deserialize_wal_sst_key() {
+    fn test_should_serialize_cached_key_as_v3() {
         let key = CachedKey {
             scope_id: 5,
             sst_id: SsTableId::from(Ulid::from_parts(123, 0)),
@@ -272,9 +307,67 @@ mod tests {
         };
 
         let encoded = bincode::serialize(&key).unwrap();
-        let decoded: CachedKey = bincode::deserialize(&encoded).unwrap();
+        let decoded: SerializedCachedKey = bincode::deserialize(&encoded).unwrap();
 
-        assert_eq!(decoded, key);
+        match decoded {
+            SerializedCachedKey::V3(scope_id, SerializedSsTableId(sst_id), block_id) => {
+                assert_eq!(scope_id, key.scope_id);
+                assert_eq!(sst_id, key.sst_id.value());
+                assert_eq!(block_id, key.block_id);
+            }
+            _ => panic!("expected V3 cache key"),
+        }
+    }
+
+    #[test]
+    fn test_should_deserialize_legacy_compacted_sst_keys() {
+        let sst_id = Ulid::from((123, 456));
+        let expected_v1 = CachedKey {
+            scope_id: 0,
+            sst_id: SsTableId::from(sst_id),
+            block_id: 98,
+        };
+        let expected_v2 = CachedKey {
+            scope_id: 5,
+            sst_id: SsTableId::from(sst_id),
+            block_id: 99,
+        };
+
+        let encoded_v1 = bincode::serialize(&LegacySerializedCachedKey::V1(
+            LegacySerializedSsTableOrWalId::Compacted(sst_id),
+            expected_v1.block_id,
+        ))
+        .unwrap();
+        let encoded_v2 = bincode::serialize(&LegacySerializedCachedKey::V2(
+            expected_v2.scope_id,
+            LegacySerializedSsTableOrWalId::Compacted(sst_id),
+            expected_v2.block_id,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            bincode::deserialize::<CachedKey>(&encoded_v1).unwrap(),
+            expected_v1
+        );
+        assert_eq!(
+            bincode::deserialize::<CachedKey>(&encoded_v2).unwrap(),
+            expected_v2
+        );
+    }
+
+    #[test]
+    fn test_should_reject_legacy_wal_sst_key() {
+        let encoded = bincode::serialize(&LegacySerializedCachedKey::V2(
+            5,
+            LegacySerializedSsTableOrWalId::Wal(123),
+            99,
+        ))
+        .unwrap();
+
+        let error = bincode::deserialize::<CachedKey>(&encoded).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("WAL entries are not valid in the SST cache"));
     }
 
     #[tokio::test]

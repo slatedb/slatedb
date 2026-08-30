@@ -952,9 +952,9 @@ impl<P: Into<Path>> AdminBuilder<P> {
         // to sub-builders (compactor/GC) that add their own retry layer, and
         // wrapping here would double-wrap them.
         let main_object_store = self.main_object_store;
-        let has_dedicated_wal_object_store = self.wal_object_store.is_some();
         let wal_object_store = self
             .wal_object_store
+            .clone()
             .unwrap_or_else(|| main_object_store.clone());
         let wal_admin = self.wal_admin.unwrap_or_else(|| {
             let retrying_object_store = Arc::new(RetryingObjectStore::new(
@@ -971,8 +971,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
         Admin {
             path: self.path.into(),
             main_object_store,
-            wal_object_store,
-            has_dedicated_wal_object_store,
+            wal_object_store: self.wal_object_store,
             wal_admin,
             system_clock: self.system_clock,
             rand: self.rand,
