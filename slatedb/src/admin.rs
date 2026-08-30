@@ -759,7 +759,7 @@ impl Admin {
             ObjectStoreType::Wal => self
                 .wal_object_store
                 .as_ref()
-                .unwrap_or(&self.main_object_store)
+                .unwrap_or(&self.main_object_store),
         }
     }
 
