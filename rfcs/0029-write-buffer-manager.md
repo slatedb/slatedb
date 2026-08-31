@@ -810,13 +810,6 @@ threshold freeze via `maybe_freeze_current_memtable` / `maybe_freeze_memtable`
 avoids manufacturing small L0 SSTs on every at-capacity write and lets the
 imm-queue-empty check gate it.
 
-> **Future work — caller-supplied write timeout.** The DB-level bound above
-> (close/fence + 30s watchdog) is the only wait bound today. A caller-supplied
-> per-write timeout on the pre-dispatch backpressure wait is a natural extension
-> but is **not yet implemented**; the reservation flow leaves room for it (the
-> cancellation point is the `acquire`/`on_block` wait, before dispatch). See
-> [Open Questions](#open-questions).
-
 > **Consideration:** The `ByteBufferManager` tracks outstanding bytes more
 > accurately than the old `max_unflushed_bytes` check, which relied on a
 > point-in-time snapshot of WAL + immutable memtable sizes under a read lock:
@@ -1238,15 +1231,6 @@ not reclaim them. Tracked as an Open Question.
   ceiling at the cost of availability/latency. What is the right surface (a
   `WriteOptions` flag, a builder-level policy) and semantics (error vs. block,
   per-write vs. per-instance)? See [Alternatives](#alternatives).
-- **Should the pre-dispatch backpressure wait honor a caller-supplied
-  timeout?** Today the only wait bound is DB-level (close/fence + 30s watchdog).
-  A per-write timeout on the `acquire`/`on_block` wait — returning the
-  `WriteBatch` to the caller via a dedicated error variant on expiry so it can
-  be retried or shed without reconstruction — would let latency-sensitive
-  callers cap how long a write blocks on memory pressure. It is **not yet
-  implemented**. The cancellation point (before dispatch) already fits this
-  cleanly; open questions are the surface (a `WriteOptions` `Duration`), whether
-  a `0` timeout means "fail fast if at capacity", and the error-variant shape.
 - **Should the transient L0 SST-build overhead be tracked at all, and if so, how?**
   Flushing a memtable transiently allocates roughly 2–3x its size to encode the
   output SST (encoder buffers, block builders, the output SST bytes) before the
