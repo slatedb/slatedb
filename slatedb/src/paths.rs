@@ -116,7 +116,7 @@ impl PathResolver {
     }
 
     /// Returns the path of the WAL SST with the given id.
-    pub fn wal_sst_path(&self, wal_file_id: &WalFileId) -> Path {
+    pub(crate) fn wal_sst_path(&self, wal_file_id: &WalFileId) -> Path {
         Path::from(format!(
             "{}/{}/{:020}.sst",
             self.root_path,

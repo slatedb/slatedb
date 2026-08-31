@@ -23,10 +23,10 @@ use crate::sst_io::{read_obj, read_with_validation_retry, ReadOnlyObject};
 use crate::wal::slatedb::sst_builder::EncodedWalSsTableBuilder;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct WalFileId(u64);
+pub(crate) struct WalFileId(u64);
 
 impl WalFileId {
-    pub fn value(self) -> u64 {
+    pub(crate) fn value(self) -> u64 {
         self.0
     }
 }
@@ -263,7 +263,7 @@ impl WalTableStore {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn block_range_size(
         &self,
         handle: &WalFileHandle,
