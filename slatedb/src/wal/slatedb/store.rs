@@ -430,7 +430,6 @@ impl WalTableStore {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn block_range_size(
         &self,
         handle: &WalFileHandle,
