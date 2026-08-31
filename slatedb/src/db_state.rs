@@ -1357,7 +1357,7 @@ mod tests {
             index_offset: raw_size,
             ..Default::default()
         };
-        let sst_id = SsTableId::Compacted(ulid::Ulid::new());
+        let sst_id = SsTableId::new(ulid::Ulid::new());
         let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
         SsTableView::identity(handle)
     }
@@ -1480,7 +1480,7 @@ mod tests {
             ..Default::default()
         };
         let handle = SsTableHandle::new(
-            SsTableId::Compacted(ulid::Ulid::new()),
+            SsTableId::new(ulid::Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             sst_info,
         );

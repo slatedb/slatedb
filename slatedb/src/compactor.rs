@@ -3881,7 +3881,7 @@ mod tests {
     fn test_calculate_estimated_source_bytes_uses_visible_size_for_borrowed_views() {
         let raw_size = 1_000_000u64;
         let l0_view = SsTableView::identity(SsTableHandle::new(
-            SsTableId::Compacted(Ulid::new()),
+            SsTableId::new(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo {
                 first_entry: Some(Bytes::from_static(b"seg/a")),
