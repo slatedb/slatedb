@@ -14,10 +14,10 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::VersionedManifest;
 use slatedb_common::clock::SystemClock;
 
-use crate::object_stores::ObjectStoreType;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::seq_tracker::FindOption;
 use crate::utils::IdGenerator;
+use crate::utils::ObjectStoreType;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
