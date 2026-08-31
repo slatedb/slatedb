@@ -717,8 +717,8 @@ impl CompactorEventHandler {
             .iter()
             .try_fold(0, |total, source| {
                 let source_bytes = match source {
-                    SourceId::SstView(id) => views_by_id.get(id)?.estimate_size(),
-                    SourceId::SortedRun(id) => srs_by_id.get(id)?.estimate_size(),
+                    SourceId::SstView(id) => views_by_id.get(id)?.estimate_visible_size(),
+                    SourceId::SortedRun(id) => srs_by_id.get(id)?.estimate_visible_size(),
                 };
                 Some(total + source_bytes)
             })
@@ -1444,6 +1444,7 @@ pub mod stats {
 mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::future::Future;
+    use std::ops::Bound::{Excluded, Included};
     use std::ops::Range;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
@@ -1460,6 +1461,7 @@ mod tests {
     use super::*;
     use crate::batch::WriteBatch;
     use crate::block_cache_policy::BlockCachePolicy;
+    use crate::bytes_range::BytesRange;
     use crate::compaction_worker::WorkerMessage;
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
@@ -3871,9 +3873,51 @@ mod tests {
             ),
         );
 
-        let expected = segment_l0.estimate_size() + segment_sr.estimate_size();
+        let expected = segment_l0.estimate_visible_size() + segment_sr.estimate_visible_size();
         let actual = CompactorEventHandler::calculate_estimated_source_bytes(&compaction, &core);
         assert_eq!(actual, Some(expected));
+    }
+
+    #[test]
+    fn test_calculate_estimated_source_bytes_uses_visible_size_for_borrowed_views() {
+        let raw_size = 1_000_000u64;
+        let l0_view = SsTableView::identity(SsTableHandle::new(
+            SsTableId::Compacted(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo {
+                first_entry: Some(Bytes::from_static(b"seg/a")),
+                last_entry: Some(Bytes::from_static(b"seg/z")),
+                index_offset: raw_size,
+                ..SsTableInfo::default()
+            },
+        ))
+        .with_visible_range(BytesRange::new(
+            Included(Bytes::from_static(b"seg/a")),
+            Excluded(Bytes::from_static(b"seg/m")),
+        ));
+
+        let mut core = ManifestCore::new();
+        core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"seg"),
+            tree: Arc::new(LsmTreeState {
+                l0: VecDeque::from(vec![l0_view.clone()]),
+                ..LsmTreeState::default()
+            }),
+        }];
+
+        let compaction = Compaction::new(
+            Ulid::new(),
+            CompactionSpec::for_segment(
+                Bytes::from_static(b"seg"),
+                vec![SourceId::SstView(l0_view.id)],
+                9,
+            ),
+        );
+
+        let expected = l0_view.estimate_visible_size();
+        let actual = CompactorEventHandler::calculate_estimated_source_bytes(&compaction, &core);
+        assert_eq!(actual, Some(expected));
+        assert!(expected < raw_size);
     }
 
     #[test]
