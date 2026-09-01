@@ -1455,7 +1455,7 @@ fn default_compaction_worker_options() -> Option<CompactionWorkerOptions> {
 }
 
 fn default_compactor_checkpoint_lifetime() -> Duration {
-    Duration::from_secs(15 * 60)
+    Duration::from_mins(15)
 }
 
 /// Options for the Size-Tiered Compaction Scheduler
@@ -1898,7 +1898,7 @@ mod tests {
 
     #[test]
     fn test_compactor_checkpoint_lifetime_config() {
-        let default_lifetime = Duration::from_secs(15 * 60);
+        let default_lifetime = Duration::from_mins(15);
         assert_eq!(
             default_lifetime,
             CompactorOptions::default().checkpoint_lifetime
