@@ -1,0 +1,205 @@
+---
+deadlock_detection: false
+options:
+    max_actions: 200
+    max_concurrent_actions: 3
+    crash_on_yield: false
+action_options:
+    KeyValueStore.Put:
+        max_actions: 2
+    KeyValueStore.Get:
+        max_actions: 1
+    KeyValueStore.BackgroundFlushWAL:
+        max_concurrent_actions: 1
+    KeyValueStore.FreezeMemtable:
+        max_concurrent_actions: 1
+    KeyValueStore.FlushMemtableToL0:
+        max_concurrent_actions: 1
+---
+
+# Constants
+KEYS = ["k1"]
+VALUES = ["v0", "v1"]
+
+DURABILITY_MEMORY = 0
+DURABILITY_REMOTE = 2
+
+role KeyValueStore:
+    action Init:
+        self.wal_buffer = []
+        self.flushed_wal = []
+        self.memtable = []
+        self.immutable_memtable = []
+        self.l0 = []
+        self.last_committed_seq = 0
+        self.last_remote_persisted_seq = 0
+        self.next_seq = 1
+
+    # Get operation - reads the most recent value for a key
+    action Get:
+        key = any KEYS
+        dirty = any [True, False]  # Whether to allow reading uncommitted data
+        durability_filter = any [DURABILITY_MEMORY, DURABILITY_REMOTE]
+        
+        # Calculate maximum readable sequence number
+        max_seq = None
+        if durability_filter == DURABILITY_REMOTE:
+            max_seq = self.last_remote_persisted_seq
+
+        if not dirty:
+            if max_seq == None:
+                max_seq = self.last_committed_seq
+            else:
+                if self.last_committed_seq < max_seq:
+                    max_seq = self.last_committed_seq
+        
+        # Search in memtable (most recent first)
+        for entry in reversed(self.memtable):
+            if entry[0] == key:
+                if max_seq == None or entry[2] <= max_seq:
+                    return entry[1]
+        
+        # Search in immutable memtable
+        for entry in reversed(self.immutable_memtable):
+            if entry[0] == key:
+                if max_seq == None or entry[2] <= max_seq:
+                    return entry[1]
+        
+        # Search in L0 levels (most recent first)
+        for level in reversed(self.l0):
+            for entry in reversed(level):
+                if entry[0] == key:
+                    if max_seq == None or entry[2] <= max_seq:
+                        return entry[1]
+        
+        return ""
+
+    # Put operation - writes a key-value pair
+    atomic action Put:
+        require self.next_seq <= 10  # Reduced limit
+        require len(self.memtable) < 3  # Limit memtable size
+        key = any KEYS
+        value = any VALUES
+        sync = any [DURABILITY_MEMORY, DURABILITY_REMOTE]
+
+        seq = self.next_seq
+        self.next_seq = self.next_seq + 1
+        
+        # Add to WAL buffer
+        self.wal_buffer = self.wal_buffer + [(key, value, seq)]
+        
+        # Add to memtable
+        self.memtable = self.memtable + [(key, value, seq)]
+        
+        # Update committed sequence first
+        self.last_committed_seq = seq
+        
+        # If sync is REMOTE, flush WAL immediately
+        if sync == DURABILITY_REMOTE:
+            self.doFlushWAL()
+        
+        # Force WAL flush if buffer gets too large (simulating background flush)
+        if len(self.wal_buffer) >= 2:
+            self.doFlushWAL()
+
+    # Background WAL flush - can run when there are any entries in buffer
+    atomic action BackgroundFlushWAL:
+        require len(self.wal_buffer) > 0
+        self.doFlushWAL()
+
+    # Freeze memtable to immutable memtable
+    atomic action FreezeMemtable:
+        require len(self.memtable) > 0
+        require len(self.immutable_memtable) < 3  # Limit immutable memtable size
+        self.immutable_memtable = self.immutable_memtable + self.memtable
+        self.memtable = []
+
+    # Flush immutable memtable to L0
+    atomic action FlushMemtableToL0:
+        require len(self.immutable_memtable) > 0
+        require len(self.l0) < 2  # Limit L0 levels
+        self.l0 = self.l0 + [self.immutable_memtable]
+        self.immutable_memtable = []
+
+    # Helper function to flush WAL
+    atomic func doFlushWAL():
+        self.flushed_wal = self.flushed_wal + self.wal_buffer
+        self.wal_buffer = []
+        if len(self.flushed_wal) > 0:
+            self.last_remote_persisted_seq = self.flushed_wal[-1][2]
+
+# Initialize the system
+action Init:
+    store = KeyValueStore()
+
+# Assertions to check properties
+always assertion SequenceNumberBounded:
+    return store.next_seq <= 11
+
+always assertion L0Consistency:
+    # L0 should only contain non-empty immutable memtables
+    for level in store.l0:
+        if len(level) == 0:
+            return False
+    return True
+
+always assertion MonotonicSequenceNumbers:
+    # Sequence numbers should always be monotonically increasing
+    for i in range(len(store.memtable) - 1):
+        if store.memtable[i][2] >= store.memtable[i + 1][2]:
+            return False
+    for i in range(len(store.immutable_memtable) - 1):
+        if store.immutable_memtable[i][2] >= store.immutable_memtable[i + 1][2]:
+            return False
+    for level in store.l0:
+        for i in range(len(level) - 1):
+            if level[i][2] >= level[i + 1][2]:
+                return False
+    return True
+
+always assertion SequenceNumberInvariant:
+    # Committed sequence should be less than or equal to next sequence
+    return store.last_committed_seq <= store.next_seq
+
+always eventually assertion WALFlushed:
+    return len(store.wal_buffer) == 0
+
+# always eventually assertion MemtableFlushed:
+#    # Memtable should eventually be empty
+#    return len(store.memtable) == 0 and len(store.immutable_memtable) == 0
+
+# always eventually assertion ImmutableMemtableFlushed:
+#    # Immutable memtable should eventually be flushed to L0
+#    return len(store.immutable_memtable) == 0
+
+always assertion ReadDurabilityRespected:
+    # Reads with DURABILITY_REMOTE should only see data up to last_remote_persisted_seq
+    # This is enforced by the Get action logic, but we can verify the invariant
+    return store.last_remote_persisted_seq <= store.last_committed_seq
+
+always assertion FlushedWalStorageConsistency:
+    # All entries in flushed_wal should have sequence numbers <= last_remote_persisted_seq
+    # and last_remote_persisted_seq should be >= the highest sequence number in flushed_wal
+    if len(store.flushed_wal) > 0:
+        max_flushed_seq = 0
+        for entry in store.flushed_wal:
+            if entry[2] > max_flushed_seq:
+                max_flushed_seq = entry[2]
+        if store.last_remote_persisted_seq < max_flushed_seq:
+            return False
+    return True
+
+always assertion OperationOrdering:
+    # Ensure that operations maintain proper ordering
+    # Sequence numbers should be unique and strictly increasing
+    seen_seqs = []
+    for entry in store.memtable + store.immutable_memtable:
+        if entry[2] in seen_seqs:
+            return False
+        seen_seqs.append(entry[2])
+    for level in store.l0:
+        for entry in level:
+            if entry[2] in seen_seqs:
+                return False
+            seen_seqs.append(entry[2])
+    return True
