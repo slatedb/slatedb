@@ -3360,6 +3360,7 @@ dependencies = [
  "chrono",
  "figment",
  "log",
+ "object_store",
  "parking_lot",
  "serde_json",
  "slatedb",
