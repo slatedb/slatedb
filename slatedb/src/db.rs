@@ -2592,6 +2592,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_seek_rejected_for_descending_scan() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_seek_descending_rejected", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        kv_store.put(b"a", b"v0").await.unwrap();
+        kv_store.put(b"b", b"v1").await.unwrap();
+        kv_store.put(b"c", b"v2").await.unwrap();
+
+        let scan_options = ScanOptions::default().with_order(IterationOrder::Descending);
+        let mut iter = kv_store.scan_with_options(.., &scan_options).await.unwrap();
+        let err = iter.seek(b"b").await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+        assert!(
+            err.to_string().contains("descending"),
+            "unexpected error: {err}"
+        );
+
+        // the scan itself still works
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"c");
+
+        // ascending scans still seek
+        let mut iter = kv_store.scan(..).await.unwrap();
+        iter.seek(b"b").await.unwrap();
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"b");
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_scan_descending_bounded_range() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let kv_store = Db::builder("/tmp/test_scan_descending_bounded", object_store)
@@ -9457,10 +9490,23 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        // A descending scan visits the SR's SSTs back to front, so the key's
+        // versions arrive out of sequence order unless the SR iterator
+        // reassembles them across the boundary.
+        let desc_options = ScanOptions::default().with_order(IterationOrder::Descending);
+        let data_scan_desc = db
+            .scan_with_options(b"k".as_slice().., &desc_options)
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
         info!("data: {:?}", data);
         info!("data (scan): {:?}", data_scan.value);
         assert_eq!(data, expected);
         assert_eq!(data_scan.value, expected);
+        assert_eq!(data_scan_desc.value, expected);
     }
 
     #[cfg(feature = "wal_disable")]
@@ -9613,10 +9659,23 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        // Same key, scanned the other way: the merge operands must still be
+        // applied newest last, which requires the SR iterator to pull the
+        // key's earlier SST before emitting anything.
+        let desc_options = ScanOptions::default().with_order(IterationOrder::Descending);
+        let data_scan_desc = db
+            .scan_with_options(b"k".as_slice().., &desc_options)
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
         info!("data: {:?}", data);
         info!("data (scan): {:?}", data_scan.value);
         assert_eq!(data, expected);
         assert_eq!(data_scan.value, expected);
+        assert_eq!(data_scan_desc.value, expected);
     }
 
     #[tokio::test]

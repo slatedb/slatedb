@@ -183,6 +183,7 @@ pub struct DbIterator {
     iter: Box<dyn RowEntryIterator + 'static>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
+    order: IterationOrder,
 }
 
 impl DbIterator {
@@ -253,6 +254,7 @@ impl DbIterator {
             iter,
             invalidated_error: None,
             last_key: None,
+            order,
         })
     }
 
@@ -319,10 +321,16 @@ impl DbIterator {
     /// After a successful seek, the iterator will return the next record
     /// with a key greater than or equal to `next_key`.
     ///
+    /// Only supported for ascending scans. Descending scans return an error:
+    /// repositioning a descending scan requires the L0 and sorted-run
+    /// iterators to skip past tables that sort above `next_key`, which they do
+    /// not yet do.
+    ///
     /// # Errors
     ///
     /// Returns an invalid argument error in the following cases:
     ///
+    /// - if the scan was opened with [`IterationOrder::Descending`]
     /// - if `next_key` comes before the current iterator position
     /// - if `next_key` is beyond the upper bound specified in the original
     ///   [`crate::db::Db::scan`] parameters
@@ -332,6 +340,8 @@ impl DbIterator {
         let next_key = next_key.as_ref();
         if let Some(error) = self.invalidated_error.clone() {
             Err(error.into())
+        } else if matches!(self.order, IterationOrder::Descending) {
+            Err(SlateDBError::SeekNotSupportedForDescendingScan.into())
         } else if !self.range.contains(&next_key) {
             Err(SlateDBError::SeekKeyOutOfRange {
                 key: next_key.to_vec(),
