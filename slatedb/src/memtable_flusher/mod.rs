@@ -13,6 +13,7 @@ mod uploader;
 pub(crate) use manifest_writer::FlushResult;
 #[cfg(test)]
 pub(crate) use tracker::MANIFEST_REFRESH_COUNT;
+pub(crate) use uploader::SegmentedSstHandle;
 
 use crate::checkpoint::CheckpointCreateResult;
 use crate::config::CheckpointOptions;

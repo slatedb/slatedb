@@ -13,11 +13,10 @@
 
 use super::tracker::TrackerMessage;
 use crate::db::DbInner;
-use crate::db_state::{SsTableHandle, SsTableId};
+use crate::db_state::SsTableHandle;
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
-use crate::flush::EncodedSegmentSst;
 use crate::mem_table::ImmutableMemtable;
 use crate::utils::SafeSender;
 use async_trait::async_trait;
@@ -189,14 +188,7 @@ impl UploadHandler {
     }
 
     async fn upload_with_retry(&self, job: &UploadJob) -> Result<UploadedMemtable, SlateDBError> {
-        // Build once, retry only the upload. `write_sst` takes
-        // `&EncodedSsTable`, so the encoded SSTs stay alive for retries —
-        // no need to rebuild from the memtable on transient upload errors.
         let min_retention_seq = self.db.compute_min_retention_seq();
-        let built = self
-            .db
-            .build_imm_ssts_with_retention(job.imm_memtable.table(), min_retention_seq)
-            .await?;
         let first_seq = job
             .imm_memtable
             .table()
@@ -208,25 +200,36 @@ impl UploadHandler {
             .last_seq()
             .expect("flush of l0 with no entries");
 
-        // Upload all segment SSTs concurrently. `try_join_all` short-circuits
-        // on the first fatal error and drops the remaining futures; sibling
-        // uploads that already landed before the abort are left for the
-        // garbage collector to reclaim.
-        let segments = futures::future::try_join_all(built.iter().map(|sst| {
-            // Ids are pre-allocated at dispatch keyed by segment prefix. Every
-            // built prefix is a subset of the dispatched touched set, so a
-            // missing id is an internal invariant violation.
-            let sst_id = job
-                .segment_sst_ids
-                .get(&sst.prefix)
-                .copied()
-                .map(SsTableId::from);
-            async move {
-                let sst_id = sst_id.ok_or(SlateDBError::InvalidDBState)?;
-                self.upload_segment_sst(sst, sst_id).await
+        let segments = loop {
+            match self
+                .db
+                .stream_imm_ssts(
+                    job.imm_memtable.table(),
+                    min_retention_seq,
+                    &job.segment_sst_ids,
+                )
+                .await
+            {
+                Ok(segments) => break segments,
+                Err(e @ (SlateDBError::IoError(_) | SlateDBError::ObjectStoreError(_))) => {
+                    // When the WAL is enabled and the database is shutting
+                    // down, give up immediately. The data is already durable
+                    // in the WAL and will be recovered on the next startup.
+                    if self.db.wal_enabled && self.db.check_closed().is_err() {
+                        info!("skipping l0 flush retry during shutdown [error={:?}]", e);
+                        return Err(e);
+                    }
+                    self.db.system_clock.sleep(self.retry_backoff).await;
+                }
+                Err(e) => return Err(e),
             }
-        }))
-        .await?;
+        };
+
+        let written_bytes: u64 = segments
+            .iter()
+            .map(|s| s.sst_handle.info.filter_offset)
+            .sum();
+        self.db.db_stats.l0_flush_bytes.increment(written_bytes);
 
         Ok(UploadedMemtable {
             imm_memtable: Arc::clone(&job.imm_memtable),
@@ -234,42 +237,6 @@ impl UploadHandler {
             first_seq,
             last_seq,
         })
-    }
-
-    /// Upload a single segment SST with retry, writing it to the id
-    /// pre-allocated for its segment at dispatch. Each retry reuses the
-    /// already-encoded SST so the upload loop never rebuilds from the
-    /// memtable.
-    async fn upload_segment_sst(
-        &self,
-        sst: &EncodedSegmentSst,
-        sst_id: SsTableId,
-    ) -> Result<SegmentedSstHandle, SlateDBError> {
-        let written_bytes = sst.encoded.remaining_len() as u64;
-        loop {
-            match self.db.upload_sst(&sst_id, &sst.encoded).await {
-                Ok(sst_handle) => {
-                    self.db.db_stats.l0_flush_bytes.increment(written_bytes);
-                    return Ok(SegmentedSstHandle {
-                        prefix: sst.prefix.clone(),
-                        sst_handle,
-                    });
-                }
-                Err(e) => {
-                    // When the WAL is enabled and the database is shutting
-                    // down, give up immediately. The data is already durable
-                    // in the WAL and will be recovered on the next startup.
-                    if self.db.wal_enabled && self.db.check_closed().is_err() {
-                        info!(
-                            "skipping l0 upload retry during shutdown [sst_id={:?}, error={:?}]",
-                            sst_id, e
-                        );
-                        return Err(e);
-                    }
-                    self.db.system_clock.sleep(self.retry_backoff).await;
-                }
-            }
-        }
     }
 }
 

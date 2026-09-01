@@ -112,10 +112,12 @@ impl TableStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
         self.sst_format.table_builder()
     }
 
+    #[cfg(test)]
     pub(crate) async fn write_sst(
         &self,
         id: &SsTableId,
@@ -898,6 +900,7 @@ fn tagged_buf_writer(
     BufWriter::new(object_store, path).with_extensions(tag.into())
 }
 
+#[cfg(test)]
 async fn write_sst_streaming_in_object_store(
     object_store: Arc<dyn ObjectStore>,
     path: &Path,
@@ -933,6 +936,11 @@ impl EncodedSsTableWriter {
     }
 
     pub(crate) async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
+        fail_point!(
+            self.table_store.fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            |_| Err(slatedb_io_error())
+        );
         let encoded_sst = self.builder.build().await?;
         for block in &encoded_sst.unconsumed_blocks {
             self.writer.write_all(block.encoded_bytes.as_ref()).await?;
@@ -968,6 +976,11 @@ impl EncodedSsTableWriter {
     }
 
     async fn write_block(&mut self, block: EncodedSsTableBlock) -> Result<(), SlateDBError> {
+        fail_point!(
+            self.table_store.fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            |_| Err(slatedb_io_error())
+        );
         self.writer.write_all(block.encoded_bytes.as_ref()).await?;
         if let (Some(cache), Some(key_span)) = (&self.table_store.cache, &block.key_span) {
             let targets = self.table_store.targets_to_cache(&self.id);
