@@ -161,109 +161,32 @@ path.
 #### ByteBudgetSemaphore
 
 The core primitive is an async semaphore built on `AtomicUsize` + `tokio::Notify`
-that tracks allocations in bytes rather than discrete permits.
-
-```rust
-struct ByteBudgetSemaphore {
-    notify: Notify,
-    allocated_bytes: AtomicUsize,
-    waiter_cnt: AtomicUsize,
-    capacity: usize,
-}
-```
+that tracks allocations in bytes rather than discrete permits. `acquire`
+reserves bytes when `allocated_bytes` is below `capacity`, otherwise parks until
+a `release` drops allocation below `capacity`; `force_acquire` reserves
+unconditionally (and may overshoot `capacity`).
 
 **Why not `tokio::sync::Semaphore`?** Two reasons. First, **soft
 over-allocation**: `force_acquire` (WAL buffers, replay, structural overhead)
 and a single admitted write can both push `allocated_bytes` above `capacity`,
-whereas Tokio's semaphore enforces a hard limit and can never over-issue.
-Second, the **async `on_block` hook**: `acquire` awaits a caller-supplied async
-callback before each park so a blocked writer can perform relief work (freeze a
-memtable, wait for the budget to drain) on every wait; `tokio::sync::Semaphore`
-has no such hook. A custom `ByteBudgetSemaphore` also lets `release` broadcast
-to `await_capacity` waiters via `notify_waiters`.
-
-The semaphore operations used in production (interface summary; bodies elided):
-
-```rust
-impl ByteBudgetSemaphore {
-    fn new(capacity: usize) -> Self;
-    async fn acquire<F, Fut, Err>(&self, num_bytes: usize, on_block: F) -> Result<usize, Err>
-    where
-        F: Fn(usize, usize) -> Fut,
-        Fut: Future<Output = Result<(), Err>>;
-    fn force_acquire(&self, num_bytes: usize);
-    fn release(&self, num_bytes: usize);
-    fn available(&self) -> usize;
-    fn allocated(&self) -> usize;
-    async fn wait_for_allocated_below(&self, num_bytes: usize);
-}
-```
-
-- **`acquire`** — the blocking reservation primitive used by the live write
-  path. On each attempt it reserves `num_bytes` immediately when `allocated_bytes`
-  is below `capacity` (atomic `compare_exchange` fast path); otherwise it parks
-  on `notify` until a `release` drops allocation below `capacity`, then
-  re-checks. `on_block` is an **async** callback invoked immediately before every
-  park, receiving `(parked_cnt, allocated)` — `parked_cnt == 1` on the first park
-  — and is awaited before the park so callers can perform async relief work (e.g.
-  freezing the active memtable and waiting for the budget to drain) on each wait.
-  It returns the number of times it parked. Because the write's bytes are only
-  reserved once allocation is below `capacity`, a parked writer holds no budget
-  of its own while it waits.
-- **`force_acquire`** — non-blocking `fetch_add`. Can push `allocated_bytes`
-  above `capacity`. Used for structural overhead, WAL buffers, and WAL replay.
-- **`release`** — subtracts `num_bytes` from `allocated_bytes` via `fetch_sub`
-  and notifies any outstanding waiters parked waiting for allocation to drain
-  below `capacity`.
-- **`available`** — returns `capacity - allocated_bytes` (saturating to zero
-  when over-allocated).
-- **`allocated`** — returns the current `allocated_bytes` count.
-- **`wait_for_allocated_below`** — blocks until `allocated_bytes` drops below
-  the given threshold *without* reserving (used by `await_capacity`). Uses the
-  same enable-before-recheck pattern as `acquire` so a `release` between the
-  initial load and park cannot be missed.
+whereas Tokio's semaphore enforces a hard limit. Second, the **async `on_block`
+hook**: `acquire` awaits a caller-supplied callback before each park so a blocked
+writer can perform relief work (freeze a memtable, wait for the budget to drain)
+on every wait. Because a write's bytes are only reserved once allocation is below
+`capacity`, a parked writer holds no budget while it waits.
 
 #### ByteBufferManager
 
-A cloneable, generic byte-budget handle wrapping a shared
-`Arc<ByteBudgetSemaphore>`. It is stored in a **new** `write_buffer_manager`
-field on `DbInner` (the baseline `DbInner` had no such field) and is also
-threaded into `DbState::new`, `KVTable::new`, and the WAL machinery — all of
-which gain a `ByteBufferManager` parameter they did not have before.
-
-```rust
-#[derive(Clone)]
-pub struct ByteBufferManager {
-    inner: Arc<ByteBudgetSemaphore>,
-}
-```
-
-The manager tracks a single threshold:
-
-- **`capacity`** — the byte budget. A caller may reserve while `allocated` is
-  below `capacity`; reaching `capacity` is what engages backpressure. Live-path
-  admission blocks in `acquire` until allocation is below `capacity`, then
-  reserves the write's full request atomically — so a single admitted write can
-  push `allocated` up to roughly one write's worth above `capacity` (the
-  intentional soft overshoot). `force_acquire` (WAL buffers, replay) can also
-  push `allocated` above `capacity`.
-
-Backpressure engages when the budget is full and relieves as soon as allocation
-dips below full — there is no sub-capacity watermark or cool-off band. The
-builder requires `capacity` to leave room for one active memtable to reach
-`l0_sst_size_bytes` (plus fixed per-memtable overhead) so a memtable can fill
-and freeze before the budget is exhausted.
-
-Methods (interface summary; bodies elided):
+A cloneable byte-budget handle wrapping a shared `Arc<ByteBudgetSemaphore>`. It
+is stored in a new `write_buffer_manager` field on `DbInner` and threaded into
+`DbState::new`, `KVTable::new`, and the WAL machinery. It exposes a single
+threshold, `capacity` (the byte budget), and the following operations:
 
 ```rust
 impl ByteBufferManager {
     pub fn new(capacity: usize) -> Self;
     pub fn unbounded() -> Self;
-    pub async fn acquire<F, Fut, Err>(&self, num_bytes: usize, on_block: F) -> Result<ByteBufferPermit, Err>
-    where
-        F: Fn(usize, usize) -> Fut,
-        Fut: Future<Output = Result<(), Err>>;
+    pub async fn acquire<F, Fut, Err>(&self, num_bytes: usize, on_block: F) -> Result<ByteBufferPermit, Err>;
     pub fn force_acquire(&self, num_bytes: usize) -> ByteBufferPermit;
     pub fn force_expand(&self, permit: &ByteBufferPermit, num_bytes: usize);
     pub fn available(&self) -> usize;
@@ -274,73 +197,45 @@ impl ByteBufferManager {
 }
 ```
 
-- **`new`** — constructs a manager with the `capacity` threshold described
-  above.
-- **`unbounded`** — `capacity == usize::MAX`; never applies
-  backpressure. Used for read-only paths (e.g. `DbReader` / empty sentinel
-  tables) and tests where the API requires a manager but accounting is
-  unnecessary. Production WAL replay does *not* use `unbounded`; it charges the
-  shared DB manager via `force_acquire`.
-- **`acquire`** — the blocking reservation used by the live write path (a thin
-  wrapper over `ByteBudgetSemaphore::acquire`), returning `Result<ByteBufferPermit,
-  Err>`. The `on_block` callback is async and its error type propagates out, so a
-  DB error raised while waiting (e.g. the DB closing) aborts the reservation. The
-  wrapper logs when a write first blocks (`parked_cnt == 1`) and when it is
-  unblocked after having parked; the park count is otherwise consumed internally.
-- **`force_acquire`** — unconditionally reserves bytes without blocking; can
-  push `allocated_bytes` above `capacity`. Used for structural overhead, WAL
-  buffer creation, and WAL replay.
-- **`force_expand`** — unconditionally adds `num_bytes` to an existing permit's
-  reservation. Used by `KVTable::put` (per-entry structural overhead) and
-  `WalBuffer::append` to record growth of the WAL buffer container as entries
-  are appended. Today that WAL growth is the container's own bookkeeping
-  (the `VecDeque`'s backing capacity — pointers/metadata), **not** the key/value
-  bytes, which are owned by the `KVTable`; framing it as "record WAL buffer
-  growth" keeps room to charge additional per-entry WAL overhead here later
-  without changing the mechanism.
-- **`available`** / **`capacity`** / **`allocated`** — accessors for
-  `capacity - allocated_bytes` (saturating), the total budget, and the current
-  outstanding reservation.
-- **`at_capacity`** — `true` once `allocated_bytes >= capacity`. A convenience
-  predicate for callers and tests; the live write path relies on `acquire`'s
-  internal below-capacity check rather than reading this directly.
-- **`await_capacity`** — the relief wait `apply_memory_backpressure` blocks on:
-  resolves once `allocated_bytes < capacity`, without reserving any bytes.
+- **`acquire`** — the blocking reservation used by the live write path. Blocks
+  until allocation is below `capacity`, then reserves the write's full request
+  atomically — so one admitted write can push `allocated` up to roughly one
+  write's worth above `capacity` (the intentional soft overshoot). The async
+  `on_block` callback's error type propagates out, so a DB error raised while
+  waiting (e.g. the DB closing) aborts the reservation.
+- **`force_acquire`** — reserves bytes without blocking; may push `allocated`
+  above `capacity`. Used for structural overhead, WAL buffer creation, and WAL
+  replay (replay charges the shared DB manager rather than using `unbounded`).
+- **`force_expand`** — grows an existing permit's reservation without blocking.
+  Used for per-entry structural overhead and to record WAL buffer container
+  growth.
+- **`unbounded`** — `capacity == usize::MAX`; never applies backpressure. Used
+  for read-only paths (e.g. `DbReader`) and tests.
+- **`await_capacity`** — the relief wait `apply_memory_backpressure` blocks on;
+  resolves once allocation drops below `capacity` without reserving bytes.
+- **`available` / `capacity` / `allocated` / `at_capacity`** — accessors for the
+  budget state.
+
+Backpressure engages when the budget is full and relieves as soon as allocation
+dips below full — there is no sub-capacity watermark or cool-off band. The
+builder requires `capacity` to leave room for one active memtable to reach
+`l0_sst_size_bytes` (plus fixed per-memtable overhead) so a memtable can fill
+and freeze before the budget is exhausted.
 
 #### ByteBufferPermit
 
-An RAII guard that releases its byte reservation on drop. Multiple permits can
-be consolidated via `merge()` to combine reservations into a single guard.
-The type is `pub` inside the private `byte_buffer_manager` module but is **not**
-re-exported from `lib.rs` — external callers interact with it only indirectly
-through `ByteBufferManager` / `DbBuilder`.
+An RAII guard that releases its byte reservation on drop. It lives in the private
+`byte_buffer_manager` module and is not re-exported from `lib.rs`. Beyond
+reporting its `size`, it supports two operations for moving reservations between
+permits without releasing to the budget:
 
-```rust
-pub struct ByteBufferPermit {
-    semaphore: Arc<ByteBudgetSemaphore>,
-    reserved_bytes: AtomicUsize,
-}
-
-impl ByteBufferPermit {
-    pub fn size(&self) -> usize;
-    pub fn merge(&self, other: &ByteBufferPermit);
-    pub fn take(&self, num_bytes: usize) -> Self;
-}
-
-impl Drop for ByteBufferPermit {
-    fn drop(&mut self); // calls semaphore.release(reserved_bytes)
-}
-```
-
-- **`size`** — returns the number of bytes currently reserved by this permit.
-- **`merge`** — atomically zeroes the source permit's `reserved_bytes` and adds
-  that value to the target. The source permit's `Drop` becomes a no-op,
-  avoiding double-release. Used by `KVTable::add_write_permit` to consolidate
-  multiple write batch permits into the table's single permit.
-- **`take`** — subtracts up to `num_bytes` from this permit (saturating if
-  fewer remain) and returns a new permit owning those bytes. Used by
-  `KVTable::put` in the overwrite case to release cancelled structural
-  overhead and replaced entry data back to the budget.
+- **`merge`** — moves another permit's bytes into this one, zeroing the source so
+  its `Drop` is a no-op (avoids double-release). Used by
+  `KVTable::add_write_permit` to consolidate write-batch permits into the table's
+  single permit.
+- **`take`** — splits off up to `num_bytes` into a new permit. Used by
+  `KVTable::put` in the overwrite case to release cancelled structural overhead
+  and replaced entry data back to the budget.
 
 #### Integration into the Write Path
 
@@ -390,100 +285,56 @@ values), and those byte buffer metrics are tracked exclusively in relation to
 the `KVTable`. The WAL buffer and dispatch channel do *not* account for the
 key/value data bytes themselves — only the `KVTable` does.
 
-1. **`WriteBatch`** gains a **new** `write_buffer_permit: Option<Arc<ByteBufferPermit>>`
-   field (the baseline `WriteBatch` had no permit and no size method).
-   `DbInner::write_with_options` obtains the permit from `acquire` and assigns
-   it to this field before dispatching the batch. The permit accounts **only
-   for the key and value byte buffers** that the user is storing (the batch's
-   new `estimated_size()`) — it does not account for the `WriteBatch` struct
-   itself, the dispatch channel, or any other transient overhead.
+1. **`WriteBatch`** gains a new `write_buffer_permit: Option<Arc<ByteBufferPermit>>`
+   field. `DbInner::write_with_options` obtains the permit from `acquire` and
+   attaches it before dispatch. The permit accounts **only for the user's key and
+   value byte buffers** (the batch's new `estimated_size()`), not the
+   `WriteBatch` struct, the dispatch channel, or other transient overhead.
 
-2. **`DbInner::write_with_options`** calls the blocking
-   `acquire(estimated_size, on_block)` *before* dispatch, where `on_block` is
-   `apply_memory_backpressure`. `acquire`'s fast path reserves immediately when
-   allocation is below `capacity`, so the common case is a single
-   `compare_exchange`. When at capacity, `acquire` parks and, before each park,
-   awaits `apply_memory_backpressure`, which freezes the active memtable (only
-   when the imm queue is empty, to seed a drainable imm) and waits until
-   allocation drains below `capacity`. Only once below capacity does `acquire`
-   reserve the write's bytes and return the permit; the batch is then attached to
-   the permit, dispatched, and applied. After apply completes, the writer calls
-   `maybe_apply_l0_backpressure()`, which stalls on the L0 count / per-key
-   overlap signals (see [Backpressure Enhancement](#backpressure-enhancement)).
+2. **`DbInner::write_with_options`** calls the blocking `acquire(estimated_size,
+   on_block = apply_memory_backpressure)` *before* dispatch. On the fast path
+   (allocation below `capacity`) it reserves immediately. At capacity it parks
+   and, before each park, runs `apply_memory_backpressure`, which freezes the
+   active memtable (only when the imm queue is empty, to seed a drainable imm)
+   and waits until allocation drains below `capacity`. It then reserves, attaches
+   the permit, and dispatches. After apply, the writer calls
+   `maybe_apply_l0_backpressure()` (see
+   [Backpressure Enhancement](#backpressure-enhancement)).
 
-   Blocking in `acquire` before dispatch is safe here precisely because the
-   waiting write **has not reserved its own bytes** and the `on_block` freeze
-   only touches local state and re-fires on every park:
-   - **No self-deadlock on the waiter's own bytes.** The write's
-     `estimated_size` is reserved only after allocation is below capacity, so a
-     parked writer holds no budget of its own that it would need to release to
-     make progress. The `on_block` freezes an *already-applied* prior write's
-     active memtable, producing an imm the flusher can drain to free budget.
-   - **Re-asserted relief.** `on_block` runs on every park, so a freeze request
-     that raced ahead of the flusher (or landed on the wrong shared-manager
-     instance) is re-issued on the next park rather than being lost.
-   - **Bounded wait.** Every wait inside `apply_memory_backpressure` is wrapped
-     in `await_backpressure_relief`, which resolves on close/fence or a 30s
-     watchdog, so a wedged or shared flush pipeline can never hang a writer
-     indefinitely.
+   Blocking before dispatch is safe because a parked writer has **not reserved
+   its own bytes** (no self-deadlock), the `on_block` freeze re-fires on every
+   park (relief is re-asserted if it raced the flusher), and every wait is
+   bounded by close/fence or a 30s watchdog. Blocking gates *admission* rather
+   than reclaiming memory — the batch's bytes already exist — so the budget
+   bounds how many in-flight writes accumulate.
 
-   The **`WriteBatch` bytes are already allocated** by the time we reach the
-   write path — the user has handed us the keys and values — so blocking does
-   not reclaim that memory; it gates *admission* so the budget bounds how many
-   in-flight writes accumulate, freezing prior state to make room.
-
-3. **`DbInner::write_batch`** (batch writer) is unchanged relative to the
-   baseline except that it now merges the write permit into the `KVTable`. It
-   still applies entries and runs the same size/WAL-based
-   `maybe_freeze_current_memtable`; the memtable freeze that responds to the
-   byte budget is handled separately by `apply_memory_backpressure` (the
-   `acquire` `on_block`), not here.
+3. **`DbInner::write_batch`** is unchanged except that it merges the write permit
+   into the `KVTable`. It still runs the same size/WAL-based
+   `maybe_freeze_current_memtable`; the byte-budget freeze is handled separately
+   by `apply_memory_backpressure`.
 
 4. **`DbInner::write_entries_to_memtable`** takes the permit off the batch and
-   merges it into the table's own permit. From this point, the `KVTable` owns
-   the byte buffer budget for those key/value bytes.
+   merges it into the table's own permit. From this point the `KVTable` owns the
+   budget for those key/value bytes.
 
 ##### Worked Examples
 
-The following per-case walkthroughs show how a write interacts with the budget.
-All three describe the **actual** behavior: the live path blocks in `acquire`
-(running `apply_memory_backpressure` on each park) until it can reserve its
-bytes below capacity, then dispatches and applies the batch, then runs the
-post-dispatch L0 gate.
+All three cases describe the actual behavior: the live path blocks in `acquire`
+(running `apply_memory_backpressure` on each park) until it can reserve below
+capacity, then dispatches, applies, and runs the post-dispatch L0 gate.
 
-```mermaid
-flowchart TD
-    A[write_with_options batch] --> B{allocated < capacity?}
-    B -- yes --> R[reserve estimated_size, get permit]
-    B -- no --> P[apply_memory_backpressure]
-    P --> F{imm queue empty?}
-    F -- yes --> G[freeze active memtable]
-    F -- no --> H[await_capacity, bounded by close/fence + watchdog]
-    G --> H
-    H --> B
-    R --> C[dispatch and apply into memtable]
-    C --> L{L0 count / overlap at capacity?}
-    L -- no --> E[return Ok]
-    L -- yes --> S[stall one manifest_poll_interval, re-check]
-    S --> L
-```
-
-- **10 MB batch, 1 MB budget (single write larger than the whole budget).**
-  Allocation starts at 0 (below `capacity`), so `acquire` reserves ~10 MB in one
-  shot and returns immediately — a single write is admitted even when it exceeds
-  the whole budget, since it cannot be split and its bytes already exist. That
-  reservation pushes `allocated` to ~10 MB, far above `capacity`; the *next*
-  write blocks in `acquire`, whose `on_block` freezes the 10 MB active memtable
-  and waits until the flush drains it below 1 MB.
-- **100 MB budget, 1 MB memtable (typical steady state).** `acquire(~1 MB)` sees
-  `allocated` well under the 100 MB budget and reserves on the fast path — no
-  `on_block`, no freeze, no wait. This is the common fast path.
-- **100 MB budget, 99 MB already outstanding (approaching the cap).** A new
-  ~2 MB write still finds `allocated` (99 MB) below `capacity`, so it reserves
-  and pushes `allocated` to ~101 MB — the intentional soft overshoot of roughly
-  one in-flight write. The *following* write now sees `allocated >= capacity`,
-  blocks in `acquire`, freezes the active memtable via `on_block`, and parks
-  until flushes bring `allocated` back below 100 MB.
+- **10 MB batch, 1 MB budget (single write larger than the budget).** Allocation
+  starts at 0, so `acquire` reserves ~10 MB in one shot and returns immediately —
+  a single write is always admitted since it cannot be split and its bytes
+  already exist. The *next* write blocks, freezes the 10 MB active memtable via
+  `on_block`, and waits for the flush to drain below 1 MB.
+- **100 MB budget, 1 MB memtable (typical steady state).** `acquire(~1 MB)`
+  reserves on the fast path — no freeze, no wait. The common case.
+- **100 MB budget, 99 MB outstanding (soft overshoot).** A ~2 MB write still
+  finds allocation below capacity, reserves, and pushes to ~101 MB (the
+  intentional overshoot of roughly one in-flight write). The *following* write
+  sees `allocated >= capacity`, blocks, freezes the active memtable, and parks
+  until flushes bring allocation back below 100 MB.
 
 #### Memory Tracking Responsibilities
 
