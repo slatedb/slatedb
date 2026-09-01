@@ -192,7 +192,11 @@ impl UploadHandler {
         // Build once, retry only the upload. `write_sst` takes
         // `&EncodedSsTable`, so the encoded SSTs stay alive for retries —
         // no need to rebuild from the memtable on transient upload errors.
-        let built = self.db.build_imm_ssts(job.imm_memtable.table()).await?;
+        let min_retention_seq = self.db.compute_min_retention_seq();
+        let built = self
+            .db
+            .build_imm_ssts_with_retention(job.imm_memtable.table(), min_retention_seq)
+            .await?;
         let first_seq = job
             .imm_memtable
             .table()

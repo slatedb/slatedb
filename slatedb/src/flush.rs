@@ -30,9 +30,10 @@ impl DbInner {
     async fn build_imm_sst(
         &self,
         imm_table: Arc<KVTable>,
+        min_retention_seq: Option<u64>,
     ) -> Result<Option<EncodedSsTable>, SlateDBError> {
         let mut sst_builder = self.table_store.table_builder();
-        let mut iter = self.iter_imm_table(imm_table).await?;
+        let mut iter = self.iter_imm_table(imm_table, min_retention_seq).await?;
         let mut any = false;
         while let Some(entry) = iter.next().await? {
             sst_builder.add(entry).await?;
@@ -65,13 +66,24 @@ impl DbInner {
     /// — per-memtable progress in the manifest (`last_l0_seq`,
     /// `replay_after_wal_id`) advances independently of whether any
     /// SST landed.
+    #[cfg(test)]
     pub(crate) async fn build_imm_ssts(
         &self,
         imm_table: Arc<KVTable>,
     ) -> Result<Vec<EncodedSegmentSst>, SlateDBError> {
+        let min_retention_seq = self.compute_min_retention_seq();
+        self.build_imm_ssts_with_retention(imm_table, min_retention_seq)
+            .await
+    }
+
+    pub(crate) async fn build_imm_ssts_with_retention(
+        &self,
+        imm_table: Arc<KVTable>,
+        min_retention_seq: Option<u64>,
+    ) -> Result<Vec<EncodedSegmentSst>, SlateDBError> {
         if self.segment_extractor.is_none() {
             return Ok(self
-                .build_imm_sst(imm_table)
+                .build_imm_sst(imm_table, min_retention_seq)
                 .await?
                 .into_iter()
                 .map(|encoded| EncodedSegmentSst {
@@ -89,7 +101,8 @@ impl DbInner {
             }
             return Err(SlateDBError::InvalidDBState);
         }
-        self.build_imm_segment_ssts(imm_table, touched).await
+        self.build_imm_segment_ssts(imm_table, touched, min_retention_seq)
+            .await
     }
 
     /// Sorted-merge walk over the precomputed touched-segment set.
@@ -103,8 +116,9 @@ impl DbInner {
         &self,
         imm_table: Arc<KVTable>,
         touched_segments: std::collections::BTreeSet<Bytes>,
+        min_retention_seq: Option<u64>,
     ) -> Result<Vec<EncodedSegmentSst>, SlateDBError> {
-        let mut entries = self.iter_imm_table(imm_table).await?;
+        let mut entries = self.iter_imm_table(imm_table, min_retention_seq).await?;
         let mut seg_iter = touched_segments.into_iter();
         let mut current_prefix = seg_iter
             .next()
@@ -182,31 +196,34 @@ impl DbInner {
         Ok(handles)
     }
 
-    async fn iter_imm_table(
-        &self,
-        imm_table: Arc<KVTable>,
-    ) -> Result<RetentionIterator<Box<dyn RowEntryIterator>>, SlateDBError> {
-        let state = self.state.read().view();
-
-        // Compute retention boundary using the minimum active sequences from active snapshots AND
-        // active transactions AND durable watermark. This does not need to be atomic as even if a
-        // new snapshot is created/dropped or a new transaction is created/dropped between reading
-        // both snapshot_manager and txn_manager we will always have the min so any race here is
-        // acceptable.
-        //
-        // Remote readers (DurabilityLevel::Remote) cap visibility at last_remote_persisted_seq,
-        // so we must retain at least one version at or below that boundary for each key.
-        // Otherwise, if we only keep a newer non-durable version, remote readers would skip
-        // it and incorrectly fall back to an even older value.
+    // Compute retention boundary using the minimum active sequences from active snapshots AND
+    // active transactions AND durable watermark. This does not need to be atomic as even if a
+    // new snapshot is created/dropped or a new transaction is created/dropped between reading
+    // both snapshot_manager and txn_manager we will always have the min so any race here is
+    // acceptable.
+    //
+    // Remote readers (DurabilityLevel::Remote) cap visibility at last_remote_persisted_seq,
+    // so we must retain at least one version at or below that boundary for each key.
+    // Otherwise, if we only keep a newer non-durable version, remote readers would skip
+    // it and incorrectly fall back to an even older value.
+    pub(crate) fn compute_min_retention_seq(&self) -> Option<u64> {
         let durable_seq = self.oracle.last_remote_persisted_seq();
-        let min_retention_seq = [
+        [
             Some(durable_seq),
             self.snapshot_manager.min_active_seq(),
             self.txn_manager.min_active_seq(),
         ]
         .into_iter()
         .flatten()
-        .min();
+        .min()
+    }
+
+    async fn iter_imm_table(
+        &self,
+        imm_table: Arc<KVTable>,
+        min_retention_seq: Option<u64>,
+    ) -> Result<RetentionIterator<Box<dyn RowEntryIterator>>, SlateDBError> {
+        let state = self.state.read().view();
 
         let merge_iter = if let Some(merge_operator) = self.flush_merge_operator.clone() {
             Box::new(MergeOperatorIterator::new(
@@ -693,6 +710,94 @@ mod tests {
         let sst_handle = handles.into_iter().next().expect("expected single SST");
 
         verify_sst(&db, &sst_handle, &test_case.expected_entries).await;
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn build_imm_ssts_with_retention_reuses_a_pinned_boundary() {
+        let db = setup_test_db_with_merge_operator().await;
+        db.inner.oracle.advance_durable_seq(4);
+
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
+        table.put(RowEntry::new_value(&Bytes::from("key"), b"value2", 2));
+        table.put(RowEntry::new_value(&Bytes::from("key"), b"value3", 3));
+        table.put(RowEntry::new_value(&Bytes::from("key"), b"value4", 4));
+
+        let pinned = db.inner.compute_min_retention_seq();
+        assert_eq!(pinned, Some(4));
+
+        let (_, snapshot_seq) = db.inner.snapshot_manager.new_snapshot(Some(1));
+        assert_eq!(snapshot_seq, 1);
+        assert_eq!(db.inner.compute_min_retention_seq(), Some(1));
+
+        for attempt in [
+            db.inner
+                .build_imm_ssts_with_retention(table.table().clone(), pinned)
+                .await
+                .unwrap(),
+            db.inner
+                .build_imm_ssts_with_retention(table.table().clone(), pinned)
+                .await
+                .unwrap(),
+        ] {
+            let encoded = attempt.into_iter().next().unwrap().encoded;
+            let handle = db
+                .inner
+                .upload_sst(&SsTableId::from(Ulid::new()), &encoded)
+                .await
+                .unwrap();
+            verify_sst(
+                &db,
+                &handle,
+                &[(
+                    Bytes::from("key"),
+                    4,
+                    ValueDeletable::Value(Bytes::from("value4")),
+                )],
+            )
+            .await;
+        }
+
+        let unpinned = db
+            .inner
+            .build_imm_ssts(table.table().clone())
+            .await
+            .unwrap();
+        let encoded = unpinned.into_iter().next().unwrap().encoded;
+        let handle = db
+            .inner
+            .upload_sst(&SsTableId::from(Ulid::new()), &encoded)
+            .await
+            .unwrap();
+        verify_sst(
+            &db,
+            &handle,
+            &[
+                (
+                    Bytes::from("key"),
+                    4,
+                    ValueDeletable::Value(Bytes::from("value4")),
+                ),
+                (
+                    Bytes::from("key"),
+                    3,
+                    ValueDeletable::Value(Bytes::from("value3")),
+                ),
+                (
+                    Bytes::from("key"),
+                    2,
+                    ValueDeletable::Value(Bytes::from("value2")),
+                ),
+                (
+                    Bytes::from("key"),
+                    1,
+                    ValueDeletable::Value(Bytes::from("value1")),
+                ),
+            ],
+        )
+        .await;
+
         db.close().await.unwrap();
     }
 
