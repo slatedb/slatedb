@@ -1276,6 +1276,23 @@ pub struct CompactorOptions {
     #[serde(serialize_with = "serialize_duration")]
     pub commit_compacted_interval: Duration,
 
+    /// How long the compactor checkpoint protects input SSTs while publishing a
+    /// manifest that replaces them with compacted output.
+    ///
+    /// A scan, get, snapshot, or transaction that began before the manifest update
+    /// and still needs an input SST must finish within this duration. If it runs
+    /// longer, garbage collection may delete the SST, causing the operation to fail
+    /// with a [`crate::ErrorKind::Data`] error backed by
+    /// [`object_store::Error::NotFound`]. Shorter lifetimes reduce retained storage;
+    /// longer lifetimes give in-flight reads more time to finish. Defaults to 15
+    /// minutes.
+    #[serde(
+        default = "default_compactor_checkpoint_lifetime",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "serialize_duration"
+    )]
+    pub checkpoint_lifetime: Duration,
+
     /// How long the coordinator will wait without a heartbeat before reclaiming
     /// a `Running` compaction from its worker and resetting it to `Submitted`.
     /// A worker that crashes or stalls will have its jobs reclaimed after this
@@ -1293,8 +1310,9 @@ pub struct CompactorOptions {
 /// Default options for the compactor. Currently, only a
 /// `SizeTieredCompactionScheduler` compaction strategy is implemented.
 impl Default for CompactorOptions {
-    /// Returns a `CompactorOptions` with a 5 second poll interval and an embedded
-    /// worker enabled with default [`CompactionWorkerOptions`].
+    /// Returns a `CompactorOptions` with a 5 second poll interval, a 15 minute
+    /// checkpoint lifetime, and an embedded worker enabled with default
+    /// [`CompactionWorkerOptions`].
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(5),
@@ -1305,6 +1323,7 @@ impl Default for CompactorOptions {
             worker: Some(CompactionWorkerOptions::default()),
             metric_level: None,
             commit_compacted_interval: Duration::from_secs(1),
+            checkpoint_lifetime: default_compactor_checkpoint_lifetime(),
             worker_heartbeat_timeout: Duration::from_secs(30),
             object_store_max_retries: None,
         }
@@ -1326,6 +1345,7 @@ impl std::fmt::Debug for CompactorOptions {
             .field("worker", &self.worker)
             .field("metric_level", &self.metric_level)
             .field("commit_compacted_interval", &self.commit_compacted_interval)
+            .field("checkpoint_lifetime", &self.checkpoint_lifetime)
             .field("worker_heartbeat_timeout", &self.worker_heartbeat_timeout)
             .field("object_store_max_retries", &self.object_store_max_retries)
             .finish()
@@ -1432,6 +1452,10 @@ impl Default for CompactionWorkerOptions {
 /// disabling it.)
 fn default_compaction_worker_options() -> Option<CompactionWorkerOptions> {
     Some(CompactionWorkerOptions::default())
+}
+
+fn default_compactor_checkpoint_lifetime() -> Duration {
+    Duration::from_mins(15)
 }
 
 /// Options for the Size-Tiered Compaction Scheduler
@@ -1870,6 +1894,27 @@ mod tests {
     fn test_db_options_default_metric_level() {
         let options = Settings::default();
         assert_eq!(MetricLevel::default(), options.metric_level);
+    }
+
+    #[test]
+    fn test_compactor_checkpoint_lifetime_config() {
+        let default_lifetime = Duration::from_mins(15);
+        assert_eq!(
+            default_lifetime,
+            CompactorOptions::default().checkpoint_lifetime
+        );
+
+        let mut value = serde_json::to_value(CompactorOptions::default()).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "checkpoint_lifetime".to_string(),
+            serde_json::Value::String("42s".to_string()),
+        );
+        let configured: CompactorOptions = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(Duration::from_secs(42), configured.checkpoint_lifetime);
+
+        value.as_object_mut().unwrap().remove("checkpoint_lifetime");
+        let omitted: CompactorOptions = serde_json::from_value(value).unwrap();
+        assert_eq!(default_lifetime, omitted.checkpoint_lifetime);
     }
 
     #[test]

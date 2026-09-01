@@ -110,6 +110,8 @@ pub(crate) struct CompactorStateWriter {
     manifest: FenceableManifest,
     /// Fenceable compactions handle used for refresh/update with fencing.
     compactions: FenceableCompactions,
+    /// Lifetime of checkpoints that protect compaction inputs during manifest updates.
+    checkpoint_lifetime: Duration,
     /// RNG for checkpoint ids.
     rand: Arc<DbRand>,
 }
@@ -170,6 +172,7 @@ impl CompactorStateWriter {
             state,
             manifest,
             compactions,
+            checkpoint_lifetime: options.checkpoint_lifetime,
             rand,
         })
     }
@@ -240,10 +243,9 @@ impl CompactorStateWriter {
 
     /// Persists the updated manifest after a compaction finishes.
     ///
-    /// A checkpoint with a 15-minute lifetime is written first to prevent GC from
-    /// deleting SSTs that are about to be removed. This is to keep them around for a
-    /// while in case any in-flight operations (such as iterator scans) are still using
-    /// them.
+    /// A checkpoint is written first to prevent GC from deleting SSTs that are about
+    /// to be removed. Its configured lifetime keeps them available to in-flight
+    /// operations such as iterator scans.
     async fn write_manifest(&mut self) -> Result<(), SlateDBError> {
         // write the checkpoint first so that it points to the manifest with the ssts
         // being removed
@@ -252,13 +254,7 @@ impl CompactorStateWriter {
             .write_checkpoint(
                 checkpoint_id,
                 &CheckpointOptions {
-                    // TODO(rohan): for now, just write a checkpoint with 15-minute expiry
-                    //              so that it's extremely unlikely for the gc to delete ssts
-                    //              out from underneath the writer. In a follow up, we'll write
-                    //              a checkpoint with no expiry and with metadata indicating its
-                    //              a compactor checkpoint. Then, the gc will delete the checkpoint
-                    //              based on a configurable timeout
-                    lifetime: Some(Duration::from_secs(900)),
+                    lifetime: Some(self.checkpoint_lifetime),
                     ..CheckpointOptions::default()
                 },
             )
@@ -1058,6 +1054,55 @@ mod tests {
             .unwrap()
             .id;
         assert_eq!(final_id, start_id + 3);
+    }
+
+    #[tokio::test]
+    async fn test_write_manifest_uses_configured_checkpoint_lifetime() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(&Path::from(ROOT), object_store));
+        let clock = Arc::new(MockSystemClock::with_time(1_000));
+        let system_clock: Arc<dyn SystemClock> = clock.clone();
+
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+
+        let checkpoint_lifetime = Duration::from_secs(42);
+        let options = CompactorOptions {
+            checkpoint_lifetime,
+            ..CompactorOptions::default()
+        };
+        let mut writer = CompactorStateWriter::new(
+            manifest_store.clone(),
+            compactions_store,
+            system_clock.clone(),
+            &options,
+            Arc::new(DbRand::new(7)),
+        )
+        .await
+        .unwrap();
+
+        writer.write_manifest_safely().await.unwrap();
+
+        let latest = manifest_store.read_latest_manifest().await.unwrap();
+        let checkpoint = latest
+            .manifest
+            .core
+            .checkpoints
+            .last()
+            .expect("missing compactor checkpoint");
+        assert_eq!(
+            Some(system_clock.now() + checkpoint_lifetime),
+            checkpoint.expire_time
+        );
     }
 
     #[tokio::test]
