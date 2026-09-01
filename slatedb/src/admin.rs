@@ -14,10 +14,10 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::VersionedManifest;
 use slatedb_common::clock::SystemClock;
 
-use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::seq_tracker::FindOption;
 use crate::utils::IdGenerator;
+use crate::utils::ObjectStoreType;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
@@ -47,8 +47,11 @@ use slatedb_txn_obj::TransactionalObject;
 pub struct Admin {
     /// The path to the database.
     pub(crate) path: Path,
-    /// The object stores to use for the main database and WAL.
-    pub(crate) object_stores: ObjectStores,
+    /// The main object store used for manifests and compacted SSTs.
+    pub(crate) main_object_store: Arc<dyn ObjectStore>,
+    /// The object store used for the WAL. This is the main object store when no
+    /// dedicated WAL object store was configured.
+    pub(crate) wal_object_store: Option<Arc<dyn ObjectStore>>,
     /// The system clock to use for operations.
     pub(crate) system_clock: Arc<dyn SystemClock>,
     /// The random number generator to use for randomness.
@@ -294,11 +297,11 @@ impl Admin {
     pub async fn run_gc_once(&self, gc_opts: GarbageCollectorOptions) -> Result<(), crate::Error> {
         let gc = GarbageCollectorBuilder::new(
             self.path.clone(),
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.object_store(ObjectStoreType::Main).clone(),
         )
         .with_system_clock(self.system_clock.clone())
         .with_wal_gc(self.wal_admin.garbage_collector(&self.path))
-        .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
+        .with_wal_object_store(self.object_store(ObjectStoreType::Wal).clone())
         .with_options(gc_opts)
         .with_seed(self.rand.rng().next_u64())
         .build();
@@ -328,11 +331,11 @@ impl Admin {
     ) -> Result<(), crate::Error> {
         let gc = GarbageCollectorBuilder::new(
             self.path.clone(),
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.object_store(ObjectStoreType::Main).clone(),
         )
         .with_system_clock(self.system_clock.clone())
         .with_wal_gc(self.wal_admin.garbage_collector(&self.path))
-        .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
+        .with_wal_object_store(self.object_store(ObjectStoreType::Wal).clone())
         .with_options(gc_opts)
         .with_seed(self.rand.rng().next_u64())
         .build();
@@ -377,7 +380,7 @@ impl Admin {
         #[allow(unused_mut)]
         let mut builder = crate::CompactorBuilder::new(
             self.path.clone(),
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.object_store(ObjectStoreType::Main).clone(),
         )
         .with_options(options)
         .with_system_clock(self.system_clock.clone())
@@ -438,7 +441,7 @@ impl Admin {
         #[allow(unused_mut)]
         let mut builder = crate::CompactionWorkerBuilder::new(
             self.path.clone(),
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.object_store(ObjectStoreType::Main).clone(),
         )
         .with_options(options)
         .with_system_clock(self.system_clock.clone())
@@ -506,7 +509,7 @@ impl Admin {
         let mut stored_manifest =
             StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
 
-        let configured_wal_uri = self.object_stores.has_wal_object_store().then(String::new);
+        let configured_wal_uri = self.wal_object_store.is_some().then(String::new);
         stored_manifest
             .db_state()
             .validate_wal_object_store_uri(configured_wal_uri.as_deref())?;
@@ -743,11 +746,21 @@ impl Admin {
     /// detected rather than surfaced as a spurious error.
     fn retrying_store(&self, store_type: ObjectStoreType) -> Arc<dyn ObjectStore> {
         Arc::new(RetryingObjectStore::new(
-            self.object_stores.store_of(store_type).clone(),
+            self.object_store(store_type).clone(),
             self.rand.clone(),
             self.system_clock.clone(),
             self.object_store_max_retries,
         ))
+    }
+
+    fn object_store(&self, store_type: ObjectStoreType) -> &Arc<dyn ObjectStore> {
+        match store_type {
+            ObjectStoreType::Main => &self.main_object_store,
+            ObjectStoreType::Wal => self
+                .wal_object_store
+                .as_ref()
+                .unwrap_or(&self.main_object_store),
+        }
     }
 
     fn manifest_store(&self) -> ManifestStore {

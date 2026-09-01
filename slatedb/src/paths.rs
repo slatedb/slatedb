@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::db_state::SsTableId;
-use crate::db_state::SsTableId::{Compacted, Wal};
 use crate::error::SlateDBError;
+use crate::wal::slatedb::store::WalFileId;
 use object_store::path::Path;
 use ulid::Ulid;
 
@@ -72,17 +72,27 @@ impl PathResolver {
     pub(crate) fn parse_table_id(&self, path: &Path) -> Result<Option<SsTableId>, SlateDBError> {
         if let Some(mut suffix_iter) = path.prefix_match(&self.root_path) {
             match suffix_iter.next() {
-                Some(a) if a.as_ref() == WAL_PATH => suffix_iter
-                    .next()
-                    .and_then(|s| s.as_ref().split('.').next().map(|s| s.parse::<u64>()))
-                    .transpose()
-                    .map(|r| r.map(Wal))
-                    .map_err(|_| SlateDBError::InvalidDBState),
                 Some(a) if a.as_ref() == COMPACTED_PATH => suffix_iter
                     .next()
                     .and_then(|s| s.as_ref().split('.').next().map(Ulid::from_string))
                     .transpose()
-                    .map(|r| r.map(Compacted))
+                    .map(|result| result.map(SsTableId::from))
+                    .map_err(|_| SlateDBError::InvalidDBState),
+                _ => Ok(None),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(crate) fn parse_wal_file_id(&self, path: &Path) -> Result<Option<WalFileId>, SlateDBError> {
+        if let Some(mut suffix_iter) = path.prefix_match(&self.root_path) {
+            match suffix_iter.next() {
+                Some(a) if a.as_ref() == WAL_PATH => suffix_iter
+                    .next()
+                    .and_then(|s| s.as_ref().split('.').next().map(|s| s.parse::<u64>()))
+                    .transpose()
+                    .map(|result| result.map(WalFileId::from))
                     .map_err(|_| SlateDBError::InvalidDBState),
                 _ => Ok(None),
             }
@@ -97,15 +107,22 @@ impl PathResolver {
             Some(external_path) => external_path,
             None => &self.root_path,
         };
-        match table_id {
-            Wal(id) => Path::from(format!("{}/{}/{:020}.sst", root_path, WAL_PATH, id)),
-            Compacted(ulid) => Path::from(format!(
-                "{}/{}/{}.sst",
-                root_path,
-                COMPACTED_PATH,
-                ulid.to_string()
-            )),
-        }
+        Path::from(format!(
+            "{}/{}/{}.sst",
+            root_path,
+            COMPACTED_PATH,
+            table_id.value()
+        ))
+    }
+
+    /// Returns the path of the WAL SST with the given id.
+    pub(crate) fn wal_sst_path(&self, wal_file_id: &WalFileId) -> Path {
+        Path::from(format!(
+            "{}/{}/{:020}.sst",
+            self.root_path,
+            WAL_PATH,
+            wal_file_id.value()
+        ))
     }
 }
 
@@ -113,6 +130,7 @@ impl PathResolver {
 mod tests {
     use crate::db_state::SsTableId;
     use crate::paths::PathResolver;
+    use crate::wal::slatedb::store::WalFileId;
     use object_store::path::Path;
     use proptest::arbitrary::any;
     use proptest::proptest;
@@ -126,10 +144,10 @@ mod tests {
             wal_id in any::<u64>(),
         ) {
             let path_resolver = PathResolver::from_root(Path::from(ROOT));
-            let table_id = SsTableId::Wal(wal_id);
-            let path = path_resolver.sst_path(&table_id);
-            let parsed_table_id = path_resolver.parse_table_id(&path).unwrap();
-            assert_eq!(Some(table_id), parsed_table_id);
+            let wal_file_id = WalFileId::from(wal_id);
+            let path = path_resolver.wal_sst_path(&wal_file_id);
+            let parsed_wal_file_id = path_resolver.parse_wal_file_id(&path).unwrap();
+            assert_eq!(Some(wal_file_id), parsed_wal_file_id);
         }
 
         #[test]
@@ -137,7 +155,7 @@ mod tests {
             compacted_id in any::<u128>(),
         ) {
             let path_resolver = PathResolver::from_root(Path::from(ROOT));
-            let table_id = SsTableId::Compacted(Ulid::from(compacted_id));
+            let table_id = SsTableId::from(Ulid::from(compacted_id));
             let path = path_resolver.sst_path(&table_id);
             let parsed_table_id = path_resolver.parse_table_id(&path).unwrap();
             assert_eq!(Some(table_id), parsed_table_id);
@@ -148,14 +166,14 @@ mod tests {
     fn test_parse_id() {
         let path_resolver = PathResolver::from_root(Path::from(ROOT));
         let path = Path::from("/root/wal/00000000000000000003.sst");
-        let id = path_resolver.parse_table_id(&path).unwrap();
-        assert_eq!(id, Some(SsTableId::Wal(3)));
+        let id = path_resolver.parse_wal_file_id(&path).unwrap();
+        assert_eq!(id, Some(WalFileId::from(3)));
 
         let path = Path::from("/root/compacted/01J79C21YKR31J2BS1EFXJZ7MR.sst");
         let id = path_resolver.parse_table_id(&path).unwrap();
         assert_eq!(
             id,
-            Some(SsTableId::Compacted(
+            Some(SsTableId::from(
                 Ulid::from_string("01J79C21YKR31J2BS1EFXJZ7MR").unwrap()
             ))
         );

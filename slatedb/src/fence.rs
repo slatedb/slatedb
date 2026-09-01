@@ -143,11 +143,10 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
     use crate::memtable_flusher::MANIFEST_REFRESH_COUNT;
-    use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::utils::WatchableOnceCell;
-    use crate::wal::slatedb::store::WalTableStore;
+    use crate::wal::slatedb::store::{WalFileId, WalTableStore};
     use crate::{CloseReason, Db, ErrorKind, Settings};
     use bytes::Bytes;
     use fail_parallel::fail_point_channel;
@@ -169,6 +168,7 @@ mod tests {
         path: String,
         manifest_store: Arc<ManifestStore>,
         table_store: Arc<TableStore>,
+        wal_store: Arc<WalTableStore>,
         fp_registry: Arc<FailPointRegistry>,
         event_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
         fencer: Option<WriterFencer>,
@@ -185,7 +185,7 @@ mod tests {
             let manifest_store =
                 Arc::new(ManifestStore::new(&Path::from(path), object_store.clone()));
             let table_store = Arc::new(TableStore::new(
-                ObjectStores::new(object_store.clone(), None),
+                object_store.clone(),
                 SsTableFormat::default(),
                 path,
                 None,
@@ -219,7 +219,7 @@ mod tests {
             let fencer = WriterFencer::new_with_fp_handle(
                 cell.reader(),
                 recorder,
-                wal_store,
+                wal_store.clone(),
                 &settings,
                 system_clock.clone(),
                 task_executor.clone(),
@@ -231,6 +231,7 @@ mod tests {
                 path: path.to_string(),
                 manifest_store,
                 table_store,
+                wal_store,
                 fp_registry,
                 event_rx,
                 fencer: Some(fencer),
@@ -297,6 +298,7 @@ mod tests {
                 self.manifest_store.clone(),
                 compactions_store,
                 self.table_store.clone(),
+                self.wal_store.clone(),
                 self.object_store.clone(),
                 gc_opts,
                 &MetricsRecorderHelper::noop(),
@@ -309,8 +311,8 @@ mod tests {
             // at replay_after_wal_id is retained as the boundary; old fence wals
             // stay because we don't enable wal_fence_options).
             let remaining: Vec<_> = self
-                .table_store
-                .list_wal_ssts(..wal_id)
+                .wal_store
+                .list_wal_ssts(..WalFileId::from(wal_id))
                 .await
                 .unwrap()
                 .into_iter()
@@ -342,7 +344,7 @@ mod tests {
         }
 
         async fn assert_fencing_wal(&self) {
-            let wals = self.table_store.list_wal_ssts(..).await.unwrap();
+            let wals = self.wal_store.list_wal_ssts(..).await.unwrap();
             let last = wals.last().expect("wal list is empty");
             assert_eq!(last.metadata.size, 0, "last wal is not a fence wal");
         }
@@ -357,12 +359,12 @@ mod tests {
                 .core
                 .replay_after_wal_id;
             let wal_ids: Vec<u64> = self
-                .table_store
-                .list_wal_ssts(replay_after_wal_id + 1..)
+                .wal_store
+                .list_wal_ssts(WalFileId::from(replay_after_wal_id + 1)..)
                 .await
                 .unwrap()
                 .into_iter()
-                .map(|w| w.id.unwrap_wal_id())
+                .map(|w| w.id.value())
                 .collect();
             for (i, id) in wal_ids.iter().enumerate() {
                 let expected = replay_after_wal_id + 1 + i as u64;

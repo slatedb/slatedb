@@ -1,18 +1,18 @@
-#![allow(dead_code)] // This store is intentionally implemented before its call sites are migrated.
-
 use std::collections::VecDeque;
-use std::ops::Range;
+use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use fail_parallel::{fail_point, FailPointRegistry};
-use futures::future::join_all;
-use log::debug;
+use futures::{future::join_all, StreamExt};
+use log::{debug, warn};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions};
 use serde::Serialize;
+use slatedb_common::object_metadata::IdentifiedObjectMetadata;
+use slatedb_common::ObjectMetadata;
 
-use crate::db_state::{SsTableId, SsTableInfo, SstType};
+use crate::db_state::{SsTableInfo, SstType};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
@@ -37,6 +37,12 @@ impl From<u64> for WalFileId {
     }
 }
 
+impl From<WalFileId> for u64 {
+    fn from(value: WalFileId) -> Self {
+        value.value()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct WalFileHandle {
     pub(crate) id: WalFileId,
@@ -45,9 +51,9 @@ pub(crate) struct WalFileHandle {
 }
 
 impl WalFileHandle {
-    fn new(id: u64, format_version: u16, info: SsTableInfo) -> Self {
+    fn new(id: WalFileId, format_version: u16, info: SsTableInfo) -> Self {
         Self {
-            id: id.into(),
+            id,
             format_version,
             info,
         }
@@ -62,6 +68,7 @@ pub(crate) struct WalTableStore {
     object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,
     path_resolver: PathResolver,
+    #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
     kind: TableStoreKind,
 }
@@ -110,7 +117,7 @@ impl WalTableStore {
     /// Writes a WAL SST with create-if-absent semantics required for fencing.
     pub(crate) async fn write_sst(
         &self,
-        wal_id: u64,
+        wal_id: WalFileId,
         encoded_sst: &EncodedSsTable,
     ) -> Result<WalFileHandle, SlateDBError> {
         fail_point!(self.fp_registry.clone(), "write-wal-sst-io-error", |_| {
@@ -127,14 +134,14 @@ impl WalTableStore {
     }
 
     /// Writes a zero-byte WAL object as a fencing marker.
-    pub(crate) async fn write_wal_fence(&self, wal_id: u64) -> Result<(), SlateDBError> {
+    pub(crate) async fn write_wal_fence(&self, wal_id: WalFileId) -> Result<(), SlateDBError> {
         fail_point!(self.fp_registry.clone(), "write-wal-sst-io-error", |_| {
             Err(slatedb_io_error())
         });
         self.write_create(wal_id, Bytes::new()).await
     }
 
-    async fn write_create(&self, wal_id: u64, data: Bytes) -> Result<(), SlateDBError> {
+    async fn write_create(&self, wal_id: WalFileId, data: Bytes) -> Result<(), SlateDBError> {
         let path = self.path(wal_id);
         let opts = PutOptions {
             mode: PutMode::Create,
@@ -154,7 +161,7 @@ impl WalTableStore {
         Ok(())
     }
 
-    pub(crate) async fn open_sst(&self, wal_id: u64) -> Result<WalFileHandle, SlateDBError> {
+    pub(crate) async fn open_sst(&self, wal_id: WalFileId) -> Result<WalFileHandle, SlateDBError> {
         let (info, version) = read_obj!(
             Arc::clone(&self.object_store),
             self.path(wal_id),
@@ -165,13 +172,61 @@ impl WalTableStore {
         Ok(WalFileHandle::new(wal_id, version, info))
     }
 
+    pub(crate) async fn list_wal_ssts<R: RangeBounds<WalFileId>>(
+        &self,
+        id_range: R,
+    ) -> Result<Vec<IdentifiedObjectMetadata<WalFileId>>, SlateDBError> {
+        let mut wal_list = Vec::new();
+        let wal_path = self.path_resolver.wal_path();
+        let mut files_stream = self.object_store.list(Some(&wal_path));
+
+        while let Some(file) = files_stream.next().await.transpose()? {
+            match self.path_resolver.parse_wal_file_id(&file.location) {
+                Ok(Some(id)) if id_range.contains(&id) => {
+                    wal_list.push(IdentifiedObjectMetadata::from_object_meta(id, file));
+                }
+                Ok(Some(_)) => {}
+                Err(error) => {
+                    warn!(
+                        "error while parsing WAL file id [location={}, error={}]",
+                        file.location, error
+                    );
+                }
+                Ok(None) => {
+                    warn!(
+                        "unexpected file found in WAL directory [location={}]",
+                        file.location
+                    );
+                }
+            }
+        }
+
+        wal_list.sort_by_key(|metadata| metadata.id);
+        Ok(wal_list)
+    }
+
+    pub(crate) async fn delete_sst(&self, wal_id: WalFileId) -> Result<(), SlateDBError> {
+        let path = self.path(wal_id);
+        debug!("deleting WAL SST [path={}]", path);
+        self.object_store
+            .delete(&path)
+            .await
+            .map_err(SlateDBError::from)
+    }
+
+    pub(crate) async fn metadata(&self, wal_id: WalFileId) -> Result<ObjectMetadata, SlateDBError> {
+        Ok(ObjectMetadata::new(
+            self.object_store.head(&self.path(wal_id)).await?,
+        ))
+    }
+
     pub(crate) async fn read_index(
         &self,
         handle: &WalFileHandle,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         let index = read_obj!(
             Arc::clone(&self.object_store),
-            self.path(handle.id.value()),
+            self.path(handle.id),
             ObjectStoreCallTag::new(self.kind, SstType::Wal),
             |obj| self.sst_format.read_index(&handle.info, &obj)
         )
@@ -208,6 +263,7 @@ impl WalTableStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn block_range_size(
         &self,
         handle: &WalFileHandle,
@@ -230,7 +286,7 @@ impl WalTableStore {
         blocks: Range<usize>,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
         let object_store = Arc::clone(&self.object_store);
-        let path = self.path(handle.id.value());
+        let path = self.path(handle.id);
         let index = &index;
         let blocks =
             read_with_validation_retry(ObjectStoreCallTag::new(self.kind, SstType::Wal), |tag| {
@@ -268,7 +324,10 @@ impl WalTableStore {
     /// Relies on the fencing protocol's contiguity invariant: "id exists" is
     /// monotone-decreasing in id, so binary search is sound. Total HEAD count
     /// is `O(log N)` for a gap of size N, vs `O(N)` for a windowed scan.
-    pub(crate) async fn last_seen_wal_id(&self, start_after: u64) -> Result<u64, SlateDBError> {
+    pub(crate) async fn last_seen_wal_id(
+        &self,
+        start_after: WalFileId,
+    ) -> Result<WalFileId, SlateDBError> {
         fail_point!(Arc::clone(&self.fp_registry), "probe-wal-ssts", |_| {
             Err(SlateDBError::from(std::io::Error::other("oops")))
         });
@@ -288,7 +347,7 @@ impl WalTableStore {
             let exps: Vec<u32> = (next_exp..end_exp).collect();
             let probes = exps.iter().map(|&exp| {
                 let offset = 1u64 << exp;
-                let path = self.path(start_after + offset);
+                let path = self.path(WalFileId::from(start_after.value() + offset));
                 let object_store = Arc::clone(&self.object_store);
                 async move { wal_object_exists(&object_store, &path).await }
             });
@@ -315,24 +374,31 @@ impl WalTableStore {
         let mut right = hi;
         while left < right {
             let mid = left + (right - left) / 2;
-            if wal_object_exists(&self.object_store, &self.path(start_after + mid)).await? {
+            if wal_object_exists(
+                &self.object_store,
+                &self.path(WalFileId::from(start_after.value() + mid)),
+            )
+            .await?
+            {
                 left = mid + 1;
             } else {
                 right = mid;
             }
         }
-        Ok(start_after + left - 1)
+        Ok(WalFileId::from(start_after.value() + left - 1))
     }
 
     pub(crate) async fn next_wal_sst_id(
         &self,
-        wal_id_last_compacted: u64,
-    ) -> Result<u64, SlateDBError> {
-        Ok(self.last_seen_wal_id(wal_id_last_compacted).await? + 1)
+        wal_id_last_compacted: WalFileId,
+    ) -> Result<WalFileId, SlateDBError> {
+        Ok(WalFileId::from(
+            self.last_seen_wal_id(wal_id_last_compacted).await?.value() + 1,
+        ))
     }
 
-    fn path(&self, wal_id: u64) -> Path {
-        self.path_resolver.sst_path(&SsTableId::Wal(wal_id))
+    fn path(&self, wal_id: WalFileId) -> Path {
+        self.path_resolver.wal_sst_path(&wal_id)
     }
 }
 
@@ -347,6 +413,7 @@ async fn wal_object_exists(
     }
 }
 
+#[allow(dead_code)]
 fn slatedb_io_error() -> SlateDBError {
     SlateDBError::from(std::io::Error::other("oops"))
 }
@@ -358,6 +425,8 @@ mod tests {
     use crate::iter::IterationOrder;
     use crate::types::RowEntry;
     use object_store::memory::InMemory;
+    use object_store::ObjectStoreExt;
+    use rstest::rstest;
 
     fn test_store() -> WalTableStore {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -383,8 +452,8 @@ mod tests {
             builder.add(row).await.unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let written = store.write_sst(1, &encoded).await.unwrap();
-        let opened = store.open_sst(1).await.unwrap();
+        let written = store.write_sst(1.into(), &encoded).await.unwrap();
+        let opened = store.open_sst(1.into()).await.unwrap();
 
         assert_eq!(written, opened);
         assert_eq!(opened.id.value(), 1);
@@ -421,15 +490,15 @@ mod tests {
     async fn uses_create_semantics_for_wals_and_fences() {
         let store = test_store();
 
-        store.write_wal_fence(1).await.unwrap();
-        assert_eq!(store.last_seen_wal_id(0).await.unwrap(), 1);
-        assert_eq!(store.next_wal_sst_id(0).await.unwrap(), 2);
+        store.write_wal_fence(1.into()).await.unwrap();
+        assert_eq!(store.last_seen_wal_id(0.into()).await.unwrap().value(), 1);
+        assert_eq!(store.next_wal_sst_id(0.into()).await.unwrap().value(), 2);
         assert!(matches!(
-            store.write_wal_fence(1).await,
+            store.write_wal_fence(1.into()).await,
             Err(SlateDBError::Fenced)
         ));
         assert!(matches!(
-            store.open_sst(1).await,
+            store.open_sst(1.into()).await,
             Err(SlateDBError::EmptySSTable)
         ));
 
@@ -440,8 +509,44 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         assert!(matches!(
-            store.write_sst(1, &encoded).await,
+            store.write_sst(1.into(), &encoded).await,
             Err(SlateDBError::Fenced)
         ));
+    }
+    #[rstest]
+    #[tokio::test]
+    async fn finds_last_seen_wal_id(
+        #[values(0, 100)] start_after: u64,
+        #[values(0, 1, 5, 7, 8, 9, 16, 127, 128, 129, 200, 255, 256, 257)] n_above: u64,
+    ) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = WalTableStore::new(
+            object_store.clone(),
+            SsTableFormat::default(),
+            Path::from("probe-wal-store"),
+            TableStoreKind::Main,
+        );
+
+        for wal_id in 1..=start_after {
+            object_store
+                .put(&store.path(wal_id.into()), Bytes::new().into())
+                .await
+                .unwrap();
+        }
+        for wal_id in (start_after + 1)..=(start_after + n_above) {
+            object_store
+                .put(&store.path(wal_id.into()), Bytes::new().into())
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            store
+                .last_seen_wal_id(start_after.into())
+                .await
+                .unwrap()
+                .value(),
+            start_after + n_above
+        );
     }
 }

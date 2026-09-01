@@ -557,13 +557,11 @@ impl From<&CoreCompaction> for Compaction {
     }
 }
 
-/// SSTable identifier.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum SsTableId {
-    /// WAL SST identified by numeric WAL ID.
-    Wal(u64),
-    /// Compacted SST identified by ULID string.
-    Compacted(String),
+/// Compacted SSTable identifier.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct SsTableId {
+    /// SST ULID string.
+    pub value: String,
 }
 
 /// Metadata describing an object in object storage.
@@ -616,23 +614,17 @@ impl From<CoreIdentifiedObjectMetadata<u64>> for IdentifiedObjectMetadata {
 
 impl From<&CoreSsTableId> for SsTableId {
     fn from(value: &CoreSsTableId) -> Self {
-        match value {
-            CoreSsTableId::Wal(id) => Self::Wal(*id),
-            CoreSsTableId::Compacted(id) => Self::Compacted(id.to_string()),
+        Self {
+            value: value.value().to_string(),
         }
     }
 }
 
 impl SsTableId {
     pub(crate) fn into_core(self) -> Result<CoreSsTableId, SlateDbError> {
-        Ok(match self {
-            SsTableId::Wal(id) => CoreSsTableId::Wal(id),
-            SsTableId::Compacted(id) => {
-                let ulid = Ulid::from_string(&id)
-                    .map_err(|source| SlateDbError::InvalidSsTableId { source })?;
-                CoreSsTableId::Compacted(ulid)
-            }
-        })
+        let ulid = Ulid::from_string(&self.value)
+            .map_err(|source| SlateDbError::InvalidSsTableId { source })?;
+        Ok(CoreSsTableId::from(ulid))
     }
 }
 

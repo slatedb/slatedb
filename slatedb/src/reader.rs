@@ -471,7 +471,6 @@ mod tests {
     use crate::db_status::DbStatusManager;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::SsTableView;
-    use crate::object_stores::ObjectStores;
     use crate::oracle::DbReaderOracle;
     use crate::tablestore::{TableStore, TableStoreKind};
     use object_store::{memory::InMemory, path::Path, ObjectStore};
@@ -516,7 +515,7 @@ mod tests {
         async fn new() -> Self {
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let table_store = Arc::new(TableStore::new(
-                ObjectStores::new(object_store, None),
+                object_store,
                 SsTableFormat::default(),
                 Path::from("/test"),
                 None,
@@ -595,7 +594,7 @@ mod tests {
             }
 
             let encoded = builder.build().await?;
-            let id = SsTableId::Compacted(Ulid::new());
+            let id = SsTableId::from(Ulid::new());
             self.table_store.write_sst(&id, &encoded).await
         }
     }

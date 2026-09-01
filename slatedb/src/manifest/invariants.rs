@@ -28,7 +28,7 @@ use crate::manifest::Manifest;
 /// from spinning on same-millisecond ULID collisions; only a genuine backwards
 /// clock step (timestamp strictly below the watermark) trips the invariant.
 ///
-/// The check uses the physical SST ULID — `view.sst.id.unwrap_compacted_id()` —
+/// The check uses the physical SST ULID — `view.sst.id.value()` —
 /// **not** the separately-allocated `view.id`. The GC keys its cutoff and its
 /// deletion filter off the SST ULID (see `garbage_collector::compacted_gc`), and
 /// in the normal V2 path the SST ULID is minted at upload while the `view.id` is
@@ -64,11 +64,11 @@ pub(crate) fn l0_ulid_cutoff(
     let existing: HashSet<Ulid> = current
         .core
         .trees()
-        .flat_map(|tree| tree.l0.iter().map(|view| view.sst.id.unwrap_compacted_id()))
+        .flat_map(|tree| tree.l0.iter().map(|view| view.sst.id.value()))
         .collect();
 
     for view in dirty.core.trees().flat_map(|tree| tree.l0.iter()) {
-        let sst_id = view.sst.id.unwrap_compacted_id();
+        let sst_id = view.sst.id.value();
         if existing.contains(&sst_id) {
             continue;
         }
@@ -111,7 +111,7 @@ mod tests {
     fn l0_view(ts_ms: u64, rand: u128) -> SsTableView {
         let view_id = Ulid::from_parts(ts_ms, rand);
         let handle = SsTableHandle::new(
-            SsTableId::Compacted(view_id),
+            SsTableId::from(view_id),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo::default(),
         );
@@ -126,7 +126,7 @@ mod tests {
     fn l0_view_split(view_ts_ms: u64, sst_ts_ms: u64) -> SsTableView {
         let view_id = Ulid::from_parts(view_ts_ms, 0);
         let handle = SsTableHandle::new(
-            SsTableId::Compacted(Ulid::from_parts(sst_ts_ms, 0)),
+            SsTableId::from(Ulid::from_parts(sst_ts_ms, 0)),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo::default(),
         );
