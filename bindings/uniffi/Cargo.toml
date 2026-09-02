@@ -30,6 +30,7 @@ tracing-subscriber = { workspace = true, features = ["fmt"] }
 ulid = { workspace = true }
 uniffi = { workspace = true, features = ["tokio"] }
 uuid = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }

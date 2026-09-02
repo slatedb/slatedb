@@ -74,6 +74,18 @@ pub(crate) enum SlateDbError {
         provider: &'static str,
         key: &'static str,
     },
+
+    #[error("invalid object store url {url:?}: {source}")]
+    InvalidObjectStoreUrl {
+        url: String,
+        source: url::ParseError,
+    },
+
+    #[error("could not derive a local filesystem path from url {url:?}")]
+    InvalidLocalObjectStoreUrl { url: String },
+
+    #[error("unsupported object store scheme in url {url:?}")]
+    UnsupportedObjectStoreScheme { url: String },
 }
 
 /// Error returned by a foreign [`crate::MergeOperator`] implementation.
