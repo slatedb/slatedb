@@ -284,6 +284,42 @@ mod tests {
         V2(u64, LegacySerializedSsTableOrWalId, u64),
     }
 
+    /// Bincode identifies an enum variant by its position, so the index of every
+    /// `SerializedCachedKey` variant is part of the on-disk cache format. Removing
+    /// or reordering one shifts every variant after it: drop `V1` or `V2` and a key
+    /// written as `V3` decodes as a different variant, against a payload that was
+    /// never encoded for it.
+    ///
+    /// The enum comment says to append new versions. This pins it as a test, so the
+    /// mistake fails here instead of in someone's disk cache.
+    ///
+    /// The assertion deliberately names `V3` and builds it from the current types
+    /// only. Removing `V2` also removes the legacy mirror the other tests encode
+    /// with, so a check written in terms of `V1`/`V2` would be deleted alongside
+    /// the thing it was meant to guard.
+    #[test]
+    fn test_v3_cached_key_stays_at_its_bincode_variant_index() {
+        let encoded = bincode::serialize(&SerializedCachedKey::V3(
+            5,
+            SerializedSsTableId(Ulid::from((123, 456))),
+            99,
+        ))
+        .unwrap();
+
+        // Bincode writes the variant index as a little-endian u32 prefix.
+        let variant_index = u32::from_le_bytes(
+            encoded[..4]
+                .try_into()
+                .expect("bincode writes a 4 byte variant index"),
+        );
+
+        assert_eq!(
+            variant_index, 2,
+            "V3 keys on disk are encoded at variant index 2. Changing this \
+             silently invalidates every cached key already written."
+        );
+    }
+
     #[test]
     fn test_should_serialize_deserialize_compacted_sst_key() {
         let key = CachedKey {
