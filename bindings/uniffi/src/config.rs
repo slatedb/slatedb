@@ -202,6 +202,99 @@ impl TryFrom<ReaderMode> for slatedb::DbReaderMode {
     }
 }
 
+/// Which SSTs to preload into the local disk cache when a database or reader opens.
+#[derive(Clone, Copy, Debug, uniffi::Enum)]
+pub enum PreloadLevel {
+    /// Preload only L0 SSTs (the most recently written files).
+    L0Sst,
+    /// Preload all SSTs (both L0 and compacted levels).
+    AllSst,
+}
+
+impl From<PreloadLevel> for slatedb::config::PreloadLevel {
+    fn from(value: PreloadLevel) -> Self {
+        match value {
+            PreloadLevel::L0Sst => Self::L0Sst,
+            PreloadLevel::AllSst => Self::AllSst,
+        }
+    }
+}
+
+/// Options for the local-disk cache that sits in front of the object store.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ObjectStoreCacheOptions {
+    /// Root folder where cache files are stored. `None` (default) disables the cache.
+    #[uniffi(default = None)]
+    pub root_folder: Option<String>,
+    /// Limit of the cache size in bytes. `None` means unbounded.
+    pub max_cache_size_bytes: Option<u64>,
+    /// Size of each cached part file in bytes; expected to be aligned to 1 KiB.
+    pub part_size_bytes: u64,
+    /// Whether SSTs produced by memtable flushes are written to the cache.
+    pub cache_on_flush: bool,
+    /// Whether SSTs produced by compaction are written to the cache.
+    pub cache_on_compaction: bool,
+    /// Which SSTs to preload into the cache on startup, up to the cache size limit.
+    /// `None` (default) preloads nothing.
+    #[uniffi(default = None)]
+    pub preload_disk_cache_on_startup: Option<PreloadLevel>,
+    /// How often the cache directory is rescanned to rebuild the evictor's in-memory
+    /// map, in milliseconds. `None` scans only once on startup.
+    pub scan_interval_ms: Option<u64>,
+    /// Maximum number of file handles kept open by the file handle cache.
+    pub max_open_file_handles: u64,
+}
+
+impl Default for ObjectStoreCacheOptions {
+    fn default() -> Self {
+        let core = slatedb::config::ObjectStoreCacheOptions::default();
+        Self {
+            root_folder: None,
+            max_cache_size_bytes: core.max_cache_size_bytes.map(|v| v as u64),
+            part_size_bytes: core.part_size_bytes as u64,
+            cache_on_flush: core.cache_on_flush,
+            cache_on_compaction: core.cache_on_compaction,
+            preload_disk_cache_on_startup: None,
+            scan_interval_ms: core.scan_interval.map(|d| d.as_millis() as u64),
+            max_open_file_handles: core.max_open_file_handles as u64,
+        }
+    }
+}
+
+impl TryFrom<ObjectStoreCacheOptions> for slatedb::config::ObjectStoreCacheOptions {
+    type Error = Error;
+
+    fn try_from(value: ObjectStoreCacheOptions) -> Result<Self, Self::Error> {
+        Ok(slatedb::config::ObjectStoreCacheOptions {
+            root_folder: value.root_folder.map(std::path::PathBuf::from),
+            max_cache_size_bytes: value
+                .max_cache_size_bytes
+                .map(|v| {
+                    usize::try_from(v).map_err(|_| {
+                        Error::from(SlateDbError::ValueTooLargeForUsize {
+                            field: "max_cache_size_bytes",
+                        })
+                    })
+                })
+                .transpose()?,
+            part_size_bytes: usize::try_from(value.part_size_bytes).map_err(|_| {
+                Error::from(SlateDbError::ValueTooLargeForUsize {
+                    field: "part_size_bytes",
+                })
+            })?,
+            cache_on_flush: value.cache_on_flush,
+            cache_on_compaction: value.cache_on_compaction,
+            preload_disk_cache_on_startup: value.preload_disk_cache_on_startup.map(Into::into),
+            scan_interval: value.scan_interval_ms.map(Duration::from_millis),
+            max_open_file_handles: usize::try_from(value.max_open_file_handles).map_err(|_| {
+                Error::from(SlateDbError::ValueTooLargeForUsize {
+                    field: "max_open_file_handles",
+                })
+            })?,
+        })
+    }
+}
+
 /// Options for opening a [`crate::DbReader`].
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ReaderOptions {
@@ -219,6 +312,10 @@ pub struct ReaderOptions {
     /// up after `n` retries and surfaces the underlying error.
     #[uniffi(default = None)]
     pub object_store_max_retries: Option<u32>,
+    /// Optional local-disk object-store cache settings. `None` (default) uses
+    /// the core defaults, which leave the cache disabled.
+    #[uniffi(default = None)]
+    pub object_store_cache_options: Option<ObjectStoreCacheOptions>,
 }
 
 impl Default for ReaderOptions {
@@ -229,20 +326,28 @@ impl Default for ReaderOptions {
             max_memtable_bytes: 64 * 1024 * 1024,
             skip_wal_replay: false,
             object_store_max_retries: None,
+            object_store_cache_options: None,
         }
     }
 }
 
-impl From<ReaderOptions> for slatedb::config::DbReaderOptions {
-    fn from(value: ReaderOptions) -> Self {
-        slatedb::config::DbReaderOptions {
+impl TryFrom<ReaderOptions> for slatedb::config::DbReaderOptions {
+    type Error = Error;
+
+    fn try_from(value: ReaderOptions) -> Result<Self, Self::Error> {
+        Ok(slatedb::config::DbReaderOptions {
             manifest_poll_interval: Duration::from_millis(value.manifest_poll_interval_ms),
             checkpoint_lifetime: Duration::from_millis(value.checkpoint_lifetime_ms),
             max_memtable_bytes: value.max_memtable_bytes,
             skip_wal_replay: value.skip_wal_replay,
             object_store_max_retries: value.object_store_max_retries,
+            object_store_cache_options: value
+                .object_store_cache_options
+                .map(TryInto::try_into)
+                .transpose()?
+                .unwrap_or_default(),
             ..Default::default()
-        }
+        })
     }
 }
 
@@ -567,7 +672,11 @@ impl From<GarbageCollectorOptions> for slatedb::config::GarbageCollectorOptions 
 
 #[cfg(test)]
 mod tests {
-    use super::{CloseOptions, FlushType, GarbageCollectorOptions, ReaderOptions};
+    use super::{
+        CloseOptions, FlushType, GarbageCollectorOptions, ObjectStoreCacheOptions, PreloadLevel,
+        ReaderOptions,
+    };
+    use std::time::Duration;
 
     #[test]
     fn close_options_default_flushes_memtable() {
@@ -639,7 +748,7 @@ mod tests {
 
     #[test]
     fn reader_object_store_max_retries_defaults_to_unbounded() {
-        let reader: slatedb::config::DbReaderOptions = ReaderOptions::default().into();
+        let reader: slatedb::config::DbReaderOptions = ReaderOptions::default().try_into().unwrap();
 
         assert_eq!(reader.object_store_max_retries, None);
     }
@@ -650,9 +759,88 @@ mod tests {
             object_store_max_retries: Some(5),
             ..ReaderOptions::default()
         }
-        .into();
+        .try_into()
+        .unwrap();
 
         assert_eq!(reader.object_store_max_retries, Some(5));
+    }
+
+    #[test]
+    fn reader_object_store_cache_options_default_to_core_defaults() {
+        let reader: slatedb::config::DbReaderOptions = ReaderOptions::default().try_into().unwrap();
+        let core = slatedb::config::ObjectStoreCacheOptions::default();
+
+        assert_eq!(reader.object_store_cache_options.root_folder, None);
+        assert_eq!(
+            reader.object_store_cache_options.part_size_bytes,
+            core.part_size_bytes
+        );
+        assert_eq!(
+            reader.object_store_cache_options.max_cache_size_bytes,
+            core.max_cache_size_bytes
+        );
+        assert_eq!(
+            reader.object_store_cache_options.scan_interval,
+            core.scan_interval
+        );
+        assert_eq!(
+            reader.object_store_cache_options.max_open_file_handles,
+            core.max_open_file_handles
+        );
+    }
+
+    #[test]
+    fn object_store_cache_options_default_mirrors_core_defaults() {
+        let converted: slatedb::config::ObjectStoreCacheOptions =
+            ObjectStoreCacheOptions::default().try_into().unwrap();
+        let core = slatedb::config::ObjectStoreCacheOptions::default();
+
+        assert_eq!(converted.root_folder, core.root_folder);
+        assert_eq!(converted.max_cache_size_bytes, core.max_cache_size_bytes);
+        assert_eq!(converted.part_size_bytes, core.part_size_bytes);
+        assert_eq!(converted.cache_on_flush, core.cache_on_flush);
+        assert_eq!(converted.cache_on_compaction, core.cache_on_compaction);
+        assert_eq!(
+            converted.preload_disk_cache_on_startup,
+            core.preload_disk_cache_on_startup
+        );
+        assert_eq!(converted.scan_interval, core.scan_interval);
+        assert_eq!(converted.max_open_file_handles, core.max_open_file_handles);
+    }
+
+    #[test]
+    fn reader_object_store_cache_options_thread_through() {
+        let reader: slatedb::config::DbReaderOptions = ReaderOptions {
+            object_store_cache_options: Some(ObjectStoreCacheOptions {
+                root_folder: Some("/tmp/slatedb-cache".to_string()),
+                max_cache_size_bytes: None,
+                part_size_bytes: 1024,
+                cache_on_flush: true,
+                cache_on_compaction: true,
+                preload_disk_cache_on_startup: Some(PreloadLevel::AllSst),
+                scan_interval_ms: Some(5_000),
+                max_open_file_handles: 16,
+            }),
+            ..ReaderOptions::default()
+        }
+        .try_into()
+        .unwrap();
+        let cache = reader.object_store_cache_options;
+
+        assert_eq!(
+            cache.root_folder,
+            Some(std::path::PathBuf::from("/tmp/slatedb-cache"))
+        );
+        assert_eq!(cache.max_cache_size_bytes, None);
+        assert_eq!(cache.part_size_bytes, 1024);
+        assert!(cache.cache_on_flush);
+        assert!(cache.cache_on_compaction);
+        assert_eq!(
+            cache.preload_disk_cache_on_startup,
+            Some(slatedb::config::PreloadLevel::AllSst)
+        );
+        assert_eq!(cache.scan_interval, Some(Duration::from_secs(5)));
+        assert_eq!(cache.max_open_file_handles, 16);
     }
 }
 

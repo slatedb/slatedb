@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -1580,6 +1581,87 @@ func TestDbReaderWalReplayBehavior(t *testing.T) {
 		}
 		if value == nil || !bytes.Equal(*value, []byte("wal-only-value")) {
 			t.Fatalf("DbReader.Get(wal-only-key) after memtable flush: got %v, want %q", value, "wal-only-value")
+		}
+	})
+}
+
+func TestDbReaderObjectStoreCache(t *testing.T) {
+	t.Run("default options leave the disk cache disabled", func(t *testing.T) {
+		store := newMemoryStore(t)
+		dbHandle := openTestDB(t, store, nil)
+
+		if _, err := dbHandle.db.Put([]byte("cached-key"), []byte("cached-value")); err != nil {
+			t.Fatalf("Put(cached-key): %v", err)
+		}
+		if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+			t.Fatalf("FlushWithOptions(MemTable): %v", err)
+		}
+
+		readerHandle := openTestReader(t, store, func(t *testing.T, builder *slatedb.DbReaderBuilder) {
+			t.Helper()
+			if err := builder.WithOptions(slatedb.ReaderOptions{
+				ManifestPollIntervalMs: 100,
+				CheckpointLifetimeMs:   1000,
+				MaxMemtableBytes:       64 * 1024 * 1024,
+				SkipWalReplay:          true,
+			}); err != nil {
+				t.Fatalf("DbReaderBuilder.WithOptions(): %v", err)
+			}
+		})
+
+		value, err := readerHandle.reader.Get([]byte("cached-key"))
+		if err != nil {
+			t.Fatalf("DbReader.Get(cached-key): %v", err)
+		}
+		if value == nil || !bytes.Equal(*value, []byte("cached-value")) {
+			t.Fatalf("DbReader.Get(cached-key): got %v, want %q", value, "cached-value")
+		}
+	})
+
+	t.Run("root folder enables the disk cache and reads populate it", func(t *testing.T) {
+		store := newMemoryStore(t)
+		dbHandle := openTestDB(t, store, nil)
+
+		if _, err := dbHandle.db.Put([]byte("cached-key"), []byte("cached-value")); err != nil {
+			t.Fatalf("Put(cached-key): %v", err)
+		}
+		if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+			t.Fatalf("FlushWithOptions(MemTable): %v", err)
+		}
+
+		cacheDir := t.TempDir()
+		readerHandle := openTestReader(t, store, func(t *testing.T, builder *slatedb.DbReaderBuilder) {
+			t.Helper()
+			rootFolder := cacheDir
+			if err := builder.WithOptions(slatedb.ReaderOptions{
+				ManifestPollIntervalMs: 100,
+				CheckpointLifetimeMs:   1000,
+				MaxMemtableBytes:       64 * 1024 * 1024,
+				SkipWalReplay:          true,
+				ObjectStoreCacheOptions: &slatedb.ObjectStoreCacheOptions{
+					RootFolder:         &rootFolder,
+					PartSizeBytes:      1024,
+					MaxOpenFileHandles: 16,
+				},
+			}); err != nil {
+				t.Fatalf("DbReaderBuilder.WithOptions(): %v", err)
+			}
+		})
+
+		value, err := readerHandle.reader.Get([]byte("cached-key"))
+		if err != nil {
+			t.Fatalf("DbReader.Get(cached-key): %v", err)
+		}
+		if value == nil || !bytes.Equal(*value, []byte("cached-value")) {
+			t.Fatalf("DbReader.Get(cached-key): got %v, want %q", value, "cached-value")
+		}
+
+		entries, err := os.ReadDir(cacheDir)
+		if err != nil {
+			t.Fatalf("os.ReadDir(%q): %v", cacheDir, err)
+		}
+		if len(entries) == 0 {
+			t.Fatalf("expected disk cache directory %q to be populated after read", cacheDir)
 		}
 	})
 }

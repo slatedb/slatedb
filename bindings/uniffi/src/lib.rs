@@ -26,8 +26,8 @@ pub use builder::{AdminBuilder, CloneBuilder, DbBuilder, DbReaderBuilder};
 pub use config::{
     CloseOptions, DurabilityLevel, FlushOptions, FlushType, GarbageCollectorDirectoryOptions,
     GarbageCollectorOptions, GarbageCollectorScheduleOptions, IsolationLevel, IterationOrder,
-    MergeOptions, PutOptions, ReadOptions, ReaderMode, ReaderOptions, ScanOptions, SstBlockSize,
-    TracingOptions, Ttl, WriteOptions,
+    MergeOptions, ObjectStoreCacheOptions, PreloadLevel, PutOptions, ReadOptions, ReaderMode,
+    ReaderOptions, ScanOptions, SstBlockSize, TracingOptions, Ttl, WriteOptions,
 };
 pub use db::Db;
 pub use db_reader::DbReader;

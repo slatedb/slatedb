@@ -22,7 +22,9 @@ from slatedb.uniffi import (
     FlushOptions,
     FlushType,
     KeyRange,
+    ObjectStoreCacheOptions,
     ReaderMode,
+    ReaderOptions,
 )
 
 
@@ -236,6 +238,55 @@ async def test_reader_skip_wal_replay_ignores_wal_only_data() -> None:
             configure=lambda builder: builder.with_options(reader_options(True)),
         ) as reader:
             assert await reader.get(b"wal-only-key") == b"wal-only-value"
+
+
+@pytest.mark.asyncio
+async def test_reader_options_without_object_store_cache_still_open() -> None:
+    store = new_memory_store()
+
+    async with open_db(store) as db:
+        await db.put(b"cached-key", b"cached-value")
+        await db.flush_with_options(FlushOptions(flush_type=FlushType.MEM_TABLE))
+
+        async with open_reader(
+            store,
+            configure=lambda builder: builder.with_options(reader_options(True)),
+        ) as reader:
+            assert await reader.get(b"cached-key") == b"cached-value"
+
+
+@pytest.mark.asyncio
+async def test_reader_object_store_cache_populates_root_folder(tmp_path) -> None:
+    store = new_memory_store()
+    cache_dir = tmp_path / "reader-cache"
+    cache_dir.mkdir()
+
+    async with open_db(store) as db:
+        await db.put(b"cached-key", b"cached-value")
+        await db.flush_with_options(FlushOptions(flush_type=FlushType.MEM_TABLE))
+
+        options = ReaderOptions(
+            manifest_poll_interval_ms=100,
+            checkpoint_lifetime_ms=1_000,
+            max_memtable_bytes=64 * 1024 * 1024,
+            skip_wal_replay=True,
+            object_store_cache_options=ObjectStoreCacheOptions(
+                root_folder=str(cache_dir),
+                max_cache_size_bytes=None,
+                part_size_bytes=1024,
+                cache_on_flush=False,
+                cache_on_compaction=False,
+                scan_interval_ms=None,
+                max_open_file_handles=16,
+            ),
+        )
+        async with open_reader(
+            store,
+            configure=lambda builder: builder.with_options(options),
+        ) as reader:
+            assert await reader.get(b"cached-key") == b"cached-value"
+
+    assert list(cache_dir.iterdir()) != []
 
 
 @pytest.mark.asyncio
