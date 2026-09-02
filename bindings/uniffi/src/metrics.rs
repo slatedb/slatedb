@@ -775,21 +775,15 @@ mod tests {
         reader.close().await.expect("failed to close reader");
     }
 
-    fn new_test_store() -> (
-        Arc<ObjectStore>,
-        Arc<dyn slatedb::object_store::ObjectStore>,
-    ) {
-        let inner: Arc<dyn slatedb::object_store::ObjectStore> = Arc::new(InMemory::new());
+    fn new_test_store() -> (Arc<ObjectStore>, Arc<dyn object_store::ObjectStore>) {
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let binding = Arc::new(ObjectStore {
             inner: inner.clone(),
         });
         (binding, inner)
     }
 
-    async fn seed_reader_data(
-        path: &str,
-        object_store: Arc<dyn slatedb::object_store::ObjectStore>,
-    ) {
+    async fn seed_reader_data(path: &str, object_store: Arc<dyn object_store::ObjectStore>) {
         let db = slatedb::Db::builder(path.to_owned(), object_store)
             .build()
             .await

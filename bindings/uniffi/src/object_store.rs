@@ -7,7 +7,7 @@ use crate::error::Error;
 /// Object store handle used when opening databases, readers, and WAL readers.
 #[derive(uniffi::Object)]
 pub struct ObjectStore {
-    pub(crate) inner: Arc<dyn slatedb::object_store::ObjectStore>,
+    pub(crate) inner: Arc<dyn object_store::ObjectStore>,
 }
 
 #[uniffi::export]
