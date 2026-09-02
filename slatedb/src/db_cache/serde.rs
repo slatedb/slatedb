@@ -306,12 +306,15 @@ mod tests {
         ))
         .unwrap();
 
-        // Bincode writes the variant index as a little-endian u32 prefix.
-        let variant_index = u32::from_le_bytes(
-            encoded[..4]
-                .try_into()
-                .expect("bincode writes a 4 byte variant index"),
-        );
+        // Bincode writes the variant index as a little-endian u32 prefix. Read it
+        // through `get` so a shorter encoding reports that the prefix is missing,
+        // rather than panicking on the slice before the assertion below runs.
+        let prefix: [u8; 4] = encoded
+            .get(..4)
+            .expect("bincode writes a 4 byte variant index prefix")
+            .try_into()
+            .expect("a 4 byte slice converts to a 4 byte array");
+        let variant_index = u32::from_le_bytes(prefix);
 
         assert_eq!(
             variant_index, 2,
