@@ -92,24 +92,23 @@ impl<'a> SortedRunView<'a> {
 /// sequence order of a key that spans an SST boundary: the earlier SST holds
 /// that key's higher sequence numbers but is reached last. The scan
 /// therefore gathers every entry of a key before emitting any of it. See
-/// [`SortedRunIterator::fill_descending_buffer`].
+/// [`SortedRunIterator::buffer_next_descending_key`].
 #[derive(Default)]
 struct DescendingIteratorState {
-    /// Entries of the current key not yet returned, in emission order.
-    buffer: VecDeque<RowEntry>,
-    /// Entry read past the end of the current key, returned by the next read
-    /// from the same table. The gather returns as soon as it is set, so it is
-    /// never carried into another table; a seek discards it with the buffer.
-    pending: Option<RowEntry>,
+    /// A complete key, in emission order, ready to be returned.
+    current_key_entries: VecDeque<RowEntry>,
+    /// The first entry of the next key, read while finding the end of the
+    /// current key.
+    next_key_first_entry: Option<RowEntry>,
 }
 
 impl DescendingIteratorState {
     /// Adds what one table contributed to the current key. An earlier table
     /// holds the higher sequence numbers but is read later, so each
     /// contribution goes in front of the ones already gathered.
-    fn prepend(&mut self, entries: Vec<RowEntry>) {
+    fn prepend_table_entries(&mut self, entries: Vec<RowEntry>) {
         for entry in entries.into_iter().rev() {
-            self.buffer.push_front(entry);
+            self.current_key_entries.push_front(entry);
         }
     }
 }
@@ -267,54 +266,61 @@ impl<'a> SortedRunIterator<'a> {
             .expect("descending state is set for descending scans")
     }
 
-    /// Reads the next entry of the current table, or `None` once that table is
-    /// exhausted. Never advances to another table.
-    async fn next_from_current_table(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        if let Some(entry) = self.descending_state().pending.take() {
-            return Ok(Some(entry));
-        }
-        match self.current_iter.as_mut() {
-            Some(iter) => iter.next().await,
-            None => Ok(None),
-        }
-    }
-
-    /// Gathers every entry of the next key, ordered by descending sequence
-    /// number.
+    /// Buffers every entry of the next key in emission order.
     ///
     /// A single key may span consecutive SSTs of a sorted run, with the
     /// earlier SST holding the higher sequence numbers. A descending scan
     /// reaches the later SST first, so once the current table runs out on a key
     /// the scan crosses into the preceding table while that table's range still
     /// covers the key, and puts what it finds ahead of what it already has.
-    async fn fill_descending_buffer(&mut self) -> Result<(), SlateDBError> {
+    async fn buffer_next_descending_key(&mut self) -> Result<(), SlateDBError> {
+        debug_assert!(
+            self.descending_state().current_key_entries.is_empty(),
+            "buffer_next_descending_key should only be called when the current key is exhausted"
+        );
+
         let mut key: Option<Bytes> = None;
+        let mut next_entry = self.descending_state().next_key_first_entry.take();
+
+        // The outer loop iterates over tables, the inner loop over entries of a table.
         loop {
-            let mut from_table = Vec::new();
-            let mut key_complete = false;
-            while let Some(entry) = self.next_from_current_table().await? {
+            // Each SST already yields versions newest-first. Buffer its entries
+            // so the SST can be prepended at the end in the right order.
+            let mut table_entries = Vec::new();
+            loop {
+                let entry = match next_entry.take() {
+                    Some(entry) => entry,
+                    None => {
+                        let Some(iter) = self.current_iter.as_mut() else {
+                            break;
+                        };
+                        let Some(entry) = iter.next().await? else {
+                            break;
+                        };
+                        entry
+                    }
+                };
+
                 match &key {
                     None => {
                         key = Some(entry.key.clone());
-                        from_table.push(entry);
+                        table_entries.push(entry);
                     }
-                    Some(current) if current == &entry.key => from_table.push(entry),
+                    Some(current) if current == &entry.key => table_entries.push(entry),
                     Some(_) => {
-                        self.descending_state().pending = Some(entry);
-                        key_complete = true;
-                        break;
+                        // The table is exhausted on this key. Save the first
+                        // entry of the next key for the next call, and prepend
+                        // what this table contributed to the current key.
+                        self.descending_state().next_key_first_entry = Some(entry);
+                        self.descending_state().prepend_table_entries(table_entries);
+                        return Ok(());
                     }
                 }
             }
-            self.descending_state().prepend(from_table);
 
-            // Case 1: The next key followed within this table, so the key is
-            // whole.
-            if key_complete {
-                return Ok(());
-            }
+            self.descending_state().prepend_table_entries(table_entries);
 
-            // Case 2: the table is exhausted and contributed nothing, either
+            // The table is exhausted and contributed nothing, either
             // because it held no entries or because the range excluded all of
             // them. Move on to the next table, or stop once the run is done.
             let Some(key) = key.as_ref() else {
@@ -325,9 +331,8 @@ impl<'a> SortedRunIterator<'a> {
                 continue;
             };
 
-            // Case 3: the table is exhausted on this key and the preceding
-            // table does not cover it, so the key ends at this boundary. Only
-            // the immediately preceding table can continue it.
+            // The table is exhausted on this key. Only the immediately
+            // preceding table can continue it.
             let spans_tables = self
                 .view
                 .peek_next_table(IterationOrder::Descending)
@@ -336,19 +341,18 @@ impl<'a> SortedRunIterator<'a> {
                 return Ok(());
             }
 
-            // Case 4: the key continues into the preceding table, which holds
-            // its higher sequence numbers. Gather those too, in front of what
-            // this table gave.
+            // The key continues into the preceding table, which holds its
+            // higher sequence numbers. Gather those too, in front of what this
+            // table gave.
             self.advance_table().await?;
         }
     }
 
     async fn next_descending(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        if let Some(entry) = self.descending_state().buffer.pop_front() {
-            return Ok(Some(entry));
+        if self.descending_state().current_key_entries.is_empty() {
+            self.buffer_next_descending_key().await?;
         }
-        self.fill_descending_buffer().await?;
-        Ok(self.descending_state().buffer.pop_front())
+        Ok(self.descending_state().current_key_entries.pop_front())
     }
 
     async fn next_ascending(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
@@ -389,6 +393,10 @@ impl RowEntryIterator for SortedRunIterator<'_> {
     /// [`crate::db_iter::DbIterator::seek`], so this is never reached with a
     /// descending order.
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        debug_assert!(
+            matches!(self.sst_iter_options.order, IterationOrder::Ascending),
+            "descending seek is rejected in DbIterator::seek and must not reach a sorted run"
+        );
         if !self.initialized {
             return Err(SlateDBError::IteratorNotInitialized);
         }
