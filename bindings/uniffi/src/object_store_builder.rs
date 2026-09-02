@@ -127,14 +127,14 @@ impl ObjectStoreBuilderInner {
         })?;
 
         Ok(match scheme {
-            ObjectStoreScheme::Local => {
-                let path = parsed
-                    .to_file_path()
-                    .map_err(|_| SlateDbError::InvalidLocalObjectStoreUrl { url })?;
-                Self::Local(LocalFileSystemBuilder {
-                    prefix: Some(path.to_string_lossy().into_owned()),
-                })
-            }
+            // `Url::to_file_path` converts to a platform-native path (and
+            // rejects a host-less `file://` URL on Windows), which would make
+            // this behave differently across platforms. `parsed.path()` is a
+            // plain string, so it stays portable and matches how
+            // `ObjectStoreScheme::parse` itself extracts a `Local` path.
+            ObjectStoreScheme::Local => Self::Local(LocalFileSystemBuilder {
+                prefix: Some(parsed.path().to_string()),
+            }),
             ObjectStoreScheme::Memory => Self::InMemory(InMemoryBuilder),
             ObjectStoreScheme::AmazonS3 => Self::Aws(AmazonS3Builder::new().with_url(url)),
             ObjectStoreScheme::GoogleCloudStorage => {

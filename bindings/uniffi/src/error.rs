@@ -81,9 +81,6 @@ pub(crate) enum SlateDbError {
         source: url::ParseError,
     },
 
-    #[error("could not derive a local filesystem path from url {url:?}")]
-    InvalidLocalObjectStoreUrl { url: String },
-
     #[error("unsupported object store scheme in url {url:?}")]
     UnsupportedObjectStoreScheme { url: String },
 }
