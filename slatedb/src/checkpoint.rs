@@ -446,7 +446,12 @@ mod tests {
             TableStoreKind::Main,
             BlockCachePolicy::default(),
         ));
-        let sst_handle = SsTableView::identity(table_store.open_sst(table_id).await.unwrap());
+        let sst_handle = SsTableView::identity(
+            table_store
+                .open_sst(table_id, Some(Bytes::new()))
+                .await
+                .unwrap(),
+        );
 
         let mut sst_iter = SstIterator::for_key_with_stats_initialized(
             &sst_handle,

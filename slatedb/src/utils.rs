@@ -152,6 +152,7 @@ pub(crate) fn merge_options<T>(
 /// ## Arguments
 /// - `table_store`: Table store for reading the SST index and blocks.
 /// - `output_sst`: Output SST already written for a compaction being resumed.
+/// - `segment`: Segment containing the output SST.
 ///
 /// ## Returns
 /// - `Ok(Some((Bytes, u64)))`: last key and sequence number from the final block.
@@ -162,15 +163,24 @@ pub(crate) fn merge_options<T>(
 pub(crate) async fn last_written_key_and_seq(
     table_store: Arc<TableStore>,
     output_sst: &SsTableHandle,
+    segment: &Bytes,
 ) -> Result<Option<(Bytes, u64)>, SlateDBError> {
-    let index = table_store.read_index(output_sst, false).await?;
+    let index = table_store
+        .read_index(output_sst, false, Some(segment.clone()))
+        .await?;
     let num_blocks = index.borrow().block_meta().len();
     if num_blocks == 0 {
         return Ok(None);
     }
     let last_block_idx = num_blocks - 1;
     let mut blocks = table_store
-        .read_blocks_using_index(output_sst, index, last_block_idx..last_block_idx + 1, false)
+        .read_blocks_using_index(
+            output_sst,
+            index,
+            last_block_idx..last_block_idx + 1,
+            false,
+            Some(segment.clone()),
+        )
         .await?;
     let Some(block) = blocks.pop_front() else {
         return Ok(None);
@@ -1121,7 +1131,11 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let _sst1 = table_store
-            .write_sst(&SsTableId::from(Ulid::new()), &encoded_sst)
+            .write_sst(
+                &SsTableId::from(Ulid::new()),
+                &encoded_sst,
+                Some(Bytes::new()),
+            )
             .await
             .unwrap();
 
@@ -1136,14 +1150,19 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let sst2 = table_store
-            .write_sst(&SsTableId::from(Ulid::new()), &encoded_sst)
+            .write_sst(
+                &SsTableId::from(Ulid::new()),
+                &encoded_sst,
+                Some(Bytes::new()),
+            )
             .await
             .unwrap();
 
-        let (last_key, last_seq) = last_written_key_and_seq(table_store.clone(), &sst2)
-            .await
-            .unwrap()
-            .expect("missing last entry");
+        let (last_key, last_seq) =
+            last_written_key_and_seq(table_store.clone(), &sst2, &Bytes::new())
+                .await
+                .unwrap()
+                .expect("missing last entry");
         assert_eq!(last_key, Bytes::from(b"z".as_slice()));
         assert_eq!(last_seq, 4);
     }
@@ -1174,15 +1193,20 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let sst = table_store
-            .write_sst(&SsTableId::from(Ulid::new()), &encoded_sst)
+            .write_sst(
+                &SsTableId::from(Ulid::new()),
+                &encoded_sst,
+                Some(Bytes::new()),
+            )
             .await
             .unwrap();
 
         // when: getting last written key and seq
-        let (last_key, last_seq) = last_written_key_and_seq(table_store.clone(), &sst)
-            .await
-            .unwrap()
-            .expect("missing last entry");
+        let (last_key, last_seq) =
+            last_written_key_and_seq(table_store.clone(), &sst, &Bytes::new())
+                .await
+                .unwrap()
+                .expect("missing last entry");
 
         // then: should return the last key and seq from the V1 formatted SST
         assert_eq!(last_key, Bytes::from(b"zzz".as_slice()));

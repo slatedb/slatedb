@@ -150,9 +150,10 @@ mod tests {
         retry: Option<RetryReason>,
     ) -> ObjectStoreCallTag {
         ObjectStoreCallTag {
-            kind,
-            sst_type,
             retry,
+            // Build through the constructor so the tag inherits the segment derived
+            // from its SST type: root for compacted SSTs and `None` for WAL SSTs.
+            ..ObjectStoreCallTag::new(kind, sst_type)
         }
     }
 

@@ -27,6 +27,7 @@
 //! entry for the path and refetch from the wrapped store, otherwise the
 //! caller keeps receiving the corrupt bytes and the read fails permanently.
 
+use bytes::Bytes;
 use object_store::Extensions;
 
 pub use crate::db_state::SstType;
@@ -55,7 +56,7 @@ pub enum TableStoreKind {
 ///
 /// An `ObjectStore` wrapper (such as an object store cache) reads the tag to
 /// decide the action for the call.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectStoreCallTag {
     /// The source of the call, to distinguish main store, compactor, etc.
     pub kind: TableStoreKind,
@@ -64,22 +65,40 @@ pub struct ObjectStoreCallTag {
     /// The reason for retry if this call is reissued after a validation failure
     /// on a read.
     pub retry: Option<RetryReason>,
+    /// Optional segment prefix used by object-store wrappers for routing.
+    /// An empty prefix identifies the root segment; `None` means the segment is
+    /// unknown or not applicable.
+    pub segment: Option<Bytes>,
 }
 
 impl ObjectStoreCallTag {
     /// A tag with no retry reason: the common case (a read sets the retry reason
     /// itself on a reissue).
+    ///
+    /// Compacted SSTs default to the root segment. WAL SSTs default to `None`.
     pub fn new(kind: TableStoreKind, sst_type: SstType) -> Self {
+        let segment = match sst_type {
+            SstType::Compacted => Some(Bytes::new()),
+            SstType::Wal => None,
+        };
         Self {
             kind,
             sst_type,
             retry: None,
+            segment,
         }
+    }
+
+    /// Sets the optional segment prefix used by object-store wrappers for
+    /// routing.
+    pub fn with_segment(mut self, segment: Option<Bytes>) -> Self {
+        self.segment = segment;
+        self
     }
 
     /// Reads the tag back from an extensions map, if present.
     pub fn from_extensions(extensions: &Extensions) -> Option<Self> {
-        extensions.get::<Self>().copied()
+        extensions.get::<Self>().cloned()
     }
 }
 

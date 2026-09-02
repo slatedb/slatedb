@@ -290,6 +290,9 @@ impl Reader {
             order: options.order,
             prefix: ctx.prefix,
             filter_context: options.filter_context.clone(),
+            // This is a shared template for every selected segment. The segment
+            // iterator clones it and sets each segment's prefix before SST I/O.
+            segment: None,
         };
 
         let IteratorSources {
@@ -355,6 +358,8 @@ impl Reader {
             order: options.order,
             prefix: Some(prefix),
             filter_context: options.filter_context.clone(),
+            // Filled from the single selected segment below before SST I/O.
+            segment: None,
         };
 
         // Cross-segment recency is not well-defined: walking segment A's
@@ -392,12 +397,14 @@ impl Reader {
         // filter check / index load / first-block fetch only happens when the
         // recency walk reaches the source.
         if let Some(segment) = segment {
+            let mut segment_options = sst_iter_options.clone();
+            segment_options.segment = Some(segment.prefix.clone());
             for sst in segment.tree.l0.iter().cloned() {
                 let iter = SstIterator::new_owned_with_stats(
                     range.clone(),
                     sst,
                     self.table_store.clone(),
-                    sst_iter_options.clone(),
+                    segment_options.clone(),
                     Some(self.db_stats.clone()),
                 )?;
                 if let Some(iter) = iter {
@@ -415,7 +422,7 @@ impl Reader {
                     range.clone(),
                     sr,
                     self.table_store.clone(),
-                    sst_iter_options.clone(),
+                    segment_options.clone(),
                     Some(self.db_stats.clone()),
                 )
                 .await?;
@@ -595,7 +602,9 @@ mod tests {
 
             let encoded = builder.build().await?;
             let id = SsTableId::from(Ulid::new());
-            self.table_store.write_sst(&id, &encoded).await
+            self.table_store
+                .write_sst(&id, &encoded, Some(Bytes::new()))
+                .await
         }
     }
 

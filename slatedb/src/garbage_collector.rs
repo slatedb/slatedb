@@ -468,6 +468,7 @@ mod tests {
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::tablestore::TableStoreKind;
     use crate::wal::slatedb::store::{WalFileId, WalTableStore};
+    use bytes::Bytes;
 
     use std::collections::HashSet;
     use std::{fs::OpenOptions, sync::Arc};
@@ -1758,7 +1759,10 @@ mod tests {
             .await
             .unwrap();
         let table = sst.build().await.unwrap();
-        table_store.write_sst(&sst_id, &table).await.unwrap()
+        table_store
+            .write_sst(&sst_id, &table, Some(Bytes::new()))
+            .await
+            .unwrap()
     }
 
     /// Set the modified time of a file to be a certain number of seconds ago.

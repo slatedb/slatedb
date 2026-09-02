@@ -1838,7 +1838,10 @@ mod tests {
         let info = &view.sst.info;
 
         let (_, _, table_store) = build_test_stores(os);
-        let index = table_store.read_index(&view.sst, false).await.unwrap();
+        let index = table_store
+            .read_index(&view.sst, false, Some(Bytes::new()))
+            .await
+            .unwrap();
         let block_metas = index.borrow().block_meta();
         assert_eq!(block_metas.len(), 4);
 
@@ -4907,6 +4910,7 @@ mod tests {
                 let args = StartCompactionJobArgs {
                     id: compaction.id(),
                     compaction_id: compaction.id(),
+                    segment: compaction.spec().segment().clone(),
                     destination,
                     l0_sst_views,
                     sorted_runs,

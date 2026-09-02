@@ -243,7 +243,11 @@ impl UploadHandler {
     ) -> Result<SegmentedSstHandle, SlateDBError> {
         let written_bytes = sst.encoded.remaining_len() as u64;
         loop {
-            match self.db.upload_sst(&sst_id, &sst.encoded).await {
+            match self
+                .db
+                .upload_sst(&sst_id, &sst.encoded, sst.prefix.clone())
+                .await
+            {
                 Ok(sst_handle) => {
                     self.db.db_stats.l0_flush_bytes.increment(written_bytes);
                     return Ok(SegmentedSstHandle {
@@ -517,7 +521,7 @@ mod tests {
         assert!(segment.prefix.is_empty());
         let sst_view = SsTableView::identity(
             db.table_store
-                .open_sst(&segment.sst_handle.id)
+                .open_sst(&segment.sst_handle.id, Some(segment.prefix.clone()))
                 .await
                 .unwrap(),
         );
@@ -854,7 +858,7 @@ mod tests {
         let mut ids = std::collections::HashSet::new();
         for segment in &uploaded.segments {
             db.table_store
-                .open_sst(&segment.sst_handle.id)
+                .open_sst(&segment.sst_handle.id, Some(segment.prefix.clone()))
                 .await
                 .expect("uploaded SST should be readable");
             assert!(ids.insert(segment.sst_handle.id));
