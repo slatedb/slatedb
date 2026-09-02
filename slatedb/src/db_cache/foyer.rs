@@ -15,6 +15,7 @@
 //!
 //! ```
 //! use slatedb::{Db, Error};
+//! use slatedb::db_cache::DbCacheAndScope;
 //! use slatedb::db_cache::foyer::FoyerCache;
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
@@ -23,7 +24,7 @@
 //! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_db_cache(Arc::new(FoyerCache::new()))
+//!         .with_db_cache(DbCacheAndScope::new(Arc::new(FoyerCache::new()), 0))
 //!         .build()
 //!         .await?;
 //!     Ok(())

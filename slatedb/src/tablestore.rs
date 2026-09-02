@@ -428,6 +428,9 @@ impl TableStore {
             return;
         };
         let targets = self.targets_to_cache(&sst_table_id);
+        if targets.is_empty() {
+            return;
+        }
         for block in &encoded_sst.unconsumed_blocks {
             // Blocks without a tracked key span (WAL blocks) are never cached.
             let Some(key_span) = &block.key_span else {
@@ -1108,17 +1111,45 @@ impl TableStore {
         }
     }
 
+    /// Enumerate the block-cache keys for every cacheable component of the given SST:
+    /// each data block, the index, and (when present) the filters and stats block.
+    ///
+    /// Only includes filter/stats keys when those sections exist. Otherwise
+    /// `SsTableInfo`'s filter_offset collides with index_offset (filter_len
+    /// == 0) and stats_offset collides with the first data block
+    /// (stats_offset == 0).
+    async fn cache_keys_for_sst(
+        &self,
+        handle: &SsTableHandle,
+    ) -> Result<Vec<CachedKey>, SlateDBError> {
+        let index = self.read_index(handle, false).await?;
+        let mut keys = {
+            let index_borrow = index.borrow();
+            let meta = index_borrow.block_meta();
+            (0..meta.len())
+                .map(|block_num| (handle.id, meta.get(block_num).offset()).into())
+                .collect::<Vec<CachedKey>>()
+        };
+        keys.push((handle.id, handle.info.index_offset).into());
+        if handle.info.filter_len > 0 {
+            keys.push((handle.id, handle.info.filter_offset).into());
+        }
+        if handle.info.stats_len > 0 {
+            keys.push((handle.id, handle.info.stats_offset).into());
+        }
+        Ok(keys)
+    }
+
     /// Best-effort removal of all cache entries associated with the given SST:
-    /// data blocks, index, filters, and stats. Returns the offsets whose
-    /// cache removal was attempted.
+    /// data blocks, index, filters, and stats.
     pub(crate) async fn evict_sst_from_cache(&self, handle: &SsTableHandle) {
         let Some(ref cache) = self.cache else {
             return;
         };
         // Best effort: if we can't read the index we can't enumerate blocks,
         // so log and skip. Remaining entries will age out under normal pressure.
-        let index = match self.read_index(handle, false).await {
-            Ok(index) => index,
+        let keys = match self.cache_keys_for_sst(handle).await {
+            Ok(keys) => keys,
             Err(e) => {
                 warn!(
                     "evict_sst_from_cache: failed to read index for SST {:?}: {}",
@@ -1127,30 +1158,8 @@ impl TableStore {
                 return;
             }
         };
-        {
-            let index_borrow = index.borrow();
-            let meta = index_borrow.block_meta();
-            for block_num in 0..meta.len() {
-                let offset = meta.get(block_num).offset();
-                cache.remove(&(handle.id, offset).into()).await;
-            }
-        }
-        cache
-            .remove(&(handle.id, handle.info.index_offset).into())
-            .await;
-        // Only evict filter/stats when those sections exist. Otherwise
-        // SsTableInfo's filter_offset collides with index_offset (filter_len
-        // == 0) and stats_offset collides with the first data block
-        // (stats_offset == 0).
-        if handle.info.filter_len > 0 {
-            cache
-                .remove(&(handle.id, handle.info.filter_offset).into())
-                .await;
-        }
-        if handle.info.stats_len > 0 {
-            cache
-                .remove(&(handle.id, handle.info.stats_offset).into())
-                .await;
+        for key in keys {
+            cache.remove(&key).await;
         }
     }
 }
@@ -1288,20 +1297,21 @@ impl EncodedSsTableWriter {
         self.writer.write_all(encoded_sst.footer.as_ref()).await?;
         self.writer.shutdown().await?;
 
+        let handle = SsTableHandle::new(
+            self.id,
+            encoded_sst.format_version,
+            encoded_sst.info.clone(),
+        );
         // Cache inserts happen after writer shutdown so an SST whose upload
         // fails contributes no metadata entries.
         //
         // Blocks drained while entries were added are cached by `write_block`,
         // so the only data block left for `cache_on_sst_write` is the tail
-        // block that `build` finished.
+        // block `build` finished.
         self.table_store
-            .cache_on_sst_write(self.id, &encoded_sst)
+            .cache_on_sst_write(handle.id, &encoded_sst)
             .await;
-        Ok(SsTableHandle::new(
-            self.id,
-            encoded_sst.format_version,
-            encoded_sst.info,
-        ))
+        Ok(handle)
     }
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {
@@ -1942,6 +1952,7 @@ mod tests {
             split_cache,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            1,
         ));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
@@ -2269,6 +2280,7 @@ mod tests {
             split_cache,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            1,
         ));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),
@@ -2316,6 +2328,7 @@ mod tests {
             cache.clone(),
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            1,
         ));
         let ts = Arc::new(TableStore::new(
             ObjectStores::new(os.clone(), None),

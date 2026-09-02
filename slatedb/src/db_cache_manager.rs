@@ -87,6 +87,16 @@ pub(crate) async fn evict_cached_sst_impl(
     Ok(())
 }
 
+pub(crate) async fn flush_cache_to_disk_impl(
+    table_store: &Arc<TableStore>,
+) -> Result<(), crate::Error> {
+    let Some(cache) = table_store.cache() else {
+        debug!("flush_cache_to_disk called on a Db without a block cache configured");
+        return Ok(());
+    };
+    cache.flush_to_disk().await
+}
+
 /// Clamp a requested data range against the SST's visible views, returning the
 /// sub-ranges to warm. Empty result means there is nothing to do — either the
 /// request collapses to empty bounds, or it overlaps no visible view.
@@ -469,6 +479,14 @@ mod tests {
             evict_err.kind(),
             crate::ErrorKind::Closed(crate::CloseReason::Clean),
         );
+        let flush_err = db
+            .flush_cache_to_disk()
+            .await
+            .expect_err("flush_cache_to_disk on closed db");
+        assert_eq!(
+            flush_err.kind(),
+            crate::ErrorKind::Closed(crate::CloseReason::Clean),
+        );
     }
 
     fn project_l0_view(manifest: &mut VersionedManifest, visible_range: BytesRange) {
@@ -780,6 +798,53 @@ mod tests {
             "expected no blocks cached after eviction, got {:?}",
             mask_after,
         );
+
+        db.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn should_noop_flush_cache_to_disk_for_non_hybrid_cache() {
+        // given: a warmed SST on the default (non-hybrid) cache
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = open_db_single_sst(os).await;
+        write_keys(&db, 64).await;
+        flush_to_l0(&db).await;
+        let sst_id = first_l0_sst_id(&db);
+        db.warm_sst(sst_id, &[CacheTarget::data::<&[u8], _>(..)])
+            .await
+            .expect("warm_sst");
+        let mask_before = cached_block_mask(&db.inner.table_store, sst_id).await;
+        assert!(
+            mask_before.iter().all(|&b| b),
+            "expected all blocks cached after warm"
+        );
+
+        // when: flushing to a cache with no disk tier to spill to
+        db.flush_cache_to_disk().await.expect("flush");
+
+        // then: the default no-op `flush_scope` leaves entries exactly as
+        // they were; only a hybrid cache implements the flush.
+        let mask_after = cached_block_mask(&db.inner.table_store, sst_id).await;
+        assert_eq!(
+            mask_before, mask_after,
+            "non-hybrid cache should be untouched by flush_cache_to_disk"
+        );
+
+        db.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn should_flush_cache_to_disk_ok_with_no_cache_configured() {
+        // given: a DB with the block cache disabled entirely
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(PATH, os)
+            .with_db_cache_disabled()
+            .build()
+            .await
+            .expect("failed to open db");
+
+        // when / then: no cache configured is a no-op, not an error
+        db.flush_cache_to_disk().await.expect("flush");
 
         db.close().await.expect("close");
     }

@@ -522,7 +522,7 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSplitCache: %v", err)
 		}
-		if err := builder.WithDbCache(dbCache); err != nil {
+		if err := builder.WithDbCache(dbCache, 0); err != nil {
 			t.Fatalf("WithMergeOperator(): %v", err)
 		}
 	})

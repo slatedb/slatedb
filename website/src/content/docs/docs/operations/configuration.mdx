@@ -19,6 +19,7 @@ This example shows all three configuration layers in one place:
 use slatedb::{
     config::{DbReaderOptions, MetricLevel, ReadOptions, Settings},
     db_cache::foyer::FoyerCache,
+    db_cache::DbCacheAndScope,
     object_store::{memory::InMemory, ObjectStore},
     Db, DbReader, Error,
 };
@@ -37,7 +38,7 @@ async fn main() -> Result<(), Error> {
     // 2. Builder configuration for process-local components and wiring.
     let db = Db::builder("example", Arc::clone(&object_store))
         .with_settings(settings)
-        .with_db_cache(Arc::new(FoyerCache::new()))
+        .with_db_cache(DbCacheAndScope::new(Arc::new(FoyerCache::new()), 0))
         .build()
         .await?;
 

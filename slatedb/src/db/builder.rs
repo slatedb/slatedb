@@ -47,6 +47,7 @@
 //!
 //! ```
 //! use slatedb::{Db, Error};
+//! use slatedb::db_cache::DbCacheAndScope;
 //! use slatedb::db_cache::foyer::FoyerCache;
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
@@ -55,7 +56,7 @@
 //! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_db_cache(Arc::new(FoyerCache::new()))
+//!         .with_db_cache(DbCacheAndScope::new(Arc::new(FoyerCache::new()), 0))
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -139,7 +140,7 @@ use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::SplitCache;
-use crate::db_cache::{DbCache, DbCacheWrapper, UnownedDbCache};
+use crate::db_cache::{DbCache, DbCacheAndScope, DbCacheWrapper, UnownedDbCache};
 use crate::db_reader::{DbReader, DbReaderMode};
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
@@ -183,6 +184,7 @@ pub struct DbBuilder<P: Into<Path>> {
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     db_cache: Option<Arc<dyn DbCache>>,
+    scope_id: u64,
     block_cache_policy: BlockCachePolicy,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
@@ -213,6 +215,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             settings: Settings::default(),
             wal_object_store: None,
             db_cache: default_db_cache(),
+            scope_id: 0,
             block_cache_policy: BlockCachePolicy::default(),
             system_clock: None,
             gc_runtime: None,
@@ -284,10 +287,15 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// A cache passed in here remains owned by the caller: it is safe to share it across
     /// multiple `Db`/`DbReader` instances, and [`Db::close`](crate::Db::close) will *not*
     /// close it. Call [`DbCache::close`] yourself after closing every database that uses it.
-    pub fn with_db_cache(mut self, db_cache: Arc<dyn DbCache>) -> Self {
+    ///
+    /// `scope_id` isolates this database's entries from any other `Db`/`DbReader` sharing
+    /// the same cache. Each database should have its own unique `scope_id`. The ID can be
+    /// reused by the database when it's re-opened to recover any persisted cache data.
+    pub fn with_db_cache(mut self, db_cache: DbCacheAndScope) -> Self {
         // Wrap so Db::close()/DbReader::close() can't close a cache the
         // caller owns and may be sharing with other instances.
-        self.db_cache = Some(Arc::new(UnownedDbCache::new(db_cache)));
+        self.db_cache = Some(Arc::new(UnownedDbCache::new(db_cache.cache)));
+        self.scope_id = db_cache.scope_id;
         self
     }
 
@@ -574,6 +582,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 cache.clone(),
                 &recorder,
                 system_clock.clone(),
+                self.scope_id,
             )) as Arc<dyn DbCache>
         });
         let table_store = Arc::new(TableStore::new_with_fp_registry(
@@ -1664,6 +1673,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     wal_reader: Option<Arc<dyn wal::WalReader>>,
     db_cache: Option<Arc<dyn DbCache>>,
+    scope_id: u64,
     mode: DbReaderMode,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
@@ -1684,6 +1694,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             wal_object_store: None,
             wal_reader: None,
             db_cache: default_db_cache(),
+            scope_id: 0,
             mode: DbReaderMode::default(),
             merge_operator: None,
             block_transformer: None,
@@ -1749,10 +1760,15 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// multiple `Db`/`DbReader` instances, and [`DbReader::close`](crate::DbReader::close)
     /// will *not* close it. Call [`DbCache::close`] yourself after closing every database
     /// that uses it.
-    pub fn with_db_cache(mut self, db_cache: Arc<dyn DbCache>) -> Self {
+    ///
+    /// `scope_id` isolates this reader's entries from any other `Db`/`DbReader` sharing
+    /// the same cache. Pass the same id as the `Db` it's reading, or the same ID as a prior open
+    /// of this same reader, to share/recover persisted entries.
+    pub fn with_db_cache(mut self, db_cache: DbCacheAndScope) -> Self {
         // Wrap so Db::close()/DbReader::close() can't close a cache the
         // caller owns and may be sharing with other instances.
-        self.db_cache = Some(Arc::new(UnownedDbCache::new(db_cache)));
+        self.db_cache = Some(Arc::new(UnownedDbCache::new(db_cache.cache)));
+        self.scope_id = db_cache.scope_id;
         self
     }
 
@@ -1899,6 +1915,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
                 c.clone(),
                 &recorder,
                 self.system_clock.clone(),
+                self.scope_id,
             )) as Arc<dyn DbCache>
         });
 

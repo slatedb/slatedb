@@ -35,6 +35,7 @@
 //! };
 //! use slatedb::Db;
 //! use slatedb::db_cache::CachedEntry;
+//! use slatedb::db_cache::DbCacheAndScope;
 //! use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
@@ -62,7 +63,7 @@
 //!         .unwrap();
 //!     let cache = Arc::new(FoyerHybridCache::new_with_cache(cache));
 //!     let db = Db::builder("path/to/db", object_store)
-//!         .with_db_cache(cache)
+//!         .with_db_cache(DbCacheAndScope::new(cache, 0))
 //!         .build()
 //!         .await
 //!         .unwrap();
@@ -147,6 +148,22 @@ impl DbCache for FoyerHybridCache {
             Err(e) => info!("foyer hybrid cache: close failed [error={e:?}]"),
         }
         result
+    }
+
+    /// Send every entry for this scope to disk and wait for the write to finish.
+    ///
+    /// A no-op if this cache has no disk tier: `flush_if` removes matching
+    /// entries from memory even then, which would lose data instead of moving
+    /// it. `HybridCache::is_hybrid` cannot tell us this (it misreports `true`
+    /// for a no-op disk tier as of foyer 0.22.4), so check the device
+    /// capacity instead.
+    async fn flush_scope(&self, scope_id: u64) -> Result<(), crate::Error> {
+        if self.inner.storage().device().capacity() == 0 {
+            return Ok(());
+        }
+        self.inner.flush_if(|k, _v| k.scope_id == scope_id).await;
+        self.inner.storage().wait().await;
+        Ok(())
     }
 
     async fn fetch_block(
@@ -311,5 +328,99 @@ mod tests {
             }
         }
         assert_eq!(found, keys.len(), "all entries should survive close+reopen");
+    }
+
+    #[tokio::test]
+    async fn should_move_resident_key_from_memory_to_disk_on_flush_scope() {
+        let dir = tempdir().unwrap();
+        let cache = open_cache(dir.path()).await;
+        let key = CachedKey::from((SST_ID, 1u64));
+        cache.insert(key.clone(), build_block()).await;
+        assert!(
+            cache.inner.memory().get(&key).is_some(),
+            "entry should be resident in memory right after insert"
+        );
+
+        cache.flush_scope(key.scope_id).await.unwrap();
+
+        assert!(
+            cache.inner.memory().get(&key).is_none(),
+            "entry should have been evicted from the memory tier"
+        );
+        let loaded = cache.inner.storage().load(&key).await.unwrap();
+        assert!(
+            loaded.entry().is_some(),
+            "entry should have been flushed to the disk tier"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_noop_flush_scope_when_nothing_matches() {
+        let dir = tempdir().unwrap();
+        let cache = open_cache(dir.path()).await;
+        let key = CachedKey::from((SST_ID, 1u64));
+
+        cache.flush_scope(key.scope_id).await.unwrap();
+
+        assert!(cache.inner.memory().get(&key).is_none());
+        let loaded = cache.inner.storage().load(&key).await.unwrap();
+        assert!(
+            loaded.is_miss(),
+            "flushing an empty scope must not create a disk entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_keep_entry_in_memory_when_flush_scope_has_no_disk_tier() {
+        let cache = HybridCacheBuilder::new()
+            .memory(1024 * 1024)
+            .with_weighter(|_, v: &CachedEntry| v.size())
+            .storage()
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            cache.storage().device().capacity(),
+            0,
+            "a cache built with no engine config has no disk tier"
+        );
+        let cache = FoyerHybridCache::new_with_cache(cache);
+        let key = CachedKey::from((SST_ID, 1u64));
+        cache.insert(key.clone(), build_block()).await;
+
+        cache.flush_scope(key.scope_id).await.unwrap();
+
+        assert!(
+            cache.inner.memory().get(&key).is_some(),
+            "entry must stay in memory: there is no disk tier to receive it"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_leave_other_scopes_untouched_when_flushing_one_scope() {
+        let dir = tempdir().unwrap();
+        let cache = open_cache(dir.path()).await;
+        let flushed_key = CachedKey {
+            scope_id: 1,
+            ..CachedKey::from((SST_ID, 2u64))
+        };
+        let kept_key = CachedKey {
+            scope_id: 2,
+            ..CachedKey::from((SST_ID, 2u64))
+        };
+        cache.insert(flushed_key.clone(), build_block()).await;
+        cache.insert(kept_key.clone(), build_block()).await;
+
+        cache.flush_scope(flushed_key.scope_id).await.unwrap();
+
+        assert!(
+            cache.inner.memory().get(&kept_key).is_some(),
+            "other scope's key should remain resident in memory"
+        );
+        let loaded = cache.inner.storage().load(&kept_key).await.unwrap();
+        assert!(
+            loaded.is_miss(),
+            "other scope's key should not have been flushed to disk"
+        );
     }
 }

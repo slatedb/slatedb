@@ -72,10 +72,17 @@ impl DbBuilder {
             .map_err(Into::into)
     }
 
-    /// Sets DB cache.
-    pub fn with_db_cache(&self, db_cache: Arc<DbCache>) -> Result<(), Error> {
-        self.update_builder(|builder| builder.with_db_cache(db_cache.inner.clone()))
-            .map_err(Into::into)
+    /// Sets DB cache. `scope_id` isolates this database's entries from any other
+    /// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
+    /// uniqueness and stability across reopens.
+    pub fn with_db_cache(&self, db_cache: Arc<DbCache>, scope_id: u64) -> Result<(), Error> {
+        self.update_builder(|builder| {
+            builder.with_db_cache(slatedb::db_cache::DbCacheAndScope::new(
+                db_cache.inner.clone(),
+                scope_id,
+            ))
+        })
+        .map_err(Into::into)
     }
 
     /// Sets the seed used for SlateDB's internal random number generation.
@@ -194,6 +201,25 @@ impl DbReaderBuilder {
     pub fn with_wal_object_store(&self, wal_object_store: Arc<ObjectStore>) -> Result<(), Error> {
         self.update_builder(|builder| builder.with_wal_object_store(wal_object_store.inner.clone()))
             .map_err(Into::into)
+    }
+
+    /// Disables the SST block and metadata cache.
+    pub fn with_db_cache_disabled(&self) -> Result<(), Error> {
+        self.update_builder(slatedb::DbReaderBuilder::with_db_cache_disabled)
+            .map_err(Into::into)
+    }
+
+    /// Sets DB cache. `scope_id` isolates this reader's entries from any other
+    /// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
+    /// uniqueness and stability across reopens.
+    pub fn with_db_cache(&self, db_cache: Arc<DbCache>, scope_id: u64) -> Result<(), Error> {
+        self.update_builder(|builder| {
+            builder.with_db_cache(slatedb::db_cache::DbCacheAndScope::new(
+                db_cache.inner.clone(),
+                scope_id,
+            ))
+        })
+        .map_err(Into::into)
     }
 
     /// Installs an application-defined merge operator used while reading merge rows.
