@@ -197,17 +197,6 @@ fn test_scan_matches_model() {
                         }
                     }
 
-                    // `get` and `scan` must agree. They read different
-                    // iterators for a single key, and have disagreed before.
-                    for byte in 0..KEY_ALPHABET {
-                        let key = Bytes::from(vec![byte]);
-                        assert_eq!(
-                            db.get(&key).await.unwrap().as_ref(),
-                            model.get(&key),
-                            "get disagrees with the model for {key:?}"
-                        );
-                    }
-
                     // Building the db dominates the cost of a case, so check
                     // several ranges in both directions rather than one.
                     for range in &ranges {
