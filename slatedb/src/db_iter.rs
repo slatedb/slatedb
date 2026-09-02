@@ -184,6 +184,11 @@ pub struct DbIterator {
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
     order: IterationOrder,
+    /// A point range covers a single key, so it yields at most one entry. The
+    /// underlying `GetIterator` keeps returning that key's older versions, and
+    /// the merge operator path needs it to in order to fold operands, so the
+    /// cap belongs here rather than in `GetIterator`.
+    point_query: bool,
 }
 
 impl DbIterator {
@@ -217,6 +222,7 @@ impl DbIterator {
         let segment_iter = Box::new(FilterIterator::new_with_max_seq(segment_iter, max_seq))
             as Box<dyn RowEntryIterator + 'static>;
 
+        let point_query = range.as_point().is_some();
         let mut iter = match range.as_point() {
             Some(key) => Box::new(GetIterator::new(
                 key.clone(),
@@ -255,6 +261,7 @@ impl DbIterator {
             invalidated_error: None,
             last_key: None,
             order,
+            point_query,
         })
     }
 
@@ -282,6 +289,9 @@ impl DbIterator {
     pub(crate) async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if let Some(error) = self.invalidated_error.clone() {
             Err(error)
+        } else if self.point_query && self.last_key.is_some() {
+            // The single key this range covers has already been returned.
+            Ok(None)
         } else {
             let result = loop {
                 let next = self.iter.next().await;
