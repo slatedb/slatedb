@@ -13,10 +13,9 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableId, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::filter_policy::{FilterContext, FilterQuery, NamedFilter};
+use crate::filter_policy::{FilterContext, FilterQuery, FilterTarget, NamedFilter};
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
-use crate::prefix_extractor::PrefixTarget;
 use crate::{
     iter::{IterationOrder, RowEntryIterator},
     partitioned_keyspace,
@@ -76,6 +75,16 @@ impl SstView<'_> {
     fn end_key(&self) -> Bound<&[u8]> {
         match self {
             SstView::Owned(_, r) | SstView::Borrowed(_, r) => r.end_bound().map(|b| b.as_ref()),
+        }
+    }
+
+    /// The view's bounds, cloned by refcount rather than copied.
+    fn bounds(&self) -> (Bound<Bytes>, Bound<Bytes>) {
+        match self {
+            SstView::Owned(_, r) | SstView::Borrowed(_, r) => (
+                r.comparable_start_bound().cloned().into(),
+                r.comparable_end_bound().cloned().into(),
+            ),
         }
     }
 
@@ -193,6 +202,21 @@ impl FilterEvaluator {
         }
     }
 
+    fn new_range(
+        lower: Bound<Bytes>,
+        upper: Bound<Bytes>,
+        context: Option<FilterContext>,
+        db_stats: Option<DbStats>,
+    ) -> Self {
+        Self {
+            query: FilterQuery::range(lower, upper).with_context(context),
+            db_stats,
+            state: FilterState::NotChecked,
+            found_key: false,
+            false_positive_recorded: false,
+        }
+    }
+
     /// Evaluate the filters against the query using AND logic.
     ///
     /// All filters must agree the query might match for the read to proceed.
@@ -228,22 +252,25 @@ impl FilterEvaluator {
 
     fn positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
         match &self.query.target {
-            PrefixTarget::Point(_) => &stats.sst_filter_point_positives,
-            PrefixTarget::Prefix(_) => &stats.sst_filter_prefix_positives,
+            FilterTarget::Point(_) => &stats.sst_filter_point_positives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_positives,
+            FilterTarget::Range { .. } => &stats.sst_filter_range_positives,
         }
     }
 
     fn negatives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
         match &self.query.target {
-            PrefixTarget::Point(_) => &stats.sst_filter_point_negatives,
-            PrefixTarget::Prefix(_) => &stats.sst_filter_prefix_negatives,
+            FilterTarget::Point(_) => &stats.sst_filter_point_negatives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_negatives,
+            FilterTarget::Range { .. } => &stats.sst_filter_range_negatives,
         }
     }
 
     fn false_positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
         match &self.query.target {
-            PrefixTarget::Point(_) => &stats.sst_filter_point_false_positives,
-            PrefixTarget::Prefix(_) => &stats.sst_filter_prefix_false_positives,
+            FilterTarget::Point(_) => &stats.sst_filter_point_false_positives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_false_positives,
+            FilterTarget::Range { .. } => &stats.sst_filter_range_false_positives,
         }
     }
 
@@ -253,8 +280,9 @@ impl FilterEvaluator {
 
     fn notify_key_found(&mut self, key: &[u8]) {
         match &self.query.target {
-            PrefixTarget::Point(k) if key == k.as_ref() => self.found_key = true,
-            PrefixTarget::Prefix(p) if key.starts_with(p.as_ref()) => self.found_key = true,
+            FilterTarget::Point(k) if key == k.as_ref() => self.found_key = true,
+            FilterTarget::Prefix(p) if key.starts_with(p.as_ref()) => self.found_key = true,
+            FilterTarget::Range { .. } => self.found_key = true,
             _ => {}
         }
     }
@@ -848,11 +876,23 @@ impl<'a> SstIterator<'a> {
     fn from_internal(internal: InternalSstIterator<'a>, db_stats: Option<DbStats>) -> Self {
         let point_key = internal.view().point_key().map(Bytes::copy_from_slice);
         let prefix = internal.options.prefix.clone();
+        let range = internal.view().bounds();
         let filter_context = internal.options.filter_context.clone();
-        let filter_evaluator = match (point_key, prefix) {
-            (Some(key), _) => Some(FilterEvaluator::new_point(key, filter_context, db_stats)),
-            (None, Some(p)) => Some(FilterEvaluator::new_prefix(p, filter_context, db_stats)),
-            (None, None) => None,
+        if let Some(stats) = &db_stats {
+            let considered = match (&point_key, &prefix) {
+                (Some(_), _) => &stats.sst_iterators_created_point,
+                (None, Some(_)) => &stats.sst_iterators_created_prefix,
+                (None, None) => &stats.sst_iterators_created_range,
+            };
+            considered.increment(1);
+        }
+        let filter_evaluator = match (point_key, prefix, range) {
+            (Some(key), _, _) => Some(FilterEvaluator::new_point(key, filter_context, db_stats)),
+            (None, Some(p), _) => Some(FilterEvaluator::new_prefix(p, filter_context, db_stats)),
+            (None, None, (lower, upper)) if filter_context.is_some() => Some(
+                FilterEvaluator::new_range(lower, upper, filter_context, db_stats),
+            ),
+            (None, None, _) => None,
         };
         let delegate = match filter_evaluator {
             Some(fe) => SstIteratorDelegate::Filter(FilterIterator::new(internal, fe)),

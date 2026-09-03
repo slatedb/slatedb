@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::filter_policy::{Filter, FilterBuilder, FilterQuery};
+use crate::filter_policy::{Filter, FilterBuilder, FilterQuery, FilterTarget};
 use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
 use crate::types::RowEntry;
 use crate::utils::clamp_allocated_size_bytes;
@@ -149,7 +149,7 @@ impl FilterBuilder for BloomFilterBuilder {
 impl Filter for BloomFilter {
     fn might_match(&self, query: &FilterQuery) -> bool {
         // Full-key hash gives the tightest answer whenever it was stored.
-        if let (PrefixTarget::Point(key), true) = (&query.target, self.whole_key_filtering) {
+        if let (FilterTarget::Point(key), true) = (&query.target, self.whole_key_filtering) {
             return self.might_contain(filter_hash(key.as_ref()));
         }
 
@@ -164,10 +164,14 @@ impl Filter for BloomFilter {
         let Some(ref extractor) = self.prefix_extractor else {
             return true;
         };
-        let Some(n) = extractor.prefix_len(&query.target) else {
+        // Hashes of keys and prefixes only, so a range is unanswerable here.
+        let Some(prefix_target) = query.target.as_prefix_target() else {
             return true;
         };
-        let bytes = match &query.target {
+        let Some(n) = extractor.prefix_len(&prefix_target) else {
+            return true;
+        };
+        let bytes = match &prefix_target {
             PrefixTarget::Point(k) => k.as_ref(),
             PrefixTarget::Prefix(p) => p.as_ref(),
         };
