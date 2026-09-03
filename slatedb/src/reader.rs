@@ -103,7 +103,7 @@ impl ReadTrace {
         if let Some(tracing_options) = self.tracing_options.as_ref() {
             let sst_id = sst_id.value().to_string();
             let level = Self::format_sst_level(sst_level);
-            tracing::debug_span!(
+            tracing::info_span!(
                 parent: &self.read_span,
                 "slatedb.read.read_filters",
                 trace_id = tracing_options.trace_id.as_str(),
@@ -125,7 +125,7 @@ impl ReadTrace {
         if let Some(tracing_options) = self.tracing_options.as_ref() {
             let sst_id = sst_id.value().to_string();
             let level = Self::format_sst_level(sst_level);
-            tracing::debug_span!(
+            tracing::info_span!(
                 parent: &self.read_span,
                 "slatedb.read.evaluate_filter",
                 trace_id = tracing_options.trace_id.as_str(),
@@ -2109,7 +2109,12 @@ mod tests {
             .iter()
             .find(|span| span.name == name)
             .unwrap_or_else(|| panic!("missing {name} span"));
-        assert_eq!(span.level, "DEBUG");
+        let expected_level = if name == "slatedb.read.memtable" {
+            "DEBUG"
+        } else {
+            "INFO"
+        };
+        assert_eq!(span.level, expected_level);
         assert_eq!(span.parent_name.as_deref(), Some("slatedb.read"));
         assert_eq!(
             span.fields.get("trace_id").map(String::as_str),
