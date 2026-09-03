@@ -175,7 +175,8 @@ pub trait DbCache: Send + Sync {
     }
 
     /// Move every entry for this scope from memory to disk.
-    async fn flush_scope(&self, _scope_id: u64) -> Result<(), crate::Error> {
+    async fn flush_scope(&self, db_cache_id: u64) -> Result<(), crate::Error> {
+        let _ = db_cache_id;
         Ok(())
     }
 
@@ -281,35 +282,33 @@ impl CacheTarget {
     }
 }
 
-/// A [`DbCache`] paired with the `scope_id` to use for it.
+/// A [`DbCache`] paired with the `db_cache_id` to use for it.
 ///
 /// Pass this to [`with_db_cache`](crate::db::builder::DbBuilder::with_db_cache). Keeping the
 /// cache and its scope together avoids passing them as two separate, easily-mismatched
 /// arguments.
 pub struct DbCacheAndScope {
     pub cache: Arc<dyn DbCache>,
-    pub scope_id: u64,
+    pub db_cache_id: u64,
 }
 
 impl DbCacheAndScope {
-    pub fn new(cache: Arc<dyn DbCache>, scope_id: u64) -> Self {
-        Self { cache, scope_id }
+    pub fn new(cache: Arc<dyn DbCache>, db_cache_id: u64) -> Self {
+        Self { cache, db_cache_id }
     }
 }
 
 /// A key used to identify a cached entry.
 ///
 /// The key is composed of a scope ID (set per [`DbCacheWrapper`] instance), an SSTable ID,
-/// and a block ID. `scope_id` is readable through [`Self::scope_id`]; the other fields stay
+/// and a block ID. `db_cache_id` is readable through [`Self::db_cache_id`]; the other fields stay
 /// private to this module, so the SST/block layout is not exposed publicly.
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CachedKey {
     /// Scope identifier set per `DbCacheWrapper`, so multiple `Db` instances sharing
-    /// one cache don't collide on WAL or compacted entries. Caller-supplied (see
-    /// `DbBuilder::with_db_cache`), not derived by SlateDB. `0` is a valid choice,
-    /// not a reserved/legacy value.
-    pub(crate) scope_id: u64,
+    /// one cache don't collide on WAL or compacted entries.
+    pub(crate) db_cache_id: u64,
     pub(crate) sst_id: SsTableId,
     pub(crate) block_id: u64,
 }
@@ -319,13 +318,13 @@ impl CachedKey {
     ///
     /// A [`DbCache`] implementation reads this to tell which keys belong
     /// to the scope passed to [`DbCache::flush_scope`].
-    pub fn scope_id(&self) -> u64 {
-        self.scope_id
+    pub fn db_cache_id(&self) -> u64 {
+        self.db_cache_id
     }
 
-    fn with_scope(&self, scope_id: u64) -> Self {
+    fn with_scope(&self, db_cache_id: u64) -> Self {
         Self {
-            scope_id,
+            db_cache_id,
             sst_id: self.sst_id,
             block_id: self.block_id,
         }
@@ -335,7 +334,7 @@ impl CachedKey {
 impl From<(SsTableId, u64)> for CachedKey {
     fn from((sst_id, block_id): (SsTableId, u64)) -> Self {
         Self {
-            scope_id: 0,
+            db_cache_id: 0,
             sst_id,
             block_id,
         }
@@ -606,13 +605,13 @@ impl DbCache for SplitCache {
         Ok(())
     }
 
-    async fn flush_scope(&self, scope_id: u64) -> Result<(), crate::Error> {
+    async fn flush_scope(&self, db_cache_id: u64) -> Result<(), crate::Error> {
         let block_result = match &self.block_cache {
-            Some(cache) => cache.flush_scope(scope_id).await,
+            Some(cache) => cache.flush_scope(db_cache_id).await,
             None => Ok(()),
         };
         let meta_result = match &self.meta_cache {
-            Some(cache) => cache.flush_scope(scope_id).await,
+            Some(cache) => cache.flush_scope(db_cache_id).await,
             None => Ok(()),
         };
         block_result.and(meta_result)
@@ -671,11 +670,11 @@ impl DbCache for SplitCache {
 ///
 /// ## Scoping
 /// When multiple `Db`/`DbReader` instances share the same underlying cache object, this
-/// wrapper assigns a `scope_id` so their entries do not collide. All cache operations
-/// transparently rewrite keys to include the wrapper's `scope_id`, isolating WAL and
+/// wrapper assigns a `db_cache_id` so their entries do not collide. All cache operations
+/// transparently rewrite keys to include the wrapper's `db_cache_id`, isolating WAL and
 /// compacted SST entries per wrapper.
 ///
-/// `scope_id` is supplied by the caller at construction time (see [`Self::new`]),
+/// `db_cache_id` is supplied by the caller at construction time (see [`Self::new`]),
 /// not derived by SlateDB: pass the same id across a legitimate reopen of the same
 /// logical database to recover its warm entries, and different ids for logically
 /// different databases sharing the cache.
@@ -688,7 +687,7 @@ pub(crate) struct DbCacheWrapper {
     /// instances backed by different logical `Db`s from clobbering each other's entries
     /// in a cache they share. `0` is a valid choice when only one instance will ever
     /// use this cache.
-    scope_id: u64,
+    db_cache_id: u64,
     // Records the last time that the wrapper logged an error from the wrapped cache at error
     // level. Used to ensure we only log at error level once every ERROR_LOG_INTERVAL.
     last_err_log_time: Mutex<Option<DateTime<Utc>>>,
@@ -699,12 +698,12 @@ impl DbCacheWrapper {
         cache: Arc<dyn DbCache>,
         recorder: &MetricsRecorderHelper,
         system_clock: Arc<dyn SystemClock>,
-        scope_id: u64,
+        db_cache_id: u64,
     ) -> Self {
         Self {
             stats: DbCacheStats::new(recorder),
             cache,
-            scope_id,
+            db_cache_id,
             last_err_log_time: Mutex::new(None),
             system_clock,
         }
@@ -717,7 +716,7 @@ const ERROR_LOG_INTERVAL: TimeDelta = TimeDelta::seconds(1);
 
 impl DbCacheWrapper {
     fn scoped_key(&self, key: &CachedKey) -> CachedKey {
-        key.with_scope(self.scope_id)
+        key.with_scope(self.db_cache_id)
     }
 
     fn record_fetch_outcome(
@@ -873,7 +872,7 @@ impl DbCache for DbCacheWrapper {
     }
 
     async fn flush_to_disk(&self) -> Result<(), crate::Error> {
-        self.cache.flush_scope(self.scope_id).await
+        self.cache.flush_scope(self.db_cache_id).await
     }
 
     async fn fetch_block(
@@ -980,8 +979,8 @@ impl DbCache for UnownedDbCache {
         Ok(())
     }
 
-    async fn flush_scope(&self, scope_id: u64) -> Result<(), crate::Error> {
-        self.inner.flush_scope(scope_id).await
+    async fn flush_scope(&self, db_cache_id: u64) -> Result<(), crate::Error> {
+        self.inner.flush_scope(db_cache_id).await
     }
 
     async fn flush_to_disk(&self) -> Result<(), crate::Error> {
@@ -1217,11 +1216,11 @@ pub(crate) mod test_utils {
             guard.iter().count() as u64
         }
 
-        async fn flush_scope(&self, scope_id: u64) -> Result<(), crate::Error> {
+        async fn flush_scope(&self, db_cache_id: u64) -> Result<(), crate::Error> {
             let mut items = self.items.lock().unwrap();
             let matching: Vec<CachedKey> = items
                 .keys()
-                .filter(|k| k.scope_id == scope_id)
+                .filter(|k| k.db_cache_id == db_cache_id)
                 .cloned()
                 .collect();
             let mut spilled = self.spilled.lock().unwrap();
@@ -1599,7 +1598,7 @@ mod tests {
         let cache_a =
             DbCacheWrapper::new(shared_cache.clone(), &recorder_a, system_clock.clone(), 1);
         let cache_b = DbCacheWrapper::new(shared_cache.clone(), &recorder_b, system_clock, 2);
-        assert_ne!(cache_a.scope_id, cache_b.scope_id);
+        assert_ne!(cache_a.db_cache_id, cache_b.db_cache_id);
 
         let policy = BloomFilterPolicy::new(1);
         let mut builder = policy.builder();
@@ -1746,14 +1745,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cache_wrapper_recovers_same_scope_for_same_scope_id() {
+    async fn test_cache_wrapper_recovers_same_scope_for_same_db_cache_id() {
         let recorder_1 = MetricsRecorderHelper::noop();
         let recorder_2 = MetricsRecorderHelper::noop();
         let system_clock = Arc::new(DefaultSystemClock::default());
         let shared_cache: Arc<dyn DbCache> = Arc::new(TestCache::new());
 
         // given: a wrapper (simulating a `Db` reopen passed the same caller-supplied
-        // scope_id) populates an entry...
+        // db_cache_id) populates an entry...
         let first_open =
             DbCacheWrapper::new(shared_cache.clone(), &recorder_1, system_clock.clone(), 1);
         let key = CachedKey::from((SST_ID, 5u64));
@@ -1765,15 +1764,15 @@ mod tests {
             .await;
         drop(first_open); // simulates `Db::close()`
 
-        // when: a brand-new wrapper is constructed with the *same* scope_id...
+        // when: a brand-new wrapper is constructed with the *same* db_cache_id...
         let reopened = DbCacheWrapper::new(shared_cache, &recorder_2, system_clock, 1);
 
         // then: it recovers the same scope, so it sees the earlier instance's entry —
-        // this is what lets a caller that reuses a scope_id across a `Db` reopen see
+        // this is what lets a caller that reuses a db_cache_id across a `Db` reopen see
         // disk entries an earlier instance evacuated there before closing.
         assert!(
             reopened.get_block(&key).await.unwrap().is_some(),
-            "reopening with the same scope_id should recover the previous instance's entries"
+            "reopening with the same db_cache_id should recover the previous instance's entries"
         );
     }
 

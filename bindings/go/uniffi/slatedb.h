@@ -796,7 +796,7 @@ uint64_t uniffi_slatedb_uniffi_fn_method_dbbuilder_build(uint64_t ptr
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_DB_CACHE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_DB_CACHE
-void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache(uint64_t ptr, uint64_t db_cache, uint64_t scope_id, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache(uint64_t ptr, uint64_t db_cache, uint64_t db_cache_id, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_DB_CACHE_DISABLED
@@ -866,7 +866,7 @@ uint64_t uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_build(uint64_t ptr
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_DB_CACHE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_DB_CACHE
-void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_db_cache(uint64_t ptr, uint64_t db_cache, uint64_t scope_id, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_db_cache(uint64_t ptr, uint64_t db_cache, uint64_t db_cache_id, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_DB_CACHE_DISABLED

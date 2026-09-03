@@ -183,8 +183,7 @@ pub struct DbBuilder<P: Into<Path>> {
     settings: Settings,
     main_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
-    db_cache: Option<Arc<dyn DbCache>>,
-    scope_id: u64,
+    db_cache: Option<DbCacheAndScope>,
     block_cache_policy: BlockCachePolicy,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
@@ -215,7 +214,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             settings: Settings::default(),
             wal_object_store: None,
             db_cache: default_db_cache(),
-            scope_id: 0,
             block_cache_policy: BlockCachePolicy::default(),
             system_clock: None,
             gc_runtime: None,
@@ -288,14 +286,16 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// multiple `Db`/`DbReader` instances, and [`Db::close`](crate::Db::close) will *not*
     /// close it. Call [`DbCache::close`] yourself after closing every database that uses it.
     ///
-    /// `scope_id` isolates this database's entries from any other `Db`/`DbReader` sharing
-    /// the same cache. Each database should have its own unique `scope_id`. The ID can be
+    /// `db_cache_id` isolates this database's entries from any other `Db`/`DbReader` sharing
+    /// the same cache. Each database should have its own unique `db_cache_id`. The ID can be
     /// reused by the database when it's re-opened to recover any persisted cache data.
     pub fn with_db_cache(mut self, db_cache: DbCacheAndScope) -> Self {
         // Wrap so Db::close()/DbReader::close() can't close a cache the
         // caller owns and may be sharing with other instances.
-        self.db_cache = Some(Arc::new(UnownedDbCache::new(db_cache.cache)));
-        self.scope_id = db_cache.scope_id;
+        self.db_cache = Some(DbCacheAndScope::new(
+            Arc::new(UnownedDbCache::new(db_cache.cache)),
+            db_cache.db_cache_id,
+        ));
         self
     }
 
@@ -577,12 +577,12 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Create path resolver and table store
         let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
-        let db_cache = self.db_cache.as_ref().map(|cache| {
+        let db_cache = self.db_cache.as_ref().map(|db_cache| {
             Arc::new(DbCacheWrapper::new(
-                cache.clone(),
+                db_cache.cache.clone(),
                 &recorder,
                 system_clock.clone(),
-                self.scope_id,
+                db_cache.db_cache_id,
             )) as Arc<dyn DbCache>
         });
         let table_store = Arc::new(TableStore::new_with_fp_registry(
@@ -1672,8 +1672,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     wal_reader: Option<Arc<dyn wal::WalReader>>,
-    db_cache: Option<Arc<dyn DbCache>>,
-    scope_id: u64,
+    db_cache: Option<DbCacheAndScope>,
     mode: DbReaderMode,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
@@ -1694,7 +1693,6 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             wal_object_store: None,
             wal_reader: None,
             db_cache: default_db_cache(),
-            scope_id: 0,
             mode: DbReaderMode::default(),
             merge_operator: None,
             block_transformer: None,
@@ -1761,14 +1759,16 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// will *not* close it. Call [`DbCache::close`] yourself after closing every database
     /// that uses it.
     ///
-    /// `scope_id` isolates this reader's entries from any other `Db`/`DbReader` sharing
+    /// `db_cache_id` isolates this reader's entries from any other `Db`/`DbReader` sharing
     /// the same cache. Pass the same id as the `Db` it's reading, or the same ID as a prior open
     /// of this same reader, to share/recover persisted entries.
     pub fn with_db_cache(mut self, db_cache: DbCacheAndScope) -> Self {
         // Wrap so Db::close()/DbReader::close() can't close a cache the
         // caller owns and may be sharing with other instances.
-        self.db_cache = Some(Arc::new(UnownedDbCache::new(db_cache.cache)));
-        self.scope_id = db_cache.scope_id;
+        self.db_cache = Some(DbCacheAndScope::new(
+            Arc::new(UnownedDbCache::new(db_cache.cache)),
+            db_cache.db_cache_id,
+        ));
         self
     }
 
@@ -1910,12 +1910,12 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             (None, _) => HashMap::new(),
         };
 
-        let wrapped_cache = self.db_cache.as_ref().map(|c| {
+        let wrapped_cache = self.db_cache.as_ref().map(|db_cache| {
             Arc::new(DbCacheWrapper::new(
-                c.clone(),
+                db_cache.cache.clone(),
                 &recorder,
                 self.system_clock.clone(),
-                self.scope_id,
+                db_cache.db_cache_id,
             )) as Arc<dyn DbCache>
         });
 
@@ -1962,15 +1962,16 @@ fn default_filter_policies() -> Vec<Arc<dyn FilterPolicy>> {
     vec![Arc::new(BloomFilterPolicy::new(10))]
 }
 
-fn default_db_cache() -> Option<Arc<dyn DbCache>> {
+fn default_db_cache() -> Option<DbCacheAndScope> {
     let block_cache = default_block_cache();
     let meta_cache = default_meta_cache();
-    Some(Arc::new(
+    let cache = Arc::new(
         SplitCache::new()
             .with_block_cache(block_cache)
             .with_meta_cache(meta_cache)
             .build(),
-    ) as Arc<dyn DbCache>)
+    ) as Arc<dyn DbCache>;
+    Some(DbCacheAndScope::new(cache, 0))
 }
 
 /// Specifies the source database and checkpoint for a clone operation.

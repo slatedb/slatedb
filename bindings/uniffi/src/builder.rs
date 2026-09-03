@@ -72,14 +72,14 @@ impl DbBuilder {
             .map_err(Into::into)
     }
 
-    /// Sets DB cache. `scope_id` isolates this database's entries from any other
+    /// Sets DB cache. `db_cache_id` isolates this database's entries from any other
     /// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
     /// uniqueness and stability across reopens.
-    pub fn with_db_cache(&self, db_cache: Arc<DbCache>, scope_id: u64) -> Result<(), Error> {
+    pub fn with_db_cache(&self, db_cache: Arc<DbCache>, db_cache_id: u64) -> Result<(), Error> {
         self.update_builder(|builder| {
             builder.with_db_cache(slatedb::db_cache::DbCacheAndScope::new(
                 db_cache.inner.clone(),
-                scope_id,
+                db_cache_id,
             ))
         })
         .map_err(Into::into)
@@ -209,14 +209,14 @@ impl DbReaderBuilder {
             .map_err(Into::into)
     }
 
-    /// Sets DB cache. `scope_id` isolates this reader's entries from any other
+    /// Sets DB cache. `db_cache_id` isolates this reader's entries from any other
     /// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
     /// uniqueness and stability across reopens.
-    pub fn with_db_cache(&self, db_cache: Arc<DbCache>, scope_id: u64) -> Result<(), Error> {
+    pub fn with_db_cache(&self, db_cache: Arc<DbCache>, db_cache_id: u64) -> Result<(), Error> {
         self.update_builder(|builder| {
             builder.with_db_cache(slatedb::db_cache::DbCacheAndScope::new(
                 db_cache.inner.clone(),
-                scope_id,
+                db_cache_id,
             ))
         })
         .map_err(Into::into)

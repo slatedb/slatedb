@@ -51,12 +51,12 @@ impl From<SerializedCachedKey> for CachedKey {
     fn from(value: SerializedCachedKey) -> Self {
         match value {
             SerializedCachedKey::V1(sst_id, block_id) => CachedKey {
-                scope_id: 0,
+                db_cache_id: 0,
                 sst_id: sst_id.into(),
                 block_id,
             },
-            SerializedCachedKey::V2(scope_id, sst_id, block_id) => CachedKey {
-                scope_id,
+            SerializedCachedKey::V2(db_cache_id, sst_id, block_id) => CachedKey {
+                db_cache_id,
                 sst_id: sst_id.into(),
                 block_id,
             },
@@ -66,7 +66,7 @@ impl From<SerializedCachedKey> for CachedKey {
 
 impl From<CachedKey> for SerializedCachedKey {
     fn from(value: CachedKey) -> Self {
-        SerializedCachedKey::V2(value.scope_id, value.sst_id.into(), value.block_id)
+        SerializedCachedKey::V2(value.db_cache_id, value.sst_id.into(), value.block_id)
     }
 }
 
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn test_should_serialize_deserialize_compacted_sst_key() {
         let key = CachedKey {
-            scope_id: 0,
+            db_cache_id: 0,
             sst_id: SsTableId::Compacted(Ulid::from((123, 456))),
             block_id: 99,
         };
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn test_should_serialize_deserialize_wal_sst_key() {
         let key = CachedKey {
-            scope_id: 5,
+            db_cache_id: 5,
             sst_id: SsTableId::Wal(123),
             block_id: 99,
         };

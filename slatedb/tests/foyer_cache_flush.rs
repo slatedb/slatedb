@@ -8,7 +8,7 @@
 //! warm-start from disk instead of object storage, and (b) the freed memory
 //! tier capacity is immediately available to other tasks sharing the cache.
 //!
-//! `scope_id` is caller-supplied (not derived by SlateDB — see
+//! `db_cache_id` is caller-supplied (not derived by SlateDB — see
 //! `DbBuilder::with_db_cache`), so every test that shares a cache across
 //! multiple `Db`s picks its own ids and passes the same one across a
 //! simulated task restart, exactly as an embedder with its own durable
@@ -327,21 +327,21 @@ async fn flush_is_a_noop_with_nothing_resident() {
     db.close().await.expect("close failed");
 }
 
-/// Two `Db`s sharing one cache with different caller-supplied `scope_id`s:
+/// Two `Db`s sharing one cache with different caller-supplied `db_cache_id`s:
 /// closing (and flushing) one must not disturb the other's resident entries,
 /// and only the closed one's entries should have actually been flushed to
 /// disk (acceptance criterion: scope isolation holds).
 ///
 /// The two claims are checked the same way the other tests establish "served
 /// from disk, not object storage" — by GET count, not by reaching into cache
-/// internals — because `CachedKey`'s `scope_id`/`sst_id`/`block_id` fields
+/// internals — because `CachedKey`'s `db_cache_id`/`sst_id`/`block_id` fields
 /// are private, so an external test cannot construct db_a's or db_b's scoped
 /// key to probe the disk tier directly:
 /// - db_b (left running, never flushed) is re-read *while still open* and
 ///   must cause zero new GETs — it was never touched, so it's still served
 ///   entirely from the memory tier.
 /// - db_a is flushed, closed, and reopened as a new instance at the same path
-///   *with the same scope_id* (simulating a caller reusing its own durable
+///   *with the same db_cache_id* (simulating a caller reusing its own durable
 ///   per-task identity across a restart); its data is re-read and
 ///   must also cause zero new GETs — this time because it recovers its scope
 ///   and hits the disk tier, not because it was still resident in memory.
@@ -411,7 +411,7 @@ async fn flush_and_close_one_db_does_not_disturb_a_sibling_on_the_same_cache() {
     );
 
     // then (positive proof): db_a, reopened as a new instance at the same path
-    // with the same scope_id, recovers its scope and is served entirely from
+    // with the same db_cache_id, recovers its scope and is served entirely from
     // the disk tier it was flushed to — zero new GETs, this time via disk
     // rather than memory.
     let db_a2 = Db::builder(PATH_A, object_store.clone() as Arc<dyn ObjectStore>)
@@ -437,7 +437,7 @@ async fn flush_and_close_one_db_does_not_disturb_a_sibling_on_the_same_cache() {
 /// reopened as a *new* `Db` instance over the *same* shared cache, rather
 /// than kept alive.
 ///
-/// The caller must pass the *same* `scope_id` on both opens — SlateDB doesn't
+/// The caller must pass the *same* `db_cache_id` on both opens — SlateDB doesn't
 /// derive or persist it — or the flushed data becomes unreachable under the
 /// new instance's different scope. GET counts are measured only after `db2`'s
 /// own open-time bootstrap, isolating the signal to whether reads hit the
@@ -492,7 +492,7 @@ async fn reopening_a_new_db_instance_with_the_same_scope_id_recovers_the_flushed
 
     // "task restart": a brand-new Db instance for the same path, over the
     // same shared cache instance (simulating a caller that keeps one
-    // process-wide cache), passing the same scope_id db1 used — as a caller
+    // process-wide cache), passing the same db_cache_id db1 used — as a caller
     // would, from its own durable per-task identity.
     let db2 = Db::builder(PATH, object_store.clone() as Arc<dyn ObjectStore>)
         .with_settings(no_periodic_flush())

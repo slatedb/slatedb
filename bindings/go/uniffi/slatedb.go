@@ -628,7 +628,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache()
 		})
-		if checksum != 55496 {
+		if checksum != 47822 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache: UniFFI API checksum mismatch")
 		}
@@ -727,7 +727,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_db_cache()
 		})
-		if checksum != 49692 {
+		if checksum != 34968 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_db_cache: UniFFI API checksum mismatch")
 		}
@@ -4346,10 +4346,10 @@ func (_ FfiDestroyerDb) Destroy(value *Db) {
 type DbBuilderInterface interface {
 	// Opens the database and consumes this builder.
 	Build() (*Db, error)
-	// Sets DB cache. `scope_id` isolates this database's entries from any other
+	// Sets DB cache. `db_cache_id` isolates this database's entries from any other
 	// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
 	// uniqueness and stability across reopens.
-	WithDbCache(dbCache *DbCache, scopeId uint64) error
+	WithDbCache(dbCache *DbCache, dbCacheId uint64) error
 	// Disables the SST block and metadata cache.
 	WithDbCacheDisabled() error
 	// Sets the filter policies used for SST filter construction and evaluation.
@@ -4427,15 +4427,15 @@ func (_self *DbBuilder) Build() (*Db, error) {
 	return res, err
 }
 
-// Sets DB cache. `scope_id` isolates this database's entries from any other
+// Sets DB cache. `db_cache_id` isolates this database's entries from any other
 // `Db`/`DbReader` sharing the same cache; the caller is responsible for its
 // uniqueness and stability across reopens.
-func (_self *DbBuilder) WithDbCache(dbCache *DbCache, scopeId uint64) error {
+func (_self *DbBuilder) WithDbCache(dbCache *DbCache, dbCacheId uint64) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
 	defer _self.ffiObject.decrementPointer()
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache(
-			_pointer, FfiConverterDbCacheINSTANCE.Lower(dbCache), FfiConverterUint64INSTANCE.Lower(scopeId), _uniffiStatus)
+			_pointer, FfiConverterDbCacheINSTANCE.Lower(dbCache), FfiConverterUint64INSTANCE.Lower(dbCacheId), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -5461,10 +5461,10 @@ func (_ FfiDestroyerDbReader) Destroy(value *DbReader) {
 type DbReaderBuilderInterface interface {
 	// Opens the reader and consumes this builder.
 	Build() (*DbReader, error)
-	// Sets DB cache. `scope_id` isolates this reader's entries from any other
+	// Sets DB cache. `db_cache_id` isolates this reader's entries from any other
 	// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
 	// uniqueness and stability across reopens.
-	WithDbCache(dbCache *DbCache, scopeId uint64) error
+	WithDbCache(dbCache *DbCache, dbCacheId uint64) error
 	// Disables the SST block and metadata cache.
 	WithDbCacheDisabled() error
 	// Sets the filter policies used when decoding SST filter blocks.
@@ -5537,15 +5537,15 @@ func (_self *DbReaderBuilder) Build() (*DbReader, error) {
 	return res, err
 }
 
-// Sets DB cache. `scope_id` isolates this reader's entries from any other
+// Sets DB cache. `db_cache_id` isolates this reader's entries from any other
 // `Db`/`DbReader` sharing the same cache; the caller is responsible for its
 // uniqueness and stability across reopens.
-func (_self *DbReaderBuilder) WithDbCache(dbCache *DbCache, scopeId uint64) error {
+func (_self *DbReaderBuilder) WithDbCache(dbCache *DbCache, dbCacheId uint64) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
 	defer _self.ffiObject.decrementPointer()
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_db_cache(
-			_pointer, FfiConverterDbCacheINSTANCE.Lower(dbCache), FfiConverterUint64INSTANCE.Lower(scopeId), _uniffiStatus)
+			_pointer, FfiConverterDbCacheINSTANCE.Lower(dbCache), FfiConverterUint64INSTANCE.Lower(dbCacheId), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()

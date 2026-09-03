@@ -157,11 +157,13 @@ impl DbCache for FoyerHybridCache {
     /// it. `HybridCache::is_hybrid` cannot tell us this (it misreports `true`
     /// for a no-op disk tier as of foyer 0.22.4), so check the device
     /// capacity instead.
-    async fn flush_scope(&self, scope_id: u64) -> Result<(), crate::Error> {
+    async fn flush_scope(&self, db_cache_id: u64) -> Result<(), crate::Error> {
         if self.inner.storage().device().capacity() == 0 {
             return Ok(());
         }
-        self.inner.flush_if(|k, _v| k.scope_id == scope_id).await;
+        self.inner
+            .flush_if(|k, _v| k.db_cache_id == db_cache_id)
+            .await;
         self.inner.storage().wait().await;
         Ok(())
     }
@@ -341,7 +343,7 @@ mod tests {
             "entry should be resident in memory right after insert"
         );
 
-        cache.flush_scope(key.scope_id).await.unwrap();
+        cache.flush_scope(key.db_cache_id).await.unwrap();
 
         assert!(
             cache.inner.memory().get(&key).is_none(),
@@ -360,7 +362,7 @@ mod tests {
         let cache = open_cache(dir.path()).await;
         let key = CachedKey::from((SST_ID, 1u64));
 
-        cache.flush_scope(key.scope_id).await.unwrap();
+        cache.flush_scope(key.db_cache_id).await.unwrap();
 
         assert!(cache.inner.memory().get(&key).is_none());
         let loaded = cache.inner.storage().load(&key).await.unwrap();
@@ -388,7 +390,7 @@ mod tests {
         let key = CachedKey::from((SST_ID, 1u64));
         cache.insert(key.clone(), build_block()).await;
 
-        cache.flush_scope(key.scope_id).await.unwrap();
+        cache.flush_scope(key.db_cache_id).await.unwrap();
 
         assert!(
             cache.inner.memory().get(&key).is_some(),
@@ -401,17 +403,17 @@ mod tests {
         let dir = tempdir().unwrap();
         let cache = open_cache(dir.path()).await;
         let flushed_key = CachedKey {
-            scope_id: 1,
+            db_cache_id: 1,
             ..CachedKey::from((SST_ID, 2u64))
         };
         let kept_key = CachedKey {
-            scope_id: 2,
+            db_cache_id: 2,
             ..CachedKey::from((SST_ID, 2u64))
         };
         cache.insert(flushed_key.clone(), build_block()).await;
         cache.insert(kept_key.clone(), build_block()).await;
 
-        cache.flush_scope(flushed_key.scope_id).await.unwrap();
+        cache.flush_scope(flushed_key.db_cache_id).await.unwrap();
 
         assert!(
             cache.inner.memory().get(&kept_key).is_some(),

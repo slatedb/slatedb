@@ -660,13 +660,13 @@ pub trait DbCacheManagerOps {
 
     /// Send this instance's cached data to disk.
     ///
-    /// This moves data for this instance's `scope_id` from memory to disk.
+    /// This moves data for this instance's `db_cache_id` from memory to disk.
     /// It frees memory now, and protects the data from an ungraceful
-    /// process exit later. A later instance with the same `scope_id` can
+    /// process exit later. A later instance with the same `db_cache_id` can
     /// read the data back from disk.
     ///
     /// This affects the whole scope, not only this instance's own reads
-    /// and writes. If another instance uses the same `scope_id`, this call
+    /// and writes. If another instance uses the same `db_cache_id`, this call
     /// also flushes that instance's data.
     ///
     /// Does nothing if no block cache is set, or if the cache has no disk
