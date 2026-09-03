@@ -196,6 +196,21 @@ impl DbReaderBuilder {
             .map_err(Into::into)
     }
 
+    /// Disables the SST block and metadata cache.
+    pub fn with_db_cache_disabled(&self) -> Result<(), Error> {
+        self.update_builder(slatedb::DbReaderBuilder::with_db_cache_disabled)
+            .map_err(Into::into)
+    }
+
+    /// Sets DB cache.
+    ///
+    /// The cache remains owned by the caller and may be shared across multiple
+    /// `Db`/`DbReader` instances; `reader.shutdown()` will not close it.
+    pub fn with_db_cache(&self, db_cache: Arc<DbCache>) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_db_cache(db_cache.inner.clone()))
+            .map_err(Into::into)
+    }
+
     /// Installs an application-defined merge operator used while reading merge rows.
     pub fn with_merge_operator(&self, merge_operator: Arc<dyn MergeOperator>) -> Result<(), Error> {
         self.update_builder(|builder| {
