@@ -31,7 +31,9 @@
 //! ```
 //!
 
-use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY};
+use crate::db_cache::{
+    instrumented_loader, CacheLoader, CachedEntry, CachedKey, DbCache, DEFAULT_MAX_CAPACITY,
+};
 use crate::error::SlateDBError;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -147,8 +149,11 @@ impl DbCache for FoyerCache {
         &self,
         key: CachedKey,
         loader: CacheLoader,
-    ) -> Result<CachedEntry, crate::Error> {
-        self.dedup_fetch(key, loader).await
+    ) -> Result<(CachedEntry, bool), crate::Error> {
+        let (loader, loader_ran) = instrumented_loader(loader);
+        self.dedup_fetch(key, loader)
+            .await
+            .map(|entry| (entry, !loader_ran.was_called()))
     }
 
     async fn fetch_stats(
@@ -180,5 +185,76 @@ impl FoyerCache {
             Ok(entry) => Ok(entry.value().clone()),
             Err(err) => Err(SlateDBError::FoyerError(Arc::new(err)).into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
+    use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache};
+    use crate::db_state::SsTableId;
+    use crate::filter_policy::{BloomFilterPolicy, FilterPolicy, NamedFilter};
+    use crate::types::{RowEntry, ValueDeletable};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use ulid::Ulid;
+
+    const SST_ID: SsTableId = SsTableId::new(Ulid::from_parts(123, 0));
+
+    fn filter_entry() -> CachedEntry {
+        let policy = BloomFilterPolicy::new(1);
+        let mut builder = policy.builder();
+        builder.add_entry(&RowEntry::new(
+            bytes::Bytes::from_static(b"a"),
+            ValueDeletable::Value(bytes::Bytes::new()),
+            0,
+            None,
+            None,
+        ));
+        let filter = builder.build();
+        let named = NamedFilter {
+            name: BloomFilterPolicy::NAME.to_string(),
+            filter,
+        };
+        CachedEntry::with_filters(Arc::from([named]))
+    }
+
+    fn counting_filter_loader(calls: Arc<AtomicUsize>) -> CacheLoader {
+        Box::new(move || {
+            let calls = calls.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(filter_entry())
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn test_fetch_filter_reports_miss_then_hit() {
+        let cache = FoyerCache::new_with_opts(FoyerCacheOptions {
+            max_capacity: 1024 * 1024,
+            shards: 1,
+        });
+        let key = CachedKey::from((SST_ID, 12345u64));
+        let loader_calls = Arc::new(AtomicUsize::new(0));
+
+        let (entry, cached) = cache
+            .fetch_filter(key.clone(), counting_filter_loader(loader_calls.clone()))
+            .await
+            .unwrap();
+
+        assert!(!cached);
+        assert_eq!(1, entry.filters().unwrap().len());
+        assert_eq!(1, loader_calls.load(Ordering::SeqCst));
+
+        loader_calls.store(0, Ordering::SeqCst);
+        let (entry, cached) = cache
+            .fetch_filter(key, counting_filter_loader(loader_calls.clone()))
+            .await
+            .unwrap();
+
+        assert!(cached);
+        assert_eq!(1, entry.filters().unwrap().len());
+        assert_eq!(0, loader_calls.load(Ordering::SeqCst));
     }
 }

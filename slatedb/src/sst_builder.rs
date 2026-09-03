@@ -443,6 +443,7 @@ mod tests {
     use crate::filter_policy::{BloomFilterPolicy, FilterQuery};
     use crate::format::block::Block;
     use crate::prefix_extractor::PrefixExtractor;
+    use crate::reader::ReadTrace;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::{assert_iterator, build_test_sst};
@@ -924,7 +925,11 @@ mod tests {
             .unwrap();
         let sst_handle = table_store.open_sst(&test_sst_id(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
-        let filters = table_store.read_filters(&sst_handle, true).await.unwrap();
+        let read_trace = ReadTrace::new(None);
+        let filters = table_store
+            .read_filters(&sst_handle, true, &read_trace, None)
+            .await
+            .unwrap();
         assert!(!filters.is_empty());
         let filter = &filters[0].filter;
 
@@ -1007,7 +1012,11 @@ mod tests {
         );
         let sst_handle = table_store.open_sst(&test_sst_id(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
-        let filters = table_store.read_filters(&sst_handle, true).await.unwrap();
+        let read_trace = ReadTrace::new(None);
+        let filters = table_store
+            .read_filters(&sst_handle, true, &read_trace, None)
+            .await
+            .unwrap();
         assert!(!filters.is_empty());
         let filter = &filters[0].filter;
 
@@ -1385,7 +1394,11 @@ mod tests {
 
         let sst_handle = table_store.open_sst(&test_sst_id(0)).await.unwrap();
         let index = table_store.read_index(&sst_handle, true).await.unwrap();
-        let filters = table_store.read_filters(&sst_handle, true).await.unwrap();
+        let read_trace = ReadTrace::new(None);
+        let filters = table_store
+            .read_filters(&sst_handle, true, &read_trace, None)
+            .await
+            .unwrap();
         assert!(!filters.is_empty());
         let filter = &filters[0].filter;
 
@@ -1963,7 +1976,11 @@ mod tests {
         let handle = table_store.open_sst(&test_sst_id(0)).await.unwrap();
 
         // --- Both sub-filters decoded correctly ---
-        let filters = table_store.read_filters(&handle, false).await.unwrap();
+        let read_trace = ReadTrace::new(None);
+        let filters = table_store
+            .read_filters(&handle, false, &read_trace, None)
+            .await
+            .unwrap();
         assert_eq!(
             filters.len(),
             2,
@@ -2005,7 +2022,7 @@ mod tests {
         );
         let handle_partial = store_partial.open_sst(&test_sst_id(0)).await.unwrap();
         let partial = store_partial
-            .read_filters(&handle_partial, false)
+            .read_filters(&handle_partial, false, &read_trace, None)
             .await
             .unwrap();
         assert_eq!(

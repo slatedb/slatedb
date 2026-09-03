@@ -26,12 +26,14 @@ use crate::iter::IterationOrder;
 use crate::object_store_tag::ObjectStoreCallTag;
 pub(crate) use crate::object_store_tag::TableStoreKind;
 use crate::paths::PathResolver;
+use crate::reader::{ReadTrace, SstTraceLevel};
 use crate::sst_builder::EncodedSsTableBuilder;
 #[cfg(test)]
 use crate::sst_io::MAX_VALIDATION_RETRIES;
 use crate::sst_io::{read_obj, read_with_validation_retry, ReadOnlyObject};
 use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
+use tracing::Instrument;
 
 pub(crate) struct TableStore {
     object_store: Arc<dyn ObjectStore>,
@@ -45,6 +47,10 @@ pub(crate) struct TableStore {
     block_cache_policy: BlockCachePolicy,
     /// Which component owns this store. Tagged on compacted-SST calls.
     kind: TableStoreKind,
+}
+
+fn record_read_filter_cached(span: &tracing::Span, cached: bool) {
+    span.record("cached", cached);
 }
 
 impl TableStore {
@@ -354,6 +360,8 @@ impl TableStore {
         &self,
         handle: &SsTableHandle,
         cache_blocks: bool,
+        trace: &ReadTrace,
+        sst_level: Option<&SstTraceLevel>,
     ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         // No filter exists for this SST (either no policies configured, or the
         // SST was built below `min_filter_keys`). Return an empty slice without
@@ -362,6 +370,17 @@ impl TableStore {
         if self.sst_format.filter_policies.is_empty() || handle.info.filter_len == 0 {
             return Ok(Arc::from([]));
         }
+        let span = trace.new_read_filter_span(handle.id, sst_level);
+        let read = self.read_filters_inner(handle, cache_blocks, span.clone());
+        read.instrument(span).await
+    }
+
+    async fn read_filters_inner(
+        &self,
+        handle: &SsTableHandle,
+        cache_blocks: bool,
+        span: tracing::Span,
+    ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         let cache_key: CachedKey = (handle.id, handle.info.filter_offset).into();
         if let Some(cache) = self.cache_for_reads() {
             // cache_blocks=true: dedup-aware fetch; concurrent callers collapse onto
@@ -379,9 +398,14 @@ impl TableStore {
                     .await
                     .ok()
             } else {
-                cache.get_filter(&cache_key).await.unwrap_or(None)
+                cache
+                    .get_filter(&cache_key)
+                    .await
+                    .unwrap_or(None)
+                    .map(|entry| (entry, true))
             };
-            if let Some(entry) = entry {
+            if let Some((entry, cached)) = entry {
+                record_read_filter_cached(&span, cached);
                 // Already decoded.
                 if let Some(filters) = entry.filters() {
                     return Ok(filters);
@@ -395,6 +419,7 @@ impl TableStore {
                 }
             }
         }
+        record_read_filter_cached(&span, false);
         read_obj!(
             &self.object_store,
             self.path(&handle.id),
@@ -1028,6 +1053,7 @@ mod tests {
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::iter::IterationOrder;
     use crate::manifest::SsTableView;
+    use crate::reader::ReadTrace;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
@@ -1597,7 +1623,11 @@ mod tests {
         );
         assert_eq!(meta_cache.entry_count(), 0);
 
-        let filters = reader.read_filters(&handle, false).await.unwrap();
+        let read_trace = ReadTrace::new(None);
+        let filters = reader
+            .read_filters(&handle, false, &read_trace, None)
+            .await
+            .unwrap();
         assert!(!filters.is_empty());
         assert!(meta_cache
             .get_filter(&(handle.id, handle.info.filter_offset).into())
@@ -1605,7 +1635,10 @@ mod tests {
             .unwrap()
             .is_none());
 
-        let _ = reader.read_filters(&handle, true).await.unwrap();
+        let _ = reader
+            .read_filters(&handle, true, &read_trace, None)
+            .await
+            .unwrap();
         assert!(meta_cache
             .get_filter(&(handle.id, handle.info.filter_offset).into())
             .await

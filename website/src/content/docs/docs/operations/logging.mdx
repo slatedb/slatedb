@@ -5,6 +5,7 @@ description: Learn how to configure logging and tracing in SlateDB
 
 import { Code } from '@astrojs/starlight/components';
 import tracingSubscriber from '/../examples/src/tracing_subscriber.rs?raw'
+import readTracing from '/../examples/src/read_tracing.rs?raw'
 
 ## Tracing in SlateDB
 
@@ -13,3 +14,44 @@ SlateDB uses the [`tracing`](https://github.com/tokio-rs/tracing) library for lo
 Here's a basic example showing how to consume tracing logs with `tracing_subscriber` and SlateDB:
 
 <Code code={tracingSubscriber} lang="rust" title="main.rs" />
+
+## Tracing Read Operation
+
+SlateDB provides structured tracing spans for read operations, allowing you to track and measure the performance of individual reads. When enabled, SlateDB creates a hierarchy of spans that wrap different parts of the read path:
+
+| Span | Description | Fields |
+| --- | --- | --- |
+| `slatedb.read` | Root span for a read operation (`get`, `scan`, or `scan_prefix_by_recency`). | `trace_id` |
+| `slatedb.read.memtable` | Records each memtable lookup. | `trace_id` |
+| `slatedb.read.read_filters` | Records reading filters for an SST. | `trace_id`, `sst_id`, `level`, `cached` |
+| `slatedb.read.evaluate_filter` | Records evaluating a named filter for an SST. | `trace_id`, `sst_id`, `level`, `name`, `result` |
+
+All `slatedb.read.*` spans are child spans of the root `slatedb.read` span.
+
+Field meanings:
+
+- `trace_id` — The value from `TracingOptions`, used to correlate spans from the same read operation.
+- `sst_id` — The identifier of the SST involved in the span.
+- `level` — The level that contains the SST: `l0` or `sorted_run:{id}`.
+- `cached` — `true` if the filter was read from cache, `false` otherwise.
+- `name` — The name of the filter policy being evaluated.
+- `result` — The boolean result of evaluating the filter.
+
+These spans are only created when you provide `TracingOptions` to the read operation.
+
+All spans listed above are created at tracing level `INFO`, except for `slatedb.read.memtable`.
+Due to the potential huge number of spans `slatedb.read.memtable` created during scan operations, `slatedb.read.memtable` spans are created at tracing level `DEBUG`.
+
+### Configuring TracingOptions
+
+Read operations (`get`, `scan`, `scan_prefix_by_recency`) can be traced by passing `TracingOptions` via the corresponding options struct. Use `ReadOptions::with_tracing_options()` for point reads and `ScanOptions::with_tracing_options()` for scans.
+
+The `trace_id` field in `TracingOptions` allows you to correlate spans of the same read operation.
+
+Here's an example of enabling tracing for a get operation:
+
+<Code code={readTracing} lang="rust" title="main.rs" />
+
+:::note
+These are the first spans introduced as part of [RFC-0033](https://github.com/slatedb/slatedb/blob/main/rfcs/0033-query_tracing.md). More spans covering additional parts of the read path will be added in future releases.
+:::

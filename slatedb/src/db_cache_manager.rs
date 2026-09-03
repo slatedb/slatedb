@@ -12,6 +12,7 @@ use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::manifest::VersionedManifest;
 use crate::partitioned_keyspace::partitions_covering_range;
+use crate::reader::ReadTrace;
 use crate::tablestore::TableStore;
 
 pub(crate) async fn warm_sst_impl(
@@ -155,7 +156,10 @@ async fn warm_filters(
     if handle.info.filter_len == 0 {
         return Ok(());
     }
-    table_store.read_filters(handle, true).await?;
+    let read_trace = ReadTrace::new(None);
+    table_store
+        .read_filters(handle, true, &read_trace, None)
+        .await?;
     Ok(())
 }
 

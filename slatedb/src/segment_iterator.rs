@@ -12,8 +12,9 @@ use crate::error::SlateDBError;
 use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
 use crate::manifest::{LsmTreeState, Segment};
 use crate::merge_iterator::MergeIterator;
+use crate::reader::{ReadTrace, SstTraceLevel};
 use crate::sorted_run_iterator::SortedRunIterator;
-use crate::sst_iter::{SstIterator, SstIteratorOptions};
+use crate::sst_iter::{SstIterator, SstIteratorOptions, SstTracingContext};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::utils::build_concurrent;
@@ -33,6 +34,7 @@ pub(crate) struct SegmentScanContext {
     pub(crate) point_lookup_stats: Option<DbStats>,
     /// Stats for range-query sorted runs.
     pub(crate) db_stats: DbStats,
+    pub(crate) read_trace: ReadTrace,
 }
 
 /// Per-segment iterator bundle built from a single [`LsmTreeState`] for
@@ -315,11 +317,16 @@ pub(crate) fn build_l0_point_iters(
 ) -> Result<VecDeque<Box<dyn RowEntryIterator>>, SlateDBError> {
     let mut iters = VecDeque::new();
     for sst in l0.iter().cloned() {
+        let sst_iter_options = ctx.sst_iter_options.clone();
         let iter = SstIterator::new_owned_with_stats(
             ctx.range.clone(),
             sst,
             ctx.table_store.clone(),
-            ctx.sst_iter_options.clone(),
+            sst_iter_options,
+            Some(SstTracingContext::new(
+                SstTraceLevel::L0,
+                ctx.read_trace.clone(),
+            )),
             ctx.point_lookup_stats.clone(),
         )?;
         if let Some(iter) = iter {
@@ -337,11 +344,16 @@ pub(crate) fn build_sr_point_iters(
     let mut iters = VecDeque::new();
     for sr in compacted.iter() {
         for handle in sr.tables_covering_point_key(key.as_ref()) {
+            let sst_iter_options = ctx.sst_iter_options.clone();
             let iter = SstIterator::new_owned_with_stats(
                 ctx.range.clone(),
                 handle.clone(),
                 ctx.table_store.clone(),
-                ctx.sst_iter_options.clone(),
+                sst_iter_options,
+                Some(SstTracingContext::new(
+                    SstTraceLevel::SortedRun(sr.id),
+                    ctx.read_trace.clone(),
+                )),
                 ctx.point_lookup_stats.clone(),
             )?;
             if let Some(iter) = iter {
@@ -359,11 +371,16 @@ async fn build_l0_range_iters(
     let table_store = ctx.table_store.clone();
     let range = ctx.range.clone();
     let opts = ctx.sst_iter_options.clone();
+    let sst_tracing_context = Some(SstTracingContext::new(
+        SstTraceLevel::L0,
+        ctx.read_trace.clone(),
+    ));
     let stats = ctx.db_stats.clone();
     build_concurrent(l0.iter().cloned(), ctx.max_parallel, move |sst| {
         let table_store = table_store.clone();
         let range = range.clone();
         let opts = opts.clone();
+        let sst_tracing_context = sst_tracing_context.clone();
         let stats = stats.clone();
         async move {
             SstIterator::new_owned_initialized_with_stats(
@@ -371,6 +388,7 @@ async fn build_l0_range_iters(
                 sst,
                 table_store,
                 opts,
+                sst_tracing_context,
                 Some(stats),
             )
             .await
@@ -393,10 +411,15 @@ async fn build_sr_range_iters(
     let table_store = ctx.table_store.clone();
     let opts = ctx.sst_iter_options.clone();
     let stats = ctx.db_stats.clone();
+    let read_trace = ctx.read_trace.clone();
     build_concurrent(overlapping.into_iter(), ctx.max_parallel, move |sr| {
         let table_store = table_store.clone();
         let range = range.clone();
         let opts = opts.clone();
+        let sst_tracing_context = Some(SstTracingContext::new(
+            SstTraceLevel::SortedRun(sr.id),
+            read_trace.clone(),
+        ));
         let stats = stats.clone();
         async move {
             SortedRunIterator::new_owned_initialized_with_stats(
@@ -404,6 +427,7 @@ async fn build_sr_range_iters(
                 sr,
                 table_store,
                 opts,
+                sst_tracing_context,
                 Some(stats),
             )
             .await

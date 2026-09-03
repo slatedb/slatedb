@@ -211,18 +211,20 @@ pub trait DbCache: Send + Sync {
         Ok(entry)
     }
 
-    /// Fetch a filter entry, invoking `loader` on cache miss. See [`Self::fetch_block`].
+    /// Fetch a filter entry and whether it was already cached, invoking `loader` on cache miss.
+    /// The bool is true when the entry was served from cache and false when `loader` ran.
+    /// See [`Self::fetch_block`].
     async fn fetch_filter(
         &self,
         key: CachedKey,
         loader: CacheLoader,
-    ) -> Result<CachedEntry, crate::Error> {
+    ) -> Result<(CachedEntry, bool), crate::Error> {
         if let Some(entry) = self.get_filter(&key).await? {
-            return Ok(entry);
+            return Ok((entry, true));
         }
         let entry = loader().await?;
         self.insert(key, entry.clone()).await;
-        Ok(entry)
+        Ok((entry, false))
     }
 
     /// Fetch a stats entry, invoking `loader` on cache miss. See [`Self::fetch_block`].
@@ -604,11 +606,11 @@ impl DbCache for SplitCache {
         &self,
         key: CachedKey,
         loader: CacheLoader,
-    ) -> Result<CachedEntry, crate::Error> {
+    ) -> Result<(CachedEntry, bool), crate::Error> {
         if let Some(cache) = &self.meta_cache {
             cache.fetch_filter(key, loader).await
         } else {
-            loader().await
+            Ok((loader().await?, false))
         }
     }
 
@@ -678,6 +680,18 @@ impl DbCacheWrapper {
         match result {
             Ok(_) if loader_ran => self.record_miss(block_type),
             Ok(_) => self.record_hit(block_type),
+            Err(err) => self.record_get_err(block_type, err),
+        }
+    }
+
+    fn record_fetch_cached_outcome(
+        &self,
+        block_type: &str,
+        result: &Result<(CachedEntry, bool), crate::Error>,
+    ) {
+        match result {
+            Ok((_, true)) => self.record_hit(block_type),
+            Ok((_, false)) => self.record_miss(block_type),
             Err(err) => self.record_get_err(block_type, err),
         }
     }
@@ -849,11 +863,10 @@ impl DbCache for DbCacheWrapper {
         &self,
         key: CachedKey,
         loader: CacheLoader,
-    ) -> Result<CachedEntry, crate::Error> {
+    ) -> Result<(CachedEntry, bool), crate::Error> {
         let scoped_key = self.scoped_key(&key);
-        let (loader, loader_ran) = instrumented_loader(loader);
         let result = self.cache.fetch_filter(scoped_key, loader).await;
-        self.record_fetch_outcome("filter", loader_ran.was_called(), &result);
+        self.record_fetch_cached_outcome("filter", &result);
         result
     }
 
@@ -945,7 +958,7 @@ impl DbCache for UnownedDbCache {
         &self,
         key: CachedKey,
         loader: CacheLoader,
-    ) -> Result<CachedEntry, crate::Error> {
+    ) -> Result<(CachedEntry, bool), crate::Error> {
         self.inner.fetch_filter(key, loader).await
     }
 
@@ -1163,10 +1176,118 @@ mod tests {
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use ulid::Ulid;
 
     const SST_ID: SsTableId = SsTableId::new(Ulid::from_parts(0u64, 0u128));
+
+    fn filter_entry() -> CachedEntry {
+        let policy = BloomFilterPolicy::new(1);
+        let mut builder = policy.builder();
+        builder.add_entry(&RowEntry::new(
+            bytes::Bytes::from_static(b"a"),
+            ValueDeletable::Value(bytes::Bytes::new()),
+            0,
+            None,
+            None,
+        ));
+        let filter = builder.build();
+        let named = NamedFilter {
+            name: BloomFilterPolicy::NAME.to_string(),
+            filter,
+        };
+        CachedEntry::with_filters(Arc::from([named]))
+    }
+
+    fn counting_filter_loader(calls: Arc<AtomicUsize>) -> crate::db_cache::CacheLoader {
+        Box::new(move || {
+            let calls = calls.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(filter_entry())
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn test_fetch_filter_default_reports_cache_miss_then_hit() {
+        let cache = TestCache::new();
+        let key = CachedKey::from((SST_ID, 12345u64));
+        let loader_calls = Arc::new(AtomicUsize::new(0));
+
+        let (entry, cached) = cache
+            .fetch_filter(key.clone(), counting_filter_loader(loader_calls.clone()))
+            .await
+            .unwrap();
+
+        assert!(!cached);
+        assert_eq!(1, entry.filters().unwrap().len());
+        assert_eq!(1, loader_calls.load(Ordering::SeqCst));
+        assert_eq!(1, cache.entry_count());
+
+        loader_calls.store(0, Ordering::SeqCst);
+        let (entry, cached) = cache
+            .fetch_filter(key, counting_filter_loader(loader_calls.clone()))
+            .await
+            .unwrap();
+
+        assert!(cached);
+        assert_eq!(1, entry.filters().unwrap().len());
+        assert_eq!(0, loader_calls.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_split_cache_fetch_filter_uses_meta_cache() {
+        let block_cache = Arc::new(TestCache::new());
+        let meta_cache = Arc::new(TestCache::new());
+        let cache = SplitCache::new()
+            .with_block_cache(Some(block_cache.clone()))
+            .with_meta_cache(Some(meta_cache.clone()))
+            .build();
+        let key = CachedKey::from((SST_ID, 12345u64));
+        let loader_calls = Arc::new(AtomicUsize::new(0));
+
+        let (entry, cached) = cache
+            .fetch_filter(key.clone(), counting_filter_loader(loader_calls.clone()))
+            .await
+            .unwrap();
+
+        assert!(!cached);
+        assert_eq!(1, entry.filters().unwrap().len());
+        assert_eq!(1, loader_calls.load(Ordering::SeqCst));
+        assert!(meta_cache.get_filter(&key).await.unwrap().is_some());
+        assert!(block_cache.get_filter(&key).await.unwrap().is_none());
+
+        loader_calls.store(0, Ordering::SeqCst);
+        let (_, cached) = cache
+            .fetch_filter(key, counting_filter_loader(loader_calls.clone()))
+            .await
+            .unwrap();
+
+        assert!(cached);
+        assert_eq!(0, loader_calls.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_split_cache_fetch_filter_without_meta_cache_reports_miss() {
+        let block_cache = Arc::new(TestCache::new());
+        let cache = SplitCache::new()
+            .with_block_cache(Some(block_cache.clone()))
+            .build();
+        let key = CachedKey::from((SST_ID, 12345u64));
+        let loader_calls = Arc::new(AtomicUsize::new(0));
+
+        let (entry, cached) = cache
+            .fetch_filter(key.clone(), counting_filter_loader(loader_calls.clone()))
+            .await
+            .unwrap();
+
+        assert!(!cached);
+        assert_eq!(1, entry.filters().unwrap().len());
+        assert_eq!(1, loader_calls.load(Ordering::SeqCst));
+        assert!(block_cache.get_filter(&key).await.unwrap().is_none());
+    }
 
     #[rstest]
     #[tokio::test]
@@ -1692,8 +1813,8 @@ mod tests {
                 &self,
                 _: CachedKey,
                 _: CacheLoader,
-            ) -> Result<CachedEntry, crate::Error> {
-                Ok(self.marker.clone())
+            ) -> Result<(CachedEntry, bool), crate::Error> {
+                Ok((self.marker.clone(), true))
             }
             async fn fetch_stats(
                 &self,
@@ -1719,7 +1840,7 @@ mod tests {
         let fetched = [
             unowned.fetch_block(key(), loader()).await.unwrap(),
             unowned.fetch_index(key(), loader()).await.unwrap(),
-            unowned.fetch_filter(key(), loader()).await.unwrap(),
+            unowned.fetch_filter(key(), loader()).await.unwrap().0,
             unowned.fetch_stats(key(), loader()).await.unwrap(),
         ];
         for entry in fetched {
