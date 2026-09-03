@@ -841,35 +841,6 @@ impl TableStore {
         }
     }
 
-    /// Enumerate the block-cache keys for every cacheable component of the given SST:
-    /// each data block, the index, and (when present) the filters and stats block.
-    ///
-    /// Only includes filter/stats keys when those sections exist. Otherwise
-    /// `SsTableInfo`'s filter_offset collides with index_offset (filter_len
-    /// == 0) and stats_offset collides with the first data block
-    /// (stats_offset == 0).
-    async fn cache_keys_for_sst(
-        &self,
-        handle: &SsTableHandle,
-    ) -> Result<Vec<CachedKey>, SlateDBError> {
-        let index = self.read_index(handle, false).await?;
-        let mut keys = {
-            let index_borrow = index.borrow();
-            let meta = index_borrow.block_meta();
-            (0..meta.len())
-                .map(|block_num| (handle.id, meta.get(block_num).offset()).into())
-                .collect::<Vec<CachedKey>>()
-        };
-        keys.push((handle.id, handle.info.index_offset).into());
-        if handle.info.filter_len > 0 {
-            keys.push((handle.id, handle.info.filter_offset).into());
-        }
-        if handle.info.stats_len > 0 {
-            keys.push((handle.id, handle.info.stats_offset).into());
-        }
-        Ok(keys)
-    }
-
     /// Best-effort removal of all cache entries associated with the given SST:
     /// data blocks, index, filters, and stats.
     pub(crate) async fn evict_sst_from_cache(&self, handle: &SsTableHandle) {
@@ -878,8 +849,8 @@ impl TableStore {
         };
         // Best effort: if we can't read the index we can't enumerate blocks,
         // so log and skip. Remaining entries will age out under normal pressure.
-        let keys = match self.cache_keys_for_sst(handle).await {
-            Ok(keys) => keys,
+        let index = match self.read_index(handle, false).await {
+            Ok(index) => index,
             Err(e) => {
                 warn!(
                     "evict_sst_from_cache: failed to read index for SST {:?}: {}",
@@ -888,8 +859,30 @@ impl TableStore {
                 return;
             }
         };
-        for key in keys {
-            cache.remove(&key).await;
+        {
+            let index_borrow = index.borrow();
+            let meta = index_borrow.block_meta();
+            for block_num in 0..meta.len() {
+                let offset = meta.get(block_num).offset();
+                cache.remove(&(handle.id, offset).into()).await;
+            }
+        }
+        cache
+            .remove(&(handle.id, handle.info.index_offset).into())
+            .await;
+        // Only evict filter/stats when those sections exist. Otherwise
+        // SsTableInfo's filter_offset collides with index_offset (filter_len
+        // == 0) and stats_offset collides with the first data block
+        // (stats_offset == 0).
+        if handle.info.filter_len > 0 {
+            cache
+                .remove(&(handle.id, handle.info.filter_offset).into())
+                .await;
+        }
+        if handle.info.stats_len > 0 {
+            cache
+                .remove(&(handle.id, handle.info.stats_offset).into())
+                .await;
         }
     }
 }
