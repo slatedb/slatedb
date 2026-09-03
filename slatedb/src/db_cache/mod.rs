@@ -1256,7 +1256,7 @@ mod tests {
     use std::sync::Arc;
     use ulid::Ulid;
 
-    const SST_ID: SsTableId = SsTableId::Compacted(Ulid::from_parts(0u64, 0u128));
+    const SST_ID: SsTableId = SsTableId::new(Ulid::from_parts(0u64, 0u128));
 
     #[rstest]
     #[tokio::test]

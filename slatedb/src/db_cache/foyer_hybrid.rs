@@ -233,8 +233,9 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::{tempdir, TempDir};
+    use ulid::Ulid;
 
-    const SST_ID: SsTableId = SsTableId::Wal(123);
+    const SST_ID: SsTableId = SsTableId::new(Ulid::from_parts(123, 0));
 
     #[tokio::test]
     async fn test_hybrid_cache() {

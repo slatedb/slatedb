@@ -119,6 +119,20 @@ impl From<Ttl> for slatedb::config::Ttl {
     }
 }
 
+/// Options for tracing a read operation.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct TracingOptions {
+    pub trace_id: String,
+}
+
+impl From<TracingOptions> for slatedb::config::TracingOptions {
+    fn from(value: TracingOptions) -> Self {
+        Self {
+            trace_id: value.trace_id,
+        }
+    }
+}
+
 /// Options that control a point read.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ReadOptions {
@@ -133,6 +147,9 @@ pub struct ReadOptions {
     /// built-in filters.
     #[uniffi(default = None)]
     pub filter_context: Option<FilterContext>,
+    /// Optional caller-supplied tracing settings.
+    #[uniffi(default = None)]
+    pub tracing_options: Option<TracingOptions>,
 }
 
 impl Default for ReadOptions {
@@ -142,6 +159,7 @@ impl Default for ReadOptions {
             dirty: false,
             cache_blocks: true,
             filter_context: None,
+            tracing_options: None,
         }
     }
 }
@@ -153,6 +171,7 @@ impl From<ReadOptions> for slatedb::config::ReadOptions {
             dirty: value.dirty,
             cache_blocks: value.cache_blocks,
             filter_context: value.filter_context.map(Into::into),
+            tracing_options: value.tracing_options.map(Into::into),
         }
     }
 }
@@ -265,6 +284,9 @@ pub struct ScanOptions {
     /// built-in filters. Only consulted for prefix scans.
     #[uniffi(default = None)]
     pub filter_context: Option<FilterContext>,
+    /// Optional caller-supplied tracing settings.
+    #[uniffi(default = None)]
+    pub tracing_options: Option<TracingOptions>,
 }
 
 impl Default for ScanOptions {
@@ -277,6 +299,7 @@ impl Default for ScanOptions {
             max_fetch_tasks: 1,
             order: None,
             filter_context: None,
+            tracing_options: None,
         }
     }
 }
@@ -301,6 +324,7 @@ impl TryFrom<ScanOptions> for slatedb::config::ScanOptions {
             })?,
             order: value.order.unwrap_or_default().into(),
             filter_context: value.filter_context.map(Into::into),
+            tracing_options: value.tracing_options.map(Into::into),
         })
     }
 }

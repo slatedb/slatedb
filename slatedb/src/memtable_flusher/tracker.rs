@@ -560,7 +560,6 @@ mod tests {
     use crate::mem_table::{ImmutableMemtable, WritableKVTable};
     use crate::memtable_flusher::uploader::Uploader;
     use crate::memtable_flusher::{FlushTarget, MemtableFlusher};
-    use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::prefix_extractor::PrefixExtractor;
     use crate::tablestore::{TableStore, TableStoreKind};
@@ -632,7 +631,7 @@ mod tests {
         .await
         .unwrap();
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            ObjectStores::new(Arc::clone(&object_store), None),
+            Arc::clone(&object_store),
             SsTableFormat::default(),
             PathResolver::from_root(Path::from(path.clone())),
             Arc::clone(&fp_registry),
@@ -720,7 +719,7 @@ mod tests {
 
     fn seeded_l0_handle_with_bounds(first_key: &[u8], last_key: Option<&[u8]>) -> SsTableHandle {
         SsTableHandle::new(
-            SsTableId::Compacted(ulid::Ulid::new()),
+            SsTableId::from(ulid::Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo {
                 first_entry: Some(Bytes::copy_from_slice(first_key)),

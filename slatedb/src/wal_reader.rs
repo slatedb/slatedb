@@ -65,38 +65,43 @@
 //! }
 //! ```
 
-use std::ops::RangeBounds;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
 use object_store::path::Path;
 use object_store::ObjectStore;
 
-use crate::block_cache_policy::BlockCachePolicy;
-use crate::db_state::SsTableId;
 use crate::format::sst::SsTableFormat;
 use crate::iter::{EmptyIterator, RowEntryIterator};
-use crate::manifest::SsTableView;
-use crate::object_stores::ObjectStores;
-use crate::sst_iter::{SstIterator, SstIteratorOptions};
-use crate::tablestore::{TableStore, TableStoreKind};
+use crate::object_store_tag::TableStoreKind;
 use crate::types::RowEntry;
+use crate::wal::slatedb::sst_iterator::{WalSstIterator, WalSstIteratorOptions};
+use crate::wal::slatedb::store::{WalFileId, WalTableStore};
 use crate::IdentifiedObjectMetadata;
 
 /// Iterator over entries in a WAL file.
 pub struct WalFileIterator {
-    iter: Box<dyn RowEntryIterator + 'static>,
+    iter: WalFileIteratorInner,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum WalFileIteratorInner {
+    Empty(EmptyIterator),
+    Sst(WalSstIterator),
 }
 
 impl WalFileIterator {
-    /// Creates a new WAL file iterator from a boxed `RowEntryIterator`. The iterator
-    /// must be initialized before being passed in.
-    fn new(iter: Box<dyn RowEntryIterator + 'static>) -> Self {
+    fn new(iter: WalFileIteratorInner) -> Self {
         Self { iter }
     }
 
     /// Returns the next entry in the WAL file.
     pub async fn next(&mut self) -> Result<Option<RowEntry>, crate::Error> {
-        self.iter.next().await.map_err(Into::into)
+        match &mut self.iter {
+            WalFileIteratorInner::Empty(iter) => iter.next().await,
+            WalFileIteratorInner::Sst(iter) => iter.next().await,
+        }
+        .map_err(Into::into)
     }
 }
 
@@ -107,7 +112,7 @@ pub struct WalFile {
     /// the extension. For example, file `000123.sst` would have id `123`.
     pub id: u64,
 
-    table_store: Arc<TableStore>,
+    wal_store: Arc<WalTableStore>,
 }
 
 impl WalFile {
@@ -122,8 +127,8 @@ impl WalFile {
     /// `object_store::Error::NotFound`.
     pub async fn metadata(&self) -> Result<IdentifiedObjectMetadata<u64>, crate::Error> {
         let metadata = self
-            .table_store
-            .metadata(&SsTableId::Wal(self.id))
+            .wal_store
+            .metadata(WalFileId::from(self.id))
             .await
             .map_err(crate::Error::from)?;
         Ok(IdentifiedObjectMetadata::new(self.id, metadata))
@@ -140,31 +145,26 @@ impl WalFile {
     /// [`crate::ErrorKind::Data`] is returned, and its source contains an
     /// `object_store::Error::NotFound`.
     pub async fn iterator(&self) -> Result<WalFileIterator, crate::Error> {
-        let sst = match self.table_store.open_sst(&SsTableId::Wal(self.id)).await {
+        let sst = match self.wal_store.open_sst(WalFileId::from(self.id)).await {
             Ok(sst) => sst,
             Err(crate::error::SlateDBError::EmptySSTable) => {
                 // Zero-byte WAL files are fencing markers, not corrupt WALs.
-                return Ok(WalFileIterator::new(Box::new(EmptyIterator::new())));
+                return Ok(WalFileIterator::new(WalFileIteratorInner::Empty(
+                    EmptyIterator::new(),
+                )));
             }
             Err(err) => return Err(err.into()),
         };
-        let iter = match SstIterator::new_owned_initialized(
-            ..,
-            SsTableView::identity(sst),
-            Arc::clone(&self.table_store),
-            SstIteratorOptions {
+        let iter = WalSstIterator::new(
+            sst,
+            Arc::clone(&self.wal_store),
+            WalSstIteratorOptions {
                 // Optimize for throughput. Go for 256MiB per fetch.
                 target_bytes_to_fetch: 256 * 1024 * 1024,
-                ..Default::default()
             },
         )
-        .await
-        {
-            Ok(Some(iter)) => Box::new(iter) as Box<dyn RowEntryIterator + 'static>,
-            Ok(None) => Box::new(EmptyIterator::new()) as Box<dyn RowEntryIterator + 'static>,
-            Err(err) => return Err(err.into()),
-        };
-        Ok(WalFileIterator::new(iter))
+        .await?;
+        Ok(WalFileIterator::new(WalFileIteratorInner::Sst(iter)))
     }
 
     /// Returns the WAL ID immediately following this file's ID.
@@ -178,14 +178,14 @@ impl WalFile {
     pub fn next_file(&self) -> Self {
         Self {
             id: self.next_id(),
-            table_store: Arc::clone(&self.table_store),
+            wal_store: Arc::clone(&self.wal_store),
         }
     }
 }
 
 /// Reads WAL files in object storage for a specific database.
 pub struct WalReader {
-    table_store: Arc<TableStore>,
+    wal_store: Arc<WalTableStore>,
 }
 
 impl WalReader {
@@ -195,26 +195,34 @@ impl WalReader {
     /// object store here.
     pub fn new<P: Into<Path>>(path: P, object_store: Arc<dyn ObjectStore>) -> Self {
         let sst_format = SsTableFormat::default();
-        let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+        let wal_store = Arc::new(WalTableStore::new(
+            object_store,
             sst_format,
             path.into(),
-            None,
             TableStoreKind::Reader,
-            BlockCachePolicy::default(),
         ));
-        Self { table_store }
+        Self { wal_store }
     }
 
     /// Lists WAL files in ascending order by their ID within the specified range.
     /// If `range` is unbounded, all WAL files are returned.
     pub async fn list<R: RangeBounds<u64>>(&self, range: R) -> Result<Vec<WalFile>, crate::Error> {
-        let result = self.table_store.list_wal_ssts(range).await;
+        let start = match range.start_bound() {
+            Bound::Included(id) => Bound::Included(WalFileId::from(*id)),
+            Bound::Excluded(id) => Bound::Excluded(WalFileId::from(*id)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(id) => Bound::Included(WalFileId::from(*id)),
+            Bound::Excluded(id) => Bound::Excluded(WalFileId::from(*id)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let result = self.wal_store.list_wal_ssts((start, end)).await;
         Ok(result?
             .into_iter()
             .map(|wal_file| WalFile {
-                id: wal_file.id.unwrap_wal_id(),
-                table_store: Arc::clone(&self.table_store),
+                id: wal_file.id.value(),
+                wal_store: Arc::clone(&self.wal_store),
             })
             .collect())
     }
@@ -223,7 +231,7 @@ impl WalReader {
     pub fn get(&self, id: u64) -> WalFile {
         WalFile {
             id,
-            table_store: Arc::clone(&self.table_store),
+            wal_store: Arc::clone(&self.wal_store),
         }
     }
 }
@@ -387,8 +395,14 @@ mod tests {
     async fn test_zero_byte_wal_file_has_empty_iterator() {
         let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/test_wal_reader_zero_byte";
+        let wal_store = WalTableStore::new(
+            main_store.clone(),
+            SsTableFormat::default(),
+            path,
+            TableStoreKind::Reader,
+        );
         let wal_reader = WalReader::new(path, main_store);
-        wal_reader.table_store.write_wal_fence(1).await.unwrap();
+        wal_store.write_wal_fence(1.into()).await.unwrap();
 
         let wal_files = wal_reader.list(..).await.unwrap();
         assert_eq!(wal_files.len(), 1);
@@ -422,7 +436,7 @@ mod tests {
 
         let next = wal_file.next_file();
         assert_eq!(next.id, 42);
-        assert!(Arc::ptr_eq(&wal_file.table_store, &next.table_store));
+        assert!(Arc::ptr_eq(&wal_file.wal_store, &next.wal_store));
     }
 
     #[tokio::test]

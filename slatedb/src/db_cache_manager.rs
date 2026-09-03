@@ -616,7 +616,7 @@ mod tests {
         let db = open_db_single_sst(os).await;
         write_keys(&db, 8).await;
         flush_to_l0(&db).await;
-        let unknown_id = SsTableId::Compacted(ulid::Ulid::new());
+        let unknown_id = SsTableId::from(ulid::Ulid::new());
 
         // when / then: warming an unreachable SST is a no-op that returns Ok.
         // Any attempted IO against a non-existent SST would surface as Err, so

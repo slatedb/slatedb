@@ -1339,6 +1339,56 @@ func TestDbReaderPointReads(t *testing.T) {
 	}
 }
 
+func TestDbReaderDbCacheConfiguration(t *testing.T) {
+	store := newMemoryStore(t)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("cached"), []byte("value")); err != nil {
+		t.Fatalf("Put(cached): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	sharedCache, err := slatedb.DbCacheNewMokaCache(slatedb.MokaCacheOptions{MaxCapacity: 1024 * 1024})
+	if err != nil {
+		t.Fatalf("NewMokaCache: %v", err)
+	}
+	defer sharedCache.Destroy()
+
+	withSharedCache := func(t *testing.T, builder *slatedb.DbReaderBuilder) {
+		t.Helper()
+		if err := builder.WithDbCache(sharedCache, 0); err != nil {
+			t.Fatalf("DbReaderBuilder.WithDbCache(): %v", err)
+		}
+	}
+	firstReader := openTestReader(t, store, withSharedCache)
+	secondReader := openTestReader(t, store, withSharedCache)
+	for name, handle := range map[string]*testReader{"first": firstReader, "second": secondReader} {
+		value, err := handle.reader.Get([]byte("cached"))
+		if err != nil {
+			t.Fatalf("%s DbReader.Get(cached): %v", name, err)
+		}
+		if value == nil || !bytes.Equal(*value, []byte("value")) {
+			t.Fatalf("%s DbReader.Get(cached): got %v, want %q", name, value, "value")
+		}
+	}
+
+	uncachedReader := openTestReader(t, store, func(t *testing.T, builder *slatedb.DbReaderBuilder) {
+		t.Helper()
+		if err := builder.WithDbCacheDisabled(); err != nil {
+			t.Fatalf("DbReaderBuilder.WithDbCacheDisabled(): %v", err)
+		}
+	})
+	value, err := uncachedReader.reader.Get([]byte("cached"))
+	if err != nil {
+		t.Fatalf("uncached DbReader.Get(cached): %v", err)
+	}
+	if value == nil || !bytes.Equal(*value, []byte("value")) {
+		t.Fatalf("uncached DbReader.Get(cached): got %v, want %q", value, "value")
+	}
+}
+
 func TestDbReaderScanVariants(t *testing.T) {
 	store := newMemoryStore(t)
 	dbHandle := openTestDB(t, store, nil)
@@ -1880,8 +1930,9 @@ func TestAdminQueries(t *testing.T) {
 	if latestManifest.LastL0Seq < 3 {
 		t.Fatalf("ReadManifest(nil): LastL0Seq = %d, want at least 3", latestManifest.LastL0Seq)
 	}
-	if latestManifest.WalObjectStoreUri == nil {
-		t.Fatal("ReadManifest(nil): WalObjectStoreUri = nil, want value for configured WAL store")
+	// ManifestV2 is now written universally and never persists wal_object_store_uri
+	if latestManifest.WalObjectStoreUri != nil {
+		t.Fatalf("ReadManifest(nil): WalObjectStoreUri = %v, want nil (dropped by ManifestV2)", *latestManifest.WalObjectStoreUri)
 	}
 
 	firstManifest, err := admin.ReadManifest(uint64Ptr(manifests[0].Id))

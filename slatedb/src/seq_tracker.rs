@@ -289,6 +289,7 @@ fn decode_sequence_tracker(buf: &[u8]) -> Result<SequenceTracker, String> {
     let mut tracker = SequenceTracker::with_config(DEFAULT_CAPACITY, DEFAULT_INTERVAL_SECS);
     tracker.sequence_numbers = sequence_numbers;
     tracker.timestamps = timestamps;
+    tracker.last_recorded_ts = tracker.timestamps.last().copied();
 
     Ok(tracker)
 }
@@ -777,6 +778,23 @@ mod tests {
         // then
         assert_eq!(decoded.sequence_numbers, tracker.sequence_numbers);
         assert_eq!(decoded.timestamps, tracker.timestamps);
+    }
+
+    #[test]
+    fn deserialize_preserves_the_recording_interval() {
+        let mut tracker = SequenceTracker::new();
+        tracker.insert(TrackedSeq {
+            seq: 0,
+            ts: DateTime::from_timestamp(1_600_000_060, 0).unwrap(),
+        });
+
+        let mut decoded = SequenceTracker::from_bytes(&tracker.to_bytes()).unwrap();
+        decoded.insert(TrackedSeq {
+            seq: 1,
+            ts: DateTime::from_timestamp(1_600_000_061, 0).unwrap(),
+        });
+
+        assert_eq!(decoded.sequence_numbers, vec![0]);
     }
 
     #[rstest]

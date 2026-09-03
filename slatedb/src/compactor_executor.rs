@@ -784,7 +784,7 @@ impl TokioCompactionExecutorInner {
     ) -> Result<Vec<SsTableHandle>, SlateDBError> {
         let mut all_iter = self.load_iterators(&args, sequence_tracker).await?;
         let mut output_ssts = args.output_ssts.clone();
-        let mut current_writer = self.table_store.table_writer(SsTableId::Compacted(
+        let mut current_writer = self.table_store.table_writer(SsTableId::from(
             self.rand.rng().gen_ulid(self.clock.as_ref()),
         ));
         let mut bytes_written = 0usize;
@@ -842,7 +842,7 @@ impl TokioCompactionExecutorInner {
                 }
                 let finished_writer = mem::replace(
                     &mut current_writer,
-                    self.table_store.table_writer(SsTableId::Compacted(
+                    self.table_store.table_writer(SsTableId::from(
                         self.rand.rng().gen_ulid(self.clock.as_ref()),
                     )),
                 );
@@ -1012,7 +1012,6 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::ManifestCore;
-    use crate::object_stores::ObjectStores;
     use crate::proptest_util::arbitrary;
     use crate::sst_iter::SstView;
     use crate::tablestore::TableStoreKind;
@@ -1046,7 +1045,7 @@ mod tests {
         // Write entries into one or more SSTs, splitting on the same block-size
         // accounting used by the compactor's output writer.
         let mut output_ssts = Vec::new();
-        let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+        let mut writer = table_store.table_writer(SsTableId::from(Ulid::new()));
         let mut bytes_written = 0usize;
 
         for (index, entry) in entries.iter().cloned().enumerate() {
@@ -1059,7 +1058,7 @@ mod tests {
                 bytes_written = 0;
 
                 if index + 1 < entries.len() {
-                    writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+                    writer = table_store.table_writer(SsTableId::from(Ulid::new()));
                 } else {
                     return output_ssts;
                 }
@@ -1461,7 +1460,7 @@ mod tests {
         let root_path = Path::from("testdb-load-iterators");
         let clock = Arc::new(DefaultSystemClock::new());
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+            object_store.clone(),
             SsTableFormat {
                 block_size,
                 ..SsTableFormat::default()
@@ -1684,7 +1683,7 @@ mod tests {
                 let root_path = Path::from("testdb-exec-resume");
                 let clock = Arc::new(DefaultSystemClock::new());
                 let table_store = Arc::new(TableStore::new(
-                    ObjectStores::new(object_store.clone(), None),
+                    object_store.clone(),
                     SsTableFormat {
                         block_size: BLOCK_SIZE,
                         ..SsTableFormat::default()
@@ -1918,7 +1917,7 @@ mod tests {
         let root_path = Path::from(path);
         let clock = Arc::new(DefaultSystemClock::new());
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+            object_store.clone(),
             SsTableFormat {
                 block_size: 256,
                 ..SsTableFormat::default()
@@ -2479,7 +2478,7 @@ mod tests {
         let root_path = Path::from("testdb-stop-single-job");
         let clock = Arc::new(DefaultSystemClock::new());
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+            object_store.clone(),
             SsTableFormat {
                 block_size: 64,
                 ..SsTableFormat::default()
@@ -2613,7 +2612,7 @@ mod tests {
         let root_path = Path::from("testdb-flush-no-block");
         let clock = Arc::new(DefaultSystemClock::new());
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+            object_store.clone(),
             SsTableFormat {
                 block_size: 64,
                 ..SsTableFormat::default()
@@ -2911,7 +2910,7 @@ mod tests {
             .await
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
-        let id = SsTableId::Compacted(Ulid::new());
+        let id = SsTableId::from(Ulid::new());
         let l0 = table_store.write_sst(&id, &encoded_sst).await.unwrap();
         let retention_min_seq_num = 2;
 
@@ -3053,7 +3052,7 @@ mod tests {
             .await
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
-        let id = SsTableId::Compacted(Ulid::new());
+        let id = SsTableId::from(Ulid::new());
         let l0 = table_store.write_sst(&id, &encoded_sst).await.unwrap();
 
         let result = ctx.run_compaction(vec![l0], true, None).await.unwrap();
@@ -3151,7 +3150,7 @@ mod tests {
             .await
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
-        let id = SsTableId::Compacted(Ulid::new());
+        let id = SsTableId::from(Ulid::new());
         let l0 = table_store.write_sst(&id, &encoded_sst).await.unwrap();
 
         let result = ctx.run_compaction(vec![l0], true, None).await;
@@ -3214,7 +3213,7 @@ mod tests {
             .await
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
-        let id = SsTableId::Compacted(Ulid::new());
+        let id = SsTableId::from(Ulid::new());
         let l0 = table_store.write_sst(&id, &encoded_sst).await.unwrap();
 
         let result = ctx.run_compaction(vec![l0], true, None).await;
