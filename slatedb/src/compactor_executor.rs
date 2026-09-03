@@ -28,7 +28,6 @@ use crate::merge_operator::{
     MergeOperatorType,
 };
 use crate::peeking_iterator::PeekingIterator;
-use crate::reader::ReadTrace;
 use crate::retention_iterator::RetentionIterator;
 use crate::seq_tracker::SequenceTracker;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -346,8 +345,6 @@ impl TokioCompactionExecutorInner {
             order: IterationOrder::Ascending,
             prefix: None,
             filter_context: None,
-            read_trace: ReadTrace::new(None),
-            sst_level: None,
         };
 
         let max_parallel =

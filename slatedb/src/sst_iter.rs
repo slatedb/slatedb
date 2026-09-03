@@ -41,8 +41,6 @@ pub(crate) struct SstIteratorOptions {
     pub(crate) order: IterationOrder,
     pub(crate) prefix: Option<Bytes>,
     pub(crate) filter_context: Option<FilterContext>,
-    pub(crate) read_trace: ReadTrace,
-    pub(crate) sst_level: Option<SstTraceLevel>,
 }
 
 impl Default for SstIteratorOptions {
@@ -56,16 +54,22 @@ impl Default for SstIteratorOptions {
             order: IterationOrder::Ascending,
             prefix: None,
             filter_context: None,
-            read_trace: ReadTrace::new(None),
-            sst_level: None,
         }
     }
 }
 
-impl SstIteratorOptions {
-    pub(crate) fn with_sst_level(mut self, sst_level: SstTraceLevel) -> Self {
-        self.sst_level = Some(sst_level);
-        self
+#[derive(Clone, Debug)]
+pub(crate) struct SstTracingContext {
+    pub(crate) sst_level: SstTraceLevel,
+    pub(crate) read_trace: ReadTrace,
+}
+
+impl SstTracingContext {
+    pub(crate) fn new(sst_level: SstTraceLevel, read_trace: ReadTrace) -> Self {
+        Self {
+            sst_level,
+            read_trace,
+        }
     }
 }
 
@@ -312,6 +316,7 @@ pub(crate) struct InternalSstIterator<'a> {
     fetch_tasks: VecDeque<FetchTask>,
     table_store: Arc<TableStore>,
     options: SstIteratorOptions,
+    tracing_context: Option<SstTracingContext>,
     /// Buffer for descending iteration to maintain correct sequence order within keys.
     descending_buffer: Option<VecDeque<RowEntry>>,
     /// Pending entry that was read ahead but belongs to the next key group.
@@ -324,6 +329,7 @@ impl<'a> InternalSstIterator<'a> {
         view: SstView<'a>,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
     ) -> Result<Self, SlateDBError> {
         assert!(options.max_fetch_tasks > 0);
         assert!(options.target_bytes_to_fetch > 0);
@@ -342,6 +348,7 @@ impl<'a> InternalSstIterator<'a> {
             fetch_tasks: VecDeque::new(),
             table_store,
             options,
+            tracing_context,
             descending_buffer,
             pending_entry: None,
         })
@@ -355,17 +362,31 @@ impl<'a> InternalSstIterator<'a> {
         &self.table_store
     }
 
+    fn sst_level(&self) -> Option<&SstTraceLevel> {
+        self.tracing_context
+            .as_ref()
+            .map(|context| &context.sst_level)
+    }
+
+    fn read_trace(&self) -> ReadTrace {
+        self.tracing_context
+            .as_ref()
+            .map(|context| context.read_trace.clone())
+            .unwrap_or_else(|| ReadTrace::new(None))
+    }
+
     fn new_owned<T: RangeBounds<Bytes>>(
         range: T,
         table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
     ) -> Result<Option<Self>, SlateDBError> {
         let Some(view_range) = table.calculate_view_range(BytesRange::from(range)) else {
             return Ok(None);
         };
         let view = SstView::Owned(Box::new(table), view_range);
-        Self::new(view, table_store, options).map(Some)
+        Self::new(view, table_store, options, tracing_context).map(Some)
     }
 
     fn new_borrowed<T: RangeBounds<Bytes>>(
@@ -378,7 +399,7 @@ impl<'a> InternalSstIterator<'a> {
             return Ok(None);
         };
         let view = SstView::Borrowed(table, view_range);
-        Self::new(view, table_store, options).map(Some)
+        Self::new(view, table_store, options, None).map(Some)
     }
 
     fn for_key(
@@ -816,13 +837,14 @@ impl<'a> FilterIterator<'a> {
     }
 
     async fn read_filters(&self) -> Result<Arc<[NamedFilter]>, SlateDBError> {
+        let read_trace = self.inner.read_trace();
         self.inner
             .table_store()
             .read_filters(
                 &self.inner.view().table_as_ref().sst,
                 self.inner.options.cache_metadata,
-                &self.inner.options.read_trace,
-                self.inner.options.sst_level.as_ref(),
+                &read_trace,
+                self.inner.sst_level(),
             )
             .await
     }
@@ -834,13 +856,9 @@ impl RowEntryIterator for FilterIterator<'_> {
         if !self.initialized {
             let filters = self.read_filters().await?;
             let sst_id = self.inner.view().table_as_ref().sst.id;
-            let sst_level = self.inner.options.sst_level.clone();
-            self.filter.evaluate(
-                &filters,
-                sst_id,
-                sst_level.as_ref(),
-                &self.inner.options.read_trace,
-            );
+            let read_trace = self.inner.read_trace();
+            self.filter
+                .evaluate(&filters, sst_id, self.inner.sst_level(), &read_trace);
 
             if self.is_filtered_out() {
                 return Ok(());
@@ -913,16 +931,17 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
-        Self::new_with_stats(view, table_store, options, None)
+        Self::new_with_stats(view, table_store, options, None, None)
     }
 
     pub(crate) fn new_with_stats(
         view: SstView<'a>,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
         db_stats: Option<DbStats>,
     ) -> Result<Self, SlateDBError> {
-        let internal = InternalSstIterator::new(view, table_store, options)?;
+        let internal = InternalSstIterator::new(view, table_store, options, tracing_context)?;
         Ok(Self::from_internal(internal, db_stats))
     }
 
@@ -932,9 +951,11 @@ impl<'a> SstIterator<'a> {
         table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
         db_stats: Option<DbStats>,
     ) -> Result<Option<Self>, SlateDBError> {
-        let internal = InternalSstIterator::new_owned(range, table, table_store, options)?;
+        let internal =
+            InternalSstIterator::new_owned(range, table, table_store, options, tracing_context)?;
         Ok(internal.map(|iter| Self::from_internal(iter, db_stats.clone())))
     }
 
@@ -944,8 +965,9 @@ impl<'a> SstIterator<'a> {
         table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
     ) -> Result<Option<Self>, SlateDBError> {
-        Self::new_owned_with_stats(range, table, table_store, options, None)
+        Self::new_owned_with_stats(range, table, table_store, options, tracing_context, None)
     }
 
     #[cfg(test)]
@@ -955,7 +977,7 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
-        Self::new_owned_initialized_with_stats(range, table, table_store, options, None).await
+        Self::new_owned_initialized_with_stats(range, table, table_store, options, None, None).await
     }
 
     pub(crate) async fn new_owned_initialized_with_stats<T: RangeBounds<Bytes>>(
@@ -963,12 +985,14 @@ impl<'a> SstIterator<'a> {
         table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
         db_stats: Option<DbStats>,
     ) -> Result<Option<Self>, SlateDBError> {
         // Construct the inner iterator without initializing it. The filter
         // is evaluated first so that an SST whose filter rules out the query
         // never pays for an index or data block read.
-        let internal = InternalSstIterator::new_owned(range, table, table_store, options)?;
+        let internal =
+            InternalSstIterator::new_owned(range, table, table_store, options, tracing_context)?;
         match internal {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, db_stats);
@@ -1050,7 +1074,7 @@ impl<'a> SstIterator<'a> {
         Ok(internal.map(|iter| Self::from_internal(iter, db_stats.clone())))
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) async fn for_key_with_stats_initialized(
         table: &'a SsTableView,
         key: &'a [u8],
@@ -1953,8 +1977,6 @@ mod tests {
                 order: IterationOrder::Ascending,
                 prefix: None,
                 filter_context: None,
-                read_trace: ReadTrace::new(None),
-                sst_level: None,
             },
         )
         .await
@@ -1974,8 +1996,6 @@ mod tests {
                 order: IterationOrder::Ascending,
                 prefix: None,
                 filter_context: None,
-                read_trace: ReadTrace::new(None),
-                sst_level: None,
             },
         )
         .await
@@ -2563,8 +2583,6 @@ mod tests {
             order,
             prefix: None,
             filter_context: None,
-            read_trace: ReadTrace::new(None),
-            sst_level: None,
         };
         let mut iter = SstIterator::new_owned_initialized(
             BytesRange::from_slice(start_key.as_ref()..=end_key.as_ref()),
@@ -2858,8 +2876,6 @@ mod tests {
                 order: IterationOrder::Ascending,
                 prefix: None,
                 filter_context: None,
-                read_trace: ReadTrace::new(None),
-                sst_level: None,
             },
         )
         .await
