@@ -2,7 +2,9 @@ use slatedb::config::{ReadOptions, TracingOptions};
 use slatedb::{bytes::Bytes, object_store::memory::InMemory, Db};
 use std::sync::Arc;
 use tracing_chrome::{ChromeLayerBuilder, TraceStyle};
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Layer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -30,7 +32,8 @@ async fn main() -> anyhow::Result<()> {
         .include_args(true)
         .trace_style(TraceStyle::Async)
         .build();
-    let subscriber = tracing_subscriber::registry().with(chrome_layer);
+    let subscriber =
+        tracing_subscriber::registry().with(chrome_layer.with_filter(LevelFilter::DEBUG));
     let _subscriber_guard = tracing::subscriber::set_default(subscriber);
 
     //Get
