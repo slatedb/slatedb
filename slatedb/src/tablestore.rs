@@ -441,7 +441,7 @@ impl TableStore {
                     .get_filter(&cache_key)
                     .await
                     .unwrap_or(None)
-                    .map(|entry| CacheFetch::miss(entry))
+                    .map(CacheFetch::miss)
             };
             if let Some(CacheFetch { entry, lookup }) = fetch {
                 record_read_filter_cached(&span, lookup);
@@ -1178,6 +1178,7 @@ fn slatedb_io_error() -> SlateDBError {
 
 #[cfg(test)]
 mod tests {
+    use crate::reader::ReadTrace;
     use crate::types::KeyValue;
     use bytes::Bytes;
     use futures::future;
@@ -1211,7 +1212,6 @@ mod tests {
     use crate::{block_iterator::BlockIteratorLatest, db_state::SsTableId, iter::RowEntryIterator};
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::DbRand;
-    use crate::reader::ReadTrace;
 
     const ROOT: &str = "/root";
 

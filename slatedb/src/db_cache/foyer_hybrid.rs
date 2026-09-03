@@ -232,17 +232,14 @@ impl FoyerHybridCache {
 #[cfg(test)]
 mod tests {
     use crate::db_cache::foyer_hybrid::FoyerHybridCache;
-    use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache};
+    use crate::db_cache::{CachedEntry, CachedKey, DbCache};
     use crate::db_state::SsTableId;
-    use crate::filter_policy::{BloomFilterPolicy, FilterPolicy, NamedFilter};
     use crate::format::sst::BlockBuilder;
-    use crate::types::{RowEntry, ValueDeletable};
     use foyer::{
         BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder, PsyncIoEngineConfig,
     };
     use rand::RngCore;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tempfile::{tempdir, TempDir};
     use ulid::Ulid;

@@ -779,18 +779,6 @@ impl DbCacheWrapper {
         }
     }
 
-    fn record_fetch_cached_outcome(
-        &self,
-        block_type: &str,
-        result: &Result<(CachedEntry, bool), crate::Error>,
-    ) {
-        match result {
-            Ok((_, true)) => self.record_hit(block_type),
-            Ok((_, false)) => self.record_miss(block_type),
-            Err(err) => self.record_get_err(block_type, err),
-        }
-    }
-
     fn record_hit(&self, block_type: &str) {
         match block_type {
             "block" => self.stats.data_block_hit.increment(1),
@@ -1320,7 +1308,6 @@ mod tests {
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use ulid::Ulid;
 

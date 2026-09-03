@@ -442,8 +442,8 @@ mod tests {
     use crate::db_state::{SsTableId, SsTableView};
     use crate::filter_policy::{BloomFilterPolicy, FilterQuery};
     use crate::format::block::Block;
-use crate::prefix_extractor::PrefixExtractor;
-use crate::reader::ReadTrace;
+    use crate::prefix_extractor::PrefixExtractor;
+    use crate::reader::ReadTrace;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::{assert_iterator, build_test_sst};
