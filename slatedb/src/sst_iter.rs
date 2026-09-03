@@ -1128,7 +1128,7 @@ mod tests {
     use crate::db_cache::SplitCache;
     use crate::db_state::{SsTableId, SsTableView};
     use crate::db_stats::DbStats;
-    use crate::filter_policy::{BloomFilterPolicy, FilterQuery};
+    use crate::filter_policy::{BloomFilterPolicy, Filter, FilterQuery};
     use crate::format::sst::SsTableFormat;
     use crate::sst_builder::BlockFormat;
     use crate::tablestore::TableStoreKind;
@@ -2912,5 +2912,260 @@ mod tests {
             panic!("a cancelled prefetch task must be reported as an error");
         };
         assert!(matches!(err, SlateDBError::BackgroundTaskCancelled(_)));
+    }
+
+    /// A [`Filter`] backed by a closure, so a test can express a verdict rule
+    /// without the encode and caching plumbing a real policy needs.
+    struct TestFilter(Box<dyn Fn(&FilterQuery) -> bool + Send + Sync>);
+
+    impl Filter for TestFilter {
+        fn might_match(&self, query: &FilterQuery) -> bool {
+            (self.0)(query)
+        }
+
+        fn encode(&self, _writer: &mut dyn bytes::BufMut) {
+            unreachable!("test filters are never serialized")
+        }
+
+        fn size(&self) -> usize {
+            0
+        }
+
+        fn clamp_allocated_size(&self) -> Arc<dyn Filter> {
+            unreachable!("test filters are never cached")
+        }
+    }
+
+    fn named_filter(
+        name: &str,
+        verdict: impl Fn(&FilterQuery) -> bool + Send + Sync + 'static,
+    ) -> NamedFilter {
+        NamedFilter {
+            name: name.to_string(),
+            filter: Arc::new(TestFilter(Box::new(verdict))),
+        }
+    }
+
+    fn hash_parity(key: &[u8]) -> u64 {
+        key.iter().map(|b| u64::from(*b)).sum::<u64>() % 2
+    }
+
+    /// Accepts a point query only when the key's hash has `parity`, and
+    /// abstains on prefixes and ranges.
+    fn key_parity_filter(parity: u64) -> NamedFilter {
+        named_filter("test.key_parity", move |query| match &query.target {
+            FilterTarget::Point(key) => hash_parity(key) == parity,
+            _ => true,
+        })
+    }
+
+    /// Answers from the query context rather than the target, so it decides
+    /// every kind including ranges.
+    fn context_parity_filter(parity: u64) -> NamedFilter {
+        named_filter("test.context_parity", move |query| match &query.context {
+            Some(FilterContext::Inline(buf)) => u64::from(buf[0]) % 2 == parity,
+            _ => true,
+        })
+    }
+
+    /// Rejects unless the range bounds are exactly `expected`, so a test can
+    /// prove the caller's bounds reach the filter unaltered.
+    fn bounds_filter(expected: (Bound<Bytes>, Bound<Bytes>)) -> NamedFilter {
+        named_filter("test.bounds", move |query| match &query.target {
+            FilterTarget::Range { lower, upper } => (lower.clone(), upper.clone()) == expected,
+            _ => false,
+        })
+    }
+
+    fn context(byte: u8) -> Option<FilterContext> {
+        let mut buf = [0u8; 64];
+        buf[0] = byte;
+        Some(FilterContext::Inline(buf))
+    }
+
+    fn stats() -> (Arc<DefaultMetricsRecorder>, DbStats) {
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let db_stats = DbStats::new(&helper);
+        (recorder, db_stats)
+    }
+
+    fn metric(recorder: &Arc<DefaultMetricsRecorder>, name: &str, kind: &str) -> Option<i64> {
+        lookup_metric_with_labels(
+            recorder,
+            name,
+            &[(crate::db_stats::FILTER_KIND_LABEL, kind)],
+        )
+    }
+
+    /// `(positives, negatives, false_positives)` recorded for `kind`.
+    fn verdicts(
+        recorder: &Arc<DefaultMetricsRecorder>,
+        kind: &str,
+    ) -> (Option<i64>, Option<i64>, Option<i64>) {
+        (
+            metric(recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT, kind),
+            metric(recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT, kind),
+            metric(
+                recorder,
+                crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT,
+                kind,
+            ),
+        )
+    }
+
+    fn range_evaluator(
+        context: Option<FilterContext>,
+        db_stats: Option<DbStats>,
+    ) -> FilterEvaluator {
+        FilterEvaluator::new_range(
+            Included(Bytes::from_static(b"a")),
+            Excluded(Bytes::from_static(b"z")),
+            context,
+            db_stats,
+        )
+    }
+
+    #[tokio::test]
+    async fn should_reject_range_query_when_only_one_of_several_filters_rejects() {
+        let (recorder, db_stats) = stats();
+        let mut evaluator = range_evaluator(context(1), Some(db_stats));
+
+        // AND logic: the key filter abstains, so the verdict is the context
+        // filter's alone. This is how a range scan is pruned in practice.
+        evaluator
+            .evaluate(&[key_parity_filter(0), context_parity_filter(0)])
+            .await;
+
+        assert!(evaluator.is_filtered_out());
+        assert_eq!(
+            verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE),
+            (Some(0), Some(1), Some(0))
+        );
+    }
+
+    #[tokio::test]
+    async fn should_accept_range_query_when_every_filter_agrees() {
+        let (recorder, db_stats) = stats();
+        let mut evaluator = range_evaluator(context(0), Some(db_stats));
+
+        evaluator
+            .evaluate(&[key_parity_filter(0), context_parity_filter(0)])
+            .await;
+        assert!(!evaluator.is_filtered_out());
+
+        // Any row in the view's range confirms a range verdict, so no false
+        // positive is recorded.
+        evaluator.notify_key_found(b"anything");
+        evaluator.notify_finished_iteration();
+
+        assert_eq!(
+            verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE),
+            (Some(1), Some(0), Some(0))
+        );
+    }
+
+    #[tokio::test]
+    async fn should_record_range_false_positive_when_no_row_is_yielded() {
+        let (recorder, db_stats) = stats();
+        let mut evaluator = range_evaluator(context(0), Some(db_stats));
+
+        evaluator.evaluate(&[context_parity_filter(0)]).await;
+        evaluator.notify_finished_iteration();
+
+        assert_eq!(
+            verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE),
+            (Some(1), Some(0), Some(1))
+        );
+    }
+
+    #[tokio::test]
+    async fn should_report_the_views_bounds() {
+        let table_store = bloom_filter_enabled_table_store(10);
+        let table = build_single_block_sst(&table_store, &[b"k1"]).await;
+        let view = SstView::Owned(
+            Box::new(table),
+            BytesRange::new(
+                Included(Bytes::from_static(b"b")),
+                Excluded(Bytes::from_static(b"y")),
+            ),
+        );
+
+        assert_eq!(
+            view.bounds(),
+            (
+                Included(Bytes::from_static(b"b")),
+                Excluded(Bytes::from_static(b"y"))
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn should_pass_the_callers_range_bounds_to_the_filter() {
+        let (recorder, db_stats) = stats();
+        let mut evaluator = range_evaluator(context(0), Some(db_stats));
+
+        evaluator
+            .evaluate(&[bounds_filter((
+                Included(Bytes::from_static(b"a")),
+                Excluded(Bytes::from_static(b"z")),
+            ))])
+            .await;
+
+        assert!(!evaluator.is_filtered_out());
+        assert_eq!(
+            verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE),
+            (Some(1), Some(0), Some(0))
+        );
+    }
+
+    #[tokio::test]
+    async fn should_evaluate_range_filters_only_when_a_context_is_supplied() {
+        for (filter_context, expect_verdict) in [(context(0), true), (None, false)] {
+            let (recorder, db_stats) = stats();
+            let table_store = bloom_filter_enabled_table_store(10);
+            let table = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
+            let options = SstIteratorOptions {
+                filter_context,
+                ..Default::default()
+            };
+
+            let iter = SstIterator::new_owned_initialized_with_stats(
+                ..,
+                table,
+                table_store,
+                options,
+                Some(db_stats),
+            )
+            .await
+            .unwrap();
+            assert!(
+                iter.is_some(),
+                "a bloom filter abstains on ranges, so the SST stays readable"
+            );
+
+            let (positives, negatives, _) = verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE);
+            let expected = if expect_verdict {
+                (Some(1), Some(0))
+            } else {
+                (Some(0), Some(0))
+            };
+            assert_eq!(
+                (positives, negatives),
+                expected,
+                "context supplied: {expect_verdict}"
+            );
+
+            // Counted either way, which is what makes it a denominator that
+            // spans filtered and unfiltered reads.
+            assert_eq!(
+                metric(
+                    &recorder,
+                    crate::db_stats::SST_ITERATORS_CREATED,
+                    crate::db_stats::FILTER_KIND_RANGE
+                ),
+                Some(1)
+            );
+        }
     }
 }

@@ -246,6 +246,7 @@ fn optimal_num_probes(bits_per_key: u32) -> u16 {
 mod tests {
     use super::*;
     use bytes::BytesMut;
+    use std::ops::Bound;
 
     fn point_builder(bits_per_key: u32) -> BloomFilterBuilder {
         BloomFilterBuilder::new(bits_per_key, true, None)
@@ -486,6 +487,24 @@ mod tests {
         // reporting "might match", so the stored short keys stay reachable.
         assert!(filter.might_match(&FilterQuery::prefix(Bytes::from_static(b"a"))));
         assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"a"))));
+    }
+
+    #[test]
+    fn test_bloom_filter_abstains_on_range_queries() {
+        let mut builder = BloomFilterBuilder::new(10, false, Some(Arc::new(GatedFixed4)));
+        builder.add_key(&Bytes::from_static(b"aaaa_key"));
+        let filter = builder.build_filter();
+
+        // The filter has real content: a prefix it never saw is rejected.
+        assert!(!filter.might_match(&FilterQuery::prefix(Bytes::from_static(b"bbbb"))));
+
+        // It stores hashes of keys and prefixes, never ranges, so a range
+        // query must abstain rather than reject. A wrong `false` here would
+        // skip an SST holding rows the scan must see.
+        assert!(filter.might_match(&FilterQuery::range(
+            Bound::Included(Bytes::from_static(b"bbbb")),
+            Bound::Excluded(Bytes::from_static(b"bbbc")),
+        )));
     }
 
     #[test]
