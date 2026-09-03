@@ -48,7 +48,7 @@ impl ReadTrace {
         let read_span = tracing_options
             .as_ref()
             .map(|tracing_options| {
-                tracing::debug_span!("slatedb.read", trace_id = tracing_options.trace_id.as_str(),)
+                tracing::info_span!("slatedb.read", trace_id = tracing_options.trace_id.as_str(),)
             })
             .unwrap_or_else(tracing::Span::none);
         Self {
@@ -1993,7 +1993,7 @@ mod tests {
             .iter()
             .find(|span| span.name == "slatedb.read")
             .expect("missing slatedb.read span");
-        assert_eq!(read_span.level, "DEBUG");
+        assert_eq!(read_span.level, "INFO");
         assert_eq!(
             read_span.fields.get("trace_id").map(String::as_str),
             Some(trace_id)
