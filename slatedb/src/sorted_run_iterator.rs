@@ -2,7 +2,7 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SortedRun, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::iter::RowEntryIterator;
+use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstView};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
@@ -22,20 +22,28 @@ enum SortedRunView<'a> {
 }
 
 impl<'a> SortedRunView<'a> {
-    /// Pops the next table, restricting the iteration range to the table's
-    /// view range. Projected tables (e.g. in cloned manifests) may have a
-    /// `visible_range` narrower than the requested range; tables whose view
-    /// range does not intersect the requested range are skipped entirely.
-    fn pop_sst(&mut self) -> Option<SstView<'a>> {
+    /// Pops the next table in iteration order, restricting the iteration range
+    /// to the table's view range. Tables are stored in ascending key order, so
+    /// a descending scan pops from the back. Projected tables (e.g. in cloned
+    /// manifests) may have a `visible_range` narrower than the requested range;
+    /// tables whose view range does not intersect the requested range are
+    /// skipped entirely.
+    fn pop_sst(&mut self, order: IterationOrder) -> Option<SstView<'a>> {
         match self {
             SortedRunView::Owned(tables, r) => loop {
-                let table = tables.pop_front()?;
+                let table = match order {
+                    IterationOrder::Ascending => tables.pop_front()?,
+                    IterationOrder::Descending => tables.pop_back()?,
+                };
                 if let Some(view_range) = table.calculate_view_range(r.clone()) {
                     return Some(SstView::Owned(Box::new(table), view_range));
                 }
             },
             SortedRunView::Borrowed(tables, r) => loop {
-                let table = tables.pop_front()?;
+                let table = match order {
+                    IterationOrder::Ascending => tables.pop_front()?,
+                    IterationOrder::Descending => tables.pop_back()?,
+                };
                 if let Some(view_range) = table.calculate_view_range(BytesRange::from_slice(*r)) {
                     return Some(SstView::Borrowed(table, view_range));
                 }
@@ -49,7 +57,8 @@ impl<'a> SortedRunView<'a> {
         sst_iterator_options: SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<Option<SstIterator<'a>>, SlateDBError> {
-        let next_iter = if let Some(view) = self.pop_sst() {
+        let order = sst_iterator_options.order;
+        let next_iter = if let Some(view) = self.pop_sst(order) {
             Some(SstIterator::new_with_stats(
                 view,
                 table_store,
@@ -62,20 +71,66 @@ impl<'a> SortedRunView<'a> {
         Ok(next_iter)
     }
 
-    fn peek_next_table(&self) -> Option<&SsTableView> {
+    /// The table that [`Self::pop_sst`] will consider next, without popping it.
+    fn peek_next_table(&self, order: IterationOrder) -> Option<&SsTableView> {
         match self {
-            SortedRunView::Owned(tables, _) => tables.front(),
-            SortedRunView::Borrowed(tables, _) => tables.front().copied(),
+            SortedRunView::Owned(tables, _) => match order {
+                IterationOrder::Ascending => tables.front(),
+                IterationOrder::Descending => tables.back(),
+            },
+            SortedRunView::Borrowed(tables, _) => match order {
+                IterationOrder::Ascending => tables.front().copied(),
+                IterationOrder::Descending => tables.back().copied(),
+            },
         }
     }
 }
 
+/// The state a descending scan needs on top of the SST chain.
+///
+/// A descending scan visits the SSTs from last to first, which inverts the
+/// sequence order of a key that spans an SST boundary: the earlier SST holds
+/// that key's higher sequence numbers but is reached last. The scan
+/// therefore gathers every entry of a key before emitting any of it. See
+/// [`SortedRunIterator::buffer_next_descending_key`].
+#[derive(Default)]
+struct DescendingIteratorState {
+    /// A complete key, in emission order, ready to be returned.
+    current_key_entries: VecDeque<RowEntry>,
+    /// The first entry of the next key, read while finding the end of the
+    /// current key.
+    next_key_first_entry: Option<RowEntry>,
+}
+
+impl DescendingIteratorState {
+    /// Adds what one table contributed to the current key. An earlier table
+    /// holds the higher sequence numbers but is read later, so each
+    /// contribution goes in front of the ones already gathered.
+    fn prepend_table_entries(&mut self, entries: Vec<RowEntry>) {
+        for entry in entries.into_iter().rev() {
+            self.current_key_entries.push_front(entry);
+        }
+    }
+}
+
+/// Iterates the SSTs of a sorted run in the order requested by
+/// [`SstIteratorOptions::order`], chaining one SST iterator at a time.
+///
+/// Ascending iteration is a plain chain: the SSTs partition the key space in
+/// ascending order, and a key that spans two SSTs is written with its higher
+/// sequence numbers in the earlier SST, so concatenating the SST iterators
+/// already yields keys ascending and, within a key, sequence numbers
+/// descending. Descending iteration needs the extra bookkeeping described on
+/// [`DescendingIteratorState`].
 pub(crate) struct SortedRunIterator<'a> {
     table_store: Arc<TableStore>,
     sst_iter_options: SstIteratorOptions,
     db_stats: Option<DbStats>,
     view: SortedRunView<'a>,
     current_iter: Option<SstIterator<'a>>,
+    /// Present only for descending scans; ascending scans chain the SST
+    /// iterators directly and carry no state of their own.
+    descending_state: Option<DescendingIteratorState>,
     initialized: bool,
 }
 
@@ -86,12 +141,17 @@ impl<'a> SortedRunIterator<'a> {
         sst_iter_options: SstIteratorOptions,
         db_stats: Option<DbStats>,
     ) -> Result<Self, SlateDBError> {
+        let descending_state = match sst_iter_options.order {
+            IterationOrder::Ascending => None,
+            IterationOrder::Descending => Some(DescendingIteratorState::default()),
+        };
         let mut res = Self {
             table_store,
             sst_iter_options,
             db_stats,
             view,
             current_iter: None,
+            descending_state,
             initialized: false,
         };
         res.advance_table().await?;
@@ -199,6 +259,112 @@ impl<'a> SortedRunIterator<'a> {
         }
         Ok(())
     }
+
+    fn descending_state(&mut self) -> &mut DescendingIteratorState {
+        self.descending_state
+            .as_mut()
+            .expect("descending state is set for descending scans")
+    }
+
+    /// Buffers every entry of the next key in emission order.
+    ///
+    /// A single key may span consecutive SSTs of a sorted run, with the
+    /// earlier SST holding the higher sequence numbers. A descending scan
+    /// reaches the later SST first, so once the current table runs out on a key
+    /// the scan crosses into the preceding table while that table's range still
+    /// covers the key, and puts what it finds ahead of what it already has.
+    async fn buffer_next_descending_key(&mut self) -> Result<(), SlateDBError> {
+        debug_assert!(
+            self.descending_state().current_key_entries.is_empty(),
+            "buffer_next_descending_key should only be called when the current key is exhausted"
+        );
+
+        let mut key: Option<Bytes> = None;
+        let mut next_entry = self.descending_state().next_key_first_entry.take();
+
+        // The outer loop iterates over tables, the inner loop over entries of a table.
+        loop {
+            // Each SST already yields versions newest-first. Buffer its entries
+            // so the SST can be prepended at the end in the right order.
+            let mut table_entries = Vec::new();
+            loop {
+                let entry = match next_entry.take() {
+                    Some(entry) => entry,
+                    None => {
+                        let Some(iter) = self.current_iter.as_mut() else {
+                            break;
+                        };
+                        let Some(entry) = iter.next().await? else {
+                            break;
+                        };
+                        entry
+                    }
+                };
+
+                match &key {
+                    None => {
+                        key = Some(entry.key.clone());
+                        table_entries.push(entry);
+                    }
+                    Some(current) if current == &entry.key => table_entries.push(entry),
+                    Some(_) => {
+                        // The table is exhausted on this key. Save the first
+                        // entry of the next key for the next call, and prepend
+                        // what this table contributed to the current key.
+                        self.descending_state().next_key_first_entry = Some(entry);
+                        self.descending_state().prepend_table_entries(table_entries);
+                        return Ok(());
+                    }
+                }
+            }
+
+            self.descending_state().prepend_table_entries(table_entries);
+
+            // The table is exhausted and contributed nothing, either
+            // because it held no entries or because the range excluded all of
+            // them. Move on to the next table, or stop once the run is done.
+            let Some(key) = key.as_ref() else {
+                self.advance_table().await?;
+                if self.current_iter.is_none() {
+                    return Ok(());
+                }
+                continue;
+            };
+
+            // The table is exhausted on this key. Only the immediately
+            // preceding table can continue it.
+            let spans_tables = self
+                .view
+                .peek_next_table(IterationOrder::Descending)
+                .is_some_and(|table| table.compacted_effective_range().contains(key));
+            if !spans_tables {
+                return Ok(());
+            }
+
+            // The key continues into the preceding table, which holds its
+            // higher sequence numbers. Gather those too, in front of what this
+            // table gave.
+            self.advance_table().await?;
+        }
+    }
+
+    async fn next_descending(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        if self.descending_state().current_key_entries.is_empty() {
+            self.buffer_next_descending_key().await?;
+        }
+        Ok(self.descending_state().current_key_entries.pop_front())
+    }
+
+    async fn next_ascending(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        while let Some(iter) = &mut self.current_iter {
+            if let Some(kv) = iter.next().await? {
+                return Ok(Some(kv));
+            } else {
+                self.advance_table().await?;
+            }
+        }
+        Ok(None)
+    }
 }
 
 #[async_trait]
@@ -217,21 +383,24 @@ impl RowEntryIterator for SortedRunIterator<'_> {
         if !self.initialized {
             return Err(SlateDBError::IteratorNotInitialized);
         }
-        while let Some(iter) = &mut self.current_iter {
-            if let Some(kv) = iter.next().await? {
-                return Ok(Some(kv));
-            } else {
-                self.advance_table().await?;
-            }
+        match self.sst_iter_options.order {
+            IterationOrder::Ascending => self.next_ascending().await,
+            IterationOrder::Descending => self.next_descending().await,
         }
-        Ok(None)
     }
 
+    /// Ascending only. Descending scans reject `seek` at the API boundary, in
+    /// [`crate::db_iter::DbIterator::seek`], so this is never reached with a
+    /// descending order.
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        debug_assert!(
+            matches!(self.sst_iter_options.order, IterationOrder::Ascending),
+            "descending seek is rejected in DbIterator::seek and must not reach a sorted run"
+        );
         if !self.initialized {
             return Err(SlateDBError::IteratorNotInitialized);
         }
-        while let Some(next_table) = self.view.peek_next_table() {
+        while let Some(next_table) = self.view.peek_next_table(IterationOrder::Ascending) {
             if next_table.compacted_effective_start_key() < next_key {
                 self.advance_table().await?;
             } else {
@@ -387,6 +556,215 @@ mod tests {
         assert_eq!(kv.value, b"value3".as_slice());
         let kv = iter.next().await.unwrap().map(KeyValue::from);
         assert!(kv.is_none());
+    }
+
+    fn descending_options() -> SstIteratorOptions {
+        SstIteratorOptions {
+            order: IterationOrder::Descending,
+            ..SstIteratorOptions::default()
+        }
+    }
+
+    fn build_table_store() -> Arc<TableStore> {
+        Arc::new(TableStore::new(
+            Arc::new(InMemory::new()),
+            SsTableFormat {
+                min_filter_keys: 3,
+                ..SsTableFormat::default()
+            },
+            Path::from(""),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ))
+    }
+
+    /// Writes one SST holding `entries` and returns an unprojected view of it.
+    async fn write_sst_view(
+        table_store: &Arc<TableStore>,
+        entries: &[(&[u8], u64)],
+    ) -> SsTableView {
+        let mut builder = table_store.table_builder();
+        for (key, seq) in entries {
+            let value = format!("{}@{seq}", String::from_utf8_lossy(key));
+            builder
+                .add(RowEntry::new_value(key, value.as_bytes(), *seq))
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        let id = SsTableId::from(ulid::Ulid::new());
+        let handle = table_store.write_sst(&id, &encoded).await.unwrap();
+        SsTableView::identity(handle)
+    }
+
+    async fn drain(iter: &mut SortedRunIterator<'_>) -> Vec<(Bytes, u64)> {
+        let mut entries = Vec::new();
+        while let Some(entry) = iter.next().await.unwrap() {
+            entries.push((entry.key, entry.seq));
+        }
+        entries
+    }
+
+    fn expected(entries: &[(&[u8], u64)]) -> Vec<(Bytes, u64)> {
+        entries
+            .iter()
+            .map(|(key, seq)| (Bytes::copy_from_slice(key), *seq))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_sr_iter_descending_visits_ssts_from_last_to_first() {
+        let table_store = build_table_store();
+        let sr = SortedRun::new(
+            0,
+            [
+                write_sst_view(&table_store, &[(b"key1", 1), (b"key2", 2)]).await,
+                write_sst_view(&table_store, &[(b"key3", 3), (b"key4", 4)]).await,
+            ],
+        );
+
+        let mut iter = SortedRunIterator::new_borrowed_initialized(
+            ..,
+            &sr,
+            table_store.clone(),
+            descending_options(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            drain(&mut iter).await,
+            expected(&[(b"key4", 4), (b"key3", 3), (b"key2", 2), (b"key1", 1)])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sr_iter_descending_orders_key_spanning_ssts_by_seq() {
+        // given: key3 spans both SSTs. Compaction writes keys ascending and
+        // seqs descending, so the first SST holds the higher seqs.
+        let table_store = build_table_store();
+        let sr = SortedRun::new(
+            0,
+            [
+                write_sst_view(&table_store, &[(b"key1", 1), (b"key3", 30), (b"key3", 20)]).await,
+                write_sst_view(&table_store, &[(b"key3", 10), (b"key5", 5)]).await,
+            ],
+        );
+
+        // when: scanning descending
+        let mut iter = SortedRunIterator::new_borrowed_initialized(
+            ..,
+            &sr,
+            table_store.clone(),
+            descending_options(),
+        )
+        .await
+        .unwrap();
+
+        // then: key3's versions stay in descending seq order across the boundary
+        assert_eq!(
+            drain(&mut iter).await,
+            expected(&[
+                (b"key5", 5),
+                (b"key3", 30),
+                (b"key3", 20),
+                (b"key3", 10),
+                (b"key1", 1),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sr_iter_descending_orders_key_spanning_three_ssts_by_seq() {
+        let table_store = build_table_store();
+        let sr = SortedRun::new(
+            0,
+            [
+                write_sst_view(&table_store, &[(b"key1", 1), (b"key3", 30)]).await,
+                write_sst_view(&table_store, &[(b"key3", 20)]).await,
+                write_sst_view(&table_store, &[(b"key3", 10), (b"key5", 5)]).await,
+            ],
+        );
+
+        let mut iter = SortedRunIterator::new_borrowed_initialized(
+            ..,
+            &sr,
+            table_store.clone(),
+            descending_options(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            drain(&mut iter).await,
+            expected(&[
+                (b"key5", 5),
+                (b"key3", 30),
+                (b"key3", 20),
+                (b"key3", 10),
+                (b"key1", 1),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sr_iter_descending_respects_range() {
+        let table_store = build_table_store();
+        let sr = SortedRun::new(
+            0,
+            [
+                write_sst_view(&table_store, &[(b"key1", 1), (b"key2", 2)]).await,
+                write_sst_view(&table_store, &[(b"key3", 3), (b"key4", 4)]).await,
+                write_sst_view(&table_store, &[(b"key5", 5), (b"key6", 6)]).await,
+            ],
+        );
+
+        let mut iter = SortedRunIterator::new_owned_initialized(
+            BytesRange::from_ref("key2".."key5"),
+            sr,
+            table_store.clone(),
+            descending_options(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            drain(&mut iter).await,
+            expected(&[(b"key4", 4), (b"key3", 3), (b"key2", 2)])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sr_iter_descending_skips_tables_disjoint_with_range() {
+        // given: projections that leave the middle table with no visible keys
+        // in the query range
+        let table_store = build_table_store();
+        let first = write_sst_view(&table_store, &[(b"key1", 1), (b"key2", 2)]).await;
+        let middle = write_sst_view(&table_store, &[(b"key3", 3), (b"key4", 4)]).await;
+        let last = write_sst_view(&table_store, &[(b"key5", 5), (b"key6", 6)]).await;
+        let sr = SortedRun::new(
+            0,
+            [
+                first,
+                middle.with_visible_range(BytesRange::from_ref("key3".."key4")),
+                last,
+            ],
+        );
+
+        let mut iter = SortedRunIterator::new_owned_initialized(
+            BytesRange::from_ref("key2".."key6"),
+            sr,
+            table_store.clone(),
+            descending_options(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            drain(&mut iter).await,
+            expected(&[(b"key5", 5), (b"key3", 3), (b"key2", 2)])
+        );
     }
 
     #[tokio::test]
