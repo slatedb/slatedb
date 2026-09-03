@@ -152,9 +152,12 @@ Both get a `with_tracing_options(TracingOptions) -> Self` builder method. Defaul
 
 The read path spans are structured hierarchically. The root span for the read path is named `slatedb.read`.
 All others are direct children of `slatedb.read`. All spans carry the trace ID
-(`trace_id`) as field. The spans are constructed at `info` level, except for `slatedb.read.memtable` which is 
+(`trace_id`) as field. Spans instrumented on a future are entered each time the future is polled by the runtime.
+
+The spans are constructed at `info` level, except for `slatedb.read.memtable` which is
 constructed at `debug` level.
-Spans instrumented on a future are entered each time the future is polled by the runtime.
+The reason for putting `slatedb.read.memtable` on a lower tracing level is the potential huge number of
+`slatedb.read.memtable` spans during scan operations since a span is constructed per key lookup in the memtables.
 
 The root span `slatedb.read` traces the entire read operation, which includes all stages of the read path
 covered by the child spans and common operations over all sources needed for reading, such as setting up
