@@ -481,8 +481,9 @@ impl<P: Into<Path>> DbBuilder<P> {
         // producing the same layering as a caller-built
         // [`CachedObjectStore`] passed to [`DbBuilder::new`]: the cache sits
         // under the retry and instrumentation layers, so the same cache
-        // instance can be shared with the compactor and GC below while each
-        // component keeps its own layers.
+        // instance can be shared with the WAL store, compactor, and GC below
+        // while each component keeps its own layers. WAL calls carry a WAL tag,
+        // so the cache wrapper applies its WAL bypass/skip policy.
         let cached_object_store = CachedObjectStore::from_config(
             self.main_object_store.clone(),
             &self.settings.object_store_cache_options,
@@ -497,7 +498,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         };
 
         let retrying_main_object_store = wrap_object_store(
-            maybe_cached_main_object_store,
+            maybe_cached_main_object_store.clone(),
             ObjectStoreComponent::Db,
             ObjectStoreType::Main,
         );
@@ -1883,7 +1884,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         };
 
         let retrying_object_store = instrumented_retrying_object_store(
-            maybe_cached_object_store,
+            maybe_cached_object_store.clone(),
             &recorder,
             ObjectStoreComponent::Reader,
             ObjectStoreType::Main,

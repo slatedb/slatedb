@@ -242,9 +242,6 @@ pub(crate) enum SlateDBError {
         interval: Duration,
     },
 
-    #[error("invalid sst batch size. size=`{0}`")]
-    InvalidSSTBatchSize(usize),
-
     #[error("invalid configuration: {0}")]
     InvalidConfiguration(String),
 
@@ -666,7 +663,6 @@ impl From<SlateDBError> for Error {
             }
             SlateDBError::InvalidObjectStorePath(_) => Error::invalid(msg),
             SlateDBError::UnknownConfigurationFormat(_) => Error::invalid(msg),
-            SlateDBError::InvalidSSTBatchSize(_) => Error::invalid(msg),
             SlateDBError::InvalidConfiguration(_) => Error::invalid(msg),
             SlateDBError::InvalidCheckpointLifetime(_) => Error::invalid(msg),
             SlateDBError::InvalidManifestPollInterval(_) => Error::invalid(msg),

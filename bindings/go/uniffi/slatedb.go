@@ -10908,16 +10908,16 @@ func (_ FfiDestroyerSegmentPrefix) Destroy(value SegmentPrefix) {
 
 // Options controlling how the native SlateDB WAL reader fetches WAL SSTs.
 type SlateDbWalReaderOptions struct {
-	// Number of WAL SSTs to preload.
-	SstBatchSize uint64
-	// Number of concurrent fetch tasks per WAL SST.
+	// Shared soft limit on bytes buffered across WAL SSTs.
+	MaxBufferedBytes uint64
+	// Shared limit on concurrent WAL SST fetch tasks.
 	MaxFetchTasks uint64
-	// Number of bytes to read ahead from each WAL SST.
+	// Target number of bytes in each WAL SST fetch.
 	ReadAheadBytes uint64
 }
 
 func (r *SlateDbWalReaderOptions) Destroy() {
-	FfiDestroyerUint64{}.Destroy(r.SstBatchSize)
+	FfiDestroyerUint64{}.Destroy(r.MaxBufferedBytes)
 	FfiDestroyerUint64{}.Destroy(r.MaxFetchTasks)
 	FfiDestroyerUint64{}.Destroy(r.ReadAheadBytes)
 }
@@ -10947,7 +10947,7 @@ func (c FfiConverterSlateDbWalReaderOptions) LowerExternal(value SlateDbWalReade
 }
 
 func (c FfiConverterSlateDbWalReaderOptions) Write(writer io.Writer, value SlateDbWalReaderOptions) {
-	FfiConverterUint64INSTANCE.Write(writer, value.SstBatchSize)
+	FfiConverterUint64INSTANCE.Write(writer, value.MaxBufferedBytes)
 	FfiConverterUint64INSTANCE.Write(writer, value.MaxFetchTasks)
 	FfiConverterUint64INSTANCE.Write(writer, value.ReadAheadBytes)
 }

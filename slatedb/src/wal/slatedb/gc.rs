@@ -195,7 +195,7 @@ impl WalGc for SlateDbWalGc {
 mod tests {
     use super::*;
     use crate::format::sst::SsTableFormat;
-    use crate::object_store_tag::TableStoreKind;
+    use crate::tablestore::TableStoreKind;
     use crate::RowEntry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
