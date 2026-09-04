@@ -6,9 +6,10 @@ What is being changed and why?
 
 -
 
-## AI-generated Code
+## AI Assistance
 
-If you used AI to generate code, add one row for each model and effort level that you used.
+If you used AI for any part of this pull request, add one row for each model and effort level.
+Include code, tests, documentation, and pull request text.
 If you did not use AI, enter `N/A` in both columns.
 
 | Model | Effort |
