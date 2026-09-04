@@ -72,9 +72,11 @@ impl DbBuilder {
             .map_err(Into::into)
     }
 
-    /// Sets DB cache.
-    pub fn with_db_cache(&self, db_cache: Arc<DbCache>) -> Result<(), Error> {
-        self.update_builder(|builder| builder.with_db_cache(db_cache.inner.clone()))
+    /// Sets DB cache. `db_cache_id` isolates this database's entries from any other
+    /// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
+    /// uniqueness and stability across reopens.
+    pub fn with_db_cache(&self, db_cache: Arc<DbCache>, db_cache_id: u64) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_db_cache(db_cache.inner.clone(), db_cache_id))
             .map_err(Into::into)
     }
 
@@ -202,12 +204,11 @@ impl DbReaderBuilder {
             .map_err(Into::into)
     }
 
-    /// Sets DB cache.
-    ///
-    /// The cache remains owned by the caller and may be shared across multiple
-    /// `Db`/`DbReader` instances; `reader.shutdown()` will not close it.
-    pub fn with_db_cache(&self, db_cache: Arc<DbCache>) -> Result<(), Error> {
-        self.update_builder(|builder| builder.with_db_cache(db_cache.inner.clone()))
+    /// Sets DB cache. `db_cache_id` isolates this reader's entries from any other
+    /// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
+    /// uniqueness and stability across reopens.
+    pub fn with_db_cache(&self, db_cache: Arc<DbCache>, db_cache_id: u64) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_db_cache(db_cache.inner.clone(), db_cache_id))
             .map_err(Into::into)
     }
 

@@ -84,6 +84,7 @@ thread_local = "1.1.9"
 uniffi = "0.31.0"
 ulid = "1.2.1"
 uuid = "1.18.0"
+url = "2.5.8"
 walkdir = "2.3.3"
 zstd = "0.13.2"
 

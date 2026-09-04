@@ -1802,7 +1802,7 @@ mod tests {
             // One data block per entry, so a data range selects a subset.
             .with_sst_block_size(SstBlockSize::Other(1))
             .with_system_clock(system_clock.clone())
-            .with_db_cache(cache.clone())
+            .with_db_cache(cache.clone(), 0)
             .with_block_cache_policy(policy)
             .build()
             .await

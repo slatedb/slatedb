@@ -1365,6 +1365,7 @@ mod tests {
             split_cache,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            1,
         ));
         let ts = Arc::new(TableStore::new(
             os.clone(),
@@ -1692,6 +1693,7 @@ mod tests {
             split_cache,
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            1,
         ));
         let ts = Arc::new(TableStore::new(
             os.clone(),
@@ -1739,6 +1741,7 @@ mod tests {
             cache.clone(),
             &recorder,
             Arc::new(DefaultSystemClock::default()),
+            1,
         ));
         let ts = Arc::new(TableStore::new(
             os.clone(),
