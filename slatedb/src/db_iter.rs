@@ -49,12 +49,11 @@ impl DbIteratorRangeTracker {
     }
 }
 
-/// Sources of a point lookup, in newest-first order, each with its `init`
-/// already driven before it is yielded.
+/// Sources for a point lookup, in newest-first order.
+/// The stream initializes each source before it yields the source.
 ///
-/// `Mutex` is only here to satisfy the `Sync` half of [`RowEntryIterator`]:
-/// the boxed `init` futures the stream drives are `Send` but not `Sync`. It is
-/// always reached through `get_mut`, so it never locks.
+/// `Mutex` makes this stream `Sync`, as [`RowEntryIterator`] requires.
+/// The code accesses `Mutex` only through `get_mut`, so it never locks.
 type InitializedSources =
     Mutex<BoxStream<'static, Result<Box<dyn RowEntryIterator + 'static>, SlateDBError>>>;
 
@@ -67,10 +66,10 @@ pub(crate) struct GetIterator {
 impl GetIterator {
     /// Builds an ordered stream of initialized sources.
     ///
-    /// The first source is initialized on its own. Remaining sources are
-    /// initialized with at most `lookahead` operations in flight.
+    /// The stream initializes the first source alone. It initializes at most
+    /// `lookahead` remaining sources at the same time.
     ///
-    /// Initialization may finish out of order because sources are yielded in
+    /// `init` calls can finish out of order. The stream yields sources in
     /// their original order.
     fn with_lookahead(
         key: Bytes,
@@ -114,8 +113,8 @@ impl GetIterator {
             .chain(std::iter::once(segment_iter))
             .collect();
 
-        // Every source here is either in memory or the segment chain itself,
-        // so there is no metadata fetch to overlap: walk them one at a time.
+        // Each source is in memory or is the segment chain.
+        // No metadata fetches between these sources can overlap.
         Self::with_lookahead(key, iters, 1)
     }
 
@@ -124,16 +123,18 @@ impl GetIterator {
     /// bloom-positive hit short-circuits the walk rather than opening every
     /// older SST.
     ///
-    /// After the newest source, up to `ctx.max_parallel` sources are
-    /// initialized concurrently so their metadata fetches overlap. Proving a
-    /// key absent costs `1 + ceil((sources - 1) / max_parallel)` round trips
-    /// instead of one per source.
+    /// After the newest source, the iterator initializes up to
+    /// `ctx.max_parallel` sources at the same time. Their metadata fetches
+    /// overlap. An absent key requires
+    /// `1 + ceil((sources - 1) / max_parallel)` round trips, instead of one
+    /// round trip for each source.
     ///
-    /// A hit past the newest source overshoots by up to `max_parallel - 1`
-    /// sources. A speculatively initialized source costs a filter read, and if
-    /// its filter is positive an index read and one data block read as well.
-    /// Dropping the walk drops the pending `init`s, but block fetches they
-    /// already spawned are detached and still run to completion.
+    /// If a hit occurs after the newest source, the iterator can initialize up
+    /// to `max_parallel - 1` extra sources. Each extra source reads a filter.
+    /// If the filter is positive, the source also reads an index and one data
+    /// block. The iterator drops pending `init` calls when the walk stops. It
+    /// cannot stop the block fetches that those calls started, so the fetches
+    /// continue to completion.
     ///
     /// `max_seq` is applied per leaf via `FilterIterator` so above-bound
     /// tombstones are dropped before the outer flat-walk encounters them
@@ -543,7 +544,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    /// Shared record of how the get walk probed its sources.
+    /// `ProbeRecord` records how the point lookup probes its sources.
     #[derive(Default)]
     struct ProbeRecord {
         in_flight: AtomicUsize,
@@ -551,8 +552,8 @@ mod tests {
         initialized: Mutex<Vec<usize>>,
     }
 
-    /// Source that reports its own `init` overlapping with its siblings',
-    /// making the walk's probe concurrency observable without object storage.
+    /// This source records `init` calls that overlap. The record shows when
+    /// probes run at the same time, without object storage.
     struct ProbeIterator {
         id: usize,
         entry: Option<RowEntry>,
@@ -581,8 +582,9 @@ mod tests {
         }
     }
 
-    /// `sources` many probes, those listed in `hits` holding the key. Each
-    /// stores its own id as the value so the walk's choice is identifiable.
+    /// This function creates `sources` probes. The probes in `hits` hold the key.
+    /// Each matching probe stores its ID as the value. This value identifies the
+    /// selected source.
     fn probe_sources(
         sources: usize,
         hits: &[usize],
@@ -609,8 +611,8 @@ mod tests {
 
         assert_eq!(iter.next().await.unwrap(), None);
 
-        // Proving the key absent must consult every source, but in windows of
-        // `lookahead` rather than one at a time.
+        // An absent key requires a probe of every source.
+        // The probes run in groups of `lookahead` instead of one at a time.
         assert_eq!(record.initialized.lock().len(), 8);
         assert_eq!(record.peak.load(Ordering::SeqCst), 4);
     }
@@ -620,8 +622,8 @@ mod tests {
         let (_, iters) = probe_sources(8, &[2, 3, 5]);
         let mut iter = GetIterator::with_lookahead(Bytes::from_static(b"key"), iters, 4);
 
-        // 3 and 5 are initialized in the same window as 2, so the answer must
-        // come from source order and not from whichever `init` finished first.
+        // The first window initializes sources 2, 3, and 5.
+        // The iterator must use source order, not `init` completion order.
         let entry = iter
             .next()
             .await
@@ -638,8 +640,8 @@ mod tests {
         let entry = iter.next().await.unwrap().expect("newest source holds key");
         assert_eq!(entry.value.as_bytes(), Some(Bytes::from_static(b"0")));
 
-        // The newest source is probed alone, so answering from it costs no
-        // speculative reads at all.
+        // The iterator probes the newest source alone.
+        // A hit in this source does not cause speculative reads.
         assert_eq!(*record.initialized.lock(), vec![0]);
     }
 
@@ -650,8 +652,8 @@ mod tests {
 
         iter.next().await.unwrap().expect("source 1 holds key");
 
-        // Sources past the newest one are probed in windows, so a hit inside
-        // the first window never reaches the rest of the chain.
+        // The iterator probes sources after the newest source in windows.
+        // A hit in the first window prevents probes in the remaining chain.
         let initialized = record.initialized.lock();
         assert!(
             initialized.iter().all(|id| *id < 5),
