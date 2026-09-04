@@ -522,7 +522,7 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSplitCache: %v", err)
 		}
-		if err := builder.WithDbCache(dbCache); err != nil {
+		if err := builder.WithDbCache(dbCache, 0); err != nil {
 			t.Fatalf("WithMergeOperator(): %v", err)
 		}
 	})
@@ -1358,7 +1358,7 @@ func TestDbReaderDbCacheConfiguration(t *testing.T) {
 
 	withSharedCache := func(t *testing.T, builder *slatedb.DbReaderBuilder) {
 		t.Helper()
-		if err := builder.WithDbCache(sharedCache); err != nil {
+		if err := builder.WithDbCache(sharedCache, 0); err != nil {
 			t.Fatalf("DbReaderBuilder.WithDbCache(): %v", err)
 		}
 	}

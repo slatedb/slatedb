@@ -796,7 +796,7 @@ uint64_t uniffi_slatedb_uniffi_fn_method_dbbuilder_build(uint64_t ptr
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_DB_CACHE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_DB_CACHE
-void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache(uint64_t ptr, uint64_t db_cache, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache(uint64_t ptr, uint64_t db_cache, uint64_t db_cache_id, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_DB_CACHE_DISABLED
@@ -866,7 +866,7 @@ uint64_t uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_build(uint64_t ptr
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_DB_CACHE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_DB_CACHE
-void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_db_cache(uint64_t ptr, uint64_t db_cache, RustCallStatus *out_status
+void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_db_cache(uint64_t ptr, uint64_t db_cache, uint64_t db_cache_id, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_DB_CACHE_DISABLED
@@ -942,6 +942,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_db_evict_cached_sst(uint64_t ptr, RustB
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH
 uint64_t uniffi_slatedb_uniffi_fn_method_db_flush(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH_CACHE_TO_DISK
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH_CACHE_TO_DISK
+uint64_t uniffi_slatedb_uniffi_fn_method_db_flush_cache_to_disk(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_FLUSH_WITH_OPTIONS
@@ -1082,6 +1087,11 @@ void uniffi_slatedb_uniffi_fn_free_dbreader(uint64_t handle, RustCallStatus *out
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_EVICT_CACHED_SST
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_EVICT_CACHED_SST
 uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_evict_cached_sst(uint64_t ptr, RustBuffer sst_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_FLUSH_CACHE_TO_DISK
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_FLUSH_CACHE_TO_DISK
+uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_flush_cache_to_disk(uint64_t ptr
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_GET
@@ -2350,6 +2360,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_db_flush(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_FLUSH_CACHE_TO_DISK
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_FLUSH_CACHE_TO_DISK
+uint16_t uniffi_slatedb_uniffi_checksum_method_db_flush_cache_to_disk(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_FLUSH_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_FLUSH_WITH_OPTIONS
 uint16_t uniffi_slatedb_uniffi_checksum_method_db_flush_with_options(void
@@ -2473,6 +2489,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_db_write_with_options(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_EVICT_CACHED_SST
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_EVICT_CACHED_SST
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_evict_cached_sst(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_FLUSH_CACHE_TO_DISK
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_FLUSH_CACHE_TO_DISK
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_flush_cache_to_disk(void
     
 );
 #endif
