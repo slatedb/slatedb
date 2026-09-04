@@ -363,7 +363,10 @@ mod tests {
             ObjectStoreBuilderInner::from_url("file:///tmp/slatedb-test".to_string()).unwrap();
         match inner {
             ObjectStoreBuilderInner::Local(builder) => {
-                assert_eq!(builder.prefix.as_deref(), Some(Path::new("/tmp/slatedb-test")));
+                assert_eq!(
+                    builder.prefix.as_deref(),
+                    Some(Path::new("/tmp/slatedb-test"))
+                );
             }
             _ => panic!("expected a Local builder"),
         }
@@ -371,13 +374,15 @@ mod tests {
 
     #[test]
     fn from_url_keeps_local_prefix_for_host_qualified_file_urls() {
-        let inner = ObjectStoreBuilderInner::from_url(
-            "file://example.com/tmp/slatedb-test".to_string(),
-        )
-        .unwrap();
+        let inner =
+            ObjectStoreBuilderInner::from_url("file://example.com/tmp/slatedb-test".to_string())
+                .unwrap();
         match inner {
             ObjectStoreBuilderInner::Local(builder) => {
-                assert_eq!(builder.prefix.as_deref(), Some(Path::new("/tmp/slatedb-test")));
+                assert_eq!(
+                    builder.prefix.as_deref(),
+                    Some(Path::new("/tmp/slatedb-test"))
+                );
             }
             _ => panic!("expected a Local builder"),
         }
