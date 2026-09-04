@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -34,12 +35,12 @@ pub enum ObjectStoreType {
 /// of its own for [`LocalFileSystem`].
 #[derive(Default)]
 struct LocalFileSystemBuilder {
-    prefix: Option<String>,
+    prefix: Option<PathBuf>,
 }
 
 impl LocalFileSystemBuilder {
     fn with_url(mut self, url: impl Into<String>) -> Self {
-        self.prefix = Some(url.into());
+        self.prefix = Some(PathBuf::from(url.into()));
         self
     }
 
@@ -50,7 +51,7 @@ impl LocalFileSystemBuilder {
                 key: key.to_string(),
             });
         }
-        self.prefix = Some(value.into());
+        self.prefix = Some(PathBuf::from(value.into()));
         Ok(self)
     }
 
@@ -120,6 +121,22 @@ impl ObjectStoreBuilderInner {
             url: url.clone(),
             source,
         })?;
+
+        // `ObjectStoreScheme::parse` only recognizes `file:` URLs with no
+        // host (`file:///path`), rejecting host-qualified ones
+        // (`file://host/path`) outright. Handle `file:` ourselves so a host
+        // component doesn't prevent treating the URL as `Local`. `Url::to_file_path`
+        // converts to a platform-native path (and rejects a host-less
+        // `file://` URL on Windows), which would make this behave
+        // differently across platforms. `parsed.path()` is a plain string,
+        // so it stays portable and matches how `ObjectStoreScheme::parse`
+        // itself extracts a `Local` path.
+        if parsed.scheme() == "file" {
+            return Ok(Self::Local(LocalFileSystemBuilder {
+                prefix: Some(PathBuf::from(parsed.path())),
+            }));
+        }
+
         let (scheme, _path) = ObjectStoreScheme::parse(&parsed).map_err(|source| {
             SlateDbError::ObjectStoreCreationError {
                 source: Box::new(source),
@@ -127,14 +144,6 @@ impl ObjectStoreBuilderInner {
         })?;
 
         Ok(match scheme {
-            // `Url::to_file_path` converts to a platform-native path (and
-            // rejects a host-less `file://` URL on Windows), which would make
-            // this behave differently across platforms. `parsed.path()` is a
-            // plain string, so it stays portable and matches how
-            // `ObjectStoreScheme::parse` itself extracts a `Local` path.
-            ObjectStoreScheme::Local => Self::Local(LocalFileSystemBuilder {
-                prefix: Some(parsed.path().to_string()),
-            }),
             ObjectStoreScheme::Memory => Self::InMemory(InMemoryBuilder),
             ObjectStoreScheme::AmazonS3 => Self::Aws(AmazonS3Builder::new().with_url(url)),
             ObjectStoreScheme::GoogleCloudStorage => {
@@ -320,6 +329,7 @@ impl ObjectStoreBuilder {
 #[cfg(test)]
 mod tests {
     use object_store::ObjectStoreExt;
+    use std::path::Path;
 
     use super::*;
 
@@ -353,7 +363,21 @@ mod tests {
             ObjectStoreBuilderInner::from_url("file:///tmp/slatedb-test".to_string()).unwrap();
         match inner {
             ObjectStoreBuilderInner::Local(builder) => {
-                assert_eq!(builder.prefix.as_deref(), Some("/tmp/slatedb-test"));
+                assert_eq!(builder.prefix.as_deref(), Some(Path::new("/tmp/slatedb-test")));
+            }
+            _ => panic!("expected a Local builder"),
+        }
+    }
+
+    #[test]
+    fn from_url_keeps_local_prefix_for_host_qualified_file_urls() {
+        let inner = ObjectStoreBuilderInner::from_url(
+            "file://example.com/tmp/slatedb-test".to_string(),
+        )
+        .unwrap();
+        match inner {
+            ObjectStoreBuilderInner::Local(builder) => {
+                assert_eq!(builder.prefix.as_deref(), Some(Path::new("/tmp/slatedb-test")));
             }
             _ => panic!("expected a Local builder"),
         }
