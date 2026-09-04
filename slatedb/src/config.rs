@@ -281,6 +281,20 @@ pub enum DurabilityLevel {
     Memory,
 }
 
+/// Options for tracing a read operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TracingOptions {
+    pub trace_id: String,
+}
+
+impl TracingOptions {
+    pub fn new(trace_id: impl Into<String>) -> Self {
+        Self {
+            trace_id: trace_id.into(),
+        }
+    }
+}
+
 /// Configuration for client read operations. `ReadOptions` is supplied for each
 /// read call and controls the behavior of the read.
 #[derive(Clone, Debug)]
@@ -298,6 +312,8 @@ pub struct ReadOptions {
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters. See [`FilterContext`].
     pub filter_context: Option<FilterContext>,
+    /// Optional caller-provided tracing settings.
+    pub tracing_options: Option<TracingOptions>,
 }
 
 impl Default for ReadOptions {
@@ -307,6 +323,7 @@ impl Default for ReadOptions {
             dirty: false,
             cache_blocks: true,
             filter_context: None,
+            tracing_options: None,
         }
     }
 }
@@ -340,6 +357,13 @@ impl ReadOptions {
             ..self
         }
     }
+
+    pub fn with_tracing_options(self, tracing_options: Option<TracingOptions>) -> Self {
+        Self {
+            tracing_options,
+            ..self
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
@@ -350,9 +374,10 @@ pub struct ScanOptions {
     /// Whether to include dirty data in the scan. "dirty" means that the data is not considered
     /// as "committed" yet, whose seq number is greater than the last committed seq number.
     pub dirty: bool,
-    /// The number of bytes to read ahead. The value is rounded up to the nearest
-    /// block size when fetching from object storage. The default is 1, which
-    /// rounds up to one block.
+    /// The target number of bytes to fetch in a single request while iterating over SSTs.
+    /// Each fetch will read the minimum number of blocks such that the resulting read is at least
+    /// this size or reaches the end of the file. The default is 1, which results in each fetch
+    /// reading one block.
     pub read_ahead_bytes: usize,
     /// Whether or not fetched data blocks should be cached. SST indexes,
     /// filters, and stats are cached independently of this setting.
@@ -368,6 +393,8 @@ pub struct ScanOptions {
     /// Only consulted for `scan_prefix` today. Plain range scans do not
     /// evaluate SST filters, so this field has no effect on `scan`.
     pub filter_context: Option<FilterContext>,
+    /// Optional caller-provided tracing settings.
+    pub tracing_options: Option<TracingOptions>,
 }
 
 impl Default for ScanOptions {
@@ -381,6 +408,7 @@ impl Default for ScanOptions {
             max_fetch_tasks: 1,
             order: IterationOrder::Ascending,
             filter_context: None,
+            tracing_options: None,
         }
     }
 }
@@ -429,6 +457,13 @@ impl ScanOptions {
     pub fn with_filter_context(self, filter_context: Option<FilterContext>) -> Self {
         Self {
             filter_context,
+            ..self
+        }
+    }
+
+    pub fn with_tracing_options(self, tracing_options: Option<TracingOptions>) -> Self {
+        Self {
+            tracing_options,
             ..self
         }
     }
@@ -1241,6 +1276,23 @@ pub struct CompactorOptions {
     #[serde(serialize_with = "serialize_duration")]
     pub commit_compacted_interval: Duration,
 
+    /// How long the compactor checkpoint protects input SSTs while publishing a
+    /// manifest that replaces them with compacted output.
+    ///
+    /// A scan, get, snapshot, or transaction that began before the manifest update
+    /// and still needs an input SST must finish within this duration. If it runs
+    /// longer, garbage collection may delete the SST, causing the operation to fail
+    /// with a [`crate::ErrorKind::Data`] error backed by
+    /// [`object_store::Error::NotFound`]. Shorter lifetimes reduce retained storage;
+    /// longer lifetimes give in-flight reads more time to finish. Defaults to 15
+    /// minutes.
+    #[serde(
+        default = "default_compactor_checkpoint_lifetime",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "serialize_duration"
+    )]
+    pub checkpoint_lifetime: Duration,
+
     /// How long the coordinator will wait without a heartbeat before reclaiming
     /// a `Running` compaction from its worker and resetting it to `Submitted`.
     /// A worker that crashes or stalls will have its jobs reclaimed after this
@@ -1258,8 +1310,9 @@ pub struct CompactorOptions {
 /// Default options for the compactor. Currently, only a
 /// `SizeTieredCompactionScheduler` compaction strategy is implemented.
 impl Default for CompactorOptions {
-    /// Returns a `CompactorOptions` with a 5 second poll interval and an embedded
-    /// worker enabled with default [`CompactionWorkerOptions`].
+    /// Returns a `CompactorOptions` with a 5 second poll interval, a 15 minute
+    /// checkpoint lifetime, and an embedded worker enabled with default
+    /// [`CompactionWorkerOptions`].
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_secs(5),
@@ -1270,6 +1323,7 @@ impl Default for CompactorOptions {
             worker: Some(CompactionWorkerOptions::default()),
             metric_level: None,
             commit_compacted_interval: Duration::from_secs(1),
+            checkpoint_lifetime: default_compactor_checkpoint_lifetime(),
             worker_heartbeat_timeout: Duration::from_secs(30),
             object_store_max_retries: None,
         }
@@ -1291,6 +1345,7 @@ impl std::fmt::Debug for CompactorOptions {
             .field("worker", &self.worker)
             .field("metric_level", &self.metric_level)
             .field("commit_compacted_interval", &self.commit_compacted_interval)
+            .field("checkpoint_lifetime", &self.checkpoint_lifetime)
             .field("worker_heartbeat_timeout", &self.worker_heartbeat_timeout)
             .field("object_store_max_retries", &self.object_store_max_retries)
             .finish()
@@ -1321,9 +1376,10 @@ pub struct CompactionWorkerOptions {
     /// compaction. Higher values can improve throughput but use more resources.
     pub max_fetch_tasks: usize,
 
-    /// Number of bytes to fetch in a single read-ahead request while iterating
-    /// over input SSTs during compaction. The value is rounded up to the nearest
-    /// block size when fetching from object storage. The default is 2MiB.
+    /// The target number of bytes to fetch in a single request while iterating over
+    /// input SSTs during compaction. Each fetch will read the minimum number of blocks
+    /// such that the resulting read is at least this size or reaches the end of the file.
+    /// The default is 2MiB.
     ///
     /// This pairs with [`CompactionWorkerOptions::max_fetch_tasks`]:
     /// `bytes_to_fetch` is the size of each read-ahead request while
@@ -1396,6 +1452,10 @@ impl Default for CompactionWorkerOptions {
 /// disabling it.)
 fn default_compaction_worker_options() -> Option<CompactionWorkerOptions> {
     Some(CompactionWorkerOptions::default())
+}
+
+fn default_compactor_checkpoint_lifetime() -> Duration {
+    Duration::from_mins(15)
 }
 
 /// Options for the Size-Tiered Compaction Scheduler
@@ -1837,6 +1897,27 @@ mod tests {
     }
 
     #[test]
+    fn test_compactor_checkpoint_lifetime_config() {
+        let default_lifetime = Duration::from_mins(15);
+        assert_eq!(
+            default_lifetime,
+            CompactorOptions::default().checkpoint_lifetime
+        );
+
+        let mut value = serde_json::to_value(CompactorOptions::default()).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "checkpoint_lifetime".to_string(),
+            serde_json::Value::String("42s".to_string()),
+        );
+        let configured: CompactorOptions = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(Duration::from_secs(42), configured.checkpoint_lifetime);
+
+        value.as_object_mut().unwrap().remove("checkpoint_lifetime");
+        let omitted: CompactorOptions = serde_json::from_value(value).unwrap();
+        assert_eq!(default_lifetime, omitted.checkpoint_lifetime);
+    }
+
+    #[test]
     fn test_gc_boundary_files_are_enabled_by_default_when_omitted() {
         fn without_boundary_setting<T: Serialize>(value: T) -> serde_json::Value {
             let mut value = serde_json::to_value(value).unwrap();
@@ -1993,6 +2074,12 @@ object_store_cache_options:
     }
 
     #[test]
+    fn test_default_tracing_options_are_none() {
+        assert!(ReadOptions::default().tracing_options.is_none());
+        assert!(ScanOptions::default().tracing_options.is_none());
+    }
+
+    #[test]
     fn test_scan_options_with_max_fetch_tasks() {
         let options = ScanOptions::default().with_max_fetch_tasks(4);
         assert_eq!(options.max_fetch_tasks, 4);
@@ -2002,6 +2089,32 @@ object_store_cache_options:
         assert!(!options.dirty);
         assert_eq!(options.read_ahead_bytes, 1);
         assert!(!options.cache_blocks);
+    }
+
+    #[test]
+    fn test_read_options_with_tracing_options() {
+        let options =
+            ReadOptions::default().with_tracing_options(Some(TracingOptions::new("read-trace")));
+        assert_eq!(
+            options
+                .tracing_options
+                .as_ref()
+                .map(|tracing_options| tracing_options.trace_id.as_str()),
+            Some("read-trace")
+        );
+    }
+
+    #[test]
+    fn test_scan_options_with_tracing_options() {
+        let options =
+            ScanOptions::default().with_tracing_options(Some(TracingOptions::new("scan-trace")));
+        assert_eq!(
+            options
+                .tracing_options
+                .as_ref()
+                .map(|tracing_options| tracing_options.trace_id.as_str()),
+            Some("scan-trace")
+        );
     }
 
     #[test]

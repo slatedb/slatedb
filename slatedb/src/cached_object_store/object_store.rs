@@ -1179,11 +1179,11 @@ mod tests {
     use crate::db_state::SstType;
     use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
     use crate::object_store_tag::{ObjectStoreCallTag, TableStoreKind};
-    use crate::object_stores::ObjectStoreType;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::{
         gen_rand_bytes, ExtensionMarker, ExtensionObjectStore, FlakyObjectStore, GatedObjectStore,
     };
+    use crate::utils::ObjectStoreType;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::MetricsRecorderHelper;
     use slatedb_common::DbRand;
@@ -1824,7 +1824,7 @@ mod tests {
         Arc<CachedObjectStore>,
     ) {
         use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
-        use crate::object_stores::ObjectStoreType;
+        use crate::utils::ObjectStoreType;
         use slatedb_common::metrics::test_recorder_helper;
 
         let (recorder, helper) = test_recorder_helper();

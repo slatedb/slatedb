@@ -158,7 +158,7 @@ impl DbInner {
 
     /// Test helper: build L0 SSTs from `imm_table` via the segment-aware
     /// path ([`Self::build_imm_ssts`]) and upload each one with a freshly
-    /// allocated [`db_state::SsTableId::Compacted`]. Returns the resulting
+    /// allocated [`db_state::SsTableId`]. Returns the resulting
     /// handles in the same order as the segments. Without an extractor the
     /// result is at most one handle; an empty Vec means retention pruned
     /// every entry.
@@ -174,9 +174,8 @@ impl DbInner {
         let built = self.build_imm_ssts(imm_table.clone()).await?;
         let mut handles = Vec::with_capacity(built.len());
         for sst in built {
-            let id = db_state::SsTableId::Compacted(
-                self.rand.rng().gen_ulid(self.system_clock.as_ref()),
-            );
+            let id =
+                db_state::SsTableId::from(self.rand.rng().gen_ulid(self.system_clock.as_ref()));
             let handle = self.upload_sst(&id, &sst.encoded).await?;
             handles.push(handle);
         }
@@ -836,7 +835,7 @@ mod tests {
             ],
         ];
         for (sst, entries) in ssts.into_iter().zip(expected.into_iter()) {
-            let id = SsTableId::Compacted(Ulid::new());
+            let id = SsTableId::from(Ulid::new());
             let handle = db.inner.upload_sst(&id, &sst.encoded).await.unwrap();
             verify_sst(&db, &handle, &entries).await;
         }

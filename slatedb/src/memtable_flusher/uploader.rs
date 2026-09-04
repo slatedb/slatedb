@@ -216,7 +216,7 @@ impl UploadHandler {
                 .segment_sst_ids
                 .get(&sst.prefix)
                 .copied()
-                .map(SsTableId::Compacted);
+                .map(SsTableId::from);
             async move {
                 let sst_id = sst_id.ok_or(SlateDBError::InvalidDBState)?;
                 self.upload_segment_sst(sst, sst_id).await
@@ -311,7 +311,6 @@ mod tests {
     use crate::iter::RowEntryIterator;
     use crate::manifest::ManifestCore;
     use crate::mem_table::ImmutableMemtable;
-    use crate::object_stores::ObjectStores;
     use crate::paths::PathResolver;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
@@ -391,7 +390,7 @@ mod tests {
         .await
         .unwrap();
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            ObjectStores::new(Arc::clone(&object_store), None),
+            Arc::clone(&object_store),
             SsTableFormat::default(),
             PathResolver::from_root(Path::from(path)),
             fp_registry.clone(),
@@ -575,7 +574,7 @@ mod tests {
         assert_eq!(event.segments.len(), 1);
         assert_eq!(
             event.segments[0].sst_handle.id,
-            SsTableId::Compacted(expected_id)
+            SsTableId::from(expected_id)
         );
 
         test.shutdown().await;

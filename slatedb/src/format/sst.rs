@@ -916,13 +916,17 @@ impl SsTableFormat {
         }
     }
 
-    fn block_range(
+    pub(crate) fn block_range(
         &self,
         blocks: Range<usize>,
         info: &SsTableInfo,
         index: &SsTableIndex,
     ) -> Range<u64> {
-        let mut end_offset = info.filter_offset;
+        let mut end_offset = if info.filter_len > 0 {
+            info.filter_offset
+        } else {
+            info.index_offset
+        };
         if blocks.end < index.block_meta().len() {
             let next_block_meta = index.block_meta().get(blocks.end);
             end_offset = next_block_meta.offset();
