@@ -65,17 +65,13 @@ pub(crate) struct GetIterator {
 }
 
 impl GetIterator {
-    /// Wrap `iters` in a stream that yields each source with its `init`
-    /// already driven.
+    /// Builds an ordered stream of initialized sources.
     ///
-    /// The newest source is probed alone; only if it does not answer the
-    /// query are the remaining ones initialized `lookahead` at a time. That
-    /// keeps a hit in the newest source exactly as cheap as a strictly serial
-    /// walk, and still collapses the round trips needed to prove a key absent.
+    /// The first source is initialized on its own. Remaining sources are
+    /// initialized with at most `lookahead` operations in flight.
     ///
-    /// Order is preserved across the concurrent tail: the walk returns the
-    /// first entry it finds, so sources must be consumed newest-first however
-    /// their `init`s interleave.
+    /// Initialization may finish out of order because sources are yielded in
+    /// their original order.
     fn with_lookahead(
         key: Bytes,
         iters: Vec<Box<dyn RowEntryIterator + 'static>>,
