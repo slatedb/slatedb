@@ -4,6 +4,7 @@ Use the `simple-english` skill at `.agents/skills/simple-english/SKILL.md` for a
 
 This rule includes chat replies, documentation, new code comments, commit messages, and GitHub prose.
 GitHub prose includes issue text, pull request titles and summaries, review comments, and discussion replies.
+When you write a pull request description, follow `.github/pull_request_template.md`.
 
 Read the complete skill file before you write or rewrite prose.
 Apply its Plain mode unless the user requests STE, ASD-STE100, or compliance.
