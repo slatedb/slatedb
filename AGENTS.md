@@ -13,3 +13,8 @@ If the user requests a text review, read `.agents/skills/simple-english/referenc
 Follow the skill rules in every chat reply.
 Do not edit an existing comment only to apply the skill.
 Apply the skill to each new comment that you add.
+
+# API design
+
+Do not add `#[non_exhaustive]` to an enum only to avoid a future breaking change.
+Prefer exhaustive enum matches, even when a new variant causes a breaking API change.
