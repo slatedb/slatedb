@@ -201,7 +201,7 @@ impl<T: TrackedRowEntryIterator> TrackedRowEntryIterator for ResumingIterator<T>
 /// Executes compaction jobs produced by the compactor.
 pub(crate) trait CompactionExecutor {
     /// Starts executing a compaction job asynchronously.
-    fn start_compaction_job(&self, compaction: StartCompactionJobArgs);
+    fn start_compaction_job(&self, compaction: StartCompactionJobArgs) -> Result<(), SlateDBError>;
 
     /// Requests that an executing compaction job stop.
     ///
@@ -265,8 +265,8 @@ impl TokioCompactionExecutor {
 }
 
 impl CompactionExecutor for TokioCompactionExecutor {
-    fn start_compaction_job(&self, compaction: StartCompactionJobArgs) {
-        self.inner.start_compaction_job(compaction);
+    fn start_compaction_job(&self, compaction: StartCompactionJobArgs) -> Result<(), SlateDBError> {
+        self.inner.start_compaction_job(compaction)
     }
 
     fn stop_compaction_job(&self, id: Ulid) -> bool {
@@ -279,7 +279,6 @@ impl CompactionExecutor for TokioCompactionExecutor {
 }
 
 struct TokioCompactionTask {
-    destination: u32,
     task: JoinHandle<Result<SortedRun, SlateDBError>>,
 }
 
@@ -880,15 +879,18 @@ impl TokioCompactionExecutorInner {
     }
 
     /// Starts a background task to run the compaction job.
-    fn start_compaction_job(self: &Arc<Self>, args: StartCompactionJobArgs) {
+    fn start_compaction_job(
+        self: &Arc<Self>,
+        args: StartCompactionJobArgs,
+    ) -> Result<(), SlateDBError> {
         let mut tasks = self.tasks.lock();
         if self.is_stopped.load(atomic::Ordering::SeqCst) {
-            return;
+            return Ok(());
         }
         let id = args.id;
-        let dst = args.destination;
-        assert!(!tasks.contains_key(&id));
-        assert!(!tasks.values().any(|task| task.destination == dst));
+        if tasks.contains_key(&id) {
+            return Err(SlateDBError::InvalidCompaction);
+        }
         self.worker_stats.running_compactions.increment(1);
 
         let this = self.clone();
@@ -926,13 +928,8 @@ impl TokioCompactionExecutorInner {
             },
             async move { this.plan_and_execute_compaction_job(args).await },
         );
-        tasks.insert(
-            id,
-            TokioCompactionTask {
-                destination: dst,
-                task,
-            },
-        );
+        tasks.insert(id, TokioCompactionTask { task });
+        Ok(())
     }
 
     /// Requests cancellation of one active compaction job.
@@ -2355,11 +2352,10 @@ mod tests {
             SUBCOMPACTION_SST_SIZE,
         )
         .await;
-        executor.inner.start_compaction_job(job_with_subcompactions(
-            vec![],
-            sorted_runs,
-            four_ranges(),
-        ));
+        executor
+            .inner
+            .start_compaction_job(job_with_subcompactions(vec![], sorted_runs, four_ranges()))
+            .unwrap();
 
         let in_flight = await_running(&running, |n| n >= 2, "subcompactions to start").await;
         assert!(in_flight >= 2, "expected a split job, got {in_flight}");
@@ -2529,10 +2525,34 @@ mod tests {
 
         // when: the first job runs and reaches a blocked output flush.
         let stopped_id = Ulid::new();
-        executor.start_compaction_job(StartCompactionJobArgs {
+        executor
+            .start_compaction_job(StartCompactionJobArgs {
+                id: stopped_id,
+                compaction_id: stopped_id,
+                destination: 0,
+                l0_sst_views: l0_sst_views.clone(),
+                sorted_runs: vec![],
+                compaction_clock_tick: 0,
+                is_dest_last_run: false,
+                retention_min_seq: Some(0),
+                ctx: Some(CompactionContext::new(
+                    vec![Subcompaction::new(BytesRange::unbounded())],
+                    Some(0),
+                )),
+            })
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            gated.put_opts_gate.wait_for_arrivals(setup_puts + 1),
+        )
+        .await
+        .expect("a close() should reach the blocked put gate");
+        assert!(executor.inner.tasks.lock().contains_key(&stopped_id));
+
+        let rejected = executor.start_compaction_job(StartCompactionJobArgs {
             id: stopped_id,
             compaction_id: stopped_id,
-            destination: 0,
+            destination: 1,
             l0_sst_views: l0_sst_views.clone(),
             sorted_runs: vec![],
             compaction_clock_tick: 0,
@@ -2543,13 +2563,8 @@ mod tests {
                 Some(0),
             )),
         });
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            gated.put_opts_gate.wait_for_arrivals(setup_puts + 1),
-        )
-        .await
-        .expect("a close() should reach the blocked put gate");
-        assert!(executor.inner.tasks.lock().contains_key(&stopped_id));
+        assert!(matches!(rejected, Err(SlateDBError::InvalidCompaction)));
+        assert_eq!(executor.inner.tasks.lock().len(), 1);
 
         // then: stopping that job clears executor bookkeeping immediately.
         assert!(executor.stop_compaction_job(stopped_id));
@@ -2560,20 +2575,22 @@ mod tests {
         // executor and destination.
         gated.put_opts_gate.release();
         let second_id = Ulid::new();
-        executor.start_compaction_job(StartCompactionJobArgs {
-            id: second_id,
-            compaction_id: second_id,
-            destination: 0,
-            l0_sst_views,
-            sorted_runs: vec![],
-            compaction_clock_tick: 0,
-            is_dest_last_run: false,
-            retention_min_seq: Some(0),
-            ctx: Some(CompactionContext::new(
-                vec![Subcompaction::new(BytesRange::unbounded())],
-                Some(0),
-            )),
-        });
+        executor
+            .start_compaction_job(StartCompactionJobArgs {
+                id: second_id,
+                compaction_id: second_id,
+                destination: 0,
+                l0_sst_views,
+                sorted_runs: vec![],
+                compaction_clock_tick: 0,
+                is_dest_last_run: false,
+                retention_min_seq: Some(0),
+                ctx: Some(CompactionContext::new(
+                    vec![Subcompaction::new(BytesRange::unbounded())],
+                    Some(0),
+                )),
+            })
+            .unwrap();
 
         // then: the second job completes, and the stopped job never reports a
         // completion after cancellation won ownership of task accounting.
@@ -2667,20 +2684,22 @@ mod tests {
         gated.put_opts_gate.close();
 
         // when: the compaction job runs.
-        executor.start_compaction_job(StartCompactionJobArgs {
-            id: Ulid::new(),
-            compaction_id: Ulid::new(),
-            destination: 0,
-            l0_sst_views,
-            sorted_runs: vec![],
-            compaction_clock_tick: 0,
-            is_dest_last_run: false,
-            retention_min_seq: Some(0),
-            ctx: Some(CompactionContext::new(
-                vec![Subcompaction::new(BytesRange::unbounded())],
-                Some(0),
-            )),
-        });
+        executor
+            .start_compaction_job(StartCompactionJobArgs {
+                id: Ulid::new(),
+                compaction_id: Ulid::new(),
+                destination: 0,
+                l0_sst_views,
+                sorted_runs: vec![],
+                compaction_clock_tick: 0,
+                is_dest_last_run: false,
+                retention_min_seq: Some(0),
+                ctx: Some(CompactionContext::new(
+                    vec![Subcompaction::new(BytesRange::unbounded())],
+                    Some(0),
+                )),
+            })
+            .unwrap();
 
         // when: the first output SST's flush is parked at the closed gate.
         tokio::time::timeout(
@@ -2868,7 +2887,7 @@ mod tests {
                     retention_min_seq,
                 )),
             };
-            self.executor.start_compaction_job(compaction);
+            self.executor.start_compaction_job(compaction)?;
 
             tokio::time::timeout(Duration::from_secs(5), async move {
                 loop {

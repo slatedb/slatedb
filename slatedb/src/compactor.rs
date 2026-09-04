@@ -931,9 +931,8 @@ impl CompactorEventHandler {
     ///
     /// Runs when a Submitted compaction is accepted and when a Compacted entry is
     /// committed, so this is the canonical gate for compaction-against-current-state
-    /// validity. Cross-compaction conflicts (destination collisions across active
-    /// compactions, concurrent drains on the same segment) are enforced upstream in
-    /// [`CompactorState::add_compaction`] and are not re-checked here.
+    /// validity. For Submitted entries, this also rejects source or destination
+    /// conflicts with compactions the coordinator has already accepted.
     ///
     /// Invariants checked:
     /// - Compaction has sources
@@ -948,6 +947,25 @@ impl CompactorEventHandler {
     /// - Scheduler-specific policy via [`CompactionScheduler::validate_compaction`]
     fn validate_compaction(&self, compaction: &Compaction) -> Result<(), SlateDBError> {
         let spec = compaction.spec();
+
+        if compaction.status() == CompactionStatus::Submitted {
+            let conflicts_with_active = self
+                .state()
+                .compactions_with_status(&[
+                    CompactionStatus::Scheduled,
+                    CompactionStatus::Running,
+                    CompactionStatus::Compacted,
+                ])
+                .any(|active| Self::compactions_conflict(spec, active.spec()));
+            if conflicts_with_active {
+                warn!(
+                    "rejected compaction: sources or destination conflict with active compaction [id={}]",
+                    compaction.id()
+                );
+                return Err(SlateDBError::InvalidCompaction);
+            }
+        }
+
         // Validate compaction sources exist
         if spec.sources().is_empty() {
             warn!("submitted compaction is empty: {:?}", spec.sources());
@@ -1057,6 +1075,20 @@ impl CompactorEventHandler {
         self.scheduler
             .validate(&self.state().into(), spec)
             .map_err(|_e| SlateDBError::InvalidCompaction)
+    }
+
+    fn compactions_conflict(left: &CompactionSpec, right: &CompactionSpec) -> bool {
+        let right_destination = right.destination().map(SourceId::SortedRun);
+        // A source cannot also be consumed or produced by the active compaction.
+        left.sources()
+            .iter()
+            .copied()
+            .any(|source| right.sources().contains(&source) || right_destination == Some(source))
+            // Likewise, the proposed destination cannot be an active source or destination.
+            || left.destination().is_some_and(|destination| {
+                let destination = SourceId::SortedRun(destination);
+                right.sources().contains(&destination) || right_destination == Some(destination)
+            })
     }
 
     /// Rejects a tiered compaction whose destination SR id already exists as a
@@ -4916,7 +4948,7 @@ mod tests {
                     ctx: compaction.ctx().cloned(),
                 };
 
-                self.real_executor.start_compaction_job(args);
+                self.real_executor.start_compaction_job(args).unwrap();
 
                 let result = tokio::time::timeout(Duration::from_millis(500), async {
                     loop {
@@ -5155,6 +5187,126 @@ mod tests {
                 .expect("missing stored compaction")
                 .status(),
             CompactionStatus::Scheduled
+        );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_validate_submitted_compactions_fails_later_shared_source() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let core = &mut fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core;
+        Arc::make_mut(&mut core.tree).compacted =
+            vec![SortedRun::new(2, []), SortedRun::new(1, [])];
+
+        let first_id = Ulid::from_parts(1, 0);
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(Compaction::new(
+                first_id,
+                CompactionSpec::new(vec![SourceId::SortedRun(2), SourceId::SortedRun(1)], 1),
+            ));
+        let later_id = Ulid::from_parts(2, 0);
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(Compaction::new(
+                later_id,
+                CompactionSpec::new(vec![SourceId::SortedRun(2)], 2),
+            ));
+
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fixture
+                .handler
+                .state()
+                .compactions()
+                .value
+                .get(&first_id)
+                .expect("missing first compaction")
+                .status(),
+            CompactionStatus::Scheduled
+        );
+        assert_eq!(
+            fixture
+                .handler
+                .state()
+                .compactions()
+                .value
+                .get(&later_id)
+                .expect("missing submitted compaction")
+                .status(),
+            CompactionStatus::Failed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_validate_submitted_compactions_fails_shared_destination() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let root_l0 = bounded_sst_view(1, b"a", b"b");
+        let segment_l0 = bounded_sst_view(2, b"c", b"d");
+        let segment = Bytes::from_static(b"seg/");
+        let core = &mut fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core;
+        Arc::make_mut(&mut core.tree).l0 = VecDeque::from([root_l0.clone()]);
+        core.segments = vec![Segment {
+            prefix: segment.clone(),
+            tree: Arc::new(LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from([segment_l0.clone()]),
+                compacted: Vec::new(),
+            }),
+        }];
+
+        let first_id = Ulid::from_parts(1, 0);
+        fixture.handler.state_mut().insert_compaction_for_test(
+            Compaction::new(
+                first_id,
+                CompactionSpec::new(vec![SourceId::SstView(root_l0.id)], 0),
+            )
+            .with_status(CompactionStatus::Scheduled),
+        );
+        let later_id = Ulid::from_parts(2, 0);
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(Compaction::new(
+                later_id,
+                CompactionSpec::for_segment(segment, vec![SourceId::SstView(segment_l0.id)], 0),
+            ));
+
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fixture
+                .handler
+                .state()
+                .compactions()
+                .value
+                .get(&later_id)
+                .expect("missing submitted compaction")
+                .status(),
+            CompactionStatus::Failed
         );
     }
 
