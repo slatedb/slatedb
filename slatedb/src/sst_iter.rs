@@ -78,7 +78,7 @@ impl SstView<'_> {
         }
     }
 
-    /// The view's bounds, cloned by refcount rather than copied.
+    /// The view's bounds.
     fn bounds(&self) -> (Bound<Bytes>, Bound<Bytes>) {
         match self {
             SstView::Owned(_, r) | SstView::Borrowed(_, r) => (
@@ -878,21 +878,15 @@ impl<'a> SstIterator<'a> {
         let prefix = internal.options.prefix.clone();
         let range = internal.view().bounds();
         let filter_context = internal.options.filter_context.clone();
-        if let Some(stats) = &db_stats {
-            let considered = match (&point_key, &prefix) {
-                (Some(_), _) => &stats.sst_iterators_created_point,
-                (None, Some(_)) => &stats.sst_iterators_created_prefix,
-                (None, None) => &stats.sst_iterators_created_range,
-            };
-            considered.increment(1);
-        }
         let filter_evaluator = match (point_key, prefix, range) {
             (Some(key), _, _) => Some(FilterEvaluator::new_point(key, filter_context, db_stats)),
             (None, Some(p), _) => Some(FilterEvaluator::new_prefix(p, filter_context, db_stats)),
-            (None, None, (lower, upper)) if filter_context.is_some() => Some(
-                FilterEvaluator::new_range(lower, upper, filter_context, db_stats),
-            ),
-            (None, None, _) => None,
+            (None, None, (lower, upper)) => Some(FilterEvaluator::new_range(
+                lower,
+                upper,
+                filter_context,
+                db_stats,
+            )),
         };
         let delegate = match filter_evaluator {
             Some(fe) => SstIteratorDelegate::Filter(FilterIterator::new(internal, fe)),
@@ -1128,7 +1122,9 @@ mod tests {
     use crate::db_cache::SplitCache;
     use crate::db_state::{SsTableId, SsTableView};
     use crate::db_stats::DbStats;
-    use crate::filter_policy::{BloomFilterPolicy, Filter, FilterQuery};
+    use crate::filter_policy::{
+        BloomFilterPolicy, Filter, FilterBuilder, FilterPolicy, FilterQuery,
+    };
     use crate::format::sst::SsTableFormat;
     use crate::sst_builder::BlockFormat;
     use crate::tablestore::TableStoreKind;
@@ -2915,24 +2911,26 @@ mod tests {
     }
 
     /// A [`Filter`] backed by a closure, so a test can express a verdict rule
-    /// without the encode and caching plumbing a real policy needs.
-    struct TestFilter(Box<dyn Fn(&FilterQuery) -> bool + Send + Sync>);
+    /// without a real filter's encoding. The rule lives in the closure, so
+    /// `encode` writes a placeholder byte and a policy's `decode` rebuilds the
+    /// rule rather than reading it back.
+    struct TestFilter(Arc<dyn Fn(&FilterQuery) -> bool + Send + Sync>);
 
     impl Filter for TestFilter {
         fn might_match(&self, query: &FilterQuery) -> bool {
             (self.0)(query)
         }
 
-        fn encode(&self, _writer: &mut dyn bytes::BufMut) {
-            unreachable!("test filters are never serialized")
+        fn encode(&self, writer: &mut dyn bytes::BufMut) {
+            writer.put_u8(0);
         }
 
         fn size(&self) -> usize {
-            0
+            1
         }
 
         fn clamp_allocated_size(&self) -> Arc<dyn Filter> {
-            unreachable!("test filters are never cached")
+            Arc::new(Self(Arc::clone(&self.0)))
         }
     }
 
@@ -2942,7 +2940,7 @@ mod tests {
     ) -> NamedFilter {
         NamedFilter {
             name: name.to_string(),
-            filter: Arc::new(TestFilter(Box::new(verdict))),
+            filter: Arc::new(TestFilter(Arc::new(verdict))),
         }
     }
 
@@ -3119,53 +3117,76 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn should_evaluate_range_filters_only_when_a_context_is_supplied() {
-        for (filter_context, expect_verdict) in [(context(0), true), (None, false)] {
-            let (recorder, db_stats) = stats();
-            let table_store = bloom_filter_enabled_table_store(10);
-            let table = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
-            let options = SstIteratorOptions {
-                filter_context,
-                ..Default::default()
-            };
+    /// A policy whose filter rejects every range query, registered on a real
+    /// table store so a scan is pruned end to end.
+    struct RangeCapablePolicy;
 
-            let iter = SstIterator::new_owned_initialized_with_stats(
-                ..,
-                table,
-                table_store,
-                options,
-                Some(db_stats),
-            )
-            .await
-            .unwrap();
-            assert!(
-                iter.is_some(),
-                "a bloom filter abstains on ranges, so the SST stays readable"
-            );
+    struct RangeCapableBuilder;
 
-            let (positives, negatives, _) = verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE);
-            let expected = if expect_verdict {
-                (Some(1), Some(0))
-            } else {
-                (Some(0), Some(0))
-            };
-            assert_eq!(
-                (positives, negatives),
-                expected,
-                "context supplied: {expect_verdict}"
-            );
+    impl FilterBuilder for RangeCapableBuilder {
+        fn add_entry(&mut self, _entry: &RowEntry) {}
 
-            // Counted either way, which is what makes it a denominator that
-            // spans filtered and unfiltered reads.
-            assert_eq!(
-                metric(
-                    &recorder,
-                    crate::db_stats::SST_ITERATORS_CREATED,
-                    crate::db_stats::FILTER_KIND_RANGE
-                ),
-                Some(1)
-            );
+        fn build(&mut self) -> Arc<dyn Filter> {
+            Arc::new(TestFilter(Arc::new(|query: &FilterQuery| {
+                !matches!(query.target, FilterTarget::Range { .. })
+            })))
         }
+    }
+
+    impl FilterPolicy for RangeCapablePolicy {
+        fn name(&self) -> &str {
+            "test.range_capable"
+        }
+
+        fn builder(&self) -> Box<dyn FilterBuilder> {
+            Box::new(RangeCapableBuilder)
+        }
+
+        fn decode(&self, _data: &[u8]) -> Arc<dyn Filter> {
+            RangeCapableBuilder.build()
+        }
+
+        fn estimate_size(&self, _num_keys: usize) -> usize {
+            1
+        }
+    }
+
+    #[tokio::test]
+    async fn should_skip_sst_when_a_range_capable_policy_rejects() {
+        let (recorder, db_stats) = stats();
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            filter_policies: vec![Arc::new(RangeCapablePolicy)],
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path,
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let table = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
+
+        // No filter context: this policy reasons from the target alone.
+        let iter = SstIterator::new_owned_initialized_with_stats(
+            ..,
+            table,
+            table_store,
+            SstIteratorOptions::default(),
+            Some(db_stats),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            iter.is_none(),
+            "the policy rejects every range, so the SST is skipped"
+        );
+        let (positives, negatives, _) = verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE);
+        assert_eq!((positives, negatives), (Some(0), Some(1)));
     }
 }

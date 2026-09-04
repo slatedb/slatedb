@@ -34,11 +34,6 @@ pub const L0_FLUSH_BYTES: &str = db_stat_name!("l0_flush_bytes");
 pub const SST_FILTER_FALSE_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_false_positive_count");
 pub const SST_FILTER_POSITIVE_COUNT: &str = db_stat_name!("sst_filter_positive_count");
 pub const SST_FILTER_NEGATIVE_COUNT: &str = db_stat_name!("sst_filter_negative_count");
-/// SST iterators built on a read path, counted before any filter verdict, so
-/// SSTs considered rather than SSTs opened. Labelled by read shape with
-/// [`FILTER_KIND_LABEL`]. Subtract the same-`kind`
-/// [`SST_FILTER_NEGATIVE_COUNT`] for the number actually opened.
-pub const SST_ITERATORS_CREATED: &str = db_stat_name!("sst_iterators_created");
 /// Size of key value pairs inserted into the memtable after batch merge operators and overwrites
 /// are collapsed.
 /// Use as denominator to calculate write amplification:
@@ -64,9 +59,6 @@ pub(crate) struct DbStatsInner {
     pub(crate) sst_filter_range_false_positives: Arc<dyn CounterFn>,
     pub(crate) sst_filter_range_positives: Arc<dyn CounterFn>,
     pub(crate) sst_filter_range_negatives: Arc<dyn CounterFn>,
-    pub(crate) sst_iterators_created_point: Arc<dyn CounterFn>,
-    pub(crate) sst_iterators_created_prefix: Arc<dyn CounterFn>,
-    pub(crate) sst_iterators_created_range: Arc<dyn CounterFn>,
     pub(crate) backpressure_count: Arc<dyn CounterFn>,
     pub(crate) l0_stall_count_num_ssts: Arc<dyn CounterFn>,
     pub(crate) l0_stall_count_num_ssts_per_key: Arc<dyn CounterFn>,
@@ -140,18 +132,6 @@ impl DbStats {
                 .register(),
             sst_filter_range_negatives: recorder
                 .counter(SST_FILTER_NEGATIVE_COUNT)
-                .labels(&[(FILTER_KIND_LABEL, FILTER_KIND_RANGE)])
-                .register(),
-            sst_iterators_created_point: recorder
-                .counter(SST_ITERATORS_CREATED)
-                .labels(&[(FILTER_KIND_LABEL, FILTER_KIND_POINT)])
-                .register(),
-            sst_iterators_created_prefix: recorder
-                .counter(SST_ITERATORS_CREATED)
-                .labels(&[(FILTER_KIND_LABEL, FILTER_KIND_PREFIX)])
-                .register(),
-            sst_iterators_created_range: recorder
-                .counter(SST_ITERATORS_CREATED)
                 .labels(&[(FILTER_KIND_LABEL, FILTER_KIND_RANGE)])
                 .register(),
             backpressure_count: recorder.counter(BACKPRESSURE_COUNT).register(),

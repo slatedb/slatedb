@@ -99,7 +99,6 @@ pub struct FilterQuery {
 
 /// The target of a filter query.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum FilterTarget {
     /// Tests whether a specific key might exist in the SST.
     Point(Bytes),
