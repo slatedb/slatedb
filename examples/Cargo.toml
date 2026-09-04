@@ -111,12 +111,20 @@ path = "src/standalone_garbage_collector.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "read_tracing"
+path = "src/read_tracing.rs"
+test = false
+bench = false
+
 [dependencies]
 anyhow.workspace = true
 object_store = { workspace = true, features = ["azure", "gcp"] }
 slatedb.workspace = true
 tokio = { workspace = true, features = ["macros", "signal"] }
 tracing-subscriber.workspace = true
+tracing-chrome = "0.7.2"
+tracing = "0.1.44"
 
 [lints]
 workspace = true

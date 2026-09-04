@@ -69,17 +69,17 @@ impl TryFrom<SerializedCachedKey> for CachedKey {
     fn try_from(value: SerializedCachedKey) -> Result<Self, Self::Error> {
         Ok(match value {
             SerializedCachedKey::V1(sst_id, block_id) => CachedKey {
-                scope_id: 0,
+                db_cache_id: 0,
                 sst_id: sst_id.try_into()?,
                 block_id,
             },
-            SerializedCachedKey::V2(scope_id, sst_id, block_id) => CachedKey {
-                scope_id,
+            SerializedCachedKey::V2(db_cache_id, sst_id, block_id) => CachedKey {
+                db_cache_id,
                 sst_id: sst_id.try_into()?,
                 block_id,
             },
-            SerializedCachedKey::V3(scope_id, sst_id, block_id) => CachedKey {
-                scope_id,
+            SerializedCachedKey::V3(db_cache_id, sst_id, block_id) => CachedKey {
+                db_cache_id,
                 sst_id: sst_id.into(),
                 block_id,
             },
@@ -89,7 +89,7 @@ impl TryFrom<SerializedCachedKey> for CachedKey {
 
 impl From<CachedKey> for SerializedCachedKey {
     fn from(value: CachedKey) -> Self {
-        SerializedCachedKey::V3(value.scope_id, value.sst_id.into(), value.block_id)
+        SerializedCachedKey::V3(value.db_cache_id, value.sst_id.into(), value.block_id)
     }
 }
 
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn test_should_serialize_deserialize_compacted_sst_key() {
         let key = CachedKey {
-            scope_id: 0,
+            db_cache_id: 0,
             sst_id: SsTableId::from(Ulid::from((123, 456))),
             block_id: 99,
         };
@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn test_should_serialize_cached_key_as_v3() {
         let key = CachedKey {
-            scope_id: 5,
+            db_cache_id: 5,
             sst_id: SsTableId::from(Ulid::from_parts(123, 0)),
             block_id: 99,
         };
@@ -310,8 +310,8 @@ mod tests {
         let decoded: SerializedCachedKey = bincode::deserialize(&encoded).unwrap();
 
         match decoded {
-            SerializedCachedKey::V3(scope_id, SerializedSsTableId(sst_id), block_id) => {
-                assert_eq!(scope_id, key.scope_id);
+            SerializedCachedKey::V3(db_cache_id, SerializedSsTableId(sst_id), block_id) => {
+                assert_eq!(db_cache_id, key.db_cache_id);
                 assert_eq!(sst_id, key.sst_id.value());
                 assert_eq!(block_id, key.block_id);
             }
@@ -323,12 +323,12 @@ mod tests {
     fn test_should_deserialize_legacy_compacted_sst_keys() {
         let sst_id = Ulid::from((123, 456));
         let expected_v1 = CachedKey {
-            scope_id: 0,
+            db_cache_id: 0,
             sst_id: SsTableId::from(sst_id),
             block_id: 98,
         };
         let expected_v2 = CachedKey {
-            scope_id: 5,
+            db_cache_id: 5,
             sst_id: SsTableId::from(sst_id),
             block_id: 99,
         };
@@ -339,7 +339,7 @@ mod tests {
         ))
         .unwrap();
         let encoded_v2 = bincode::serialize(&LegacySerializedCachedKey::V2(
-            expected_v2.scope_id,
+            expected_v2.db_cache_id,
             LegacySerializedSsTableOrWalId::Compacted(sst_id),
             expected_v2.block_id,
         ))
