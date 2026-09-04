@@ -107,6 +107,7 @@ impl TableStore {
                 ObjectStoreCallTag::new(self.kind, SstType::from(&id)),
             ),
             table_store: self.clone(),
+            bytes_written: 0,
             #[cfg(test)]
             blocks_written: 0,
         }
@@ -116,6 +117,7 @@ impl TableStore {
         self.sst_format.table_builder()
     }
 
+    #[cfg(test)]
     pub(crate) async fn write_sst(
         &self,
         id: &SsTableId,
@@ -898,6 +900,7 @@ fn tagged_buf_writer(
     BufWriter::new(object_store, path).with_extensions(tag.into())
 }
 
+#[cfg(test)]
 async fn write_sst_streaming_in_object_store(
     object_store: Arc<dyn ObjectStore>,
     path: &Path,
@@ -918,6 +921,7 @@ pub(crate) struct EncodedSsTableWriter {
     builder: EncodedSsTableBuilder,
     writer: BufWriter,
     table_store: Arc<TableStore>,
+    bytes_written: usize,
     #[cfg(test)]
     blocks_written: usize,
 }
@@ -932,12 +936,53 @@ impl EncodedSsTableWriter {
         Ok(block_size)
     }
 
-    pub(crate) async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
-        let encoded_sst = self.builder.build().await?;
+    pub(crate) async fn close(self) -> Result<SsTableHandle, SlateDBError> {
+        self.close_and_count_bytes().await.map(|(handle, _)| handle)
+    }
+
+    /// Finish this SST: write the last block, write the footer, close
+    /// the upload.
+    ///
+    /// On success, returns the finished SST handle and the exact
+    /// number of bytes written.
+    ///
+    /// On failure, aborts the upload before returning the error. This
+    /// discards any blocks already sent to object storage for this
+    /// SST.
+    pub(crate) async fn close_and_count_bytes(
+        mut self,
+    ) -> Result<(SsTableHandle, u64), SlateDBError> {
+        match self.close_inner().await {
+            Ok(result) => Ok(result),
+            Err(e) => {
+                if let Err(abort_err) = self.writer.abort().await {
+                    warn!(
+                        "failed to abort sst writer after error [id={:?}, error={:?}]",
+                        self.id, abort_err
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Build the final block, write every block and the footer to
+    /// object storage, then record this SST's blocks in the read
+    /// cache.
+    async fn close_inner(&mut self) -> Result<(SsTableHandle, u64), SlateDBError> {
+        fail_point!(
+            self.table_store.fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            |_| Err(slatedb_io_error())
+        );
+        let builder = std::mem::replace(&mut self.builder, self.table_store.table_builder());
+        let encoded_sst = builder.build().await?;
         for block in &encoded_sst.unconsumed_blocks {
             self.writer.write_all(block.encoded_bytes.as_ref()).await?;
+            self.bytes_written += block.encoded_bytes.len();
         }
         self.writer.write_all(encoded_sst.footer.as_ref()).await?;
+        self.bytes_written += encoded_sst.footer.len();
         self.writer.shutdown().await?;
 
         // Cache inserts happen after writer shutdown so an SST whose upload
@@ -949,11 +994,23 @@ impl EncodedSsTableWriter {
         self.table_store
             .cache_on_sst_write(self.id, &encoded_sst)
             .await;
-        Ok(SsTableHandle::new(
-            self.id,
-            encoded_sst.format_version,
-            encoded_sst.info,
+        Ok((
+            SsTableHandle::new(self.id, encoded_sst.format_version, encoded_sst.info),
+            self.bytes_written as u64,
         ))
+    }
+
+    /// Tell object storage to discard this SST's upload.
+    ///
+    /// If the upload never grew past the small in-memory buffer,
+    /// nothing reached object storage yet, so this is a no-op.
+    /// Otherwise this cancels the multipart upload and asks object
+    /// storage to delete the parts already stored.
+    pub(crate) async fn abort(&mut self) -> Result<(), SlateDBError> {
+        self.writer
+            .abort()
+            .await
+            .map_err(|e| SlateDBError::ObjectStoreError(Arc::new(e)))
     }
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {
@@ -968,7 +1025,13 @@ impl EncodedSsTableWriter {
     }
 
     async fn write_block(&mut self, block: EncodedSsTableBlock) -> Result<(), SlateDBError> {
+        fail_point!(
+            self.table_store.fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            |_| Err(slatedb_io_error())
+        );
         self.writer.write_all(block.encoded_bytes.as_ref()).await?;
+        self.bytes_written += block.encoded_bytes.len();
         if let (Some(cache), Some(key_span)) = (&self.table_store.cache, &block.key_span) {
             let targets = self.table_store.targets_to_cache(&self.id);
             if should_cache_data_block(targets, key_span) {

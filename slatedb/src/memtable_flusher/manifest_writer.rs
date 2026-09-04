@@ -1831,6 +1831,7 @@ mod tests {
             segments.push(SegmentedSstHandle {
                 prefix: Bytes::copy_from_slice(prefix),
                 sst_handle,
+                encoded_bytes: encoded_sst.remaining_len() as u64,
             });
         }
         inner.oracle.advance_durable_seq(last_seq);
