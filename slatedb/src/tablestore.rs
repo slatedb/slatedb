@@ -167,9 +167,6 @@ impl TableStore {
             return;
         };
         let targets = self.targets_to_cache(&sst_table_id);
-        if targets.is_empty() {
-            return;
-        }
         for block in &encoded_sst.unconsumed_blocks {
             // Blocks without a tracked key span (WAL blocks) are never cached.
             let Some(key_span) = &block.key_span else {
@@ -842,7 +839,8 @@ impl TableStore {
     }
 
     /// Best-effort removal of all cache entries associated with the given SST:
-    /// data blocks, index, filters, and stats.
+    /// data blocks, index, filters, and stats. Returns the offsets whose
+    /// cache removal was attempted.
     pub(crate) async fn evict_sst_from_cache(&self, handle: &SsTableHandle) {
         let Some(ref cache) = self.cache else {
             return;
