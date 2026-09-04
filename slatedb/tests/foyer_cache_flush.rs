@@ -35,7 +35,7 @@ use object_store::{
 };
 use slatedb::config::{FlushOptions, FlushType, Settings, WriteOptions};
 use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
-use slatedb::db_cache::{CacheTarget, CachedEntry, DbCache, DbCacheAndScope};
+use slatedb::db_cache::{CacheTarget, CachedEntry, DbCache};
 use slatedb::{BlockCachePolicy, Db, DbCacheManagerOps, DbReader};
 use tempfile::TempDir;
 
@@ -224,7 +224,7 @@ async fn flush_frees_memory_and_serves_from_disk_without_new_gets() {
     let object_store = Arc::new(CountingObjectStore::new(Arc::new(InMemory::new())));
     let db = Db::builder("/evac-test", object_store.clone() as Arc<dyn ObjectStore>)
         .with_settings(no_periodic_flush())
-        .with_db_cache(DbCacheAndScope::new(cache, 1))
+        .with_db_cache(cache, 1)
         .build()
         .await
         .expect("failed to open db");
@@ -303,7 +303,7 @@ async fn flush_is_a_noop_with_nothing_resident() {
         // The default policy caches flush output; disable it so this test's
         // starting point is actually an empty cache.
         .with_block_cache_policy(BlockCachePolicy::default().with_flush_targets(&[]))
-        .with_db_cache(DbCacheAndScope::new(cache, 1))
+        .with_db_cache(cache, 1)
         .build()
         .await
         .expect("failed to open db");
@@ -358,13 +358,13 @@ async fn flush_and_close_one_db_does_not_disturb_a_sibling_on_the_same_cache() {
 
     let db_a = Db::builder(PATH_A, object_store.clone() as Arc<dyn ObjectStore>)
         .with_settings(no_periodic_flush())
-        .with_db_cache(DbCacheAndScope::new(cache.clone(), SCOPE_A))
+        .with_db_cache(cache.clone(), SCOPE_A)
         .build()
         .await
         .expect("failed to open db_a");
     let db_b = Db::builder(PATH_B, object_store.clone() as Arc<dyn ObjectStore>)
         .with_settings(no_periodic_flush())
-        .with_db_cache(DbCacheAndScope::new(cache.clone(), SCOPE_B))
+        .with_db_cache(cache.clone(), SCOPE_B)
         .build()
         .await
         .expect("failed to open db_b");
@@ -416,7 +416,7 @@ async fn flush_and_close_one_db_does_not_disturb_a_sibling_on_the_same_cache() {
     // rather than memory.
     let db_a2 = Db::builder(PATH_A, object_store.clone() as Arc<dyn ObjectStore>)
         .with_settings(no_periodic_flush())
-        .with_db_cache(DbCacheAndScope::new(cache, SCOPE_A))
+        .with_db_cache(cache, SCOPE_A)
         .build()
         .await
         .expect("failed to reopen db_a");
@@ -453,7 +453,7 @@ async fn reopening_a_new_db_instance_with_the_same_scope_id_recovers_the_flushed
 
     let db1 = Db::builder(PATH, object_store.clone() as Arc<dyn ObjectStore>)
         .with_settings(no_periodic_flush())
-        .with_db_cache(DbCacheAndScope::new(cache.clone(), SCOPE))
+        .with_db_cache(cache.clone(), SCOPE)
         .build()
         .await
         .expect("failed to open db1");
@@ -496,7 +496,7 @@ async fn reopening_a_new_db_instance_with_the_same_scope_id_recovers_the_flushed
     // would, from its own durable per-task identity.
     let db2 = Db::builder(PATH, object_store.clone() as Arc<dyn ObjectStore>)
         .with_settings(no_periodic_flush())
-        .with_db_cache(DbCacheAndScope::new(cache, SCOPE))
+        .with_db_cache(cache, SCOPE)
         .build()
         .await
         .expect("failed to reopen db2");
@@ -540,7 +540,7 @@ async fn flush_does_not_read_the_index_of_untouched_ssts() {
     // Disable flush-time caching so the only way an SST becomes "touched" is
     // by actually being read, isolating the signal this test checks.
     .with_block_cache_policy(BlockCachePolicy::default().with_flush_targets(&[]))
-    .with_db_cache(DbCacheAndScope::new(cache, 1))
+    .with_db_cache(cache, 1)
     .build()
     .await
     .expect("failed to open db");
@@ -613,7 +613,7 @@ async fn flush_from_a_reader_flushes_the_shared_scope_including_the_live_writers
 
     let db = Db::builder(PATH, object_store.clone() as Arc<dyn ObjectStore>)
         .with_settings(no_periodic_flush())
-        .with_db_cache(DbCacheAndScope::new(cache.clone(), SCOPE))
+        .with_db_cache(cache.clone(), SCOPE)
         .build()
         .await
         .expect("failed to open db");
@@ -628,7 +628,7 @@ async fn flush_from_a_reader_flushes_the_shared_scope_including_the_live_writers
     read_keys(&db, N).await;
 
     let reader = DbReader::builder(PATH, object_store.clone() as Arc<dyn ObjectStore>)
-        .with_db_cache(DbCacheAndScope::new(cache, SCOPE))
+        .with_db_cache(cache, SCOPE)
         .build()
         .await
         .expect("failed to open reader");

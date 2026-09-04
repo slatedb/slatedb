@@ -25,7 +25,7 @@ use slatedb::config::{
     DurabilityLevel, FlushOptions, FlushType, PutOptions, ScanOptions, Settings, WriteOptions,
 };
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
-use slatedb::db_cache::{DbCacheAndScope, SplitCache};
+use slatedb::db_cache::SplitCache;
 use slatedb::{BloomFilterPolicy, Db, FilterPolicy, PrefixExtractor, PrefixTarget};
 use tokio::runtime::Runtime;
 
@@ -200,7 +200,7 @@ async fn build_db(path: &str, filter_policies: Vec<Arc<dyn FilterPolicy>>) -> Be
     let store = make_throttled_store();
     let db = Db::builder(path, store.clone())
         .with_settings(base_settings())
-        .with_db_cache(DbCacheAndScope::new(meta_only_cache(), 0))
+        .with_db_cache(meta_only_cache(), 0)
         .with_filter_policies(filter_policies)
         .build()
         .await

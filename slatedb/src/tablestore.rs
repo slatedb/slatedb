@@ -942,21 +942,20 @@ impl EncodedSsTableWriter {
         self.writer.write_all(encoded_sst.footer.as_ref()).await?;
         self.writer.shutdown().await?;
 
-        let handle = SsTableHandle::new(
-            self.id,
-            encoded_sst.format_version,
-            encoded_sst.info.clone(),
-        );
         // Cache inserts happen after writer shutdown so an SST whose upload
         // fails contributes no metadata entries.
         //
         // Blocks drained while entries were added are cached by `write_block`,
         // so the only data block left for `cache_on_sst_write` is the tail
-        // block `build` finished.
+        // block that `build` finished.
         self.table_store
-            .cache_on_sst_write(handle.id, &encoded_sst)
+            .cache_on_sst_write(self.id, &encoded_sst)
             .await;
-        Ok(handle)
+        Ok(SsTableHandle::new(
+            self.id,
+            encoded_sst.format_version,
+            encoded_sst.info,
+        ))
     }
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {

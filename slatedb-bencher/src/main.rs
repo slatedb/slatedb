@@ -19,7 +19,6 @@ use object_store::PutResult;
 use slatedb::admin;
 use slatedb::compaction_execute_bench::CompactionExecuteBench;
 use slatedb::config::WriteOptions;
-use slatedb::db_cache::DbCacheAndScope;
 use slatedb::Db;
 use std::error::Error;
 use std::sync::Arc;
@@ -89,7 +88,7 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
     let mut builder = Db::builder(path.clone(), object_store.clone()).with_settings(config);
 
     if let Some(memory_cache) = memory_cache {
-        builder = builder.with_db_cache(DbCacheAndScope::new(memory_cache, 0));
+        builder = builder.with_db_cache(memory_cache, 0);
     }
 
     let db = Arc::new(builder.build().await.unwrap());
@@ -160,7 +159,7 @@ async fn exec_benchmark_transaction(
     let mut builder = Db::builder(path.clone(), object_store.clone()).with_settings(config);
 
     if let Some(memory_cache) = memory_cache {
-        builder = builder.with_db_cache(DbCacheAndScope::new(memory_cache, 0));
+        builder = builder.with_db_cache(memory_cache, 0);
     }
 
     let db = Arc::new(builder.build().await.unwrap());

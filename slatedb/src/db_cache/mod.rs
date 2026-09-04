@@ -63,7 +63,7 @@ pub type CacheLoader =
 /// ```
 /// use async_trait::async_trait;
 /// use slatedb::{Db, Error};
-/// use slatedb::db_cache::{DbCache, DbCacheAndScope, CachedEntry, CachedKey};
+/// use slatedb::db_cache::{DbCache, CachedEntry, CachedKey};
 /// use slatedb::object_store::memory::InMemory;
 /// use std::collections::HashMap;
 /// use std::sync::{Arc, Mutex};
@@ -140,7 +140,7 @@ pub type CacheLoader =
 ///     let object_store = Arc::new(InMemory::new());
 ///     let cache = Arc::new(MyCache::new(128u64 * 1024 * 1024));
 ///     let db = Db::builder("/path/to/db", object_store)
-///         .with_db_cache(DbCacheAndScope::new(cache, 0))
+///         .with_db_cache(cache, 0)
 ///         .build()
 ///         .await;
 /// }
@@ -174,7 +174,7 @@ pub trait DbCache: Send + Sync {
         Ok(())
     }
 
-    /// Move every entry for this scope from memory to disk.
+    /// Move every entry for this db_cache_id from memory to disk.
     async fn flush_scope(&self, db_cache_id: u64) -> Result<(), crate::Error> {
         let _ = db_cache_id;
         Ok(())
@@ -284,16 +284,16 @@ impl CacheTarget {
 
 /// A [`DbCache`] paired with the `db_cache_id` to use for it.
 ///
-/// Pass this to [`with_db_cache`](crate::db::builder::DbBuilder::with_db_cache). Keeping the
-/// cache and its scope together avoids passing them as two separate, easily-mismatched
-/// arguments.
-pub struct DbCacheAndScope {
+/// Built by [`with_db_cache`](crate::db::builder::DbBuilder::with_db_cache) to keep the
+/// cache and its id together internally, instead of passing them around as two separate,
+/// easily-mismatched fields.
+pub(crate) struct DbCacheAndScope {
     pub cache: Arc<dyn DbCache>,
     pub db_cache_id: u64,
 }
 
 impl DbCacheAndScope {
-    pub fn new(cache: Arc<dyn DbCache>, db_cache_id: u64) -> Self {
+    pub(crate) fn new(cache: Arc<dyn DbCache>, db_cache_id: u64) -> Self {
         Self { cache, db_cache_id }
     }
 }

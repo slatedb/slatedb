@@ -47,7 +47,6 @@
 //!
 //! ```
 //! use slatedb::{Db, Error};
-//! use slatedb::db_cache::DbCacheAndScope;
 //! use slatedb::db_cache::foyer::FoyerCache;
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
@@ -56,7 +55,7 @@
 //! async fn main() -> Result<(), Error> {
 //!     let object_store = Arc::new(InMemory::new());
 //!     let db = Db::builder("test_db", object_store)
-//!         .with_db_cache(DbCacheAndScope::new(Arc::new(FoyerCache::new()), 0))
+//!         .with_db_cache(Arc::new(FoyerCache::new()), 0)
 //!         .build()
 //!         .await?;
 //!     Ok(())
@@ -289,12 +288,12 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// `db_cache_id` isolates this database's entries from any other `Db`/`DbReader` sharing
     /// the same cache. Each database should have its own unique `db_cache_id`. The ID can be
     /// reused by the database when it's re-opened to recover any persisted cache data.
-    pub fn with_db_cache(mut self, db_cache: DbCacheAndScope) -> Self {
+    pub fn with_db_cache(mut self, db_cache: Arc<dyn DbCache>, db_cache_id: u64) -> Self {
         // Wrap so Db::close()/DbReader::close() can't close a cache the
         // caller owns and may be sharing with other instances.
         self.db_cache = Some(DbCacheAndScope::new(
-            Arc::new(UnownedDbCache::new(db_cache.cache)),
-            db_cache.db_cache_id,
+            Arc::new(UnownedDbCache::new(db_cache)),
+            db_cache_id,
         ));
         self
     }
@@ -1788,12 +1787,12 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// `db_cache_id` isolates this reader's entries from any other `Db`/`DbReader` sharing
     /// the same cache. Pass the same id as the `Db` it's reading, or the same ID as a prior open
     /// of this same reader, to share/recover persisted entries.
-    pub fn with_db_cache(mut self, db_cache: DbCacheAndScope) -> Self {
+    pub fn with_db_cache(mut self, db_cache: Arc<dyn DbCache>, db_cache_id: u64) -> Self {
         // Wrap so Db::close()/DbReader::close() can't close a cache the
         // caller owns and may be sharing with other instances.
         self.db_cache = Some(DbCacheAndScope::new(
-            Arc::new(UnownedDbCache::new(db_cache.cache)),
-            db_cache.db_cache_id,
+            Arc::new(UnownedDbCache::new(db_cache)),
+            db_cache_id,
         ));
         self
     }

@@ -35,7 +35,6 @@
 //! };
 //! use slatedb::Db;
 //! use slatedb::db_cache::CachedEntry;
-//! use slatedb::db_cache::DbCacheAndScope;
 //! use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
 //! use slatedb::object_store::memory::InMemory;
 //! use std::sync::Arc;
@@ -63,7 +62,7 @@
 //!         .unwrap();
 //!     let cache = Arc::new(FoyerHybridCache::new_with_cache(cache));
 //!     let db = Db::builder("path/to/db", object_store)
-//!         .with_db_cache(DbCacheAndScope::new(cache, 0))
+//!         .with_db_cache(cache, 0)
 //!         .build()
 //!         .await
 //!         .unwrap();

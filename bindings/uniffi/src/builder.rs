@@ -76,13 +76,8 @@ impl DbBuilder {
     /// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
     /// uniqueness and stability across reopens.
     pub fn with_db_cache(&self, db_cache: Arc<DbCache>, db_cache_id: u64) -> Result<(), Error> {
-        self.update_builder(|builder| {
-            builder.with_db_cache(slatedb::db_cache::DbCacheAndScope::new(
-                db_cache.inner.clone(),
-                db_cache_id,
-            ))
-        })
-        .map_err(Into::into)
+        self.update_builder(|builder| builder.with_db_cache(db_cache.inner.clone(), db_cache_id))
+            .map_err(Into::into)
     }
 
     /// Sets the seed used for SlateDB's internal random number generation.
@@ -213,13 +208,8 @@ impl DbReaderBuilder {
     /// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
     /// uniqueness and stability across reopens.
     pub fn with_db_cache(&self, db_cache: Arc<DbCache>, db_cache_id: u64) -> Result<(), Error> {
-        self.update_builder(|builder| {
-            builder.with_db_cache(slatedb::db_cache::DbCacheAndScope::new(
-                db_cache.inner.clone(),
-                db_cache_id,
-            ))
-        })
-        .map_err(Into::into)
+        self.update_builder(|builder| builder.with_db_cache(db_cache.inner.clone(), db_cache_id))
+            .map_err(Into::into)
     }
 
     /// Installs an application-defined merge operator used while reading merge rows.
