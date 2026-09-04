@@ -1,3 +1,4 @@
+use std::error::Error as StdError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -58,6 +59,30 @@ pub(crate) enum SlateDbError {
 
     #[error("settings update produced invalid settings: {source}")]
     InvalidSettingsUpdate { source: serde_json::Error },
+
+    #[error("object store creation failed: {source}")]
+    ObjectStoreCreationError {
+        #[from]
+        source: Box<dyn StdError>,
+    },
+
+    #[error("invalid {provider} object store config key: {key}")]
+    InvalidObjectStoreConfigKey { provider: &'static str, key: String },
+
+    #[error("missing required {provider} object store config key: {key}")]
+    MissingObjectStoreConfigKey {
+        provider: &'static str,
+        key: &'static str,
+    },
+
+    #[error("invalid object store url {url:?}: {source}")]
+    InvalidObjectStoreUrl {
+        url: String,
+        source: url::ParseError,
+    },
+
+    #[error("unsupported object store scheme in url {url:?}")]
+    UnsupportedObjectStoreScheme { url: String },
 }
 
 /// Error returned by a foreign [`crate::MergeOperator`] implementation.
