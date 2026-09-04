@@ -6,6 +6,15 @@ What is being changed and why?
 
 -
 
+## AI-generated Code
+
+If you used AI to generate code, add one row for each model and effort level that you used.
+If you did not use AI, enter `N/A` in both columns.
+
+| Model | Effort |
+| --- | --- |
+|  |  |
+
 ## Notes for Reviewers
 
 Any hints on how to best review this PR? Anything you’d like reviewers to focus on? Any follow-ups planned?
