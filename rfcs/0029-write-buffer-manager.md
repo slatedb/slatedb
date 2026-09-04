@@ -62,12 +62,15 @@ WAL buffers. On the live write path a blocking `acquire` reserves budget for the
 batch's estimated size before dispatch, running an async `on_block` callback
 (`apply_memory_backpressure`) that frees budget while it waits; the returned RAII
 permit is released when the owning memtable or WAL buffer is dropped after flush.
-This byte budget **replaces** the old point-in-time `max_unflushed_bytes`
-snapshot backpressure mechanism entirely. A second, post-dispatch gate
-(`maybe_apply_l0_backpressure`) stalls the writer on compaction lag. The
-mechanism, its shared-manager safety, and the two gates are detailed in
-[Integration into the Write Path](#integration-into-the-write-path) and
-[Backpressure Enhancement](#backpressure-enhancement).
+Batches too large to ever fit — those whose estimated size exceeds the buffer
+capacity minus the irreducible baseline it always keeps reserved — are rejected
+up front with `SlateDBError::BatchTooLarge`, which returns the batch so the caller
+can split and retry. This byte budget **replaces** the old point-in-time
+`max_unflushed_bytes` snapshot backpressure mechanism entirely. A second,
+post-dispatch gate (`maybe_apply_l0_backpressure`) stalls the writer on
+compaction lag. The mechanism, its shared-manager safety, and the two gates are
+detailed in [Integration into the Write Path](#integration-into-the-write-path)
+and [Backpressure Enhancement](#backpressure-enhancement).
 
 Phase 2 (WIP) builds on the shareable `ByteBufferManager` to add an instance
 registry for intelligent, per-instance backpressure across DB instances that
@@ -250,6 +253,8 @@ sequenceDiagram
     participant MT as KVTable
 
     W->>DB: write_with_options(batch)
+    DB->>DB: reject BatchTooLarge if estimated_size > max_write_batch_size
+    Note over DB: max_write_batch_size = capacity minus irreducible baseline (memtable + WAL buffer)
     DB->>DB: acquire(estimated_size, on_block = apply_memory_backpressure)
     Note over DB: blocks while allocated >= capacity
     loop each park while at capacity
@@ -291,14 +296,30 @@ key/value data bytes themselves — only the `KVTable` does.
    value byte buffers** (the batch's new `estimated_size()`), not the
    `WriteBatch` struct, the dispatch channel, or other transient overhead.
 
-2. **`DbInner::write_with_options`** calls the blocking `acquire(estimated_size,
-   on_block = apply_memory_backpressure)` *before* dispatch. On the fast path
-   (allocation below `capacity`) it reserves immediately. At capacity it parks
-   and, before each park, runs `apply_memory_backpressure`, which freezes the
-   active memtable (only when the imm queue is empty, to seed a drainable imm)
-   and waits until allocation drains below `capacity`. It then reserves, attaches
-   the permit, and dispatches. After apply, the writer calls
-   `maybe_apply_l0_backpressure()` (see
+2. **`DbInner::write_with_options`** first rejects batches that can never be
+   admitted. The write buffer always keeps an *irreducible baseline* reserved:
+   the current active memtable's fixed overhead (`KVTable::BASE_OVERHEAD` — the
+   `SequenceTracker` pre-allocation plus the struct size), plus the current WAL
+   buffer's overhead (`WalBuffer::BASE_OVERHEAD`) when the WAL is enabled. Both
+   structures always exist, so a batch whose `estimated_size()` exceeds
+   `capacity - baseline` can never reserve its permit without pushing allocation
+   past `capacity`, no matter how much the flush pipeline drains. Such a batch is
+   rejected up front with `SlateDBError::BatchTooLarge { estimated_size,
+   max_size, batch }`, which returns the rejected batch so the caller can split
+   it and retry. This limit is constant for the life of the database (it depends
+   only on the buffer capacity and whether the WAL is enabled), so it is computed
+   once at construction and cached as `DbInner::max_write_batch_size`. The check
+   runs before `acquire`, so an oversized batch fails fast instead of
+   overshooting the budget.
+
+3. **`DbInner::write_with_options`** then calls the blocking
+   `acquire(estimated_size, on_block = apply_memory_backpressure)` *before*
+   dispatch. On the fast path (allocation below `capacity`) it reserves
+   immediately. At capacity it parks and, before each park, runs
+   `apply_memory_backpressure`, which freezes the active memtable (only when the
+   imm queue is empty, to seed a drainable imm) and waits until allocation drains
+   below `capacity`. It then reserves, attaches the permit, and dispatches. After
+   apply, the writer calls `maybe_apply_l0_backpressure()` (see
    [Backpressure Enhancement](#backpressure-enhancement)).
 
    Blocking before dispatch is safe because a parked writer has **not reserved
@@ -306,35 +327,49 @@ key/value data bytes themselves — only the `KVTable` does.
    park (relief is re-asserted if it raced the flusher), and every wait is
    bounded by close/fence or a 30s watchdog. Blocking gates *admission* rather
    than reclaiming memory — the batch's bytes already exist — so the budget
-   bounds how many in-flight writes accumulate.
+   bounds how many in-flight writes accumulate. Because the up-front check has
+   already rejected any batch larger than `capacity - baseline`, an admitted
+   batch is guaranteed to fit within capacity once the baseline is the only other
+   outstanding allocation.
 
-3. **`DbInner::write_batch`** is unchanged except that it merges the write permit
+4. **`DbInner::write_batch`** is unchanged except that it merges the write permit
    into the `KVTable`. It still runs the same size/WAL-based
    `maybe_freeze_current_memtable`; the byte-budget freeze is handled separately
    by `apply_memory_backpressure`.
 
-4. **`DbInner::write_entries_to_memtable`** takes the permit off the batch and
+5. **`DbInner::write_entries_to_memtable`** takes the permit off the batch and
    merges it into the table's own permit. From this point the `KVTable` owns the
    budget for those key/value bytes.
 
 ##### Worked Examples
 
-All three cases describe the actual behavior: the live path blocks in `acquire`
-(running `apply_memory_backpressure` on each park) until it can reserve below
-capacity, then dispatches, applies, and runs the post-dispatch L0 gate.
+The cases below describe the actual behavior: `write_with_options` first rejects
+any batch larger than `max_write_batch_size` (`capacity` minus the irreducible
+baseline), then the live path blocks in `acquire` (running
+`apply_memory_backpressure` on each park) until it can reserve below capacity,
+then dispatches, applies, and runs the post-dispatch L0 gate.
 
-- **10 MB batch, 1 MB budget (single write larger than the budget).** Allocation
-  starts at 0, so `acquire` reserves ~10 MB in one shot and returns immediately —
-  a single write is always admitted since it cannot be split and its bytes
-  already exist. The *next* write blocks, freezes the 10 MB active memtable via
-  `on_block`, and waits for the flush to drain below 1 MB.
+- **10 MB batch, 1 MB budget (single write larger than the budget).** The
+  baseline (memtable + WAL buffer overhead, ~128 KiB) leaves
+  `max_write_batch_size` well under 1 MB, so a 10 MB batch could never reserve
+  its permit without exceeding capacity. `write_with_options` rejects it up front
+  with `BatchTooLarge`, returning the batch so the caller can split it into
+  smaller batches (each below `max_write_batch_size`) and retry.
+- **800 KB batch, 1 MB budget (single write below the limit).** With a 1 MB
+  capacity the baseline (~128 KiB) leaves `max_write_batch_size` at ~896 KiB, so
+  the 800 KB batch is under the limit. Allocation starts at just the baseline, so
+  `acquire` reserves ~800 KB on the fast path and returns immediately. Allocation
+  is now ~950 KB — still below capacity — so the *next* in-limit write is also
+  admitted, soft-overshooting past 1 MB. Only once allocation reaches capacity
+  does a subsequent write block, freeze the active memtable via `on_block`, and
+  wait for the flush to drain below 1 MB.
 - **100 MB budget, 1 MB memtable (typical steady state).** `acquire(~1 MB)`
   reserves on the fast path — no freeze, no wait. The common case.
-- **100 MB budget, 99 MB outstanding (soft overshoot).** A ~2 MB write still
-  finds allocation below capacity, reserves, and pushes to ~101 MB (the
-  intentional overshoot of roughly one in-flight write). The *following* write
-  sees `allocated >= capacity`, blocks, freezes the active memtable, and parks
-  until flushes bring allocation back below 100 MB.
+- **100 MB budget, 99 MB outstanding (soft overshoot).** A ~2 MB write (below
+  `max_write_batch_size`) still finds allocation below capacity, reserves, and
+  pushes to ~101 MB (the intentional overshoot of roughly one in-flight write).
+  The *following* write sees `allocated >= capacity`, blocks, freezes the active
+  memtable, and parks until flushes bring allocation back below 100 MB.
 
 #### Memory Tracking Responsibilities
 
@@ -806,7 +841,16 @@ apply.
 - [x] Basic KV API (`get`/`put`/`delete`)
 - [ ] Range queries, iterators, seek semantics
 - [ ] Range deletions
-- [ ] Error model, API errors
+- [x] Error model, API errors
+
+Writes now have a new terminal failure mode: a batch whose estimated key/value
+size exceeds `max_write_batch_size` (the buffer `capacity` minus the irreducible
+memtable + WAL-buffer baseline) is rejected with `SlateDBError::BatchTooLarge {
+estimated_size, max_size, batch }` before any permit is acquired. Unlike
+backpressure (which blocks and eventually succeeds), this is a fast, deterministic
+rejection. The variant carries the rejected `WriteBatch` back to the caller so it
+can be split into smaller batches and retried. This is distinct from the existing
+`EmptyBatch` rejection and does not affect writes that fit within the limit.
 
 ### Consistency, Isolation, and Multi-Versioning
 
@@ -949,7 +993,10 @@ configured to drain L0.
   fenced, `total_mem_size_bytes` reflecting the manager's allocated bytes, and
   builder rejection of a manager whose capacity is below `MIN_WRITE_BUFFER_SIZE`
   (1 MiB), plus a check that `MIN_WRITE_BUFFER_SIZE` is itself sufficient for a
-  single write. WAL replay
+  single write. A dedicated test asserts that a batch whose estimated size
+  exceeds `max_write_batch_size` is rejected with `SlateDBError::BatchTooLarge`
+  (carrying the batch back) while a batch at the limit is still admitted. WAL
+  replay
   under a tight write-buffer budget confirms open does not deadlock when a
   single replayed table exceeds capacity (integrate → freeze → wait).
   Dedicated tests assert the L0 backpressure gates (`l0_at_capacity`,
@@ -1052,13 +1099,17 @@ simple and handles skewed workloads naturally.
 
 **Strict admission control (error or block-until-drained before admitting the write)**
 
-The adopted design still admits a single write even when it would push
-allocation past `capacity`: `acquire`'s fast path reserves the full request once
-allocation is *below* capacity, so a write can soft-overshoot by roughly one
-in-flight write's worth. In memory-constrained environments (e.g. a Kubernetes
-pod with a hard cgroup limit and an OOMKiller), that overshoot can be the
-difference between graceful backpressure and a killed process. A stricter mode
-would **reject** an incoming write with a retriable error once at capacity,
+The adopted design already rejects batches that can *never* fit — those larger
+than `max_write_batch_size` (`capacity` minus the irreducible baseline) — up
+front with `BatchTooLarge`. The discussion here is separate: it concerns
+*admissible* batches (those within `max_write_batch_size`) that still
+soft-overshoot `capacity`. The adopted design admits such a write even when it
+would push allocation past `capacity`: `acquire`'s fast path reserves the full
+request once allocation is *below* capacity, so a write can soft-overshoot by
+roughly one in-flight write's worth. In memory-constrained environments (e.g. a
+Kubernetes pod with a hard cgroup limit and an OOMKiller), that overshoot can be
+the difference between graceful backpressure and a killed process. A stricter
+mode would **reject** an incoming write with a retriable error once at capacity,
 rather than admitting the overshoot — trading availability/latency for a harder
 memory ceiling. This is attractive enough that we expect to offer it as an
 opt-in policy, but it is not the Phase 1 default because the `WriteBatch` bytes
@@ -1074,14 +1125,16 @@ not reclaim them. Tracked as an Open Question.
   e.g. at 80%, with hysteresis) was part of an earlier design but removed for
   now to keep configuration to a single threshold; it may be reintroduced as a
   future refinement if hysteresis proves necessary.
-- **Should there be a strict / error-returning mode?** The default admits a
-  single write even when it soft-overshoots `capacity` (the reservation succeeds
-  as long as allocation was below capacity) and blocks the *next* write. For
-  hard-limited environments (k8s cgroup + OOMKiller) an opt-in mode that returns
-  a retriable error once the budget is at capacity would give a firmer memory
-  ceiling at the cost of availability/latency. What is the right surface (a
-  `WriteOptions` flag, a builder-level policy) and semantics (error vs. block,
-  per-write vs. per-instance)? See [Alternatives](#alternatives).
+- **Should there be a strict / error-returning mode?** Distinct from the
+  `BatchTooLarge` rejection (which fails batches that can *never* fit, i.e. above
+  `max_write_batch_size`), the default still admits an *in-limit* write even when
+  it soft-overshoots `capacity` (the reservation succeeds as long as allocation
+  was below capacity) and blocks the *next* write. For hard-limited environments
+  (k8s cgroup + OOMKiller) an opt-in mode that returns a retriable error once the
+  budget is at capacity would give a firmer memory ceiling at the cost of
+  availability/latency. What is the right surface (a `WriteOptions` flag, a
+  builder-level policy) and semantics (error vs. block, per-write vs.
+  per-instance)? See [Alternatives](#alternatives).
 - **Should the transient L0 SST-build overhead be tracked at all, and if so, how?**
   Flushing a memtable transiently allocates roughly 2–3x its size to encode the
   output SST (encoder buffers, block builders, the output SST bytes) before the
