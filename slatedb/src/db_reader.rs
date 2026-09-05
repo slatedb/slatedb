@@ -111,6 +111,7 @@ impl WalReplayEnd {
 pub struct DbReader {
     inner: Arc<DbReaderInner>,
     task_executor: MessageHandlerExecutor,
+    refresh_tx: Option<async_channel::Sender<DbReaderMessage>>,
 }
 
 struct DbReaderInner {
@@ -136,6 +137,7 @@ struct DbReaderInner {
 #[derive(Debug)]
 enum DbReaderMessage {
     PollManifest,
+    Refresh(tokio::sync::oneshot::Sender<Result<(), SlateDBError>>),
 }
 
 #[derive(Clone)]
@@ -629,11 +631,11 @@ impl DbReaderInner {
     fn spawn_manifest_poller(
         self: &Arc<Self>,
         task_executor: &MessageHandlerExecutor,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<async_channel::Sender<DbReaderMessage>, SlateDBError> {
         let poller = ManifestPoller {
             inner: Arc::clone(self),
         };
-        let (_tx, rx) = async_channel::unbounded();
+        let (tx, rx) = async_channel::bounded(1);
         let result = task_executor.add_handler(
             DB_READER_TASK_NAME.to_string(),
             Box::new(poller),
@@ -641,7 +643,8 @@ impl DbReaderInner {
             &Handle::current(),
         );
         task_executor.monitor_on(&Handle::current())?;
-        result
+        result?;
+        Ok(tx)
     }
 
     /// The `(last replayed WAL id, last committed seq)` the reader has already
@@ -799,7 +802,32 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
     }
 
     async fn handle(&mut self, message: DbReaderMessage) -> Result<(), SlateDBError> {
-        assert!(matches!(message, DbReaderMessage::PollManifest));
+        if let DbReaderMessage::Refresh(reply) = message {
+            let _ = reply.send(self.refresh().await);
+            return Ok(());
+        }
+        let result = self.refresh().await;
+        if self.inner.mode == DbReaderMode::FollowLatest {
+            if let Err(error) = result {
+                warn!("failed to refresh reader to latest manifest [error={error:?}]");
+            }
+            Ok(())
+        } else {
+            result
+        }
+    }
+
+    async fn cleanup(
+        &mut self,
+        _messages: BoxStream<'async_trait, DbReaderMessage>,
+        _result: Result<(), SlateDBError>,
+    ) -> Result<(), SlateDBError> {
+        self.cleanup_checkpoint().await
+    }
+}
+
+impl ManifestPoller {
+    async fn refresh(&self) -> Result<(), SlateDBError> {
         match self.inner.mode {
             DbReaderMode::ManagedCheckpoint => {
                 let mut manifest = StoredManifest::load(
@@ -821,23 +849,13 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
 
                 self.inner.maybe_refresh_checkpoint(&mut manifest).await
             }
-            DbReaderMode::FollowLatest => {
-                let result = self.inner.refresh_latest_manifest().await;
-                if let Err(error) = result {
-                    warn!("failed to refresh reader to latest manifest [error={error:?}]");
-                }
-                Ok(())
-            }
+            DbReaderMode::FollowLatest => self.inner.refresh_latest_manifest().await,
             // No polling is needed for a pinned checkpoint, so we just return Ok(()).
             DbReaderMode::Checkpoint(_) => Ok(()),
         }
     }
 
-    async fn cleanup(
-        &mut self,
-        _messages: BoxStream<'async_trait, DbReaderMessage>,
-        _result: Result<(), SlateDBError>,
-    ) -> Result<(), SlateDBError> {
+    async fn cleanup_checkpoint(&self) -> Result<(), SlateDBError> {
         if self.inner.mode != DbReaderMode::ManagedCheckpoint {
             return Ok(());
         }
@@ -1013,14 +1031,39 @@ impl DbReader {
 
         // Pinned checkpoints never advance. Managed checkpoints and unprotected readers both
         // poll for newer database state according to `DbReaderOptions`.
-        if !matches!(mode, DbReaderMode::Checkpoint(_)) {
-            inner.spawn_manifest_poller(&task_executor)?;
-        }
+        let refresh_tx = if !matches!(mode, DbReaderMode::Checkpoint(_)) {
+            Some(inner.spawn_manifest_poller(&task_executor)?)
+        } else {
+            None
+        };
 
         Ok(Self {
             inner,
             task_executor,
+            refresh_tx,
         })
+    }
+
+    /// Refresh this reader now and wait until it installs the persisted state.
+    ///
+    /// This uses the same serialized path as periodic refreshes and respects
+    /// [`DbReaderOptions::skip_wal_replay`]. It does not flush the writer.
+    /// Readers pinned to an explicit checkpoint remain unchanged.
+    /// Storage errors return to the caller without stopping periodic refreshes.
+    /// Cancellation stops the wait, but does not cancel a submitted refresh.
+    pub async fn refresh(&self) -> Result<(), crate::Error> {
+        self.inner.check_closed()?;
+        let Some(tx) = &self.refresh_tx else {
+            return Ok(());
+        };
+        let (reply, result) = tokio::sync::oneshot::channel();
+        tx.send(DbReaderMessage::Refresh(reply))
+            .await
+            .map_err(|_| SlateDBError::Closed)?;
+        result
+            .await
+            .map_err(|_| SlateDBError::Closed)?
+            .map_err(Into::into)
     }
 
     /// Get a value from the database with default read options.
@@ -1730,6 +1773,11 @@ mod tests {
             reader.get(key).await.unwrap(),
             Some(Bytes::from_static(checkpoint_value))
         );
+        reader.refresh().await.unwrap();
+        assert_eq!(
+            reader.get(key).await.unwrap(),
+            Some(Bytes::from_static(checkpoint_value))
+        );
     }
 
     #[tokio::test]
@@ -2021,6 +2069,84 @@ mod tests {
 
         reader.close().await.unwrap();
         assert!(recording_store.write_kinds().is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_refresh_replays_wals_without_waiting_for_poll() {
+        for mode in [DbReaderMode::FollowLatest, DbReaderMode::ManagedCheckpoint] {
+            for skip_wal_replay in [false, true] {
+                let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+                let provider = TestProvider::new(Path::from("explicit-refresh"), objects);
+                let db = provider.new_db(Settings::default()).await.unwrap();
+                db.put(b"key", b"before").await.unwrap();
+                db.flush_with_options(FlushOptions {
+                    flush_type: FlushType::MemTable,
+                })
+                .await
+                .unwrap();
+                let reader = DbReader::open_internal(
+                    provider.manifest_store(),
+                    provider.table_store(),
+                    provider.wal_store(),
+                    mode,
+                    None,
+                    None,
+                    None,
+                    DbReaderOptions {
+                        manifest_poll_interval: Duration::from_secs(3600),
+                        checkpoint_lifetime: Duration::from_secs(7200),
+                        skip_wal_replay,
+                        ..DbReaderOptions::default()
+                    },
+                    provider.system_clock.clone(),
+                    provider.rand.clone(),
+                    slatedb_common::metrics::MetricsRecorderHelper::noop(),
+                )
+                .await
+                .unwrap();
+                let manifest_id = reader.manifest().id();
+                db.put(b"key", b"after").await.unwrap();
+                db.flush_with_options(FlushOptions {
+                    flush_type: FlushType::Wal,
+                })
+                .await
+                .unwrap();
+                // A durable write alone does not advance the reader.
+                assert_eq!(
+                    reader.get(b"key").await.unwrap(),
+                    Some(Bytes::from_static(b"before"))
+                );
+                let (first, second) = tokio::join!(reader.refresh(), reader.refresh());
+                first.unwrap();
+                second.unwrap();
+                assert_eq!(reader.manifest().id(), manifest_id);
+                let expected: &[u8] = if skip_wal_replay { b"before" } else { b"after" };
+                assert_eq!(
+                    reader.get(b"key").await.unwrap(),
+                    Some(Bytes::copy_from_slice(expected))
+                );
+
+                if !skip_wal_replay {
+                    fail_parallel::cfg(
+                        Arc::clone(&provider.fp_registry),
+                        "probe-wal-ssts",
+                        "return",
+                    )
+                    .unwrap();
+                    assert!(reader.refresh().await.is_err());
+                    assert_eq!(
+                        reader.get(b"key").await.unwrap(),
+                        Some(Bytes::from_static(b"after"))
+                    );
+                    fail_parallel::cfg(Arc::clone(&provider.fp_registry), "probe-wal-ssts", "off")
+                        .unwrap();
+                    reader.refresh().await.unwrap();
+                }
+                reader.close().await.unwrap();
+                assert!(reader.refresh().await.is_err());
+                db.close().await.unwrap();
+            }
+        }
     }
 
     #[tokio::test]
