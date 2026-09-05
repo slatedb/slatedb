@@ -18,11 +18,12 @@ use crate::tablestore::TableStore;
 use crate::types::RowEntry;
 use crate::utils::build_concurrent;
 
-/// Shared inputs needed to construct a per-segment iterator. Used by
-/// the scan path's [`SegmentMergeIterator`] (one instance held by the
-/// chain, consulted on every promotion) and by the get path's
-/// [`crate::db_iter::GetIterator::from_lsm_tree`] (one instance per
-/// query, consumed when building L0 + sorted-run point iters).
+/// Inputs needed to construct a per-segment iterator. The scan path's
+/// [`SegmentMergeIterator`] holds an unbound template and clones it with the
+/// selected segment in [`Self::for_segment`] before building each child. The
+/// get path binds its single selected segment before constructing its L0 and
+/// sorted-run point iterators.
+#[derive(Clone)]
 pub(crate) struct SegmentScanContext {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) range: BytesRange,
@@ -33,6 +34,15 @@ pub(crate) struct SegmentScanContext {
     pub(crate) point_lookup_stats: Option<DbStats>,
     /// Stats for range-query sorted runs.
     pub(crate) db_stats: DbStats,
+}
+
+impl SegmentScanContext {
+    /// Returns a context whose SST options carry the selected segment.
+    fn for_segment(&self, segment: &Bytes) -> Self {
+        let mut context = self.clone();
+        context.sst_iter_options.segment = Some(segment.clone());
+        context
+    }
 }
 
 /// Per-segment iterator bundle built from a single [`LsmTreeState`] for
@@ -207,7 +217,8 @@ impl SegmentMergeIterator {
                 .context
                 .as_ref()
                 .expect("Pending children require a SegmentScanContext");
-            let RangeTreeIterators { l0, sr } = RangeTreeIterators::build(&tree, context).await?;
+            let context = context.for_segment(&prefix);
+            let RangeTreeIterators { l0, sr } = RangeTreeIterators::build(&tree, &context).await?;
             let iters: VecDeque<Box<dyn RowEntryIterator>> = l0.into_iter().chain(sr).collect();
             let merge = MergeIterator::new_with_order(iters, context.sst_iter_options.order)?;
             // Per-segment merge runs with dedup disabled so the outer
@@ -296,12 +307,15 @@ pub(crate) fn build_segment_iter(
 ) -> Result<Box<dyn RowEntryIterator>, SlateDBError> {
     if let Some(point_key) = context.range.as_point() {
         match segments.last() {
-            Some(segment) => Ok(Box::new(GetIterator::from_lsm_tree(
-                point_key.clone(),
-                &segment.tree,
-                &context,
-                max_seq,
-            )?)),
+            Some(segment) => {
+                let context = context.for_segment(&segment.prefix);
+                Ok(Box::new(GetIterator::from_lsm_tree(
+                    point_key.clone(),
+                    &segment.tree,
+                    &context,
+                    max_seq,
+                )?))
+            }
             None => Ok(Box::new(EmptyIterator::new())),
         }
     } else {
@@ -314,12 +328,13 @@ pub(crate) fn build_l0_point_iters(
     ctx: &SegmentScanContext,
 ) -> Result<VecDeque<Box<dyn RowEntryIterator>>, SlateDBError> {
     let mut iters = VecDeque::new();
+    let options = ctx.sst_iter_options.clone();
     for sst in l0.iter().cloned() {
         let iter = SstIterator::new_owned_with_stats(
             ctx.range.clone(),
             sst,
             ctx.table_store.clone(),
-            ctx.sst_iter_options.clone(),
+            options.clone(),
             ctx.point_lookup_stats.clone(),
         )?;
         if let Some(iter) = iter {
@@ -335,13 +350,14 @@ pub(crate) fn build_sr_point_iters(
     ctx: &SegmentScanContext,
 ) -> Result<VecDeque<Box<dyn RowEntryIterator>>, SlateDBError> {
     let mut iters = VecDeque::new();
+    let options = ctx.sst_iter_options.clone();
     for sr in compacted.iter() {
         for handle in sr.tables_covering_point_key(key.as_ref()) {
             let iter = SstIterator::new_owned_with_stats(
                 ctx.range.clone(),
                 handle.clone(),
                 ctx.table_store.clone(),
-                ctx.sst_iter_options.clone(),
+                options.clone(),
                 ctx.point_lookup_stats.clone(),
             )?;
             if let Some(iter) = iter {

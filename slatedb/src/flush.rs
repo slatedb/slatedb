@@ -151,8 +151,12 @@ impl DbInner {
         &self,
         id: &db_state::SsTableId,
         encoded_sst: &EncodedSsTable,
+        segment: Bytes,
     ) -> Result<SsTableHandle, SlateDBError> {
-        let handle = self.table_store.write_sst(id, encoded_sst).await?;
+        let handle = self
+            .table_store
+            .write_sst(id, encoded_sst, Some(segment))
+            .await?;
         Ok(handle)
     }
 
@@ -176,7 +180,9 @@ impl DbInner {
         for sst in built {
             let id =
                 db_state::SsTableId::from(self.rand.rng().gen_ulid(self.system_clock.as_ref()));
-            let handle = self.upload_sst(&id, &sst.encoded).await?;
+            let handle = self
+                .upload_sst(&id, &sst.encoded, sst.prefix.clone())
+                .await?;
             handles.push(handle);
         }
         Ok(handles)
@@ -283,14 +289,14 @@ mod tests {
         let index = db
             .inner
             .table_store
-            .read_index(sst_handle, true)
+            .read_index(sst_handle, true, Some(Bytes::new()))
             .await
             .unwrap();
         let block_count = index.borrow().block_meta().len();
         let blocks = db
             .inner
             .table_store
-            .read_blocks(sst_handle, 0..block_count)
+            .read_blocks(sst_handle, 0..block_count, Some(Bytes::new()))
             .await
             .unwrap();
         let mut found_entries = Vec::new();
@@ -836,7 +842,11 @@ mod tests {
         ];
         for (sst, entries) in ssts.into_iter().zip(expected.into_iter()) {
             let id = SsTableId::from(Ulid::new());
-            let handle = db.inner.upload_sst(&id, &sst.encoded).await.unwrap();
+            let handle = db
+                .inner
+                .upload_sst(&id, &sst.encoded, sst.prefix.clone())
+                .await
+                .unwrap();
             verify_sst(&db, &handle, &entries).await;
         }
         db.close().await.unwrap();

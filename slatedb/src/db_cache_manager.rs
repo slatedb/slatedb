@@ -7,16 +7,36 @@ use tokio::sync::OnceCell;
 
 use crate::bytes_range::BytesRange;
 use crate::db_cache::CacheTarget;
-use crate::db_state::{SsTableHandle, SsTableId};
+use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
-use crate::manifest::VersionedManifest;
+use crate::manifest::ManifestCore;
 use crate::partitioned_keyspace::partitions_covering_range;
 use crate::tablestore::TableStore;
 
+fn find_sst<'a>(
+    manifest: &'a ManifestCore,
+    sst_id: &SsTableId,
+) -> Option<(Bytes, &'a SsTableView)> {
+    if let Some(view) = manifest
+        .tree
+        .sst_views()
+        .find(|view| view.sst.id == *sst_id)
+    {
+        return Some((Bytes::new(), view));
+    }
+    manifest.segments.iter().find_map(|segment| {
+        segment
+            .tree
+            .sst_views()
+            .find(|view| view.sst.id == *sst_id)
+            .map(|view| (segment.prefix.clone(), view))
+    })
+}
+
 pub(crate) async fn warm_sst_impl(
     table_store: &Arc<TableStore>,
-    manifest: &VersionedManifest,
+    manifest: &ManifestCore,
     sst_id: SsTableId,
     targets: &[CacheTarget],
 ) -> Result<(), crate::Error> {
@@ -30,14 +50,10 @@ pub(crate) async fn warm_sst_impl(
 
     // Reuse the handle embedded in the manifest view instead of calling
     // `open_sst`, which would issue an extra object_store GET for info+version.
-    // RFC-0024: walk every tree (unsegmented + segments) via `core()`. Each
-    // SST id appears in at most one view (segments have disjoint key spaces;
-    // within a tree an SST is in either L0 or one SR), so `find` is enough.
-    let Some(view) = manifest
-        .core()
-        .all_sst_views()
-        .find(|view| view.sst.id == sst_id)
-    else {
+    // RFC-0024: walk every tree (unsegmented + segments). Each SST id appears
+    // in at most one view (segments have disjoint key spaces; within a tree an
+    // SST is in either L0 or one SR), so `find` is enough.
+    let Some((segment, view)) = find_sst(manifest, &sst_id) else {
         debug!(
             "warm_sst: SST {:?} not reachable from current manifest",
             sst_id
@@ -55,9 +71,9 @@ pub(crate) async fn warm_sst_impl(
 
     for target in targets {
         match target {
-            CacheTarget::Filters => warm_filters(table_store, &handle).await?,
-            CacheTarget::Index => warm_index(table_store, &handle, &index_cell).await?,
-            CacheTarget::Stats => warm_stats(table_store, &handle).await?,
+            CacheTarget::Filters => warm_filters(table_store, &handle, &segment).await?,
+            CacheTarget::Index => warm_index(table_store, &handle, &index_cell, &segment).await?,
+            CacheTarget::Stats => warm_stats(table_store, &handle, &segment).await?,
             CacheTarget::Data(data_range) => {
                 warm_data(
                     table_store,
@@ -66,6 +82,7 @@ pub(crate) async fn warm_sst_impl(
                     &visible_ranges,
                     data_range,
                     &sst_id,
+                    &segment,
                 )
                 .await?
             }
@@ -76,14 +93,18 @@ pub(crate) async fn warm_sst_impl(
 
 pub(crate) async fn evict_cached_sst_impl(
     table_store: &Arc<TableStore>,
+    manifest: &ManifestCore,
     sst_id: SsTableId,
 ) -> Result<(), crate::Error> {
     if table_store.cache().is_none() {
         warn!("evict_cached_sst called on a Db without a block cache configured");
         return Ok(());
     }
-    let handle = table_store.open_sst(&sst_id).await?;
-    table_store.evict_sst_from_cache(&handle).await;
+    let (handle, segment) = match find_sst(manifest, &sst_id) {
+        Some((segment, view)) => (view.sst.clone(), Some(segment)),
+        None => (table_store.open_sst(&sst_id, None).await?, None),
+    };
+    table_store.evict_sst_from_cache(&handle, segment).await;
     Ok(())
 }
 
@@ -120,6 +141,7 @@ async fn warm_data(
     visible_ranges: &[BytesRange],
     data_range: &(Bound<Bytes>, Bound<Bytes>),
     sst_id: &SsTableId,
+    segment: &Bytes,
 ) -> Result<(), crate::Error> {
     let intersections = plan_warm_intersections(visible_ranges, data_range);
     if intersections.is_empty() {
@@ -130,7 +152,7 @@ async fn warm_data(
         return Ok(());
     }
 
-    let index = ensure_index(table_store, handle, index_cell).await?;
+    let index = ensure_index(table_store, handle, index_cell, segment).await?;
     for r in &intersections {
         let block_range = partitions_covering_range(
             &index.borrow(),
@@ -141,7 +163,13 @@ async fn warm_data(
             continue;
         }
         table_store
-            .read_blocks_using_index(handle, index.clone(), block_range, true)
+            .read_blocks_using_index(
+                handle,
+                index.clone(),
+                block_range,
+                true,
+                Some(segment.clone()),
+            )
             .await?;
     }
     Ok(())
@@ -151,34 +179,41 @@ async fn warm_index(
     table_store: &Arc<TableStore>,
     handle: &SsTableHandle,
     index_cell: &OnceCell<Result<Arc<SsTableIndexOwned>, SlateDBError>>,
+    segment: &Bytes,
 ) -> Result<(), crate::Error> {
-    ensure_index(table_store, handle, index_cell).await?;
+    ensure_index(table_store, handle, index_cell, segment).await?;
     Ok(())
 }
 
 async fn warm_filters(
     table_store: &Arc<TableStore>,
     handle: &SsTableHandle,
+    segment: &Bytes,
 ) -> Result<(), crate::Error> {
     // filter_len == 0 means "no filters"; filter_offset aliases index_offset
     // in that case and cannot be meaningfully probed or warmed.
     if handle.info.filter_len == 0 {
         return Ok(());
     }
-    table_store.read_filters(handle, true).await?;
+    table_store
+        .read_filters(handle, true, Some(segment.clone()))
+        .await?;
     Ok(())
 }
 
 async fn warm_stats(
     table_store: &Arc<TableStore>,
     handle: &SsTableHandle,
+    segment: &Bytes,
 ) -> Result<(), crate::Error> {
     // stats_len == 0 means "no stats block"; stats_offset is 0 in that case
     // and collides with the first data block's cache key.
     if handle.info.stats_len == 0 {
         return Ok(());
     }
-    table_store.read_stats(handle, true).await?;
+    table_store
+        .read_stats(handle, true, Some(segment.clone()))
+        .await?;
     Ok(())
 }
 
@@ -186,9 +221,14 @@ async fn ensure_index(
     table_store: &Arc<TableStore>,
     handle: &SsTableHandle,
     index_cell: &OnceCell<Result<Arc<SsTableIndexOwned>, SlateDBError>>,
+    segment: &Bytes,
 ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
     let result: &Result<Arc<SsTableIndexOwned>, SlateDBError> = index_cell
-        .get_or_init(|| async { table_store.read_index(handle, true).await })
+        .get_or_init(|| async {
+            table_store
+                .read_index(handle, true, Some(segment.clone()))
+                .await
+        })
         .await;
     match result {
         Ok(index) => Ok(index.clone()),
@@ -204,6 +244,7 @@ mod tests {
     use crate::config::{FlushOptions, FlushType, PutOptions, Settings, WriteOptions};
     use crate::db::Db;
     use crate::db_cache::{CachedKey, DbCache};
+    use crate::manifest::VersionedManifest;
     use crate::DbCacheManagerOps;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
@@ -226,10 +267,17 @@ mod tests {
     /// For each data block in the SST (ordered), returns whether it is
     /// currently present in the block cache. Used by tests to assert cache
     /// population directly instead of going through metrics.
-    async fn cached_block_mask(table_store: &Arc<TableStore>, sst_id: SsTableId) -> Vec<bool> {
-        let handle = table_store.open_sst(&sst_id).await.expect("open_sst");
+    async fn cached_block_mask(
+        table_store: &Arc<TableStore>,
+        sst_id: SsTableId,
+        segment: Bytes,
+    ) -> Vec<bool> {
+        let handle = table_store
+            .open_sst(&sst_id, Some(segment.clone()))
+            .await
+            .expect("open_sst");
         let index = table_store
-            .read_index(&handle, false)
+            .read_index(&handle, false, Some(segment))
             .await
             .expect("read_index");
         let cache = table_store.cache().expect("cache configured").clone();
@@ -244,9 +292,12 @@ mod tests {
     }
 
     async fn is_key_cached(table_store: &Arc<TableStore>, sst_id: SsTableId, key: &[u8]) -> bool {
-        let handle = table_store.open_sst(&sst_id).await.expect("open_sst");
+        let handle = table_store
+            .open_sst(&sst_id, Some(Bytes::new()))
+            .await
+            .expect("open_sst");
         let index = table_store
-            .read_index(&handle, false)
+            .read_index(&handle, false, Some(Bytes::new()))
             .await
             .expect("read_index");
         let block_idx =
@@ -413,7 +464,7 @@ mod tests {
             .expect("warm_sst");
 
         // then: every data block is in cache
-        let mask = cached_block_mask(&db.inner.table_store, sst_id).await;
+        let mask = cached_block_mask(&db.inner.table_store, sst_id, Bytes::new()).await;
         assert!(!mask.is_empty(), "expected SST to have data blocks");
         assert!(
             mask.iter().all(|&b| b),
@@ -545,7 +596,7 @@ mod tests {
         // when: we warm the full range through the projected manifest
         warm_sst_impl(
             &db.inner.table_store,
-            &manifest,
+            manifest.core(),
             sst_id,
             &[CacheTarget::data::<&[u8], _>(..)],
         )
@@ -591,14 +642,17 @@ mod tests {
 
         warm_sst_impl(
             &db.inner.table_store,
-            &manifest,
+            manifest.core(),
             sst_id,
             &[CacheTarget::data::<&[u8], _>(..)],
         )
         .await
         .expect("warm_sst_impl");
 
-        let mask = cached_block_mask(&db.inner.table_store, sst_id).await;
+        let segment = find_sst(manifest.core(), &sst_id)
+            .expect("segment-resident SST should be in manifest")
+            .0;
+        let mask = cached_block_mask(&db.inner.table_store, sst_id, segment).await;
         assert!(!mask.is_empty(), "expected SST to have data blocks");
         assert!(
             mask.iter().all(|&b| b),
@@ -680,7 +734,10 @@ mod tests {
         db.evict_cached_sst(sst_id).await.expect("evict");
 
         let table_store = db.inner.table_store.clone();
-        let handle = table_store.open_sst(&sst_id).await.expect("open_sst");
+        let handle = table_store
+            .open_sst(&sst_id, Some(Bytes::new()))
+            .await
+            .expect("open_sst");
         let cache = table_store.cache().expect("cache configured").clone();
         (db, sst_id, handle, cache)
     }
@@ -782,7 +839,7 @@ mod tests {
         db.warm_sst(sst_id, &[CacheTarget::data::<&[u8], _>(..)])
             .await
             .expect("warm_sst");
-        let mask_before = cached_block_mask(&db.inner.table_store, sst_id).await;
+        let mask_before = cached_block_mask(&db.inner.table_store, sst_id, Bytes::new()).await;
         assert!(
             mask_before.iter().all(|&b| b),
             "expected all blocks cached after warm"
@@ -792,7 +849,7 @@ mod tests {
         db.evict_cached_sst(sst_id).await.expect("evict");
 
         // then: no blocks remain in cache
-        let mask_after = cached_block_mask(&db.inner.table_store, sst_id).await;
+        let mask_after = cached_block_mask(&db.inner.table_store, sst_id, Bytes::new()).await;
         assert!(
             mask_after.iter().all(|&b| !b),
             "expected no blocks cached after eviction, got {:?}",
@@ -813,7 +870,7 @@ mod tests {
         db.warm_sst(sst_id, &[CacheTarget::data::<&[u8], _>(..)])
             .await
             .expect("warm_sst");
-        let mask_before = cached_block_mask(&db.inner.table_store, sst_id).await;
+        let mask_before = cached_block_mask(&db.inner.table_store, sst_id, Bytes::new()).await;
         assert!(
             mask_before.iter().all(|&b| b),
             "expected all blocks cached after warm"
@@ -824,7 +881,7 @@ mod tests {
 
         // then: the default no-op `flush_scope` leaves entries exactly as
         // they were; only a hybrid cache implements the flush.
-        let mask_after = cached_block_mask(&db.inner.table_store, sst_id).await;
+        let mask_after = cached_block_mask(&db.inner.table_store, sst_id, Bytes::new()).await;
         assert_eq!(
             mask_before, mask_after,
             "non-hybrid cache should be untouched by flush_cache_to_disk"

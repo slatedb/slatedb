@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
+use bytes::Bytes;
 use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::join_all, StreamExt};
 use log::{debug, warn};
@@ -95,7 +96,13 @@ impl TableStore {
         Ok(())
     }
 
-    pub(crate) fn table_writer(self: &Arc<Self>, id: SsTableId) -> EncodedSsTableWriter {
+    /// Creates a streaming SST writer. `segment` is a hint attached to the
+    /// [`ObjectStoreCallTag`] for object-store routing.
+    pub(crate) fn table_writer(
+        self: &Arc<Self>,
+        id: SsTableId,
+        segment: Option<Bytes>,
+    ) -> EncodedSsTableWriter {
         let object_store = self.object_store.clone();
         let path = self.path(&id);
         EncodedSsTableWriter {
@@ -104,7 +111,7 @@ impl TableStore {
             writer: tagged_buf_writer(
                 object_store,
                 path,
-                ObjectStoreCallTag::new(self.kind, SstType::from(&id)),
+                ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&id), segment),
             ),
             table_store: self.clone(),
             #[cfg(test)]
@@ -116,10 +123,13 @@ impl TableStore {
         self.sst_format.table_builder()
     }
 
+    /// Writes an SST. `segment` is a hint attached to the
+    /// [`ObjectStoreCallTag`] for object-store routing.
     pub(crate) async fn write_sst(
         &self,
         id: &SsTableId,
         encoded_sst: &EncodedSsTable,
+        segment: Option<Bytes>,
     ) -> Result<SsTableHandle, SlateDBError> {
         fail_point!(
             self.fp_registry.clone(),
@@ -133,7 +143,7 @@ impl TableStore {
             object_store,
             &path,
             encoded_sst,
-            ObjectStoreCallTag::new(self.kind, SstType::from(id)),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(id), segment),
         )
         .await?;
 
@@ -258,6 +268,8 @@ impl TableStore {
     ///
     /// ## Arguments
     /// - `id`: The SST identifier to fetch metadata for.
+    /// - `segment`: A hint attached to the [`ObjectStoreCallTag`] for
+    ///   object-store routing.
     ///
     /// ## Returns
     /// - `Ok(ObjectMetadata)` containing the path, last-modified time,
@@ -267,12 +279,17 @@ impl TableStore {
     /// - Returns [`SlateDBError`] if the underlying object store `head` request
     ///   fails (for example, if the object does not exist or storage access
     ///   fails).
-    pub(crate) async fn metadata(&self, id: &SsTableId) -> Result<ObjectMetadata, SlateDBError> {
+    pub(crate) async fn metadata(
+        &self,
+        id: &SsTableId,
+        segment: Option<Bytes>,
+    ) -> Result<ObjectMetadata, SlateDBError> {
         let object_store = self.object_store.clone();
         let path = self.path(id);
         let opts = GetOptions {
             head: true,
-            extensions: ObjectStoreCallTag::new(self.kind, SstType::from(id)).into(),
+            extensions: ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(id), segment)
+                .into(),
             ..GetOptions::default()
         };
         Ok(ObjectMetadata::new(
@@ -322,11 +339,17 @@ impl TableStore {
         Ok(sst_list)
     }
 
-    pub(crate) async fn open_sst(&self, id: &SsTableId) -> Result<SsTableHandle, SlateDBError> {
+    /// Opens an SST. `segment` is a hint attached to the
+    /// [`ObjectStoreCallTag`] for object-store routing.
+    pub(crate) async fn open_sst(
+        &self,
+        id: &SsTableId,
+        segment: Option<Bytes>,
+    ) -> Result<SsTableHandle, SlateDBError> {
         let (info, version) = read_obj!(
             &self.object_store,
             self.path(id),
-            ObjectStoreCallTag::new(self.kind, SstType::from(id)),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(id), segment),
             |obj| self.sst_format.read_info_and_version(&obj)
         )
         .await?;
@@ -334,11 +357,17 @@ impl TableStore {
     }
 
     #[cfg(test)]
-    pub(crate) async fn read_sst_version(&self, id: &SsTableId) -> Result<u16, SlateDBError> {
+    /// Reads an SST format version. `segment` is a hint attached to the
+    /// [`ObjectStoreCallTag`] for object-store routing.
+    pub(crate) async fn read_sst_version(
+        &self,
+        id: &SsTableId,
+        segment: Option<Bytes>,
+    ) -> Result<u16, SlateDBError> {
         let (_, version) = read_obj!(
             &self.object_store,
             self.path(id),
-            ObjectStoreCallTag::new(self.kind, SstType::from(id)),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(id), segment),
             |obj| self.sst_format.read_info_and_version(&obj)
         )
         .await?;
@@ -350,10 +379,13 @@ impl TableStore {
     /// ## Arguments
     /// - `handle`: The handle of the SSTable to read the filters from.
     /// - `cache_blocks`: Whether to cache the filters after reading them.
+    /// - `segment`: A hint attached to the [`ObjectStoreCallTag`] for
+    ///   object-store routing.
     pub(crate) async fn read_filters(
         &self,
         handle: &SsTableHandle,
         cache_blocks: bool,
+        segment: Option<Bytes>,
     ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         // No filter exists for this SST (either no policies configured, or the
         // SST was built below `min_filter_keys`). Return an empty slice without
@@ -374,7 +406,7 @@ impl TableStore {
                 cache
                     .fetch_filter(
                         cache_key.clone(),
-                        self.read_loader(handle, CacheTarget::Filters),
+                        self.read_loader(handle, CacheTarget::Filters, segment.clone()),
                     )
                     .await
                     .ok()
@@ -398,7 +430,7 @@ impl TableStore {
         read_obj!(
             &self.object_store,
             self.path(&handle.id),
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment),
             |obj| self.sst_format.read_filters(&handle.info, &obj)
         )
         .await
@@ -408,10 +440,14 @@ impl TableStore {
     ///
     /// ## Arguments
     /// - `handle`: The handle of the SSTable to read the stats from.
+    /// - `cache_blocks`: Whether to cache the stats after reading them.
+    /// - `segment`: A hint attached to the [`ObjectStoreCallTag`] for
+    ///   object-store routing.
     pub(crate) async fn read_stats(
         &self,
         handle: &SsTableHandle,
         cache_blocks: bool,
+        segment: Option<Bytes>,
     ) -> Result<Option<SstStats>, SlateDBError> {
         if handle.info.stats_len == 0 {
             return Ok(None);
@@ -421,7 +457,10 @@ impl TableStore {
             // See `read_filters` for the rationale on the fall-through path.
             let entry = if cache_blocks {
                 cache
-                    .fetch_stats(cache_key, self.read_loader(handle, CacheTarget::Stats))
+                    .fetch_stats(
+                        cache_key,
+                        self.read_loader(handle, CacheTarget::Stats, segment.clone()),
+                    )
                     .await
                     .ok()
             } else {
@@ -434,7 +473,7 @@ impl TableStore {
         read_obj!(
             &self.object_store,
             self.path(&handle.id),
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment),
             |obj| self.sst_format.read_stats(&handle.info, &obj)
         )
         .await
@@ -445,17 +484,23 @@ impl TableStore {
     /// ## Arguments
     /// - `handle`: The handle of the SSTable to read the index from.
     /// - `cache_blocks`: Whether to cache the index blocks after reading them.
+    /// - `segment`: A hint attached to the [`ObjectStoreCallTag`] for
+    ///   object-store routing.
     pub(crate) async fn read_index(
         &self,
         handle: &SsTableHandle,
         cache_blocks: bool,
+        segment: Option<Bytes>,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         let cache_key = (handle.id, handle.info.index_offset).into();
         if let Some(cache) = self.cache_for_reads() {
             // See `read_filters` for the rationale on the fall-through path.
             let entry = if cache_blocks {
                 cache
-                    .fetch_index(cache_key, self.read_loader(handle, CacheTarget::Index))
+                    .fetch_index(
+                        cache_key,
+                        self.read_loader(handle, CacheTarget::Index, segment.clone()),
+                    )
                     .await
                     .ok()
             } else {
@@ -468,7 +513,7 @@ impl TableStore {
         let index = read_obj!(
             &self.object_store,
             self.path(&handle.id),
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment),
             |obj| self.sst_format.read_index(&handle.info, &obj)
         )
         .await?;
@@ -482,12 +527,18 @@ impl TableStore {
     /// Builds a fresh boxed closure on every call, even when the cache hits and
     /// the loader is never invoked; revisit if cache-hit allocations show up in
     /// profiles.
-    fn read_loader(&self, handle: &SsTableHandle, target: CacheTarget) -> CacheLoader {
+    fn read_loader(
+        &self,
+        handle: &SsTableHandle,
+        target: CacheTarget,
+        segment: Option<Bytes>,
+    ) -> CacheLoader {
         let info = handle.info.clone();
         let object_store = self.object_store.clone();
         let path = self.path(&handle.id);
         let sst_format = self.sst_format.clone();
-        let tag = ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id));
+        let tag =
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment);
         Box::new(move || {
             Box::pin(async move {
                 // Only the stats arm can produce `None` (stats_len > 0 but no
@@ -541,12 +592,14 @@ impl TableStore {
         handle: &SsTableHandle,
         index: Arc<SsTableIndexOwned>,
         block_num: usize,
+        segment: Option<Bytes>,
     ) -> CacheLoader {
         let info = handle.info.clone();
         let object_store = self.object_store.clone();
         let path = self.path(&handle.id);
         let sst_format = self.sst_format.clone();
-        let tag = ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id));
+        let tag =
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment);
         Box::new(move || {
             Box::pin(async move {
                 let block = read_with_validation_retry(tag, async |tag| {
@@ -567,15 +620,18 @@ impl TableStore {
     }
 
     #[allow(dead_code)]
+    /// Reads a range of SST blocks. `segment` is a hint attached to the
+    /// [`ObjectStoreCallTag`] for object-store routing.
     pub(crate) async fn read_blocks(
         &self,
         handle: &SsTableHandle,
         blocks: Range<usize>,
+        segment: Option<Bytes>,
     ) -> Result<VecDeque<Block>, SlateDBError> {
         let object_store = self.object_store.clone();
         let path = self.path(&handle.id);
         read_with_validation_retry(
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment),
             |tag| {
                 let obj = ReadOnlyObject {
                     object_store: object_store.clone(),
@@ -656,12 +712,15 @@ impl TableStore {
     /// and falls back to reading from storage for uncached blocks
     /// using an async fetch for each contiguous range that blocks are not cached.
     /// It can optionally cache newly read blocks.
+    /// `segment` is a hint attached to the [`ObjectStoreCallTag`] for
+    /// object-store routing.
     pub(crate) async fn read_blocks_using_index(
         &self,
         handle: &SsTableHandle,
         index: Arc<SsTableIndexOwned>,
         blocks: Range<usize>,
         cache_blocks: bool,
+        segment: Option<Bytes>,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
         // Single-block reads (point-gets via SstIterator::for_key, SstFile::read_block,
         // etc.) take a dedup-aware fast-path: concurrent callers for the same block
@@ -674,7 +733,7 @@ impl TableStore {
                 let block_num = blocks.start;
                 let offset = index.borrow().block_meta().get(block_num).offset();
                 let cache_key: CachedKey = (handle.id, offset).into();
-                let loader = self.block_loader(handle, index.clone(), block_num);
+                let loader = self.block_loader(handle, index.clone(), block_num, segment.clone());
                 if let Ok(entry) = cache.fetch_block(cache_key, loader).await {
                     if let Some(block) = entry.block() {
                         let mut result = VecDeque::with_capacity(1);
@@ -737,9 +796,14 @@ impl TableStore {
             let object_store = &object_store;
             let path = &path;
             let index_ref = &index;
+            let segment = segment.clone();
             async move {
                 read_with_validation_retry(
-                    ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)),
+                    ObjectStoreCallTag::new_with_segment(
+                        self.kind,
+                        SstType::from(&handle.id),
+                        segment,
+                    ),
                     |tag| {
                         let obj = ReadOnlyObject {
                             object_store: object_store.clone(),
@@ -788,15 +852,18 @@ impl TableStore {
     }
 
     #[allow(dead_code)]
+    /// Reads one SST block. `segment` is a hint attached to the
+    /// [`ObjectStoreCallTag`] for object-store routing.
     pub(crate) async fn read_block(
         &self,
         handle: &SsTableHandle,
         block: usize,
+        segment: Option<Bytes>,
     ) -> Result<Block, SlateDBError> {
         read_obj!(
             &self.object_store,
             self.path(&handle.id),
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment),
             |obj| async {
                 let index = self.sst_format.read_index(&handle.info, &obj).await?;
                 self.sst_format
@@ -841,13 +908,19 @@ impl TableStore {
     /// Best-effort removal of all cache entries associated with the given SST:
     /// data blocks, index, filters, and stats. Returns the offsets whose
     /// cache removal was attempted.
-    pub(crate) async fn evict_sst_from_cache(&self, handle: &SsTableHandle) {
+    /// Evicts an SST from the block cache. `segment` is a hint attached to the
+    /// [`ObjectStoreCallTag`] if reading its index is required for eviction.
+    pub(crate) async fn evict_sst_from_cache(
+        &self,
+        handle: &SsTableHandle,
+        segment: Option<Bytes>,
+    ) {
         let Some(ref cache) = self.cache else {
             return;
         };
         // Best effort: if we can't read the index we can't enumerate blocks,
         // so log and skip. Remaining entries will age out under normal pressure.
-        let index = match self.read_index(handle, false).await {
+        let index = match self.read_index(handle, false, segment).await {
             Ok(index) => index,
             Err(e) => {
                 warn!(
@@ -1197,7 +1270,7 @@ mod tests {
         let id = SsTableId::from(ulid::Ulid::new());
 
         // when:
-        let mut writer = ts.table_writer(id);
+        let mut writer = ts.table_writer(id, Some(Bytes::new()));
         writer
             .add(RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0))
             .await
@@ -1281,12 +1354,12 @@ mod tests {
         let sst = builder.build().await.unwrap();
 
         // when:
-        ts.write_sst(&id, &sst).await.unwrap();
+        ts.write_sst(&id, &sst, Some(Bytes::new())).await.unwrap();
 
         // then:
         assert_eq!(os.put_attempts(), 0);
         assert_eq!(os.multipart_attempts(), 1);
-        ts.open_sst(&id).await.unwrap();
+        ts.open_sst(&id, Some(Bytes::new())).await.unwrap();
     }
 
     #[tokio::test]
@@ -1307,7 +1380,7 @@ mod tests {
         ));
         let id = SsTableId::from(ulid::Ulid::new());
 
-        let mut writer = ts.table_writer(id);
+        let mut writer = ts.table_writer(id, Some(Bytes::new()));
         writer
             .add(RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0))
             .await
@@ -1320,8 +1393,8 @@ mod tests {
         corrupted[0] ^= 0x01;
         os.put(&sst_path, corrupted.into()).await.unwrap();
 
-        let handle = ts.open_sst(&id).await.unwrap();
-        let err = match ts.read_blocks(&handle, 0..1).await {
+        let handle = ts.open_sst(&id, Some(Bytes::new())).await.unwrap();
+        let err = match ts.read_blocks(&handle, 0..1, Some(Bytes::new())).await {
             Err(e) => e,
             Ok(_) => panic!("expected checksum mismatch"),
         };
@@ -1378,7 +1451,7 @@ mod tests {
 
         // Create and write SST
         let id = SsTableId::from(ulid::Ulid::new());
-        let mut writer = ts.table_writer(id);
+        let mut writer = ts.table_writer(id, Some(Bytes::new()));
         let mut expected_data = Vec::with_capacity(20);
         for i in 0..20 {
             let key = [i as u8; 16];
@@ -1395,11 +1468,14 @@ mod tests {
         let handle = writer.close().await.unwrap();
 
         // Read the index
-        let index = ts.read_index(&handle, true).await.unwrap();
+        let index = ts
+            .read_index(&handle, true, Some(Bytes::new()))
+            .await
+            .unwrap();
 
         // Test 1: SST hit
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true)
+            .read_blocks_using_index(&handle, index.clone(), 0..20, true, Some(Bytes::new()))
             .await
             .unwrap();
 
@@ -1431,7 +1507,7 @@ mod tests {
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true)
+            .read_blocks_using_index(&handle, index.clone(), 0..20, true, Some(Bytes::new()))
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data).await;
@@ -1456,7 +1532,7 @@ mod tests {
 
         // Test 3: All blocks should be in cache after SST file is emptied
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true)
+            .read_blocks_using_index(&handle, index.clone(), 0..20, true, Some(Bytes::new()))
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data).await;
@@ -1477,13 +1553,13 @@ mod tests {
 
         // Test 4: Verify that reading specific ranges still works after SST file is emptied
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 5..10, true)
+            .read_blocks_using_index(&handle, index.clone(), 5..10, true, Some(Bytes::new()))
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data[5..10]).await;
 
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 15..20, true)
+            .read_blocks_using_index(&handle, index.clone(), 15..20, true, Some(Bytes::new()))
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data[15..20]).await;
@@ -1516,7 +1592,7 @@ mod tests {
             .unwrap();
         let id = SsTableId::from(ulid::Ulid::new());
         let handle = writer
-            .write_sst(&id, &builder.build().await.unwrap())
+            .write_sst(&id, &builder.build().await.unwrap(), Some(Bytes::new()))
             .await
             .unwrap();
 
@@ -1536,14 +1612,20 @@ mod tests {
         );
         assert_eq!(meta_cache.entry_count(), 0);
 
-        let _ = reader.read_index(&handle, false).await.unwrap();
+        let _ = reader
+            .read_index(&handle, false, Some(Bytes::new()))
+            .await
+            .unwrap();
         assert!(meta_cache
             .get_index(&(handle.id, handle.info.index_offset).into())
             .await
             .unwrap()
             .is_none());
 
-        let _ = reader.read_index(&handle, true).await.unwrap();
+        let _ = reader
+            .read_index(&handle, true, Some(Bytes::new()))
+            .await
+            .unwrap();
         assert!(meta_cache
             .get_index(&(handle.id, handle.info.index_offset).into())
             .await
@@ -1578,7 +1660,7 @@ mod tests {
             .unwrap();
         let id = SsTableId::from(ulid::Ulid::new());
         let handle = writer
-            .write_sst(&id, &builder.build().await.unwrap())
+            .write_sst(&id, &builder.build().await.unwrap(), Some(Bytes::new()))
             .await
             .unwrap();
 
@@ -1598,7 +1680,10 @@ mod tests {
         );
         assert_eq!(meta_cache.entry_count(), 0);
 
-        let filters = reader.read_filters(&handle, false).await.unwrap();
+        let filters = reader
+            .read_filters(&handle, false, Some(Bytes::new()))
+            .await
+            .unwrap();
         assert!(!filters.is_empty());
         assert!(meta_cache
             .get_filter(&(handle.id, handle.info.filter_offset).into())
@@ -1606,7 +1691,10 @@ mod tests {
             .unwrap()
             .is_none());
 
-        let _ = reader.read_filters(&handle, true).await.unwrap();
+        let _ = reader
+            .read_filters(&handle, true, Some(Bytes::new()))
+            .await
+            .unwrap();
         assert!(meta_cache
             .get_filter(&(handle.id, handle.info.filter_offset).into())
             .await
@@ -1638,7 +1726,7 @@ mod tests {
             .unwrap();
         let id = SsTableId::from(ulid::Ulid::new());
         let handle = writer
-            .write_sst(&id, &builder.build().await.unwrap())
+            .write_sst(&id, &builder.build().await.unwrap(), Some(Bytes::new()))
             .await
             .unwrap();
         assert!(handle.info.stats_len > 0);
@@ -1659,7 +1747,10 @@ mod tests {
         );
         assert_eq!(meta_cache.entry_count(), 0);
 
-        let stats = reader.read_stats(&handle, false).await.unwrap();
+        let stats = reader
+            .read_stats(&handle, false, Some(Bytes::new()))
+            .await
+            .unwrap();
         assert!(stats.is_some());
         assert!(meta_cache
             .get_stats(&(handle.id, handle.info.stats_offset).into())
@@ -1667,7 +1758,10 @@ mod tests {
             .unwrap()
             .is_none());
 
-        let _ = reader.read_stats(&handle, true).await.unwrap();
+        let _ = reader
+            .read_stats(&handle, true, Some(Bytes::new()))
+            .await
+            .unwrap();
         assert!(meta_cache
             .get_stats(&(handle.id, handle.info.stats_offset).into())
             .await
@@ -1708,7 +1802,7 @@ mod tests {
         let sst_bytes = sst.remaining_as_bytes();
         let sst_info = sst.info.clone();
 
-        ts.write_sst(&id, &sst).await.unwrap();
+        ts.write_sst(&id, &sst, Some(Bytes::new())).await.unwrap();
 
         let index = ts
             .sst_format
@@ -1756,7 +1850,7 @@ mod tests {
         let sst_bytes = sst.remaining_as_bytes();
         let sst_info = sst.info.clone();
 
-        ts.write_sst(&id, &sst).await.unwrap();
+        ts.write_sst(&id, &sst, Some(Bytes::new())).await.unwrap();
 
         let index = ts
             .sst_format
@@ -1801,7 +1895,7 @@ mod tests {
         let filter_key: CachedKey = (id, sst.info.filter_offset).into();
         let stats_key: CachedKey = (id, sst.info.stats_offset).into();
 
-        ts.write_sst(&id, &sst).await.unwrap();
+        ts.write_sst(&id, &sst, Some(Bytes::new())).await.unwrap();
 
         assert_eq!(
             cache.get_block(&data_key).await.unwrap().is_some(),
@@ -1843,7 +1937,7 @@ mod tests {
             ]),
         ));
         let id = SsTableId::from(ulid::Ulid::new());
-        let mut writer = ts.table_writer(id);
+        let mut writer = ts.table_writer(id, Some(Bytes::new()));
         for i in 0..4 {
             writer
                 .add(RowEntry::new_value(&[b'a' + i; 16], &[i; 16], 0))
@@ -1874,7 +1968,10 @@ mod tests {
         // Delete the SST from the object store and verify that the cache won't
         // be used and reading the index will just return an error.
         os.delete(&ts.path(&id)).await.unwrap();
-        assert!(ts.read_index(&handle, false).await.is_err());
+        assert!(ts
+            .read_index(&handle, false, Some(Bytes::new()))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -1907,7 +2004,7 @@ mod tests {
         assert_eq!(sst.unconsumed_blocks.len(), 4);
         let id = SsTableId::from(ulid::Ulid::new());
 
-        ts.write_sst(&id, &sst).await.unwrap();
+        ts.write_sst(&id, &sst, Some(Bytes::new())).await.unwrap();
 
         for (block, expected) in sst.unconsumed_blocks.iter().zip([false, true, true, false]) {
             let data_key: CachedKey = (id, block.offset).into();
@@ -1939,7 +2036,7 @@ mod tests {
         ));
         let id = SsTableId::from(ulid::Ulid::new());
         // single-entry blocks for keys aa.., bb.., cc.., dd..
-        let mut writer = ts.table_writer(id);
+        let mut writer = ts.table_writer(id, Some(Bytes::new()));
         for i in 0..4 {
             writer
                 .add(RowEntry::new_value(&[b'a' + i; 16], &[i; 16], 0))
@@ -1983,7 +2080,7 @@ mod tests {
             BlockCachePolicy::default(),
         ));
         let id = SsTableId::from(ulid::Ulid::new());
-        let mut writer = ts.table_writer(id);
+        let mut writer = ts.table_writer(id, Some(Bytes::new()));
         writer
             .add(RowEntry::new_value(b"key", b"value", 0))
             .await
@@ -2119,7 +2216,7 @@ mod tests {
         let expected_bytes = sst.remaining_as_bytes();
 
         // When writing via TableStore (should retry once)
-        ts.write_sst(&id, &sst).await.unwrap();
+        ts.write_sst(&id, &sst, Some(Bytes::new())).await.unwrap();
 
         // Then: a retry happened
         assert!(flaky.put_attempts() >= 2);
@@ -2182,7 +2279,7 @@ mod tests {
         let bytes = Bytes::from_static(b"compacted");
         main_store.put(&path, bytes.clone().into()).await.unwrap();
 
-        let metadata = ts.metadata(&id).await.unwrap();
+        let metadata = ts.metadata(&id, Some(Bytes::new())).await.unwrap();
         assert_eq!(metadata.size, bytes.len() as u64);
         assert_eq!(metadata.location, path);
     }
@@ -2317,7 +2414,7 @@ mod tests {
             .unwrap();
         let id = SsTableId::from(ulid::Ulid::new());
         let handle = writer
-            .write_sst(&id, &builder.build().await.unwrap())
+            .write_sst(&id, &builder.build().await.unwrap(), Some(Bytes::new()))
             .await
             .unwrap();
 
@@ -2348,7 +2445,7 @@ mod tests {
         let handle_a = tokio::spawn({
             let reader = reader.clone();
             let handle = handle.clone();
-            async move { reader.read_index(&handle, true).await }
+            async move { reader.read_index(&handle, true, Some(Bytes::new())).await }
         });
 
         // wait until A's read has reached the object store and is paused
@@ -2364,7 +2461,7 @@ mod tests {
         let task_b = {
             let reader = reader.clone();
             let handle = handle.clone();
-            async move { reader.read_index(&handle, true).await }
+            async move { reader.read_index(&handle, true, Some(Bytes::new())).await }
         };
         let release_task = {
             let release = release.clone();
@@ -2421,14 +2518,17 @@ mod tests {
             .unwrap();
         let id = SsTableId::from(ulid::Ulid::new());
         let handle = writer
-            .write_sst(&id, &builder.build().await.unwrap())
+            .write_sst(&id, &builder.build().await.unwrap(), Some(Bytes::new()))
             .await
             .unwrap();
 
         // given: pre-load the index via the unwrapped writer so the wrapped store
         // sees only block reads (the fast-path takes `index` as an argument, so no
         // extra index read happens inside the race).
-        let index = writer.read_index(&handle, false).await.unwrap();
+        let index = writer
+            .read_index(&handle, false, Some(Bytes::new()))
+            .await
+            .unwrap();
 
         // given: the same store wrapped so the first range read pauses, behind a
         // real FoyerCache that supports dedup
@@ -2460,7 +2560,7 @@ mod tests {
             let index = index.clone();
             async move {
                 reader
-                    .read_blocks_using_index(&handle, index, 0..1, true)
+                    .read_blocks_using_index(&handle, index, 0..1, true, Some(Bytes::new()))
                     .await
             }
         });
@@ -2481,7 +2581,7 @@ mod tests {
             let index = index.clone();
             async move {
                 reader
-                    .read_blocks_using_index(&handle, index, 0..1, true)
+                    .read_blocks_using_index(&handle, index, 0..1, true, Some(Bytes::new()))
                     .await
             }
         };
@@ -2518,6 +2618,7 @@ mod tests {
         use crate::format::sst::SsTableFormat;
         use crate::tablestore::TableStore;
         use crate::test_utils::{build_test_sst, RecordingObjectStore};
+        use bytes::Bytes;
         use object_store::memory::InMemory;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
@@ -2549,10 +2650,16 @@ mod tests {
             let (recording, ts) = recording_store(TableStoreKind::Reader);
             let encoded = build_test_sst(&format(), 4).await;
             let id = SsTableId::from(ulid::Ulid::new());
-            let handle = ts.write_sst(&id, &encoded).await.unwrap();
+            let segment = Bytes::from_static(b"segment/");
+            let handle = ts
+                .write_sst(&id, &encoded, Some(segment.clone()))
+                .await
+                .unwrap();
 
             recording.clear();
-            ts.read_index(&handle, false).await.unwrap();
+            ts.read_index(&handle, false, Some(segment.clone()))
+                .await
+                .unwrap();
 
             let kinds = recording.get_kinds(false);
             assert!(!kinds.is_empty(), "expected at least one range read");
@@ -2571,6 +2678,13 @@ mod tests {
                 recording.get_retries(false).iter().all(|r| r.is_none()),
                 "a successful read should carry no retry reason"
             );
+            assert!(
+                recording
+                    .get_segments(false)
+                    .iter()
+                    .all(|actual| actual.as_ref() == Some(&segment)),
+                "compacted reads should carry the segment hint"
+            );
         }
 
         // A compacted-SST metadata HEAD read carries the source kind and type.
@@ -2579,10 +2693,13 @@ mod tests {
             let (recording, ts) = recording_store(TableStoreKind::Compactor);
             let encoded = build_test_sst(&format(), 1).await;
             let id = SsTableId::from(ulid::Ulid::new());
-            ts.write_sst(&id, &encoded).await.unwrap();
+            let segment = Bytes::from_static(b"segment/");
+            ts.write_sst(&id, &encoded, Some(segment.clone()))
+                .await
+                .unwrap();
 
             recording.clear();
-            ts.metadata(&id).await.unwrap();
+            ts.metadata(&id, Some(segment.clone())).await.unwrap();
 
             assert_eq!(
                 recording.get_kinds(true),
@@ -2594,6 +2711,7 @@ mod tests {
                 vec![Some(SstType::Compacted)],
                 "the metadata HEAD read should carry the Compacted type"
             );
+            assert_eq!(recording.get_segments(true), vec![Some(segment)]);
         }
 
         // A recoverable validation failure on a compacted read reissues it once
@@ -2603,8 +2721,13 @@ mod tests {
             let observed: Arc<Mutex<Vec<ObjectStoreCallTag>>> = Arc::new(Mutex::new(Vec::new()));
             let attempts = AtomicUsize::new(0);
             let obs = observed.clone();
+            let segment = Bytes::from_static(b"segment/");
             let result: Result<u8, SlateDBError> = read_with_validation_retry(
-                ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted),
+                ObjectStoreCallTag::new_with_segment(
+                    TableStoreKind::Compactor,
+                    SstType::Compacted,
+                    Some(segment.clone()),
+                ),
                 |tag| {
                     obs.lock().unwrap().push(tag);
                     let n = attempts.fetch_add(1, Ordering::SeqCst);
@@ -2629,11 +2752,13 @@ mod tests {
                         kind: TableStoreKind::Compactor,
                         sst_type: SstType::Compacted,
                         retry: None,
+                        segment: Some(segment.clone()),
                     },
                     ObjectStoreCallTag {
                         kind: TableStoreKind::Compactor,
                         sst_type: SstType::Compacted,
                         retry: Some(RetryReason::CrcMismatch),
+                        segment: Some(segment),
                     },
                 ],
                 "the reissue must carry the same source/type and the retry reason"
@@ -2645,7 +2770,10 @@ mod tests {
             let (recording, ts) = recording_store(TableStoreKind::Compactor);
             let encoded = build_test_sst(&format(), 4).await;
             let id = SsTableId::from(ulid::Ulid::new());
-            ts.write_sst(&id, &encoded).await.unwrap();
+            let segment = Bytes::from_static(b"segment/");
+            ts.write_sst(&id, &encoded, Some(segment.clone()))
+                .await
+                .unwrap();
 
             let kinds = recording.write_kinds();
             let sst_types = recording.write_sst_types();
@@ -2657,6 +2785,13 @@ mod tests {
             assert!(
                 sst_types.iter().all(|t| *t == Some(SstType::Compacted)),
                 "compacted writes should carry the Compacted type, got {sst_types:?}"
+            );
+            assert!(
+                recording
+                    .write_segments()
+                    .iter()
+                    .all(|actual| actual.as_ref() == Some(&segment)),
+                "compacted writes should carry the segment hint"
             );
         }
     }

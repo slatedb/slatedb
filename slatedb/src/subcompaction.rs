@@ -102,6 +102,7 @@ pub(crate) async fn plan_subcompaction_ranges(
     table_store: &Arc<TableStore>,
     sst_views: &[SsTableView],
     sorted_runs: &[SortedRun],
+    segment: &Bytes,
     max_subcompactions: usize,
     max_fetch_tasks: usize,
 ) -> Result<Vec<BytesRange>, SlateDBError> {
@@ -144,8 +145,11 @@ pub(crate) async fn plan_subcompaction_ranges(
     let anchors: Vec<(Bytes, u64)> = stream::iter(views)
         .map(|view| {
             let table_store = table_store.clone();
+            let segment = segment.clone();
             async move {
-                let index = table_store.read_index(&view.sst, true).await?;
+                let index = table_store
+                    .read_index(&view.sst, true, Some(segment))
+                    .await?;
                 // `filter_offset` marks the end of the data-block region: the
                 // filter, index, and stats blocks all follow it, and when the
                 // SST has no filter it aliases `index_offset`. Using

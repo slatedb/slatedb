@@ -567,7 +567,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let compacted_id = SsTableId::from(ulid::Ulid::new());
         table_store
-            .write_sst(&compacted_id, &encoded)
+            .write_sst(&compacted_id, &encoded, Some(Bytes::new()))
             .await
             .unwrap();
         report(
@@ -842,7 +842,7 @@ mod tests {
 
         // write sst and validate that the handle returned has the correct content.
         let sst_handle = table_store
-            .write_sst(&test_sst_id(table_id_seed), &encoded)
+            .write_sst(&test_sst_id(table_id_seed), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
@@ -855,12 +855,12 @@ mod tests {
 
         // construct sst info from the raw bytes and validate that it matches the original info.
         let sst_handle_from_store = table_store
-            .open_sst(&test_sst_id(table_id_seed))
+            .open_sst(&test_sst_id(table_id_seed), Some(Bytes::new()))
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle_from_store.info);
         let index = table_store
-            .read_index(&sst_handle_from_store, true)
+            .read_index(&sst_handle_from_store, true, Some(Bytes::new()))
             .await
             .unwrap();
         let sst_info_from_store = sst_handle_from_store.info;
@@ -919,12 +919,21 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
         table_store
-            .write_sst(&test_sst_id(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
-        let sst_handle = table_store.open_sst(&test_sst_id(0)).await.unwrap();
-        let index = table_store.read_index(&sst_handle, true).await.unwrap();
-        let filters = table_store.read_filters(&sst_handle, true).await.unwrap();
+        let sst_handle = table_store
+            .open_sst(&test_sst_id(0), Some(Bytes::new()))
+            .await
+            .unwrap();
+        let index = table_store
+            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .await
+            .unwrap();
+        let filters = table_store
+            .read_filters(&sst_handle, true, Some(Bytes::new()))
+            .await
+            .unwrap();
         assert!(!filters.is_empty());
         let filter = &filters[0].filter;
 
@@ -988,7 +997,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
         table_store
-            .write_sst(&test_sst_id(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
 
@@ -1005,9 +1014,18 @@ mod tests {
             TableStoreKind::Main,
             BlockCachePolicy::default(),
         );
-        let sst_handle = table_store.open_sst(&test_sst_id(0)).await.unwrap();
-        let index = table_store.read_index(&sst_handle, true).await.unwrap();
-        let filters = table_store.read_filters(&sst_handle, true).await.unwrap();
+        let sst_handle = table_store
+            .open_sst(&test_sst_id(0), Some(Bytes::new()))
+            .await
+            .unwrap();
+        let index = table_store
+            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .await
+            .unwrap();
+        let filters = table_store
+            .read_filters(&sst_handle, true, Some(Bytes::new()))
+            .await
+            .unwrap();
         assert!(!filters.is_empty());
         let filter = &filters[0].filter;
 
@@ -1133,7 +1151,7 @@ mod tests {
 
         // write sst and validate that the handle returned has the correct content.
         let sst_handle = table_store
-            .write_sst(&test_sst_id(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
         assert_eq!(encoded_info, sst_handle.info);
@@ -1145,10 +1163,13 @@ mod tests {
         );
 
         // construct sst info from the raw bytes and validate that it matches the original info.
-        let sst_handle_from_store = table_store.open_sst(&test_sst_id(0)).await.unwrap();
+        let sst_handle_from_store = table_store
+            .open_sst(&test_sst_id(0), Some(Bytes::new()))
+            .await
+            .unwrap();
         assert_eq!(encoded_info, sst_handle_from_store.info);
         let index = table_store
-            .read_index(&sst_handle_from_store, true)
+            .read_index(&sst_handle_from_store, true, Some(Bytes::new()))
             .await
             .unwrap();
 
@@ -1254,8 +1275,12 @@ mod tests {
         let encoded = builder.build().await?;
 
         let sst_id = test_sst_id(0);
-        let sst_handle = SsTableView::identity(table_store.write_sst(&sst_id, &encoded).await?)
-            .with_visible_range(BytesRange::from_ref("c"..="f"));
+        let sst_handle = SsTableView::identity(
+            table_store
+                .write_sst(&sst_id, &encoded, Some(Bytes::new()))
+                .await?,
+        )
+        .with_visible_range(BytesRange::from_ref("c"..="f"));
 
         let expected_entries = vec![
             RowEntry::new_value(b"c", b"value", 0),
@@ -1379,13 +1404,22 @@ mod tests {
         let encoded = builder.build().await.unwrap();
         let encoded_info = encoded.info.clone();
         table_store
-            .write_sst(&test_sst_id(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
 
-        let sst_handle = table_store.open_sst(&test_sst_id(0)).await.unwrap();
-        let index = table_store.read_index(&sst_handle, true).await.unwrap();
-        let filters = table_store.read_filters(&sst_handle, true).await.unwrap();
+        let sst_handle = table_store
+            .open_sst(&test_sst_id(0), Some(Bytes::new()))
+            .await
+            .unwrap();
+        let index = table_store
+            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .await
+            .unwrap();
+        let filters = table_store
+            .read_filters(&sst_handle, true, Some(Bytes::new()))
+            .await
+            .unwrap();
         assert!(!filters.is_empty());
         let filter = &filters[0].filter;
 
@@ -1435,12 +1469,18 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&test_sst_id(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
 
-        let sst_handle = table_store.open_sst(&test_sst_id(0)).await.unwrap();
-        let index = table_store.read_index(&sst_handle, true).await.unwrap();
+        let sst_handle = table_store
+            .open_sst(&test_sst_id(0), Some(Bytes::new()))
+            .await
+            .unwrap();
+        let index = table_store
+            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .await
+            .unwrap();
 
         assert_eq!(1, index.borrow().block_meta().len());
         assert_eq!(
@@ -1530,17 +1570,23 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&test_sst_id(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
 
         // then: the stored SST should be V1 format
-        let version = table_store.read_sst_version(&sst_handle.id).await.unwrap();
+        let version = table_store
+            .read_sst_version(&sst_handle.id, Some(Bytes::new()))
+            .await
+            .unwrap();
         assert_eq!(version, SST_FORMAT_VERSION);
         assert_eq!(sst_handle.format_version, SST_FORMAT_VERSION);
 
         // then: V1 blocks should have one offset per entry
-        let blocks = table_store.read_blocks(&sst_handle, 0..1).await.unwrap();
+        let blocks = table_store
+            .read_blocks(&sst_handle, 0..1, Some(Bytes::new()))
+            .await
+            .unwrap();
         let block = &blocks[0];
         // V1: offsets.len() == number of entries in the block, which should be
         // much larger than 1 (unlike V2 which would have ~1 restart point)
@@ -1596,17 +1642,23 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&test_sst_id(1), &encoded)
+            .write_sst(&test_sst_id(1), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
 
         // then: the stored SST should be V2 format
-        let version = table_store.read_sst_version(&sst_handle.id).await.unwrap();
+        let version = table_store
+            .read_sst_version(&sst_handle.id, Some(Bytes::new()))
+            .await
+            .unwrap();
         assert_eq!(version, SST_FORMAT_VERSION_LATEST);
         assert_eq!(sst_handle.format_version, SST_FORMAT_VERSION_LATEST);
 
         // then: V2 blocks should have fewer offsets than entries (restart points only)
-        let blocks = table_store.read_blocks(&sst_handle, 0..1).await.unwrap();
+        let blocks = table_store
+            .read_blocks(&sst_handle, 0..1, Some(Bytes::new()))
+            .await
+            .unwrap();
         let block = &blocks[0];
         // V2 default restart interval is 16, so 20 entries -> 2 restart points
         assert!(
@@ -1695,11 +1747,11 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&test_sst_id(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
         let stats = table_store
-            .read_stats(&sst_handle, true)
+            .read_stats(&sst_handle, true, Some(Bytes::new()))
             .await
             .unwrap()
             .expect("stats should be present");
@@ -1766,11 +1818,11 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&test_sst_id(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
         let stats = table_store
-            .read_stats(&sst_handle, true)
+            .read_stats(&sst_handle, true, Some(Bytes::new()))
             .await
             .unwrap()
             .expect("stats should be present");
@@ -1810,11 +1862,11 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&test_sst_id(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
         let stats = table_store
-            .read_stats(&sst_handle, true)
+            .read_stats(&sst_handle, true, Some(Bytes::new()))
             .await
             .unwrap()
             .expect("stats should be present");
@@ -1877,11 +1929,11 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         let sst_handle = table_store
-            .write_sst(&test_sst_id(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
         let stats = table_store
-            .read_stats(&sst_handle, true)
+            .read_stats(&sst_handle, true, Some(Bytes::new()))
             .await
             .unwrap()
             .expect("stats should be present");
@@ -1957,13 +2009,19 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&test_sst_id(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
-        let handle = table_store.open_sst(&test_sst_id(0)).await.unwrap();
+        let handle = table_store
+            .open_sst(&test_sst_id(0), Some(Bytes::new()))
+            .await
+            .unwrap();
 
         // --- Both sub-filters decoded correctly ---
-        let filters = table_store.read_filters(&handle, false).await.unwrap();
+        let filters = table_store
+            .read_filters(&handle, false, Some(Bytes::new()))
+            .await
+            .unwrap();
         assert_eq!(
             filters.len(),
             2,
@@ -2003,9 +2061,12 @@ mod tests {
             TableStoreKind::Main,
             BlockCachePolicy::default(),
         );
-        let handle_partial = store_partial.open_sst(&test_sst_id(0)).await.unwrap();
+        let handle_partial = store_partial
+            .open_sst(&test_sst_id(0), Some(Bytes::new()))
+            .await
+            .unwrap();
         let partial = store_partial
-            .read_filters(&handle_partial, false)
+            .read_filters(&handle_partial, false, Some(Bytes::new()))
             .await
             .unwrap();
         assert_eq!(

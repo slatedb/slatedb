@@ -488,6 +488,7 @@ impl CompactionWorkerHandler {
             // the entry in `.compactions`. (One-job-per-Compaction in phase 2.)
             id: compaction.id(),
             compaction_id: compaction.id(),
+            segment: compaction.spec().segment().clone(),
             destination,
             l0_sst_views,
             sorted_runs,
