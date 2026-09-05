@@ -870,7 +870,7 @@ mod tests {
         db.warm_sst(sst_id, &[CacheTarget::data::<&[u8], _>(..)])
             .await
             .expect("warm_sst");
-        let mask_before = cached_block_mask(&db.inner.table_store, sst_id).await;
+        let mask_before = cached_block_mask(&db.inner.table_store, sst_id, Bytes::new()).await;
         assert!(
             mask_before.iter().all(|&b| b),
             "expected all blocks cached after warm"
@@ -881,7 +881,7 @@ mod tests {
 
         // then: the default no-op `flush_scope` leaves entries exactly as
         // they were; only a hybrid cache implements the flush.
-        let mask_after = cached_block_mask(&db.inner.table_store, sst_id).await;
+        let mask_after = cached_block_mask(&db.inner.table_store, sst_id, Bytes::new()).await;
         assert_eq!(
             mask_before, mask_after,
             "non-hybrid cache should be untouched by flush_cache_to_disk"
