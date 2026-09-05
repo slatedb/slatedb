@@ -657,6 +657,21 @@ pub trait DbCacheManagerOps {
     /// Does not check whether the SST is still live in the current manifest —
     /// callers own that policy.
     async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), crate::Error>;
+
+    /// Send this instance's cached data to disk.
+    ///
+    /// This moves data for this instance's `db_cache_id` from memory to disk.
+    /// It frees memory now, and protects the data from an ungraceful
+    /// process exit later. A later instance with the same `db_cache_id` can
+    /// read the data back from disk.
+    ///
+    /// This affects the whole scope, not only this instance's own reads
+    /// and writes. If another instance uses the same `db_cache_id`, this call
+    /// also flushes that instance's data.
+    ///
+    /// Does nothing if no block cache is set, or if the cache has no disk
+    /// storage.
+    async fn flush_cache_to_disk(&self) -> Result<(), crate::Error>;
 }
 
 #[cfg(test)]

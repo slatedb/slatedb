@@ -1478,6 +1478,11 @@ impl DbCacheManagerOps for DbReader {
         db_cache_manager::evict_cached_sst_impl(&self.inner.table_store, manifest.core(), sst_id)
             .await
     }
+
+    async fn flush_cache_to_disk(&self) -> Result<(), crate::Error> {
+        self.inner.check_closed()?;
+        db_cache_manager::flush_cache_to_disk_impl(&self.inner.table_store).await
+    }
 }
 
 #[cfg(test)]

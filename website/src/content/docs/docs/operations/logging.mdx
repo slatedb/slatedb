@@ -5,6 +5,7 @@ description: Learn how to configure logging and tracing in SlateDB
 
 import { Code } from '@astrojs/starlight/components';
 import tracingSubscriber from '/../examples/src/tracing_subscriber.rs?raw'
+import readTracing from '/../examples/src/read_tracing.rs?raw'
 
 ## Tracing in SlateDB
 
@@ -13,3 +14,29 @@ SlateDB uses the [`tracing`](https://github.com/tokio-rs/tracing) library for lo
 Here's a basic example showing how to consume tracing logs with `tracing_subscriber` and SlateDB:
 
 <Code code={tracingSubscriber} lang="rust" title="main.rs" />
+
+## Tracing Read Operation
+
+SlateDB provides structured tracing spans for read operations, allowing you to track and measure the performance of individual reads. When enabled, SlateDB creates a hierarchy of spans that wrap different parts of the read path:
+
+- `slatedb.read` — The root span that wraps the entire read operation (get, scan, or scan_prefix_by_recency)
+- `slatedb.read.memtable` — A child span that wraps each memtable lookup
+
+These spans are only created when you provide `TracingOptions` to the read operation.
+
+The spans `slatedb.read` are created at tracing level `INFO`.
+Due to the potential huge number of spans `slatedb.read.memtable` created during scan operations, spans `slatedb.read.memtable` are created at tracing level `DEBUG`.
+
+### Configuring TracingOptions
+
+Read operations (`get`, `scan`, `scan_prefix_by_recency`) can be traced by passing `TracingOptions` via the corresponding options struct. Use `ReadOptions::with_tracing_options()` for point reads and `ScanOptions::with_tracing_options()` for scans.
+
+The `trace_id` field in `TracingOptions` allows you to correlate spans of the same read operation.
+
+Here's an example of enabling tracing for a get operation:
+
+<Code code={readTracing} lang="rust" title="main.rs" />
+
+:::note
+These are the first spans introduced as part of [RFC-0033](https://github.com/slatedb/slatedb/blob/main/rfcs/0033-query_tracing.md). More spans covering additional parts of the read path will be added in future releases.
+:::

@@ -17,11 +17,13 @@ from conftest import (
 
 from slatedb.uniffi import (
     CloseReason,
+    DbCache,
     DbReaderBuilder,
     Error,
     FlushOptions,
     FlushType,
     KeyRange,
+    MokaCacheOptions,
     ReaderMode,
 )
 
@@ -324,3 +326,49 @@ async def test_reader_invalid_ranges_raise_invalid_errors() -> None:
                 KeyRange(start=b"", start_inclusive=True, end=None, end_inclusive=False)
             )
             require_rows(await drain_iterator(scan), ["seed"], ["value"])
+
+
+@pytest.mark.asyncio
+async def test_reader_shared_db_cache() -> None:
+    store = new_memory_store()
+
+    async with open_db(store) as db:
+        await db.put(b"cached", b"value")
+        await db.flush_with_options(FlushOptions(flush_type=FlushType.MEM_TABLE))
+
+        shared_cache = DbCache.new_moka_cache(
+            MokaCacheOptions(max_capacity=1024 * 1024, time_to_live=None, time_to_idle=None)
+        )
+
+        async with open_reader(
+            store,
+            configure=lambda builder: builder.with_db_cache(shared_cache, 0),
+        ) as first_reader, open_reader(
+            store,
+            configure=lambda builder: builder.with_db_cache(shared_cache, 0),
+        ) as second_reader:
+            assert await first_reader.get(b"cached") == b"value"
+            assert await second_reader.get(b"cached") == b"value"
+
+        # The shared cache outlives the readers that used it.
+        async with open_reader(
+            store,
+            configure=lambda builder: builder.with_db_cache(shared_cache, 0),
+        ) as reader:
+            assert await reader.get(b"cached") == b"value"
+
+
+@pytest.mark.asyncio
+async def test_reader_db_cache_disabled() -> None:
+    store = new_memory_store()
+
+    async with open_db(store) as db:
+        await db.put(b"uncached", b"value")
+        await db.flush_with_options(FlushOptions(flush_type=FlushType.MEM_TABLE))
+
+        async with open_reader(
+            store,
+            configure=lambda builder: builder.with_db_cache_disabled(),
+        ) as reader:
+            assert await reader.get(b"uncached") == b"value"
+            assert await reader.get(b"missing") is None

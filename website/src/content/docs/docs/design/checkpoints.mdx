@@ -39,7 +39,7 @@ A new checkpoint can also be created from an existing checkpoint through [`Check
 
 [`DbReaderOptions::checkpoint_lifetime`](https://docs.rs/slatedb/latest/slatedb/config/struct.DbReaderOptions.html#structfield.checkpoint_lifetime) controls how long a `ManagedCheckpoint` reader's checkpoint lives before it must be refreshed.
 
-SlateDB also uses short-lived internal checkpoints during some background transitions. For example, the compactor writes a temporary checkpoint before publishing a manifest that drops obsolete SST references. That keeps recently replaced SSTs readable until GC can safely remove them.
+SlateDB also uses short-lived internal checkpoints during some background transitions. For example, the compactor writes a temporary checkpoint before publishing a manifest that drops obsolete SST references. The checkpoint's lifetime is configurable via [`CompactorOptions::checkpoint_lifetime`](https://docs.rs/slatedb/latest/slatedb/config/struct.CompactorOptions.html#structfield.checkpoint_lifetime) and defaults to 15 minutes. Shorter lifetimes reduce retained storage; longer lifetimes give in-flight reads more time to complete before GC deletes their SSTs. If a read operation runs longer than the configured lifetime, it may fail with a data error when GC removes the SST.
 
 ## Clones
 
