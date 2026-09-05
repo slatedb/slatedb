@@ -81,19 +81,24 @@ impl ObjectStoreCallTag {
             SstType::Compacted => Some(Bytes::new()),
             SstType::Wal => None,
         };
+        Self::new_with_segment(kind, sst_type, segment)
+    }
+
+    /// A tag with an explicit segment hint and no retry reason.
+    ///
+    /// An empty prefix identifies the root segment. Unlike [`Self::new`],
+    /// passing `None` leaves the segment unknown or not applicable for any SST type.
+    pub fn new_with_segment(
+        kind: TableStoreKind,
+        sst_type: SstType,
+        segment: Option<Bytes>,
+    ) -> Self {
         Self {
             kind,
             sst_type,
             retry: None,
             segment,
         }
-    }
-
-    /// Sets the optional segment prefix used by object-store wrappers for
-    /// routing.
-    pub fn with_segment(mut self, segment: Option<Bytes>) -> Self {
-        self.segment = segment;
-        self
     }
 
     /// Reads the tag back from an extensions map, if present.
@@ -107,5 +112,46 @@ impl From<ObjectStoreCallTag> for Extensions {
         let mut extensions = Extensions::new();
         extensions.insert(tag);
         extensions
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(SstType::Compacted, Some(Bytes::new()))]
+    #[case(SstType::Wal, None)]
+    fn test_new_defaults(#[case] sst_type: SstType, #[case] segment: Option<Bytes>) {
+        assert_eq!(
+            ObjectStoreCallTag::new(TableStoreKind::Main, sst_type),
+            ObjectStoreCallTag {
+                kind: TableStoreKind::Main,
+                sst_type,
+                retry: None,
+                segment,
+            }
+        );
+    }
+
+    #[rstest]
+    #[case(Some(Bytes::from_static(b"segment/")))]
+    #[case(Some(Bytes::new()))]
+    #[case(None)]
+    fn test_new_with_segment(#[case] segment: Option<Bytes>) {
+        assert_eq!(
+            ObjectStoreCallTag::new_with_segment(
+                TableStoreKind::Compactor,
+                SstType::Compacted,
+                segment.clone(),
+            ),
+            ObjectStoreCallTag {
+                kind: TableStoreKind::Compactor,
+                sst_type: SstType::Compacted,
+                retry: None,
+                segment,
+            }
+        );
     }
 }

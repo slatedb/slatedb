@@ -111,7 +111,7 @@ impl TableStore {
             writer: tagged_buf_writer(
                 object_store,
                 path,
-                ObjectStoreCallTag::new(self.kind, SstType::from(&id)).with_segment(segment),
+                ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&id), segment),
             ),
             table_store: self.clone(),
             #[cfg(test)]
@@ -143,7 +143,7 @@ impl TableStore {
             object_store,
             &path,
             encoded_sst,
-            ObjectStoreCallTag::new(self.kind, SstType::from(id)).with_segment(segment),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(id), segment),
         )
         .await?;
 
@@ -288,8 +288,7 @@ impl TableStore {
         let path = self.path(id);
         let opts = GetOptions {
             head: true,
-            extensions: ObjectStoreCallTag::new(self.kind, SstType::from(id))
-                .with_segment(segment)
+            extensions: ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(id), segment)
                 .into(),
             ..GetOptions::default()
         };
@@ -350,7 +349,7 @@ impl TableStore {
         let (info, version) = read_obj!(
             &self.object_store,
             self.path(id),
-            ObjectStoreCallTag::new(self.kind, SstType::from(id)).with_segment(segment),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(id), segment),
             |obj| self.sst_format.read_info_and_version(&obj)
         )
         .await?;
@@ -368,7 +367,7 @@ impl TableStore {
         let (_, version) = read_obj!(
             &self.object_store,
             self.path(id),
-            ObjectStoreCallTag::new(self.kind, SstType::from(id)).with_segment(segment),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(id), segment),
             |obj| self.sst_format.read_info_and_version(&obj)
         )
         .await?;
@@ -431,7 +430,7 @@ impl TableStore {
         read_obj!(
             &self.object_store,
             self.path(&handle.id),
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)).with_segment(segment),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment),
             |obj| self.sst_format.read_filters(&handle.info, &obj)
         )
         .await
@@ -474,7 +473,7 @@ impl TableStore {
         read_obj!(
             &self.object_store,
             self.path(&handle.id),
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)).with_segment(segment),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment),
             |obj| self.sst_format.read_stats(&handle.info, &obj)
         )
         .await
@@ -514,7 +513,7 @@ impl TableStore {
         let index = read_obj!(
             &self.object_store,
             self.path(&handle.id),
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)).with_segment(segment),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment),
             |obj| self.sst_format.read_index(&handle.info, &obj)
         )
         .await?;
@@ -539,7 +538,7 @@ impl TableStore {
         let path = self.path(&handle.id);
         let sst_format = self.sst_format.clone();
         let tag =
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)).with_segment(segment);
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment);
         Box::new(move || {
             Box::pin(async move {
                 // Only the stats arm can produce `None` (stats_len > 0 but no
@@ -600,7 +599,7 @@ impl TableStore {
         let path = self.path(&handle.id);
         let sst_format = self.sst_format.clone();
         let tag =
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)).with_segment(segment);
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment);
         Box::new(move || {
             Box::pin(async move {
                 let block = read_with_validation_retry(tag, async |tag| {
@@ -632,7 +631,7 @@ impl TableStore {
         let object_store = self.object_store.clone();
         let path = self.path(&handle.id);
         read_with_validation_retry(
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)).with_segment(segment),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment),
             |tag| {
                 let obj = ReadOnlyObject {
                     object_store: object_store.clone(),
@@ -800,8 +799,11 @@ impl TableStore {
             let segment = segment.clone();
             async move {
                 read_with_validation_retry(
-                    ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id))
-                        .with_segment(segment),
+                    ObjectStoreCallTag::new_with_segment(
+                        self.kind,
+                        SstType::from(&handle.id),
+                        segment,
+                    ),
                     |tag| {
                         let obj = ReadOnlyObject {
                             object_store: object_store.clone(),
@@ -861,7 +863,7 @@ impl TableStore {
         read_obj!(
             &self.object_store,
             self.path(&handle.id),
-            ObjectStoreCallTag::new(self.kind, SstType::from(&handle.id)).with_segment(segment),
+            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment),
             |obj| async {
                 let index = self.sst_format.read_index(&handle.info, &obj).await?;
                 self.sst_format
@@ -2718,8 +2720,11 @@ mod tests {
             let obs = observed.clone();
             let segment = Bytes::from_static(b"segment/");
             let result: Result<u8, SlateDBError> = read_with_validation_retry(
-                ObjectStoreCallTag::new(TableStoreKind::Compactor, SstType::Compacted)
-                    .with_segment(Some(segment.clone())),
+                ObjectStoreCallTag::new_with_segment(
+                    TableStoreKind::Compactor,
+                    SstType::Compacted,
+                    Some(segment.clone()),
+                ),
                 |tag| {
                     obs.lock().unwrap().push(tag);
                     let n = attempts.fetch_add(1, Ordering::SeqCst);
