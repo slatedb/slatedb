@@ -713,13 +713,18 @@ mod tests {
         manifest.manifest.core.checkpoints.len()
     }
 
-    fn seeded_l0_handle(first_key: &[u8]) -> SsTableHandle {
-        seeded_l0_handle_with_bounds(first_key, None)
+    fn seeded_l0_handle(seed: u128, first_key: &[u8]) -> SsTableHandle {
+        seeded_l0_handle_with_bounds(seed, first_key, None)
     }
 
-    fn seeded_l0_handle_with_bounds(first_key: &[u8], last_key: Option<&[u8]>) -> SsTableHandle {
+    fn seeded_l0_handle_with_bounds(
+        seed: u128,
+        first_key: &[u8],
+        last_key: Option<&[u8]>,
+    ) -> SsTableHandle {
+        // Seed test L0s with an old timestamp so live uploads are always newer.
         SsTableHandle::new(
-            SsTableId::from(ulid::Ulid::new()),
+            SsTableId::from(ulid::Ulid::from_parts(0, seed)),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo {
                 first_entry: Some(Bytes::copy_from_slice(first_key)),
@@ -749,12 +754,12 @@ mod tests {
                 .unwrap();
         let mut dirty = stored_manifest.prepare_dirty().unwrap();
         Arc::make_mut(&mut dirty.value.core.tree).l0.clear();
-        for (first, last) in ranges {
+        for (seed, (first, last)) in ranges.iter().enumerate() {
             Arc::make_mut(&mut dirty.value.core.tree)
                 .l0
                 .push_back(SsTableView::new(
                     ulid::Ulid::new(),
-                    seeded_l0_handle_with_bounds(first, Some(last)),
+                    seeded_l0_handle_with_bounds(seed as u128, first, Some(last)),
                 ));
         }
         stored_manifest.update(dirty).await.unwrap();
@@ -766,12 +771,12 @@ mod tests {
             Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
                 .l0
                 .clear();
-            for (first, last) in ranges {
+            for (seed, (first, last)) in ranges.iter().enumerate() {
                 Arc::make_mut(&mut modifier.state.manifest.value.core.tree)
                     .l0
                     .push_back(SsTableView::new(
                         ulid::Ulid::new(),
-                        seeded_l0_handle_with_bounds(first, Some(last)),
+                        seeded_l0_handle_with_bounds(seed as u128, first, Some(last)),
                     ));
             }
         });
@@ -790,7 +795,7 @@ mod tests {
                 .l0
                 .push_back(SsTableView::new(
                     ulid::Ulid::new(),
-                    seeded_l0_handle(format!("seed-{idx}").as_bytes()),
+                    seeded_l0_handle(idx as u128, format!("seed-{idx}").as_bytes()),
                 ));
         }
         stored_manifest.update(dirty).await.unwrap();
@@ -804,7 +809,7 @@ mod tests {
             for idx in 0..l0_len {
                 l0.push_back(SsTableView::new(
                     ulid::Ulid::new(),
-                    seeded_l0_handle(format!("local-segment-seed-{idx}").as_bytes()),
+                    seeded_l0_handle(idx as u128, format!("local-segment-seed-{idx}").as_bytes()),
                 ));
             }
             modifier.state.manifest.value.core.segments = vec![Segment {
@@ -830,7 +835,7 @@ mod tests {
                     .l0
                     .push_back(SsTableView::new(
                         ulid::Ulid::new(),
-                        seeded_l0_handle(format!("local-seed-{idx}").as_bytes()),
+                        seeded_l0_handle(idx as u128, format!("local-seed-{idx}").as_bytes()),
                     ));
             }
         });

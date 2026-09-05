@@ -1,4 +1,4 @@
-//! RFC-0026 "GC cutoff rule enforcement" invariants for the `.manifest` object.
+//! RFC-0029 GC cutoff invariants for the `.manifest` object.
 //!
 //! Each invariant is a plain [`Invariant<Manifest>`] predicate attached once to
 //! the [`StoredManifest`](super::store::StoredManifest)'s transactional object, so
@@ -49,7 +49,6 @@ use crate::manifest::Manifest;
 /// watermark timestamp as `last_tick` and the offending ULID timestamp as
 /// `next_tick`. The txn-obj layer wraps the boxed error in `CallbackError`, which
 /// maps back to `SlateDBError::InvalidClockTick` for the caller.
-#[allow(dead_code)]
 pub(crate) fn l0_ulid_cutoff(
     dirty: &Manifest,
     current: &Manifest,
@@ -84,10 +83,7 @@ pub(crate) fn l0_ulid_cutoff(
     Ok(())
 }
 
-/// The invariants enforced on every `.manifest` update (RFC-0026 GC cutoff
-/// rules). Will be attached once at [`StoredManifest`](super::store::StoredManifest)
-/// construction via `with_invariants` in the follow-up wiring PR.
-#[allow(dead_code)]
+/// The RFC-0029 invariants that run before each `.manifest` update.
 pub(crate) fn manifest_invariants() -> Vec<Invariant<Manifest>> {
     vec![Arc::new(l0_ulid_cutoff)]
 }
