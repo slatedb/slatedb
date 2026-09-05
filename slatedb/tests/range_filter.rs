@@ -27,16 +27,48 @@ const KEYS_PER_SST: usize = 3;
 /// of the SSTs so the saving is measurable.
 struct ParityPolicy;
 
+impl FilterPolicy for ParityPolicy {
+    fn name(&self) -> &str {
+        "test.last_byte_parity"
+    }
+
+    fn builder(&self) -> Box<dyn FilterBuilder> {
+        Box::new(ParityBuilder { all_even: true })
+    }
+
+    fn decode(&self, data: &[u8]) -> Arc<dyn Filter> {
+        Arc::new(ParityFilter {
+            all_even: data[0] == 1,
+        })
+    }
+
+    fn estimate_size(&self, _num_keys: usize) -> usize {
+        1
+    }
+
+    fn supports_range_queries(&self) -> bool {
+        true
+    }
+}
+
 struct ParityBuilder {
     all_even: bool,
 }
 
-struct ParityFilter {
-    all_even: bool,
+impl FilterBuilder for ParityBuilder {
+    fn add_entry(&mut self, entry: &RowEntry) {
+        self.all_even &= ends_even(&entry.key);
+    }
+
+    fn build(&mut self) -> Arc<dyn Filter> {
+        Arc::new(ParityFilter {
+            all_even: self.all_even,
+        })
+    }
 }
 
-fn ends_even(key: &[u8]) -> bool {
-    key.last().expect("keys are never empty").is_multiple_of(2)
+struct ParityFilter {
+    all_even: bool,
 }
 
 impl Filter for ParityFilter {
@@ -62,36 +94,8 @@ impl Filter for ParityFilter {
     }
 }
 
-impl FilterBuilder for ParityBuilder {
-    fn add_entry(&mut self, entry: &RowEntry) {
-        self.all_even &= ends_even(&entry.key);
-    }
-
-    fn build(&mut self) -> Arc<dyn Filter> {
-        Arc::new(ParityFilter {
-            all_even: self.all_even,
-        })
-    }
-}
-
-impl FilterPolicy for ParityPolicy {
-    fn name(&self) -> &str {
-        "test.last_byte_parity"
-    }
-
-    fn builder(&self) -> Box<dyn FilterBuilder> {
-        Box::new(ParityBuilder { all_even: true })
-    }
-
-    fn decode(&self, data: &[u8]) -> Arc<dyn Filter> {
-        Arc::new(ParityFilter {
-            all_even: data[0] == 1,
-        })
-    }
-
-    fn estimate_size(&self, _num_keys: usize) -> usize {
-        1
-    }
+fn ends_even(key: &[u8]) -> bool {
+    key.last().expect("keys are never empty").is_multiple_of(2)
 }
 
 /// Keys for one SST, as `k<sst><digit>`.
@@ -155,9 +159,12 @@ async fn open_db(path: &str, filtered: bool) -> (Db, Arc<DefaultMetricsRecorder>
     }
     let db = builder.build().await.expect("failed to build db");
 
+    // Values big enough that each SST spans several blocks, so skipping one
+    // saves more reads than consulting its filter costs.
+    let value = vec![b'v'; 8 * 1024];
     for sst in 0..SSTS {
         for key in sst_keys(sst) {
-            db.put(&key, b"v").await.expect("put failed");
+            db.put(&key, &value).await.expect("put failed");
         }
         db.flush_with_options(FlushOptions {
             flush_type: FlushType::MemTable,
@@ -193,13 +200,13 @@ async fn range_scan_filter_skips_ssts_and_saves_object_store_reads() {
     let filtered_keys = scan_all_keys(&filtered).await;
     let filtered_gets = main_store_gets(&filtered_recorder) - filtered_before;
 
-    // The baseline DB keeps the default bloom policy, which abstains on a
-    // range and so prunes nothing: every SST reports a positive verdict and
-    // the scan sees every key. Both DBs therefore pay one filter read per
-    // SST, leaving the index and block reads as the only difference below.
+    // The baseline DB keeps the default bloom policy, which cannot answer a
+    // range and says so through `supports_range_queries`. Its range scan
+    // therefore builds no evaluator, reads no filters, records no verdict, and
+    // sees every key.
     let all_keys: Vec<Vec<u8>> = (0..SSTS).flat_map(sst_keys).collect();
     assert_eq!(plain_keys, all_keys);
-    assert_eq!(filter_verdicts(&plain_recorder), (SSTS as u64, 0));
+    assert_eq!(filter_verdicts(&plain_recorder), (0, 0));
 
     // With the parity policy the odd-digit SSTs are rejected, so exactly the
     // even-numbered SSTs' keys survive, already in scan order.
@@ -211,10 +218,9 @@ async fn range_scan_filter_skips_ssts_and_saves_object_store_reads() {
         ((SSTS - SKIPPED) as u64, SKIPPED as u64)
     );
 
-    // The point of range filtering: a skipped SST costs no index or block
-    // reads, so the scan issues fewer object-store requests. Observed 16
-    // against 24 at the time of writing; asserted as an inequality because
-    // block-fetch batching can move the absolute counts.
+    // A skipped SST costs no index or block reads, which outweighs the one
+    // filter read every SST pays. Only the direction is asserted: the counts
+    // themselves depend on how the read path batches block fetches.
     assert!(
         filtered_gets < plain_gets,
         "filtered scan should issue fewer gets, got {filtered_gets} against {plain_gets}"

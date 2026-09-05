@@ -43,6 +43,21 @@ pub trait FilterPolicy: Send + Sync {
     /// This is a hint used by the SST builder to reserve buffer space before
     /// the filter is built. It does not need to be exact.
     fn estimate_size(&self, num_keys: usize) -> usize;
+
+    /// Whether filters from this policy can answer [`FilterTarget::Range`]
+    /// queries.
+    ///
+    /// A plain range scan reads an SST's filters only when some registered
+    /// policy says yes here. Defaults to `false`, so a policy that indexes
+    /// keys alone, such as a bloom filter, costs a range scan nothing.
+    ///
+    /// A policy that can answer a range only when the caller supplies a
+    /// [`crate::config::ScanOptions::filter_context`] should still return
+    /// `true`, and abstain by returning `true` from `might_match` when the
+    /// context is absent.
+    fn supports_range_queries(&self) -> bool {
+        false
+    }
 }
 
 /// Accumulator for entries during SST construction that produces a [`Filter`].

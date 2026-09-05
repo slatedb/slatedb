@@ -282,6 +282,8 @@ impl FilterEvaluator {
         match &self.query.target {
             FilterTarget::Point(k) if key == k.as_ref() => self.found_key = true,
             FilterTarget::Prefix(p) if key.starts_with(p.as_ref()) => self.found_key = true,
+            // Keys the iterator yields are already inside the range, so any
+            // row confirms the match.
             FilterTarget::Range { .. } => self.found_key = true,
             _ => {}
         }
@@ -881,12 +883,21 @@ impl<'a> SstIterator<'a> {
         let filter_evaluator = match (point_key, prefix, range) {
             (Some(key), _, _) => Some(FilterEvaluator::new_point(key, filter_context, db_stats)),
             (None, Some(p), _) => Some(FilterEvaluator::new_prefix(p, filter_context, db_stats)),
-            (None, None, (lower, upper)) => Some(FilterEvaluator::new_range(
-                lower,
-                upper,
-                filter_context,
-                db_stats,
-            )),
+            // A plain range scan reads this SST's filters only when there is
+            // a registered policy that can answer a range.
+            (None, None, (lower, upper))
+                if internal
+                    .table_store()
+                    .any_filter_policy_supports_range_queries() =>
+            {
+                Some(FilterEvaluator::new_range(
+                    lower,
+                    upper,
+                    filter_context,
+                    db_stats,
+                ))
+            }
+            (None, None, _) => None,
         };
         let delegate = match filter_evaluator {
             Some(fe) => SstIteratorDelegate::Filter(FilterIterator::new(internal, fe)),
@@ -2944,21 +2955,20 @@ mod tests {
         }
     }
 
-    fn hash_parity(key: &[u8]) -> u64 {
-        key.iter().map(|b| u64::from(*b)).sum::<u64>() % 2
+    // Three doubles cover the range tests:
+    // - `abstaining_filter` stands in for a policy that indexes keys alone,
+    //   which cannot answer a range and so always matches.
+    // - `context_parity_filter` answers from the query context instead of the
+    //   target, so it is the one that can reject a range.
+    // - `bounds_filter` checks the bounds themselves.
+
+    /// Accepts all queries.
+    fn abstaining_filter() -> NamedFilter {
+        named_filter("test.abstaining", |_| true)
     }
 
-    /// Accepts a point query only when the key's hash has `parity`, and
-    /// abstains on prefixes and ranges.
-    fn key_parity_filter(parity: u64) -> NamedFilter {
-        named_filter("test.key_parity", move |query| match &query.target {
-            FilterTarget::Point(key) => hash_parity(key) == parity,
-            _ => true,
-        })
-    }
-
-    /// Answers from the query context rather than the target, so it decides
-    /// every kind including ranges.
+    /// Accepts when the context byte's parity is `parity`, and abstains
+    /// without a context.
     fn context_parity_filter(parity: u64) -> NamedFilter {
         named_filter("test.context_parity", move |query| match &query.context {
             Some(FilterContext::Inline(buf)) => u64::from(buf[0]) % 2 == parity,
@@ -2966,8 +2976,7 @@ mod tests {
         })
     }
 
-    /// Rejects unless the range bounds are exactly `expected`, so a test can
-    /// prove the caller's bounds reach the filter unaltered.
+    /// Rejects unless the range bounds are exactly `expected`.
     fn bounds_filter(expected: (Bound<Bytes>, Bound<Bytes>)) -> NamedFilter {
         named_filter("test.bounds", move |query| match &query.target {
             FilterTarget::Range { lower, upper } => (lower.clone(), upper.clone()) == expected,
@@ -3029,10 +3038,10 @@ mod tests {
         let (recorder, db_stats) = stats();
         let mut evaluator = range_evaluator(context(1), Some(db_stats));
 
-        // AND logic: the key filter abstains, so the verdict is the context
+        // AND logic: one filter abstains, so the verdict is the context
         // filter's alone. This is how a range scan is pruned in practice.
         evaluator
-            .evaluate(&[key_parity_filter(0), context_parity_filter(0)])
+            .evaluate(&[abstaining_filter(), context_parity_filter(0)])
             .await;
 
         assert!(evaluator.is_filtered_out());
@@ -3048,7 +3057,7 @@ mod tests {
         let mut evaluator = range_evaluator(context(0), Some(db_stats));
 
         evaluator
-            .evaluate(&[key_parity_filter(0), context_parity_filter(0)])
+            .evaluate(&[abstaining_filter(), context_parity_filter(0)])
             .await;
         assert!(!evaluator.is_filtered_out());
 
@@ -3121,18 +3130,6 @@ mod tests {
     /// table store so a scan is pruned end to end.
     struct RangeCapablePolicy;
 
-    struct RangeCapableBuilder;
-
-    impl FilterBuilder for RangeCapableBuilder {
-        fn add_entry(&mut self, _entry: &RowEntry) {}
-
-        fn build(&mut self) -> Arc<dyn Filter> {
-            Arc::new(TestFilter(Arc::new(|query: &FilterQuery| {
-                !matches!(query.target, FilterTarget::Range { .. })
-            })))
-        }
-    }
-
     impl FilterPolicy for RangeCapablePolicy {
         fn name(&self) -> &str {
             "test.range_capable"
@@ -3148,6 +3145,54 @@ mod tests {
 
         fn estimate_size(&self, _num_keys: usize) -> usize {
             1
+        }
+
+        fn supports_range_queries(&self) -> bool {
+            true
+        }
+    }
+
+    struct RangeCapableBuilder;
+
+    impl FilterBuilder for RangeCapableBuilder {
+        fn add_entry(&mut self, _entry: &RowEntry) {}
+
+        fn build(&mut self) -> Arc<dyn Filter> {
+            Arc::new(TestFilter(Arc::new(|query: &FilterQuery| {
+                !matches!(query.target, FilterTarget::Range { .. })
+            })))
+        }
+    }
+
+    #[tokio::test]
+    async fn should_not_read_filters_for_a_range_when_no_policy_supports_ranges() {
+        // A bloom filter cannot answer a range, so a bloom-only database must
+        // build no evaluator for a range scan and must not read the SST's
+        // filters, with or without a caller-supplied context.
+        for filter_context in [context(0), None] {
+            let (recorder, db_stats) = stats();
+            let table_store = bloom_filter_enabled_table_store(10);
+            let table = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
+            let options = SstIteratorOptions {
+                filter_context,
+                ..Default::default()
+            };
+
+            let iter = SstIterator::new_owned_initialized_with_stats(
+                ..,
+                table,
+                table_store,
+                options,
+                Some(db_stats),
+            )
+            .await
+            .unwrap();
+            assert!(iter.is_some(), "nothing rejected the SST");
+            assert_eq!(
+                verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE),
+                (Some(0), Some(0), Some(0)),
+                "no evaluator should have been built"
+            );
         }
     }
 
