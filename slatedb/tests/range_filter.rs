@@ -219,12 +219,10 @@ async fn range_scan_filter_skips_ssts_and_saves_object_store_reads() {
     );
 
     // A skipped SST costs no index or block reads, which outweighs the one
-    // filter read every SST pays. Only the direction is asserted: the counts
-    // themselves depend on how the read path batches block fetches.
-    assert!(
-        filtered_gets < plain_gets,
-        "filtered scan should issue fewer gets, got {filtered_gets} against {plain_gets}"
-    );
+    // filter read every SST pays. Exact counts, so a change to the read-ahead
+    // default or to block batching breaks this on purpose.
+    assert_eq!(plain_gets, 32);
+    assert_eq!(filtered_gets, 24);
 
     plain.close().await.expect("close failed");
     filtered.close().await.expect("close failed");

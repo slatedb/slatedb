@@ -50,11 +50,6 @@ pub trait FilterPolicy: Send + Sync {
     /// A plain range scan reads an SST's filters only when some registered
     /// policy says yes here. Defaults to `false`, so a policy that indexes
     /// keys alone, such as a bloom filter, costs a range scan nothing.
-    ///
-    /// A policy that can answer a range only when the caller supplies a
-    /// [`crate::config::ScanOptions::filter_context`] should still return
-    /// `true`, and abstain by returning `true` from `might_match` when the
-    /// context is absent.
     fn supports_range_queries(&self) -> bool {
         false
     }
