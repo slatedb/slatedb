@@ -115,6 +115,8 @@ pub struct DbReader {
 }
 
 struct DbReaderInner {
+    #[cfg(test)]
+    poll_completed: tokio::sync::Notify,
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
     wal_reader: Arc<dyn WalReaderTrait>,
@@ -137,6 +139,7 @@ struct DbReaderInner {
 #[derive(Debug)]
 enum DbReaderMessage {
     PollManifest,
+    // Explicit refreshes return a result to the caller. Timer polls have no caller.
     Refresh(tokio::sync::oneshot::Sender<Result<(), SlateDBError>>),
 }
 
@@ -265,6 +268,8 @@ impl DbReaderInner {
         );
 
         let inner = Self {
+            #[cfg(test)]
+            poll_completed: tokio::sync::Notify::new(),
             manifest_store,
             table_store,
             wal_reader,
@@ -636,14 +641,13 @@ impl DbReaderInner {
             inner: Arc::clone(self),
         };
         let (tx, rx) = async_channel::bounded(1);
-        let result = task_executor.add_handler(
+        task_executor.add_handler(
             DB_READER_TASK_NAME.to_string(),
             Box::new(poller),
             rx,
             &Handle::current(),
-        );
+        )?;
         task_executor.monitor_on(&Handle::current())?;
-        result?;
         Ok(tx)
     }
 
@@ -802,18 +806,24 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
     }
 
     async fn handle(&mut self, message: DbReaderMessage) -> Result<(), SlateDBError> {
-        if let DbReaderMessage::Refresh(reply) = message {
-            let _ = reply.send(self.refresh().await);
-            return Ok(());
-        }
         let result = self.refresh().await;
-        if self.inner.mode == DbReaderMode::FollowLatest {
-            if let Err(error) = result {
-                warn!("failed to refresh reader to latest manifest [error={error:?}]");
+        match message {
+            DbReaderMessage::Refresh(reply) => {
+                let _ = reply.send(result);
+                Ok(())
             }
-            Ok(())
-        } else {
-            result
+            DbReaderMessage::PollManifest => {
+                #[cfg(test)]
+                self.inner.poll_completed.notify_one();
+                if self.inner.mode == DbReaderMode::FollowLatest {
+                    if let Err(error) = result {
+                        warn!("failed to refresh reader to latest manifest [error={error:?}]");
+                    }
+                    Ok(())
+                } else {
+                    result
+                }
+            }
         }
     }
 
@@ -2104,6 +2114,15 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                // The first timer poll is immediate. Let it finish before writes
+                // or injected errors can race with it. Explicit messages do not
+                // provide this fence because the dispatcher prioritizes them.
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    reader.inner.poll_completed.notified(),
+                )
+                .await
+                .expect("the first background poll must complete");
                 let manifest_id = reader.manifest().id();
                 db.put(b"key", b"after").await.unwrap();
                 db.flush_with_options(FlushOptions {
@@ -3502,6 +3521,7 @@ mod tests {
         let status_manager = status_manager_for_core(&stored_manifest.manifest().core);
         let wal_reader = Arc::new(native_wal_reader(&wal_store, &status_manager));
         let inner = DbReaderInner {
+            poll_completed: tokio::sync::Notify::new(),
             manifest_store,
             table_store,
             wal_reader,
@@ -3592,6 +3612,7 @@ mod tests {
         );
         let wal_reader = Arc::new(native_wal_reader(&wal_store, &status_manager));
         DbReaderInner {
+            poll_completed: tokio::sync::Notify::new(),
             manifest_store,
             table_store,
             wal_reader,
