@@ -186,6 +186,7 @@ pub struct DbBuilder<P: Into<Path>> {
     block_cache_policy: BlockCachePolicy,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
+    write_runtime: Option<Handle>,
     compactor_builder: Option<CompactorBuilder<Path>>,
     gc_builder: Option<GarbageCollectorBuilder<Path>>,
     fp_registry: Arc<FailPointRegistry>,
@@ -216,6 +217,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             block_cache_policy: BlockCachePolicy::default(),
             system_clock: None,
             gc_runtime: None,
+            write_runtime: None,
             compactor_builder: None,
             gc_builder: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
@@ -321,6 +323,20 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Sets the garbage collection runtime to use for the database.
     pub fn with_gc_runtime(mut self, gc_runtime: Handle) -> Self {
         self.gc_runtime = Some(gc_runtime);
+        self
+    }
+
+    /// Runs the batch-writer task on `runtime` instead of the one the database is built on; all
+    /// other components stay put. On a current-thread runtime the writing threads drive
+    /// themselves, a write becomes a task switch rather than a cross-thread wake-up.
+    ///
+    /// The caller must drive `runtime` for every write, [`Db::flush`], [`Db::close`] and
+    /// [`Db::create_checkpoint`] — they go through the batch-writer and otherwise hang; reads do
+    /// not. Build it with [`enable_time`] and no IO driver, which would cost a syscall per write.
+    ///
+    /// [`enable_time`]: tokio::runtime::Builder::enable_time
+    pub fn with_write_runtime(mut self, runtime: Handle) -> Self {
+        self.write_runtime = Some(runtime);
         self
     }
 
@@ -701,7 +717,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             WRITE_BATCH_TASK_NAME.to_string(),
             Box::new(WriteBatchEventHandler::new(inner.clone(), wal_writer)),
             write_rx,
-            &tokio_handle,
+            self.write_runtime.as_ref().unwrap_or(&tokio_handle),
         )?;
 
         // Selects the store a background component (compactor, GC) reads and
@@ -2294,6 +2310,8 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
+    // Aliased because `tempfile::Builder` is also used below.
+    use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
     struct EmptyWalIterator;
 
@@ -2658,6 +2676,61 @@ mod tests {
         assert!(cached_compacted > 0);
         assert!(!cached_db_path.join("manifest").exists());
 
+        assert_eq!(
+            db.get(b"k1").await.expect("failed to get").as_deref(),
+            Some(b"v1".as_ref())
+        );
+        db.close().await.expect("failed to close db");
+    }
+
+    // Not a `#[tokio::test]`: the caller has to own both runtimes.
+    #[test]
+    fn test_write_runtime_serves_writes_and_close() {
+        let background = Runtime::new().expect("failed to build background runtime");
+        let writer = RuntimeBuilder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("failed to build writer runtime");
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = background
+            .block_on(
+                crate::Db::builder(
+                    Path::from("test_write_runtime_serves_writes_and_close"),
+                    object_store,
+                )
+                .with_write_runtime(writer.handle().clone())
+                .build(),
+            )
+            .expect("failed to build db");
+
+        writer
+            .block_on(db.put(b"k1", b"v1"))
+            .expect("failed to put");
+
+        // Reads do not go through the batch-writer.
+        let value = background
+            .block_on(db.get(b"k1"))
+            .expect("failed to get")
+            .expect("expected the written value");
+        assert_eq!(value.as_ref(), b"v1");
+
+        // Close flushes through the batch-writer and joins it.
+        writer.block_on(db.close()).expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn test_write_runtime_defaults_to_the_build_runtime() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::builder(
+            Path::from("test_write_runtime_defaults_to_the_build_runtime"),
+            object_store,
+        )
+        .build()
+        .await
+        .expect("failed to build db");
+
+        db.put(b"k1", b"v1").await.expect("failed to put");
         assert_eq!(
             db.get(b"k1").await.expect("failed to get").as_deref(),
             Some(b"v1".as_ref())
