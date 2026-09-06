@@ -832,7 +832,28 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
         _messages: BoxStream<'async_trait, DbReaderMessage>,
         _result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        self.cleanup_checkpoint().await
+        if self.inner.mode != DbReaderMode::ManagedCheckpoint {
+            return Ok(());
+        }
+        let mut manifest = StoredManifest::load(
+            Arc::clone(&self.inner.manifest_store),
+            self.inner.system_clock.clone(),
+        )
+        .await?;
+        let checkpoint_id = self
+            .inner
+            .state
+            .read()
+            .checkpoint
+            .as_ref()
+            .expect("managed reader must have a checkpoint")
+            .id;
+        info!(
+            "deleting reader established checkpoint for shutdown [checkpoint_id={}]",
+            checkpoint_id
+        );
+        manifest.delete_checkpoint(checkpoint_id).await?;
+        Ok(())
     }
 }
 
@@ -863,31 +884,6 @@ impl ManifestPoller {
             // No polling is needed for a pinned checkpoint, so we just return Ok(()).
             DbReaderMode::Checkpoint(_) => Ok(()),
         }
-    }
-
-    async fn cleanup_checkpoint(&self) -> Result<(), SlateDBError> {
-        if self.inner.mode != DbReaderMode::ManagedCheckpoint {
-            return Ok(());
-        }
-        let mut manifest = StoredManifest::load(
-            Arc::clone(&self.inner.manifest_store),
-            self.inner.system_clock.clone(),
-        )
-        .await?;
-        let checkpoint_id = self
-            .inner
-            .state
-            .read()
-            .checkpoint
-            .as_ref()
-            .expect("managed reader must have a checkpoint")
-            .id;
-        info!(
-            "deleting reader established checkpoint for shutdown [checkpoint_id={}]",
-            checkpoint_id
-        );
-        manifest.delete_checkpoint(checkpoint_id).await?;
-        Ok(())
     }
 }
 
