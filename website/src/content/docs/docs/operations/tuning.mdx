@@ -48,6 +48,8 @@ SlateDB provides several configuration options to tune performance. See [slatedb
 * **`max_unflushed_bytes`**: The total amount of unflushed WAL and memtable data allowed in memory before SlateDB applies backpressure to writers.
 * **`l0_max_ssts`**: The maximum number of L0 SSTs SlateDB allows before it stops flushing memtables and waits for compaction to catch up.
 
+Writes go through a single batch-writer task, which by default runs on a worker thread, so a write from another thread pays a cross-thread hand-off. **`DbBuilder::with_write_runtime(...)`** places that task on a current-thread runtime the writing thread also drives, turning the hand-off into a task switch — a large win for single- or low-concurrency writers, with no regression as concurrency rises. See [`examples/write_runtime.rs`](https://github.com/slatedb/slatedb/blob/main/examples/src/write_runtime.rs).
+
 ### Read Performance
 
 * **`min_filter_keys`**: SlateDB only builds filters for SSTs with at least this many keys. Raising it avoids filter overhead on small SSTs.
