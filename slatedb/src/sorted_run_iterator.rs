@@ -192,14 +192,9 @@ impl<'a> SortedRunIterator<'a> {
         table_store: Arc<TableStore>,
         sst_iter_options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
-        let mut iter = SortedRunIterator::new_borrowed_with_stats(
-            range,
-            sorted_run,
-            table_store,
-            sst_iter_options,
-            None,
-        )
-        .await?;
+        let mut iter =
+            SortedRunIterator::new_borrowed(range, sorted_run, table_store, sst_iter_options)
+                .await?;
         iter.init().await?;
         Ok(iter)
     }

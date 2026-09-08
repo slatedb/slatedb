@@ -1448,7 +1448,7 @@ mod tests {
 
         let read_trace = ReadTrace::new(None);
         let filters = table_store
-            .read_filters(&sst_handle.sst, true, None, &read_trace, None)
+            .read_filters(&sst_handle.sst, true, Some(Bytes::new()), &read_trace, None)
             .await
             .expect("filter read should succeed");
         assert!(!filters.is_empty(), "filter should exist");
