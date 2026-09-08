@@ -18,7 +18,7 @@ use futures::StreamExt;
 use log::debug;
 use slatedb_common::metrics::{CounterFn, MetricsRecorderHelper};
 
-use crate::checkpoint::CheckpointCreateResult;
+use crate::checkpoint::CheckpointRequest;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::dispatcher::MessageHandler;
@@ -33,6 +33,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use ulid::Ulid;
+use uuid::Uuid;
 
 macro_rules! memtable_flush_stat_name {
     ($suffix:expr) => {
@@ -83,7 +84,12 @@ pub(crate) enum TrackerMessage {
     CheckpointRequest {
         target: FlushTarget,
         options: CheckpointOptions,
-        sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
+        request: CheckpointRequest,
+    },
+    /// Requests checkpoint cancellation from its public handle.
+    CancelCheckpoint {
+        id: Uuid,
+        done: Option<oneshot::Sender<Result<(), SlateDBError>>>,
     },
     /// An upload worker completed successfully.
     UploadComplete(UploadedMemtable),
@@ -103,6 +109,7 @@ impl std::fmt::Debug for TrackerMessage {
             Self::MemtableFrozen => write!(f, "MemtableFrozen"),
             Self::FlushRequest { .. } => write!(f, "FlushRequest"),
             Self::CheckpointRequest { .. } => write!(f, "CheckpointRequest"),
+            Self::CancelCheckpoint { id, .. } => write!(f, "CancelCheckpoint({id})"),
             Self::UploadComplete(u) => {
                 write!(
                     f,
@@ -159,11 +166,15 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
             TrackerMessage::CheckpointRequest {
                 target,
                 options,
-                sender,
+                request,
             } => {
                 self.stats.checkpoint_request_count.increment(1);
-                self.handle_checkpoint_request(target, options, sender)
+                self.handle_checkpoint_request(target, options, request)
                     .await
+            }
+            TrackerMessage::CancelCheckpoint { id, done } => {
+                let _ = self.manifest_writer.cancel_checkpoint(id, done);
+                Ok(())
             }
             TrackerMessage::UploadComplete(uploaded) => {
                 self.stats.l0_upload_count.increment(1);
@@ -219,15 +230,17 @@ impl FlushTracker {
         &mut self,
         target: FlushTarget,
         options: CheckpointOptions,
-        sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
+        request: CheckpointRequest,
     ) -> Result<(), SlateDBError> {
         if let Err(err) = self.reconcile_and_dispatch().await {
-            let _ = sender.send(Err(err.clone()));
+            request.lifecycle.mark_failed();
+            let _ = request.result_tx.send(Some(Err(err.clone())));
+            let _ = request.ready_tx.send(Err(err.clone()));
             return Err(err);
         }
         let through_seq = self.frontier.resolve_target(target);
         self.manifest_writer
-            .send_checkpoint(through_seq, options, sender)?;
+            .begin_checkpoint(through_seq, options, request)?;
         self.dispatch_ready_memtables()
     }
 
@@ -377,9 +390,17 @@ impl FlushTracker {
                 TrackerMessage::FlushRequest { sender, .. } => {
                     let _ = sender.send(Err(err.clone()));
                 }
-                TrackerMessage::CheckpointRequest { sender, .. } => {
+                TrackerMessage::CheckpointRequest { request, .. } => {
+                    request.lifecycle.mark_failed();
+                    let _ = request.result_tx.send(Some(Err(err.clone())));
+                    let _ = request.ready_tx.send(Err(err.clone()));
+                }
+                TrackerMessage::CancelCheckpoint {
+                    done: Some(sender), ..
+                } => {
                     let _ = sender.send(Err(err.clone()));
                 }
+                TrackerMessage::CancelCheckpoint { done: None, .. } => {}
                 TrackerMessage::PollManifest { sender } => {
                     let _ = sender.send(Err(err.clone()));
                 }

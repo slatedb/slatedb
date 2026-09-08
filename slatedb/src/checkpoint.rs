@@ -1,9 +1,21 @@
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
-use crate::memtable_flusher::FlushTarget;
+use crate::error::SlateDBError;
+use crate::memtable_flusher::{FlushTarget, TrackerMessage};
+use crate::utils::{IdGenerator, SafeSender};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
+use tokio::sync::{oneshot, watch};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+const CHECKPOINT_ACTIVE: u8 = 0;
+const CHECKPOINT_COMMITTED: u8 = 1;
+const CHECKPOINT_CLAIMED: u8 = 2;
+const CHECKPOINT_CANCELLED: u8 = 3;
+const CHECKPOINT_FAILED: u8 = 4;
 
 #[non_exhaustive]
 #[derive(Clone, PartialEq, Serialize, Debug)]
@@ -24,14 +36,218 @@ pub struct CheckpointCreateResult {
     pub manifest_id: u64,
 }
 
+pub(crate) type CheckpointResult = Result<CheckpointCreateResult, SlateDBError>;
+
+pub(crate) struct CheckpointRequest {
+    pub(crate) id: Uuid,
+    pub(crate) result_tx: watch::Sender<Option<CheckpointResult>>,
+    pub(crate) ready_tx: oneshot::Sender<Result<(), SlateDBError>>,
+    pub(crate) cancellation: CancellationToken,
+    pub(crate) lifecycle: Arc<CheckpointLifecycle>,
+}
+
+/// Tracks the result owner and its cancellation state.
+///
+/// Cancellation changes the state before it signals the token. Completion changes the state
+/// before it sends the result. A waiter reads the channel or token before it reads the state.
+pub(crate) struct CheckpointLifecycle {
+    state: AtomicU8,
+}
+
+impl CheckpointLifecycle {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: AtomicU8::new(CHECKPOINT_ACTIVE),
+        }
+    }
+
+    pub(crate) fn request_cancel(&self) -> bool {
+        loop {
+            let state = self.state.load(Ordering::Acquire);
+            match state {
+                CHECKPOINT_ACTIVE | CHECKPOINT_COMMITTED => {
+                    if self
+                        .state
+                        .compare_exchange(
+                            state,
+                            CHECKPOINT_CANCELLED,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                CHECKPOINT_CLAIMED | CHECKPOINT_CANCELLED | CHECKPOINT_FAILED => return false,
+                _ => return false,
+            }
+        }
+    }
+
+    pub(crate) fn mark_committed(&self) -> bool {
+        match self.state.compare_exchange(
+            CHECKPOINT_ACTIVE,
+            CHECKPOINT_COMMITTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(CHECKPOINT_CANCELLED) => false,
+            Err(_) => false,
+        }
+    }
+
+    fn mark_claimed(&self) -> bool {
+        match self.state.compare_exchange(
+            CHECKPOINT_COMMITTED,
+            CHECKPOINT_CLAIMED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) | Err(CHECKPOINT_CLAIMED) => true,
+            Err(CHECKPOINT_CANCELLED) => false,
+            Err(_) => false,
+        }
+    }
+
+    pub(crate) fn mark_failed(&self) {
+        let _ = self.state.compare_exchange(
+            CHECKPOINT_ACTIVE,
+            CHECKPOINT_FAILED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.state.load(Ordering::Acquire) == CHECKPOINT_CANCELLED
+    }
+}
+
+/// A checkpoint request that separates its state boundary from durable storage work.
+pub struct CheckpointHandle {
+    id: Uuid,
+    result_rx: watch::Receiver<Option<CheckpointResult>>,
+    cancellation: CancellationToken,
+    lifecycle: Arc<CheckpointLifecycle>,
+    control_tx: SafeSender<TrackerMessage>,
+}
+
+impl CheckpointHandle {
+    pub(crate) fn new(
+        id: Uuid,
+        result_rx: watch::Receiver<Option<CheckpointResult>>,
+        cancellation: CancellationToken,
+        lifecycle: Arc<CheckpointLifecycle>,
+        control_tx: SafeSender<TrackerMessage>,
+    ) -> Self {
+        Self {
+            id,
+            result_rx,
+            cancellation,
+            lifecycle,
+            control_tx,
+        }
+    }
+
+    /// Returns the identifier reserved for this checkpoint.
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    /// Waits until the checkpoint manifest is durable.
+    pub async fn wait(&self) -> Result<CheckpointCreateResult, crate::Error> {
+        self.wait_inner().await.map_err(Into::into)
+    }
+
+    pub(crate) async fn wait_inner(&self) -> CheckpointResult {
+        let mut result_rx = self.result_rx.clone();
+        let result = tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => Err(checkpoint_cancelled(self.id)),
+            result = result_rx.wait_for(|result| result.is_some()) => result
+                .map_err(|_| checkpoint_cancelled(self.id))?
+                .clone()
+                .expect("checkpoint result must be present"),
+        };
+
+        match result {
+            Ok(result) if self.lifecycle.mark_claimed() => Ok(result),
+            Ok(_) => Err(checkpoint_cancelled(self.id)),
+            Err(err) => {
+                self.lifecycle.mark_failed();
+                Err(err)
+            }
+        }
+    }
+
+    /// Requests cancellation without waiting for durable cleanup.
+    ///
+    /// This method does not report cleanup errors. Use [`Self::cancel_and_wait`] before closing
+    /// the database when the caller must know that cleanup finished.
+    pub fn cancel(&self) {
+        if self.request_cancellation() {
+            let _ = self.control_tx.send(TrackerMessage::CancelCheckpoint {
+                id: self.id,
+                done: None,
+            });
+        }
+    }
+
+    /// Requests cancellation and waits for cleanup to finish.
+    ///
+    /// If [`Self::wait`] returned a checkpoint, this method keeps that checkpoint.
+    /// Call this method before [`Db::close`] to receive the cleanup result.
+    pub async fn cancel_and_wait(&self) -> Result<(), crate::Error> {
+        let requested = self.request_cancellation();
+        if !requested && !self.lifecycle.is_cancelled() {
+            return Ok(());
+        }
+
+        let (done_tx, done_rx) = oneshot::channel();
+        self.control_tx
+            .send(TrackerMessage::CancelCheckpoint {
+                id: self.id,
+                done: Some(done_tx),
+            })
+            .map_err(crate::Error::from)?;
+        done_rx
+            .await
+            .map_err(SlateDBError::ReadChannelError)?
+            .map_err(Into::into)
+    }
+
+    fn request_cancellation(&self) -> bool {
+        if self.lifecycle.request_cancel() {
+            self.cancellation.cancel();
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Drop for CheckpointHandle {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+pub(crate) fn checkpoint_cancelled(id: Uuid) -> SlateDBError {
+    SlateDBError::BackgroundTaskCancelled(format!("checkpoint {id}"))
+}
+
 impl Db {
-    /// Creates a checkpoint of an opened db using the provided options. Returns the ID of the created
-    /// checkpoint and the id of the referenced manifest.
-    pub async fn create_checkpoint(
+    /// Captures the checkpoint boundary and starts the durable storage work.
+    ///
+    /// [`CheckpointScope::All`] freezes the active memtable before this method returns.
+    /// Call [`CheckpointHandle::wait`] to wait for the checkpoint manifest.
+    pub async fn begin_checkpoint(
         &self,
         scope: CheckpointScope,
         options: &CheckpointOptions,
-    ) -> Result<CheckpointCreateResult, crate::Error> {
+    ) -> Result<CheckpointHandle, crate::Error> {
         let target = match scope {
             CheckpointScope::All => {
                 self.inner.request_batch_writer_flush(true).await?;
@@ -39,12 +255,23 @@ impl Db {
             }
             CheckpointScope::Durable => FlushTarget::CurrentDurable,
         };
+        let id = self.inner.rand.rng().gen_uuid();
 
         self.inner
             .memtable_flusher()
-            .create_checkpoint(target, options.clone())
+            .begin_checkpoint(id, target, options.clone())
             .await
             .map_err(Into::into)
+    }
+
+    /// Creates a checkpoint of an opened db using the provided options. Returns the ID of the created
+    /// checkpoint and the id of the referenced manifest.
+    pub async fn create_checkpoint(
+        &self,
+        scope: CheckpointScope,
+        options: &CheckpointOptions,
+    ) -> Result<CheckpointCreateResult, crate::Error> {
+        self.begin_checkpoint(scope, options).await?.wait().await
     }
 }
 
@@ -376,6 +603,192 @@ mod tests {
             (&Bytes::from_static(b"k2"), &Bytes::from_static(b"v2")),
         )
         .await;
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_begin_checkpoint_excludes_later_writes() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_begin_checkpoint_excludes_later_writes");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings {
+                wal_enabled: false,
+                flush_interval: Some(Duration::from_secs(3600)),
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"before", b"v1").await.unwrap();
+        let checkpoint = db
+            .begin_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        db.put(b"after", b"v2").await.unwrap();
+
+        let (checkpoint_result, flush_result) = tokio::join!(checkpoint.wait(), db.flush());
+        let checkpoint_result = checkpoint_result.unwrap();
+        flush_result.unwrap();
+
+        let checkpoint_manifest = ManifestStore::new(&path, object_store)
+            .read_manifest(checkpoint_result.manifest_id)
+            .await
+            .unwrap();
+        assert_eq!(checkpoint_manifest.core.last_l0_seq, 1);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_handle_allows_repeated_waits() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_checkpoint_handle_allows_repeated_waits");
+        let db = Db::builder(path, object_store).build().await.unwrap();
+        db.put(b"key", b"value").await.unwrap();
+        let checkpoint = db
+            .begin_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        let (first, second) = tokio::join!(checkpoint.wait(), checkpoint.wait());
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.manifest_id, second.manifest_id);
+        let third = checkpoint.wait().await.unwrap();
+        assert_eq!(first.id, third.id);
+        assert_eq!(first.manifest_id, third.manifest_id);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_drop_checkpoint_handle_removes_unclaimed_checkpoint() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_drop_checkpoint_handle_removes_unclaimed_checkpoint");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        db.put(b"key", b"value").await.unwrap();
+        db.flush().await.unwrap();
+        let checkpoint = db
+            .begin_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        let checkpoint_id = checkpoint.id();
+        db.inner
+            .memtable_flusher()
+            .refresh_manifest()
+            .await
+            .unwrap();
+
+        drop(checkpoint);
+        db.inner
+            .memtable_flusher()
+            .refresh_manifest()
+            .await
+            .unwrap();
+        let manifest = ManifestStore::new(&path, object_store)
+            .read_latest_manifest()
+            .await
+            .unwrap();
+        assert!(!manifest
+            .manifest
+            .core
+            .checkpoints
+            .iter()
+            .any(|entry| entry.id == checkpoint_id));
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_cancel_checkpoint_removes_pending_request() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_cancel_checkpoint_removes_pending_request");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings {
+                wal_enabled: false,
+                flush_interval: Some(Duration::from_secs(3600)),
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"key", b"value").await.unwrap();
+        let checkpoint = db
+            .begin_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        let checkpoint_id = checkpoint.id();
+        checkpoint.cancel();
+        let error = checkpoint.wait().await.unwrap_err();
+        assert!(error.to_string().contains("background task cancelled"));
+
+        db.inner
+            .memtable_flusher()
+            .refresh_manifest()
+            .await
+            .unwrap();
+        let manifest = ManifestStore::new(&path, object_store)
+            .read_latest_manifest()
+            .await
+            .unwrap();
+        assert!(!manifest
+            .manifest
+            .core
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.id == checkpoint_id));
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cancel_checkpoint_removes_committed_checkpoint() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_cancel_checkpoint_removes_committed_checkpoint");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"key", b"value").await.unwrap();
+        db.flush().await.unwrap();
+        let checkpoint = db
+            .begin_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        let checkpoint_id = checkpoint.id();
+
+        db.inner
+            .memtable_flusher()
+            .refresh_manifest()
+            .await
+            .unwrap();
+        let manifest_store = ManifestStore::new(&path, object_store);
+        let committed = manifest_store.read_latest_manifest().await.unwrap();
+        assert!(committed
+            .manifest
+            .core
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.id == checkpoint_id));
+
+        checkpoint.cancel_and_wait().await.unwrap();
+        let deleted = manifest_store.read_latest_manifest().await.unwrap();
+        assert!(!deleted
+            .manifest
+            .core
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.id == checkpoint_id));
 
         db.close().await.unwrap();
     }
