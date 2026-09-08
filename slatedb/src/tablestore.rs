@@ -410,6 +410,7 @@ impl TableStore {
                     )
                     .await
                     .ok()
+                    .map(|fetch| fetch.entry)
             } else {
                 cache.get_filter(&cache_key).await.unwrap_or(None)
             };
@@ -463,6 +464,7 @@ impl TableStore {
                     )
                     .await
                     .ok()
+                    .map(|fetch| fetch.entry)
             } else {
                 cache.get_stats(&cache_key).await.unwrap_or(None)
             };
@@ -503,6 +505,7 @@ impl TableStore {
                     )
                     .await
                     .ok()
+                    .map(|fetch| fetch.entry)
             } else {
                 cache.get_index(&cache_key).await.unwrap_or(None)
             };
@@ -734,8 +737,8 @@ impl TableStore {
                 let offset = index.borrow().block_meta().get(block_num).offset();
                 let cache_key: CachedKey = (handle.id, offset).into();
                 let loader = self.block_loader(handle, index.clone(), block_num, segment.clone());
-                if let Ok(entry) = cache.fetch_block(cache_key, loader).await {
-                    if let Some(block) = entry.block() {
+                if let Ok(fetch) = cache.fetch_block(cache_key, loader).await {
+                    if let Some(block) = fetch.entry.block() {
                         let mut result = VecDeque::with_capacity(1);
                         result.push_back(block);
                         return Ok(result);
