@@ -428,7 +428,7 @@ pub(crate) async fn write_ssts(
     }
 
     let mut output_ssts = Vec::new();
-    let mut writer = table_store.table_writer(SsTableId::from(Ulid::new()));
+    let mut writer = table_store.table_writer(SsTableId::from(Ulid::new()), Some(Bytes::new()));
     let mut bytes_written = 0usize;
 
     for (index, entry) in entries.iter().cloned().enumerate() {
@@ -441,7 +441,7 @@ pub(crate) async fn write_ssts(
             bytes_written = 0;
 
             if index + 1 < entries.len() {
-                writer = table_store.table_writer(SsTableId::from(Ulid::new()));
+                writer = table_store.table_writer(SsTableId::from(Ulid::new()), Some(Bytes::new()));
             } else {
                 return output_ssts;
             }
@@ -1610,14 +1610,17 @@ pub(crate) enum RecordedCall {
         kind: Option<TableStoreKind>,
         sst_type: Option<SstType>,
         retry: Option<RetryReason>,
+        segment: Option<Bytes>,
     },
     Put {
         kind: Option<TableStoreKind>,
         sst_type: Option<SstType>,
+        segment: Option<Bytes>,
     },
     PutMultipart {
         kind: Option<TableStoreKind>,
         sst_type: Option<SstType>,
+        segment: Option<Bytes>,
     },
 }
 
@@ -1676,6 +1679,19 @@ impl RecordingObjectStore {
             .collect()
     }
 
+    pub(crate) fn get_segments(&self, head: bool) -> Vec<Option<Bytes>> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::Get {
+                    head: h, segment, ..
+                } if *h == head => Some(segment.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn write_kinds(&self) -> Vec<Option<TableStoreKind>> {
         self.calls
             .lock()
@@ -1700,6 +1716,19 @@ impl RecordingObjectStore {
             })
             .collect()
     }
+
+    pub(crate) fn write_segments(&self) -> Vec<Option<Bytes>> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::Put { segment, .. } | RecordedCall::PutMultipart { segment, .. } => {
+                    Some(segment.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 impl fmt::Display for RecordingObjectStore {
@@ -1718,9 +1747,10 @@ impl ObjectStore for RecordingObjectStore {
         let tag = ObjectStoreCallTag::from_extensions(&options.extensions);
         self.calls.lock().push(RecordedCall::Get {
             head: options.head,
-            kind: tag.map(|t| t.kind),
-            sst_type: tag.map(|t| t.sst_type),
-            retry: tag.and_then(|t| t.retry),
+            kind: tag.as_ref().map(|t| t.kind),
+            sst_type: tag.as_ref().map(|t| t.sst_type),
+            retry: tag.as_ref().and_then(|t| t.retry),
+            segment: tag.as_ref().and_then(|t| t.segment.clone()),
         });
         self.inner.get_opts(location, options).await
     }
@@ -1733,8 +1763,9 @@ impl ObjectStore for RecordingObjectStore {
     ) -> object_store::Result<PutResult> {
         let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
         self.calls.lock().push(RecordedCall::Put {
-            kind: tag.map(|t| t.kind),
-            sst_type: tag.map(|t| t.sst_type),
+            kind: tag.as_ref().map(|t| t.kind),
+            sst_type: tag.as_ref().map(|t| t.sst_type),
+            segment: tag.as_ref().and_then(|t| t.segment.clone()),
         });
         self.inner.put_opts(location, payload, opts).await
     }
@@ -1746,8 +1777,9 @@ impl ObjectStore for RecordingObjectStore {
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
         self.calls.lock().push(RecordedCall::PutMultipart {
-            kind: tag.map(|t| t.kind),
-            sst_type: tag.map(|t| t.sst_type),
+            kind: tag.as_ref().map(|t| t.kind),
+            sst_type: tag.as_ref().map(|t| t.sst_type),
+            segment: tag.as_ref().and_then(|t| t.segment.clone()),
         });
         self.inner.put_multipart_opts(location, opts).await
     }

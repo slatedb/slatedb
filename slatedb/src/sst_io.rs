@@ -43,7 +43,7 @@ pub(crate) struct ReadOnlyObject {
 
 impl ReadOnlyObject {
     fn extensions(&self) -> Extensions {
-        self.tag.into()
+        self.tag.clone().into()
     }
 }
 
@@ -92,7 +92,7 @@ where
     Fut: std::future::Future<Output = Result<T, SlateDBError>>,
 {
     for _ in 0..MAX_VALIDATION_RETRIES {
-        let result = read(tag).await;
+        let result = read(tag.clone()).await;
         match result {
             Err(ref err) => match err.maybe_validation_retry_reason() {
                 Some(reason) => {

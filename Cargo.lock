@@ -3362,6 +3362,7 @@ dependencies = [
  "chrono",
  "figment",
  "log",
+ "object_store",
  "parking_lot",
  "serde_json",
  "slatedb",
@@ -3373,6 +3374,7 @@ dependencies = [
  "tracing-subscriber",
  "ulid",
  "uniffi",
+ "url",
  "uuid",
 ]
 

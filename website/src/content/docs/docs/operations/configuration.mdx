@@ -37,7 +37,7 @@ async fn main() -> Result<(), Error> {
     // 2. Builder configuration for process-local components and wiring.
     let db = Db::builder("example", Arc::clone(&object_store))
         .with_settings(settings)
-        .with_db_cache(Arc::new(FoyerCache::new()))
+        .with_db_cache(Arc::new(FoyerCache::new()), 0)
         .build()
         .await?;
 

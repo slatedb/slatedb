@@ -2609,7 +2609,7 @@ mod tests {
         // Populate the cache with the correct head and part via a normal read.
         let main_tag = ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Compacted);
         let got = store
-            .get_opts(&location, get_opts_tagged(main_tag))
+            .get_opts(&location, get_opts_tagged(main_tag.clone()))
             .await
             .unwrap()
             .bytes()
@@ -2630,7 +2630,7 @@ mod tests {
 
         // A normal read now serves the poisoned bytes (cache hit).
         let served = store
-            .get_opts(&location, get_opts_tagged(main_tag))
+            .get_opts(&location, get_opts_tagged(main_tag.clone()))
             .await
             .unwrap()
             .bytes()
@@ -2643,6 +2643,7 @@ mod tests {
             kind: TableStoreKind::Main,
             sst_type: SstType::Compacted,
             retry: Some(crate::error::RetryReason::CrcMismatch),
+            segment: Some(Bytes::new()),
         };
         let refetched = store
             .get_opts(&location, get_opts_tagged(retry_tag))
@@ -2736,7 +2737,7 @@ mod tests {
 
         // A WAL data read bypasses: it returns the bytes but caches nothing.
         let got = store
-            .get_opts(&location, get_opts_tagged(wal_tag))
+            .get_opts(&location, get_opts_tagged(wal_tag.clone()))
             .await
             .unwrap()
             .bytes()
@@ -2781,7 +2782,7 @@ mod tests {
             .put_opts(
                 &location,
                 PutPayload::from_bytes(payload.clone()),
-                put_opts_tagged(tag),
+                put_opts_tagged(tag.clone()),
             )
             .await
             .unwrap();

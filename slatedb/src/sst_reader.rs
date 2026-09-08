@@ -47,6 +47,7 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use ulid::Ulid;
@@ -110,7 +111,10 @@ impl SstReader {
     /// Returns an error if the SST file does not exist (e.g. it was GC'd)
     /// or if there is an issue reading from object storage.
     pub async fn open(&self, id: Ulid) -> Result<SstFile, crate::Error> {
-        let handle = self.table_store.open_sst(&SsTableId::from(id)).await?;
+        let handle = self
+            .table_store
+            .open_sst(&SsTableId::from(id), Some(Bytes::new()))
+            .await?;
         Ok(SstFile {
             id,
             handle,
@@ -224,7 +228,7 @@ impl SstFile {
     pub async fn metadata(&self) -> Result<IdentifiedObjectMetadata<Ulid>, crate::Error> {
         let metadata = self
             .table_store
-            .metadata(&self.handle.id)
+            .metadata(&self.handle.id, Some(Bytes::new()))
             .await
             .map_err(crate::Error::from)?;
         Ok(IdentifiedObjectMetadata::new(self.id, metadata))
@@ -240,7 +244,7 @@ impl SstFile {
     /// Returns an error if there is an issue reading from object storage.
     pub async fn stats(&self) -> Result<Option<SstStats>, crate::Error> {
         self.table_store
-            .read_stats(&self.handle, true)
+            .read_stats(&self.handle, true, Some(Bytes::new()))
             .await
             .map_err(Into::into)
     }
@@ -257,7 +261,10 @@ impl SstFile {
     ///
     /// Returns an error if there is an issue reading from object storage.
     pub async fn index(&self) -> Result<SstIndex, crate::Error> {
-        let inner = self.table_store.read_index(&self.handle, true).await?;
+        let inner = self
+            .table_store
+            .read_index(&self.handle, true, Some(Bytes::new()))
+            .await?;
         Ok(SstIndex { inner })
     }
 
@@ -274,7 +281,10 @@ impl SstFile {
     /// Returns an error if `block` is out of range for this SST, or if there
     /// is an issue reading or decoding the block.
     pub async fn read_block(&self, block: usize) -> Result<Vec<RowEntry>, crate::Error> {
-        let index = self.table_store.read_index(&self.handle, true).await?;
+        let index = self
+            .table_store
+            .read_index(&self.handle, true, Some(Bytes::new()))
+            .await?;
         let num_blocks = index.borrow().block_meta().len();
         if block >= num_blocks {
             return Err(crate::Error::invalid(format!(
@@ -283,7 +293,13 @@ impl SstFile {
         }
         let mut blocks = self
             .table_store
-            .read_blocks_using_index(&self.handle, index, block..block + 1, true)
+            .read_blocks_using_index(
+                &self.handle,
+                index,
+                block..block + 1,
+                true,
+                Some(Bytes::new()),
+            )
             .await?;
         let block = blocks
             .pop_front()

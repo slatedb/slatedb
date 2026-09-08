@@ -338,15 +338,15 @@ mod tests {
         let sst_active_recent = build_test_sst(&format, 1).await;
 
         table_store
-            .write_sst(&id_to_delete, &sst_to_delete)
+            .write_sst(&id_to_delete, &sst_to_delete, Some(Bytes::new()))
             .await
             .unwrap();
         table_store
-            .write_sst(&id_within_min_age, &sst_within_min_age)
+            .write_sst(&id_within_min_age, &sst_within_min_age, Some(Bytes::new()))
             .await
             .unwrap();
         let active_handle = table_store
-            .write_sst(&id_active_recent, &sst_active_recent)
+            .write_sst(&id_active_recent, &sst_active_recent, Some(Bytes::new()))
             .await
             .unwrap();
 
@@ -444,14 +444,17 @@ mod tests {
         let sst_newer = build_test_sst(&format, 1).await;
 
         table_store
-            .write_sst(&id_to_delete, &sst_to_delete)
+            .write_sst(&id_to_delete, &sst_to_delete, Some(Bytes::new()))
             .await
             .unwrap();
         let manifest_handle = table_store
-            .write_sst(&id_manifest, &sst_manifest)
+            .write_sst(&id_manifest, &sst_manifest, Some(Bytes::new()))
             .await
             .unwrap();
-        table_store.write_sst(&id_newer, &sst_newer).await.unwrap();
+        table_store
+            .write_sst(&id_newer, &sst_newer, Some(Bytes::new()))
+            .await
+            .unwrap();
 
         // Mark id_manifest as the only active SST in the manifest so that
         // most_recent_sst_dt is 3_000ms, which becomes the cutoff.
@@ -534,15 +537,15 @@ mod tests {
         let sst_barrier = build_test_sst(&format, 1).await;
         let sst_to_newer = build_test_sst(&format, 1).await;
         table_store
-            .write_sst(&id_to_delete, &sst_to_delete)
+            .write_sst(&id_to_delete, &sst_to_delete, Some(Bytes::new()))
             .await
             .unwrap();
         table_store
-            .write_sst(&id_barrier, &sst_barrier)
+            .write_sst(&id_barrier, &sst_barrier, Some(Bytes::new()))
             .await
             .unwrap();
         let active_handle = table_store
-            .write_sst(&id_to_newer, &sst_to_newer)
+            .write_sst(&id_to_newer, &sst_to_newer, Some(Bytes::new()))
             .await
             .unwrap();
 
@@ -640,7 +643,11 @@ mod tests {
         // Newest L0 in the manifest has a later timestamp (9_000ms).
         let l0_id = SsTableId::from(ulid::Ulid::from_parts(9_000, 0));
         let l0_handle = table_store
-            .write_sst(&l0_id, &build_test_sst(&format, 1).await)
+            .write_sst(
+                &l0_id,
+                &build_test_sst(&format, 1).await,
+                Some(Bytes::new()),
+            )
             .await
             .unwrap();
         let mut dirty_manifest = stored_manifest.prepare_dirty().unwrap();
@@ -653,7 +660,11 @@ mod tests {
         // output SST (6_000ms), but hasn't updated the manifest yet.
         let compaction_output_id = SsTableId::from(ulid::Ulid::from_parts(6_000, 0));
         table_store
-            .write_sst(&compaction_output_id, &build_test_sst(&format, 1).await)
+            .write_sst(
+                &compaction_output_id,
+                &build_test_sst(&format, 1).await,
+                Some(Bytes::new()),
+            )
             .await
             .unwrap();
 
@@ -884,7 +895,7 @@ mod tests {
         let id_to_delete = SsTableId::from(ulid::Ulid::from_parts(1_000, 0));
         let sst = build_test_sst(&format, 1).await;
         main_table_store
-            .write_sst(&id_to_delete, &sst)
+            .write_sst(&id_to_delete, &sst, Some(Bytes::new()))
             .await
             .unwrap();
 

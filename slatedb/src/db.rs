@@ -2050,12 +2050,20 @@ impl DbCacheManagerOps for Db {
     ) -> Result<(), crate::Error> {
         self.inner.check_closed()?;
         let manifest = self.manifest();
-        db_cache_manager::warm_sst_impl(&self.inner.table_store, &manifest, sst_id, targets).await
+        db_cache_manager::warm_sst_impl(&self.inner.table_store, manifest.core(), sst_id, targets)
+            .await
     }
 
     async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), crate::Error> {
         self.inner.check_closed()?;
-        db_cache_manager::evict_cached_sst_impl(&self.inner.table_store, sst_id).await
+        let manifest = self.manifest();
+        db_cache_manager::evict_cached_sst_impl(&self.inner.table_store, manifest.core(), sst_id)
+            .await
+    }
+
+    async fn flush_cache_to_disk(&self) -> Result<(), crate::Error> {
+        self.inner.check_closed()?;
+        db_cache_manager::flush_cache_to_disk_impl(&self.inner.table_store).await
     }
 }
 
@@ -3858,7 +3866,7 @@ mod tests {
         let index = db
             .inner
             .table_store
-            .read_index(&view.sst, true)
+            .read_index(&view.sst, true, Some(Bytes::new()))
             .await
             .unwrap();
         assert!(!index.borrow().block_meta().is_empty());
@@ -11478,13 +11486,13 @@ mod tests {
 
         // Open both databases as readers with the shared cache
         let reader_a = DbReaderBuilder::new("/tmp/test_reader_cache_a", object_store_a)
-            .with_db_cache(shared_cache.clone())
+            .with_db_cache(shared_cache.clone(), 1)
             .build()
             .await
             .unwrap();
 
         let reader_b = DbReaderBuilder::new("/tmp/test_reader_cache_b", object_store_b)
-            .with_db_cache(shared_cache.clone())
+            .with_db_cache(shared_cache.clone(), 2)
             .build()
             .await
             .unwrap();
@@ -11567,13 +11575,13 @@ mod tests {
 
         let db_a = Db::builder("/tmp/test_shared_hybrid_a", object_store_a)
             .with_settings(test_db_options(0, 1024, None))
-            .with_db_cache(shared_cache.clone())
+            .with_db_cache(shared_cache.clone(), 1)
             .build()
             .await
             .unwrap();
         let db_b = Db::builder("/tmp/test_shared_hybrid_b", object_store_b)
             .with_settings(test_db_options(0, 1024, None))
-            .with_db_cache(shared_cache.clone())
+            .with_db_cache(shared_cache.clone(), 2)
             .build()
             .await
             .unwrap();

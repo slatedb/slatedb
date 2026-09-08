@@ -13,6 +13,7 @@ mod logging;
 mod merge_operator;
 mod metrics;
 mod object_store;
+mod object_store_builder;
 mod runtime;
 mod settings;
 mod types;
@@ -45,6 +46,7 @@ pub use metrics::{
     MetricValue, MetricsRecorder, UpDownCounter,
 };
 pub use object_store::ObjectStore;
+pub use object_store_builder::{ObjectStoreBuilder, ObjectStoreType};
 pub use settings::Settings;
 pub use types::{
     CacheTarget, Checkpoint, CloneSourceSpec, Compaction, CompactionSpec, CompactionStatus,

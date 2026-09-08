@@ -342,10 +342,10 @@ async def test_reader_shared_db_cache() -> None:
 
         async with open_reader(
             store,
-            configure=lambda builder: builder.with_db_cache(shared_cache),
+            configure=lambda builder: builder.with_db_cache(shared_cache, 0),
         ) as first_reader, open_reader(
             store,
-            configure=lambda builder: builder.with_db_cache(shared_cache),
+            configure=lambda builder: builder.with_db_cache(shared_cache, 0),
         ) as second_reader:
             assert await first_reader.get(b"cached") == b"value"
             assert await second_reader.get(b"cached") == b"value"
@@ -353,7 +353,7 @@ async def test_reader_shared_db_cache() -> None:
         # The shared cache outlives the readers that used it.
         async with open_reader(
             store,
-            configure=lambda builder: builder.with_db_cache(shared_cache),
+            configure=lambda builder: builder.with_db_cache(shared_cache, 0),
         ) as reader:
             assert await reader.get(b"cached") == b"value"
 

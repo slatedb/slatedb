@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use object_store::path::Path;
 use slatedb::wal::WalReader as _;
 use tokio::sync::Mutex;
 
@@ -110,7 +111,7 @@ impl SlateDbWalReader {
         options: SlateDbWalReaderOptions,
     ) -> Result<Arc<Self>, Error> {
         let options = options.try_into()?;
-        let path = slatedb::object_store::path::Path::from(path);
+        let path = Path::from(path);
         let mut builder = slatedb::wal::SlateDbWalReaderBuilder::new()
             .with_object_store(Arc::clone(&object_store.inner))
             .with_path(path)
