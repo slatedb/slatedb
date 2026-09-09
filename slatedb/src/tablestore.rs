@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::future::Future;
 use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
@@ -33,6 +34,34 @@ use crate::sst_io::MAX_VALIDATION_RETRIES;
 use crate::sst_io::{read_obj, read_with_validation_retry, ReadOnlyObject};
 use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
+
+/// Keep object-store loads inside the requesting future. Some cache implementations
+/// spawn their loader and keep it running after the request is dropped. The proxy
+/// can outlive this call, but cancellation drops the actual read with its caller's
+/// snapshot lease. Other cache waiters receive an error and use their own direct read.
+async fn fetch_cached<F, Fut>(loader: CacheLoader, fetch: F) -> Result<CachedEntry, crate::Error>
+where
+    F: FnOnce(CacheLoader) -> Fut,
+    Fut: Future<Output = Result<CachedEntry, crate::Error>>,
+{
+    let (request, requested) = tokio::sync::oneshot::channel();
+    let (result, response) = tokio::sync::oneshot::channel();
+    let proxy: CacheLoader = Box::new(move || {
+        let _ = request.send(());
+        Box::pin(async move { response.await.map_err(SlateDBError::from)? })
+    });
+    let fetch = fetch(proxy);
+    tokio::pin!(fetch);
+    let load = async move {
+        if requested.await.is_ok() {
+            let _ = result.send(loader().await);
+        }
+    };
+    tokio::select! {
+        result = &mut fetch => result,
+        () = load => fetch.await,
+    }
+}
 
 pub(crate) struct TableStore {
     object_store: Arc<dyn ObjectStore>,
@@ -403,13 +432,12 @@ impl TableStore {
             // always the smuggled loader error (so the direct retry will also fail),
             // and on the rare foyer-machinery error an insert would likely fail too.
             let entry = if cache_blocks {
-                cache
-                    .fetch_filter(
-                        cache_key.clone(),
-                        self.read_loader(handle, CacheTarget::Filters, segment.clone()),
-                    )
-                    .await
-                    .ok()
+                fetch_cached(
+                    self.read_loader(handle, CacheTarget::Filters, segment.clone()),
+                    |loader| cache.fetch_filter(cache_key.clone(), loader),
+                )
+                .await
+                .ok()
             } else {
                 cache.get_filter(&cache_key).await.unwrap_or(None)
             };
@@ -456,13 +484,12 @@ impl TableStore {
         if let Some(cache) = self.cache_for_reads() {
             // See `read_filters` for the rationale on the fall-through path.
             let entry = if cache_blocks {
-                cache
-                    .fetch_stats(
-                        cache_key,
-                        self.read_loader(handle, CacheTarget::Stats, segment.clone()),
-                    )
-                    .await
-                    .ok()
+                fetch_cached(
+                    self.read_loader(handle, CacheTarget::Stats, segment.clone()),
+                    |loader| cache.fetch_stats(cache_key, loader),
+                )
+                .await
+                .ok()
             } else {
                 cache.get_stats(&cache_key).await.unwrap_or(None)
             };
@@ -496,13 +523,12 @@ impl TableStore {
         if let Some(cache) = self.cache_for_reads() {
             // See `read_filters` for the rationale on the fall-through path.
             let entry = if cache_blocks {
-                cache
-                    .fetch_index(
-                        cache_key,
-                        self.read_loader(handle, CacheTarget::Index, segment.clone()),
-                    )
-                    .await
-                    .ok()
+                fetch_cached(
+                    self.read_loader(handle, CacheTarget::Index, segment.clone()),
+                    |loader| cache.fetch_index(cache_key, loader),
+                )
+                .await
+                .ok()
             } else {
                 cache.get_index(&cache_key).await.unwrap_or(None)
             };
@@ -734,7 +760,9 @@ impl TableStore {
                 let offset = index.borrow().block_meta().get(block_num).offset();
                 let cache_key: CachedKey = (handle.id, offset).into();
                 let loader = self.block_loader(handle, index.clone(), block_num, segment.clone());
-                if let Ok(entry) = cache.fetch_block(cache_key, loader).await {
+                if let Ok(entry) =
+                    fetch_cached(loader, |loader| cache.fetch_block(cache_key, loader)).await
+                {
                     if let Some(block) = entry.block() {
                         let mut result = VecDeque::with_capacity(1);
                         result.push_back(block);
@@ -2387,14 +2415,17 @@ mod tests {
     ///
     /// 1. The first range-bounded `get_opts` call to the wrapped object store signals
     ///    `first_read_started` and parks on `release`. Once we see that signal we
-    ///    know task A's load is in flight inside foyer's spawned loader task.
+    ///    know task A's load has reached the object store.
     /// 2. `tokio::join!(task_b, release_task)` polls members in source order. Task
     ///    B's first poll synchronously joins foyer's in-flight fetch (no second
     ///    object-store call); the release fires only after B has registered as a
     ///    waiter.
     #[cfg(feature = "foyer")]
+    #[rstest]
+    #[case::completed(false)]
+    #[case::cancelled(true)]
     #[tokio::test]
-    async fn dedups_concurrent_reads_through_object_store() {
+    async fn dedups_concurrent_reads_through_object_store(#[case] cancel_first: bool) {
         use crate::db_cache::foyer::FoyerCache;
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use tokio::sync::Notify;
@@ -2456,8 +2487,13 @@ mod tests {
             async move { reader.read_index(&handle, true, Some(Bytes::new())).await }
         });
 
-        // wait until A's read has reached the object store and is paused
-        first_read_started.notified().await;
+        // Wait until A's read has reached the object store and is paused.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            first_read_started.notified(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             counting.get_range_count.load(Ordering::SeqCst),
             1,
@@ -2473,21 +2509,33 @@ mod tests {
         };
         let release_task = {
             let release = release.clone();
+            let abort = handle_a.abort_handle();
             async move {
                 tokio::task::yield_now().await;
-                release.notify_one();
+                if cancel_first {
+                    abort.abort();
+                } else {
+                    release.notify_one();
+                }
             }
         };
-        let (b_result, _) = tokio::join!(task_b, release_task);
+        let (b_result, _) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            tokio::join!(task_b, release_task)
+        })
+        .await
+        .unwrap();
 
-        // then: both callers got an index, and exactly one object-store read happened
-        let a_result = handle_a.await.expect("task A panicked");
-        assert!(a_result.is_ok(), "task A failed: {:?}", a_result.err());
+        let a_result = handle_a.await;
+        if cancel_first {
+            assert!(matches!(a_result, Err(error) if error.is_cancelled()));
+        } else {
+            assert!(a_result.unwrap().is_ok());
+        }
         assert!(b_result.is_ok(), "task B failed: {:?}", b_result.err());
         assert_eq!(
             counting.get_range_count.load(Ordering::SeqCst),
-            1,
-            "concurrent index reads must dedup into a single object-store read"
+            if cancel_first { 2 } else { 1 },
+            "only cancellation should require a second object-store read"
         );
     }
 

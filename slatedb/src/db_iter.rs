@@ -10,6 +10,7 @@ use crate::merge_operator::{
 };
 use crate::reader::ReadTrace;
 use crate::segment_iterator::{build_l0_point_iters, build_sr_point_iters, SegmentScanContext};
+use crate::snapshot_lease::SnapshotLease;
 use crate::types::{KeyValue, RowEntry, ValueDeletable};
 
 use async_trait::async_trait;
@@ -18,6 +19,7 @@ use futures::stream::{self, BoxStream, StreamExt};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::ops::RangeBounds;
+use std::sync::Arc;
 use tracing::Instrument;
 
 /// [`DbIteratorRangeTracker`] records the *requested* scan range of a
@@ -245,6 +247,7 @@ impl RowEntryIterator for ScanIterator {
 }
 
 pub struct DbIterator {
+    snapshot_lease: Option<Arc<SnapshotLease>>,
     range: BytesRange,
     iter: Box<dyn RowEntryIterator + 'static>,
     invalidated_error: Option<SlateDBError>,
@@ -262,6 +265,7 @@ impl DbIterator {
         merge_operator: Option<MergeOperatorType>,
         order: IterationOrder,
         read_trace: ReadTrace,
+        snapshot_lease: Option<Arc<SnapshotLease>>,
     ) -> Result<Self, SlateDBError> {
         let read_span = read_trace.read_span();
 
@@ -316,9 +320,14 @@ impl DbIterator {
             iter = Box::new(MergeOperatorRequiredIterator::new(iter));
         }
 
-        iter.init().instrument(read_span.clone()).await?;
+        SnapshotLease::protect(
+            snapshot_lease.clone(),
+            iter.init().instrument(read_span.clone()),
+        )
+        .await?;
 
         Ok(DbIterator {
+            snapshot_lease,
             range,
             iter,
             invalidated_error: None,
@@ -349,33 +358,36 @@ impl DbIterator {
     }
 
     pub(crate) async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        if let Some(error) = self.invalidated_error.clone() {
+            return Err(error);
+        }
         let read_span = self.read_span.clone();
-        self.next_entry_inner().instrument(read_span).await
+        let result = SnapshotLease::protect(
+            self.snapshot_lease.clone(),
+            self.next_entry_inner().instrument(read_span),
+        )
+        .await;
+        self.maybe_invalidate(result)
     }
 
     async fn next_entry_inner(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        if let Some(error) = self.invalidated_error.clone() {
-            Err(error)
-        } else {
-            let result = loop {
-                let next = self.iter.next().await;
-                // Keep cached iteration cooperative.
-                tokio::task::coop::consume_budget().await;
-                match next {
-                    Ok(Some(entry)) => match entry.value {
-                        ValueDeletable::Tombstone => continue,
-                        _ => break Ok(Some(entry)),
-                    },
-                    Ok(None) => break Ok(None),
-                    Err(e) => break Err(e),
-                }
-            };
-            let result = self.maybe_invalidate(result);
-            if let Ok(Some(ref entry)) = result {
-                self.last_key = Some(entry.key.clone());
+        let result = loop {
+            let next = self.iter.next().await;
+            // Keep cached iteration cooperative.
+            tokio::task::coop::consume_budget().await;
+            match next {
+                Ok(Some(entry)) => match entry.value {
+                    ValueDeletable::Tombstone => continue,
+                    _ => break Ok(Some(entry)),
+                },
+                Ok(None) => break Ok(None),
+                Err(error) => break Err(error),
             }
-            result
+        };
+        if let Ok(Some(ref entry)) = result {
+            self.last_key = Some(entry.key.clone());
         }
+        result
     }
 
     fn maybe_invalidate<T: Clone>(
@@ -407,8 +419,14 @@ impl DbIterator {
     pub async fn seek<K: AsRef<[u8]>>(&mut self, next_key: K) -> Result<(), crate::Error> {
         let next_key = next_key.as_ref();
         if let Some(error) = self.invalidated_error.clone() {
-            Err(error.into())
-        } else if !self.range.contains(&next_key) {
+            return Err(error.into());
+        }
+        let validity = self
+            .snapshot_lease
+            .as_ref()
+            .map_or(Ok(()), |lease| lease.check());
+        self.maybe_invalidate(validity)?;
+        if !self.range.contains(&next_key) {
             Err(SlateDBError::SeekKeyOutOfRange {
                 key: next_key.to_vec(),
                 range: self.range.clone(),
@@ -421,7 +439,8 @@ impl DbIterator {
         {
             Err(SlateDBError::SeekKeyLessThanLastReturnedKey.into())
         } else {
-            let result = self.iter.seek(next_key).await;
+            let result =
+                SnapshotLease::protect(self.snapshot_lease.clone(), self.iter.seek(next_key)).await;
             self.maybe_invalidate(result).map_err(Into::into)
         }
     }
@@ -683,6 +702,7 @@ mod tests {
             None,
             IterationOrder::Ascending,
             ReadTrace::new(None),
+            None,
         )
         .await
         .unwrap();
@@ -724,6 +744,7 @@ mod tests {
             None,
             IterationOrder::Ascending,
             ReadTrace::new(None),
+            None,
         )
         .await
         .unwrap();
@@ -755,6 +776,7 @@ mod tests {
             None,
             IterationOrder::Ascending,
             ReadTrace::new(None),
+            None,
         )
         .await
         .unwrap();
@@ -805,6 +827,7 @@ mod tests {
             None,
             IterationOrder::Ascending,
             ReadTrace::new(None),
+            None,
         )
         .await
         .unwrap();

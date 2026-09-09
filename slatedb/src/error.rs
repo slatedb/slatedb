@@ -192,6 +192,14 @@ pub(crate) enum SlateDBError {
     CheckpointMissing(Uuid),
 
     #[error(
+        "checkpoint protection ended. checkpoint_id=`{checkpoint_id}`, manifest_id=`{manifest_id}`"
+    )]
+    SnapshotLeaseLost {
+        checkpoint_id: Uuid,
+        manifest_id: u64,
+    },
+
+    #[error(
         "unsupported {format_name} format version. supported_versions=`{supported_versions:?}`, actual_version=`{actual_version}`"
     )]
     InvalidVersion {
@@ -712,6 +720,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::BlockTransformError => Error::data(msg),
             SlateDBError::InvalidRowFlags { .. } => Error::data(msg),
             SlateDBError::CheckpointMissing(_) => Error::data(msg),
+            SlateDBError::SnapshotLeaseLost { .. } => Error::data(msg),
             SlateDBError::InvalidVersion { .. } => Error::data(msg),
             SlateDBError::ManifestMissing(_) => Error::data(msg),
             LatestTransactionalObjectVersionMissing => Error::data(msg),
