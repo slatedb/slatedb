@@ -71,6 +71,24 @@ pub struct CacheFetch {
     pub lookup: CacheLookup,
 }
 
+impl CacheFetch {
+    /// Create a result for an entry that the cache supplied.
+    pub fn hit(entry: CachedEntry) -> Self {
+        Self {
+            entry,
+            lookup: CacheLookup::Hit,
+        }
+    }
+
+    /// Create a result for an entry that the fetch loaded.
+    pub fn miss(entry: CachedEntry) -> Self {
+        Self {
+            entry,
+            lookup: CacheLookup::Miss,
+        }
+    }
+}
+
 /// A trait for slatedb's in-memory cache.
 ///
 /// This trait defines the interface for an in-memory cache,
@@ -205,6 +223,13 @@ pub trait DbCache: Send + Sync {
 
     /// Fetch a data-block entry, invoking `loader` on cache miss.
     ///
+    /// Custom implementations must report the lookup result in [`CacheFetch::lookup`].
+    /// Return [`CacheLookup::Miss`] when this fetch loads the entry from object storage.
+    /// Return [`CacheLookup::Hit`] when memory, disk, or a concurrent fetch supplies the entry.
+    /// The cache wrapper uses this result to update hit and miss counters.
+    /// It does not track whether the supplied loader runs.
+    /// This contract also applies to [`Self::fetch_index`], [`Self::fetch_filter`], and [`Self::fetch_stats`].
+    ///
     /// Implementations should deduplicate concurrent fetches: if multiple callers request the
     /// same key while it is being loaded, only one should run `loader` and the rest should
     /// share its result. The default implementation does **not** dedup; it simply does a
@@ -216,17 +241,11 @@ pub trait DbCache: Send + Sync {
         loader: CacheLoader,
     ) -> Result<CacheFetch, crate::Error> {
         if let Some(entry) = self.get_block(&key).await? {
-            return Ok(CacheFetch {
-                entry,
-                lookup: CacheLookup::Hit,
-            });
+            return Ok(CacheFetch::hit(entry));
         }
         let entry = loader().await?;
         self.insert(key, entry.clone()).await;
-        Ok(CacheFetch {
-            entry,
-            lookup: CacheLookup::Miss,
-        })
+        Ok(CacheFetch::miss(entry))
     }
 
     /// Fetch an index entry, invoking `loader` on cache miss. See [`Self::fetch_block`].
@@ -236,17 +255,11 @@ pub trait DbCache: Send + Sync {
         loader: CacheLoader,
     ) -> Result<CacheFetch, crate::Error> {
         if let Some(entry) = self.get_index(&key).await? {
-            return Ok(CacheFetch {
-                entry,
-                lookup: CacheLookup::Hit,
-            });
+            return Ok(CacheFetch::hit(entry));
         }
         let entry = loader().await?;
         self.insert(key, entry.clone()).await;
-        Ok(CacheFetch {
-            entry,
-            lookup: CacheLookup::Miss,
-        })
+        Ok(CacheFetch::miss(entry))
     }
 
     /// Fetch a filter entry, invoking `loader` on cache miss. See [`Self::fetch_block`].
@@ -256,17 +269,11 @@ pub trait DbCache: Send + Sync {
         loader: CacheLoader,
     ) -> Result<CacheFetch, crate::Error> {
         if let Some(entry) = self.get_filter(&key).await? {
-            return Ok(CacheFetch {
-                entry,
-                lookup: CacheLookup::Hit,
-            });
+            return Ok(CacheFetch::hit(entry));
         }
         let entry = loader().await?;
         self.insert(key, entry.clone()).await;
-        Ok(CacheFetch {
-            entry,
-            lookup: CacheLookup::Miss,
-        })
+        Ok(CacheFetch::miss(entry))
     }
 
     /// Fetch a stats entry, invoking `loader` on cache miss. See [`Self::fetch_block`].
@@ -276,17 +283,11 @@ pub trait DbCache: Send + Sync {
         loader: CacheLoader,
     ) -> Result<CacheFetch, crate::Error> {
         if let Some(entry) = self.get_stats(&key).await? {
-            return Ok(CacheFetch {
-                entry,
-                lookup: CacheLookup::Hit,
-            });
+            return Ok(CacheFetch::hit(entry));
         }
         let entry = loader().await?;
         self.insert(key, entry.clone()).await;
-        Ok(CacheFetch {
-            entry,
-            lookup: CacheLookup::Miss,
-        })
+        Ok(CacheFetch::miss(entry))
     }
 }
 
@@ -668,10 +669,7 @@ impl DbCache for SplitCache {
         if let Some(cache) = &self.block_cache {
             cache.fetch_block(key, loader).await
         } else {
-            loader().await.map(|entry| CacheFetch {
-                entry,
-                lookup: CacheLookup::Miss,
-            })
+            loader().await.map(CacheFetch::miss)
         }
     }
 
@@ -683,10 +681,7 @@ impl DbCache for SplitCache {
         if let Some(cache) = &self.meta_cache {
             cache.fetch_index(key, loader).await
         } else {
-            loader().await.map(|entry| CacheFetch {
-                entry,
-                lookup: CacheLookup::Miss,
-            })
+            loader().await.map(CacheFetch::miss)
         }
     }
 
@@ -698,10 +693,7 @@ impl DbCache for SplitCache {
         if let Some(cache) = &self.meta_cache {
             cache.fetch_filter(key, loader).await
         } else {
-            loader().await.map(|entry| CacheFetch {
-                entry,
-                lookup: CacheLookup::Miss,
-            })
+            loader().await.map(CacheFetch::miss)
         }
     }
 
@@ -713,10 +705,7 @@ impl DbCache for SplitCache {
         if let Some(cache) = &self.meta_cache {
             cache.fetch_stats(key, loader).await
         } else {
-            loader().await.map(|entry| CacheFetch {
-                entry,
-                lookup: CacheLookup::Miss,
-            })
+            loader().await.map(CacheFetch::miss)
         }
     }
 }
@@ -776,10 +765,14 @@ impl DbCacheWrapper {
 
     fn record_fetch_outcome(&self, block_type: &str, result: &Result<CacheFetch, crate::Error>) {
         match result {
-            Ok(fetch) => match fetch.lookup {
-                CacheLookup::Miss => self.record_miss(block_type),
-                CacheLookup::Hit => self.record_hit(block_type),
-            },
+            Ok(CacheFetch {
+                lookup: CacheLookup::Miss,
+                ..
+            }) => self.record_miss(block_type),
+            Ok(CacheFetch {
+                lookup: CacheLookup::Hit,
+                ..
+            }) => self.record_hit(block_type),
             Err(err) => self.record_get_err(block_type, err),
         }
     }
@@ -1311,6 +1304,116 @@ mod tests {
     const SST_ID: SsTableId = SsTableId::new(Ulid::from_parts(0u64, 0u128));
 
     #[tokio::test]
+    async fn test_wrapper_counts_reported_fetch_lookup() {
+        struct ReportedLookupCache {
+            lookup: CacheLookup,
+            entry: CachedEntry,
+        }
+
+        #[async_trait::async_trait]
+        impl DbCache for ReportedLookupCache {
+            async fn get_block(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+                panic!("The wrapper must call fetch_block.");
+            }
+            async fn get_index(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+                panic!("The wrapper must call fetch_index.");
+            }
+            async fn get_filter(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+                panic!("The wrapper must call fetch_filter.");
+            }
+            async fn get_stats(&self, _: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+                panic!("The wrapper must call fetch_stats.");
+            }
+            async fn insert(&self, _: CachedKey, _: CachedEntry) {}
+            async fn remove(&self, _: &CachedKey) {}
+            fn entry_count(&self) -> u64 {
+                0
+            }
+            async fn fetch_block(
+                &self,
+                _: CachedKey,
+                _: CacheLoader,
+            ) -> Result<CacheFetch, crate::Error> {
+                Ok(CacheFetch {
+                    entry: self.entry.clone(),
+                    lookup: self.lookup,
+                })
+            }
+            async fn fetch_index(
+                &self,
+                key: CachedKey,
+                loader: CacheLoader,
+            ) -> Result<CacheFetch, crate::Error> {
+                self.fetch_block(key, loader).await
+            }
+            async fn fetch_filter(
+                &self,
+                key: CachedKey,
+                loader: CacheLoader,
+            ) -> Result<CacheFetch, crate::Error> {
+                self.fetch_block(key, loader).await
+            }
+            async fn fetch_stats(
+                &self,
+                key: CachedKey,
+                loader: CacheLoader,
+            ) -> Result<CacheFetch, crate::Error> {
+                self.fetch_block(key, loader).await
+            }
+        }
+
+        for lookup in [CacheLookup::Miss, CacheLookup::Hit] {
+            for method in ["data_block", "index", "filter", "stats"] {
+                let recorder = Arc::new(DefaultMetricsRecorder::new());
+                let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+                let mut builder = BlockBuilder::new_latest(4096);
+                assert!(builder
+                    .add(RowEntry::new_value(b"key", b"value", 0))
+                    .unwrap());
+                let block = Arc::new(builder.build().unwrap());
+                let cache = DbCacheWrapper::new(
+                    Arc::new(ReportedLookupCache {
+                        lookup,
+                        entry: CachedEntry::with_block(block.clone()),
+                    }),
+                    &helper,
+                    Arc::new(DefaultSystemClock::default()),
+                    1,
+                );
+                let key = CachedKey::from((SST_ID, 0));
+                let loader: CacheLoader =
+                    Box::new(|| panic!("This cache supplies its own result."));
+                let fetch = match method {
+                    "data_block" => cache.fetch_block(key, loader).await,
+                    "index" => cache.fetch_index(key, loader).await,
+                    "filter" => cache.fetch_filter(key, loader).await,
+                    "stats" => cache.fetch_stats(key, loader).await,
+                    _ => unreachable!(),
+                }
+                .unwrap();
+                assert_eq!(fetch.lookup, lookup);
+                assert!(Arc::ptr_eq(&fetch.entry.block().unwrap(), &block));
+                for entry_kind in ["data_block", "index", "filter", "stats"] {
+                    for (result, expected_lookup) in
+                        [("hit", CacheLookup::Hit), ("miss", CacheLookup::Miss)]
+                    {
+                        let expected = i64::from(entry_kind == method && lookup == expected_lookup);
+                        assert_eq!(
+                            lookup_metric_with_labels(
+                                &recorder,
+                                super::stats::ACCESS_COUNT,
+                                &[("entry_kind", entry_kind), ("result", result)],
+                            ),
+                            Some(expected),
+                            "method={method}, lookup={lookup:?}, entry_kind={entry_kind}, result={result}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_fetch_lookup_outcomes() {
         let mut caches: Vec<(Arc<dyn DbCache>, bool)> = vec![
             (Arc::new(TestCache::new()), true),
@@ -1330,8 +1433,11 @@ mod tests {
         caches.push((Arc::new(super::moka::MokaCache::new()), true));
 
         for (cache, retains_entries) in caches {
-            for method in 0..4 {
-                let key = CachedKey::from((SST_ID, method));
+            for (offset, method) in ["data_block", "index", "filter", "stats"]
+                .into_iter()
+                .enumerate()
+            {
+                let key = CachedKey::from((SST_ID, offset as u64));
                 let mut builder = BlockBuilder::new_latest(4096);
                 assert!(builder
                     .add(RowEntry::new_value(b"key", b"value", 0))
@@ -1341,10 +1447,11 @@ mod tests {
                     let entry = CachedEntry::with_block(block.clone());
                     let loader: CacheLoader = Box::new(move || Box::pin(async move { Ok(entry) }));
                     let fetch = match method {
-                        0 => cache.fetch_block(key.clone(), loader).await,
-                        1 => cache.fetch_index(key.clone(), loader).await,
-                        2 => cache.fetch_filter(key.clone(), loader).await,
-                        _ => cache.fetch_stats(key.clone(), loader).await,
+                        "data_block" => cache.fetch_block(key.clone(), loader).await,
+                        "index" => cache.fetch_index(key.clone(), loader).await,
+                        "filter" => cache.fetch_filter(key.clone(), loader).await,
+                        "stats" => cache.fetch_stats(key.clone(), loader).await,
+                        _ => unreachable!(),
                     }
                     .unwrap();
                     assert_eq!(
@@ -2018,40 +2125,28 @@ mod tests {
                 _: CachedKey,
                 _: CacheLoader,
             ) -> Result<CacheFetch, crate::Error> {
-                Ok(CacheFetch {
-                    entry: self.marker.clone(),
-                    lookup: CacheLookup::Hit,
-                })
+                Ok(CacheFetch::hit(self.marker.clone()))
             }
             async fn fetch_index(
                 &self,
                 _: CachedKey,
                 _: CacheLoader,
             ) -> Result<CacheFetch, crate::Error> {
-                Ok(CacheFetch {
-                    entry: self.marker.clone(),
-                    lookup: CacheLookup::Hit,
-                })
+                Ok(CacheFetch::hit(self.marker.clone()))
             }
             async fn fetch_filter(
                 &self,
                 _: CachedKey,
                 _: CacheLoader,
             ) -> Result<CacheFetch, crate::Error> {
-                Ok(CacheFetch {
-                    entry: self.marker.clone(),
-                    lookup: CacheLookup::Hit,
-                })
+                Ok(CacheFetch::hit(self.marker.clone()))
             }
             async fn fetch_stats(
                 &self,
                 _: CachedKey,
                 _: CacheLoader,
             ) -> Result<CacheFetch, crate::Error> {
-                Ok(CacheFetch {
-                    entry: self.marker.clone(),
-                    lookup: CacheLookup::Hit,
-                })
+                Ok(CacheFetch::hit(self.marker.clone()))
             }
         }
 
