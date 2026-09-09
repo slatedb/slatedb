@@ -1,3 +1,4 @@
+use crate::snapshot_lease::SnapshotLease;
 use async_trait::async_trait;
 use bytes::Bytes;
 use log::error;
@@ -6,7 +7,7 @@ use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::block_iterator::DataBlockIterator;
 use crate::bytes_range::BytesRange;
@@ -25,12 +26,13 @@ use crate::{
 };
 
 enum FetchTask {
-    InFlight(JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
+    InFlight(AbortOnDropHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
     Finished(VecDeque<Arc<Block>>),
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct SstIteratorOptions {
+    pub(crate) snapshot_lease: Option<Arc<SnapshotLease>>,
     pub(crate) max_fetch_tasks: usize,
     pub(crate) target_bytes_to_fetch: usize,
     pub(crate) cache_blocks: bool,
@@ -45,6 +47,7 @@ pub(crate) struct SstIteratorOptions {
 impl Default for SstIteratorOptions {
     fn default() -> Self {
         SstIteratorOptions {
+            snapshot_lease: None,
             max_fetch_tasks: 1,
             target_bytes_to_fetch: 1,
             cache_blocks: true,
@@ -427,17 +430,22 @@ impl<'a> InternalSstIterator<'a> {
                     let segment = self.options.segment.clone();
                     let blocks_end = blocks.end;
                     self.fetch_tasks
-                        .push_back(FetchTask::InFlight(tokio::spawn(async move {
-                            table_store
-                                .read_blocks_using_index(
-                                    &table,
-                                    index,
-                                    blocks,
-                                    cache_blocks,
-                                    segment,
-                                )
-                                .await
-                        })));
+                        .push_back(FetchTask::InFlight(AbortOnDropHandle::new(tokio::spawn(
+                            SnapshotLease::protect_task(
+                                self.options.snapshot_lease.clone(),
+                                async move {
+                                    table_store
+                                        .read_blocks_using_index(
+                                            &table,
+                                            index,
+                                            blocks,
+                                            cache_blocks,
+                                            segment,
+                                        )
+                                        .await
+                                },
+                            ),
+                        ))));
                     self.next_block_idx_to_fetch = blocks_end;
                 }
             }
@@ -461,17 +469,22 @@ impl<'a> InternalSstIterator<'a> {
                     let segment = self.options.segment.clone();
                     let blocks_start = blocks.start;
                     self.fetch_tasks
-                        .push_back(FetchTask::InFlight(tokio::spawn(async move {
-                            table_store
-                                .read_blocks_using_index(
-                                    &table,
-                                    index,
-                                    blocks,
-                                    cache_blocks,
-                                    segment,
-                                )
-                                .await
-                        })));
+                        .push_back(FetchTask::InFlight(AbortOnDropHandle::new(tokio::spawn(
+                            SnapshotLease::protect_task(
+                                self.options.snapshot_lease.clone(),
+                                async move {
+                                    table_store
+                                        .read_blocks_using_index(
+                                            &table,
+                                            index,
+                                            blocks,
+                                            cache_blocks,
+                                            segment,
+                                        )
+                                        .await
+                                },
+                            ),
+                        ))));
                     self.next_block_idx_to_fetch = blocks_start;
                 }
             }
@@ -1990,6 +2003,7 @@ mod tests {
             &sst,
             table_store.clone(),
             SstIteratorOptions {
+                snapshot_lease: None,
                 max_fetch_tasks: 32,
                 target_bytes_to_fetch: 256 * 128,
                 cache_blocks: true,
@@ -2010,6 +2024,7 @@ mod tests {
             &sst,
             table_store.clone(),
             SstIteratorOptions {
+                snapshot_lease: None,
                 max_fetch_tasks: 1,
                 target_bytes_to_fetch: 1,
                 cache_blocks: true,
@@ -2633,6 +2648,7 @@ mod tests {
         let end_key = b"key079";
 
         let sst_iter_options = SstIteratorOptions {
+            snapshot_lease: None,
             max_fetch_tasks: 3,
             target_bytes_to_fetch: 3 * 128,
             cache_blocks: true,
@@ -2933,6 +2949,7 @@ mod tests {
             &sst,
             table_store.clone(),
             SstIteratorOptions {
+                snapshot_lease: None,
                 max_fetch_tasks: 1,
                 target_bytes_to_fetch: 1,
                 cache_blocks: true,

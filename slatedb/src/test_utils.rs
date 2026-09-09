@@ -985,6 +985,7 @@ pub(crate) struct Gate {
     /// (see [`admit`](Self::admit)).
     permits: AtomicUsize,
     arrival_count: AtomicUsize,
+    active_count: AtomicUsize,
     /// If `Some`, callers receive the produced error after the gate opens.
     error_fn: std::sync::Mutex<Option<Box<dyn Fn() -> object_store::Error + Send + Sync>>>,
 }
@@ -1005,6 +1006,7 @@ impl Default for Gate {
             open: std::sync::atomic::AtomicBool::new(true),
             permits: AtomicUsize::new(0),
             arrival_count: AtomicUsize::new(0),
+            active_count: AtomicUsize::new(0),
             error_fn: std::sync::Mutex::new(None),
         }
     }
@@ -1064,9 +1066,23 @@ impl Gate {
         self.arrival_count.load(Ordering::Acquire)
     }
 
+    /// How many callers are currently waiting at the gate.
+    pub(crate) fn active_calls(&self) -> usize {
+        self.active_count.load(Ordering::Acquire)
+    }
+
     /// Block at this gate until released or admitted. Returns the configured
     /// error (if any) or `Ok(())` to let the caller proceed to the inner store.
     async fn wait(&self) -> object_store::Result<()> {
+        struct ActiveCall<'a>(&'a AtomicUsize);
+        impl Drop for ActiveCall<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+        self.active_count.fetch_add(1, Ordering::AcqRel);
+        let _active = ActiveCall(&self.active_count);
+
         // Signal arrival.
         self.arrival_count.fetch_add(1, Ordering::AcqRel);
 
