@@ -807,7 +807,13 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
             Some(retention) => tokio::select! {
                 biased;
                 _ = retention.stopped.cancelled() => Ok(()),
-                result = self.poll() => result,
+                result = self.poll() => match result {
+                    // Close can invalidate a lease after select checked cancellation.
+                    // Only a recorded clean shutdown makes that Closed result expected.
+                    Err(SlateDBError::Closed)
+                        if matches!(self.inner.status_manager.result_reader().read(), Some(Ok(()))) => Ok(()),
+                    result => result,
+                },
             },
             None => self.poll().await,
         }
@@ -3963,6 +3969,136 @@ mod tests {
 
         db.close().await.unwrap();
     }
+
+    #[rstest]
+    #[case::clean_shutdown(true, true, None)]
+    #[case::wal_failure(
+        true,
+        false,
+        Some(SlateDBError::WalUnavailable(Arc::new(std::io::Error::other("probe failed"))))
+    )]
+    #[case::lease_failure(false, true, Some(SlateDBError::SnapshotLeaseLost { checkpoint_id: Uuid::nil(), manifest_id: 1 }))]
+    #[case::prior_lease_failure(true, true, Some(SlateDBError::SnapshotLeaseLost { checkpoint_id: Uuid::nil(), manifest_id: 1 }))]
+    #[case::unmarked_closed(false, true, Some(SlateDBError::Closed))]
+    #[tokio::test]
+    async fn managed_close_during_manifest_poll_preserves_task_result(
+        #[case] clean_shutdown: bool,
+        #[case] reestablish: bool,
+        #[case] expected_error: Option<SlateDBError>,
+    ) {
+        type ProbeAction = Box<dyn FnOnce() -> Result<u64, WalError> + Send>;
+        #[derive(Default)]
+        struct ProbeWalReader(parking_lot::Mutex<Option<ProbeAction>>);
+
+        #[async_trait::async_trait]
+        impl WalReaderTrait for ProbeWalReader {
+            async fn iterator(&self, _: WalFileRange) -> Result<Box<dyn WalIterator>, WalError> {
+                Ok(Box::new(EmptyTestWalIterator))
+            }
+
+            async fn last_wal_file_id(&self, _: u64) -> Result<u64, WalError> {
+                let action = self.0.lock().take();
+                action.map_or(Ok(0), |action| action())
+            }
+        }
+
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let provider = TestProvider::new(Path::from("close-during-manifest-poll"), store);
+        let manifest = StoredManifest::create_new_db(
+            provider.manifest_store(),
+            ManifestCore::new(),
+            provider.system_clock.clone(),
+        )
+        .await
+        .unwrap();
+        let wal_reader = Arc::new(ProbeWalReader::default());
+        let inner = Arc::new(
+            DbReaderInner::new(
+                provider.manifest_store(),
+                provider.table_store(),
+                provider.wal_store(),
+                Some(wal_reader.clone()),
+                DbReaderOptions::default(),
+                DbReaderMode::ManagedCheckpoint,
+                None,
+                None,
+                provider.system_clock.clone(),
+                provider.rand.clone(),
+                slatedb_common::metrics::MetricsRecorderHelper::noop(),
+                manifest,
+            )
+            .await
+            .unwrap(),
+        );
+        let task_executor = crate::dispatcher::MessageHandlerExecutor::new(
+            Arc::new(inner.status_manager.clone()),
+            provider.system_clock.clone(),
+        );
+        let reader = Arc::new(DbReader {
+            inner,
+            task_executor,
+        });
+        if reestablish {
+            let mut manifest =
+                StoredManifest::load(provider.manifest_store(), provider.system_clock.clone())
+                    .await
+                    .unwrap();
+            let mut dirty = manifest.prepare_dirty().unwrap();
+            dirty.value.core.last_l0_seq = 1;
+            manifest.update(dirty).await.unwrap();
+        }
+        *wal_reader.0.lock() = Some(Box::new({
+            let reader = reader.clone();
+            let error = expected_error.clone();
+            move || {
+                if clean_shutdown {
+                    if let Some(error) = error.as_ref().filter(|_| reestablish) {
+                        reader.inner.retention.as_ref().unwrap().stop(error.clone());
+                    }
+                    // Stop inside the poll branch, after select has already checked
+                    // its cancellation branch. The task cannot join itself yet.
+                    let mut close = Box::pin(reader.close());
+                    let mut context =
+                        std::task::Context::from_waker(futures::task::noop_waker_ref());
+                    assert!(std::future::Future::poll(close.as_mut(), &mut context).is_pending());
+                } else {
+                    reader
+                        .inner
+                        .retention
+                        .as_ref()
+                        .unwrap()
+                        .stop(error.clone().unwrap());
+                }
+                if reestablish {
+                    Ok(0)
+                } else {
+                    Err(error.unwrap().into())
+                }
+            }
+        }));
+        reader
+            .inner
+            .spawn_manifest_poller(&reader.task_executor)
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            reader.task_executor.join_task(super::DB_READER_TASK_NAME),
+        )
+        .await
+        .unwrap();
+        assert!(wal_reader.0.lock().is_none());
+        match expected_error {
+            Some(error) => {
+                assert_eq!(result.unwrap_err().to_string(), error.to_string());
+                assert!(reader.close().await.is_err());
+            }
+            None => {
+                result.unwrap();
+                reader.close().await.unwrap();
+            }
+        }
+    }
+
     async fn gated_managed_reader() -> (
         DbReader,
         Arc<test_utils::GatedObjectStore>,
