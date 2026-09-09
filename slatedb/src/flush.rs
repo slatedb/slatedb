@@ -126,7 +126,7 @@ impl DbInner {
         if !any {
             return Ok(None);
         }
-        Ok(Some(writer.close_and_count_bytes().await?))
+        Ok(Some(writer.close().await?))
     }
 
     /// Write one SST per touched segment, block by block.
@@ -175,8 +175,7 @@ impl DbInner {
             // to the next prefix.
             while !entry.key.starts_with(current_prefix.as_ref()) {
                 if current_has_entry {
-                    let (sst_handle, encoded_bytes) =
-                        current_writer.close_and_count_bytes().await?;
+                    let (sst_handle, encoded_bytes) = current_writer.close().await?;
                     out.push(SegmentedSstHandle {
                         prefix: current_prefix,
                         sst_handle,
@@ -204,7 +203,7 @@ impl DbInner {
             tokio::task::coop::consume_budget().await;
         }
         if current_has_entry {
-            let (sst_handle, encoded_bytes) = current_writer.close_and_count_bytes().await?;
+            let (sst_handle, encoded_bytes) = current_writer.close().await?;
             out.push(SegmentedSstHandle {
                 prefix: current_prefix,
                 sst_handle,

@@ -860,7 +860,7 @@ impl TokioCompactionExecutorInner {
                     format!("compactor_sst_close:{:?}", finished_writer.id()),
                     &self.handle,
                     |_| {},
-                    async move { finished_writer.close().await },
+                    async move { finished_writer.close().await.map(|(sst, _)| sst) },
                 )));
                 bytes_written = 0;
                 let total_bytes = start_bytes_processed + all_iter.bytes_processed();
@@ -877,7 +877,7 @@ impl TokioCompactionExecutorInner {
             self.collect_close(pending, &mut output_ssts).await?;
         }
         if !current_writer.is_drained() {
-            let sst = current_writer.close().await?;
+            let (sst, _) = current_writer.close().await?;
 
             self.worker_stats
                 .bytes_compacted
@@ -1064,7 +1064,7 @@ mod tests {
             }
 
             if bytes_written > max_sst_size {
-                output_ssts.push(writer.close().await.unwrap());
+                output_ssts.push(writer.close().await.unwrap().0);
                 bytes_written = 0;
 
                 if index + 1 < entries.len() {
@@ -1076,7 +1076,7 @@ mod tests {
             }
         }
 
-        output_ssts.push(writer.close().await.unwrap());
+        output_ssts.push(writer.close().await.unwrap().0);
         output_ssts
     }
 

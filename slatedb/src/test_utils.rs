@@ -437,7 +437,7 @@ pub(crate) async fn write_ssts(
         }
 
         if bytes_written > max_sst_size {
-            output_ssts.push(writer.close().await.unwrap());
+            output_ssts.push(writer.close().await.unwrap().0);
             bytes_written = 0;
 
             if index + 1 < entries.len() {
@@ -448,7 +448,7 @@ pub(crate) async fn write_ssts(
         }
     }
 
-    output_ssts.push(writer.close().await.unwrap());
+    output_ssts.push(writer.close().await.unwrap().0);
     output_ssts
 }
 

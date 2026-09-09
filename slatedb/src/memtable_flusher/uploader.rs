@@ -20,6 +20,7 @@ use crate::dispatcher::{MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::flush::SegmentedSstHandle;
 use crate::mem_table::ImmutableMemtable;
+use crate::retrying_object_store::RetryingObjectStore;
 use crate::utils::SafeSender;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -33,6 +34,32 @@ use tokio::runtime::Handle;
 use ulid::Ulid;
 
 const UPLOADER_TASK_NAME: &str = "l0_sst_uploader";
+
+// `BufWriter` wraps an `object_store::Error` inside `std::io::Error` through
+// `AsyncWrite`. Find the original error before applying the shared retry rule.
+// Without this step, `NotSupported` can retry forever.
+fn should_retry_upload_error(error: &SlateDBError) -> bool {
+    match error {
+        SlateDBError::ObjectStoreError(error) => RetryingObjectStore::should_retry(error),
+        SlateDBError::IoError(error) => {
+            let Some(source) = error.get_ref() else {
+                return true;
+            };
+            let mut source: Option<&(dyn std::error::Error + 'static)> = Some(source);
+            while let Some(error) = source {
+                if let Some(error) = error.downcast_ref::<object_store::Error>() {
+                    return RetryingObjectStore::should_retry(error);
+                }
+                if let Some(error) = error.downcast_ref::<Arc<object_store::Error>>() {
+                    return RetryingObjectStore::should_retry(error);
+                }
+                source = error.source();
+            }
+            true
+        }
+        _ => false,
+    }
+}
 
 /// One immutable-memtable upload request submitted to the uploader. Physical
 /// SST ids are allocated at dispatch (in sequence order) and carried here, so
@@ -208,10 +235,7 @@ impl UploadHandler {
                 .await
             {
                 Ok(segments) => break segments,
-                // Only a storage-layer error is worth retrying. Any
-                // other error is a logic error that retrying cannot
-                // fix, so it is returned right away below.
-                Err(e @ (SlateDBError::IoError(_) | SlateDBError::ObjectStoreError(_))) => {
+                Err(e) if should_retry_upload_error(&e) => {
                     // When the WAL is enabled and the database is shutting
                     // down, give up immediately. The data is already durable
                     // in the WAL and will be recovered on the next startup.
@@ -265,7 +289,7 @@ impl MessageHandler<UploadJob> for UploadHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::{TrackerMessage, UploadJob, Uploader};
+    use super::{should_retry_upload_error, TrackerMessage, UploadJob, Uploader};
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::config::Settings;
     use crate::db::DbInner;
@@ -302,6 +326,27 @@ mod tests {
     use tokio::runtime::Handle;
     use tokio::time::timeout;
     use ulid::Ulid;
+
+    fn not_supported_error() -> object_store::Error {
+        object_store::Error::NotSupported {
+            source: Box::new(std::io::Error::other("not supported")),
+        }
+    }
+
+    #[test]
+    fn should_not_retry_not_supported_upload_error() {
+        let direct = SlateDBError::from(not_supported_error());
+        assert!(!should_retry_upload_error(&direct));
+
+        let wrapped = SlateDBError::from(std::io::Error::from(not_supported_error()));
+        assert!(!should_retry_upload_error(&wrapped));
+    }
+
+    #[test]
+    fn should_retry_io_error_without_object_store_source() {
+        let error = SlateDBError::from(std::io::Error::other("temporary failure"));
+        assert!(should_retry_upload_error(&error));
+    }
 
     /// Build a pre-allocated id map for a test job, mirroring dispatch-time
     /// allocation: one id per segment prefix, falling back to the empty prefix

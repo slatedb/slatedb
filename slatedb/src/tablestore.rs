@@ -1019,10 +1019,6 @@ impl EncodedSsTableWriter {
         Ok(block_size)
     }
 
-    pub(crate) async fn close(self) -> Result<SsTableHandle, SlateDBError> {
-        self.close_and_count_bytes().await.map(|(handle, _)| handle)
-    }
-
     /// Finish this SST: write the last block, write the footer, close
     /// the upload.
     ///
@@ -1032,56 +1028,49 @@ impl EncodedSsTableWriter {
     /// On failure, aborts the upload before returning the error. This
     /// discards any blocks already sent to object storage for this
     /// SST.
-    pub(crate) async fn close_and_count_bytes(
-        mut self,
-    ) -> Result<(SsTableHandle, u64), SlateDBError> {
-        match self.close_inner().await {
-            Ok(result) => Ok(result),
-            Err(e) => {
-                if let Err(abort_err) = self.abort().await {
-                    warn!(
-                        "failed to abort sst writer after error [id={:?}, error={:?}]",
-                        self.id, abort_err
-                    );
-                }
-                Err(e)
+    pub(crate) async fn close(mut self) -> Result<(SsTableHandle, u64), SlateDBError> {
+        let result = async {
+            fail_point!(
+                self.table_store.fp_registry.clone(),
+                "write-compacted-sst-io-error",
+                |_| Err(slatedb_io_error())
+            );
+            let builder = std::mem::replace(&mut self.builder, self.table_store.table_builder());
+            let encoded_sst = builder.build().await?;
+            for block in &encoded_sst.unconsumed_blocks {
+                self.writer.write_all(block.encoded_bytes.as_ref()).await?;
+                self.bytes_written += block.encoded_bytes.len();
+            }
+            self.writer.write_all(encoded_sst.footer.as_ref()).await?;
+            self.bytes_written += encoded_sst.footer.len();
+            self.shutdown_started = true;
+            self.writer.shutdown().await?;
+
+            // Cache inserts happen after writer shutdown so an SST whose upload
+            // fails contributes no metadata entries.
+            //
+            // Blocks drained while entries were added are cached by `write_block`,
+            // so the only data block left for `cache_on_sst_write` is the tail
+            // block that `build` finished.
+            self.table_store
+                .cache_on_sst_write(self.id, &encoded_sst)
+                .await;
+            Ok((
+                SsTableHandle::new(self.id, encoded_sst.format_version, encoded_sst.info),
+                self.bytes_written as u64,
+            ))
+        }
+        .await;
+
+        if result.is_err() {
+            if let Err(abort_err) = self.abort().await {
+                warn!(
+                    "failed to abort sst writer after error [id={:?}, error={:?}]",
+                    self.id, abort_err
+                );
             }
         }
-    }
-
-    /// Build the final block, write every block and the footer to
-    /// object storage, then record this SST's blocks in the read
-    /// cache.
-    async fn close_inner(&mut self) -> Result<(SsTableHandle, u64), SlateDBError> {
-        fail_point!(
-            self.table_store.fp_registry.clone(),
-            "write-compacted-sst-io-error",
-            |_| Err(slatedb_io_error())
-        );
-        let builder = std::mem::replace(&mut self.builder, self.table_store.table_builder());
-        let encoded_sst = builder.build().await?;
-        for block in &encoded_sst.unconsumed_blocks {
-            self.writer.write_all(block.encoded_bytes.as_ref()).await?;
-            self.bytes_written += block.encoded_bytes.len();
-        }
-        self.writer.write_all(encoded_sst.footer.as_ref()).await?;
-        self.bytes_written += encoded_sst.footer.len();
-        self.shutdown_started = true;
-        self.writer.shutdown().await?;
-
-        // Cache inserts happen after writer shutdown so an SST whose upload
-        // fails contributes no metadata entries.
-        //
-        // Blocks drained while entries were added are cached by `write_block`,
-        // so the only data block left for `cache_on_sst_write` is the tail
-        // block that `build` finished.
-        self.table_store
-            .cache_on_sst_write(self.id, &encoded_sst)
-            .await;
-        Ok((
-            SsTableHandle::new(self.id, encoded_sst.format_version, encoded_sst.info),
-            self.bytes_written as u64,
-        ))
+        result
     }
 
     /// Tell object storage to discard this SST's upload.
@@ -1368,7 +1357,7 @@ mod tests {
             .add(RowEntry::new_value(&[b'd'; 16], &[4u8; 16], 0))
             .await
             .unwrap();
-        let sst = writer.close().await.unwrap();
+        let (sst, _) = writer.close().await.unwrap();
 
         let sst_iter_options = SstIteratorOptions {
             eager_spawn: true,
@@ -1469,7 +1458,7 @@ mod tests {
             .add(RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0))
             .await
             .unwrap();
-        let result = writer.close_and_count_bytes().await;
+        let result = writer.close().await;
         assert!(
             result.is_err(),
             "a failed shutdown must surface as an error, not a panic"
@@ -1587,7 +1576,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
 
         // Read the index
         let index = ts
@@ -2067,7 +2056,7 @@ mod tests {
                 .unwrap();
         }
 
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
         let index_key: CachedKey = (id, handle.info.index_offset).into();
         let filter_key: CachedKey = (id, handle.info.filter_offset).into();
         let stats_key: CachedKey = (id, handle.info.stats_offset).into();
@@ -2166,7 +2155,7 @@ mod tests {
                 .unwrap();
         }
 
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
 
         let index_key: CachedKey = (id, handle.info.index_offset).into();
         let index = cache
@@ -2208,7 +2197,7 @@ mod tests {
             .await
             .unwrap();
 
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
 
         assert_eq!(cache.entry_count(), 2);
         assert!(cache

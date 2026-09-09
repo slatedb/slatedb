@@ -712,7 +712,7 @@ mod tests {
                     RowEntry::new_value(key_gen.next().as_ref(), val_gen.next().as_ref(), 0);
                 writer.add(entry).await.unwrap();
             }
-            let sst = writer.close().await.unwrap();
+            let (sst, _) = writer.close().await.unwrap();
             ssts.push(SsTableView::identity(sst));
         }
         SortedRun::new(0, ssts)

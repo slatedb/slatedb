@@ -104,7 +104,7 @@ impl RetryingObjectStore {
     }
 
     #[inline]
-    fn should_retry(err: &object_store::Error) -> bool {
+    pub(crate) fn should_retry(err: &object_store::Error) -> bool {
         let retry = !matches!(
             err,
             object_store::Error::AlreadyExists { .. }
