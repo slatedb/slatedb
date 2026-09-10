@@ -19,8 +19,6 @@
 //! through to object storage (a GET), which is the externally-observable
 //! signal the whole feature is trying to produce.
 
-#![cfg(feature = "foyer")]
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
