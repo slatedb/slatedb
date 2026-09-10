@@ -449,7 +449,8 @@ impl Reader {
             order: options.order,
             prefix: ctx.prefix,
             filter_context: options.filter_context.clone(),
-            // Filled from the single selected segment below before SST I/O.
+            // This is a shared template for every selected segment. The segment
+            // iterator clones it and sets each segment's prefix before SST I/O.
             segment: None,
         };
 
@@ -535,6 +536,7 @@ impl Reader {
             order: options.order,
             prefix: Some(prefix),
             filter_context: options.filter_context.clone(),
+            // Filled from the single selected segment below before SST I/O.
             segment: None,
         };
 
