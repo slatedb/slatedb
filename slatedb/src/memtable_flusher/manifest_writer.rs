@@ -1142,10 +1142,11 @@ mod tests {
     use crate::db::DbInner;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
+    use crate::flush::SegmentedSstHandle;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
-    use crate::memtable_flusher::uploader::{SegmentedSstHandle, UploadedMemtable};
+    use crate::memtable_flusher::uploader::UploadedMemtable;
     use crate::paths::PathResolver;
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::RowEntry;
@@ -2340,6 +2341,7 @@ mod tests {
             segments.push(SegmentedSstHandle {
                 prefix: Bytes::copy_from_slice(prefix),
                 sst_handle,
+                encoded_bytes: encoded_sst.remaining_len() as u64,
             });
         }
         inner.oracle.advance_durable_seq(last_seq);
