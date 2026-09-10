@@ -245,7 +245,7 @@ impl WalTableStore {
             read_with_validation_retry(ObjectStoreCallTag::new(self.kind, SstType::Wal), |tag| {
                 let path = path.clone();
                 async move {
-                    let cached_footer = self.read_cached_footer(&path, tag).await?;
+                    let cached_footer = self.read_cached_footer(&path, tag.clone()).await?;
                     let obj = WalReadOnlyObject {
                         inner: ReadOnlyObject {
                             object_store: Arc::clone(&self.object_store),
@@ -280,7 +280,7 @@ impl WalTableStore {
         // recognize zero-byte WAL fence files without issuing the problematic range request.
         let head_options = GetOptions {
             head: true,
-            extensions: tag.into(),
+            extensions: tag.clone().into(),
             ..GetOptions::default()
         };
         let object_size = self
@@ -382,7 +382,7 @@ impl WalTableStore {
                     inner: ReadOnlyObject {
                         object_store: Arc::clone(&self.object_store),
                         path: path.clone(),
-                        tag,
+                        tag: tag.clone(),
                     },
                     cached_footer: if tag.retry.is_none() {
                         handle.cached_footer.clone()
@@ -460,7 +460,7 @@ impl WalTableStore {
                     inner: ReadOnlyObject {
                         object_store: Arc::clone(&object_store),
                         path: path.clone(),
-                        tag,
+                        tag: tag.clone(),
                     },
                     cached_footer: if tag.retry.is_none() {
                         handle.cached_footer.clone()

@@ -1813,6 +1813,7 @@ impl RecordingObjectStore {
                 RecordedCall::Get {
                     head: h, segment, ..
                 } if *h == head => Some(segment.clone()),
+                _ => None,
             })
             .collect()
     }
@@ -1887,17 +1888,11 @@ impl ObjectStore for RecordingObjectStore {
         let tag = ObjectStoreCallTag::from_extensions(&options.extensions);
         self.calls.lock().push(RecordedCall::Get {
             head: options.head,
-<<<<<<< HEAD
+            range: options.range.clone(),
             kind: tag.as_ref().map(|t| t.kind),
             sst_type: tag.as_ref().map(|t| t.sst_type),
             retry: tag.as_ref().and_then(|t| t.retry),
             segment: tag.as_ref().and_then(|t| t.segment.clone()),
-=======
-            range: options.range.clone(),
-            kind: tag.map(|t| t.kind),
-            sst_type: tag.map(|t| t.sst_type),
-            retry: tag.and_then(|t| t.retry),
->>>>>>> 2b487a29 (perf(wal): pipeline replay reads with shared limits)
         });
         self.inner.get_opts(location, options).await
     }
