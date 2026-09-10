@@ -1422,25 +1422,33 @@ mod tests {
     }
 
     #[rstest]
-    #[case(Arc::new(TestCache::new()), true)]
-    #[case(Arc::new(SplitCache::new()), false)]
-    #[case(Arc::new(SplitCache::new()
-            .with_block_cache(Some(Arc::new(TestCache::new())))
-            .with_meta_cache(Some(Arc::new(TestCache::new())))),
-        true)]
-    #[cfg(feature = "foyer")]
-    #[case(Arc::new(FoyerCache::new()), true)]
-    #[cfg(feature = "foyer")]
-    #[case(Arc::new(FoyerHybridCache::new_with_cache(
-        HybridCacheBuilder::new()
-            .memory(1024 * 1024)
-            .storage()
-            .build()
-            .await
-            .unwrap())),
-        true)]
-    #[cfg(feature = "moka")]
-    #[case(Arc::new(MokaCache::new()), true)]
+    #[case::test_cache(Arc::new(TestCache::new()), true)]
+    #[case::split_cache(Arc::new(SplitCache::new()), false)]
+    #[case::split_cache_with_delegates(
+        Arc::new(
+            SplitCache::new()
+                .with_block_cache(Some(Arc::new(TestCache::new())))
+                .with_meta_cache(Some(Arc::new(TestCache::new())))
+        ),
+        true
+    )]
+    #[cfg_attr(feature = "foyer", case::foyer(Arc::new(FoyerCache::new()), true))]
+    #[cfg_attr(
+        feature = "foyer",
+        case::foyer_hybrid(
+            Arc::new(FoyerHybridCache::new_with_cache(
+                HybridCacheBuilder::new()
+                    .memory(1024 * 1024)
+                    .with_weighter(|_, v: &CachedEntry| v.size())
+                    .storage()
+                    .build()
+                    .await
+                    .unwrap()
+            )),
+            true
+        )
+    )]
+    #[cfg_attr(feature = "moka", case::moka(Arc::new(MokaCache::new()), true))]
     #[tokio::test]
     async fn test_fetch_lookup_outcomes(
         #[case] cache: Arc<dyn DbCache>,
