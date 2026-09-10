@@ -5,7 +5,7 @@
 //!
 //! There are currently two built-in cache implementations:
 //! - [Foyer](crate::db_cache::foyer::FoyerCache): Requires the `foyer` feature flag. (Enabled by default)
-//! - [Moka](crate::db_cache::moka::MokaCache): Requires the `moka` feature flag. (Enabled by default)
+//! - [Moka](crate::db_cache::moka::MokaCache): Requires the `moka` feature flag.
 //!
 //! ## Usage
 //!
@@ -1290,10 +1290,18 @@ mod tests {
 
     use crate::flatbuffer_types::test_utils::assert_index_clamped;
 
+    #[cfg(feature = "foyer")]
+    use super::foyer::FoyerCache;
+    #[cfg(feature = "foyer")]
+    use super::foyer_hybrid::FoyerHybridCache;
+    #[cfg(feature = "moka")]
+    use super::moka::MokaCache;
     use crate::db_cache::test_utils::TestCache;
     use crate::format::sst::{EncodedSsTable, SsTableFormat};
     use crate::test_utils::build_test_sst;
     use crate::types::{RowEntry, ValueDeletable};
+    #[cfg(feature = "foyer")]
+    use foyer::HybridCacheBuilder;
     use rstest::{fixture, rstest};
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
@@ -1413,57 +1421,69 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::test_cache(Arc::new(TestCache::new()), true)]
+    #[case::split_cache(Arc::new(SplitCache::new()), false)]
+    #[case::split_cache_with_delegates(
+        Arc::new(
+            SplitCache::new()
+                .with_block_cache(Some(Arc::new(TestCache::new())))
+                .with_meta_cache(Some(Arc::new(TestCache::new())))
+        ),
+        true
+    )]
+    #[cfg_attr(feature = "foyer", case::foyer(Arc::new(FoyerCache::new()), true))]
+    #[cfg_attr(
+        feature = "foyer",
+        case::foyer_hybrid(
+            Arc::new(FoyerHybridCache::new_with_cache(
+                HybridCacheBuilder::new()
+                    .memory(1024 * 1024)
+                    .with_weighter(|_, v: &CachedEntry| v.size())
+                    .storage()
+                    .build()
+                    .await
+                    .unwrap()
+            )),
+            true
+        )
+    )]
+    #[cfg_attr(feature = "moka", case::moka(Arc::new(MokaCache::new()), true))]
     #[tokio::test]
-    async fn test_fetch_lookup_outcomes() {
-        let mut caches: Vec<(Arc<dyn DbCache>, bool)> = vec![
-            (Arc::new(TestCache::new()), true),
-            (Arc::new(SplitCache::new()), false),
-            (
-                Arc::new(
-                    SplitCache::new()
-                        .with_block_cache(Some(Arc::new(TestCache::new())))
-                        .with_meta_cache(Some(Arc::new(TestCache::new()))),
-                ),
-                true,
-            ),
-        ];
-        #[cfg(feature = "foyer")]
-        caches.push((Arc::new(super::foyer::FoyerCache::new()), true));
-        #[cfg(feature = "moka")]
-        caches.push((Arc::new(super::moka::MokaCache::new()), true));
-
-        for (cache, retains_entries) in caches {
-            for (offset, method) in ["data_block", "index", "filter", "stats"]
-                .into_iter()
-                .enumerate()
-            {
-                let key = CachedKey::from((SST_ID, offset as u64));
-                let mut builder = BlockBuilder::new_latest(4096);
-                assert!(builder
-                    .add(RowEntry::new_value(b"key", b"value", 0))
-                    .unwrap());
-                let block = Arc::new(builder.build().unwrap());
-                for attempt in 0..2 {
-                    let entry = CachedEntry::with_block(block.clone());
-                    let loader: CacheLoader = Box::new(move || Box::pin(async move { Ok(entry) }));
-                    let fetch = match method {
-                        "data_block" => cache.fetch_block(key.clone(), loader).await,
-                        "index" => cache.fetch_index(key.clone(), loader).await,
-                        "filter" => cache.fetch_filter(key.clone(), loader).await,
-                        "stats" => cache.fetch_stats(key.clone(), loader).await,
-                        _ => unreachable!(),
-                    }
-                    .unwrap();
-                    assert_eq!(
-                        fetch.lookup,
-                        if attempt == 0 || !retains_entries {
-                            CacheLookup::Miss
-                        } else {
-                            CacheLookup::Hit
-                        }
-                    );
-                    assert_eq!(fetch.entry.block().unwrap().size(), block.size());
+    async fn test_fetch_lookup_outcomes(
+        #[case] cache: Arc<dyn DbCache>,
+        #[case] retains_entries: bool,
+    ) {
+        for (offset, method) in ["data_block", "index", "filter", "stats"]
+            .into_iter()
+            .enumerate()
+        {
+            let key = CachedKey::from((SST_ID, offset as u64));
+            let mut builder = BlockBuilder::new_latest(4096);
+            assert!(builder
+                .add(RowEntry::new_value(b"key", b"value", 0))
+                .unwrap());
+            let block = Arc::new(builder.build().unwrap());
+            for attempt in 0..2 {
+                let entry = CachedEntry::with_block(block.clone());
+                let loader: CacheLoader = Box::new(move || Box::pin(async move { Ok(entry) }));
+                let fetch = match method {
+                    "data_block" => cache.fetch_block(key.clone(), loader).await,
+                    "index" => cache.fetch_index(key.clone(), loader).await,
+                    "filter" => cache.fetch_filter(key.clone(), loader).await,
+                    "stats" => cache.fetch_stats(key.clone(), loader).await,
+                    _ => unreachable!(),
                 }
+                .unwrap();
+                assert_eq!(
+                    fetch.lookup,
+                    if attempt == 0 || !retains_entries {
+                        CacheLookup::Miss
+                    } else {
+                        CacheLookup::Hit
+                    }
+                );
+                assert_eq!(fetch.entry.block().unwrap().size(), block.size());
             }
         }
     }
@@ -1471,7 +1491,7 @@ mod tests {
     #[cfg(feature = "foyer")]
     #[tokio::test]
     async fn test_concurrent_fetch_lookup() {
-        let cache = super::foyer::FoyerCache::new();
+        let cache = FoyerCache::new();
         let key = CachedKey::from((SST_ID, 0));
         let loader_started = Arc::new(tokio::sync::Notify::new());
         let release_loader = Arc::new(tokio::sync::Notify::new());
