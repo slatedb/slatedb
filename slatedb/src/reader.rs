@@ -359,9 +359,6 @@ impl Reader {
             cache_blocks: options.cache_blocks,
             eager_spawn: true,
             filter_context: options.filter_context.clone(),
-            // This is a shared template for every selected segment. The segment
-            // iterator clones it and sets each segment's prefix before SST I/O.
-            segment: None,
             ..SstIteratorOptions::default()
         };
 
