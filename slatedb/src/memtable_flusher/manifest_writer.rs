@@ -16,9 +16,10 @@ use log::debug;
 
 use super::tracker::TrackerMessage;
 use super::uploader::UploadedMemtable;
+#[cfg(test)]
+use crate::checkpoint::CheckpointResult;
 use crate::checkpoint::{
     checkpoint_cancelled, CheckpointCreateResult, CheckpointLifecycle, CheckpointRequest,
-    CheckpointResult,
 };
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
@@ -42,7 +43,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::{oneshot, watch};
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// Result reported for a completed flush request.
@@ -180,9 +180,7 @@ impl ManifestWriter {
             },
             |message, err| {
                 if let ManifestWriterCommand::CreateCheckpoint { request, .. } = message {
-                    request.lifecycle.mark_failed();
-                    let _ = request.result_tx.send(Some(Err(err.clone())));
-                    let _ = request.ready_tx.send(Err(err.clone()));
+                    request.lifecycle.fail(err.clone());
                 }
             },
         )
@@ -196,15 +194,10 @@ impl ManifestWriter {
         sender: oneshot::Sender<CheckpointResult>,
     ) -> Result<(), SlateDBError> {
         let id = Uuid::new_v4();
-        let (result_tx, mut result_rx) = watch::channel(None);
-        let (ready_tx, ready_rx) = oneshot::channel();
-        let cancellation = CancellationToken::new();
-        let lifecycle = Arc::new(CheckpointLifecycle::new());
+        let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
         let request = CheckpointRequest {
             id,
-            result_tx,
-            ready_tx,
-            cancellation,
+            wal_id_last_seen: Some(0),
             lifecycle,
         };
         let result = self.begin_checkpoint(through_seq, options, request);
@@ -212,8 +205,8 @@ impl ManifestWriter {
             if ready_rx.await.is_err() {
                 return;
             }
-            if let Ok(result) = result_rx.wait_for(|result| result.is_some()).await {
-                let _ = sender.send(result.clone().expect("checkpoint result must be present"));
+            if let Ok(result) = result_rx.await {
+                let _ = sender.send(result);
             }
         });
         result
@@ -419,21 +412,22 @@ impl ManifestWriterHandler {
         options: CheckpointOptions,
         request: CheckpointRequest,
     ) {
-        let checkpoint = PendingCheckpoint {
-            id: request.id,
+        let CheckpointRequest {
+            id,
+            wal_id_last_seen,
+            mut lifecycle,
+        } = request;
+        if !lifecycle.accept() {
+            lifecycle.fail(checkpoint_cancelled(id));
+            return;
+        }
+        self.pending_checkpoints.push(PendingCheckpoint {
+            id,
+            wal_id_last_seen,
             through_seq,
             options,
-            result_tx: request.result_tx,
-            cancellation: request.cancellation,
-            lifecycle: request.lifecycle,
-        };
-        if request.ready_tx.send(Ok(())).is_err() {
-            checkpoint.lifecycle.request_cancel();
-            checkpoint.cancellation.cancel();
-            checkpoint.send_cancelled();
-        } else {
-            self.pending_checkpoints.push(checkpoint);
-        }
+            lifecycle,
+        });
     }
 
     async fn handle_cancel_checkpoint(
@@ -465,7 +459,6 @@ impl ManifestWriterHandler {
 
     async fn process_ready_work(&mut self) -> Result<(), SlateDBError> {
         loop {
-            self.remove_cancelled_checkpoints();
             self.write_already_durable_checkpoints().await?;
             let Some(staged_batch) = self.take_next_ready_batch() else {
                 return Ok(());
@@ -485,7 +478,6 @@ impl ManifestWriterHandler {
         let checkpoint_boundary = self
             .pending_checkpoints
             .iter()
-            .filter(|checkpoint| !checkpoint.cancellation.is_cancelled())
             .filter_map(|checkpoint| checkpoint.through_seq)
             .filter(|through_seq| *through_seq > self.durable_seq)
             .min();
@@ -534,12 +526,12 @@ impl ManifestWriterHandler {
     fn take_satisfied_pending_checkpoints(&mut self, through_seq: u64) -> Vec<PendingCheckpoint> {
         let mut satisfied = Vec::new();
         let mut pending = Vec::with_capacity(self.pending_checkpoints.len());
+        let mut wal_id_last_seen = None;
         for checkpoint in self.pending_checkpoints.drain(..) {
-            if checkpoint.cancellation.is_cancelled() {
-                checkpoint.send_cancelled();
-            } else if checkpoint
+            if checkpoint
                 .through_seq
                 .is_none_or(|required_seq| required_seq <= through_seq)
+                && checkpoint.matches_or_sets_wal_boundary(&mut wal_id_last_seen)
             {
                 satisfied.push(checkpoint);
             } else {
@@ -701,6 +693,14 @@ impl ManifestWriterHandler {
         checkpoints: &[&PendingCheckpoint],
     ) -> Result<Vec<CheckpointCreateResult>, SlateDBError> {
         let mut dirty = self.clone_local_manifest_for_write();
+        if let Some(wal_id_last_seen) = self.checkpoint_wal_id_last_seen(checkpoints)? {
+            if wal_id_last_seen < dirty.value.core.replay_after_wal_id {
+                return Err(SlateDBError::InvalidDBState);
+            }
+            dirty.value.core.next_wal_sst_id = wal_id_last_seen
+                .checked_add(1)
+                .ok_or(SlateDBError::InvalidDBState)?;
+        }
         let mut checkpoint_results = Vec::new();
         for pending in checkpoints {
             let checkpoint = self.manifest.new_checkpoint(pending.id, &pending.options)?;
@@ -713,6 +713,32 @@ impl ManifestWriterHandler {
         }
         self.manifest.update(dirty).await?;
         Ok(checkpoint_results)
+    }
+
+    fn checkpoint_wal_id_last_seen(
+        &self,
+        checkpoints: &[&PendingCheckpoint],
+    ) -> Result<Option<u64>, SlateDBError> {
+        let mut boundary = None;
+        for checkpoint in checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.options.source.is_none())
+        {
+            if self.db.wal_enabled && checkpoint.wal_id_last_seen.is_none() {
+                return Err(SlateDBError::InvalidDBState);
+            }
+            match boundary {
+                Some(current) => {
+                    if checkpoint.wal_id_last_seen != current {
+                        return Err(SlateDBError::InvalidDBState);
+                    }
+                }
+                None => {
+                    boundary = Some(checkpoint.wal_id_last_seen);
+                }
+            }
+        }
+        Ok(boundary.flatten())
     }
 
     async fn write_current_manifest_safely(&mut self) -> Result<(), SlateDBError> {
@@ -821,28 +847,16 @@ impl ManifestWriterHandler {
         self.write_manifest_update_safely(checkpoints).await
     }
 
-    fn remove_cancelled_checkpoints(&mut self) {
-        let mut retained = Vec::with_capacity(self.pending_checkpoints.len());
-        for checkpoint in self.pending_checkpoints.drain(..) {
-            if checkpoint.cancellation.is_cancelled() {
-                checkpoint.send_cancelled();
-            } else {
-                retained.push(checkpoint);
-            }
-        }
-        self.pending_checkpoints = retained;
-    }
-
     async fn write_already_durable_checkpoints(&mut self) -> Result<(), SlateDBError> {
         let durable_seq = self.durable_seq;
         let mut ready = Vec::new();
         let mut pending = Vec::with_capacity(self.pending_checkpoints.len());
+        let mut wal_id_last_seen = None;
         for checkpoint in self.pending_checkpoints.drain(..) {
-            if checkpoint.cancellation.is_cancelled() {
-                checkpoint.send_cancelled();
-            } else if checkpoint
+            if checkpoint
                 .through_seq
                 .is_none_or(|through_seq| through_seq <= durable_seq)
+                && checkpoint.matches_or_sets_wal_boundary(&mut wal_id_last_seen)
             {
                 ready.push(checkpoint);
             } else {
@@ -874,15 +888,9 @@ impl ManifestWriterHandler {
     ) -> Result<(), SlateDBError> {
         let mut delete_ids = Vec::new();
         for (checkpoint, result) in checkpoints.into_iter().zip(results) {
-            if checkpoint.lifecycle.mark_committed() {
-                debug!("checkpoint created [id={}]", result.id);
-                if checkpoint.result_tx.send(Some(Ok(result))).is_err() {
-                    checkpoint.lifecycle.request_cancel();
-                    delete_ids.push(checkpoint.id);
-                }
-            } else {
+            debug!("checkpoint created [id={}]", result.id);
+            if !checkpoint.lifecycle.complete(result) {
                 delete_ids.push(checkpoint.id);
-                checkpoint.send_cancelled();
             }
         }
         self.delete_checkpoints(&delete_ids).await
@@ -1020,15 +1028,17 @@ impl ManifestWriterHandler {
             ManifestWriterCommand::CreateCheckpoint {
                 through_seq,
                 options,
-                request,
+                mut request,
             } => {
-                let _ = request.ready_tx.send(Ok(()));
+                if !request.lifecycle.accept() {
+                    request.lifecycle.fail(checkpoint_cancelled(request.id));
+                    return;
+                }
                 self.pending_checkpoints.push(PendingCheckpoint {
                     id: request.id,
                     through_seq,
+                    wal_id_last_seen: request.wal_id_last_seen,
                     options,
-                    result_tx: request.result_tx,
-                    cancellation: request.cancellation,
                     lifecycle: request.lifecycle,
                 });
             }
@@ -1075,22 +1085,31 @@ struct PendingFlush {
 struct PendingCheckpoint {
     id: Uuid,
     through_seq: Option<u64>,
+    wal_id_last_seen: Option<u64>,
     options: CheckpointOptions,
-    result_tx: watch::Sender<Option<CheckpointResult>>,
-    cancellation: CancellationToken,
-    lifecycle: Arc<CheckpointLifecycle>,
+    lifecycle: CheckpointLifecycle,
 }
 
 impl PendingCheckpoint {
+    fn matches_or_sets_wal_boundary(&self, boundary: &mut Option<Option<u64>>) -> bool {
+        if self.options.source.is_some() {
+            return true;
+        }
+        match boundary {
+            Some(boundary) => *boundary == self.wal_id_last_seen,
+            None => {
+                *boundary = Some(self.wal_id_last_seen);
+                true
+            }
+        }
+    }
+
     fn send_cancelled(self) {
-        let _ = self
-            .result_tx
-            .send(Some(Err(checkpoint_cancelled(self.id))));
+        self.lifecycle.fail(checkpoint_cancelled(self.id));
     }
 
     fn send_error(self, err: SlateDBError) {
-        self.lifecycle.mark_failed();
-        let _ = self.result_tx.send(Some(Err(err)));
+        self.lifecycle.fail(err);
     }
 }
 
@@ -1146,9 +1165,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;
-    use tokio::sync::{oneshot, watch};
+    use tokio::sync::oneshot;
     use tokio::time::timeout;
-    use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
     struct StartedManifestWriter {
@@ -1179,30 +1197,31 @@ mod tests {
     struct TestCheckpointRequest {
         id: Uuid,
         ready_rx: oneshot::Receiver<Result<(), SlateDBError>>,
-        result_rx: watch::Receiver<Option<CheckpointResult>>,
-        cancellation: CancellationToken,
-        lifecycle: Arc<CheckpointLifecycle>,
+        result_rx: oneshot::Receiver<CheckpointResult>,
     }
 
     fn begin_test_checkpoint(
         writer: &ManifestWriter,
         through_seq: Option<u64>,
     ) -> TestCheckpointRequest {
+        begin_test_checkpoint_with_wal_boundary(writer, through_seq, Some(0))
+    }
+
+    fn begin_test_checkpoint_with_wal_boundary(
+        writer: &ManifestWriter,
+        through_seq: Option<u64>,
+        wal_id_last_seen: Option<u64>,
+    ) -> TestCheckpointRequest {
         let id = Uuid::new_v4();
-        let (result_tx, result_rx) = watch::channel(None);
-        let (ready_tx, ready_rx) = oneshot::channel();
-        let cancellation = CancellationToken::new();
-        let lifecycle = Arc::new(CheckpointLifecycle::new());
+        let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
         writer
             .begin_checkpoint(
                 through_seq,
                 CheckpointOptions::default(),
                 CheckpointRequest {
                     id,
-                    result_tx,
-                    ready_tx,
-                    cancellation: cancellation.clone(),
-                    lifecycle: Arc::clone(&lifecycle),
+                    wal_id_last_seen,
+                    lifecycle,
                 },
             )
             .unwrap();
@@ -1210,8 +1229,6 @@ mod tests {
             id,
             ready_rx,
             result_rx,
-            cancellation,
-            lifecycle,
         }
     }
 
@@ -1656,6 +1673,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checkpoint_stops_wal_at_its_begin_boundary() {
+        let harness = setup_harness(
+            "/tmp/test_checkpoint_manifest_wal_boundary",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+        let uploaded = next_uploaded_memtable(&inner, b"before", b"v1").await;
+        let request =
+            begin_test_checkpoint_with_wal_boundary(&started, Some(uploaded.last_seq), Some(1));
+        request.ready_rx.await.unwrap().unwrap();
+
+        inner.state.write().set_next_wal_id(3);
+        started.notify_uploaded(uploaded).await.unwrap();
+        assert_eq!(expect_flushed(&started.tracker_rx).await, 1);
+
+        let result = request.result_rx.await.unwrap().unwrap();
+        let manifest = ManifestStore::new(&Path::from(path), object_store)
+            .read_manifest(result.manifest_id)
+            .await
+            .unwrap();
+        assert_eq!(manifest.core.next_wal_sst_id, 2);
+
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn checkpoints_with_different_wal_boundaries_use_different_manifests() {
+        let harness = setup_harness(
+            "/tmp/test_concurrent_checkpoint_wal_boundaries",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+        let uploaded = next_uploaded_memtable(&inner, b"before", b"v1").await;
+        let first =
+            begin_test_checkpoint_with_wal_boundary(&started, Some(uploaded.last_seq), Some(1));
+        first.ready_rx.await.unwrap().unwrap();
+        let second =
+            begin_test_checkpoint_with_wal_boundary(&started, Some(uploaded.last_seq), Some(2));
+        second.ready_rx.await.unwrap().unwrap();
+
+        inner.state.write().set_next_wal_id(3);
+        started.notify_uploaded(uploaded).await.unwrap();
+        assert_eq!(expect_flushed(&started.tracker_rx).await, 1);
+
+        let first_result = first.result_rx.await.unwrap().unwrap();
+        let second_result = second.result_rx.await.unwrap().unwrap();
+        assert_ne!(first_result.manifest_id, second_result.manifest_id);
+
+        let store = ManifestStore::new(&Path::from(path), object_store);
+        let first_manifest = store.read_manifest(first_result.manifest_id).await.unwrap();
+        let second_manifest = store
+            .read_manifest(second_result.manifest_id)
+            .await
+            .unwrap();
+        assert_eq!(first_manifest.core.next_wal_sst_id, 2);
+        assert_eq!(second_manifest.core.next_wal_sst_id, 3);
+
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn cancel_removes_a_pending_checkpoint_without_a_manifest_write() {
         let harness = setup_harness(
             "/tmp/test_cancel_pending_checkpoint",
@@ -1674,23 +1768,14 @@ mod tests {
         let TestCheckpointRequest {
             id,
             ready_rx,
-            mut result_rx,
-            cancellation,
-            lifecycle,
+            result_rx,
         } = begin_test_checkpoint(&started, Some(1));
         ready_rx.await.unwrap().unwrap();
-        assert!(lifecycle.request_cancel());
-        cancellation.cancel();
 
         let (done_tx, done_rx) = oneshot::channel();
         started.cancel_checkpoint(id, Some(done_tx)).unwrap();
         done_rx.await.unwrap().unwrap();
-        let result = result_rx
-            .wait_for(|result| result.is_some())
-            .await
-            .unwrap()
-            .clone()
-            .unwrap();
+        let result = result_rx.await.unwrap();
         assert!(matches!(
             result,
             Err(SlateDBError::BackgroundTaskCancelled(_))
@@ -1708,7 +1793,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_deletes_an_unclaimed_committed_checkpoint() {
+    async fn cancel_deletes_a_completed_checkpoint() {
         let harness = setup_harness(
             "/tmp/test_cancel_committed_checkpoint",
             Arc::new(FailPointRegistry::new()),
@@ -1724,14 +1809,10 @@ mod tests {
         let TestCheckpointRequest {
             id,
             ready_rx,
-            mut result_rx,
-            cancellation,
-            lifecycle,
+            result_rx,
         } = begin_test_checkpoint(&started, None);
         ready_rx.await.unwrap().unwrap();
-        result_rx.wait_for(|result| result.is_some()).await.unwrap();
-        assert!(lifecycle.request_cancel());
-        cancellation.cancel();
+        let _result = result_rx.await.unwrap().unwrap();
 
         let (done_tx, done_rx) = oneshot::channel();
         started.cancel_checkpoint(id, Some(done_tx)).unwrap();

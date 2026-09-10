@@ -14,9 +14,7 @@ pub(crate) use manifest_writer::FlushResult;
 #[cfg(test)]
 pub(crate) use tracker::MANIFEST_REFRESH_COUNT;
 
-use crate::checkpoint::{
-    CheckpointHandle, CheckpointLifecycle, CheckpointRequest, CheckpointResult,
-};
+use crate::checkpoint::{CheckpointHandle, CheckpointLifecycle, CheckpointRequest};
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::db_status::ClosedResultWriter;
@@ -30,8 +28,7 @@ use crate::utils::SafeSender;
 use log::warn;
 use std::sync::Arc;
 use tokio::runtime::Handle;
-use tokio::sync::{oneshot, watch};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 const TRACKER_TASK_NAME: &str = "l0_flush_tracker";
@@ -135,16 +132,11 @@ impl MemtableFlusher {
         target: FlushTarget,
         options: CheckpointOptions,
     ) -> Result<CheckpointHandle, SlateDBError> {
-        let (result_tx, result_rx) = watch::channel::<Option<CheckpointResult>>(None);
-        let (ready_tx, ready_rx) = oneshot::channel();
-        let cancellation = CancellationToken::new();
-        let lifecycle = Arc::new(CheckpointLifecycle::new());
+        let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
         let request = CheckpointRequest {
             id,
-            result_tx,
-            ready_tx,
-            cancellation: cancellation.clone(),
-            lifecycle: Arc::clone(&lifecycle),
+            wal_id_last_seen: None,
+            lifecycle,
         };
         self.messages_tx.send(TrackerMessage::CheckpointRequest {
             target,
@@ -155,8 +147,6 @@ impl MemtableFlusher {
         Ok(CheckpointHandle::new(
             id,
             result_rx,
-            cancellation,
-            lifecycle,
             self.messages_tx.clone(),
         ))
     }

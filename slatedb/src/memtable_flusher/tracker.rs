@@ -230,15 +230,25 @@ impl FlushTracker {
         &mut self,
         target: FlushTarget,
         options: CheckpointOptions,
-        request: CheckpointRequest,
+        mut request: CheckpointRequest,
     ) -> Result<(), SlateDBError> {
         if let Err(err) = self.reconcile_and_dispatch().await {
-            request.lifecycle.mark_failed();
-            let _ = request.result_tx.send(Some(Err(err.clone())));
-            let _ = request.ready_tx.send(Err(err.clone()));
+            request.lifecycle.fail(err.clone());
             return Err(err);
         }
         let through_seq = self.frontier.resolve_target(target);
+        request.wal_id_last_seen = if self.inner.wal_enabled {
+            match self.inner.wal_observer.status() {
+                Ok(status) => Some(status.last_flushed_wal_id),
+                Err(error) => {
+                    let error = SlateDBError::from(error);
+                    request.lifecycle.fail(error.clone());
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         self.manifest_writer
             .begin_checkpoint(through_seq, options, request)?;
         self.dispatch_ready_memtables()
@@ -391,9 +401,7 @@ impl FlushTracker {
                     let _ = sender.send(Err(err.clone()));
                 }
                 TrackerMessage::CheckpointRequest { request, .. } => {
-                    request.lifecycle.mark_failed();
-                    let _ = request.result_tx.send(Some(Err(err.clone())));
-                    let _ = request.ready_tx.send(Err(err.clone()));
+                    request.lifecycle.fail(err.clone());
                 }
                 TrackerMessage::CancelCheckpoint {
                     done: Some(sender), ..
@@ -995,7 +1003,7 @@ mod tests {
         let path = harness.path.clone();
         let object_store = Arc::clone(&harness.object_store);
         let flusher = start_flusher(harness);
-        freeze_value_imm(&flusher.inner, b"k1", b"v1", 21);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 0);
 
         let checkpoint = timeout(
             Duration::from_secs(5),
