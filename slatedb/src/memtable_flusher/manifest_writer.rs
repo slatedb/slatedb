@@ -12,15 +12,15 @@
 //! - flush request semantics
 //! - flush waiter bookkeeping
 
-use log::debug;
+use log::{debug, warn};
 
 use super::tracker::TrackerMessage;
 use super::uploader::UploadedMemtable;
-#[cfg(test)]
-use crate::checkpoint::CheckpointResult;
 use crate::checkpoint::{
     checkpoint_cancelled, CheckpointCreateResult, CheckpointLifecycle, CheckpointRequest,
 };
+#[cfg(test)]
+use crate::checkpoint::{CheckpointBoundary, CheckpointResult};
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::db_state::{collect_touched_segments, DbState, SsTableId, SsTableView};
@@ -197,7 +197,10 @@ impl ManifestWriter {
         let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
         let request = CheckpointRequest {
             id,
-            wal_id_last_seen: Some(0),
+            boundary: CheckpointBoundary {
+                through_seq,
+                wal_id_last_seen: Some(0),
+            },
             lifecycle,
         };
         let result = self.begin_checkpoint(through_seq, options, request);
@@ -414,7 +417,7 @@ impl ManifestWriterHandler {
     ) {
         let CheckpointRequest {
             id,
-            wal_id_last_seen,
+            boundary,
             mut lifecycle,
         } = request;
         if !lifecycle.accept() {
@@ -423,7 +426,7 @@ impl ManifestWriterHandler {
         }
         self.pending_checkpoints.push(PendingCheckpoint {
             id,
-            wal_id_last_seen,
+            wal_id_last_seen: boundary.wal_id_last_seen,
             through_seq,
             options,
             lifecycle,
@@ -848,35 +851,37 @@ impl ManifestWriterHandler {
     }
 
     async fn write_already_durable_checkpoints(&mut self) -> Result<(), SlateDBError> {
-        let durable_seq = self.durable_seq;
-        let mut ready = Vec::new();
-        let mut pending = Vec::with_capacity(self.pending_checkpoints.len());
-        let mut wal_id_last_seen = None;
-        for checkpoint in self.pending_checkpoints.drain(..) {
-            if checkpoint
-                .through_seq
-                .is_none_or(|through_seq| through_seq <= durable_seq)
-                && checkpoint.matches_or_sets_wal_boundary(&mut wal_id_last_seen)
-            {
-                ready.push(checkpoint);
-            } else {
-                pending.push(checkpoint);
-            }
-        }
-        self.pending_checkpoints = pending;
-
-        if ready.is_empty() {
-            return Ok(());
-        }
-
-        let checkpoint_refs = ready.iter().collect::<Vec<_>>();
-        match self.write_checkpoints_safely(&checkpoint_refs).await {
-            Ok(results) => self.complete_checkpoints(ready, results).await,
-            Err(err) => {
-                for checkpoint in ready {
-                    checkpoint.send_error(err.clone());
+        loop {
+            let durable_seq = self.durable_seq;
+            let mut ready = Vec::new();
+            let mut pending = Vec::with_capacity(self.pending_checkpoints.len());
+            let mut wal_id_last_seen = None;
+            for checkpoint in self.pending_checkpoints.drain(..) {
+                if checkpoint
+                    .through_seq
+                    .is_none_or(|through_seq| through_seq <= durable_seq)
+                    && checkpoint.matches_or_sets_wal_boundary(&mut wal_id_last_seen)
+                {
+                    ready.push(checkpoint);
+                } else {
+                    pending.push(checkpoint);
                 }
-                Err(err)
+            }
+            self.pending_checkpoints = pending;
+
+            if ready.is_empty() {
+                return Ok(());
+            }
+
+            let checkpoint_refs = ready.iter().collect::<Vec<_>>();
+            match self.write_checkpoints_safely(&checkpoint_refs).await {
+                Ok(results) => self.complete_checkpoints(ready, results).await?,
+                Err(err) => {
+                    for checkpoint in ready {
+                        checkpoint.send_error(err.clone());
+                    }
+                    return Err(err);
+                }
             }
         }
     }
@@ -893,7 +898,17 @@ impl ManifestWriterHandler {
                 delete_ids.push(checkpoint.id);
             }
         }
-        self.delete_checkpoints(&delete_ids).await
+        match self.delete_checkpoints(&delete_ids).await {
+            Err(error @ SlateDBError::Fenced) => Err(error),
+            Err(error) => {
+                warn!(
+                    "failed to delete checkpoints after their result receivers closed [ids={:?}, error={:?}]",
+                    delete_ids, error
+                );
+                Ok(())
+            }
+            Ok(()) => Ok(()),
+        }
     }
 
     async fn delete_checkpoints(&mut self, ids: &[Uuid]) -> Result<(), SlateDBError> {
@@ -1037,7 +1052,7 @@ impl ManifestWriterHandler {
                 self.pending_checkpoints.push(PendingCheckpoint {
                     id: request.id,
                     through_seq,
-                    wal_id_last_seen: request.wal_id_last_seen,
+                    wal_id_last_seen: request.boundary.wal_id_last_seen,
                     options,
                     lifecycle: request.lifecycle,
                 });
@@ -1045,6 +1060,7 @@ impl ManifestWriterHandler {
             ManifestWriterCommand::CancelCheckpoint {
                 done: Some(sender), ..
             } => {
+                // Shutdown returns the terminal actor error instead of matching checkpoint IDs.
                 self.pending_checkpoint_cancellations.push(sender);
             }
             ManifestWriterCommand::CancelCheckpoint { done: None, .. } => {}
@@ -1137,7 +1153,9 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
 mod tests {
     use super::{ManifestWriter, ManifestWriterCommand, ManifestWriterHandler, TrackerMessage};
     use crate::block_cache_policy::BlockCachePolicy;
-    use crate::checkpoint::{CheckpointLifecycle, CheckpointRequest, CheckpointResult};
+    use crate::checkpoint::{
+        CheckpointBoundary, CheckpointLifecycle, CheckpointRequest, CheckpointResult,
+    };
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
@@ -1149,6 +1167,7 @@ mod tests {
     use crate::memtable_flusher::uploader::UploadedMemtable;
     use crate::paths::PathResolver;
     use crate::tablestore::{TableStore, TableStoreKind};
+    use crate::test_utils::GatedObjectStore;
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
 
@@ -1221,7 +1240,10 @@ mod tests {
                 CheckpointOptions::default(),
                 CheckpointRequest {
                     id,
-                    wal_id_last_seen,
+                    boundary: CheckpointBoundary {
+                        through_seq,
+                        wal_id_last_seen,
+                    },
                     lifecycle,
                 },
             )
@@ -1325,6 +1347,15 @@ mod tests {
         segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     ) -> TestHarness {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        setup_harness_with_object_store(path, fp_registry, segment_extractor, object_store).await
+    }
+
+    async fn setup_harness_with_object_store(
+        path: &str,
+        fp_registry: Arc<FailPointRegistry>,
+        segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> TestHarness {
         let path = path.to_string();
         let settings = Settings::default();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
@@ -1729,14 +1760,19 @@ mod tests {
         let second =
             begin_test_checkpoint_with_wal_boundary(&started, Some(uploaded.last_seq), Some(2));
         second.ready_rx.await.unwrap().unwrap();
+        let third =
+            begin_test_checkpoint_with_wal_boundary(&started, Some(uploaded.last_seq), Some(3));
+        third.ready_rx.await.unwrap().unwrap();
 
-        inner.state.write().set_next_wal_id(3);
+        inner.state.write().set_next_wal_id(4);
         started.notify_uploaded(uploaded).await.unwrap();
         assert_eq!(expect_flushed(&started.tracker_rx).await, 1);
 
         let first_result = first.result_rx.await.unwrap().unwrap();
         let second_result = second.result_rx.await.unwrap().unwrap();
+        let third_result = third.result_rx.await.unwrap().unwrap();
         assert_ne!(first_result.manifest_id, second_result.manifest_id);
+        assert_ne!(second_result.manifest_id, third_result.manifest_id);
 
         let store = ManifestStore::new(&Path::from(path), object_store);
         let first_manifest = store.read_manifest(first_result.manifest_id).await.unwrap();
@@ -1744,8 +1780,91 @@ mod tests {
             .read_manifest(second_result.manifest_id)
             .await
             .unwrap();
+        let third_manifest = store.read_manifest(third_result.manifest_id).await.unwrap();
         assert_eq!(first_manifest.core.next_wal_sst_id, 2);
         assert_eq!(second_manifest.core.next_wal_sst_id, 3);
+        assert_eq!(third_manifest.core.next_wal_sst_id, 4);
+
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn checkpoint_cleanup_failure_does_not_stop_the_manifest_writer() {
+        let inner_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated_store = Arc::new(GatedObjectStore::new(inner_store));
+        let object_store: Arc<dyn ObjectStore> = gated_store.clone();
+        let harness = setup_harness_with_object_store(
+            "/tmp/test_checkpoint_cleanup_failure",
+            Arc::new(FailPointRegistry::new()),
+            None,
+            object_store,
+        )
+        .await;
+        let started = start_manifest_writer(
+            Arc::clone(&harness.inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+
+        let first_arrival = gated_store.put_opts_gate.arrivals();
+        gated_store.put_opts_gate.close();
+        gated_store.put_opts_gate.admit(1);
+        let id = Uuid::new_v4();
+        let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
+        drop(result_rx);
+        started
+            .begin_checkpoint(
+                None,
+                CheckpointOptions::default(),
+                CheckpointRequest {
+                    id,
+                    boundary: CheckpointBoundary {
+                        through_seq: None,
+                        wal_id_last_seen: Some(0),
+                    },
+                    lifecycle,
+                },
+            )
+            .unwrap();
+        ready_rx.await.unwrap().unwrap();
+        timeout(
+            Duration::from_secs(5),
+            gated_store
+                .put_opts_gate
+                .wait_for_arrivals(first_arrival + 2),
+        )
+        .await
+        .unwrap();
+
+        let cleanup_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let failure_observer = Arc::clone(&cleanup_failed);
+        gated_store.put_opts_gate.set_error(move || {
+            failure_observer.store(true, std::sync::atomic::Ordering::Release);
+            object_store::Error::Generic {
+                store: "checkpoint_cleanup_test",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "injected checkpoint cleanup timeout",
+                )),
+            }
+        });
+        gated_store.put_opts_gate.release();
+        timeout(Duration::from_secs(5), async {
+            while !cleanup_failed.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        gated_store.put_opts_gate.clear_error();
+
+        let (poll_tx, poll_rx) = oneshot::channel();
+        started.send_poll(poll_tx).unwrap();
+        assert!(timeout(Duration::from_secs(5), poll_rx)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_ok());
 
         started.shutdown().await;
     }

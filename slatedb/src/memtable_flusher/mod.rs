@@ -14,7 +14,9 @@ pub(crate) use manifest_writer::FlushResult;
 #[cfg(test)]
 pub(crate) use tracker::MANIFEST_REFRESH_COUNT;
 
-use crate::checkpoint::{CheckpointHandle, CheckpointLifecycle, CheckpointRequest};
+use crate::checkpoint::{
+    CheckpointBoundary, CheckpointHandle, CheckpointLifecycle, CheckpointRequest,
+};
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::db_status::ClosedResultWriter;
@@ -38,10 +40,6 @@ pub(crate) use tracker::TrackerMessage;
 /// Flush request target exposed by the memtable flusher.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum FlushTarget {
-    /// Return the current durability frontier without initiating new flush work.
-    /// Used for `CheckpointScope::Durable` when the caller just needs a consistent
-    /// snapshot of what is already durable.
-    CurrentDurable,
     /// Wait until all currently known immutable memtables are durably flushed. Used
     /// for explicit `flush()` calls and checkpoint creation, where full durability
     /// is required before proceeding.
@@ -129,20 +127,17 @@ impl MemtableFlusher {
     pub(crate) async fn begin_checkpoint(
         &self,
         id: Uuid,
-        target: FlushTarget,
+        boundary: CheckpointBoundary,
         options: CheckpointOptions,
     ) -> Result<CheckpointHandle, SlateDBError> {
         let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
         let request = CheckpointRequest {
             id,
-            wal_id_last_seen: None,
+            boundary,
             lifecycle,
         };
-        self.messages_tx.send(TrackerMessage::CheckpointRequest {
-            target,
-            options,
-            request,
-        })?;
+        self.messages_tx
+            .send(TrackerMessage::CheckpointRequest { options, request })?;
         ready_rx.await.map_err(SlateDBError::ReadChannelError)??;
         Ok(CheckpointHandle::new(
             id,
@@ -154,10 +149,10 @@ impl MemtableFlusher {
     #[cfg(test)]
     pub(crate) async fn create_checkpoint(
         &self,
-        target: FlushTarget,
+        boundary: CheckpointBoundary,
         options: CheckpointOptions,
     ) -> Result<crate::checkpoint::CheckpointCreateResult, SlateDBError> {
-        self.begin_checkpoint(Uuid::new_v4(), target, options)
+        self.begin_checkpoint(Uuid::new_v4(), boundary, options)
             .await?
             .wait_inner()
             .await
