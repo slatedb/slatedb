@@ -262,9 +262,7 @@ pub trait DbCache: Send + Sync {
         Ok(CacheFetch::miss(entry))
     }
 
-    /// Fetch a filter entry and whether it was already cached, invoking `loader` on cache miss.
-    /// The bool is true when the entry was served from cache and false when `loader` ran.
-    /// See [`Self::fetch_block`].
+    /// Fetch a filter entry, invoking `loader` on cache miss. See [`Self::fetch_block`].
     async fn fetch_filter(
         &self,
         key: CachedKey,
