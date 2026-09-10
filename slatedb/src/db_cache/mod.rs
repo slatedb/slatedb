@@ -1294,6 +1294,8 @@ mod tests {
     use crate::format::sst::{EncodedSsTable, SsTableFormat};
     use crate::test_utils::build_test_sst;
     use crate::types::{RowEntry, ValueDeletable};
+    #[cfg(feature = "foyer")]
+    use foyer::HybridCacheBuilder;
     use rstest::{fixture, rstest};
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
@@ -1415,7 +1417,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_lookup_outcomes() {
-        let mut caches: Vec<(Arc<dyn DbCache>, bool)> = vec![
+        let caches: Vec<(Arc<dyn DbCache>, bool)> = vec![
             (Arc::new(TestCache::new()), true),
             (Arc::new(SplitCache::new()), false),
             (
@@ -1427,11 +1429,43 @@ mod tests {
                 true,
             ),
         ];
-        #[cfg(feature = "foyer")]
-        caches.push((Arc::new(super::foyer::FoyerCache::new()), true));
-        #[cfg(feature = "moka")]
-        caches.push((Arc::new(super::moka::MokaCache::new()), true));
 
+        verify_fetch_lookup_outcomes(caches).await;
+    }
+
+    #[cfg(feature = "foyer")]
+    #[tokio::test]
+    async fn test_fetch_lookup_outcomes_foyer() {
+        let caches: Vec<(Arc<dyn DbCache>, bool)> =
+            vec![(Arc::new(super::foyer::FoyerCache::new()), true)];
+        verify_fetch_lookup_outcomes(caches).await;
+    }
+
+    #[cfg(feature = "foyer")]
+    #[tokio::test]
+    async fn test_fetch_lookup_outcomes_foyer_hybrid() {
+        let cache = HybridCacheBuilder::new()
+            .memory(1024 * 1024)
+            .storage()
+            .build()
+            .await
+            .unwrap();
+        let caches: Vec<(Arc<dyn DbCache>, bool)> = vec![(
+            Arc::new(super::foyer_hybrid::FoyerHybridCache::new_with_cache(cache)),
+            true,
+        )];
+        verify_fetch_lookup_outcomes(caches).await;
+    }
+
+    #[cfg(feature = "moka")]
+    #[tokio::test]
+    async fn test_fetch_lookup_outcomes_moka() {
+        let caches: Vec<(Arc<dyn DbCache>, bool)> =
+            vec![(Arc::new(super::moka::MokaCache::new()), true)];
+        verify_fetch_lookup_outcomes(caches).await;
+    }
+
+    async fn verify_fetch_lookup_outcomes(caches: Vec<(Arc<dyn DbCache>, bool)>) {
         for (cache, retains_entries) in caches {
             for (offset, method) in ["data_block", "index", "filter", "stats"]
                 .into_iter()
