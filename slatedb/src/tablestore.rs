@@ -1178,16 +1178,19 @@ fn slatedb_io_error() -> SlateDBError {
 
 #[cfg(test)]
 mod tests {
-    use crate::reader::ReadTrace;
+    use crate::config::TracingOptions;
+    use crate::reader::{ReadTrace, SstTraceLevel};
     use crate::types::KeyValue;
     use bytes::Bytes;
     use futures::future;
     use futures::StreamExt;
     use object_store::{memory::InMemory, path::Path, ObjectStore, ObjectStoreExt};
     use rstest::rstest;
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::ops::Range;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::Layer;
 
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::db_cache::test_utils::TestCache;
@@ -1214,6 +1217,99 @@ mod tests {
     use slatedb_common::DbRand;
 
     const ROOT: &str = "/root";
+
+    #[derive(Clone, Debug)]
+    struct RecordedReadFilterSpan {
+        id: tracing::Id,
+        fields: HashMap<String, String>,
+    }
+
+    #[derive(Clone, Default)]
+    struct ReadFilterSpanRecorder {
+        spans: Arc<Mutex<Vec<RecordedReadFilterSpan>>>,
+    }
+
+    impl ReadFilterSpanRecorder {
+        fn only_span(&self) -> RecordedReadFilterSpan {
+            let spans = self
+                .spans
+                .lock()
+                .expect("The span recorder lock is poisoned.");
+            assert_eq!(
+                spans.len(),
+                1,
+                "The recorder must contain one read-filter span."
+            );
+            spans[0].clone()
+        }
+    }
+
+    struct SpanFieldRecorder<'a> {
+        fields: &'a mut HashMap<String, String>,
+    }
+
+    impl tracing::field::Visit for SpanFieldRecorder<'_> {
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    impl<S> Layer<S> for ReadFilterSpanRecorder
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            id: &tracing::Id,
+            _ctx: Context<'_, S>,
+        ) {
+            if attrs.metadata().name() != "slatedb.read.read_filters" {
+                return;
+            }
+            let mut fields = HashMap::new();
+            attrs.record(&mut SpanFieldRecorder {
+                fields: &mut fields,
+            });
+            self.spans
+                .lock()
+                .expect("The span recorder lock is poisoned.")
+                .push(RecordedReadFilterSpan {
+                    id: id.clone(),
+                    fields,
+                });
+        }
+
+        fn on_record(
+            &self,
+            id: &tracing::Id,
+            values: &tracing::span::Record<'_>,
+            _ctx: Context<'_, S>,
+        ) {
+            let mut fields = HashMap::new();
+            values.record(&mut SpanFieldRecorder {
+                fields: &mut fields,
+            });
+            let mut spans = self
+                .spans
+                .lock()
+                .expect("The span recorder lock is poisoned.");
+            if let Some(span) = spans.iter_mut().find(|span| span.id == *id) {
+                span.fields.extend(fields);
+            }
+        }
+    }
 
     /// Wraps an object store: counts range-bounded `get_opts` calls and pauses the first
     /// one until `release` is notified. Other methods just delegate. Shared by the
@@ -1774,6 +1870,110 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    #[rstest]
+    #[case::cache_enabled_with_caching_hit(true, true, true)]
+    #[case::cache_enabled_with_caching_miss(true, true, false)]
+    #[case::cache_enabled_without_caching_hit(true, false, true)]
+    #[case::cache_enabled_without_caching_miss(true, false, false)]
+    #[case::cache_disabled_without_caching(false, false, false)]
+    #[test]
+    fn test_read_filter_span_fields(
+        #[case] cache_enabled: bool,
+        #[case] cache_blocks: bool,
+        #[case] cache_hit: bool,
+    ) {
+        const TRACE_ID: &str = "filter-read-trace";
+        const SORTED_RUN_ID: u32 = 7;
+
+        let span_recorder = ReadFilterSpanRecorder::default();
+        let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
+        let id = tracing::subscriber::with_default(subscriber, || {
+            tokio_test::block_on(async {
+                let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+                let format = SsTableFormat {
+                    min_filter_keys: 1,
+                    ..SsTableFormat::default()
+                };
+                let writer = TableStore::new(
+                    main_store.clone(),
+                    format.clone(),
+                    Path::from(ROOT),
+                    None,
+                    TableStoreKind::Main,
+                    BlockCachePolicy::default(),
+                );
+                let mut builder = writer.table_builder();
+                builder
+                    .add(RowEntry::new_value(b"key1", b"value1", 0))
+                    .await
+                    .unwrap();
+                builder
+                    .add(RowEntry::new_value(b"key2", b"value2", 0))
+                    .await
+                    .unwrap();
+                let id = SsTableId::from(ulid::Ulid::new());
+                let handle = writer
+                    .write_sst(&id, &builder.build().await.unwrap(), Some(Bytes::new()))
+                    .await
+                    .unwrap();
+
+                let meta_cache = Arc::new(TestCache::new());
+                let cache: Option<Arc<dyn DbCache>> = if cache_enabled {
+                    Some(Arc::new(
+                        SplitCache::new().with_meta_cache(Some(meta_cache)).build(),
+                    ))
+                } else {
+                    None
+                };
+                let reader = TableStore::new(
+                    main_store,
+                    format,
+                    Path::from(ROOT),
+                    cache,
+                    TableStoreKind::Main,
+                    BlockCachePolicy::default(),
+                );
+
+                if cache_hit {
+                    reader
+                        .read_filters(
+                            &handle,
+                            true,
+                            Some(Bytes::new()),
+                            &ReadTrace::new(None),
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                }
+
+                let filters = reader
+                    .read_filters(
+                        &handle,
+                        cache_blocks,
+                        Some(Bytes::new()),
+                        &ReadTrace::new(Some(TracingOptions::new(TRACE_ID))),
+                        Some(&SstTraceLevel::SortedRun(SORTED_RUN_ID)),
+                    )
+                    .await
+                    .unwrap();
+                assert!(!filters.is_empty());
+                id
+            })
+        });
+
+        let span = span_recorder.only_span();
+        assert_eq!(
+            span.fields,
+            HashMap::from([
+                ("trace_id".to_string(), TRACE_ID.to_string()),
+                ("sst_id".to_string(), id.value().to_string()),
+                ("level".to_string(), format!("sorted_run:{SORTED_RUN_ID}")),
+                ("cached".to_string(), cache_hit.to_string()),
+            ])
+        );
     }
 
     #[tokio::test]
