@@ -1219,6 +1219,7 @@ mod tests {
     use super::*;
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_generator::OrderedBytesGenerator;
+    use crate::config::TracingOptions;
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::DbCache;
     use crate::db_cache::SplitCache;
@@ -1230,14 +1231,17 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::sst_builder::BlockFormat;
     use crate::tablestore::TableStoreKind;
-    use crate::test_utils::assert_kv;
+    use crate::test_utils::{assert_kv, SpanRecorder};
     use crate::types::{KeyValue, ValueDeletable};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
+    use rstest::rstest;
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
+    use std::collections::HashMap;
     use std::sync::Arc;
+    use tracing_subscriber::layer::SubscriberExt;
     use ulid::Ulid;
 
     fn test_sst_id(id: u64) -> SsTableId {
@@ -3115,6 +3119,45 @@ mod tests {
             name: name.to_string(),
             filter: Arc::new(TestFilter(Arc::new(verdict))),
         }
+    }
+
+    #[rstest]
+    #[case::filter_returns_true(true)]
+    #[case::filter_returns_false(false)]
+    #[test]
+    fn test_evaluate_filter_span_fields(#[case] filter_result: bool) {
+        const TRACE_ID: &str = "filter-evaluation-trace";
+        const FILTER_NAME: &str = "test.filter";
+        const SORTED_RUN_ID: u32 = 7;
+
+        let span_recorder = SpanRecorder::for_name("slatedb.read.evaluate_filter");
+        let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
+        let sst_id = test_sst_id(1);
+        tracing::subscriber::with_default(subscriber, || {
+            let mut evaluator = FilterEvaluator::new_point(Bytes::from_static(b"key"), None, None);
+            evaluator.evaluate(
+                &[named_filter(FILTER_NAME, move |_| filter_result)],
+                sst_id,
+                Some(&SstTraceLevel::SortedRun(SORTED_RUN_ID)),
+                &ReadTrace::new(Some(TracingOptions::new(TRACE_ID))),
+            );
+            assert_eq!(evaluator.is_filtered_out(), !filter_result);
+        });
+
+        let span = span_recorder.only_span();
+        assert_eq!(
+            span.fields,
+            HashMap::from([
+                ("trace_id".to_string(), TRACE_ID.to_string()),
+                ("sst_id".to_string(), sst_id.value().to_string()),
+                (
+                    "sst_level".to_string(),
+                    format!("sorted_run:{SORTED_RUN_ID}"),
+                ),
+                ("filter_name".to_string(), FILTER_NAME.to_string()),
+                ("result".to_string(), filter_result.to_string()),
+            ])
+        );
     }
 
     // Three doubles cover the range tests:

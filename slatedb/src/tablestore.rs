@@ -1188,9 +1188,8 @@ mod tests {
     use rstest::rstest;
     use std::collections::{HashMap, VecDeque};
     use std::ops::Range;
-    use std::sync::{Arc, Mutex};
-    use tracing_subscriber::layer::{Context, SubscriberExt};
-    use tracing_subscriber::Layer;
+    use std::sync::Arc;
+    use tracing_subscriber::layer::SubscriberExt;
 
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::db_cache::test_utils::TestCache;
@@ -1209,107 +1208,13 @@ mod tests {
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
-    use crate::test_utils::FlakyObjectStore;
-    use crate::test_utils::{assert_iterator, build_test_sst};
+    use crate::test_utils::{assert_iterator, build_test_sst, FlakyObjectStore, SpanRecorder};
     use crate::types::{RowEntry, ValueDeletable};
     use crate::{block_iterator::BlockIteratorLatest, db_state::SsTableId, iter::RowEntryIterator};
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::DbRand;
 
     const ROOT: &str = "/root";
-
-    #[derive(Clone, Debug)]
-    struct RecordedReadFilterSpan {
-        id: tracing::Id,
-        fields: HashMap<String, String>,
-    }
-
-    #[derive(Clone, Default)]
-    struct ReadFilterSpanRecorder {
-        spans: Arc<Mutex<Vec<RecordedReadFilterSpan>>>,
-    }
-
-    impl ReadFilterSpanRecorder {
-        fn only_span(&self) -> RecordedReadFilterSpan {
-            let spans = self
-                .spans
-                .lock()
-                .expect("The span recorder lock is poisoned.");
-            assert_eq!(
-                spans.len(),
-                1,
-                "The recorder must contain one read-filter span."
-            );
-            spans[0].clone()
-        }
-    }
-
-    struct SpanFieldRecorder<'a> {
-        fields: &'a mut HashMap<String, String>,
-    }
-
-    impl tracing::field::Visit for SpanFieldRecorder<'_> {
-        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
-            self.fields
-                .insert(field.name().to_string(), value.to_string());
-        }
-
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.fields
-                .insert(field.name().to_string(), value.to_string());
-        }
-
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.fields
-                .insert(field.name().to_string(), format!("{value:?}"));
-        }
-    }
-
-    impl<S> Layer<S> for ReadFilterSpanRecorder
-    where
-        S: tracing::Subscriber,
-    {
-        fn on_new_span(
-            &self,
-            attrs: &tracing::span::Attributes<'_>,
-            id: &tracing::Id,
-            _ctx: Context<'_, S>,
-        ) {
-            if attrs.metadata().name() != "slatedb.read.read_filters" {
-                return;
-            }
-            let mut fields = HashMap::new();
-            attrs.record(&mut SpanFieldRecorder {
-                fields: &mut fields,
-            });
-            self.spans
-                .lock()
-                .expect("The span recorder lock is poisoned.")
-                .push(RecordedReadFilterSpan {
-                    id: id.clone(),
-                    fields,
-                });
-        }
-
-        fn on_record(
-            &self,
-            id: &tracing::Id,
-            values: &tracing::span::Record<'_>,
-            _ctx: Context<'_, S>,
-        ) {
-            let mut fields = HashMap::new();
-            values.record(&mut SpanFieldRecorder {
-                fields: &mut fields,
-            });
-            let mut spans = self
-                .spans
-                .lock()
-                .expect("The span recorder lock is poisoned.");
-            if let Some(span) = spans.iter_mut().find(|span| span.id == *id) {
-                span.fields.extend(fields);
-            }
-        }
-    }
 
     /// Wraps an object store: counts range-bounded `get_opts` calls and pauses the first
     /// one until `release` is notified. Other methods just delegate. Shared by the
@@ -1887,7 +1792,7 @@ mod tests {
         const TRACE_ID: &str = "filter-read-trace";
         const SORTED_RUN_ID: u32 = 7;
 
-        let span_recorder = ReadFilterSpanRecorder::default();
+        let span_recorder = SpanRecorder::for_name("slatedb.read.read_filters");
         let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
         let id = tracing::subscriber::with_default(subscriber, || {
             tokio_test::block_on(async {
@@ -1936,6 +1841,7 @@ mod tests {
                     BlockCachePolicy::default(),
                 );
 
+                // setup a cache hit by reading the filter w/o tracing
                 if cache_hit {
                     reader
                         .read_filters(

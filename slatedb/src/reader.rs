@@ -620,7 +620,7 @@ mod tests {
     use crate::merge_operator::{
         MergeOperator, MergeOperatorError, MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH,
     };
-    use crate::test_utils::lookup_merge_operator_operands;
+    use crate::test_utils::{lookup_merge_operator_operands, RecordedSpan, SpanRecorder};
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
     use rstest::rstest;
@@ -665,11 +665,8 @@ mod tests {
         MetricsRecorderHelper,
     };
     use std::collections::HashMap;
-    use std::fmt;
-    use std::sync::{Arc, Mutex};
-    use tracing_subscriber::layer::{Context, SubscriberExt};
-    use tracing_subscriber::registry::LookupSpan;
-    use tracing_subscriber::Layer;
+    use std::sync::Arc;
+    use tracing_subscriber::layer::SubscriberExt;
     use ulid::Ulid;
 
     /// A simple merge operator for testing that concatenates byte strings
@@ -690,98 +687,6 @@ mod tests {
                 }
                 None => Ok(operand),
             }
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct RecordedSpan {
-        id: tracing::Id,
-        name: String,
-        level: String,
-        parent_name: Option<String>,
-        fields: HashMap<String, String>,
-    }
-
-    #[derive(Clone, Default)]
-    struct SpanRecorder {
-        spans: Arc<Mutex<Vec<RecordedSpan>>>,
-    }
-
-    impl SpanRecorder {
-        fn spans(&self) -> Vec<RecordedSpan> {
-            self.spans.lock().expect("span recorder poisoned").clone()
-        }
-    }
-
-    struct FieldRecorder<'a> {
-        fields: &'a mut HashMap<String, String>,
-    }
-
-    impl tracing::field::Visit for FieldRecorder<'_> {
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.fields
-                .insert(field.name().to_string(), value.to_string());
-        }
-
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
-            self.fields
-                .insert(field.name().to_string(), format!("{value:?}"));
-        }
-    }
-
-    impl<S> Layer<S> for SpanRecorder
-    where
-        S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
-    {
-        fn on_new_span(
-            &self,
-            attrs: &tracing::span::Attributes<'_>,
-            id: &tracing::Id,
-            ctx: Context<'_, S>,
-        ) {
-            let mut fields = HashMap::new();
-            attrs.record(&mut FieldRecorder {
-                fields: &mut fields,
-            });
-
-            let explicit_parent = attrs.parent().and_then(|id| ctx.span(id));
-            let contextual_parent = ctx.current_span().id().and_then(|id| ctx.span(id));
-            let parent_name = explicit_parent
-                .or(contextual_parent)
-                .map(|span| span.metadata().name().to_string());
-
-            self.spans
-                .lock()
-                .expect("span recorder poisoned")
-                .push(RecordedSpan {
-                    id: id.clone(),
-                    name: attrs.metadata().name().to_string(),
-                    level: attrs.metadata().level().to_string(),
-                    parent_name,
-                    fields,
-                });
-        }
-
-        fn on_record(
-            &self,
-            id: &tracing::Id,
-            values: &tracing::span::Record<'_>,
-            _ctx: Context<'_, S>,
-        ) {
-            let mut fields = HashMap::new();
-            values.record(&mut FieldRecorder {
-                fields: &mut fields,
-            });
-            if fields.is_empty() {
-                return;
-            }
-
-            let mut spans = self.spans.lock().expect("span recorder poisoned");
-            let span = spans
-                .iter_mut()
-                .find(|span| span.id == *id)
-                .unwrap_or_else(|| panic!("missing span for recorded fields: {id:?}"));
-            span.fields.extend(fields);
         }
     }
 
