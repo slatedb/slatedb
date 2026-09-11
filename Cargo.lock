@@ -215,13 +215,9 @@ dependencies = [
 
 [[package]]
 name = "asyncband"
-version = "0.6.7"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94a214ba60d6231afd0e805e3c27c45a1626d9debaa5a5061c45a1ea1b2f1ed0"
-dependencies = [
- "hashbrown 0.17.1",
- "slab",
-]
+checksum = "2e52766975a4f080528a898235c51e82e65df9db713419067b5368040eeb5659"
 
 [[package]]
 name = "atomic"
@@ -930,6 +926,8 @@ dependencies = [
  "object_store",
  "slatedb",
  "tokio",
+ "tracing",
+ "tracing-chrome",
  "tracing-subscriber",
 ]
 
@@ -1062,9 +1060,9 @@ dependencies = [
 
 [[package]]
 name = "foyer"
-version = "0.22.4"
+version = "0.22.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab5c4bac30455a0dbc4c858436fb440d51bc6543daafbdf35c5e6ca94c0afd7"
+checksum = "6a59f42276891c0a4ce683fcda1aa1b4fd1065d68116c264e4bf49b9d318a0ed"
 dependencies = [
  "anyhow",
  "asyncband",
@@ -1082,9 +1080,9 @@ dependencies = [
 
 [[package]]
 name = "foyer-common"
-version = "0.22.4"
+version = "0.22.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3634c6f3da978b6cae98d54367a2342041d3a4786b20c0384164cc7fce94787"
+checksum = "643b47d510032a01e5af70dca288b0c5ec531646c1a8392e793fb5b0c13bef30"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1109,9 +1107,9 @@ dependencies = [
 
 [[package]]
 name = "foyer-memory"
-version = "0.22.4"
+version = "0.22.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5349a61af676b3275bfef7a5fceceeadf6b0a7dd9ec14ba0edd78e1ff771d101"
+checksum = "ae51f5089f3d9025ae77f17ea66d2489ac0f82fbb1d91462807bea174d486d82"
 dependencies = [
  "anyhow",
  "asyncband",
@@ -1134,9 +1132,9 @@ dependencies = [
 
 [[package]]
 name = "foyer-storage"
-version = "0.22.4"
+version = "0.22.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49cfcce3c10a1f2ac65bfcf0bd85501462d454c594c8a16a4a27cce773599381"
+checksum = "118192f532ba013f0cdc607efc22324b9ed855baed185608af0daa986e835c6b"
 dependencies = [
  "allocator-api2",
  "anyhow",
@@ -1167,9 +1165,9 @@ dependencies = [
 
 [[package]]
 name = "foyer-tokio"
-version = "0.22.4"
+version = "0.22.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b7315103199f3415a010befd6dd5a1c8e7082fbc49c0194931e65629995d9d1"
+checksum = "6741d1133dfaab64d3f8a9290bbfed3685084add28f8b6ee7a6264aa4dc26918"
 dependencies = [
  "tokio",
 ]
@@ -3360,6 +3358,7 @@ dependencies = [
  "chrono",
  "figment",
  "log",
+ "object_store",
  "parking_lot",
  "serde_json",
  "slatedb",
@@ -3371,6 +3370,7 @@ dependencies = [
  "tracing-subscriber",
  "ulid",
  "uniffi",
+ "url",
  "uuid",
 ]
 
@@ -3880,6 +3880,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tracing-chrome"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf0a738ed5d6450a9fb96e86a23ad808de2b727fd1394585da5cdd6788ffe724"
+dependencies = [
+ "serde_json",
+ "tracing-core",
+ "tracing-subscriber",
 ]
 
 [[package]]

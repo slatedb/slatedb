@@ -140,20 +140,24 @@ Both get a `with_tracing_options(TracingOptions) -> Self` builder method. Defaul
 
 ### Tracing spans
 
-| Span                           | Recorded fields                                             |
-|--------------------------------|-------------------------------------------------------------|
-| `slatedb.read`                 | `trace_id`                                                  |
-| `slatedb.read.memtable`        | `trace_id`                                                  |
-| `slatedb.read.read_filters`    | `trace_id`, `sst_id`, `level`, `cached`                     |
-| `slatedb.read.evaluate_filter` | `trace_id`, `sst_id`, `level`, `name`, `result`             |
-| `slatedb.read.read_index`      | `trace_id`, `sst_id`, `level`, `cached`                     |
-| `slatedb.read.read_blocks`     | `trace_id`, `sst_id`, `level`, `cache_hits`, `cache_misses` |
-| `slatedb.read.merge`           | `trace_id`, `num_operands`                                  |
+| Span                           | Recorded fields                                                 |
+|--------------------------------|-----------------------------------------------------------------|
+| `slatedb.read`                 | `trace_id`                                                      |
+| `slatedb.read.memtable`        | `trace_id`                                                      |
+| `slatedb.read.read_filters`    | `trace_id`, `sst_id`, `sst_level`, `cached`                     |
+| `slatedb.read.evaluate_filter` | `trace_id`, `sst_id`, `sst_level`, `filter_name`, `result`      |
+| `slatedb.read.read_index`      | `trace_id`, `sst_id`, `sst_level`, `cached`                     |
+| `slatedb.read.read_blocks`     | `trace_id`, `sst_id`, `sst_level`, `cache_hits`, `cache_misses` |
+| `slatedb.read.merge`           | `trace_id`, `num_operands`                                      |
 
 The read path spans are structured hierarchically. The root span for the read path is named `slatedb.read`.
 All others are direct children of `slatedb.read`. All spans carry the trace ID
-(`trace_id`) as field. The spans are all constructed at debug level.
-Spans instrumented on a future are entered each time the future is polled by the runtime.
+(`trace_id`) as field. Spans instrumented on a future are entered each time the future is polled by the runtime.
+
+The spans are constructed at `info` level, except for `slatedb.read.memtable` which is
+constructed at `debug` level.
+The reason for putting `slatedb.read.memtable` on a lower tracing level is the potential huge number of
+`slatedb.read.memtable` spans during scan operations since a span is constructed per key lookup in the memtables.
 
 The root span `slatedb.read` traces the entire read operation, which includes all stages of the read path
 covered by the child spans and common operations over all sources needed for reading, such as setting up
@@ -163,13 +167,13 @@ Span `slatedb.read.memtable` traces lookups on the active memtable and the immut
 
 Spans `slatedb.read.read_filters` and `slatedb.read.read_index` trace the reading of filters and reading of the index
 of an SST, respectively. The spans carry the ID of the SST (`sst_id`) the filters and the index belong to, the
-level on which the SST resides (`level=l0` or `level=sorted_run:{id}`), and field `cached`
+level that contains the SST (`sst_level=l0` or `sst_level=sorted_run:{id}`), and field `cached`
 that records if the filters or index were found in the cache (`cached=true`) or not (`cached=false`). If the cache
 is disabled, `cached` will be `false`.
 
 The evaluation of a single filter is tracked by span `slatedb.read.evaluate_filter`. The span exposes fields for
-the SST ID, the level of the SST, the name of the filter (`name`), and the result of the evaluation (`result`).
-For the built-in bloom filter, the `name` field will contain `_bf`.
+the SST ID, the level of the SST, the name of the filter (`filter_name`), and the result of the evaluation (`result`).
+For the built-in bloom filter, the `filter_name` field will contain `_bf`.
 
 Span `slatedb.read.read_blocks` traces the reading of data blocks of an SST. The fields of the span hold the SST ID,
 the level of the SST, and how many cache hits and misses were encountered while reading the blocks.

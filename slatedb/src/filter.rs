@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::filter_policy::{Filter, FilterBuilder, FilterQuery};
+use crate::filter_policy::{Filter, FilterBuilder, FilterQuery, FilterTarget};
 use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
 use crate::types::RowEntry;
 use crate::utils::clamp_allocated_size_bytes;
@@ -149,7 +149,7 @@ impl FilterBuilder for BloomFilterBuilder {
 impl Filter for BloomFilter {
     fn might_match(&self, query: &FilterQuery) -> bool {
         // Full-key hash gives the tightest answer whenever it was stored.
-        if let (PrefixTarget::Point(key), true) = (&query.target, self.whole_key_filtering) {
+        if let (FilterTarget::Point(key), true) = (&query.target, self.whole_key_filtering) {
             return self.might_contain(filter_hash(key.as_ref()));
         }
 
@@ -164,10 +164,14 @@ impl Filter for BloomFilter {
         let Some(ref extractor) = self.prefix_extractor else {
             return true;
         };
-        let Some(n) = extractor.prefix_len(&query.target) else {
+        // Hashes of keys and prefixes only, so a range is unanswerable here.
+        let Some(prefix_target) = query.target.as_prefix_target() else {
             return true;
         };
-        let bytes = match &query.target {
+        let Some(n) = extractor.prefix_len(&prefix_target) else {
+            return true;
+        };
+        let bytes = match &prefix_target {
             PrefixTarget::Point(k) => k.as_ref(),
             PrefixTarget::Prefix(p) => p.as_ref(),
         };
@@ -242,6 +246,7 @@ fn optimal_num_probes(bits_per_key: u32) -> u16 {
 mod tests {
     use super::*;
     use bytes::BytesMut;
+    use std::ops::Bound;
 
     fn point_builder(bits_per_key: u32) -> BloomFilterBuilder {
         BloomFilterBuilder::new(bits_per_key, true, None)
@@ -482,6 +487,24 @@ mod tests {
         // reporting "might match", so the stored short keys stay reachable.
         assert!(filter.might_match(&FilterQuery::prefix(Bytes::from_static(b"a"))));
         assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"a"))));
+    }
+
+    #[test]
+    fn test_bloom_filter_abstains_on_range_queries() {
+        let mut builder = BloomFilterBuilder::new(10, false, Some(Arc::new(GatedFixed4)));
+        builder.add_key(&Bytes::from_static(b"aaaa_key"));
+        let filter = builder.build_filter();
+
+        // The filter has real content: a prefix it never saw is rejected.
+        assert!(!filter.might_match(&FilterQuery::prefix(Bytes::from_static(b"bbbb"))));
+
+        // It stores hashes of keys and prefixes, never ranges, so a range
+        // query must abstain rather than reject. A wrong `false` here would
+        // skip an SST holding rows the scan must see.
+        assert!(filter.might_match(&FilterQuery::range(
+            Bound::Included(Bytes::from_static(b"bbbb")),
+            Bound::Excluded(Bytes::from_static(b"bbbc")),
+        )));
     }
 
     #[test]

@@ -18,6 +18,7 @@ use crate::db_common::extract_segment_prefix;
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::prefix_extractor::PrefixExtractor;
+use crate::reader::ReadTrace;
 use crate::seq_tracker::{SequenceTracker, TrackedSeq};
 use crate::types::RowEntry;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
@@ -194,6 +195,7 @@ pub(crate) struct MemTableIteratorInner<T: RangeBounds<SequencedKey>> {
     /// in seq-ascending order. Pushing them onto this stack and popping gives
     /// seq-descending order, which is what the merge iterator needs for dedup.
     descending_stack: Vec<RowEntry>,
+    read_trace: ReadTrace,
 }
 pub(crate) type MemTableIterator = MemTableIteratorInner<KVTableInternalKeyRange>;
 
@@ -223,6 +225,8 @@ impl RowEntryIterator for MemTableIterator {
 
 impl MemTableIterator {
     pub(crate) fn next_sync(&mut self) -> Option<RowEntry> {
+        let span = self.borrow_read_trace().new_memtable_span();
+        let _guard = span.enter();
         match self.borrow_ordering() {
             IterationOrder::Ascending => self.next_ascending(),
             IterationOrder::Descending => self.next_descending(),
@@ -500,13 +504,14 @@ impl KVTable {
     }
 
     pub(crate) fn range_ascending<T: RangeBounds<Bytes>>(&self, range: T) -> MemTableIterator {
-        self.range(range, IterationOrder::Ascending)
+        self.range(range, IterationOrder::Ascending, ReadTrace::new(None))
     }
 
     pub(crate) fn range<T: RangeBounds<Bytes>>(
         &self,
         range: T,
         ordering: IterationOrder,
+        read_trace: ReadTrace,
     ) -> MemTableIterator {
         let internal_range = KVTableInternalKeyRange::from(range);
         let mut iterator = MemTableIteratorInnerBuilder {
@@ -515,6 +520,7 @@ impl KVTable {
             ordering,
             item: None,
             descending_stack: Vec::new(),
+            read_trace,
         }
         .build();
         iterator.next_sync();
@@ -860,7 +866,10 @@ mod tests {
             .run(
                 &(arbitrary::nonempty_range(10), arbitrary::iteration_order()),
                 |(range, ordering)| {
-                    let mut kv_iter = kv_table.table.range(range.clone(), ordering);
+                    let mut kv_iter =
+                        kv_table
+                            .table
+                            .range(range.clone(), ordering, ReadTrace::new(None));
 
                     runtime.block_on(test_utils::assert_ranged_kv_scan(
                         &sample_table,
@@ -1076,7 +1085,9 @@ mod tests {
         table.put(RowEntry::new_value(b"bbbb", b"new", 2));
         table.put(RowEntry::new_value(b"cccc", b"v3", 3));
 
-        let mut iter = table.table().range(.., IterationOrder::Descending);
+        let mut iter = table
+            .table()
+            .range(.., IterationOrder::Descending, ReadTrace::new(None));
 
         // In descending order, for key "bbbb" the newest version (seq 2) must
         // come before the older version (seq 1) so that dedup works correctly.

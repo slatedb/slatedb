@@ -21,7 +21,7 @@ use object_store::{
 };
 use rand::{Rng, RngCore};
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
@@ -33,7 +33,10 @@ use std::thread;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer;
 use ulid::Ulid;
 
 pub(crate) fn bounded_sst_view(id: u64, first: &'static [u8], last: &'static [u8]) -> SsTableView {
@@ -80,6 +83,127 @@ pub(crate) async fn assert_next<T: RowEntryIterator>(iterator: &mut T, expected_
 pub(crate) fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
     assert_eq!(kv.key, key);
     assert_eq!(kv.value, val);
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecordedSpan {
+    id: tracing::Id,
+    pub(crate) name: String,
+    pub(crate) level: String,
+    pub(crate) parent_name: Option<String>,
+    pub(crate) fields: HashMap<String, String>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct SpanRecorder {
+    span_name: Option<&'static str>,
+    spans: Arc<std::sync::Mutex<Vec<RecordedSpan>>>,
+}
+
+impl SpanRecorder {
+    pub(crate) fn for_name(span_name: &'static str) -> Self {
+        Self {
+            span_name: Some(span_name),
+            spans: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    pub(crate) fn spans(&self) -> Vec<RecordedSpan> {
+        self.spans
+            .lock()
+            .expect("The span recorder lock is poisoned.")
+            .clone()
+    }
+
+    pub(crate) fn only_span(&self) -> RecordedSpan {
+        let spans = self.spans();
+        assert_eq!(
+            spans.len(),
+            1,
+            "The recorder must contain one matching span."
+        );
+        spans[0].clone()
+    }
+}
+
+struct SpanFieldRecorder<'a> {
+    fields: &'a mut HashMap<String, String>,
+}
+
+impl tracing::field::Visit for SpanFieldRecorder<'_> {
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+        self.fields
+            .insert(field.name().to_string(), format!("{value:?}"));
+    }
+}
+
+impl<S> Layer<S> for SpanRecorder
+where
+    S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::Id,
+        ctx: Context<'_, S>,
+    ) {
+        if self
+            .span_name
+            .is_some_and(|span_name| attrs.metadata().name() != span_name)
+        {
+            return;
+        }
+        let mut fields = HashMap::new();
+        attrs.record(&mut SpanFieldRecorder {
+            fields: &mut fields,
+        });
+
+        let explicit_parent = attrs.parent().and_then(|id| ctx.span(id));
+        let contextual_parent = ctx.current_span().id().and_then(|id| ctx.span(id));
+        let parent_name = explicit_parent
+            .or(contextual_parent)
+            .map(|span| span.metadata().name().to_string());
+
+        self.spans
+            .lock()
+            .expect("The span recorder lock is poisoned.")
+            .push(RecordedSpan {
+                id: id.clone(),
+                name: attrs.metadata().name().to_string(),
+                level: attrs.metadata().level().to_string(),
+                parent_name,
+                fields,
+            });
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::Id,
+        values: &tracing::span::Record<'_>,
+        _ctx: Context<'_, S>,
+    ) {
+        let mut fields = HashMap::new();
+        values.record(&mut SpanFieldRecorder {
+            fields: &mut fields,
+        });
+        let mut spans = self
+            .spans
+            .lock()
+            .expect("The span recorder lock is poisoned.");
+        if let Some(span) = spans.iter_mut().find(|span| span.id == *id) {
+            span.fields.extend(fields);
+        }
+    }
 }
 
 pub(crate) struct TestIterator {
@@ -428,7 +552,7 @@ pub(crate) async fn write_ssts(
     }
 
     let mut output_ssts = Vec::new();
-    let mut writer = table_store.table_writer(SsTableId::from(Ulid::new()));
+    let mut writer = table_store.table_writer(SsTableId::from(Ulid::new()), Some(Bytes::new()));
     let mut bytes_written = 0usize;
 
     for (index, entry) in entries.iter().cloned().enumerate() {
@@ -437,18 +561,18 @@ pub(crate) async fn write_ssts(
         }
 
         if bytes_written > max_sst_size {
-            output_ssts.push(writer.close().await.unwrap());
+            output_ssts.push(writer.close().await.unwrap().0);
             bytes_written = 0;
 
             if index + 1 < entries.len() {
-                writer = table_store.table_writer(SsTableId::from(Ulid::new()));
+                writer = table_store.table_writer(SsTableId::from(Ulid::new()), Some(Bytes::new()));
             } else {
                 return output_ssts;
             }
         }
     }
 
-    output_ssts.push(writer.close().await.unwrap());
+    output_ssts.push(writer.close().await.unwrap().0);
     output_ssts
 }
 
@@ -1610,14 +1734,17 @@ pub(crate) enum RecordedCall {
         kind: Option<TableStoreKind>,
         sst_type: Option<SstType>,
         retry: Option<RetryReason>,
+        segment: Option<Bytes>,
     },
     Put {
         kind: Option<TableStoreKind>,
         sst_type: Option<SstType>,
+        segment: Option<Bytes>,
     },
     PutMultipart {
         kind: Option<TableStoreKind>,
         sst_type: Option<SstType>,
+        segment: Option<Bytes>,
     },
 }
 
@@ -1676,6 +1803,19 @@ impl RecordingObjectStore {
             .collect()
     }
 
+    pub(crate) fn get_segments(&self, head: bool) -> Vec<Option<Bytes>> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::Get {
+                    head: h, segment, ..
+                } if *h == head => Some(segment.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn write_kinds(&self) -> Vec<Option<TableStoreKind>> {
         self.calls
             .lock()
@@ -1700,6 +1840,19 @@ impl RecordingObjectStore {
             })
             .collect()
     }
+
+    pub(crate) fn write_segments(&self) -> Vec<Option<Bytes>> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::Put { segment, .. } | RecordedCall::PutMultipart { segment, .. } => {
+                    Some(segment.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 impl fmt::Display for RecordingObjectStore {
@@ -1718,9 +1871,10 @@ impl ObjectStore for RecordingObjectStore {
         let tag = ObjectStoreCallTag::from_extensions(&options.extensions);
         self.calls.lock().push(RecordedCall::Get {
             head: options.head,
-            kind: tag.map(|t| t.kind),
-            sst_type: tag.map(|t| t.sst_type),
-            retry: tag.and_then(|t| t.retry),
+            kind: tag.as_ref().map(|t| t.kind),
+            sst_type: tag.as_ref().map(|t| t.sst_type),
+            retry: tag.as_ref().and_then(|t| t.retry),
+            segment: tag.as_ref().and_then(|t| t.segment.clone()),
         });
         self.inner.get_opts(location, options).await
     }
@@ -1733,8 +1887,9 @@ impl ObjectStore for RecordingObjectStore {
     ) -> object_store::Result<PutResult> {
         let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
         self.calls.lock().push(RecordedCall::Put {
-            kind: tag.map(|t| t.kind),
-            sst_type: tag.map(|t| t.sst_type),
+            kind: tag.as_ref().map(|t| t.kind),
+            sst_type: tag.as_ref().map(|t| t.sst_type),
+            segment: tag.as_ref().and_then(|t| t.segment.clone()),
         });
         self.inner.put_opts(location, payload, opts).await
     }
@@ -1746,8 +1901,9 @@ impl ObjectStore for RecordingObjectStore {
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
         self.calls.lock().push(RecordedCall::PutMultipart {
-            kind: tag.map(|t| t.kind),
-            sst_type: tag.map(|t| t.sst_type),
+            kind: tag.as_ref().map(|t| t.kind),
+            sst_type: tag.as_ref().map(|t| t.sst_type),
+            segment: tag.as_ref().and_then(|t| t.segment.clone()),
         });
         self.inner.put_multipart_opts(location, opts).await
     }
