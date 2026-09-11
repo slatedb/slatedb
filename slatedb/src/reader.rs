@@ -571,7 +571,7 @@ impl Reader {
                     range.clone(),
                     sst,
                     self.table_store.clone(),
-                    sst_iter_options.clone(),
+                    segment_options.clone(),
                     Some(SstTracingContext::new(
                         SstTraceLevel::L0,
                         read_trace.clone(),
