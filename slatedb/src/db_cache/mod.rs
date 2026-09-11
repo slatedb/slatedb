@@ -520,6 +520,56 @@ impl CachedEntry {
     }
 }
 
+/// A view of a [`DbCache`] that cannot insert.
+///
+/// Reads and removals forward to the wrapped cache. Inserts do nothing.
+pub(crate) struct NoInsertCache {
+    cache: Arc<dyn DbCache>,
+}
+
+impl NoInsertCache {
+    pub(crate) fn new(cache: Arc<dyn DbCache>) -> Self {
+        Self { cache }
+    }
+}
+
+#[async_trait]
+impl DbCache for NoInsertCache {
+    async fn get_block(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        self.cache.get_block(key).await
+    }
+
+    async fn get_index(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        self.cache.get_index(key).await
+    }
+
+    async fn get_filter(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        self.cache.get_filter(key).await
+    }
+
+    async fn get_stats(&self, key: &CachedKey) -> Result<Option<CachedEntry>, crate::Error> {
+        self.cache.get_stats(key).await
+    }
+
+    async fn insert(&self, _key: CachedKey, _value: CachedEntry) {}
+
+    async fn remove(&self, key: &CachedKey) {
+        self.cache.remove(key).await
+    }
+
+    fn entry_count(&self) -> u64 {
+        self.cache.entry_count()
+    }
+
+    async fn flush_scope(&self, db_cache_id: u64) -> Result<(), crate::Error> {
+        self.cache.flush_scope(db_cache_id).await
+    }
+
+    async fn flush_to_disk(&self) -> Result<(), crate::Error> {
+        self.cache.flush_to_disk().await
+    }
+}
+
 pub struct SplitCache {
     // Cache for block data
     block_cache: Option<Arc<dyn DbCache>>,
@@ -1281,7 +1331,7 @@ mod tests {
 
     use crate::db_cache::{
         CacheFetch, CacheLoader, CacheLookup, CachedEntry, CachedKey, DbCache, DbCacheWrapper,
-        SplitCache,
+        NoInsertCache, SplitCache,
     };
     use crate::db_state::SsTableId;
     use crate::filter_policy::{BloomFilterPolicy, FilterPolicy, NamedFilter};
@@ -2214,5 +2264,32 @@ mod tests {
             probe.flush_to_disk_called.load(Ordering::SeqCst),
             "flush_to_disk was not forwarded to the inner cache"
         );
+    }
+
+    #[tokio::test]
+    async fn test_no_insert_cache_forwards_reads_and_removals_but_drops_inserts() {
+        let inner: Arc<dyn DbCache> = Arc::new(TestCache::new());
+        let view = NoInsertCache::new(inner.clone());
+        let sst = build_test_sst(&SsTableFormat::default(), 1).await;
+        let index = Arc::new(sst.index);
+        let key = CachedKey::from((SST_ID, 2u64));
+
+        // An insert through the view leaves the wrapped cache untouched.
+        view.insert(key.clone(), CachedEntry::with_sst_index(index.clone()))
+            .await;
+        assert_eq!(inner.entry_count(), 0);
+        assert!(view.get_index(&key).await.unwrap().is_none());
+
+        // A read through the view sees what the wrapped cache holds.
+        inner
+            .insert(key.clone(), CachedEntry::with_sst_index(index))
+            .await;
+        assert!(view.get_index(&key).await.unwrap().is_some());
+        assert_eq!(view.entry_count(), 1);
+
+        // A removal through the view reaches the wrapped cache.
+        view.remove(&key).await;
+        assert!(inner.get_index(&key).await.unwrap().is_none());
+        assert_eq!(inner.entry_count(), 0);
     }
 }

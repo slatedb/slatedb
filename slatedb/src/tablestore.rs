@@ -947,11 +947,11 @@ impl TableStore {
         }
     }
 
-    /// Best-effort removal of all cache entries associated with the given SST:
-    /// data blocks, index, filters, and stats. Returns the offsets whose
-    /// cache removal was attempted.
-    /// Evicts an SST from the block cache. `segment` is a hint attached to the
-    /// [`ObjectStoreCallTag`] if reading its index is required for eviction.
+    /// Best-effort removal of every cache entry of an SST: data blocks, index,
+    /// filters, and stats.
+    ///
+    /// `segment` is a hint attached to the [`ObjectStoreCallTag`] if reading
+    /// its index is required for eviction.
     pub(crate) async fn evict_sst_from_cache(
         &self,
         handle: &SsTableHandle,
@@ -980,6 +980,14 @@ impl TableStore {
                 cache.remove(&(handle.id, offset).into()).await;
             }
         }
+        self.evict_sst_metadata_from_cache(handle).await;
+    }
+
+    /// Removes the index, filter, and stats entries of an SST from the cache.
+    pub(crate) async fn evict_sst_metadata_from_cache(&self, handle: &SsTableHandle) {
+        let Some(ref cache) = self.cache else {
+            return;
+        };
         cache
             .remove(&(handle.id, handle.info.index_offset).into())
             .await;
