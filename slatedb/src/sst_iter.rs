@@ -2059,7 +2059,7 @@ mod tests {
             writer.add(entry).await.unwrap();
             nkeys += 1;
         }
-        let sst = writer.close().await.unwrap();
+        let (sst, _) = writer.close().await.unwrap();
         (SsTableView::identity(sst), nkeys)
     }
 
@@ -2840,7 +2840,7 @@ mod tests {
             .add(RowEntry::new_value(b"key_c", b"value_50", 50))
             .await
             .unwrap();
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
 
         let mut iter = SstIterator::new_owned_initialized(
             ..,
@@ -2924,7 +2924,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let sst_handle = writer.close().await.unwrap();
+        let (sst_handle, _) = writer.close().await.unwrap();
         let sst = SsTableView::identity(sst_handle);
 
         // Minimal prefetch: 1 block at a time, 1 task max.
