@@ -16,6 +16,7 @@ use crate::error::SlateDBError;
 use crate::filter_policy::{FilterContext, FilterQuery, FilterTarget, NamedFilter};
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
+use crate::reader::{ReadTrace, SstTraceLevel};
 use crate::{
     iter::{IterationOrder, RowEntryIterator},
     partitioned_keyspace,
@@ -54,6 +55,21 @@ impl Default for SstIteratorOptions {
             prefix: None,
             filter_context: None,
             segment: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SstTracingContext {
+    pub(crate) sst_level: SstTraceLevel,
+    pub(crate) read_trace: ReadTrace,
+}
+
+impl SstTracingContext {
+    pub(crate) fn new(sst_level: SstTraceLevel, read_trace: ReadTrace) -> Self {
+        Self {
+            sst_level,
+            read_trace,
         }
     }
 }
@@ -224,7 +240,13 @@ impl FilterEvaluator {
     /// All filters must agree the query might match for the read to proceed.
     /// If any filter says the query is absent, the SST is skipped.
     /// If no filters are provided, the state is set to `NoFilter`.
-    async fn evaluate(&mut self, filters: &[NamedFilter]) {
+    fn evaluate(
+        &mut self,
+        filters: &[NamedFilter],
+        sst_id: SsTableId,
+        sst_level: Option<&SstTraceLevel>,
+        read_trace: &ReadTrace,
+    ) {
         if self.state != FilterState::NotChecked {
             return;
         }
@@ -237,7 +259,9 @@ impl FilterEvaluator {
         // AND logic: if any filter says the key is NOT present, filter it out.
         // All filters reaching here are decoded. TableStore::read_filters
         // resolves any raw cache entries before returning.
-        let might_match = filters.iter().all(|nf| nf.filter.might_match(&self.query));
+        let might_match = filters
+            .iter()
+            .all(|nf| self.filter_might_match(nf, sst_id, sst_level, read_trace));
 
         if might_match {
             if let Some(stats) = &self.db_stats {
@@ -250,6 +274,20 @@ impl FilterEvaluator {
             }
             self.state = FilterState::Negative;
         }
+    }
+
+    fn filter_might_match(
+        &self,
+        filter: &NamedFilter,
+        sst_id: SsTableId,
+        sst_level: Option<&SstTraceLevel>,
+        read_trace: &ReadTrace,
+    ) -> bool {
+        let span = read_trace.new_evaluate_filter_span(sst_id, sst_level, &filter.name);
+        let _guard = span.enter();
+        let result = filter.filter.might_match(&self.query);
+        span.record("result", result);
+        result
     }
 
     fn positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
@@ -310,6 +348,7 @@ pub(crate) struct InternalSstIterator<'a> {
     fetch_tasks: VecDeque<FetchTask>,
     table_store: Arc<TableStore>,
     options: SstIteratorOptions,
+    tracing_context: Option<SstTracingContext>,
     /// Buffer for descending iteration to maintain correct sequence order within keys.
     descending_buffer: Option<VecDeque<RowEntry>>,
     /// Pending entry that was read ahead but belongs to the next key group.
@@ -322,6 +361,7 @@ impl<'a> InternalSstIterator<'a> {
         view: SstView<'a>,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
     ) -> Result<Self, SlateDBError> {
         assert!(options.max_fetch_tasks > 0);
         assert!(options.target_bytes_to_fetch > 0);
@@ -340,6 +380,7 @@ impl<'a> InternalSstIterator<'a> {
             fetch_tasks: VecDeque::new(),
             table_store,
             options,
+            tracing_context,
             descending_buffer,
             pending_entry: None,
         })
@@ -353,17 +394,31 @@ impl<'a> InternalSstIterator<'a> {
         &self.table_store
     }
 
+    fn sst_level(&self) -> Option<&SstTraceLevel> {
+        self.tracing_context
+            .as_ref()
+            .map(|context| &context.sst_level)
+    }
+
+    fn read_trace(&self) -> ReadTrace {
+        self.tracing_context
+            .as_ref()
+            .map(|context| context.read_trace.clone())
+            .unwrap_or_else(|| ReadTrace::new(None))
+    }
+
     fn new_owned<T: RangeBounds<Bytes>>(
         range: T,
         table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
     ) -> Result<Option<Self>, SlateDBError> {
         let Some(view_range) = table.calculate_view_range(BytesRange::from(range)) else {
             return Ok(None);
         };
         let view = SstView::Owned(Box::new(table), view_range);
-        Self::new(view, table_store, options).map(Some)
+        Self::new(view, table_store, options, tracing_context).map(Some)
     }
 
     fn new_borrowed<T: RangeBounds<Bytes>>(
@@ -376,7 +431,7 @@ impl<'a> InternalSstIterator<'a> {
             return Ok(None);
         };
         let view = SstView::Borrowed(table, view_range);
-        Self::new(view, table_store, options).map(Some)
+        Self::new(view, table_store, options, None).map(Some)
     }
 
     fn for_key(
@@ -830,22 +885,31 @@ impl<'a> FilterIterator<'a> {
     fn is_filtered_out(&self) -> bool {
         self.filter.is_filtered_out()
     }
+
+    async fn read_filters(&self) -> Result<Arc<[NamedFilter]>, SlateDBError> {
+        let read_trace = self.inner.read_trace();
+        self.inner
+            .table_store()
+            .read_filters(
+                &self.inner.view().table_as_ref().sst,
+                self.inner.options.cache_metadata,
+                self.inner.options.segment.clone(),
+                &read_trace,
+                self.inner.sst_level(),
+            )
+            .await
+    }
 }
 
 #[async_trait]
 impl RowEntryIterator for FilterIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized {
-            let filters = self
-                .inner
-                .table_store()
-                .read_filters(
-                    &self.inner.view().table_as_ref().sst,
-                    self.inner.options.cache_metadata,
-                    self.inner.options.segment.clone(),
-                )
-                .await?;
-            self.filter.evaluate(&filters).await;
+            let filters = self.read_filters().await?;
+            let sst_id = self.inner.view().table_as_ref().sst.id;
+            let read_trace = self.inner.read_trace();
+            self.filter
+                .evaluate(&filters, sst_id, self.inner.sst_level(), &read_trace);
 
             if self.is_filtered_out() {
                 return Ok(());
@@ -933,16 +997,17 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
-        Self::new_with_stats(view, table_store, options, None)
+        Self::new_with_stats(view, table_store, options, None, None)
     }
 
     pub(crate) fn new_with_stats(
         view: SstView<'a>,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
         db_stats: Option<DbStats>,
     ) -> Result<Self, SlateDBError> {
-        let internal = InternalSstIterator::new(view, table_store, options)?;
+        let internal = InternalSstIterator::new(view, table_store, options, tracing_context)?;
         Ok(Self::from_internal(internal, db_stats))
     }
 
@@ -952,9 +1017,11 @@ impl<'a> SstIterator<'a> {
         table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
         db_stats: Option<DbStats>,
     ) -> Result<Option<Self>, SlateDBError> {
-        let internal = InternalSstIterator::new_owned(range, table, table_store, options)?;
+        let internal =
+            InternalSstIterator::new_owned(range, table, table_store, options, tracing_context)?;
         Ok(internal.map(|iter| Self::from_internal(iter, db_stats.clone())))
     }
 
@@ -964,8 +1031,9 @@ impl<'a> SstIterator<'a> {
         table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
     ) -> Result<Option<Self>, SlateDBError> {
-        Self::new_owned_with_stats(range, table, table_store, options, None)
+        Self::new_owned_with_stats(range, table, table_store, options, tracing_context, None)
     }
 
     #[cfg(test)]
@@ -975,7 +1043,7 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
-        Self::new_owned_initialized_with_stats(range, table, table_store, options, None).await
+        Self::new_owned_initialized_with_stats(range, table, table_store, options, None, None).await
     }
 
     pub(crate) async fn new_owned_initialized_with_stats<T: RangeBounds<Bytes>>(
@@ -983,12 +1051,14 @@ impl<'a> SstIterator<'a> {
         table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
         db_stats: Option<DbStats>,
     ) -> Result<Option<Self>, SlateDBError> {
         // Construct the inner iterator without initializing it. The filter
         // is evaluated first so that an SST whose filter rules out the query
         // never pays for an index or data block read.
-        let internal = InternalSstIterator::new_owned(range, table, table_store, options)?;
+        let internal =
+            InternalSstIterator::new_owned(range, table, table_store, options, tracing_context)?;
         match internal {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, db_stats);
@@ -1070,7 +1140,7 @@ impl<'a> SstIterator<'a> {
         Ok(internal.map(|iter| Self::from_internal(iter, db_stats.clone())))
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) async fn for_key_with_stats_initialized(
         table: &'a SsTableView,
         key: &'a [u8],
@@ -1149,6 +1219,7 @@ mod tests {
     use super::*;
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_generator::OrderedBytesGenerator;
+    use crate::config::TracingOptions;
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::DbCache;
     use crate::db_cache::SplitCache;
@@ -1160,17 +1231,21 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::sst_builder::BlockFormat;
     use crate::tablestore::TableStoreKind;
-    use crate::test_utils::assert_kv;
+    use crate::test_utils::{assert_kv, SpanRecorder};
     use crate::types::{KeyValue, ValueDeletable};
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore};
+    use rstest::rstest;
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
+    use std::collections::HashMap;
     use std::sync::Arc;
+    use tracing_subscriber::layer::SubscriberExt;
+    use ulid::Ulid;
 
     fn test_sst_id(id: u64) -> SsTableId {
-        SsTableId::from(ulid::Ulid::from_parts(id, 0))
+        SsTableId::from(Ulid::from_parts(id, 0))
     }
 
     #[tokio::test]
@@ -1375,8 +1450,9 @@ mod tests {
         let existing_keys = [b"k1".as_slice(), b"k3".as_slice()];
         let sst_handle = build_single_block_sst(&table_store, &existing_keys).await;
 
+        let read_trace = ReadTrace::new(None);
         let filters = table_store
-            .read_filters(&sst_handle.sst, true, Some(Bytes::new()))
+            .read_filters(&sst_handle.sst, true, Some(Bytes::new()), &read_trace, None)
             .await
             .expect("filter read should succeed");
         assert!(!filters.is_empty(), "filter should exist");
@@ -1462,7 +1538,7 @@ mod tests {
             .unwrap();
         let sst = writer
             .write_sst(
-                &SsTableId::from(ulid::Ulid::new()),
+                &SsTableId::from(Ulid::new()),
                 &builder.build().await.unwrap(),
                 Some(Bytes::new()),
             )
@@ -1551,7 +1627,7 @@ mod tests {
             .unwrap();
         let sst = writer
             .write_sst(
-                &SsTableId::from(ulid::Ulid::new()),
+                &SsTableId::from(Ulid::new()),
                 &builder.build().await.unwrap(),
                 Some(Bytes::new()),
             )
@@ -1641,7 +1717,7 @@ mod tests {
                 .unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::from(ulid::Ulid::new());
+        let id = SsTableId::from(Ulid::new());
         SsTableView::identity(
             table_store
                 .write_sst(&id, &encoded, Some(Bytes::new()))
@@ -1918,7 +1994,7 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::from(ulid::Ulid::new());
+        let id = SsTableId::from(Ulid::new());
         let sst_handle = SsTableView::identity(
             table_store
                 .write_sst(&id, &encoded, Some(Bytes::new()))
@@ -2111,7 +2187,7 @@ mod tests {
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::from(ulid::Ulid::new());
+        let id = SsTableId::from(Ulid::new());
         table_store
             .write_sst(&id, &encoded, Some(Bytes::new()))
             .await
@@ -2193,7 +2269,7 @@ mod tests {
             builder.add_value(key, value, Some(0), None).await.unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::from(ulid::Ulid::new());
+        let id = SsTableId::from(Ulid::new());
         SsTableView::identity(
             table_store
                 .write_sst(&id, &encoded, Some(Bytes::new()))
@@ -2338,7 +2414,7 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::from(ulid::Ulid::new());
+        let id = SsTableId::from(Ulid::new());
         let sst_handle = SsTableView::identity(
             table_store
                 .write_sst(&id, &encoded, Some(Bytes::new()))
@@ -2407,7 +2483,7 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::from(ulid::Ulid::new());
+        let id = SsTableId::from(Ulid::new());
         let sst_handle = table_store
             .write_sst(&id, &encoded, Some(Bytes::new()))
             .await
@@ -2482,7 +2558,7 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::from(ulid::Ulid::new());
+        let id = SsTableId::from(Ulid::new());
         let sst_handle = SsTableView::identity(
             table_store
                 .write_sst(&id, &encoded, Some(Bytes::new()))
@@ -2540,7 +2616,7 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::from(ulid::Ulid::new());
+        let id = SsTableId::from(Ulid::new());
         let sst_handle = SsTableView::identity(
             table_store
                 .write_sst(&id, &encoded, Some(Bytes::new()))
@@ -2606,7 +2682,7 @@ mod tests {
                 .unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::from(ulid::Ulid::new());
+        let id = SsTableId::from(Ulid::new());
         table_store
             .write_sst(&id, &encoded, Some(Bytes::new()))
             .await
@@ -2752,7 +2828,7 @@ mod tests {
                 .unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::from(ulid::Ulid::new());
+        let id = SsTableId::from(Ulid::new());
         table_store
             .write_sst(&id, &encoded, Some(Bytes::new()))
             .await
@@ -3045,6 +3121,45 @@ mod tests {
         }
     }
 
+    #[rstest]
+    #[case::filter_returns_true(true)]
+    #[case::filter_returns_false(false)]
+    #[test]
+    fn test_evaluate_filter_span_fields(#[case] filter_result: bool) {
+        const TRACE_ID: &str = "filter-evaluation-trace";
+        const FILTER_NAME: &str = "test.filter";
+        const SORTED_RUN_ID: u32 = 7;
+
+        let span_recorder = SpanRecorder::for_name("slatedb.read.evaluate_filter");
+        let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
+        let sst_id = test_sst_id(1);
+        tracing::subscriber::with_default(subscriber, || {
+            let mut evaluator = FilterEvaluator::new_point(Bytes::from_static(b"key"), None, None);
+            evaluator.evaluate(
+                &[named_filter(FILTER_NAME, move |_| filter_result)],
+                sst_id,
+                Some(&SstTraceLevel::SortedRun(SORTED_RUN_ID)),
+                &ReadTrace::new(Some(TracingOptions::new(TRACE_ID))),
+            );
+            assert_eq!(evaluator.is_filtered_out(), !filter_result);
+        });
+
+        let span = span_recorder.only_span();
+        assert_eq!(
+            span.fields,
+            HashMap::from([
+                ("trace_id".to_string(), TRACE_ID.to_string()),
+                ("sst_id".to_string(), sst_id.value().to_string()),
+                (
+                    "sst_level".to_string(),
+                    format!("sorted_run:{SORTED_RUN_ID}"),
+                ),
+                ("filter_name".to_string(), FILTER_NAME.to_string()),
+                ("result".to_string(), filter_result.to_string()),
+            ])
+        );
+    }
+
     // Three doubles cover the range tests:
     // - `abstaining_filter` stands in for a policy that indexes keys alone,
     //   which cannot answer a range and so always matches.
@@ -3130,9 +3245,12 @@ mod tests {
 
         // AND logic: one filter abstains, so the verdict is the context
         // filter's alone. This is how a range scan is pruned in practice.
-        evaluator
-            .evaluate(&[abstaining_filter(), context_parity_filter(0)])
-            .await;
+        evaluator.evaluate(
+            &[abstaining_filter(), context_parity_filter(0)],
+            SsTableId::new(Ulid::new()),
+            None,
+            &ReadTrace::new(None),
+        );
 
         assert!(evaluator.is_filtered_out());
         assert_eq!(
@@ -3146,9 +3264,12 @@ mod tests {
         let (recorder, db_stats) = stats();
         let mut evaluator = range_evaluator(context(0), Some(db_stats));
 
-        evaluator
-            .evaluate(&[abstaining_filter(), context_parity_filter(0)])
-            .await;
+        evaluator.evaluate(
+            &[abstaining_filter(), context_parity_filter(0)],
+            SsTableId::new(Ulid::new()),
+            None,
+            &ReadTrace::new(None),
+        );
         assert!(!evaluator.is_filtered_out());
 
         // Any row in the view's range confirms a range verdict, so no false
@@ -3167,7 +3288,12 @@ mod tests {
         let (recorder, db_stats) = stats();
         let mut evaluator = range_evaluator(context(0), Some(db_stats));
 
-        evaluator.evaluate(&[context_parity_filter(0)]).await;
+        evaluator.evaluate(
+            &[context_parity_filter(0)],
+            SsTableId::new(Ulid::new()),
+            None,
+            &ReadTrace::new(None),
+        );
         evaluator.notify_finished_iteration();
 
         assert_eq!(
@@ -3202,12 +3328,15 @@ mod tests {
         let (recorder, db_stats) = stats();
         let mut evaluator = range_evaluator(context(0), Some(db_stats));
 
-        evaluator
-            .evaluate(&[bounds_filter((
+        evaluator.evaluate(
+            &[bounds_filter((
                 Included(Bytes::from_static(b"a")),
                 Excluded(Bytes::from_static(b"z")),
-            ))])
-            .await;
+            ))],
+            SsTableId::new(Ulid::new()),
+            None,
+            &ReadTrace::new(None),
+        );
 
         assert!(!evaluator.is_filtered_out());
         assert_eq!(
@@ -3273,6 +3402,7 @@ mod tests {
                 table,
                 table_store,
                 options,
+                None,
                 Some(db_stats),
             )
             .await
@@ -3312,6 +3442,7 @@ mod tests {
             table,
             table_store,
             SstIteratorOptions::default(),
+            None,
             Some(db_stats),
         )
         .await
