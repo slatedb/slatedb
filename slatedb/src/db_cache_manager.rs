@@ -12,6 +12,7 @@ use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::manifest::ManifestCore;
 use crate::partitioned_keyspace::partitions_covering_range;
+use crate::reader::ReadTrace;
 use crate::tablestore::TableStore;
 
 fn find_sst<'a>(
@@ -196,7 +197,13 @@ async fn warm_filters(
         return Ok(());
     }
     table_store
-        .read_filters(handle, true, Some(segment.clone()))
+        .read_filters(
+            handle,
+            true,
+            Some(segment.clone()),
+            &ReadTrace::new(None),
+            None,
+        )
         .await?;
     Ok(())
 }
@@ -226,7 +233,13 @@ async fn ensure_index(
     let result: &Result<Arc<SsTableIndexOwned>, SlateDBError> = index_cell
         .get_or_init(|| async {
             table_store
-                .read_index(handle, true, Some(segment.clone()))
+                .read_index(
+                    handle,
+                    true,
+                    Some(segment.clone()),
+                    &ReadTrace::new(None),
+                    None,
+                )
                 .await
         })
         .await;
@@ -277,7 +290,7 @@ mod tests {
             .await
             .expect("open_sst");
         let index = table_store
-            .read_index(&handle, false, Some(segment))
+            .read_index(&handle, false, Some(segment), &ReadTrace::new(None), None)
             .await
             .expect("read_index");
         let cache = table_store.cache().expect("cache configured").clone();
@@ -297,7 +310,13 @@ mod tests {
             .await
             .expect("open_sst");
         let index = table_store
-            .read_index(&handle, false, Some(Bytes::new()))
+            .read_index(
+                &handle,
+                false,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .expect("read_index");
         let block_idx =

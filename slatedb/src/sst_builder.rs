@@ -443,6 +443,7 @@ mod tests {
     use crate::filter_policy::{BloomFilterPolicy, FilterQuery};
     use crate::format::block::Block;
     use crate::prefix_extractor::PrefixExtractor;
+    use crate::reader::ReadTrace;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::{assert_iterator, build_test_sst};
@@ -860,7 +861,13 @@ mod tests {
             .unwrap();
         assert_eq!(encoded_info, sst_handle_from_store.info);
         let index = table_store
-            .read_index(&sst_handle_from_store, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle_from_store,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         let sst_info_from_store = sst_handle_from_store.info;
@@ -927,11 +934,23 @@ mod tests {
             .await
             .unwrap();
         let index = table_store
-            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         let filters = table_store
-            .read_filters(&sst_handle, true, Some(Bytes::new()))
+            .read_filters(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert!(!filters.is_empty());
@@ -1019,11 +1038,23 @@ mod tests {
             .await
             .unwrap();
         let index = table_store
-            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         let filters = table_store
-            .read_filters(&sst_handle, true, Some(Bytes::new()))
+            .read_filters(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert!(!filters.is_empty());
@@ -1169,7 +1200,13 @@ mod tests {
             .unwrap();
         assert_eq!(encoded_info, sst_handle_from_store.info);
         let index = table_store
-            .read_index(&sst_handle_from_store, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle_from_store,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1413,11 +1450,23 @@ mod tests {
             .await
             .unwrap();
         let index = table_store
-            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         let filters = table_store
-            .read_filters(&sst_handle, true, Some(Bytes::new()))
+            .read_filters(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert!(!filters.is_empty());
@@ -1478,7 +1527,13 @@ mod tests {
             .await
             .unwrap();
         let index = table_store
-            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
 
@@ -2019,7 +2074,13 @@ mod tests {
 
         // --- Both sub-filters decoded correctly ---
         let filters = table_store
-            .read_filters(&handle, false, Some(Bytes::new()))
+            .read_filters(
+                &handle,
+                false,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -2066,7 +2127,13 @@ mod tests {
             .await
             .unwrap();
         let partial = store_partial
-            .read_filters(&handle_partial, false, Some(Bytes::new()))
+            .read_filters(
+                &handle_partial,
+                false,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
