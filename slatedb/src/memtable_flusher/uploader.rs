@@ -616,7 +616,7 @@ mod tests {
             panic!("expected UploadComplete");
         };
         let handle = &event.segments[0].sst_handle;
-        let filter_key: CachedKey = (handle.id, handle.info.filter_offset).into();
+        let filter_key = CachedKey::filter(handle.id);
 
         assert!(cache.get_filter(&filter_key).await.unwrap().is_some());
         assert_eq!(cache.entry_count(), 1);

@@ -11,6 +11,7 @@
 //!
 //! To use the cache, you need to configure the [DbOptions](crate::config::DbOptions) with the desired cache implementation.
 
+use std::hash::{Hash, Hasher};
 use std::ops::{Bound, RangeBounds};
 #[cfg(feature = "foyer")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -342,19 +343,70 @@ impl DbCacheAndScope {
     }
 }
 
+/// What a cache entry holds.
+///
+/// A data block is identified by its byte offset in the SST. The three
+/// metadata sections need no offset, so their keys follow from the SST id
+/// alone, and a caller that holds only the id can still evict them.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum CachedKind {
+    Block(u64),
+    Index,
+    Filter,
+    Stats,
+}
+
+/// Values that stand for the metadata kinds in the `u64` slot that older keys
+/// used for an offset. No block starts this far into an SST, so they never
+/// collide with a block offset.
+const INDEX_KIND: u64 = u64::MAX;
+const FILTER_KIND: u64 = u64::MAX - 1;
+const STATS_KIND: u64 = u64::MAX - 2;
+
+impl CachedKind {
+    /// The `u64` an older key stored in place of this kind. Hashing and disk
+    /// serialization use this, so a block key hashes and serializes exactly
+    /// as it did when the field was a plain offset.
+    pub(crate) fn as_u64(self) -> u64 {
+        match self {
+            CachedKind::Block(offset) => offset,
+            CachedKind::Index => INDEX_KIND,
+            CachedKind::Filter => FILTER_KIND,
+            CachedKind::Stats => STATS_KIND,
+        }
+    }
+
+    pub(crate) fn from_u64(value: u64) -> Self {
+        match value {
+            INDEX_KIND => CachedKind::Index,
+            FILTER_KIND => CachedKind::Filter,
+            STATS_KIND => CachedKind::Stats,
+            offset => CachedKind::Block(offset),
+        }
+    }
+}
+
 /// A key used to identify a cached entry.
 ///
 /// The key is composed of a scope ID (set per [`DbCacheWrapper`] instance), an SSTable ID,
-/// and a block ID. `db_cache_id` is readable through [`Self::db_cache_id`]; the other fields stay
-/// private to this module, so the SST/block layout is not exposed publicly.
+/// and what the entry holds. `db_cache_id` is readable through [`Self::db_cache_id`]; the
+/// other fields stay private to this module, so the SST/block layout is not exposed publicly.
 #[non_exhaustive]
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CachedKey {
     /// Scope identifier set per `DbCacheWrapper`, so multiple `Db` instances sharing
     /// one cache don't collide on WAL or compacted entries.
     pub(crate) db_cache_id: u64,
     pub(crate) sst_id: SsTableId,
-    pub(crate) block_id: u64,
+    pub(crate) kind: CachedKind,
+}
+
+impl Hash for CachedKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.db_cache_id.hash(state);
+        self.sst_id.hash(state);
+        self.kind.as_u64().hash(state);
+    }
 }
 
 impl CachedKey {
@@ -366,22 +418,43 @@ impl CachedKey {
         self.db_cache_id
     }
 
+    pub(crate) fn block(sst_id: SsTableId, offset: u64) -> Self {
+        Self::new(sst_id, CachedKind::Block(offset))
+    }
+
+    pub(crate) fn index(sst_id: SsTableId) -> Self {
+        Self::new(sst_id, CachedKind::Index)
+    }
+
+    pub(crate) fn filter(sst_id: SsTableId) -> Self {
+        Self::new(sst_id, CachedKind::Filter)
+    }
+
+    pub(crate) fn stats(sst_id: SsTableId) -> Self {
+        Self::new(sst_id, CachedKind::Stats)
+    }
+
+    fn new(sst_id: SsTableId, kind: CachedKind) -> Self {
+        Self {
+            db_cache_id: 0,
+            sst_id,
+            kind,
+        }
+    }
+
     fn with_scope(&self, db_cache_id: u64) -> Self {
         Self {
             db_cache_id,
             sst_id: self.sst_id,
-            block_id: self.block_id,
+            kind: self.kind,
         }
     }
 }
 
+/// A block key from an SST id and a block offset.
 impl From<(SsTableId, u64)> for CachedKey {
-    fn from((sst_id, block_id): (SsTableId, u64)) -> Self {
-        Self {
-            db_cache_id: 0,
-            sst_id,
-            block_id,
-        }
+    fn from((sst_id, offset): (SsTableId, u64)) -> Self {
+        Self::block(sst_id, offset)
     }
 }
 
@@ -2291,5 +2364,62 @@ mod tests {
         view.remove(&key).await;
         assert!(inner.get_index(&key).await.unwrap().is_none());
         assert_eq!(inner.entry_count(), 0);
+    }
+
+    /// The hybrid cache locates a disk entry by the hash of its in-memory key,
+    /// so a block key must hash exactly as it did when the field was an offset.
+    #[test]
+    fn test_block_key_hashes_as_the_old_offset_key_did() {
+        use std::hash::{Hash, Hasher};
+
+        /// The key layout before `CachedKind`, with the derived `Hash` it had.
+        #[derive(Hash)]
+        struct OldCachedKey {
+            db_cache_id: u64,
+            sst_id: SsTableId,
+            block_id: u64,
+        }
+
+        fn hash_of<T: Hash>(value: &T) -> u64 {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        let old = OldCachedKey {
+            db_cache_id: 7,
+            sst_id: SST_ID,
+            block_id: 4096,
+        };
+        let new = CachedKey::block(SST_ID, 4096).with_scope(7);
+        assert_eq!(hash_of(&new), hash_of(&old));
+
+        // A metadata key hashes as the sentinel the old layout never produced,
+        // so it cannot land on an old metadata entry's slot by accident.
+        let old_index = OldCachedKey {
+            db_cache_id: 7,
+            sst_id: SST_ID,
+            block_id: 4096,
+        };
+        assert_ne!(
+            hash_of(&CachedKey::index(SST_ID).with_scope(7)),
+            hash_of(&old_index)
+        );
+    }
+
+    #[test]
+    fn test_metadata_keys_never_collide_with_block_keys() {
+        let keys = [
+            CachedKey::index(SST_ID),
+            CachedKey::filter(SST_ID),
+            CachedKey::stats(SST_ID),
+            CachedKey::block(SST_ID, 0),
+            CachedKey::block(SST_ID, u64::MAX - 3),
+        ];
+        for (i, a) in keys.iter().enumerate() {
+            for b in &keys[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
     }
 }

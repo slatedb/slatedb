@@ -4,7 +4,7 @@
 //! of the indirection is to decouple the serialized format from the in-memory representation
 //! used by the rest of the codebase.
 
-use crate::db_cache::{CachedEntry, CachedItem, CachedKey, EncodedCachedFilter};
+use crate::db_cache::{CachedEntry, CachedItem, CachedKey, CachedKind, EncodedCachedFilter};
 use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::filter_policy::BloomFilterPolicy;
@@ -71,17 +71,17 @@ impl TryFrom<SerializedCachedKey> for CachedKey {
             SerializedCachedKey::V1(sst_id, block_id) => CachedKey {
                 db_cache_id: 0,
                 sst_id: sst_id.try_into()?,
-                block_id,
+                kind: CachedKind::from_u64(block_id),
             },
             SerializedCachedKey::V2(db_cache_id, sst_id, block_id) => CachedKey {
                 db_cache_id,
                 sst_id: sst_id.try_into()?,
-                block_id,
+                kind: CachedKind::from_u64(block_id),
             },
             SerializedCachedKey::V3(db_cache_id, sst_id, block_id) => CachedKey {
                 db_cache_id,
                 sst_id: sst_id.into(),
-                block_id,
+                kind: CachedKind::from_u64(block_id),
             },
         })
     }
@@ -89,7 +89,7 @@ impl TryFrom<SerializedCachedKey> for CachedKey {
 
 impl From<CachedKey> for SerializedCachedKey {
     fn from(value: CachedKey) -> Self {
-        SerializedCachedKey::V3(value.db_cache_id, value.sst_id.into(), value.block_id)
+        SerializedCachedKey::V3(value.db_cache_id, value.sst_id.into(), value.kind.as_u64())
     }
 }
 
@@ -257,7 +257,7 @@ impl<'de> Deserialize<'de> for CachedEntry {
 mod tests {
     use super::{SerializedCachedKey, SerializedSsTableId};
     use crate::block_iterator::BlockIteratorLatest;
-    use crate::db_cache::{CachedEntry, CachedItem, CachedKey};
+    use crate::db_cache::{CachedEntry, CachedItem, CachedKey, CachedKind};
     use crate::db_state::SsTableId;
     use crate::filter_policy::{BloomFilterPolicy, FilterPolicy, NamedFilter};
     use crate::flatbuffer_types::{
@@ -289,7 +289,7 @@ mod tests {
         let key = CachedKey {
             db_cache_id: 0,
             sst_id: SsTableId::from(Ulid::from((123, 456))),
-            block_id: 99,
+            kind: CachedKind::Block(99),
         };
 
         let encoded = bincode::serialize(&key).unwrap();
@@ -303,7 +303,7 @@ mod tests {
         let key = CachedKey {
             db_cache_id: 5,
             sst_id: SsTableId::from(Ulid::from_parts(123, 0)),
-            block_id: 99,
+            kind: CachedKind::Block(99),
         };
 
         let encoded = bincode::serialize(&key).unwrap();
@@ -313,7 +313,7 @@ mod tests {
             SerializedCachedKey::V3(db_cache_id, SerializedSsTableId(sst_id), block_id) => {
                 assert_eq!(db_cache_id, key.db_cache_id);
                 assert_eq!(sst_id, key.sst_id.value());
-                assert_eq!(block_id, key.block_id);
+                assert_eq!(block_id, key.kind.as_u64());
             }
             _ => panic!("expected V3 cache key"),
         }
@@ -325,23 +325,23 @@ mod tests {
         let expected_v1 = CachedKey {
             db_cache_id: 0,
             sst_id: SsTableId::from(sst_id),
-            block_id: 98,
+            kind: CachedKind::Block(98),
         };
         let expected_v2 = CachedKey {
             db_cache_id: 5,
             sst_id: SsTableId::from(sst_id),
-            block_id: 99,
+            kind: CachedKind::Block(99),
         };
 
         let encoded_v1 = bincode::serialize(&LegacySerializedCachedKey::V1(
             LegacySerializedSsTableOrWalId::Compacted(sst_id),
-            expected_v1.block_id,
+            expected_v1.kind.as_u64(),
         ))
         .unwrap();
         let encoded_v2 = bincode::serialize(&LegacySerializedCachedKey::V2(
             expected_v2.db_cache_id,
             LegacySerializedSsTableOrWalId::Compacted(sst_id),
-            expected_v2.block_id,
+            expected_v2.kind.as_u64(),
         ))
         .unwrap();
 
@@ -493,5 +493,20 @@ mod tests {
         index_builder.finish(index_wip, None);
         let index_bytes = Bytes::copy_from_slice(index_builder.finished_data());
         SsTableIndexOwned::new(index_bytes).unwrap()
+    }
+
+    #[test]
+    fn test_metadata_keys_round_trip_through_v3() {
+        let sst_id = SsTableId::from(Ulid::from_parts(1, 0));
+        for key in [
+            CachedKey::index(sst_id),
+            CachedKey::filter(sst_id),
+            CachedKey::stats(sst_id),
+        ] {
+            let serialized: SerializedCachedKey = key.clone().into();
+            assert!(matches!(serialized, SerializedCachedKey::V3(..)));
+            let decoded: CachedKey = serialized.try_into().unwrap();
+            assert_eq!(decoded, key);
+        }
     }
 }

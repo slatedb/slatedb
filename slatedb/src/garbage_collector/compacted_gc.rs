@@ -1004,8 +1004,8 @@ mod tests {
 
     /// Whether the SST's index and filter are in the cache, in that order.
     async fn metadata_is_cached(cache: &Arc<dyn DbCache>, handle: &SsTableHandle) -> (bool, bool) {
-        let index_key: CachedKey = (handle.id, handle.info.index_offset).into();
-        let filter_key: CachedKey = (handle.id, handle.info.filter_offset).into();
+        let index_key = CachedKey::index(handle.id);
+        let filter_key = CachedKey::filter(handle.id);
         (
             cache.get_index(&index_key).await.unwrap().is_some(),
             cache.get_filter(&filter_key).await.unwrap().is_some(),

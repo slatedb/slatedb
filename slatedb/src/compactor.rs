@@ -1479,7 +1479,7 @@ mod tests {
     };
     use crate::db::Db;
     use crate::db_cache::test_utils::TestCache;
-    use crate::db_cache::CacheTarget;
+    use crate::db_cache::{CacheTarget, CachedKind};
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
@@ -1835,7 +1835,6 @@ mod tests {
             .collect();
         assert_eq!(output_ssts.len(), 1);
         let view = output_ssts[0];
-        let info = &view.sst.info;
 
         let (_, _, table_store) = build_test_stores(os);
         let index = table_store
@@ -1845,28 +1844,30 @@ mod tests {
         let block_metas = index.borrow().block_meta();
         assert_eq!(block_metas.len(), 4);
 
-        let mut expected_ids: Vec<u64> = expected_entries
+        let mut expected_kinds: Vec<CachedKind> = expected_entries
             .iter()
             .map(|entry| match entry {
-                ExpectedEntry::Index => info.index_offset,
-                ExpectedEntry::Filter => info.filter_offset,
-                ExpectedEntry::Stats => info.stats_offset,
-                ExpectedEntry::DataBlock(position) => block_metas.get(*position).offset(),
+                ExpectedEntry::Index => CachedKind::Index,
+                ExpectedEntry::Filter => CachedKind::Filter,
+                ExpectedEntry::Stats => CachedKind::Stats,
+                ExpectedEntry::DataBlock(position) => {
+                    CachedKind::Block(block_metas.get(*position).offset())
+                }
             })
             .collect();
-        expected_ids.sort();
+        expected_kinds.sort_by_key(|kind| kind.as_u64());
 
         // Entries written by the flush carry the L0 SST's id, so filtering on
         // the output id leaves only compaction output entries.
-        let mut cached_ids: Vec<u64> = cache
+        let mut cached_kinds: Vec<CachedKind> = cache
             .keys()
             .iter()
             .filter(|key| key.sst_id == view.sst.id)
-            .map(|key| key.block_id)
+            .map(|key| key.kind)
             .collect();
-        cached_ids.sort();
+        cached_kinds.sort_by_key(|kind| kind.as_u64());
 
-        assert_eq!(cached_ids, expected_ids);
+        assert_eq!(cached_kinds, expected_kinds);
         db.close().await.unwrap();
     }
 

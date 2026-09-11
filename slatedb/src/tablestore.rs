@@ -198,7 +198,7 @@ impl TableStore {
         if targets.contains(&CacheTarget::Index) {
             cache
                 .insert(
-                    (sst_table_id, encoded_sst.info.index_offset).into(),
+                    CachedKey::index(sst_table_id),
                     CachedEntry::with_sst_index(Arc::new(encoded_sst.index.clone())),
                 )
                 .await;
@@ -206,7 +206,7 @@ impl TableStore {
         if targets.contains(&CacheTarget::Filters) && !encoded_sst.filters.is_empty() {
             cache
                 .insert(
-                    (sst_table_id, encoded_sst.info.filter_offset).into(),
+                    CachedKey::filter(sst_table_id),
                     CachedEntry::with_filters(encoded_sst.filters.clone()),
                 )
                 .await;
@@ -215,7 +215,7 @@ impl TableStore {
             if let Some(stats) = &encoded_sst.stats {
                 cache
                     .insert(
-                        (sst_table_id, encoded_sst.info.stats_offset).into(),
+                        CachedKey::stats(sst_table_id),
                         CachedEntry::with_sst_stats(Arc::new(stats.clone())),
                     )
                     .await;
@@ -397,7 +397,7 @@ impl TableStore {
         if self.sst_format.filter_policies.is_empty() || handle.info.filter_len == 0 {
             return Ok(Arc::from([]));
         }
-        let cache_key: CachedKey = (handle.id, handle.info.filter_offset).into();
+        let cache_key = CachedKey::filter(handle.id);
         if let Some(cache) = self.cache_for_reads() {
             // cache_blocks=true: dedup-aware fetch; concurrent callers collapse onto
             // one loader. cache_blocks=false: read-only lookup that won't pollute the
@@ -456,7 +456,7 @@ impl TableStore {
         if handle.info.stats_len == 0 {
             return Ok(None);
         }
-        let cache_key = (handle.id, handle.info.stats_offset).into();
+        let cache_key = CachedKey::stats(handle.id);
         if let Some(cache) = self.cache_for_reads() {
             // See `read_filters` for the rationale on the fall-through path.
             let entry = if cache_blocks {
@@ -497,7 +497,7 @@ impl TableStore {
         cache_blocks: bool,
         segment: Option<Bytes>,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
-        let cache_key = (handle.id, handle.info.index_offset).into();
+        let cache_key = CachedKey::index(handle.id);
         if let Some(cache) = self.cache_for_reads() {
             // See `read_filters` for the rationale on the fall-through path.
             let entry = if cache_blocks {
@@ -960,23 +960,9 @@ impl TableStore {
         let Some(ref cache) = self.cache else {
             return;
         };
-        cache
-            .remove(&(handle.id, handle.info.index_offset).into())
-            .await;
-        // Only evict filter/stats when those sections exist. Otherwise
-        // SsTableInfo's filter_offset collides with index_offset (filter_len
-        // == 0) and stats_offset collides with the first data block
-        // (stats_offset == 0).
-        if handle.info.filter_len > 0 {
-            cache
-                .remove(&(handle.id, handle.info.filter_offset).into())
-                .await;
-        }
-        if handle.info.stats_len > 0 {
-            cache
-                .remove(&(handle.id, handle.info.stats_offset).into())
-                .await;
-        }
+        cache.remove(&CachedKey::index(handle.id)).await;
+        cache.remove(&CachedKey::filter(handle.id)).await;
+        cache.remove(&CachedKey::stats(handle.id)).await;
     }
 }
 
@@ -1739,7 +1725,7 @@ mod tests {
             .await
             .unwrap();
         assert!(meta_cache
-            .get_index(&(handle.id, handle.info.index_offset).into())
+            .get_index(&CachedKey::index(handle.id))
             .await
             .unwrap()
             .is_none());
@@ -1749,7 +1735,7 @@ mod tests {
             .await
             .unwrap();
         assert!(meta_cache
-            .get_index(&(handle.id, handle.info.index_offset).into())
+            .get_index(&CachedKey::index(handle.id))
             .await
             .unwrap()
             .is_some());
@@ -1808,7 +1794,7 @@ mod tests {
             .unwrap();
         assert!(!filters.is_empty());
         assert!(meta_cache
-            .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .get_filter(&CachedKey::filter(handle.id))
             .await
             .unwrap()
             .is_none());
@@ -1818,7 +1804,7 @@ mod tests {
             .await
             .unwrap();
         assert!(meta_cache
-            .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .get_filter(&CachedKey::filter(handle.id))
             .await
             .unwrap()
             .is_some());
@@ -1875,7 +1861,7 @@ mod tests {
             .unwrap();
         assert!(stats.is_some());
         assert!(meta_cache
-            .get_stats(&(handle.id, handle.info.stats_offset).into())
+            .get_stats(&CachedKey::stats(handle.id))
             .await
             .unwrap()
             .is_none());
@@ -1885,7 +1871,7 @@ mod tests {
             .await
             .unwrap();
         assert!(meta_cache
-            .get_stats(&(handle.id, handle.info.stats_offset).into())
+            .get_stats(&CachedKey::stats(handle.id))
             .await
             .unwrap()
             .is_some());
@@ -2013,9 +1999,9 @@ mod tests {
         let id = SsTableId::from(ulid::Ulid::new());
         let sst = build_test_sst(&ts.sst_format, 3).await;
         let data_key: CachedKey = (id, sst.unconsumed_blocks[0].offset).into();
-        let index_key: CachedKey = (id, sst.info.index_offset).into();
-        let filter_key: CachedKey = (id, sst.info.filter_offset).into();
-        let stats_key: CachedKey = (id, sst.info.stats_offset).into();
+        let index_key = CachedKey::index(id);
+        let filter_key = CachedKey::filter(id);
+        let stats_key = CachedKey::stats(id);
 
         ts.write_sst(&id, &sst, Some(Bytes::new())).await.unwrap();
 
@@ -2068,9 +2054,9 @@ mod tests {
         }
 
         let (handle, _) = writer.close().await.unwrap();
-        let index_key: CachedKey = (id, handle.info.index_offset).into();
-        let filter_key: CachedKey = (id, handle.info.filter_offset).into();
-        let stats_key: CachedKey = (id, handle.info.stats_offset).into();
+        let index_key = CachedKey::index(id);
+        let filter_key = CachedKey::filter(id);
+        let stats_key = CachedKey::stats(id);
         let index = cache
             .get_index(&index_key)
             .await
@@ -2166,9 +2152,9 @@ mod tests {
                 .unwrap();
         }
 
-        let (handle, _) = writer.close().await.unwrap();
+        let _ = writer.close().await.unwrap();
 
-        let index_key: CachedKey = (id, handle.info.index_offset).into();
+        let index_key = CachedKey::index(id);
         let index = cache
             .get_index(&index_key)
             .await
@@ -2208,21 +2194,21 @@ mod tests {
             .await
             .unwrap();
 
-        let (handle, _) = writer.close().await.unwrap();
+        let _ = writer.close().await.unwrap();
 
         assert_eq!(cache.entry_count(), 2);
         assert!(cache
-            .get_index(&(id, handle.info.index_offset).into())
+            .get_index(&CachedKey::index(id))
             .await
             .unwrap()
             .is_some());
         assert!(cache
-            .get_filter(&(id, handle.info.filter_offset).into())
+            .get_filter(&CachedKey::filter(id))
             .await
             .unwrap()
             .is_some());
         assert!(cache
-            .get_stats(&(id, handle.info.stats_offset).into())
+            .get_stats(&CachedKey::stats(id))
             .await
             .unwrap()
             .is_none());

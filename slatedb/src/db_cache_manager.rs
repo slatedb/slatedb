@@ -746,9 +746,9 @@ mod tests {
     async fn should_populate_cache_for_filters_target() {
         // given
         let (db, sst_id, handle, cache) = open_db_with_evicted_meta_sections().await;
-        let filter_key: CachedKey = (sst_id, handle.info.filter_offset).into();
-        let index_key: CachedKey = (sst_id, handle.info.index_offset).into();
-        let stats_key: CachedKey = (sst_id, handle.info.stats_offset).into();
+        let filter_key = CachedKey::filter(sst_id);
+        let index_key = CachedKey::index(sst_id);
+        let stats_key = CachedKey::stats(sst_id);
         assert!(handle.info.filter_len > 0, "expected SST to carry filters");
         assert!(cache.get_filter(&filter_key).await.unwrap().is_none());
 
@@ -774,10 +774,10 @@ mod tests {
     #[tokio::test]
     async fn should_populate_cache_for_index_target() {
         // given
-        let (db, sst_id, handle, cache) = open_db_with_evicted_meta_sections().await;
-        let filter_key: CachedKey = (sst_id, handle.info.filter_offset).into();
-        let index_key: CachedKey = (sst_id, handle.info.index_offset).into();
-        let stats_key: CachedKey = (sst_id, handle.info.stats_offset).into();
+        let (db, sst_id, _, cache) = open_db_with_evicted_meta_sections().await;
+        let filter_key = CachedKey::filter(sst_id);
+        let index_key = CachedKey::index(sst_id);
+        let stats_key = CachedKey::stats(sst_id);
         assert!(cache.get_index(&index_key).await.unwrap().is_none());
 
         // when
@@ -803,9 +803,9 @@ mod tests {
     async fn should_populate_cache_for_stats_target() {
         // given
         let (db, sst_id, handle, cache) = open_db_with_evicted_meta_sections().await;
-        let filter_key: CachedKey = (sst_id, handle.info.filter_offset).into();
-        let index_key: CachedKey = (sst_id, handle.info.index_offset).into();
-        let stats_key: CachedKey = (sst_id, handle.info.stats_offset).into();
+        let filter_key = CachedKey::filter(sst_id);
+        let index_key = CachedKey::index(sst_id);
+        let stats_key = CachedKey::stats(sst_id);
         assert!(handle.info.stats_len > 0, "expected SST to carry stats");
         assert!(cache.get_stats(&stats_key).await.unwrap().is_none());
 

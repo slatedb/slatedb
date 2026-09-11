@@ -1150,8 +1150,8 @@ mod tests {
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_generator::OrderedBytesGenerator;
     use crate::db_cache::test_utils::TestCache;
-    use crate::db_cache::DbCache;
     use crate::db_cache::SplitCache;
+    use crate::db_cache::{CachedKey, DbCache};
     use crate::db_state::{SsTableId, SsTableView};
     use crate::db_stats::DbStats;
     use crate::filter_policy::{
@@ -1485,7 +1485,7 @@ mod tests {
             BlockCachePolicy::default(),
         ));
 
-        let filter_key = (handle.sst.id, handle.sst.info.filter_offset).into();
+        let filter_key = CachedKey::filter(handle.sst.id);
 
         for cache_blocks in [false, true] {
             meta_cache.remove(&filter_key).await;
@@ -1574,7 +1574,7 @@ mod tests {
             BlockCachePolicy::default(),
         ));
 
-        let index_key = (handle.sst.id, handle.sst.info.index_offset).into();
+        let index_key = CachedKey::index(handle.sst.id);
 
         for cache_blocks in [false, true] {
             meta_cache.remove(&index_key).await;
