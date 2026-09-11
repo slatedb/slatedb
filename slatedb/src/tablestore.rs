@@ -1970,7 +1970,10 @@ mod tests {
             HashMap::from([
                 ("trace_id".to_string(), TRACE_ID.to_string()),
                 ("sst_id".to_string(), id.value().to_string()),
-                ("level".to_string(), format!("sorted_run:{SORTED_RUN_ID}")),
+                (
+                    "sst_level".to_string(),
+                    format!("sorted_run:{SORTED_RUN_ID}"),
+                ),
                 ("cached".to_string(), cache_hit.to_string()),
             ])
         );

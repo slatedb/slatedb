@@ -102,13 +102,13 @@ impl ReadTrace {
     ) -> tracing::Span {
         if let Some(tracing_options) = self.tracing_options.as_ref() {
             let sst_id = sst_id.value().to_string();
-            let level = Self::format_sst_level(sst_level);
+            let sst_level = Self::format_sst_level(sst_level);
             tracing::info_span!(
                 parent: &self.read_span,
                 "slatedb.read.read_filters",
                 trace_id = tracing_options.trace_id.as_str(),
                 sst_id = sst_id.as_str(),
-                level = level.as_str(),
+                sst_level = sst_level.as_str(),
                 cached = tracing::field::Empty,
             )
         } else {
@@ -120,18 +120,18 @@ impl ReadTrace {
         &self,
         sst_id: SsTableId,
         sst_level: Option<&SstTraceLevel>,
-        name: impl AsRef<str>,
+        filter_name: impl AsRef<str>,
     ) -> tracing::Span {
         if let Some(tracing_options) = self.tracing_options.as_ref() {
             let sst_id = sst_id.value().to_string();
-            let level = Self::format_sst_level(sst_level);
+            let sst_level = Self::format_sst_level(sst_level);
             tracing::info_span!(
                 parent: &self.read_span,
                 "slatedb.read.evaluate_filter",
                 trace_id = tracing_options.trace_id.as_str(),
                 sst_id = sst_id.as_str(),
-                level = level.as_str(),
-                name = name.as_ref(),
+                sst_level = sst_level.as_str(),
+                filter_name = filter_name.as_ref(),
                 result = tracing::field::Empty,
             )
         } else {
@@ -2164,7 +2164,7 @@ mod tests {
             Some(expected_sst_id)
         );
         assert_eq!(
-            read_filter.fields.get("level").map(String::as_str),
+            read_filter.fields.get("sst_level").map(String::as_str),
             Some("sorted_run:0")
         );
         assert_eq!(
@@ -2179,11 +2179,14 @@ mod tests {
             Some(expected_sst_id)
         );
         assert_eq!(
-            evaluate_filter.fields.get("level").map(String::as_str),
+            evaluate_filter.fields.get("sst_level").map(String::as_str),
             Some("sorted_run:0")
         );
         assert_eq!(
-            evaluate_filter.fields.get("name").map(String::as_str),
+            evaluate_filter
+                .fields
+                .get("filter_name")
+                .map(String::as_str),
             Some("_bf")
         );
         assert_eq!(
