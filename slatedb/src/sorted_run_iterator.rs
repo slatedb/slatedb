@@ -620,7 +620,10 @@ mod tests {
         }
         let encoded = builder.build().await.unwrap();
         let id = SsTableId::from(ulid::Ulid::new());
-        let handle = table_store.write_sst(&id, &encoded).await.unwrap();
+        let handle = table_store
+            .write_sst(&id, &encoded, Some(Bytes::new()))
+            .await
+            .unwrap();
         SsTableView::identity(handle)
     }
 
