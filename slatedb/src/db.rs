@@ -3866,7 +3866,13 @@ mod tests {
         let index = db
             .inner
             .table_store
-            .read_index(&view.sst, true, Some(Bytes::new()))
+            .read_index(
+                &view.sst,
+                true,
+                Some(Bytes::new()),
+                &crate::reader::ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert!(!index.borrow().block_meta().is_empty());
