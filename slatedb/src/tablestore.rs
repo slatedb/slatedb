@@ -441,7 +441,7 @@ impl TableStore {
                     .get_filter(&cache_key)
                     .await
                     .unwrap_or(None)
-                    .map(CacheFetch::miss)
+                    .map(CacheFetch::hit)
             };
             if let Some(CacheFetch { entry, lookup }) = fetch {
                 record_read_filter_cached(&span, lookup);

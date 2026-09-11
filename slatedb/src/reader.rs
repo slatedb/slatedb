@@ -597,7 +597,7 @@ impl Reader {
                     range.clone(),
                     sr,
                     self.table_store.clone(),
-                    sst_iter_options.clone(),
+                    segment_options.clone(),
                     sst_tracing_context,
                     Some(self.db_stats.clone()),
                 )
