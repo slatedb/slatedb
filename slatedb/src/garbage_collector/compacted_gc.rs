@@ -3,7 +3,7 @@ use crate::{
     compactor_state::VersionedCompactions,
     compactor_state_protocols::CompactorStateReader,
     config::GarbageCollectorDirectoryOptions,
-    db_state::SsTableId,
+    db_state::{SsTableHandle, SsTableId},
     error::SlateDBError,
     manifest::{store::ManifestStore, Manifest, VersionedManifest},
     tablestore::TableStore,
@@ -11,7 +11,8 @@ use crate::{
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use log::error;
-use std::collections::HashSet;
+use parking_lot::Mutex;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::filter::retain_allowed_by_gc_filter;
@@ -25,6 +26,8 @@ pub(crate) struct CompactedGcTask {
     stats: Arc<GcStats>,
     compacted_options: GarbageCollectorDirectoryOptions,
     gc_filter: Option<Arc<dyn GcFilter>>,
+    /// Handles of SSTs seen in a live manifest, kept until SST deletion.
+    sst_handles: Arc<Mutex<HashMap<SsTableId, SsTableHandle>>>,
 }
 
 impl std::fmt::Debug for CompactedGcTask {
@@ -51,6 +54,7 @@ impl CompactedGcTask {
             stats,
             compacted_options,
             gc_filter,
+            sst_handles: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -75,7 +79,14 @@ impl CompactedGcTask {
             .manifest_store
             .read_referenced_manifests(manifest_id, manifest)
             .await?;
-        Ok(collect_active_ssts(active_manifests.values()))
+        let handles = collect_active_sst_handles(active_manifests.values());
+        let ids = handles.keys().copied().collect();
+        // Remembers each SST's handle so that the table store can evict its
+        // cache entries when GC deletes it later.
+        if self.table_store.cache().is_some() {
+            self.sst_handles.lock().extend(handles);
+        }
+        Ok(ids)
     }
 
     /// Returns the minimum starting timestamp of:
@@ -133,24 +144,36 @@ impl CompactedGcTask {
                     error!("error deleting SST [id={:?}, error={}]", id, e);
                 } else {
                     self.stats.gc_compacted_count.increment(1);
+                    let handle = self.sst_handles.lock().remove(&id);
+                    match handle {
+                        Some(handle) => {
+                            self.table_store.evict_sst_metadata_from_cache(&handle).await
+                        }
+                        None => log::debug!(
+                            "no remembered handle for deleted SST, skipping cache eviction [id={:?}]",
+                            id
+                        ),
+                    }
                 }
             })
             .await;
     }
 }
 
-/// Collect every SST id referenced by `manifests`, across the unsegmented
-/// tree and each named segment (RFC-0024).
-fn collect_active_ssts<'a>(manifests: impl Iterator<Item = &'a Manifest>) -> HashSet<SsTableId> {
-    let mut active = HashSet::new();
+/// The handle of every SST referenced by `manifests`, keyed by id, across the
+/// unsegmented tree and each named segment (RFC-0024).
+fn collect_active_sst_handles<'a>(
+    manifests: impl Iterator<Item = &'a Manifest>,
+) -> HashMap<SsTableId, SsTableHandle> {
+    let mut active = HashMap::new();
     for manifest in manifests {
         for tree in manifest.core.trees() {
             for view in tree.l0.iter() {
-                active.insert(view.sst.id);
+                active.insert(view.sst.id, view.sst.clone());
             }
             for sr in tree.compacted.iter() {
                 for view in sr.sst_views() {
-                    active.insert(view.sst.id);
+                    active.insert(view.sst.id, view.sst.clone());
                 }
             }
         }
@@ -273,6 +296,8 @@ mod tests {
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
+    use crate::db_cache::test_utils::TestCache;
+    use crate::db_cache::{CachedKey, DbCache, NoInsertCache};
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::StoredManifest;
@@ -282,9 +307,32 @@ mod tests {
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path};
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::metrics::MetricsRecorderHelper;
     use slatedb_common::DbRand;
     use std::collections::{BTreeMap, VecDeque};
     use std::time::Duration;
+
+    /// A compacted GC task over `store`, deleting through `table_store`.
+    fn gc_task(store: Arc<InMemory>, table_store: Arc<TableStore>) -> CompactedGcTask {
+        CompactedGcTask::new(
+            Arc::new(ManifestStore::new(&Path::from("/root"), store.clone())),
+            Arc::new(CompactionsStore::new(&Path::from("/root"), store)),
+            table_store,
+            Arc::new(GcStats::new(&MetricsRecorderHelper::noop())),
+            GarbageCollectorDirectoryOptions {
+                interval: None,
+                min_age: Duration::from_secs(5),
+                dry_run: false,
+            },
+            None,
+        )
+    }
+
+    fn collect_active_ssts<'a>(
+        manifests: impl Iterator<Item = &'a Manifest>,
+    ) -> HashSet<SsTableId> {
+        collect_active_sst_handles(manifests).into_keys().collect()
+    }
 
     #[tokio::test]
     async fn test_compacted_gc_respects_min_age_cutoff() {
@@ -358,7 +406,7 @@ mod tests {
             .push_back(SsTableView::identity(active_handle));
         stored_manifest.update(dirty).await.unwrap();
 
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let recorder = MetricsRecorderHelper::noop();
 
         // GC task with min_age = 5 seconds. Using utc_now at 10 seconds after the epoch
         // yields a configured_min_age_dt of 5 seconds.
@@ -464,7 +512,7 @@ mod tests {
             .push_back(SsTableView::identity(manifest_handle));
         stored_manifest.update(dirty).await.unwrap();
 
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let recorder = MetricsRecorderHelper::noop();
 
         // min_age = 0, so configured_min_age_dt == utc_now (10 seconds after epoch).
         // The manifest's most recent SST (3 seconds) is the smallest cutoff, so only
@@ -576,7 +624,7 @@ mod tests {
             min_age: Duration::from_secs(0),
             dry_run: false,
         };
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let recorder = MetricsRecorderHelper::noop();
         let stats = Arc::new(GcStats::new(&recorder));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
@@ -675,7 +723,7 @@ mod tests {
             min_age: Duration::from_secs(2),
             dry_run: false,
         };
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let recorder = MetricsRecorderHelper::noop();
         let stats = Arc::new(GcStats::new(&recorder));
         let task = CompactedGcTask::new(
             manifest_store.clone(),
@@ -843,7 +891,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_compacted_gc_evicts_deleted_sst_from_object_store_cache() {
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let recorder = MetricsRecorderHelper::noop();
         let main_store = Arc::new(InMemory::new());
         let cache_stats = Arc::new(CachedObjectStoreStats::new(&recorder));
         let temp_dir = tempfile::Builder::new()
@@ -915,23 +963,7 @@ mod tests {
         );
 
         // Call GC deletion directly, no need to test the decision here.
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
-        let compactions_store = Arc::new(CompactionsStore::new(
-            &Path::from("/root"),
-            main_store.clone(),
-        ));
-        let task = CompactedGcTask::new(
-            manifest_store,
-            compactions_store,
-            gc_table_store.clone(),
-            Arc::new(GcStats::new(&recorder)),
-            GarbageCollectorDirectoryOptions {
-                interval: None,
-                min_age: Duration::from_secs(5),
-                dry_run: false,
-            },
-            None,
-        );
+        let task = gc_task(main_store.clone(), gc_table_store.clone());
         task.maybe_delete_compacted_ssts(vec![id_to_delete]).await;
 
         let entry = cached_store.cache_storage.entry(&location, part_size);
@@ -939,5 +971,165 @@ mod tests {
             entry.cached_parts().await.unwrap().is_empty(),
             "sst should be evicted after delete"
         );
+    }
+
+    /// A main table store over `cache`. Writing an SST through it caches the
+    /// index and filters, as the default policy directs.
+    fn cached_main_table_store(
+        store: Arc<InMemory>,
+        format: &SsTableFormat,
+        cache: Arc<dyn DbCache>,
+    ) -> Arc<TableStore> {
+        Arc::new(TableStore::new(
+            store,
+            format.clone(),
+            Path::from("/root"),
+            Some(cache),
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ))
+    }
+
+    async fn write_test_sst(
+        table_store: &Arc<TableStore>,
+        format: &SsTableFormat,
+        id: SsTableId,
+    ) -> SsTableHandle {
+        let sst = build_test_sst(format, 1).await;
+        table_store
+            .write_sst(&id, &sst, Some(Bytes::new()))
+            .await
+            .unwrap()
+    }
+
+    /// Whether the SST's index and filter are in the cache, in that order.
+    async fn metadata_is_cached(cache: &Arc<dyn DbCache>, handle: &SsTableHandle) -> (bool, bool) {
+        let index_key: CachedKey = (handle.id, handle.info.index_offset).into();
+        let filter_key: CachedKey = (handle.id, handle.info.filter_offset).into();
+        (
+            cache.get_index(&index_key).await.unwrap().is_some(),
+            cache.get_filter(&filter_key).await.unwrap().is_some(),
+        )
+    }
+
+    /// A GC task whose table store sees `cache` through a view that cannot
+    /// insert, as `Db::build` wires it.
+    fn gc_task_over_cache(
+        store: Arc<InMemory>,
+        format: &SsTableFormat,
+        cache: Option<Arc<dyn DbCache>>,
+    ) -> CompactedGcTask {
+        let gc_cache =
+            cache.map(|cache| -> Arc<dyn DbCache> { Arc::new(NoInsertCache::new(cache)) });
+        let gc_table_store = Arc::new(TableStore::new(
+            store.clone(),
+            format.clone(),
+            Path::from("/root"),
+            gc_cache,
+            TableStoreKind::GC,
+            BlockCachePolicy::default(),
+        ));
+        gc_task(store, gc_table_store)
+    }
+
+    #[tokio::test]
+    async fn test_compacted_gc_evicts_metadata_of_deleted_ssts() {
+        let store = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+        let cache: Arc<dyn DbCache> = Arc::new(TestCache::new());
+        let table_store = cached_main_table_store(store.clone(), &format, cache.clone());
+        let id = |n| SsTableId::from(ulid::Ulid::from_parts(n, 0));
+        let remembered = write_test_sst(&table_store, &format, id(1_000)).await;
+        let forgotten = write_test_sst(&table_store, &format, id(2_000)).await;
+        let live = write_test_sst(&table_store, &format, id(3_000)).await;
+        assert!(
+            remembered.info.filter_len > 0,
+            "test needs a filter entry to evict"
+        );
+        for handle in [&remembered, &forgotten, &live] {
+            assert_eq!(metadata_is_cached(&cache, handle).await, (true, true));
+        }
+
+        // GC saw `remembered` and `live` in a manifest on an earlier run. It
+        // never saw `forgotten`, as for an SST retired before a restart.
+        let task = gc_task_over_cache(store, &format, Some(cache.clone()));
+        task.sst_handles
+            .lock()
+            .extend([(remembered.id, remembered.clone()), (live.id, live.clone())]);
+
+        task.maybe_delete_compacted_ssts(vec![remembered.id, forgotten.id])
+            .await;
+
+        assert_eq!(
+            metadata_is_cached(&cache, &remembered).await,
+            (false, false),
+            "a deleted SST with a remembered handle evicts its index and filter"
+        );
+        assert_eq!(
+            metadata_is_cached(&cache, &forgotten).await,
+            (true, true),
+            "a deleted SST with no remembered handle is left to capacity eviction"
+        );
+        assert_eq!(
+            metadata_is_cached(&cache, &live).await,
+            (true, true),
+            "an SST that was not deleted keeps its entries"
+        );
+        let remaining: Vec<_> = table_store
+            .list_compacted_ssts(..)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|sst| sst.id)
+            .collect();
+        assert_eq!(remaining, vec![live.id], "both deletions still happened");
+        assert_eq!(
+            task.sst_handles.lock().keys().copied().collect::<Vec<_>>(),
+            vec![live.id],
+            "the remembered handle is dropped with its SST"
+        );
+    }
+
+    /// Listing the live SSTs handles when the table store has a cache.
+    #[tokio::test]
+    async fn test_listing_active_ssts_remembers_their_handles() {
+        let store = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+        let cache: Arc<dyn DbCache> = Arc::new(TestCache::new());
+        let table_store = cached_main_table_store(store.clone(), &format, cache.clone());
+        let live = write_test_sst(
+            &table_store,
+            &format,
+            SsTableId::from(ulid::Ulid::from_parts(1_000, 0)),
+        )
+        .await;
+        let manifest = manifest_with(
+            LsmTreeState {
+                l0: VecDeque::from([SsTableView::new(live.id.value(), live.clone())]),
+                ..LsmTreeState::default()
+            },
+            vec![],
+        );
+
+        let task = gc_task_over_cache(store.clone(), &format, Some(cache));
+        let active = task
+            .list_active_l0_and_compacted_ssts(1, &manifest)
+            .await
+            .unwrap();
+
+        assert_eq!(active, HashSet::from([live.id]));
+        assert_eq!(
+            task.sst_handles.lock().get(&live.id),
+            Some(&live),
+            "listing a live SST records the handle its eviction will need"
+        );
+
+        // A table store with no cache has nothing to evict from, so the map
+        // stays empty.
+        let task = gc_task_over_cache(store, &format, None);
+        task.list_active_l0_and_compacted_ssts(1, &manifest)
+            .await
+            .unwrap();
+        assert!(task.sst_handles.lock().is_empty());
     }
 }

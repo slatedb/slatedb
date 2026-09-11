@@ -138,8 +138,8 @@ use crate::config::{CompactionWorkerOptions, CompactorOptions};
 use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
-use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheAndScope, DbCacheWrapper, UnownedDbCache};
+use crate::db_cache::{NoInsertCache, SplitCache};
 use crate::db_reader::{DbReader, DbReaderMode};
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
@@ -821,12 +821,18 @@ impl<P: Into<Path>> DbBuilder<P> {
                 ObjectStoreComponent::Gc,
                 ObjectStoreType::Main,
             );
+            // GC evicts a deleted SST's cache entries but must never insert
+            // any, so it sees the database's cache through a view that cannot
+            // insert.
+            let gc_cache = db_cache
+                .clone()
+                .map(|cache| -> Arc<dyn DbCache> { Arc::new(NoInsertCache::new(cache)) });
             let gc_table_store = Arc::new(TableStore::new_with_fp_registry(
                 gc_object_store.clone(),
                 sst_format.clone(),
                 path_resolver.clone(),
                 self.fp_registry.clone(),
-                None,
+                gc_cache,
                 TableStoreKind::GC,
                 BlockCachePolicy::default(),
             ));
