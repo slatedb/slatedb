@@ -233,7 +233,13 @@ async fn ensure_index(
     let result: &Result<Arc<SsTableIndexOwned>, SlateDBError> = index_cell
         .get_or_init(|| async {
             table_store
-                .read_index(handle, true, Some(segment.clone()))
+                .read_index(
+                    handle,
+                    true,
+                    Some(segment.clone()),
+                    &ReadTrace::new(None),
+                    None,
+                )
                 .await
         })
         .await;
@@ -284,7 +290,7 @@ mod tests {
             .await
             .expect("open_sst");
         let index = table_store
-            .read_index(&handle, false, Some(segment))
+            .read_index(&handle, false, Some(segment), &ReadTrace::new(None), None)
             .await
             .expect("read_index");
         let cache = table_store.cache().expect("cache configured").clone();
@@ -304,7 +310,13 @@ mod tests {
             .await
             .expect("open_sst");
         let index = table_store
-            .read_index(&handle, false, Some(Bytes::new()))
+            .read_index(
+                &handle,
+                false,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .expect("read_index");
         let block_idx =

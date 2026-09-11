@@ -25,6 +25,7 @@ SlateDB provides structured tracing spans for read operations, allowing you to t
 | `slatedb.read.memtable` | Records each memtable lookup. | `trace_id` |
 | `slatedb.read.read_filters` | Records reading filters for an SST. | `trace_id`, `sst_id`, `sst_level`, `cached` |
 | `slatedb.read.evaluate_filter` | Records evaluating a named filter for an SST. | `trace_id`, `sst_id`, `sst_level`, `filter_name`, `result` |
+| `slatedb.read.read_index` | Records reading the index for an SST. | `trace_id`, `sst_id`, `sst_level`, `cached` |
 
 All `slatedb.read.*` spans are child spans of the root `slatedb.read` span.
 
@@ -33,7 +34,7 @@ Field meanings:
 - `trace_id` — The value from `TracingOptions`, used to correlate spans from the same read operation.
 - `sst_id` — The identifier of the SST involved in the span.
 - `sst_level`: The level that contains the SST is `l0` or `sorted_run:{id}`.
-- `cached` — `true` if the filter was read from cache or a concurrent lookup to the cache fetched the filter, `false` otherwise. The field can be absent if the read was stopped before the filter for the SST is read.
+- `cached`: `true` if the filter or index came from the cache or a concurrent cache lookup fetched it. Otherwise, the value is `false`. The field can be absent if the read stops before the filter or index is read.
 - `filter_name`: The name of the filter policy being evaluated.
 - `result` — The boolean result of evaluating the filter.
 
