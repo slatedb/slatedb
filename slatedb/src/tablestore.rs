@@ -952,17 +952,17 @@ impl TableStore {
                 cache.remove(&(handle.id, offset).into()).await;
             }
         }
-        self.evict_sst_metadata_from_cache(handle).await;
+        self.evict_sst_metadata_from_cache(handle.id).await;
     }
 
     /// Removes the index, filter, and stats entries of an SST from the cache.
-    pub(crate) async fn evict_sst_metadata_from_cache(&self, handle: &SsTableHandle) {
+    pub(crate) async fn evict_sst_metadata_from_cache(&self, id: SsTableId) {
         let Some(ref cache) = self.cache else {
             return;
         };
-        cache.remove(&CachedKey::index(handle.id)).await;
-        cache.remove(&CachedKey::filter(handle.id)).await;
-        cache.remove(&CachedKey::stats(handle.id)).await;
+        cache.remove(&CachedKey::index(id)).await;
+        cache.remove(&CachedKey::filter(id)).await;
+        cache.remove(&CachedKey::stats(id)).await;
     }
 }
 

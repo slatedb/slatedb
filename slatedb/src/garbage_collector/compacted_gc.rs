@@ -3,7 +3,7 @@ use crate::{
     compactor_state::VersionedCompactions,
     compactor_state_protocols::CompactorStateReader,
     config::GarbageCollectorDirectoryOptions,
-    db_state::{SsTableHandle, SsTableId},
+    db_state::SsTableId,
     error::SlateDBError,
     manifest::{store::ManifestStore, Manifest, VersionedManifest},
     tablestore::TableStore,
@@ -11,8 +11,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use log::error;
-use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::filter::retain_allowed_by_gc_filter;
@@ -26,8 +25,6 @@ pub(crate) struct CompactedGcTask {
     stats: Arc<GcStats>,
     compacted_options: GarbageCollectorDirectoryOptions,
     gc_filter: Option<Arc<dyn GcFilter>>,
-    /// Handles of SSTs seen in a live manifest, kept until SST deletion.
-    sst_handles: Arc<Mutex<HashMap<SsTableId, SsTableHandle>>>,
 }
 
 impl std::fmt::Debug for CompactedGcTask {
@@ -54,7 +51,6 @@ impl CompactedGcTask {
             stats,
             compacted_options,
             gc_filter,
-            sst_handles: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -79,14 +75,7 @@ impl CompactedGcTask {
             .manifest_store
             .read_referenced_manifests(manifest_id, manifest)
             .await?;
-        let handles = collect_active_sst_handles(active_manifests.values());
-        let ids = handles.keys().copied().collect();
-        // Remembers each SST's handle so that the table store can evict its
-        // cache entries when GC deletes it later.
-        if self.table_store.cache().is_some() {
-            self.sst_handles.lock().extend(handles);
-        }
-        Ok(ids)
+        Ok(collect_active_ssts(active_manifests.values()))
     }
 
     /// Returns the minimum starting timestamp of:
@@ -144,36 +133,25 @@ impl CompactedGcTask {
                     error!("error deleting SST [id={:?}, error={}]", id, e);
                 } else {
                     self.stats.gc_compacted_count.increment(1);
-                    let handle = self.sst_handles.lock().remove(&id);
-                    match handle {
-                        Some(handle) => {
-                            self.table_store.evict_sst_metadata_from_cache(&handle).await
-                        }
-                        None => log::debug!(
-                            "no remembered handle for deleted SST, skipping cache eviction [id={:?}]",
-                            id
-                        ),
-                    }
+                    self.table_store.evict_sst_metadata_from_cache(id).await;
                 }
             })
             .await;
     }
 }
 
-/// The handle of every SST referenced by `manifests`, keyed by id, across the
-/// unsegmented tree and each named segment (RFC-0024).
-fn collect_active_sst_handles<'a>(
-    manifests: impl Iterator<Item = &'a Manifest>,
-) -> HashMap<SsTableId, SsTableHandle> {
-    let mut active = HashMap::new();
+/// Collect every SST id referenced by `manifests`, across the unsegmented
+/// tree and each named segment (RFC-0024).
+fn collect_active_ssts<'a>(manifests: impl Iterator<Item = &'a Manifest>) -> HashSet<SsTableId> {
+    let mut active = HashSet::new();
     for manifest in manifests {
         for tree in manifest.core.trees() {
             for view in tree.l0.iter() {
-                active.insert(view.sst.id, view.sst.clone());
+                active.insert(view.sst.id);
             }
             for sr in tree.compacted.iter() {
                 for view in sr.sst_views() {
-                    active.insert(view.sst.id, view.sst.clone());
+                    active.insert(view.sst.id);
                 }
             }
         }
@@ -326,12 +304,6 @@ mod tests {
             },
             None,
         )
-    }
-
-    fn collect_active_ssts<'a>(
-        manifests: impl Iterator<Item = &'a Manifest>,
-    ) -> HashSet<SsTableId> {
-        collect_active_sst_handles(manifests).into_keys().collect()
     }
 
     #[tokio::test]
@@ -990,25 +962,32 @@ mod tests {
         ))
     }
 
-    async fn write_test_sst(
-        table_store: &Arc<TableStore>,
-        format: &SsTableFormat,
-        id: SsTableId,
-    ) -> SsTableHandle {
+    /// Writes an SST with a filter through `table_store`.
+    async fn write_test_sst(table_store: &Arc<TableStore>, format: &SsTableFormat, id: SsTableId) {
         let sst = build_test_sst(format, 1).await;
+        assert!(
+            sst.info.filter_len > 0,
+            "test needs a filter entry to evict"
+        );
         table_store
             .write_sst(&id, &sst, Some(Bytes::new()))
             .await
-            .unwrap()
+            .unwrap();
     }
 
     /// Whether the SST's index and filter are in the cache, in that order.
-    async fn metadata_is_cached(cache: &Arc<dyn DbCache>, handle: &SsTableHandle) -> (bool, bool) {
-        let index_key = CachedKey::index(handle.id);
-        let filter_key = CachedKey::filter(handle.id);
+    async fn metadata_is_cached(cache: &Arc<dyn DbCache>, id: SsTableId) -> (bool, bool) {
         (
-            cache.get_index(&index_key).await.unwrap().is_some(),
-            cache.get_filter(&filter_key).await.unwrap().is_some(),
+            cache
+                .get_index(&CachedKey::index(id))
+                .await
+                .unwrap()
+                .is_some(),
+            cache
+                .get_filter(&CachedKey::filter(id))
+                .await
+                .unwrap()
+                .is_some(),
         )
     }
 
@@ -1038,40 +1017,24 @@ mod tests {
         let format = SsTableFormat::default();
         let cache: Arc<dyn DbCache> = Arc::new(TestCache::new());
         let table_store = cached_main_table_store(store.clone(), &format, cache.clone());
-        let id = |n| SsTableId::from(ulid::Ulid::from_parts(n, 0));
-        let remembered = write_test_sst(&table_store, &format, id(1_000)).await;
-        let forgotten = write_test_sst(&table_store, &format, id(2_000)).await;
-        let live = write_test_sst(&table_store, &format, id(3_000)).await;
-        assert!(
-            remembered.info.filter_len > 0,
-            "test needs a filter entry to evict"
-        );
-        for handle in [&remembered, &forgotten, &live] {
-            assert_eq!(metadata_is_cached(&cache, handle).await, (true, true));
+        let deleted = SsTableId::from(ulid::Ulid::from_parts(1_000, 0));
+        let live = SsTableId::from(ulid::Ulid::from_parts(2_000, 0));
+        write_test_sst(&table_store, &format, deleted).await;
+        write_test_sst(&table_store, &format, live).await;
+        for id in [deleted, live] {
+            assert_eq!(metadata_is_cached(&cache, id).await, (true, true));
         }
 
-        // GC saw `remembered` and `live` in a manifest on an earlier run. It
-        // never saw `forgotten`, as for an SST retired before a restart.
         let task = gc_task_over_cache(store, &format, Some(cache.clone()));
-        task.sst_handles
-            .lock()
-            .extend([(remembered.id, remembered.clone()), (live.id, live.clone())]);
-
-        task.maybe_delete_compacted_ssts(vec![remembered.id, forgotten.id])
-            .await;
+        task.maybe_delete_compacted_ssts(vec![deleted]).await;
 
         assert_eq!(
-            metadata_is_cached(&cache, &remembered).await,
+            metadata_is_cached(&cache, deleted).await,
             (false, false),
-            "a deleted SST with a remembered handle evicts its index and filter"
+            "a deleted SST loses its index and filter entries"
         );
         assert_eq!(
-            metadata_is_cached(&cache, &forgotten).await,
-            (true, true),
-            "a deleted SST with no remembered handle is left to capacity eviction"
-        );
-        assert_eq!(
-            metadata_is_cached(&cache, &live).await,
+            metadata_is_cached(&cache, live).await,
             (true, true),
             "an SST that was not deleted keeps its entries"
         );
@@ -1082,54 +1045,6 @@ mod tests {
             .into_iter()
             .map(|sst| sst.id)
             .collect();
-        assert_eq!(remaining, vec![live.id], "both deletions still happened");
-        assert_eq!(
-            task.sst_handles.lock().keys().copied().collect::<Vec<_>>(),
-            vec![live.id],
-            "the remembered handle is dropped with its SST"
-        );
-    }
-
-    /// Listing the live SSTs handles when the table store has a cache.
-    #[tokio::test]
-    async fn test_listing_active_ssts_remembers_their_handles() {
-        let store = Arc::new(InMemory::new());
-        let format = SsTableFormat::default();
-        let cache: Arc<dyn DbCache> = Arc::new(TestCache::new());
-        let table_store = cached_main_table_store(store.clone(), &format, cache.clone());
-        let live = write_test_sst(
-            &table_store,
-            &format,
-            SsTableId::from(ulid::Ulid::from_parts(1_000, 0)),
-        )
-        .await;
-        let manifest = manifest_with(
-            LsmTreeState {
-                l0: VecDeque::from([SsTableView::new(live.id.value(), live.clone())]),
-                ..LsmTreeState::default()
-            },
-            vec![],
-        );
-
-        let task = gc_task_over_cache(store.clone(), &format, Some(cache));
-        let active = task
-            .list_active_l0_and_compacted_ssts(1, &manifest)
-            .await
-            .unwrap();
-
-        assert_eq!(active, HashSet::from([live.id]));
-        assert_eq!(
-            task.sst_handles.lock().get(&live.id),
-            Some(&live),
-            "listing a live SST records the handle its eviction will need"
-        );
-
-        // A table store with no cache has nothing to evict from, so the map
-        // stays empty.
-        let task = gc_task_over_cache(store, &format, None);
-        task.list_active_l0_and_compacted_ssts(1, &manifest)
-            .await
-            .unwrap();
-        assert!(task.sst_handles.lock().is_empty());
+        assert_eq!(remaining, vec![live], "the deletion still happened");
     }
 }
