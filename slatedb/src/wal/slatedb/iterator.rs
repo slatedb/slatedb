@@ -372,9 +372,10 @@ impl SlateDbWalIterator {
         while self.next_files.front().is_some_and(JoinHandle::is_finished) {
             let result = self
                 .next_files
-                .pop_front()
+                .front_mut()
                 .expect("a finished open must exist")
                 .await;
+            self.next_files.pop_front();
             self.loading_files
                 .push_back(Self::open_task_result(&self.end_bound, result));
         }
@@ -913,6 +914,49 @@ mod tests {
         assert!(buffer_limiter
             .allocate(one_file_buffer_limit, false)
             .is_some());
+    }
+
+    #[tokio::test]
+    // tests cancellation-safety of moving completed pre-fetches to the ready files queue
+    async fn should_not_pop_completed_file_until_await_returns() {
+        use futures::FutureExt;
+
+        let mut iter = SlateDbWalIterator::range(
+            1,
+            WalIteratorEndBound::Exclusive(3),
+            SlateDbWalIteratorOptions::default(),
+            test_table_store(),
+        )
+        .unwrap();
+        iter.next_wal_id = Some(3);
+        for wal_id in 1..=2 {
+            iter.next_files.push_back(tokio::spawn(async move {
+                Ok(WalRowsCollector::new(
+                    wal_id,
+                    WalFileIterator::Empty(EmptyIterator::new()),
+                ))
+            }));
+        }
+        // wait for all the file waits to finish
+        while !iter
+            .next_files
+            .iter()
+            .all(tokio::task::JoinHandle::is_finished)
+        {
+            tokio::task::yield_now().await;
+        }
+        // exhaust the current tasks's budget and ensure the future is pending even though
+        // all the file waits are finished
+        while tokio::task::coop::has_budget_remaining() {
+            tokio::task::consume_budget().await;
+        }
+        assert!(iter.next().now_or_never().is_none());
+        // clear the budget
+        tokio::task::yield_now().await;
+
+        let first = iter.next().await.unwrap().unwrap();
+
+        assert_eq!(first.last_consumed_wal_file_id, 1);
     }
 
     fn test_table_store() -> Arc<WalTableStore> {

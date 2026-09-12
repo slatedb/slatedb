@@ -122,11 +122,7 @@ impl wal::WriterInit for SlateDbWalWriterInit {
                 let replay_iterator = SlateDbWalIterator::range(
                     replay_after_wal_id + 1,
                     WalIteratorEndBound::Exclusive(empty_wal_id + 1),
-                    SlateDbWalIteratorOptions {
-                        target_bytes_to_fetch: 1024 * 1024,
-                        max_buffered_bytes: 4 * 1024,
-                        max_fetch_tasks: 2,
-                    },
+                    SlateDbWalIteratorOptions::default(),
                     self.table_store.clone(),
                 )?;
                 let wal_writer = SlateDbWalWriter::start_new(
