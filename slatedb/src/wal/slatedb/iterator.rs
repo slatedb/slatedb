@@ -921,22 +921,18 @@ mod tests {
     async fn should_not_pop_completed_file_until_await_returns() {
         use futures::FutureExt;
 
+        let table_store = test_table_store();
+        for wal_id in 1..=3 {
+            table_store.write_wal_fence(wal_id.into()).await.unwrap();
+        }
         let mut iter = SlateDbWalIterator::range(
             1,
-            WalIteratorEndBound::Exclusive(3),
+            WalIteratorEndBound::Exclusive(4),
             SlateDbWalIteratorOptions::default(),
-            test_table_store(),
+            table_store,
         )
         .unwrap();
-        iter.next_wal_id = Some(3);
-        for wal_id in 1..=2 {
-            iter.next_files.push_back(tokio::spawn(async move {
-                Ok(WalRowsCollector::new(
-                    wal_id,
-                    WalFileIterator::Empty(EmptyIterator::new()),
-                ))
-            }));
-        }
+        iter.spawn_opens();
         // wait for all the file waits to finish
         while !iter
             .next_files
