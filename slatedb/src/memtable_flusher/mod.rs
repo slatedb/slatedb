@@ -14,7 +14,9 @@ pub(crate) use manifest_writer::FlushResult;
 #[cfg(test)]
 pub(crate) use tracker::MANIFEST_REFRESH_COUNT;
 
-use crate::checkpoint::CheckpointCreateResult;
+use crate::checkpoint::{
+    CheckpointBoundary, CheckpointHandle, CheckpointLifecycle, CheckpointRequest,
+};
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::db_status::ClosedResultWriter;
@@ -22,23 +24,22 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::manifest::store::FenceableManifest;
 use crate::memtable_flusher::manifest_writer::ManifestWriter;
-use crate::memtable_flusher::tracker::{FlushTracker, TrackerMessage};
+use crate::memtable_flusher::tracker::FlushTracker;
 use crate::memtable_flusher::uploader::Uploader;
 use crate::utils::SafeSender;
 use log::warn;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 const TRACKER_TASK_NAME: &str = "l0_flush_tracker";
+
+pub(crate) use tracker::TrackerMessage;
 
 /// Flush request target exposed by the memtable flusher.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum FlushTarget {
-    /// Return the current durability frontier without initiating new flush work.
-    /// Used for `CheckpointScope::Durable` when the caller just needs a consistent
-    /// snapshot of what is already durable.
-    CurrentDurable,
     /// Wait until all currently known immutable memtables are durably flushed. Used
     /// for explicit `flush()` calls and checkpoint creation, where full durability
     /// is required before proceeding.
@@ -122,19 +123,39 @@ impl MemtableFlusher {
         self.messages_tx.send(TrackerMessage::MemtableFrozen)
     }
 
-    /// Creates a checkpoint using the memtable flusher's flush semantics.
+    /// Starts a checkpoint and returns after the manifest writer records its boundary.
+    pub(crate) async fn begin_checkpoint(
+        &self,
+        id: Uuid,
+        boundary: CheckpointBoundary,
+        options: CheckpointOptions,
+    ) -> Result<CheckpointHandle, SlateDBError> {
+        let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
+        let request = CheckpointRequest {
+            id,
+            boundary,
+            lifecycle,
+        };
+        self.messages_tx
+            .send(TrackerMessage::CheckpointRequest { options, request })?;
+        ready_rx.await.map_err(SlateDBError::ReadChannelError)??;
+        Ok(CheckpointHandle::new(
+            id,
+            result_rx,
+            self.messages_tx.clone(),
+        ))
+    }
+
+    #[cfg(test)]
     pub(crate) async fn create_checkpoint(
         &self,
-        target: FlushTarget,
+        boundary: CheckpointBoundary,
         options: CheckpointOptions,
-    ) -> Result<CheckpointCreateResult, SlateDBError> {
-        let (tx, rx) = oneshot::channel();
-        self.messages_tx.send(TrackerMessage::CheckpointRequest {
-            target,
-            options,
-            sender: tx,
-        })?;
-        rx.await.map_err(SlateDBError::ReadChannelError)?
+    ) -> Result<crate::checkpoint::CheckpointCreateResult, SlateDBError> {
+        self.begin_checkpoint(Uuid::new_v4(), boundary, options)
+            .await?
+            .wait_inner()
+            .await
     }
 
     /// Closes the flusher and its subsystems via the executor.

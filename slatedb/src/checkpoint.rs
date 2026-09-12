@@ -1,8 +1,11 @@
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
-use crate::memtable_flusher::FlushTarget;
+use crate::error::SlateDBError;
+use crate::memtable_flusher::TrackerMessage;
+use crate::utils::{IdGenerator, SafeSender};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 #[non_exhaustive]
@@ -24,7 +27,197 @@ pub struct CheckpointCreateResult {
     pub manifest_id: u64,
 }
 
+pub(crate) type CheckpointResult = Result<CheckpointCreateResult, SlateDBError>;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CheckpointBoundary {
+    pub(crate) through_seq: Option<u64>,
+    pub(crate) wal_id_last_seen: Option<u64>,
+}
+
+pub(crate) struct CheckpointRequest {
+    pub(crate) id: Uuid,
+    pub(crate) boundary: CheckpointBoundary,
+    pub(crate) lifecycle: CheckpointLifecycle,
+}
+
+pub(crate) struct CheckpointLifecycle {
+    result_tx: oneshot::Sender<CheckpointResult>,
+    ready_tx: Option<oneshot::Sender<Result<(), SlateDBError>>>,
+}
+
+impl CheckpointLifecycle {
+    pub(crate) fn new() -> (
+        Self,
+        oneshot::Receiver<CheckpointResult>,
+        oneshot::Receiver<Result<(), SlateDBError>>,
+    ) {
+        let (result_tx, result_rx) = oneshot::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        (
+            Self {
+                result_tx,
+                ready_tx: Some(ready_tx),
+            },
+            result_rx,
+            ready_rx,
+        )
+    }
+
+    pub(crate) fn accept(&mut self) -> bool {
+        self.ready_tx
+            .take()
+            .is_some_and(|ready_tx| ready_tx.send(Ok(())).is_ok())
+    }
+
+    pub(crate) fn complete(self, result: CheckpointCreateResult) -> bool {
+        self.result_tx.send(Ok(result)).is_ok()
+    }
+
+    pub(crate) fn fail(mut self, error: SlateDBError) {
+        if let Some(ready_tx) = self.ready_tx.take() {
+            let _ = ready_tx.send(Err(error.clone()));
+        }
+        let _ = self.result_tx.send(Err(error));
+    }
+}
+
+/// A checkpoint request that separates its state boundary from durable storage work.
+pub struct CheckpointHandle {
+    id: Uuid,
+    result_rx: oneshot::Receiver<CheckpointResult>,
+    control_tx: SafeSender<TrackerMessage>,
+    cancel_on_drop: bool,
+}
+
+impl CheckpointHandle {
+    pub(crate) fn new(
+        id: Uuid,
+        result_rx: oneshot::Receiver<CheckpointResult>,
+        control_tx: SafeSender<TrackerMessage>,
+    ) -> Self {
+        Self {
+            id,
+            result_rx,
+            control_tx,
+            cancel_on_drop: true,
+        }
+    }
+
+    /// Returns the identifier reserved for this checkpoint.
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    /// Waits until the checkpoint manifest is durable.
+    /// This method consumes the handle and keeps a completed checkpoint.
+    pub async fn wait(self) -> Result<CheckpointCreateResult, crate::Error> {
+        self.wait_inner().await.map_err(Into::into)
+    }
+
+    pub(crate) async fn wait_inner(mut self) -> CheckpointResult {
+        let result = match (&mut self.result_rx).await {
+            Ok(result) => result,
+            Err(_) => return Err(checkpoint_outcome_unknown(self.id)),
+        };
+        self.cancel_on_drop = false;
+        result
+    }
+
+    /// Requests cancellation without waiting for durable cleanup.
+    ///
+    /// This method consumes the handle.
+    /// This method does not report cleanup errors. Use [`Self::cancel_and_wait`] before closing
+    /// the database when the caller must know that cleanup finished.
+    pub fn cancel(mut self) {
+        let _ = self.control_tx.send(TrackerMessage::CancelCheckpoint {
+            id: self.id,
+            done: None,
+        });
+        self.cancel_on_drop = false;
+    }
+
+    /// Requests cancellation and waits for cleanup to finish.
+    ///
+    /// Call this method before [`Db::close`] to receive the cleanup result.
+    pub async fn cancel_and_wait(mut self) -> Result<(), crate::Error> {
+        let (done_tx, done_rx) = oneshot::channel();
+        self.control_tx
+            .send(TrackerMessage::CancelCheckpoint {
+                id: self.id,
+                done: Some(done_tx),
+            })
+            .map_err(crate::Error::from)?;
+        self.cancel_on_drop = false;
+        done_rx
+            .await
+            .map_err(SlateDBError::ReadChannelError)?
+            .map_err(Into::into)
+    }
+}
+
+impl Drop for CheckpointHandle {
+    fn drop(&mut self) {
+        if self.cancel_on_drop {
+            let _ = self.control_tx.send(TrackerMessage::CancelCheckpoint {
+                id: self.id,
+                done: None,
+            });
+        }
+    }
+}
+
+pub(crate) fn checkpoint_cancelled(id: Uuid) -> SlateDBError {
+    SlateDBError::BackgroundTaskCancelled(format!("checkpoint {id}"))
+}
+
+pub(crate) fn checkpoint_outcome_unknown(id: Uuid) -> SlateDBError {
+    SlateDBError::CheckpointOutcomeUnknown(id)
+}
+
 impl Db {
+    /// Captures the checkpoint boundary and starts the durable storage work.
+    ///
+    /// [`CheckpointScope::All`] freezes the active memtable before this method returns.
+    /// Call [`CheckpointHandle::wait`] to wait for the checkpoint manifest.
+    pub async fn begin_checkpoint(
+        &self,
+        scope: CheckpointScope,
+        options: &CheckpointOptions,
+    ) -> Result<CheckpointHandle, crate::Error> {
+        let boundary = match scope {
+            CheckpointScope::All => self
+                .inner
+                .request_batch_writer_flush(true)
+                .await?
+                .expect("a memtable freeze must return a checkpoint boundary"),
+            CheckpointScope::Durable => {
+                let guard = self.inner.state.read();
+                let state = guard.state();
+                let core = state.core();
+                CheckpointBoundary {
+                    through_seq: None,
+                    wal_id_last_seen: if self.inner.wal_enabled {
+                        Some(
+                            core.next_wal_sst_id
+                                .checked_sub(1)
+                                .ok_or(SlateDBError::InvalidDBState)?,
+                        )
+                    } else {
+                        None
+                    },
+                }
+            }
+        };
+        let id = self.inner.rand.rng().gen_uuid();
+
+        self.inner
+            .memtable_flusher()
+            .begin_checkpoint(id, boundary, options.clone())
+            .await
+            .map_err(Into::into)
+    }
+
     /// Creates a checkpoint of an opened db using the provided options. Returns the ID of the created
     /// checkpoint and the id of the referenced manifest.
     pub async fn create_checkpoint(
@@ -32,19 +225,7 @@ impl Db {
         scope: CheckpointScope,
         options: &CheckpointOptions,
     ) -> Result<CheckpointCreateResult, crate::Error> {
-        let target = match scope {
-            CheckpointScope::All => {
-                self.inner.request_batch_writer_flush(true).await?;
-                FlushTarget::All
-            }
-            CheckpointScope::Durable => FlushTarget::CurrentDurable,
-        };
-
-        self.inner
-            .memtable_flusher()
-            .create_checkpoint(target, options.clone())
-            .await
-            .map_err(Into::into)
+        self.begin_checkpoint(scope, options).await?.wait().await
     }
 }
 
@@ -54,9 +235,12 @@ mod tests {
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::checkpoint::Checkpoint;
     use crate::checkpoint::CheckpointCreateResult;
-    use crate::config::{CheckpointOptions, CheckpointScope, Settings};
+    use crate::checkpoint::{CheckpointHandle, CheckpointLifecycle};
+    use crate::config::{CheckpointOptions, CheckpointScope, FlushOptions, FlushType, Settings};
     use crate::db::Db;
     use crate::db_state::{SsTableId, SsTableView};
+    use crate::db_status::ClosedResultWriter;
+    use crate::error::SlateDBError;
     use crate::format::sst::SsTableFormat;
     use crate::iter::RowEntryIterator;
     use crate::manifest::store::ManifestStore;
@@ -65,15 +249,36 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils;
+    use crate::utils::{SafeSender, WatchableOnceCell};
     use bytes::Bytes;
     use chrono::TimeDelta;
+    use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::clock::SystemClock;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_dropped_result_sender_reports_unknown_outcome() {
+        let id = uuid::Uuid::new_v4();
+        let closed_result = WatchableOnceCell::<Result<(), SlateDBError>>::new();
+        let (control_tx, _control_rx) =
+            SafeSender::unbounded_channel(closed_result.result_reader());
+        let (lifecycle, result_rx, _ready_rx) = CheckpointLifecycle::new();
+        drop(lifecycle);
+
+        let error = CheckpointHandle::new(id, result_rx, control_tx)
+            .wait()
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(&format!(
+            "checkpoint outcome is unknown. checkpoint_id=`{id}`"
+        )));
+    }
 
     #[tokio::test]
     async fn test_should_create_checkpoint() {
@@ -376,6 +581,271 @@ mod tests {
             (&Bytes::from_static(b"k2"), &Bytes::from_static(b"v2")),
         )
         .await;
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_begin_checkpoint_excludes_later_writes() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_begin_checkpoint_excludes_later_writes");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings {
+                wal_enabled: false,
+                flush_interval: Some(Duration::from_secs(3600)),
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"before", b"v1").await.unwrap();
+        let checkpoint = db
+            .begin_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        db.put(b"after", b"v2").await.unwrap();
+
+        let (checkpoint_result, flush_result) = tokio::join!(checkpoint.wait(), db.flush());
+        let checkpoint_result = checkpoint_result.unwrap();
+        flush_result.unwrap();
+
+        let checkpoint_manifest = ManifestStore::new(&path, object_store)
+            .read_manifest(checkpoint_result.manifest_id)
+            .await
+            .unwrap();
+        assert_eq!(checkpoint_manifest.core.last_l0_seq, 1);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_begin_checkpoint_keeps_the_wal_boundary_from_its_freeze() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_begin_checkpoint_keeps_wal_boundary");
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings {
+                flush_interval: Some(Duration::from_secs(3600)),
+                ..Settings::default()
+            })
+            .with_fp_registry(Arc::clone(&fp_registry))
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"before", b"v1").await.unwrap();
+        let checkpoint_reached = Arc::new(AtomicBool::new(false));
+        let release_checkpoint = Arc::new(AtomicBool::new(false));
+        let callback_reached = Arc::clone(&checkpoint_reached);
+        let callback_release = Arc::clone(&release_checkpoint);
+        fail_parallel::cfg_callback(
+            Arc::clone(&fp_registry),
+            "checkpoint-after-reconcile",
+            move || {
+                callback_reached.store(true, Ordering::Release);
+                while !callback_release.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            },
+        )
+        .unwrap();
+        let checkpoint_db = db.clone();
+        let checkpoint_task = tokio::spawn(async move {
+            checkpoint_db
+                .begin_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+                .await
+                .unwrap()
+                .wait()
+                .await
+                .unwrap()
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !checkpoint_reached.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let wal_id_before_later_write = db.inner.wal_observer.status().unwrap().last_flushed_wal_id;
+
+        db.put(b"after", b"v2").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+        let later_wal_id = db.inner.wal_observer.status().unwrap().last_flushed_wal_id;
+        assert!(later_wal_id > wal_id_before_later_write);
+
+        release_checkpoint.store(true, Ordering::Release);
+        fail_parallel::remove(Arc::clone(&fp_registry), "checkpoint-after-reconcile");
+        let checkpoint = tokio::time::timeout(Duration::from_secs(5), checkpoint_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let manifest = ManifestStore::new(&path, object_store)
+            .read_manifest(checkpoint.manifest_id)
+            .await
+            .unwrap();
+        assert!(manifest.core.next_wal_sst_id <= later_wal_id);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_wait_keeps_completed_checkpoint() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_wait_keeps_completed_checkpoint");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        db.put(b"key", b"value").await.unwrap();
+        let checkpoint = db
+            .begin_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await
+            .unwrap();
+
+        let result = checkpoint.wait().await.unwrap();
+        let manifest = ManifestStore::new(&path, object_store)
+            .read_latest_manifest()
+            .await
+            .unwrap();
+        assert!(manifest
+            .manifest
+            .core
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.id == result.id));
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_drop_checkpoint_handle_removes_unclaimed_checkpoint() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_drop_checkpoint_handle_removes_unclaimed_checkpoint");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        db.put(b"key", b"value").await.unwrap();
+        db.flush().await.unwrap();
+        let checkpoint = db
+            .begin_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        let checkpoint_id = checkpoint.id();
+        db.inner
+            .memtable_flusher()
+            .refresh_manifest()
+            .await
+            .unwrap();
+
+        drop(checkpoint);
+        db.inner
+            .memtable_flusher()
+            .refresh_manifest()
+            .await
+            .unwrap();
+        let manifest = ManifestStore::new(&path, object_store)
+            .read_latest_manifest()
+            .await
+            .unwrap();
+        assert!(!manifest
+            .manifest
+            .core
+            .checkpoints
+            .iter()
+            .any(|entry| entry.id == checkpoint_id));
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_cancel_checkpoint_removes_pending_request() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_cancel_checkpoint_removes_pending_request");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings {
+                wal_enabled: false,
+                flush_interval: Some(Duration::from_secs(3600)),
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"key", b"value").await.unwrap();
+        let checkpoint = db
+            .begin_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        let checkpoint_id = checkpoint.id();
+        checkpoint.cancel_and_wait().await.unwrap();
+
+        db.inner
+            .memtable_flusher()
+            .refresh_manifest()
+            .await
+            .unwrap();
+        let manifest = ManifestStore::new(&path, object_store)
+            .read_latest_manifest()
+            .await
+            .unwrap();
+        assert!(!manifest
+            .manifest
+            .core
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.id == checkpoint_id));
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cancel_checkpoint_removes_committed_checkpoint() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_cancel_checkpoint_removes_committed_checkpoint");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .build()
+            .await
+            .unwrap();
+
+        db.put(b"key", b"value").await.unwrap();
+        db.flush().await.unwrap();
+        let checkpoint = db
+            .begin_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        let checkpoint_id = checkpoint.id();
+
+        db.inner
+            .memtable_flusher()
+            .refresh_manifest()
+            .await
+            .unwrap();
+        let manifest_store = ManifestStore::new(&path, object_store);
+        let committed = manifest_store.read_latest_manifest().await.unwrap();
+        assert!(committed
+            .manifest
+            .core
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.id == checkpoint_id));
+
+        checkpoint.cancel_and_wait().await.unwrap();
+        let deleted = manifest_store.read_latest_manifest().await.unwrap();
+        assert!(!deleted
+            .manifest
+            .core
+            .checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.id == checkpoint_id));
 
         db.close().await.unwrap();
     }

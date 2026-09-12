@@ -32,6 +32,7 @@ use futures::{FutureExt, StreamExt};
 use std::sync::Arc;
 use tracing::instrument;
 
+use crate::checkpoint::CheckpointBoundary;
 use crate::config::WriteOptions;
 use crate::db_state::DbState;
 use crate::db_transaction::DbTransaction;
@@ -49,6 +50,7 @@ use tokio::sync::oneshot;
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 
 pub(crate) type WriteBatchResult = Result<WriteHandle, SlateDBError>;
+type BatchWriterFlushResult = (FlushResultFuture, Option<CheckpointBoundary>);
 
 /// A message processed by the batch writer event loop.
 #[allow(clippy::large_enum_variant)]
@@ -65,7 +67,7 @@ pub(crate) struct BatchWriterFlush {
     /// Sends a message when the writer has processed the flush message. On successful receipt
     /// of a message, the caller should wait on the received Receiver to get the result of the
     /// wal flush.
-    done: oneshot::Sender<Result<FlushResultFuture, SlateDBError>>,
+    done: oneshot::Sender<Result<BatchWriterFlushResult, SlateDBError>>,
 }
 
 pub(crate) struct WriteBatchRequest {
@@ -352,21 +354,34 @@ impl DbInner {
         &self,
         freeze_memtable: bool,
         wal_writer: Option<&mut Box<dyn WalWriter>>,
-    ) -> Result<FlushResultFuture, SlateDBError> {
+    ) -> Result<BatchWriterFlushResult, SlateDBError> {
         let flush_rx = if let Some(wal_writer) = wal_writer {
             wal_writer.flush().await?
         } else {
             async { Ok(()) }.boxed()
         };
-        if freeze_memtable {
-            // Note that this likely won't reflect the result of the above flush call as we don't
-            // block until the flush completes. That's fine, as any earlier wal is still a safe
-            // replay point.
-            let replay_after_wal_id = self.wal_observer.status()?.last_flushed_wal_id;
+        let checkpoint_boundary = if freeze_memtable {
             let mut guard = self.state.write();
+            let replay_after_wal_id = guard
+                .state()
+                .core()
+                .next_wal_sst_id
+                .checked_sub(1)
+                .ok_or(SlateDBError::InvalidDBState)?;
             self.freeze_current_memtable_with_state_guard(&mut guard, replay_after_wal_id);
-        }
-        Ok(flush_rx)
+            let through_seq = guard
+                .state()
+                .imm_memtable
+                .front()
+                .and_then(|imm| imm.table().last_seq());
+            Some(CheckpointBoundary {
+                through_seq,
+                wal_id_last_seen: self.wal_enabled.then_some(replay_after_wal_id),
+            })
+        } else {
+            None
+        };
+        Ok((flush_rx, checkpoint_boundary))
     }
 
     // TODO: this is only pub(crate) because currently the replay logic resides in db_common. We
@@ -390,14 +405,16 @@ impl DbInner {
     pub(crate) async fn request_batch_writer_flush(
         &self,
         freeze_memtable: bool,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<Option<CheckpointBoundary>, SlateDBError> {
         let (done, rx) = oneshot::channel();
         self.write_notifier
             .send(BatchWriterMessage::Flush(BatchWriterFlush {
                 freeze_memtable,
                 done,
             }))?;
-        Ok(rx.await??.await?)
+        let (flush_result, checkpoint_boundary) = rx.await??;
+        flush_result.await?;
+        Ok(checkpoint_boundary)
     }
 
     /// RFC-0024 route-consistency check. Verifies that `batch_prefixes`,
