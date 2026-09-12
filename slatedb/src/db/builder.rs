@@ -497,8 +497,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // producing the same layering as a caller-built
         // [`CachedObjectStore`] passed to [`DbBuilder::new`]: the cache sits
         // under the retry and instrumentation layers, so the same cache
-        // instance can be shared with the compactor and GC below while each
-        // component keeps its own layers.
+        // instance can be shared with the WAL store, compactor, and GC.
         let cached_object_store = CachedObjectStore::from_config(
             self.main_object_store.clone(),
             &self.settings.object_store_cache_options,

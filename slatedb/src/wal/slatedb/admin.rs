@@ -1,7 +1,7 @@
 use crate::format::sst::SsTableFormat;
 use crate::garbage_collector::stats::GcStats;
-use crate::object_store_tag::TableStoreKind;
 use crate::paths::PathResolver;
+use crate::tablestore::TableStoreKind;
 use crate::wal::slatedb::gc::{SlateDbWalGc, WalGcMode};
 use crate::wal::slatedb::store::{WalFileId, WalTableStore};
 use crate::wal::{WalAdmin, WalError, WalGc};
