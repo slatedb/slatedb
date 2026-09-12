@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="390" viewBox="0 0 1040 390" role="img" aria-labelledby="title desc">
+<title id="title">Publish the first prefix while the middle waits</title>
+<desc id="desc">Subcompaction 1: durable below 5. Subcompaction 2: durable below 18. Published intervals: [0, 5). Newly released SSTs: None.</desc>
+<rect width="1040" height="390" rx="14" fill="#ffffff"/>
+<rect x="24" y="23" width="38" height="38" rx="10" fill="#162c43" stroke="none"/>
+<text x="43" y="49" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="700" fill="white" text-anchor="middle">1</text>
+<text x="77" y="50" font-family="Arial, Helvetica, sans-serif" font-size="25" font-weight="700" fill="#162c43" text-anchor="start">Publish the first prefix while the middle waits</text>
+<text x="28" y="84" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="400" fill="#52657a" text-anchor="start">Subcompaction 1: durable below 5     |     Subcompaction 2: durable below 18</text>
+<text x="28" y="125" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="400" fill="#52657a" text-anchor="start">Key</text>
+<line x1="230" y1="130" x2="230" y2="312" stroke="#e7edf3"/>
+<text x="230" y="124" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="400" fill="#52657a" text-anchor="middle">0</text>
+<line x1="350" y1="130" x2="350" y2="312" stroke="#e7edf3"/>
+<text x="350" y="124" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="400" fill="#52657a" text-anchor="middle">5</text>
+<line x1="470" y1="130" x2="470" y2="312" stroke="#e7edf3"/>
+<text x="470" y="124" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="400" fill="#52657a" text-anchor="middle">10</text>
+<line x1="590" y1="130" x2="590" y2="312" stroke="#e7edf3"/>
+<text x="590" y="124" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="400" fill="#52657a" text-anchor="middle">15</text>
+<line x1="710" y1="130" x2="710" y2="312" stroke="#e7edf3"/>
+<text x="710" y="124" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="400" fill="#52657a" text-anchor="middle">20</text>
+<line x1="830" y1="130" x2="830" y2="312" stroke="#e7edf3"/>
+<text x="830" y="124" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="400" fill="#52657a" text-anchor="middle">25</text>
+<line x1="950" y1="130" x2="950" y2="312" stroke="#e7edf3"/>
+<text x="950" y="124" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="400" fill="#52657a" text-anchor="middle">30</text>
+<text x="28" y="151" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="400" fill="#52657a" text-anchor="start">Subcompactions</text>
+<rect x="231" y="134" width="358" height="25" rx="3" fill="#edf2f7" stroke="none"/>
+<text x="410.0" y="152" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="600" fill="#52657a" text-anchor="middle">1: [0, 15)</text>
+<rect x="591" y="134" width="358" height="25" rx="3" fill="#edf2f7" stroke="none"/>
+<text x="770.0" y="152" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="600" fill="#52657a" text-anchor="middle">2: [15, 30)</text>
+<text x="28" y="203" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="600" fill="#162c43" text-anchor="start">Input run A</text>
+<rect x="232" y="177" width="236" height="42" rx="5" fill="#f3f5f8" stroke="#c6d1dc" stroke-dasharray="4 3"/>
+<rect x="352" y="177" width="116" height="42" rx="5" fill="#2563a6" stroke="none"/>
+<text x="410.0" y="204" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700" fill="white" text-anchor="middle">A1</text>
+<rect x="472" y="177" width="236" height="42" rx="5" fill="#f3f5f8" stroke="#c6d1dc" stroke-dasharray="4 3"/>
+<rect x="472" y="177" width="236" height="42" rx="5" fill="#2563a6" stroke="none"/>
+<text x="590.0" y="204" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700" fill="white" text-anchor="middle">A2</text>
+<rect x="712" y="177" width="236" height="42" rx="5" fill="#f3f5f8" stroke="#c6d1dc" stroke-dasharray="4 3"/>
+<rect x="712" y="177" width="236" height="42" rx="5" fill="#2563a6" stroke="none"/>
+<text x="830.0" y="204" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700" fill="white" text-anchor="middle">A3</text>
+<text x="28" y="260" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="600" fill="#162c43" text-anchor="start">Input run B</text>
+<rect x="232" y="234" width="476" height="42" rx="5" fill="#f3f5f8" stroke="#c6d1dc" stroke-dasharray="4 3"/>
+<rect x="352" y="234" width="356" height="42" rx="5" fill="#2563a6" stroke="none"/>
+<text x="530.0" y="261" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700" fill="white" text-anchor="middle">B1</text>
+<rect x="712" y="234" width="236" height="42" rx="5" fill="#f3f5f8" stroke="#c6d1dc" stroke-dasharray="4 3"/>
+<rect x="712" y="234" width="236" height="42" rx="5" fill="#2563a6" stroke="none"/>
+<text x="830.0" y="261" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700" fill="white" text-anchor="middle">B2</text>
+<text x="28" y="310" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="600" fill="#162c43" text-anchor="start">Output</text>
+<rect x="232" y="289" width="116" height="31" rx="4" fill="#147d59" stroke="none"/>
+<text x="290.0" y="310" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="600" fill="white" text-anchor="middle">[0, 5)</text>
+<rect x="592" y="289" width="68" height="31" rx="4" fill="#fff0da" stroke="#af6000"/>
+<text x="626.0" y="310" font-family="Arial, Helvetica, sans-serif" font-size="14" font-weight="700" fill="#af6000" text-anchor="middle">[15, 18)</text>
+<text x="28" y="351" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="600" fill="#162c43" text-anchor="start">Newly released: None</text>
+<rect x="28" y="366" width="12" height="12" rx="3" fill="#2563a6" stroke="none"/>
+<text x="47" y="377" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="400" fill="#52657a" text-anchor="start">Input still visible</text>
+<rect x="269" y="366" width="12" height="12" rx="3" fill="#147d59" stroke="none"/>
+<text x="288" y="377" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="400" fill="#52657a" text-anchor="start">Published output</text>
+<rect x="506" y="366" width="12" height="12" rx="3" fill="#fff0da" stroke="#af6000"/>
+<text x="525" y="377" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="400" fill="#52657a" text-anchor="start">Output waiting</text>
+<rect x="735" y="366" width="12" height="12" rx="3" fill="#f3f5f8" stroke="#c6d1dc" stroke-dasharray="3 2"/>
+<text x="754" y="377" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="400" fill="#52657a" text-anchor="start">Input no longer visible</text>
+</svg>
