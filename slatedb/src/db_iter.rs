@@ -173,14 +173,18 @@ impl RowEntryIterator for GetIterator {
             let iter = self.current.as_mut().expect("source set above");
 
             if let Some(entry) = iter.next().await? {
-                // Note: The Get iterator should not advance past tombstones, which is
-                // why we filter them out here. When a tombstone is encountered, we return None
-                // so the iterator stops without advancing to the next iterator in the chain.
                 match &entry.value {
-                    ValueDeletable::Tombstone => {
-                        return Ok(None);
+                    ValueDeletable::Value(_) | ValueDeletable::Tombstone => {
+                        // Merge operands need their base, but no older entries.
+                        // Drop the remaining sources and any pending initialization.
+                        self.current = None;
+                        *self.sources.get_mut() = stream::empty().boxed();
+                        if entry.value.is_tombstone() {
+                            return Ok(None);
+                        }
+                        return Ok(Some(entry));
                     }
-                    _ => {
+                    ValueDeletable::Merge(_) => {
                         return Ok(Some(entry));
                     }
                 }
@@ -249,6 +253,7 @@ pub struct DbIterator {
     iter: Box<dyn RowEntryIterator + 'static>,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
+    order: IterationOrder,
     read_span: tracing::Span,
 }
 
@@ -323,6 +328,7 @@ impl DbIterator {
             iter,
             invalidated_error: None,
             last_key: None,
+            order,
             read_span,
         })
     }
@@ -395,10 +401,16 @@ impl DbIterator {
     /// After a successful seek, the iterator will return the next record
     /// with a key greater than or equal to `next_key`.
     ///
+    /// Only supported for ascending scans. Descending scans return an error:
+    /// repositioning a descending scan requires the L0 and sorted-run
+    /// iterators to skip past tables that sort above `next_key`, which they do
+    /// not yet do.
+    ///
     /// # Errors
     ///
     /// Returns an invalid argument error in the following cases:
     ///
+    /// - if the scan was opened with [`IterationOrder::Descending`]
     /// - if `next_key` comes before the current iterator position
     /// - if `next_key` is beyond the upper bound specified in the original
     ///   [`crate::db::Db::scan`] parameters
@@ -408,6 +420,8 @@ impl DbIterator {
         let next_key = next_key.as_ref();
         if let Some(error) = self.invalidated_error.clone() {
             Err(error.into())
+        } else if matches!(self.order, IterationOrder::Descending) {
+            Err(SlateDBError::SeekNotSupportedForDescendingScan.into())
         } else if !self.range.contains(&next_key) {
             Err(SlateDBError::SeekKeyOutOfRange {
                 key: next_key.to_vec(),
@@ -534,12 +548,14 @@ mod tests {
     use crate::db_iter::{DbIterator, GetIterator};
     use crate::error::SlateDBError;
     use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
+    use crate::merge_operator::MergeOperatorType;
     use crate::reader::ReadTrace;
-    use crate::test_utils::TestIterator;
+    use crate::test_utils::{StringConcatMergeOperator, TestIterator};
     use crate::types::RowEntry;
     use async_trait::async_trait;
     use bytes::Bytes;
     use parking_lot::Mutex;
+    use rstest::rstest;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -639,6 +655,8 @@ mod tests {
 
         let entry = iter.next().await.unwrap().expect("newest source holds key");
         assert_eq!(entry.value.as_bytes(), Some(Bytes::from_static(b"0")));
+        assert_eq!(iter.next().await.unwrap(), None);
+        assert_eq!(iter.next().await.unwrap(), None);
 
         // The iterator probes the newest source alone.
         // A hit in this source does not cause speculative reads.
@@ -651,6 +669,8 @@ mod tests {
         let mut iter = GetIterator::with_lookahead(Bytes::from_static(b"key"), iters, 4);
 
         iter.next().await.unwrap().expect("source 1 holds key");
+        assert_eq!(iter.next().await.unwrap(), None);
+        assert_eq!(iter.next().await.unwrap(), None);
 
         // The iterator probes sources after the newest source in windows.
         // A hit in the first window prevents probes in the remaining chain.
@@ -669,6 +689,98 @@ mod tests {
         assert_eq!(iter.next().await.unwrap(), None);
 
         assert_eq!(record.peak.load(Ordering::SeqCst), 1);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_get_stops_at_base(
+        #[values(false, true)] tombstone: bool,
+        #[values(false, true)] merge: bool,
+    ) {
+        let base = if tombstone {
+            RowEntry::new_tombstone(b"key", 3)
+        } else {
+            RowEntry::new_value(b"key", b"base", 3)
+        };
+        let newer_operand = RowEntry::new_merge(b"key", b"newer", 5);
+        let older_operand = RowEntry::new_merge(b"key", b"older", 4);
+        let mut base_source = TestIterator::new();
+        let mut sources: Vec<Box<dyn RowEntryIterator>> = Vec::new();
+        if merge {
+            sources.push(Box::new(
+                TestIterator::new().with_row_entry(newer_operand.clone()),
+            ));
+            base_source = base_source.with_row_entry(older_operand.clone());
+        }
+        sources.push(Box::new(
+            base_source
+                .with_row_entry(base.clone())
+                .with_entry(b"key", b"obsolete", 2),
+        ));
+        let (record, older_sources) = probe_sources(3, &[0, 1, 2]);
+        sources.extend(older_sources);
+        let mut iter = GetIterator::with_lookahead(Bytes::from_static(b"key"), sources, 1);
+
+        if merge {
+            assert_eq!(iter.next().await.unwrap(), Some(newer_operand));
+            assert_eq!(iter.next().await.unwrap(), Some(older_operand));
+        }
+        assert_eq!(iter.next().await.unwrap(), (!tombstone).then_some(base));
+        for _ in 0..3 {
+            assert_eq!(iter.next().await.unwrap(), None);
+        }
+        assert!(record.initialized.lock().is_empty());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_point_scan_stops_at_base(
+        #[values(false, true)] tombstone: bool,
+        #[values(false, true)] merge: bool,
+        #[values(IterationOrder::Ascending, IterationOrder::Descending)] order: IterationOrder,
+    ) {
+        let base = if tombstone {
+            RowEntry::new_tombstone(b"key", 3)
+        } else {
+            RowEntry::new_value(b"key", b"base", 3)
+        };
+        let mut newest = TestIterator::new().with_row_entry(RowEntry::new_tombstone(b"key", 6));
+        if merge {
+            newest = newest.with_row_entry(RowEntry::new_merge(b"key", b"newer", 5));
+        }
+        let mut older = TestIterator::new();
+        if merge {
+            older = older.with_row_entry(RowEntry::new_merge(b"key", b"older", 4));
+        }
+        older = older
+            .with_row_entry(base)
+            .with_entry(b"key", b"obsolete", 2);
+        let mut iter = DbIterator::new(
+            BytesRange::from(Bytes::from_static(b"key")..=Bytes::from_static(b"key")),
+            None,
+            vec![
+                Box::new(newest) as Box<dyn RowEntryIterator>,
+                Box::new(older),
+            ],
+            Box::new(TestIterator::new().with_entry(b"key", b"oldest", 1)),
+            Some(5),
+            merge.then(|| Arc::new(StringConcatMergeOperator) as MergeOperatorType),
+            order,
+            ReadTrace::new(None),
+        )
+        .await
+        .unwrap();
+
+        let expected = match (tombstone, merge) {
+            (false, false) => Some(Bytes::from_static(b"base")),
+            (true, false) => None,
+            (false, true) => Some(Bytes::from_static(b"baseoldernewer")),
+            (true, true) => Some(Bytes::from_static(b"oldernewer")),
+        };
+        assert_eq!(iter.next().await.unwrap().map(|kv| kv.value), expected);
+        for _ in 0..3 {
+            assert_eq!(iter.next().await.unwrap(), None);
+        }
     }
 
     #[tokio::test]
