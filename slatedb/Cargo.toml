@@ -144,6 +144,7 @@ harness = false
 [[bench]]
 name = "scan_prefix_bench"
 harness = false
+required-features = ["foyer"]
 
 [[bench]]
 name = "scan_prefix_large_sorted_run_bench"
@@ -165,3 +166,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[test]]
+name = "foyer_cache_flush"
+required-features = ["foyer"]

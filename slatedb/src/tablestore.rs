@@ -16,7 +16,7 @@ use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 use crate::block_cache_policy::{should_cache_data_block, BlockCachePolicy};
-use crate::db_cache::CacheTarget;
+use crate::db_cache::{CacheFetch, CacheLookup, CacheTarget};
 use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
 use crate::db_state::{SsTableHandle, SsTableId, SstType};
 use crate::error::SlateDBError;
@@ -28,21 +28,23 @@ use crate::iter::IterationOrder;
 use crate::object_store_tag::ObjectStoreCallTag;
 pub(crate) use crate::object_store_tag::TableStoreKind;
 use crate::paths::PathResolver;
+use crate::reader::{ReadTrace, SstTraceLevel};
 use crate::sst_builder::EncodedSsTableBuilder;
 #[cfg(test)]
 use crate::sst_io::MAX_VALIDATION_RETRIES;
 use crate::sst_io::{read_obj, read_with_validation_retry, ReadOnlyObject};
 use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
+use tracing::Instrument;
 
 /// Keep object-store loads inside the requesting future. Some cache implementations
 /// spawn their loader and keep it running after the request is dropped. The proxy
 /// can outlive this call, but cancellation drops the actual read with its caller's
 /// snapshot lease. Other cache waiters receive an error and use their own direct read.
-async fn fetch_cached<F, Fut>(loader: CacheLoader, fetch: F) -> Result<CachedEntry, crate::Error>
+async fn fetch_cached<F, Fut>(loader: CacheLoader, fetch: F) -> Result<CacheFetch, crate::Error>
 where
     F: FnOnce(CacheLoader) -> Fut,
-    Fut: Future<Output = Result<CachedEntry, crate::Error>>,
+    Fut: Future<Output = Result<CacheFetch, crate::Error>>,
 {
     let (request, requested) = tokio::sync::oneshot::channel();
     let (result, response) = tokio::sync::oneshot::channel();
@@ -75,6 +77,13 @@ pub(crate) struct TableStore {
     block_cache_policy: BlockCachePolicy,
     /// Which component owns this store. Tagged on compacted-SST calls.
     kind: TableStoreKind,
+}
+
+fn record_read_filter_cached(span: &tracing::Span, lookup: CacheLookup) {
+    match lookup {
+        CacheLookup::Hit => span.record("cached", true),
+        CacheLookup::Miss => span.record("cached", false),
+    };
 }
 
 impl TableStore {
@@ -143,6 +152,8 @@ impl TableStore {
                 ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&id), segment),
             ),
             table_store: self.clone(),
+            bytes_written: 0,
+            shutdown_started: false,
             #[cfg(test)]
             blocks_written: 0,
         }
@@ -154,6 +165,7 @@ impl TableStore {
 
     /// Writes an SST. `segment` is a hint attached to the
     /// [`ObjectStoreCallTag`] for object-store routing.
+    #[cfg(test)]
     pub(crate) async fn write_sst(
         &self,
         id: &SsTableId,
@@ -415,6 +427,8 @@ impl TableStore {
         handle: &SsTableHandle,
         cache_blocks: bool,
         segment: Option<Bytes>,
+        trace: &ReadTrace,
+        sst_level: Option<&SstTraceLevel>,
     ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         // No filter exists for this SST (either no policies configured, or the
         // SST was built below `min_filter_keys`). Return an empty slice without
@@ -423,6 +437,18 @@ impl TableStore {
         if self.sst_format.filter_policies.is_empty() || handle.info.filter_len == 0 {
             return Ok(Arc::from([]));
         }
+        let span = trace.new_read_filter_span(handle.id, sst_level);
+        let read = self.read_filters_inner(handle, cache_blocks, segment, span.clone());
+        read.instrument(span).await
+    }
+
+    async fn read_filters_inner(
+        &self,
+        handle: &SsTableHandle,
+        cache_blocks: bool,
+        segment: Option<Bytes>,
+        span: tracing::Span,
+    ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         let cache_key: CachedKey = (handle.id, handle.info.filter_offset).into();
         if let Some(cache) = self.cache_for_reads() {
             // cache_blocks=true: dedup-aware fetch; concurrent callers collapse onto
@@ -431,7 +457,7 @@ impl TableStore {
             // we intentionally don't re-insert there — `fetch_X` errors are almost
             // always the smuggled loader error (so the direct retry will also fail),
             // and on the rare foyer-machinery error an insert would likely fail too.
-            let entry = if cache_blocks {
+            let fetch = if cache_blocks {
                 fetch_cached(
                     self.read_loader(handle, CacheTarget::Filters, segment.clone()),
                     |loader| cache.fetch_filter(cache_key.clone(), loader),
@@ -439,9 +465,14 @@ impl TableStore {
                 .await
                 .ok()
             } else {
-                cache.get_filter(&cache_key).await.unwrap_or(None)
+                cache
+                    .get_filter(&cache_key)
+                    .await
+                    .unwrap_or(None)
+                    .map(CacheFetch::hit)
             };
-            if let Some(entry) = entry {
+            if let Some(CacheFetch { entry, lookup }) = fetch {
+                record_read_filter_cached(&span, lookup);
                 // Already decoded.
                 if let Some(filters) = entry.filters() {
                     return Ok(filters);
@@ -455,6 +486,7 @@ impl TableStore {
                 }
             }
         }
+        record_read_filter_cached(&span, CacheLookup::Miss);
         read_obj!(
             &self.object_store,
             self.path(&handle.id),
@@ -490,6 +522,7 @@ impl TableStore {
                 )
                 .await
                 .ok()
+                .map(|fetch| fetch.entry)
             } else {
                 cache.get_stats(&cache_key).await.unwrap_or(None)
             };
@@ -529,6 +562,7 @@ impl TableStore {
                 )
                 .await
                 .ok()
+                .map(|fetch| fetch.entry)
             } else {
                 cache.get_index(&cache_key).await.unwrap_or(None)
             };
@@ -760,10 +794,10 @@ impl TableStore {
                 let offset = index.borrow().block_meta().get(block_num).offset();
                 let cache_key: CachedKey = (handle.id, offset).into();
                 let loader = self.block_loader(handle, index.clone(), block_num, segment.clone());
-                if let Ok(entry) =
+                if let Ok(fetch) =
                     fetch_cached(loader, |loader| cache.fetch_block(cache_key, loader)).await
                 {
-                    if let Some(block) = entry.block() {
+                    if let Some(block) = fetch.entry.block() {
                         let mut result = VecDeque::with_capacity(1);
                         result.push_back(block);
                         return Ok(result);
@@ -1007,6 +1041,7 @@ fn tagged_buf_writer(
     BufWriter::new(object_store, path).with_extensions(tag.into())
 }
 
+#[cfg(test)]
 async fn write_sst_streaming_in_object_store(
     object_store: Arc<dyn ObjectStore>,
     path: &Path,
@@ -1027,6 +1062,8 @@ pub(crate) struct EncodedSsTableWriter {
     builder: EncodedSsTableBuilder,
     writer: BufWriter,
     table_store: Arc<TableStore>,
+    bytes_written: usize,
+    shutdown_started: bool,
     #[cfg(test)]
     blocks_written: usize,
 }
@@ -1041,28 +1078,78 @@ impl EncodedSsTableWriter {
         Ok(block_size)
     }
 
-    pub(crate) async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
-        let encoded_sst = self.builder.build().await?;
-        for block in &encoded_sst.unconsumed_blocks {
-            self.writer.write_all(block.encoded_bytes.as_ref()).await?;
-        }
-        self.writer.write_all(encoded_sst.footer.as_ref()).await?;
-        self.writer.shutdown().await?;
+    /// Finish this SST: write the last block, write the footer, close
+    /// the upload.
+    ///
+    /// On success, returns the finished SST handle and the exact
+    /// number of bytes written.
+    ///
+    /// On failure, aborts the upload before returning the error. This
+    /// discards any blocks already sent to object storage for this
+    /// SST.
+    pub(crate) async fn close(mut self) -> Result<(SsTableHandle, u64), SlateDBError> {
+        let result = async {
+            fail_point!(
+                self.table_store.fp_registry.clone(),
+                "write-compacted-sst-io-error",
+                |_| Err(slatedb_io_error())
+            );
+            let builder = std::mem::replace(&mut self.builder, self.table_store.table_builder());
+            let encoded_sst = builder.build().await?;
+            for block in &encoded_sst.unconsumed_blocks {
+                self.writer.write_all(block.encoded_bytes.as_ref()).await?;
+                self.bytes_written += block.encoded_bytes.len();
+            }
+            self.writer.write_all(encoded_sst.footer.as_ref()).await?;
+            self.bytes_written += encoded_sst.footer.len();
+            self.shutdown_started = true;
+            self.writer.shutdown().await?;
 
-        // Cache inserts happen after writer shutdown so an SST whose upload
-        // fails contributes no metadata entries.
-        //
-        // Blocks drained while entries were added are cached by `write_block`,
-        // so the only data block left for `cache_on_sst_write` is the tail
-        // block that `build` finished.
-        self.table_store
-            .cache_on_sst_write(self.id, &encoded_sst)
-            .await;
-        Ok(SsTableHandle::new(
-            self.id,
-            encoded_sst.format_version,
-            encoded_sst.info,
-        ))
+            // Cache inserts happen after writer shutdown so an SST whose upload
+            // fails contributes no metadata entries.
+            //
+            // Blocks drained while entries were added are cached by `write_block`,
+            // so the only data block left for `cache_on_sst_write` is the tail
+            // block that `build` finished.
+            self.table_store
+                .cache_on_sst_write(self.id, &encoded_sst)
+                .await;
+            Ok((
+                SsTableHandle::new(self.id, encoded_sst.format_version, encoded_sst.info),
+                self.bytes_written as u64,
+            ))
+        }
+        .await;
+
+        if result.is_err() {
+            if let Err(abort_err) = self.abort().await {
+                warn!(
+                    "failed to abort sst writer after error [id={:?}, error={:?}]",
+                    self.id, abort_err
+                );
+            }
+        }
+        result
+    }
+
+    /// Tell object storage to discard this SST's upload.
+    ///
+    /// If the upload never grew past the small in-memory buffer,
+    /// nothing reached object storage yet, so this is a no-op.
+    /// Otherwise this cancels the multipart upload and asks object
+    /// storage to delete the parts already stored.
+    ///
+    /// Once shutdown has started this is a no-op: the underlying
+    /// `BufWriter` panics if aborted after shutdown, and a failed
+    /// shutdown leaves nothing this can usefully cancel.
+    pub(crate) async fn abort(&mut self) -> Result<(), SlateDBError> {
+        if self.shutdown_started {
+            return Ok(());
+        }
+        self.writer
+            .abort()
+            .await
+            .map_err(|e| SlateDBError::ObjectStoreError(Arc::new(e)))
     }
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {
@@ -1077,7 +1164,13 @@ impl EncodedSsTableWriter {
     }
 
     async fn write_block(&mut self, block: EncodedSsTableBlock) -> Result<(), SlateDBError> {
+        fail_point!(
+            self.table_store.fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            |_| Err(slatedb_io_error())
+        );
         self.writer.write_all(block.encoded_bytes.as_ref()).await?;
+        self.bytes_written += block.encoded_bytes.len();
         if let (Some(cache), Some(key_span)) = (&self.table_store.cache, &block.key_span) {
             let targets = self.table_store.targets_to_cache(&self.id);
             if should_cache_data_block(targets, key_span) {
@@ -1113,15 +1206,18 @@ fn slatedb_io_error() -> SlateDBError {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::TracingOptions;
+    use crate::reader::{ReadTrace, SstTraceLevel};
     use crate::types::KeyValue;
     use bytes::Bytes;
     use futures::future;
     use futures::StreamExt;
     use object_store::{memory::InMemory, path::Path, ObjectStore, ObjectStoreExt};
     use rstest::rstest;
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::ops::Range;
     use std::sync::Arc;
+    use tracing_subscriber::layer::SubscriberExt;
 
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::db_cache::test_utils::TestCache;
@@ -1140,8 +1236,7 @@ mod tests {
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
-    use crate::test_utils::FlakyObjectStore;
-    use crate::test_utils::{assert_iterator, build_test_sst};
+    use crate::test_utils::{assert_iterator, build_test_sst, FlakyObjectStore, SpanRecorder};
     use crate::types::{RowEntry, ValueDeletable};
     use crate::{block_iterator::BlockIteratorLatest, db_state::SsTableId, iter::RowEntryIterator};
     use slatedb_common::clock::DefaultSystemClock;
@@ -1323,7 +1418,7 @@ mod tests {
             .add(RowEntry::new_value(&[b'd'; 16], &[4u8; 16], 0))
             .await
             .unwrap();
-        let sst = writer.close().await.unwrap();
+        let (sst, _) = writer.close().await.unwrap();
 
         let sst_iter_options = SstIteratorOptions {
             eager_spawn: true,
@@ -1395,6 +1490,47 @@ mod tests {
         // then:
         assert_eq!(os.put_attempts(), 0);
         assert_eq!(os.multipart_attempts(), 1);
+        ts.open_sst(&id, Some(Bytes::new())).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_surfaces_error_instead_of_panicking_when_shutdown_fails() {
+        // A small SST flushes as a single put during shutdown. Failing
+        // that put must come back as an error the caller can retry, not a
+        // panic from aborting a BufWriter that has already shut down.
+        let os = Arc::new(FlakyObjectStore::new(Arc::new(InMemory::new()), 1));
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            os.clone(),
+            format,
+            Path::from(ROOT),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let id = SsTableId::from(ulid::Ulid::new());
+
+        let mut writer = ts.table_writer(id, Some(Bytes::new()));
+        writer
+            .add(RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0))
+            .await
+            .unwrap();
+        let result = writer.close().await;
+        assert!(
+            result.is_err(),
+            "a failed shutdown must surface as an error, not a panic"
+        );
+
+        let mut writer = ts.table_writer(id, Some(Bytes::new()));
+        writer
+            .add(RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0))
+            .await
+            .unwrap();
+        writer.close().await.unwrap();
         ts.open_sst(&id, Some(Bytes::new())).await.unwrap();
     }
 
@@ -1501,7 +1637,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
 
         // Read the index
         let index = ts
@@ -1669,6 +1805,114 @@ mod tests {
             .is_some());
     }
 
+    #[rstest]
+    #[case::cache_enabled_with_caching_hit(true, true, true)]
+    #[case::cache_enabled_with_caching_miss(true, true, false)]
+    #[case::cache_enabled_without_caching_hit(true, false, true)]
+    #[case::cache_enabled_without_caching_miss(true, false, false)]
+    #[case::cache_disabled_without_caching(false, false, false)]
+    #[test]
+    fn test_read_filter_span_fields(
+        #[case] cache_enabled: bool,
+        #[case] cache_blocks: bool,
+        #[case] cache_hit: bool,
+    ) {
+        const TRACE_ID: &str = "filter-read-trace";
+        const SORTED_RUN_ID: u32 = 7;
+
+        let span_recorder = SpanRecorder::for_name("slatedb.read.read_filters");
+        let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
+        let id = tracing::subscriber::with_default(subscriber, || {
+            tokio_test::block_on(async {
+                let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+                let format = SsTableFormat {
+                    min_filter_keys: 1,
+                    ..SsTableFormat::default()
+                };
+                let writer = TableStore::new(
+                    main_store.clone(),
+                    format.clone(),
+                    Path::from(ROOT),
+                    None,
+                    TableStoreKind::Main,
+                    BlockCachePolicy::default(),
+                );
+                let mut builder = writer.table_builder();
+                builder
+                    .add(RowEntry::new_value(b"key1", b"value1", 0))
+                    .await
+                    .unwrap();
+                builder
+                    .add(RowEntry::new_value(b"key2", b"value2", 0))
+                    .await
+                    .unwrap();
+                let id = SsTableId::from(ulid::Ulid::new());
+                let handle = writer
+                    .write_sst(&id, &builder.build().await.unwrap(), Some(Bytes::new()))
+                    .await
+                    .unwrap();
+
+                let meta_cache = Arc::new(TestCache::new());
+                let cache: Option<Arc<dyn DbCache>> = if cache_enabled {
+                    Some(Arc::new(
+                        SplitCache::new().with_meta_cache(Some(meta_cache)).build(),
+                    ))
+                } else {
+                    None
+                };
+                let reader = TableStore::new(
+                    main_store,
+                    format,
+                    Path::from(ROOT),
+                    cache,
+                    TableStoreKind::Main,
+                    BlockCachePolicy::default(),
+                );
+
+                // setup a cache hit by reading the filter w/o tracing
+                if cache_hit {
+                    reader
+                        .read_filters(
+                            &handle,
+                            true,
+                            Some(Bytes::new()),
+                            &ReadTrace::new(None),
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                }
+
+                let filters = reader
+                    .read_filters(
+                        &handle,
+                        cache_blocks,
+                        Some(Bytes::new()),
+                        &ReadTrace::new(Some(TracingOptions::new(TRACE_ID))),
+                        Some(&SstTraceLevel::SortedRun(SORTED_RUN_ID)),
+                    )
+                    .await
+                    .unwrap();
+                assert!(!filters.is_empty());
+                id
+            })
+        });
+
+        let span = span_recorder.only_span();
+        assert_eq!(
+            span.fields,
+            HashMap::from([
+                ("trace_id".to_string(), TRACE_ID.to_string()),
+                ("sst_id".to_string(), id.value().to_string()),
+                (
+                    "sst_level".to_string(),
+                    format!("sorted_run:{SORTED_RUN_ID}"),
+                ),
+                ("cached".to_string(), cache_hit.to_string()),
+            ])
+        );
+    }
+
     #[tokio::test]
     async fn test_read_filter_honors_cache_blocks() {
         let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -1717,7 +1961,13 @@ mod tests {
         assert_eq!(meta_cache.entry_count(), 0);
 
         let filters = reader
-            .read_filters(&handle, false, Some(Bytes::new()))
+            .read_filters(
+                &handle,
+                false,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert!(!filters.is_empty());
@@ -1728,7 +1978,13 @@ mod tests {
             .is_none());
 
         let _ = reader
-            .read_filters(&handle, true, Some(Bytes::new()))
+            .read_filters(
+                &handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert!(meta_cache
@@ -1981,7 +2237,7 @@ mod tests {
                 .unwrap();
         }
 
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
         let index_key: CachedKey = (id, handle.info.index_offset).into();
         let filter_key: CachedKey = (id, handle.info.filter_offset).into();
         let stats_key: CachedKey = (id, handle.info.stats_offset).into();
@@ -2080,7 +2336,7 @@ mod tests {
                 .unwrap();
         }
 
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
 
         let index_key: CachedKey = (id, handle.info.index_offset).into();
         let index = cache
@@ -2122,7 +2378,7 @@ mod tests {
             .await
             .unwrap();
 
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
 
         assert_eq!(cache.entry_count(), 2);
         assert!(cache
