@@ -401,10 +401,8 @@ impl DbIterator {
     /// After a successful seek, the iterator will return the next record
     /// with a key greater than or equal to `next_key`.
     ///
-    /// Only supported for ascending scans. Descending scans return an error:
-    /// repositioning a descending scan requires the L0 and sorted-run
-    /// iterators to skip past tables that sort above `next_key`, which they do
-    /// not yet do.
+    /// Only supported for ascending scans. Descending scans return an error
+    /// because the merge and sorted-run iterators only seek in ascending order.
     ///
     /// # Errors
     ///

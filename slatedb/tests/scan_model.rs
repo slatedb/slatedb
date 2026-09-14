@@ -137,12 +137,13 @@ async fn open_db(path: &str) -> Db {
 /// Flushes L0 and waits for the compactor to drain it into a sorted run.
 async fn compact_l0(db: &Db) {
     db.flush().await.unwrap();
-    let _ = tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while !db.manifest().l0().is_empty() {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
-    .await;
+    .await
+    .expect("compactor did not drain L0 within 30s");
 }
 
 async fn collect(db: &Db, range: KeyRange, order: IterationOrder) -> Vec<(Bytes, Bytes)> {

@@ -441,7 +441,7 @@ mod tests {
     use crate::proptest_util;
     use crate::proptest_util::sample;
     use crate::tablestore::TableStoreKind;
-    use crate::test_utils::assert_kv;
+    use crate::test_utils::{assert_iterator, assert_kv, build_sorted_runs, write_ssts};
     use crate::types::KeyValue;
 
     use bytes::{BufMut, BytesMut};
@@ -605,53 +605,29 @@ mod tests {
         ))
     }
 
-    /// Writes one SST holding `entries` and returns an unprojected view of it.
-    async fn write_sst_view(
-        table_store: &Arc<TableStore>,
-        entries: &[(&[u8], u64)],
-    ) -> SsTableView {
-        let mut builder = table_store.table_builder();
-        for (key, seq) in entries {
-            let value = format!("{}@{seq}", String::from_utf8_lossy(key));
-            builder
-                .add(RowEntry::new_value(key, value.as_bytes(), *seq))
-                .await
-                .unwrap();
-        }
-        let encoded = builder.build().await.unwrap();
-        let id = SsTableId::from(ulid::Ulid::new());
-        let handle = table_store
-            .write_sst(&id, &encoded, Some(Bytes::new()))
+    fn row(key: &[u8], seq: u64) -> RowEntry {
+        let value = format!("{}@{seq}", String::from_utf8_lossy(key));
+        RowEntry::new_value(key, value.as_bytes(), seq)
+    }
+
+    /// Writes each entry set as one SST and returns them as sorted run 0.
+    async fn build_sr(table_store: &Arc<TableStore>, sst_sets: Vec<Vec<RowEntry>>) -> SortedRun {
+        build_sorted_runs(table_store, &[sst_sets], usize::MAX)
             .await
-            .unwrap();
-        SsTableView::identity(handle)
-    }
-
-    async fn drain(iter: &mut SortedRunIterator<'_>) -> Vec<(Bytes, u64)> {
-        let mut entries = Vec::new();
-        while let Some(entry) = iter.next().await.unwrap() {
-            entries.push((entry.key, entry.seq));
-        }
-        entries
-    }
-
-    fn expected(entries: &[(&[u8], u64)]) -> Vec<(Bytes, u64)> {
-        entries
-            .iter()
-            .map(|(key, seq)| (Bytes::copy_from_slice(key), *seq))
-            .collect()
+            .remove(0)
     }
 
     #[tokio::test]
     async fn test_sr_iter_descending_visits_ssts_from_last_to_first() {
         let table_store = build_table_store();
-        let sr = SortedRun::new(
-            0,
-            [
-                write_sst_view(&table_store, &[(b"key1", 1), (b"key2", 2)]).await,
-                write_sst_view(&table_store, &[(b"key3", 3), (b"key4", 4)]).await,
+        let sr = build_sr(
+            &table_store,
+            vec![
+                vec![row(b"key1", 1), row(b"key2", 2)],
+                vec![row(b"key3", 3), row(b"key4", 4)],
             ],
-        );
+        )
+        .await;
 
         let mut iter = SortedRunIterator::new_borrowed_initialized(
             ..,
@@ -662,10 +638,16 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            drain(&mut iter).await,
-            expected(&[(b"key4", 4), (b"key3", 3), (b"key2", 2), (b"key1", 1)])
-        );
+        assert_iterator(
+            &mut iter,
+            vec![
+                row(b"key4", 4),
+                row(b"key3", 3),
+                row(b"key2", 2),
+                row(b"key1", 1),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -673,13 +655,14 @@ mod tests {
         // given: key3 spans both SSTs. Compaction writes keys ascending and
         // seqs descending, so the first SST holds the higher seqs.
         let table_store = build_table_store();
-        let sr = SortedRun::new(
-            0,
-            [
-                write_sst_view(&table_store, &[(b"key1", 1), (b"key3", 30), (b"key3", 20)]).await,
-                write_sst_view(&table_store, &[(b"key3", 10), (b"key5", 5)]).await,
+        let sr = build_sr(
+            &table_store,
+            vec![
+                vec![row(b"key1", 1), row(b"key3", 30), row(b"key3", 20)],
+                vec![row(b"key3", 10), row(b"key5", 5)],
             ],
-        );
+        )
+        .await;
 
         // when: scanning descending
         let mut iter = SortedRunIterator::new_borrowed_initialized(
@@ -692,29 +675,31 @@ mod tests {
         .unwrap();
 
         // then: key3's versions stay in descending seq order across the boundary
-        assert_eq!(
-            drain(&mut iter).await,
-            expected(&[
-                (b"key5", 5),
-                (b"key3", 30),
-                (b"key3", 20),
-                (b"key3", 10),
-                (b"key1", 1),
-            ])
-        );
+        assert_iterator(
+            &mut iter,
+            vec![
+                row(b"key5", 5),
+                row(b"key3", 30),
+                row(b"key3", 20),
+                row(b"key3", 10),
+                row(b"key1", 1),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_sr_iter_descending_orders_key_spanning_three_ssts_by_seq() {
         let table_store = build_table_store();
-        let sr = SortedRun::new(
-            0,
-            [
-                write_sst_view(&table_store, &[(b"key1", 1), (b"key3", 30)]).await,
-                write_sst_view(&table_store, &[(b"key3", 20)]).await,
-                write_sst_view(&table_store, &[(b"key3", 10), (b"key5", 5)]).await,
+        let sr = build_sr(
+            &table_store,
+            vec![
+                vec![row(b"key1", 1), row(b"key3", 30)],
+                vec![row(b"key3", 20)],
+                vec![row(b"key3", 10), row(b"key5", 5)],
             ],
-        );
+        )
+        .await;
 
         let mut iter = SortedRunIterator::new_borrowed_initialized(
             ..,
@@ -725,29 +710,31 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            drain(&mut iter).await,
-            expected(&[
-                (b"key5", 5),
-                (b"key3", 30),
-                (b"key3", 20),
-                (b"key3", 10),
-                (b"key1", 1),
-            ])
-        );
+        assert_iterator(
+            &mut iter,
+            vec![
+                row(b"key5", 5),
+                row(b"key3", 30),
+                row(b"key3", 20),
+                row(b"key3", 10),
+                row(b"key1", 1),
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_sr_iter_descending_respects_range() {
         let table_store = build_table_store();
-        let sr = SortedRun::new(
-            0,
-            [
-                write_sst_view(&table_store, &[(b"key1", 1), (b"key2", 2)]).await,
-                write_sst_view(&table_store, &[(b"key3", 3), (b"key4", 4)]).await,
-                write_sst_view(&table_store, &[(b"key5", 5), (b"key6", 6)]).await,
+        let sr = build_sr(
+            &table_store,
+            vec![
+                vec![row(b"key1", 1), row(b"key2", 2)],
+                vec![row(b"key3", 3), row(b"key4", 4)],
+                vec![row(b"key5", 5), row(b"key6", 6)],
             ],
-        );
+        )
+        .await;
 
         let mut iter = SortedRunIterator::new_owned_initialized(
             BytesRange::from_ref("key2".."key5"),
@@ -758,10 +745,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            drain(&mut iter).await,
-            expected(&[(b"key4", 4), (b"key3", 3), (b"key2", 2)])
-        );
+        assert_iterator(
+            &mut iter,
+            vec![row(b"key4", 4), row(b"key3", 3), row(b"key2", 2)],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -769,15 +757,22 @@ mod tests {
         // given: projections that leave the middle table with no visible keys
         // in the query range
         let table_store = build_table_store();
-        let first = write_sst_view(&table_store, &[(b"key1", 1), (b"key2", 2)]).await;
-        let middle = write_sst_view(&table_store, &[(b"key3", 3), (b"key4", 4)]).await;
-        let last = write_sst_view(&table_store, &[(b"key5", 5), (b"key6", 6)]).await;
+        let mut ssts = Vec::new();
+        for entries in [
+            vec![row(b"key1", 1), row(b"key2", 2)],
+            vec![row(b"key3", 3), row(b"key4", 4)],
+            vec![row(b"key5", 5), row(b"key6", 6)],
+        ] {
+            ssts.extend(write_ssts(&table_store, &entries, usize::MAX).await);
+        }
+        let [first, middle, last]: [SsTableHandle; 3] = ssts.try_into().unwrap();
         let sr = SortedRun::new(
             0,
             [
-                first,
-                middle.with_visible_range(BytesRange::from_ref("key3".."key4")),
-                last,
+                SsTableView::identity(first),
+                SsTableView::identity(middle)
+                    .with_visible_range(BytesRange::from_ref("key3".."key4")),
+                SsTableView::identity(last),
             ],
         );
 
@@ -790,10 +785,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            drain(&mut iter).await,
-            expected(&[(b"key5", 5), (b"key3", 3), (b"key2", 2)])
-        );
+        assert_iterator(
+            &mut iter,
+            vec![row(b"key5", 5), row(b"key3", 3), row(b"key2", 2)],
+        )
+        .await;
     }
 
     #[tokio::test]
