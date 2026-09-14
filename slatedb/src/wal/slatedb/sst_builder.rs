@@ -65,9 +65,13 @@ use crate::types::RowEntry;
 use bytes::Bytes;
 use flatbuffers::DefaultAllocator;
 
+// use as large of a block size as possible for the WAL. We don't need to support random seeks,
+// so the size is optimized to minimize overhead.
+const WAL_BLOCK_SIZE: usize = u16::MAX as usize;
+
 impl SsTableFormat {
     pub(crate) fn wal_table_builder(&self) -> EncodedWalSsTableBuilder {
-        let mut builder = EncodedWalSsTableBuilder::new(self.block_size, self.sst_codec.clone());
+        let mut builder = EncodedWalSsTableBuilder::new(WAL_BLOCK_SIZE, self.sst_codec.clone());
         if let Some(codec) = self.compression_codec {
             builder = builder.with_compression_codec(codec);
         }
