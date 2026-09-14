@@ -6,7 +6,7 @@ use {
         clock::MonotonicClock,
         config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions},
         db_cache::CacheTarget,
-        db_cache_manager,
+        db_cache_manager::{self, MetadataCacheEvictor},
         db_common::extract_segment_prefix,
         db_state::{collect_touched_segments, SsTableId},
         db_stats::DbStats,
@@ -637,6 +637,12 @@ impl DbReaderInner {
             rx,
             &Handle::current(),
         );
+        MetadataCacheEvictor::start(
+            &self.table_store,
+            &self.status_manager,
+            task_executor,
+            &Handle::current(),
+        )?;
         task_executor.monitor_on(&Handle::current())?;
         result
     }
@@ -1373,6 +1379,8 @@ impl DbReader {
             .await
             .map_err(Into::<crate::Error>::into)?;
 
+        MetadataCacheEvictor::shutdown(&self.task_executor).await;
+
         if let Err(e) = self.inner.table_store.close_cache().await {
             warn!("failed to close block cache [error={:?}]", e);
         }
@@ -1494,6 +1502,7 @@ mod tests {
                 CheckpointOptions, CheckpointScope, CloseOptions, FlushOptions, FlushType,
                 MergeOptions, PutOptions, Settings, WriteOptions,
             },
+            db_cache::CachedKey,
             db_reader::{DbReader, DbReaderInner, DbReaderMode, DbReaderOptions},
             db_state::SstType,
             db_stats::DbStats,
@@ -1513,7 +1522,7 @@ mod tests {
             proptest_util::{rng::new_test_rng, sample},
             reader::Reader,
             tablestore::{TableStore, TableStoreKind},
-            test_utils,
+            test_utils::{self, wait_until_index_evicted},
             types::RowEntry,
             wal::{
                 slatedb::store::WalTableStore, WalError, WalFileRange, WalIterator,
@@ -1627,6 +1636,51 @@ mod tests {
 
         assert!(wal_reader.last_wal_file_id_calls.load(Ordering::Relaxed) > 0);
         assert!(wal_reader.iterator_calls.load(Ordering::Relaxed) > 0);
+        reader.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn should_evict_sst_that_leaves_the_manifest() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_reader_evicts_retired_sst");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+        let db = test_provider
+            .new_db(Settings {
+                min_filter_keys: 1,
+                ..Settings::default()
+            })
+            .await
+            .unwrap();
+        db.put(b"test_key", b"test_value").await.unwrap();
+        db.flush().await.unwrap();
+        db.close().await.unwrap();
+
+        // given: a read through the reader caches the SST's index and filter
+        let reader = DbReader::open(
+            path,
+            object_store,
+            DbReaderMode::FollowLatest,
+            DbReaderOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert!(reader.get(b"test_key").await.unwrap().is_some());
+        let mut manifest = reader.manifest();
+        let sst = manifest.manifest.core.tree.l0[0].sst.clone();
+        let cache = reader.inner.table_store.cache().unwrap().clone();
+        let index_key: CachedKey = (sst.id, sst.info.index_offset).into();
+        let filter_key: CachedKey = (sst.id, sst.info.filter_offset).into();
+        assert!(cache.get_index(&index_key).await.unwrap().is_some());
+        assert!(cache.get_filter(&filter_key).await.unwrap().is_some());
+
+        // when: a polled manifest no longer holds the SST
+        Arc::make_mut(&mut manifest.manifest.core.tree).l0.clear();
+        reader.inner.status_manager.report_manifest(manifest);
+
+        // then
+        wait_until_index_evicted(&cache, &index_key).await;
+        assert!(cache.get_filter(&filter_key).await.unwrap().is_none());
+
         reader.close().await.unwrap();
     }
 

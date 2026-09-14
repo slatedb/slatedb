@@ -1,19 +1,129 @@
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use bytes::Bytes;
+use futures::stream::BoxStream;
 use log::{debug, warn};
-use tokio::sync::OnceCell;
+use tokio::runtime::Handle;
+use tokio::sync::{watch, OnceCell};
 
 use crate::bytes_range::BytesRange;
 use crate::db_cache::CacheTarget;
 use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
+use crate::db_status::{DbStatus, DbStatusManager};
+use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, Notifier};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::manifest::ManifestCore;
 use crate::partitioned_keyspace::partitions_covering_range;
 use crate::reader::ReadTrace;
 use crate::tablestore::TableStore;
+
+const METADATA_CACHE_EVICTOR_TASK_NAME: &str = "metadata_cache_evictor";
+
+#[derive(Debug)]
+enum MetadataCacheEvictorMessage {
+    StatusChanged,
+}
+
+/// Evicts the index, filter, and stats entries of SSTs that leave the
+/// manifest. Does not evict data blocks.
+pub(crate) struct MetadataCacheEvictor {
+    table_store: Arc<TableStore>,
+    status: watch::Receiver<DbStatus>,
+    last_seen: ManifestCore,
+}
+
+impl MetadataCacheEvictor {
+    fn new(table_store: Arc<TableStore>, status: watch::Receiver<DbStatus>) -> Self {
+        let last_seen = status.borrow().current_manifest.core().clone();
+        Self {
+            table_store,
+            status,
+            last_seen,
+        }
+    }
+
+    /// Starts the evictor by registering with the executor. Does nothing when
+    /// `table_store` has no cache.
+    pub(crate) fn start(
+        table_store: &Arc<TableStore>,
+        status_manager: &DbStatusManager,
+        executor: &MessageHandlerExecutor,
+        tokio_handle: &Handle,
+    ) -> Result<(), SlateDBError> {
+        if table_store.cache().is_none() {
+            return Ok(());
+        }
+        let evictor = Self::new(table_store.clone(), status_manager.subscribe());
+        // The evictor only uses a notifier, so pass in a dummy rx channel
+        let (_, rx) = async_channel::unbounded();
+        executor.add_handler(
+            METADATA_CACHE_EVICTOR_TASK_NAME.to_string(),
+            Box::new(evictor),
+            rx,
+            tokio_handle,
+        )
+    }
+
+    pub(crate) async fn shutdown(executor: &MessageHandlerExecutor) {
+        if let Err(e) = executor
+            .shutdown_task(METADATA_CACHE_EVICTOR_TASK_NAME)
+            .await
+        {
+            warn!(
+                "failed to shutdown metadata cache evictor task [error={:?}]",
+                e
+            );
+        }
+    }
+}
+
+#[async_trait]
+impl MessageHandler<MetadataCacheEvictorMessage> for MetadataCacheEvictor {
+    fn notifiers(&mut self) -> Vec<Box<dyn Notifier<MetadataCacheEvictorMessage>>> {
+        vec![Box::new(StatusNotifier {
+            rx: self.status.clone(),
+        })]
+    }
+
+    /// Evict metadata for SSTs that have been retired in between the last seen
+    /// manifest and the current manifest.
+    async fn handle(&mut self, _: MetadataCacheEvictorMessage) -> Result<(), SlateDBError> {
+        let current = self.status.borrow().current_manifest.core().clone();
+        for handle in current.ssts_retired_since(&self.last_seen) {
+            self.table_store.evict_sst_metadata_from_cache(handle).await;
+        }
+        self.last_seen = current;
+        Ok(())
+    }
+
+    async fn cleanup(
+        &mut self,
+        _messages: BoxStream<'async_trait, MetadataCacheEvictorMessage>,
+        _result: Result<(), SlateDBError>,
+    ) -> Result<(), SlateDBError> {
+        Ok(())
+    }
+}
+
+/// Turns each change of the database status into a message.
+struct StatusNotifier {
+    rx: watch::Receiver<DbStatus>,
+}
+
+#[async_trait]
+impl Notifier<MetadataCacheEvictorMessage> for StatusNotifier {
+    async fn notify(&mut self) -> MetadataCacheEvictorMessage {
+        // The sender drops only when the database shuts down. The dispatcher's
+        // cancellation token ends the loop, so wait forever here.
+        if self.rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+        MetadataCacheEvictorMessage::StatusChanged
+    }
+}
 
 fn find_sst<'a>(
     manifest: &'a ManifestCore,
@@ -252,6 +362,7 @@ mod tests {
     use crate::db::Db;
     use crate::db_cache::{CachedKey, DbCache};
     use crate::manifest::VersionedManifest;
+    use crate::test_utils::wait_until_index_evicted;
     use crate::DbCacheManagerOps;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
@@ -862,6 +973,50 @@ mod tests {
             "expected no blocks cached after eviction, got {:?}",
             mask_after,
         );
+
+        db.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn should_evict_sst_that_leaves_the_manifest() {
+        // given: one L0 SST whose blocks, index, and filter the flush cached
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(PATH, os)
+            .with_settings(Settings {
+                flush_interval: None,
+                min_filter_keys: 1,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .expect("failed to open db");
+        write_keys(&db, 64).await;
+        flush_to_l0(&db).await;
+        let sst_id = first_l0_sst_id(&db);
+        let table_store = db.inner.table_store.clone();
+        let handle = table_store
+            .open_sst(&sst_id, Some(Bytes::new()))
+            .await
+            .expect("open_sst");
+        let cache = table_store.cache().expect("cache configured").clone();
+        let index_key: CachedKey = (sst_id, handle.info.index_offset).into();
+        let filter_key: CachedKey = (sst_id, handle.info.filter_offset).into();
+        assert!(cache.get_index(&index_key).await.unwrap().is_some());
+        assert!(cache.get_filter(&filter_key).await.unwrap().is_some());
+        let blocks_before = cached_block_mask(&table_store, sst_id, Bytes::new()).await;
+        assert!(blocks_before.iter().all(|&cached| cached));
+
+        // when: the status carries a manifest without the SST, as after a
+        // compaction retires it
+        let mut manifest = db.inner.state.read().state().manifest.clone();
+        Arc::make_mut(&mut manifest.value.core.tree).l0.clear();
+        db.inner.status_manager.report_manifest(manifest.into());
+
+        // then: the metadata is gone and the data blocks are left in place
+        wait_until_index_evicted(&cache, &index_key).await;
+        assert!(cache.get_filter(&filter_key).await.unwrap().is_none());
+        let blocks_after = cached_block_mask(&table_store, sst_id, Bytes::new()).await;
+        assert_eq!(blocks_after, blocks_before);
 
         db.close().await.expect("close");
     }

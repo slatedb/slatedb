@@ -142,20 +142,9 @@ impl CompactedGcTask {
 /// Collect every SST id referenced by `manifests`, across the unsegmented
 /// tree and each named segment (RFC-0024).
 fn collect_active_ssts<'a>(manifests: impl Iterator<Item = &'a Manifest>) -> HashSet<SsTableId> {
-    let mut active = HashSet::new();
-    for manifest in manifests {
-        for tree in manifest.core.trees() {
-            for view in tree.l0.iter() {
-                active.insert(view.sst.id);
-            }
-            for sr in tree.compacted.iter() {
-                for view in sr.sst_views() {
-                    active.insert(view.sst.id);
-                }
-            }
-        }
-    }
-    active
+    manifests
+        .flat_map(|manifest| manifest.core.sst_ids())
+        .collect()
 }
 
 /// Computes the newest L0 timestamp from the latest manifest.

@@ -33,6 +33,7 @@ use object_store::path::Path;
 use object_store::{parse_url_opts, ObjectStore};
 
 use crate::compactor::COMPACTOR_TASK_NAME;
+use crate::db_cache_manager::MetadataCacheEvictor;
 use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
@@ -738,6 +739,8 @@ impl Db {
         {
             warn!("failed to shutdown writer task [error={:?}]", e);
         }
+
+        MetadataCacheEvictor::shutdown(&self.task_executor).await;
 
         if let Err(e) = self.inner.table_store.close_cache().await {
             warn!("failed to close block cache [error={:?}]", e);
