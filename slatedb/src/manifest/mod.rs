@@ -501,6 +501,18 @@ impl ManifestCore {
             .map(|view| view.sst.id)
     }
 
+    /// Whether this manifest and `other` share every tree allocation. Trees
+    /// are copied on write, so a shared allocation is an unchanged tree.
+    pub(crate) fn same_trees_as(&self, other: &ManifestCore) -> bool {
+        Arc::ptr_eq(&self.tree, &other.tree)
+            && self.segments.len() == other.segments.len()
+            && self
+                .segments
+                .iter()
+                .zip(&other.segments)
+                .all(|(a, b)| Arc::ptr_eq(&a.tree, &b.tree))
+    }
+
     /// The SSTs that `previous` references and this manifest no longer does,
     /// each paired with the prefix of the segment that held it.
     pub(crate) fn ssts_retired_since<'a>(
@@ -2284,6 +2296,27 @@ mod tests {
         let ids: HashSet<SsTableId> = core_with_four_ssts().sst_ids().collect();
         let expected: HashSet<SsTableId> = (1..=4).map(|seed| make_view(seed).sst.id).collect();
         assert_eq!(ids, expected);
+    }
+
+    #[test]
+    fn test_same_trees_as_is_true_for_a_clone_and_false_after_a_write() {
+        let core = core_with_four_ssts();
+        let mut clone = core.clone();
+        assert!(core.same_trees_as(&clone));
+
+        Arc::make_mut(&mut clone.tree).l0.clear();
+        assert!(!core.same_trees_as(&clone));
+
+        let mut clone = core.clone();
+        Arc::make_mut(&mut clone.segments[0].tree).l0.clear();
+        assert!(!core.same_trees_as(&clone));
+
+        let mut clone = core.clone();
+        clone.segments.push(Segment {
+            prefix: Bytes::from_static(b"t"),
+            tree: Arc::new(LsmTreeState::default()),
+        });
+        assert!(!core.same_trees_as(&clone));
     }
 
     #[test]

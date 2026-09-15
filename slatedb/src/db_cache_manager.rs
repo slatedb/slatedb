@@ -85,6 +85,10 @@ async fn evict_retired_ssts(table_store: Arc<TableStore>, mut status: watch::Rec
     let mut last_seen = status.borrow_and_update().current_manifest.core().clone();
     while status.changed().await.is_ok() {
         let current = status.borrow_and_update().current_manifest.core().clone();
+        // Check if the manifest changed.
+        if current.same_trees_as(&last_seen) {
+            continue;
+        }
         let targets = table_store.block_cache_policy().evictable_sst_targets();
         for (segment, handle) in current.ssts_retired_since(&last_seen) {
             table_store
