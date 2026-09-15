@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::ops::{Range, RangeBounds};
+use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -26,6 +26,7 @@ use crate::format::sst::{EncodedSsTable, EncodedSsTableBlock, SsTableFormat};
 use crate::iter::IterationOrder;
 use crate::object_store_tag::ObjectStoreCallTag;
 pub(crate) use crate::object_store_tag::TableStoreKind;
+use crate::partitioned_keyspace::partitions_covering_range;
 use crate::paths::PathResolver;
 use crate::reader::{ReadTrace, SstTraceLevel};
 use crate::sst_builder::EncodedSsTableBuilder;
@@ -933,6 +934,10 @@ impl TableStore {
         self.cache.as_ref()
     }
 
+    pub(crate) fn block_cache_policy(&self) -> &BlockCachePolicy {
+        &self.block_cache_policy
+    }
+
     /// The block cache to probe for read operations, gated based on the table
     /// store kind.
     ///
@@ -955,9 +960,70 @@ impl TableStore {
         handle: &SsTableHandle,
         segment: Option<Bytes>,
     ) {
+        let all = [
+            CacheTarget::data::<&[u8], _>(..),
+            CacheTarget::Index,
+            CacheTarget::Filters,
+            CacheTarget::Stats,
+        ];
+        self.evict_sst_targets_from_cache(handle, &all, segment)
+            .await;
+    }
+
+    /// Best-effort removal of the cache entries of an SST named by `targets`.
+    /// A [`CacheTarget::Data`] target removes the blocks whose key span
+    /// overlaps its range, which needs the SST index. `segment` is a hint
+    /// attached to the [`ObjectStoreCallTag`] of that index read.
+    pub(crate) async fn evict_sst_targets_from_cache(
+        &self,
+        handle: &SsTableHandle,
+        targets: &[CacheTarget],
+        segment: Option<Bytes>,
+    ) {
         let Some(ref cache) = self.cache else {
             return;
         };
+        let data_ranges: Vec<_> = targets
+            .iter()
+            .filter_map(|target| match target {
+                CacheTarget::Data(range) => Some(range),
+                _ => None,
+            })
+            .collect();
+        if !data_ranges.is_empty() {
+            self.evict_blocks_from_cache(cache, handle, &data_ranges, segment)
+                .await;
+        }
+        if targets.contains(&CacheTarget::Index) {
+            cache
+                .remove(&(handle.id, handle.info.index_offset).into())
+                .await;
+        }
+        // Only evict filter/stats when those sections exist. Otherwise
+        // SsTableInfo's filter_offset collides with index_offset (filter_len
+        // == 0) and stats_offset collides with the first data block
+        // (stats_offset == 0).
+        if targets.contains(&CacheTarget::Filters) && handle.info.filter_len > 0 {
+            cache
+                .remove(&(handle.id, handle.info.filter_offset).into())
+                .await;
+        }
+        if targets.contains(&CacheTarget::Stats) && handle.info.stats_len > 0 {
+            cache
+                .remove(&(handle.id, handle.info.stats_offset).into())
+                .await;
+        }
+    }
+
+    /// Removes the data blocks of an SST whose key span overlaps any of
+    /// `ranges` from `cache`.
+    async fn evict_blocks_from_cache(
+        &self,
+        cache: &Arc<dyn DbCache>,
+        handle: &SsTableHandle,
+        ranges: &[&(Bound<Bytes>, Bound<Bytes>)],
+        segment: Option<Bytes>,
+    ) {
         // Best effort: if we can't read the index we can't enumerate blocks,
         // so log and skip. Remaining entries will age out under normal pressure.
         let index = match self.read_index(handle, false, segment).await {
@@ -970,38 +1036,18 @@ impl TableStore {
                 return;
             }
         };
-        {
-            let index_borrow = index.borrow();
-            let meta = index_borrow.block_meta();
-            for block_num in 0..meta.len() {
+        let index_borrow = index.borrow();
+        let meta = index_borrow.block_meta();
+        for range in ranges {
+            let blocks = partitions_covering_range(
+                &index_borrow,
+                range.0.as_ref().map(|b| b.as_ref()),
+                range.1.as_ref().map(|b| b.as_ref()),
+            );
+            for block_num in blocks {
                 let offset = meta.get(block_num).offset();
                 cache.remove(&(handle.id, offset).into()).await;
             }
-        }
-        self.evict_sst_metadata_from_cache(handle).await;
-    }
-
-    /// Removes the index, filter, and stats entries of an SST from the cache.
-    pub(crate) async fn evict_sst_metadata_from_cache(&self, handle: &SsTableHandle) {
-        let Some(ref cache) = self.cache else {
-            return;
-        };
-        cache
-            .remove(&(handle.id, handle.info.index_offset).into())
-            .await;
-        // Only evict filter/stats when those sections exist. Otherwise
-        // SsTableInfo's filter_offset collides with index_offset (filter_len
-        // == 0) and stats_offset collides with the first data block
-        // (stats_offset == 0).
-        if handle.info.filter_len > 0 {
-            cache
-                .remove(&(handle.id, handle.info.filter_offset).into())
-                .await;
-        }
-        if handle.info.stats_len > 0 {
-            cache
-                .remove(&(handle.id, handle.info.stats_offset).into())
-                .await;
         }
     }
 }
@@ -2181,6 +2227,71 @@ mod tests {
         );
         assert_eq!(
             cache.get_stats(&stats_key).await.unwrap().is_some(),
+            selected.contains(&CacheTarget::Stats)
+        );
+    }
+
+    #[rstest]
+    #[case::nothing(&[])]
+    #[case::metadata(&[CacheTarget::Index, CacheTarget::Filters, CacheTarget::Stats])]
+    #[case::data_only(&[CacheTarget::data::<&[u8], _>(..)])]
+    #[case::all(&[
+        CacheTarget::data::<&[u8], _>(..),
+        CacheTarget::Filters,
+        CacheTarget::Index,
+        CacheTarget::Stats,
+    ])]
+    #[tokio::test]
+    async fn evict_sst_targets_should_remove_only_selected_components(
+        #[case] selected: &[CacheTarget],
+    ) {
+        let cache = Arc::new(TestCache::new());
+        let all = [
+            CacheTarget::data::<&[u8], _>(..),
+            CacheTarget::Filters,
+            CacheTarget::Index,
+            CacheTarget::Stats,
+        ];
+        let ts = Arc::new(TableStore::new(
+            Arc::new(InMemory::new()),
+            SsTableFormat::default(),
+            Path::from("/root"),
+            Some(cache.clone()),
+            TableStoreKind::Main,
+            BlockCachePolicy::default()
+                .with_flush_targets(&all)
+                .with_evictable_sst_targets(selected),
+        ));
+        let id = SsTableId::from(ulid::Ulid::new());
+        let sst = build_test_sst(&ts.sst_format, 3).await;
+        let data_key: CachedKey = (id, sst.unconsumed_blocks[0].offset).into();
+        let index_key: CachedKey = (id, sst.info.index_offset).into();
+        let filter_key: CachedKey = (id, sst.info.filter_offset).into();
+        let stats_key: CachedKey = (id, sst.info.stats_offset).into();
+        let handle = ts.write_sst(&id, &sst, Some(Bytes::new())).await.unwrap();
+        assert_eq!(cache.entry_count(), 3 + sst.unconsumed_blocks.len() as u64);
+
+        ts.evict_sst_targets_from_cache(
+            &handle,
+            ts.block_cache_policy().evictable_sst_targets(),
+            Some(Bytes::new()),
+        )
+        .await;
+
+        assert_eq!(
+            cache.get_block(&data_key).await.unwrap().is_none(),
+            selected.iter().any(|c| matches!(c, CacheTarget::Data(_)))
+        );
+        assert_eq!(
+            cache.get_index(&index_key).await.unwrap().is_none(),
+            selected.contains(&CacheTarget::Index)
+        );
+        assert_eq!(
+            cache.get_filter(&filter_key).await.unwrap().is_none(),
+            selected.contains(&CacheTarget::Filters)
+        );
+        assert_eq!(
+            cache.get_stats(&stats_key).await.unwrap().is_none(),
             selected.contains(&CacheTarget::Stats)
         );
     }

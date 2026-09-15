@@ -6,7 +6,7 @@ use {
         clock::MonotonicClock,
         config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions},
         db_cache::CacheTarget,
-        db_cache_manager::{self, MetadataCacheEvictor},
+        db_cache_manager::{self, CacheEvictor},
         db_common::extract_segment_prefix,
         db_state::{collect_touched_segments, SsTableId},
         db_stats::DbStats,
@@ -637,7 +637,7 @@ impl DbReaderInner {
             rx,
             &Handle::current(),
         );
-        MetadataCacheEvictor::start(
+        CacheEvictor::start(
             &self.table_store,
             &self.status_manager,
             task_executor,
@@ -1379,7 +1379,7 @@ impl DbReader {
             .await
             .map_err(Into::<crate::Error>::into)?;
 
-        MetadataCacheEvictor::shutdown(&self.task_executor).await;
+        CacheEvictor::shutdown(&self.task_executor).await;
 
         if let Err(e) = self.inner.table_store.close_cache().await {
             warn!("failed to close block cache [error={:?}]", e);

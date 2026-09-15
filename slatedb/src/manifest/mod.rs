@@ -501,17 +501,20 @@ impl ManifestCore {
             .map(|view| view.sst.id)
     }
 
-    /// The SSTs that `previous` references and this manifest no longer does.
+    /// The SSTs that `previous` references and this manifest no longer does,
+    /// each paired with the prefix of the segment that held it.
     pub(crate) fn ssts_retired_since<'a>(
         &self,
         previous: &'a ManifestCore,
-    ) -> impl Iterator<Item = &'a SsTableHandle> + 'a {
+    ) -> impl Iterator<Item = (Bytes, &'a SsTableHandle)> + 'a {
         let kept: HashSet<SsTableId> = self.sst_ids().collect();
         previous
-            .trees()
-            .flat_map(|tree| tree.sst_views())
-            .map(|view| &view.sst)
-            .filter(move |handle| !kept.contains(&handle.id))
+            .trees_with_prefix()
+            .flat_map(|(prefix, tree)| {
+                tree.sst_views()
+                    .map(move |view| (prefix.clone(), &view.sst))
+            })
+            .filter(move |(_, handle)| !kept.contains(&handle.id))
     }
 
     /// Look up the LSM tree for a given segment prefix. An empty `prefix`
@@ -2284,7 +2287,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ssts_retired_since_lists_ssts_dropped_from_any_tree() {
+    fn test_ssts_retired_since_lists_dropped_ssts_with_their_segment() {
         let old = core_with_four_ssts();
         // The new manifest keeps SSTs 2 and 3 and adds SST 5.
         let mut new = ManifestCore::new();
@@ -2294,12 +2297,18 @@ mod tests {
             ..LsmTreeState::default()
         });
 
-        let retired: Vec<SsTableId> = new
+        let retired: Vec<(Bytes, SsTableId)> = new
             .ssts_retired_since(&old)
-            .map(|handle| handle.id)
+            .map(|(prefix, handle)| (prefix, handle.id))
             .collect();
 
-        assert_eq!(retired, vec![make_view(1).sst.id, make_view(4).sst.id]);
+        assert_eq!(
+            retired,
+            vec![
+                (Bytes::new(), make_view(1).sst.id),
+                (Bytes::from_static(b"s"), make_view(4).sst.id),
+            ]
+        );
         assert_eq!(old.ssts_retired_since(&old).count(), 0);
     }
 

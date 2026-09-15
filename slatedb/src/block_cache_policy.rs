@@ -26,7 +26,8 @@ pub(crate) fn should_cache_data_block(targets: &[CacheTarget], key_span: &(Bytes
     })
 }
 
-/// Controls block-cache insertion for memtable flush and compaction output.
+/// Controls block-cache insertion for memtable flush and compaction output,
+/// and block-cache eviction for SSTs that leave the manifest.
 ///
 // TODO: add control over when reads go through the block cache, e.g. for
 // probing during compaction.
@@ -34,6 +35,7 @@ pub(crate) fn should_cache_data_block(targets: &[CacheTarget], key_span: &(Bytes
 pub struct BlockCachePolicy {
     flush_targets: Vec<CacheTarget>,
     compaction_output_targets: Vec<CacheTarget>,
+    evictable_sst_targets: Vec<CacheTarget>,
 }
 
 impl BlockCachePolicy {
@@ -51,6 +53,13 @@ impl BlockCachePolicy {
         self
     }
 
+    /// Sets the targets evicted when an SST leaves the manifest, which
+    /// happens when a compaction retires it. An empty slice disables eviction.
+    pub fn with_evictable_sst_targets(mut self, targets: &[CacheTarget]) -> Self {
+        self.evictable_sst_targets = targets.to_vec();
+        self
+    }
+
     pub(crate) fn flush_targets(&self) -> &[CacheTarget] {
         &self.flush_targets
     }
@@ -58,10 +67,16 @@ impl BlockCachePolicy {
     pub(crate) fn compaction_output_targets(&self) -> &[CacheTarget] {
         &self.compaction_output_targets
     }
+
+    pub(crate) fn evictable_sst_targets(&self) -> &[CacheTarget] {
+        &self.evictable_sst_targets
+    }
 }
 
 /// The default policy inserts data, index, and filter blocks after a memtable
-/// flush, and inserts index and filter blocks as compaction output is written.
+/// flush, inserts index and filter blocks as compaction output is written, and
+/// evicts the index, filter, and stats blocks of an SST that leaves the
+/// manifest.
 impl Default for BlockCachePolicy {
     fn default() -> Self {
         Self {
@@ -71,6 +86,11 @@ impl Default for BlockCachePolicy {
                 CacheTarget::Filters,
             ],
             compaction_output_targets: vec![CacheTarget::Index, CacheTarget::Filters],
+            evictable_sst_targets: vec![
+                CacheTarget::Index,
+                CacheTarget::Filters,
+                CacheTarget::Stats,
+            ],
         }
     }
 }
@@ -95,6 +115,16 @@ mod tests {
             policy.compaction_output_targets(),
             &[CacheTarget::Index, CacheTarget::Filters]
         );
+        assert_eq!(
+            policy.evictable_sst_targets(),
+            &[CacheTarget::Index, CacheTarget::Filters, CacheTarget::Stats]
+        );
+    }
+
+    #[test]
+    fn with_evictable_sst_targets_replaces_the_default() {
+        let policy = BlockCachePolicy::default().with_evictable_sst_targets(&[]);
+        assert!(policy.evictable_sst_targets().is_empty());
     }
 
     #[test]

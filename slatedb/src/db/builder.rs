@@ -140,7 +140,7 @@ use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheAndScope, DbCacheWrapper, UnownedDbCache};
-use crate::db_cache_manager::MetadataCacheEvictor;
+use crate::db_cache_manager::CacheEvictor;
 use crate::db_reader::{DbReader, DbReaderMode};
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
@@ -866,7 +866,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             inner.status_manager.as_ref(),
         )?;
 
-        MetadataCacheEvictor::start(
+        CacheEvictor::start(
             &inner.table_store,
             &inner.status_manager,
             &task_executor,
