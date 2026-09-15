@@ -480,10 +480,20 @@ impl<'a> InternalSstIterator<'a> {
                     let index = index.clone();
                     let cache_blocks = self.options.cache_blocks;
                     let segment = self.options.segment.clone();
+                    let read_trace = self.read_trace();
+                    let sst_level = self.sst_level().cloned();
                     let blocks_end = blocks.end;
                     let fetch = tokio::spawn(async move {
                         table_store
-                            .read_blocks_using_index(&table, index, blocks, cache_blocks, segment)
+                            .read_blocks_using_index(
+                                &table,
+                                index,
+                                blocks,
+                                cache_blocks,
+                                segment,
+                                &read_trace,
+                                sst_level.as_ref(),
+                            )
                             .await
                     });
                     self.fetch_tasks
@@ -509,10 +519,20 @@ impl<'a> InternalSstIterator<'a> {
                     let index = index.clone();
                     let cache_blocks = self.options.cache_blocks;
                     let segment = self.options.segment.clone();
+                    let read_trace = self.read_trace();
+                    let sst_level = self.sst_level().cloned();
                     let blocks_start = blocks.start;
                     let fetch = tokio::spawn(async move {
                         table_store
-                            .read_blocks_using_index(&table, index, blocks, cache_blocks, segment)
+                            .read_blocks_using_index(
+                                &table,
+                                index,
+                                blocks,
+                                cache_blocks,
+                                segment,
+                                &read_trace,
+                                sst_level.as_ref(),
+                            )
                             .await
                     });
                     self.fetch_tasks

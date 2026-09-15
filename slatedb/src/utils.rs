@@ -186,6 +186,8 @@ pub(crate) async fn last_written_key_and_seq(
             last_block_idx..last_block_idx + 1,
             false,
             Some(segment.clone()),
+            &crate::reader::ReadTrace::new(None),
+            None,
         )
         .await?;
     let Some(block) = blocks.pop_front() else {

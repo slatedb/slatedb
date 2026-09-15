@@ -311,6 +311,8 @@ impl SstFile {
                 block..block + 1,
                 true,
                 Some(Bytes::new()),
+                &crate::reader::ReadTrace::new(None),
+                None,
             )
             .await?;
         let block = blocks

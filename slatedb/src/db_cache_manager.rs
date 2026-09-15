@@ -177,6 +177,8 @@ async fn warm_data(
                 block_range,
                 true,
                 Some(segment.clone()),
+                &ReadTrace::new(None),
+                None,
             )
             .await?;
     }
