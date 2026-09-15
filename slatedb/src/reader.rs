@@ -159,6 +159,28 @@ impl ReadTrace {
             tracing::Span::none()
         }
     }
+
+    pub(crate) fn new_read_block_span(
+        &self,
+        sst_id: SsTableId,
+        sst_level: Option<&SstTraceLevel>,
+    ) -> tracing::Span {
+        if let Some(tracing_options) = self.tracing_options.as_ref() {
+            let sst_id = sst_id.value().to_string();
+            let sst_level = Self::format_sst_level(sst_level);
+            tracing::info_span!(
+                parent: &self.read_span,
+                "slatedb.read.read_blocks",
+                trace_id = tracing_options.trace_id.as_str(),
+                sst_id = sst_id.as_str(),
+                sst_level = sst_level.as_str(),
+                cache_hits = tracing::field::Empty,
+                cache_misses = tracing::field::Empty,
+            )
+        } else {
+            tracing::Span::none()
+        }
+    }
 }
 
 /// Context for [`Reader::scan_with_options`].
@@ -2133,15 +2155,35 @@ mod tests {
             read_index.fields.get("cached").map(String::as_str),
             Some("false")
         );
+
+        let read_blocks =
+            assert_recorded_read_child_span(recorder, "slatedb.read.read_blocks", trace_id);
+        assert_eq!(
+            read_blocks.fields.get("sst_id").map(String::as_str),
+            Some(expected_sst_id)
+        );
+        assert_eq!(
+            read_blocks.fields.get("sst_level").map(String::as_str),
+            Some("sorted_run:0")
+        );
+        assert_eq!(
+            read_blocks.fields.get("cache_hits").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            read_blocks.fields.get("cache_misses").map(String::as_str),
+            Some("1")
+        );
     }
 
     fn assert_no_read_spans(recorder: &SpanRecorder) {
-        const READ_SPAN_NAMES: [&str; 5] = [
+        const READ_SPAN_NAMES: [&str; 6] = [
             "slatedb.read",
             "slatedb.read.memtable",
             "slatedb.read.read_filters",
             "slatedb.read.evaluate_filter",
             "slatedb.read.read_index",
+            "slatedb.read.read_blocks",
         ];
         let spans = recorder.spans();
         assert!(

@@ -59,6 +59,11 @@ fn record_read_cached(span: &tracing::Span, lookup: CacheLookup) {
     };
 }
 
+fn record_read_block_cache_counts(span: &tracing::Span, cache_hits: usize, cache_misses: usize) {
+    span.record("cache_hits", cache_hits as u64);
+    span.record("cache_misses", cache_misses as u64);
+}
+
 impl TableStore {
     pub(crate) fn new<P: Into<Path>>(
         object_store: Arc<dyn ObjectStore>,
@@ -774,6 +779,8 @@ impl TableStore {
     /// It can optionally cache newly read blocks.
     /// `segment` is a hint attached to the [`ObjectStoreCallTag`] for
     /// object-store routing.
+    /// `trace` owns the span for the block read.
+    /// `sst_level` identifies the level that contains the SST.
     pub(crate) async fn read_blocks_using_index(
         &self,
         handle: &SsTableHandle,
@@ -781,6 +788,29 @@ impl TableStore {
         blocks: Range<usize>,
         cache_blocks: bool,
         segment: Option<Bytes>,
+        trace: &ReadTrace,
+        sst_level: Option<&SstTraceLevel>,
+    ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
+        let span = trace.new_read_block_span(handle.id, sst_level);
+        let read = self.read_blocks_using_index_inner(
+            handle,
+            index,
+            blocks,
+            cache_blocks,
+            segment,
+            span.clone(),
+        );
+        read.instrument(span).await
+    }
+
+    async fn read_blocks_using_index_inner(
+        &self,
+        handle: &SsTableHandle,
+        index: Arc<SsTableIndexOwned>,
+        blocks: Range<usize>,
+        cache_blocks: bool,
+        segment: Option<Bytes>,
+        span: tracing::Span,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
         // Single-block reads (point-gets via SstIterator::for_key, SstFile::read_block,
         // etc.) take a dedup-aware fast-path: concurrent callers for the same block
@@ -796,6 +826,11 @@ impl TableStore {
                 let loader = self.block_loader(handle, index.clone(), block_num, segment.clone());
                 if let Ok(fetch) = cache.fetch_block(cache_key, loader).await {
                     if let Some(block) = fetch.entry.block() {
+                        let (cache_hits, cache_misses) = match fetch.lookup {
+                            CacheLookup::Hit => (1, 0),
+                            CacheLookup::Miss => (0, 1),
+                        };
+                        record_read_block_cache_counts(&span, cache_hits, cache_misses);
                         let mut result = VecDeque::with_capacity(1);
                         result.push_back(block);
                         return Ok(result);
@@ -809,6 +844,8 @@ impl TableStore {
         // Initialize the result vector and a vector to track uncached ranges
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
+        let mut cache_hits = 0;
+        let mut cache_misses = 0;
 
         // If block cache is available, try to retrieve cached blocks
         if let Some(cache) = self.cache_for_reads() {
@@ -831,6 +868,7 @@ impl TableStore {
             for (index, block_result) in cached_blocks.into_iter().enumerate() {
                 match block_result {
                     Some(cached_block) => {
+                        cache_hits += 1;
                         // If a cached block is found, add it to blocks_read
                         if let Some(start) = last_uncached_start.take() {
                             uncached_ranges.push((blocks.start + start)..(blocks.start + index));
@@ -838,6 +876,7 @@ impl TableStore {
                         blocks_read.push_back(cached_block);
                     }
                     None => {
+                        cache_misses += 1;
                         // If a block is not in cache, mark the start of an uncached range
                         last_uncached_start.get_or_insert(index);
                     }
@@ -849,8 +888,10 @@ impl TableStore {
             }
         } else {
             // If no cache is available, treat all blocks as uncached
+            cache_misses = blocks.len();
             uncached_ranges.push(blocks.clone());
         }
+        record_read_block_cache_counts(&span, cache_hits, cache_misses);
         // Read uncached blocks concurrently
         let uncached_blocks = join_all(uncached_ranges.iter().map(|range| {
             let object_store = &object_store;
@@ -1685,7 +1726,15 @@ mod tests {
 
         // Test 1: SST hit
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                0..20,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1717,7 +1766,15 @@ mod tests {
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                0..20,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data).await;
@@ -1742,7 +1799,15 @@ mod tests {
 
         // Test 3: All blocks should be in cache after SST file is emptied
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                0..20,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data).await;
@@ -1763,13 +1828,29 @@ mod tests {
 
         // Test 4: Verify that reading specific ranges still works after SST file is emptied
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 5..10, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                5..10,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data[5..10]).await;
 
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 15..20, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                15..20,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data[15..20]).await;
@@ -2009,6 +2090,126 @@ mod tests {
                 ("cached".to_string(), cache_hit.to_string()),
             ])
         );
+    }
+
+    #[test]
+    fn test_read_blocks_span_fields() {
+        let span_recorder = SpanRecorder::for_name("slatedb.read.read_blocks");
+        let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            tokio_test::block_on(async {
+                let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+                let format = SsTableFormat {
+                    block_size: 32,
+                    min_filter_keys: u32::MAX,
+                    ..SsTableFormat::default()
+                };
+                let writer = TableStore::new(
+                    main_store.clone(),
+                    format.clone(),
+                    Path::from(ROOT),
+                    None,
+                    TableStoreKind::Main,
+                    BlockCachePolicy::default(),
+                );
+
+                let mut builder = writer.table_builder();
+                for i in 0..8 {
+                    builder
+                        .add(RowEntry::new_value(&[i; 16], &[i + 1; 16], 0))
+                        .await
+                        .unwrap();
+                }
+                let id = SsTableId::from(ulid::Ulid::new());
+                let handle = writer
+                    .write_sst(&id, &builder.build().await.unwrap(), Some(Bytes::new()))
+                    .await
+                    .unwrap();
+
+                let block_cache = Arc::new(TestCache::new());
+                let cache = Arc::new(
+                    SplitCache::new()
+                        .with_block_cache(Some(block_cache.clone()))
+                        .build(),
+                );
+                let reader = TableStore::new(
+                    main_store,
+                    format,
+                    Path::from(ROOT),
+                    Some(cache),
+                    TableStoreKind::Main,
+                    BlockCachePolicy::default(),
+                );
+                let index = reader
+                    .read_index(
+                        &handle,
+                        false,
+                        Some(Bytes::new()),
+                        &ReadTrace::new(None),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let num_blocks = index.borrow().block_meta().len();
+                assert!(num_blocks > 1);
+
+                for (trace_id, block_range, evict_first, cache_hits, cache_misses) in [
+                    ("all-miss", 0..num_blocks, false, 0, num_blocks),
+                    ("partial-hit", 0..num_blocks, true, num_blocks - 1, 1),
+                    ("single-hit", 0..1, false, 1, 0),
+                    ("single-miss", 0..1, true, 0, 1),
+                ] {
+                    if evict_first {
+                        let offset = index.borrow().block_meta().get(0).offset();
+                        block_cache.remove(&(handle.id, offset).into()).await;
+                    }
+                    let trace = ReadTrace::new(Some(TracingOptions::new(trace_id)));
+                    let sst_level = SstTraceLevel::SortedRun(7);
+                    let expected_blocks = block_range.len();
+                    let blocks = reader
+                        .read_blocks_using_index(
+                            &handle,
+                            index.clone(),
+                            block_range,
+                            true,
+                            Some(Bytes::new()),
+                            &trace,
+                            Some(&sst_level),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(blocks.len(), expected_blocks);
+
+                    let spans = span_recorder.spans();
+                    let span = spans
+                        .iter()
+                        .find(|span| {
+                            span.fields.get("trace_id").map(String::as_str) == Some(trace_id)
+                        })
+                        .unwrap_or_else(|| {
+                            panic!("The read_blocks span is missing for {trace_id}: {spans:?}")
+                        });
+                    assert_eq!(span.level, "INFO");
+                    assert_eq!(span.parent_name.as_deref(), Some("slatedb.read"));
+                    assert_eq!(
+                        span.fields.get("sst_id").map(String::as_str),
+                        Some(handle.id.value().to_string().as_str())
+                    );
+                    assert_eq!(
+                        span.fields.get("sst_level").map(String::as_str),
+                        Some("sorted_run:7")
+                    );
+                    assert_eq!(
+                        span.fields.get("cache_hits").map(String::as_str),
+                        Some(cache_hits.to_string().as_str())
+                    );
+                    assert_eq!(
+                        span.fields.get("cache_misses").map(String::as_str),
+                        Some(cache_misses.to_string().as_str())
+                    );
+                }
+            })
+        });
     }
 
     #[tokio::test]
@@ -3122,7 +3323,15 @@ mod tests {
             let index = index.clone();
             async move {
                 reader
-                    .read_blocks_using_index(&handle, index, 0..1, true, Some(Bytes::new()))
+                    .read_blocks_using_index(
+                        &handle,
+                        index,
+                        0..1,
+                        true,
+                        Some(Bytes::new()),
+                        &ReadTrace::new(None),
+                        None,
+                    )
                     .await
             }
         });
@@ -3143,7 +3352,15 @@ mod tests {
             let index = index.clone();
             async move {
                 reader
-                    .read_blocks_using_index(&handle, index, 0..1, true, Some(Bytes::new()))
+                    .read_blocks_using_index(
+                        &handle,
+                        index,
+                        0..1,
+                        true,
+                        Some(Bytes::new()),
+                        &ReadTrace::new(None),
+                        None,
+                    )
                     .await
             }
         };
