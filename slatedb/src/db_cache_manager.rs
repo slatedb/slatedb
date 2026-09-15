@@ -1,18 +1,16 @@
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::BoxStream;
 use log::{debug, warn};
 use tokio::runtime::Handle;
 use tokio::sync::{watch, OnceCell};
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::bytes_range::BytesRange;
 use crate::db_cache::CacheTarget;
 use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
-use crate::db_status::{DbStatus, DbStatusManager};
-use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, Notifier};
+use crate::db_status::DbStatus;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::manifest::ManifestCore;
@@ -20,109 +18,80 @@ use crate::partitioned_keyspace::partitions_covering_range;
 use crate::reader::ReadTrace;
 use crate::tablestore::TableStore;
 
-const CACHE_EVICTOR_TASK_NAME: &str = "cache_evictor";
+/// Warms, evicts, and flushes the block cache of one database, and evicts the
+/// entries of SSTs that leave the manifest in the background.
+pub(crate) struct DbCacheManager {
+    table_store: Arc<TableStore>,
+    evictor: Option<AbortOnDropHandle<()>>,
+}
 
-#[derive(Debug)]
-enum CacheEvictorMessage {
-    StatusChanged,
+impl DbCacheManager {
+    pub(crate) fn new(table_store: Arc<TableStore>) -> Self {
+        Self {
+            table_store,
+            evictor: None,
+        }
+    }
+
+    /// Starts background eviction on `tokio_handle`. Does nothing when the
+    /// table store has no cache.
+    pub(crate) fn start_eviction(
+        &mut self,
+        status: watch::Receiver<DbStatus>,
+        tokio_handle: &Handle,
+    ) {
+        if self.table_store.cache().is_none() {
+            return;
+        }
+        let task = tokio_handle.spawn(evict_retired_ssts(self.table_store.clone(), status));
+        self.evictor = Some(AbortOnDropHandle::new(task));
+    }
+
+    pub(crate) async fn warm_sst(
+        &self,
+        manifest: &ManifestCore,
+        sst_id: SsTableId,
+        targets: &[CacheTarget],
+    ) -> Result<(), crate::Error> {
+        warm_sst_impl(&self.table_store, manifest, sst_id, targets).await
+    }
+
+    pub(crate) async fn evict_cached_sst(
+        &self,
+        manifest: &ManifestCore,
+        sst_id: SsTableId,
+    ) -> Result<(), crate::Error> {
+        evict_cached_sst_impl(&self.table_store, manifest, sst_id).await
+    }
+
+    pub(crate) async fn flush_cache_to_disk(&self) -> Result<(), crate::Error> {
+        flush_cache_to_disk_impl(&self.table_store).await
+    }
+
+    /// Stops background eviction. Dropping the manager stops it too.
+    pub(crate) fn stop(&self) {
+        if let Some(evictor) = &self.evictor {
+            evictor.abort();
+        }
+    }
 }
 
 /// Evicts the cache entries of SSTs that leave the manifest, as the block
 /// cache policy directs. By default that is the index, filter, and stats
 /// entries, and data blocks are left to capacity eviction.
-pub(crate) struct CacheEvictor {
-    table_store: Arc<TableStore>,
-    status: watch::Receiver<DbStatus>,
-    last_seen: ManifestCore,
-}
-
-impl CacheEvictor {
-    fn new(table_store: Arc<TableStore>, status: watch::Receiver<DbStatus>) -> Self {
-        let last_seen = status.borrow().current_manifest.core().clone();
-        Self {
-            table_store,
-            status,
-            last_seen,
-        }
-    }
-
-    /// Starts the evictor by registering with the executor. Does nothing when
-    /// `table_store` has no cache.
-    pub(crate) fn start(
-        table_store: &Arc<TableStore>,
-        status_manager: &DbStatusManager,
-        executor: &MessageHandlerExecutor,
-        tokio_handle: &Handle,
-    ) -> Result<(), SlateDBError> {
-        if table_store.cache().is_none() {
-            return Ok(());
-        }
-        let evictor = Self::new(table_store.clone(), status_manager.subscribe());
-        // The evictor only uses a notifier, so pass in a dummy rx channel
-        let (_, rx) = async_channel::unbounded();
-        executor.add_handler(
-            CACHE_EVICTOR_TASK_NAME.to_string(),
-            Box::new(evictor),
-            rx,
-            tokio_handle,
-        )
-    }
-
-    pub(crate) async fn shutdown(executor: &MessageHandlerExecutor) {
-        if let Err(e) = executor.shutdown_task(CACHE_EVICTOR_TASK_NAME).await {
-            warn!("failed to shutdown cache evictor task [error={:?}]", e);
-        }
-    }
-}
-
-#[async_trait]
-impl MessageHandler<CacheEvictorMessage> for CacheEvictor {
-    fn notifiers(&mut self) -> Vec<Box<dyn Notifier<CacheEvictorMessage>>> {
-        vec![Box::new(StatusNotifier {
-            rx: self.status.clone(),
-        })]
-    }
-
-    /// Evict metadata for SSTs that have been retired in between the last seen
-    /// manifest and the current manifest.
-    async fn handle(&mut self, _: CacheEvictorMessage) -> Result<(), SlateDBError> {
-        let current = self.status.borrow().current_manifest.core().clone();
-        let targets = self
-            .table_store
-            .block_cache_policy()
-            .evictable_sst_targets();
-        for (segment, handle) in current.ssts_retired_since(&self.last_seen) {
-            self.table_store
+///
+/// Runs until the status sender drops, which is when the database drops.
+async fn evict_retired_ssts(table_store: Arc<TableStore>, mut status: watch::Receiver<DbStatus>) {
+    let mut last_seen = status.borrow_and_update().current_manifest.core().clone();
+    while status.changed().await.is_ok() {
+        let current = status.borrow_and_update().current_manifest.core().clone();
+        let targets = table_store.block_cache_policy().evictable_sst_targets();
+        for (segment, handle) in current.ssts_retired_since(&last_seen) {
+            table_store
                 .evict_sst_targets_from_cache(handle, targets, Some(segment))
                 .await;
         }
-        self.last_seen = current;
-        Ok(())
-    }
-
-    async fn cleanup(
-        &mut self,
-        _messages: BoxStream<'async_trait, CacheEvictorMessage>,
-        _result: Result<(), SlateDBError>,
-    ) -> Result<(), SlateDBError> {
-        Ok(())
-    }
-}
-
-/// Turns each change of the database status into a message.
-struct StatusNotifier {
-    rx: watch::Receiver<DbStatus>,
-}
-
-#[async_trait]
-impl Notifier<CacheEvictorMessage> for StatusNotifier {
-    async fn notify(&mut self) -> CacheEvictorMessage {
-        // The sender drops only when the database shuts down. The dispatcher's
-        // cancellation token ends the loop, so wait forever here.
-        if self.rx.changed().await.is_err() {
-            std::future::pending::<()>().await;
-        }
-        CacheEvictorMessage::StatusChanged
+        last_seen = current;
     }
 }
 
@@ -146,7 +115,7 @@ fn find_sst<'a>(
     })
 }
 
-pub(crate) async fn warm_sst_impl(
+async fn warm_sst_impl(
     table_store: &Arc<TableStore>,
     manifest: &ManifestCore,
     sst_id: SsTableId,
@@ -203,7 +172,7 @@ pub(crate) async fn warm_sst_impl(
     Ok(())
 }
 
-pub(crate) async fn evict_cached_sst_impl(
+async fn evict_cached_sst_impl(
     table_store: &Arc<TableStore>,
     manifest: &ManifestCore,
     sst_id: SsTableId,
@@ -220,9 +189,7 @@ pub(crate) async fn evict_cached_sst_impl(
     Ok(())
 }
 
-pub(crate) async fn flush_cache_to_disk_impl(
-    table_store: &Arc<TableStore>,
-) -> Result<(), crate::Error> {
+async fn flush_cache_to_disk_impl(table_store: &Arc<TableStore>) -> Result<(), crate::Error> {
     let Some(cache) = table_store.cache() else {
         debug!("flush_cache_to_disk called on a Db without a block cache configured");
         return Ok(());

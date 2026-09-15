@@ -6,7 +6,7 @@ use {
         clock::MonotonicClock,
         config::{CheckpointOptions, DbReaderOptions, ReadOptions, ScanOptions},
         db_cache::CacheTarget,
-        db_cache_manager::{self, CacheEvictor},
+        db_cache_manager::DbCacheManager,
         db_common::extract_segment_prefix,
         db_state::{collect_touched_segments, SsTableId},
         db_stats::DbStats,
@@ -124,6 +124,7 @@ struct DbReaderInner {
     oracle: Arc<DbReaderOracle>,
     reader: Reader,
     status_manager: DbStatusManager,
+    cache_manager: DbCacheManager,
     segment_extractor: Option<Arc<dyn PrefixExtractor>>,
     rand: Arc<DbRand>,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
@@ -259,6 +260,11 @@ impl DbReaderInner {
             merge_operator,
         );
 
+        let mut cache_manager = DbCacheManager::new(Arc::clone(&table_store));
+        // A pinned checkpoint never changes, so there is nothing to evict.
+        if !matches!(mode, DbReaderMode::Checkpoint(_)) {
+            cache_manager.start_eviction(status_manager.subscribe(), &Handle::current());
+        }
         let inner = Self {
             manifest_store,
             table_store,
@@ -270,6 +276,7 @@ impl DbReaderInner {
             oracle,
             reader,
             status_manager,
+            cache_manager,
             segment_extractor,
             rand,
             recorder,
@@ -637,12 +644,6 @@ impl DbReaderInner {
             rx,
             &Handle::current(),
         );
-        CacheEvictor::start(
-            &self.table_store,
-            &self.status_manager,
-            task_executor,
-            &Handle::current(),
-        )?;
         task_executor.monitor_on(&Handle::current())?;
         result
     }
@@ -1379,7 +1380,7 @@ impl DbReader {
             .await
             .map_err(Into::<crate::Error>::into)?;
 
-        CacheEvictor::shutdown(&self.task_executor).await;
+        self.inner.cache_manager.stop();
 
         if let Err(e) = self.inner.table_store.close_cache().await {
             warn!("failed to close block cache [error={:?}]", e);
@@ -1473,20 +1474,24 @@ impl DbCacheManagerOps for DbReader {
     ) -> Result<(), crate::Error> {
         self.inner.check_closed()?;
         let manifest = self.manifest();
-        db_cache_manager::warm_sst_impl(&self.inner.table_store, manifest.core(), sst_id, targets)
+        self.inner
+            .cache_manager
+            .warm_sst(manifest.core(), sst_id, targets)
             .await
     }
 
     async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), crate::Error> {
         self.inner.check_closed()?;
         let manifest = self.manifest();
-        db_cache_manager::evict_cached_sst_impl(&self.inner.table_store, manifest.core(), sst_id)
+        self.inner
+            .cache_manager
+            .evict_cached_sst(manifest.core(), sst_id)
             .await
     }
 
     async fn flush_cache_to_disk(&self) -> Result<(), crate::Error> {
         self.inner.check_closed()?;
-        db_cache_manager::flush_cache_to_disk_impl(&self.inner.table_store).await
+        self.inner.cache_manager.flush_cache_to_disk().await
     }
 }
 
@@ -1503,6 +1508,7 @@ mod tests {
                 MergeOptions, PutOptions, Settings, WriteOptions,
             },
             db_cache::CachedKey,
+            db_cache_manager::DbCacheManager,
             db_reader::{DbReader, DbReaderInner, DbReaderMode, DbReaderOptions},
             db_state::SstType,
             db_stats::DbStats,
@@ -3377,6 +3383,7 @@ mod tests {
         );
         let status_manager = status_manager_for_core(&stored_manifest.manifest().core);
         let wal_reader = Arc::new(native_wal_reader(&wal_store, &status_manager));
+        let cache_manager = DbCacheManager::new(Arc::clone(&table_store));
         let inner = DbReaderInner {
             manifest_store,
             table_store,
@@ -3391,6 +3398,7 @@ mod tests {
             oracle,
             reader,
             status_manager,
+            cache_manager,
             segment_extractor: None,
             rand: test_provider.rand.clone(),
             recorder,
@@ -3467,6 +3475,7 @@ mod tests {
             None,
         );
         let wal_reader = Arc::new(native_wal_reader(&wal_store, &status_manager));
+        let cache_manager = DbCacheManager::new(Arc::clone(&table_store));
         DbReaderInner {
             manifest_store,
             table_store,
@@ -3478,6 +3487,7 @@ mod tests {
             oracle,
             reader,
             status_manager,
+            cache_manager,
             segment_extractor: None,
             rand: test_provider.rand.clone(),
             recorder,
