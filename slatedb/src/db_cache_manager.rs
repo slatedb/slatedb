@@ -3,101 +3,17 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use log::{debug, warn};
-use tokio::runtime::Handle;
-use tokio::sync::{watch, OnceCell};
-use tokio_util::task::AbortOnDropHandle;
+use tokio::sync::OnceCell;
 
 use crate::bytes_range::BytesRange;
 use crate::db_cache::CacheTarget;
 use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
-use crate::db_status::DbStatus;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::manifest::ManifestCore;
 use crate::partitioned_keyspace::partitions_covering_range;
 use crate::reader::ReadTrace;
 use crate::tablestore::TableStore;
-
-/// Warms, evicts, and flushes the block cache of one database, and evicts the
-/// entries of SSTs that leave the manifest in the background.
-pub(crate) struct DbCacheManager {
-    table_store: Arc<TableStore>,
-    evictor: Option<AbortOnDropHandle<()>>,
-}
-
-impl DbCacheManager {
-    pub(crate) fn new(table_store: Arc<TableStore>) -> Self {
-        Self {
-            table_store,
-            evictor: None,
-        }
-    }
-
-    /// Starts background eviction on `tokio_handle`. Does nothing when the
-    /// table store has no cache.
-    pub(crate) fn start_eviction(
-        &mut self,
-        status: watch::Receiver<DbStatus>,
-        tokio_handle: &Handle,
-    ) {
-        if self.table_store.cache().is_none() {
-            return;
-        }
-        let task = tokio_handle.spawn(evict_retired_ssts(self.table_store.clone(), status));
-        self.evictor = Some(AbortOnDropHandle::new(task));
-    }
-
-    pub(crate) async fn warm_sst(
-        &self,
-        manifest: &ManifestCore,
-        sst_id: SsTableId,
-        targets: &[CacheTarget],
-    ) -> Result<(), crate::Error> {
-        warm_sst_impl(&self.table_store, manifest, sst_id, targets).await
-    }
-
-    pub(crate) async fn evict_cached_sst(
-        &self,
-        manifest: &ManifestCore,
-        sst_id: SsTableId,
-    ) -> Result<(), crate::Error> {
-        evict_cached_sst_impl(&self.table_store, manifest, sst_id).await
-    }
-
-    pub(crate) async fn flush_cache_to_disk(&self) -> Result<(), crate::Error> {
-        flush_cache_to_disk_impl(&self.table_store).await
-    }
-
-    /// Stops background eviction. Dropping the manager stops it too.
-    pub(crate) fn stop(&self) {
-        if let Some(evictor) = &self.evictor {
-            evictor.abort();
-        }
-    }
-}
-
-/// Evicts the cache entries of SSTs that leave the manifest, as the block
-/// cache policy directs. By default that is the index, filter, and stats
-/// entries, and data blocks are left to capacity eviction.
-///
-/// Runs until the status sender drops, which is when the database drops.
-async fn evict_retired_ssts(table_store: Arc<TableStore>, mut status: watch::Receiver<DbStatus>) {
-    let mut last_seen = status.borrow_and_update().current_manifest.core().clone();
-    while status.changed().await.is_ok() {
-        let current = status.borrow_and_update().current_manifest.core().clone();
-        // Check if the manifest changed.
-        if current.same_trees_as(&last_seen) {
-            continue;
-        }
-        let targets = table_store.block_cache_policy().evictable_sst_targets();
-        for (segment, handle) in current.ssts_retired_since(&last_seen) {
-            table_store
-                .evict_sst_targets_from_cache(handle, targets, Some(segment))
-                .await;
-        }
-        last_seen = current;
-    }
-}
 
 fn find_sst<'a>(
     manifest: &'a ManifestCore,
@@ -119,7 +35,7 @@ fn find_sst<'a>(
     })
 }
 
-async fn warm_sst_impl(
+pub(crate) async fn warm_sst_impl(
     table_store: &Arc<TableStore>,
     manifest: &ManifestCore,
     sst_id: SsTableId,
@@ -176,7 +92,7 @@ async fn warm_sst_impl(
     Ok(())
 }
 
-async fn evict_cached_sst_impl(
+pub(crate) async fn evict_cached_sst_impl(
     table_store: &Arc<TableStore>,
     manifest: &ManifestCore,
     sst_id: SsTableId,
@@ -193,7 +109,9 @@ async fn evict_cached_sst_impl(
     Ok(())
 }
 
-async fn flush_cache_to_disk_impl(table_store: &Arc<TableStore>) -> Result<(), crate::Error> {
+pub(crate) async fn flush_cache_to_disk_impl(
+    table_store: &Arc<TableStore>,
+) -> Result<(), crate::Error> {
     let Some(cache) = table_store.cache() else {
         debug!("flush_cache_to_disk called on a Db without a block cache configured");
         return Ok(());
@@ -330,12 +248,10 @@ mod tests {
     use super::*;
     use std::ops::Bound::Unbounded;
 
-    use crate::block_cache_policy::BlockCachePolicy;
     use crate::config::{FlushOptions, FlushType, PutOptions, Settings, WriteOptions};
     use crate::db::Db;
     use crate::db_cache::{CachedKey, DbCache};
     use crate::manifest::VersionedManifest;
-    use crate::test_utils::wait_until_index_evicted;
     use crate::DbCacheManagerOps;
     use object_store::memory::InMemory;
     use object_store::ObjectStore;
@@ -946,95 +862,6 @@ mod tests {
             "expected no blocks cached after eviction, got {:?}",
             mask_after,
         );
-
-        db.close().await.expect("close");
-    }
-
-    /// Opens a `Db` under `policy` holding one L0 SST whose blocks, index,
-    /// and filter the flush cached. Returns the SST id and the cache.
-    async fn open_db_with_one_cached_sst(
-        policy: BlockCachePolicy,
-    ) -> (Db, SsTableId, SsTableHandle, Arc<dyn DbCache>) {
-        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::builder(PATH, os)
-            .with_settings(Settings {
-                flush_interval: None,
-                min_filter_keys: 1,
-                ..Default::default()
-            })
-            .with_block_cache_policy(policy)
-            .build()
-            .await
-            .expect("failed to open db");
-        write_keys(&db, 64).await;
-        flush_to_l0(&db).await;
-        let sst_id = first_l0_sst_id(&db);
-        let table_store = db.inner.table_store.clone();
-        let handle = table_store
-            .open_sst(&sst_id, Some(Bytes::new()))
-            .await
-            .expect("open_sst");
-        let cache = table_store.cache().expect("cache configured").clone();
-        (db, sst_id, handle, cache)
-    }
-
-    /// Reports a manifest without any L0 SST through the status manager, as
-    /// the writer does after a compaction retires them. `DbState` is not
-    /// changed.
-    fn report_manifest_without_l0(db: &Db) {
-        let mut manifest = db.inner.state.read().state().manifest.clone();
-        Arc::make_mut(&mut manifest.value.core.tree).l0.clear();
-        db.inner.status_manager.report_manifest(manifest.into());
-    }
-
-    #[tokio::test]
-    async fn should_evict_metadata_of_sst_that_leaves_the_manifest() {
-        // given
-        let (db, sst_id, handle, cache) =
-            open_db_with_one_cached_sst(BlockCachePolicy::default()).await;
-        let table_store = db.inner.table_store.clone();
-        let index_key: CachedKey = (sst_id, handle.info.index_offset).into();
-        let filter_key: CachedKey = (sst_id, handle.info.filter_offset).into();
-        assert!(cache.get_index(&index_key).await.unwrap().is_some());
-        assert!(cache.get_filter(&filter_key).await.unwrap().is_some());
-        let blocks_before = cached_block_mask(&table_store, sst_id, Bytes::new()).await;
-        assert!(blocks_before.iter().all(|&cached| cached));
-
-        // when
-        report_manifest_without_l0(&db);
-
-        // then: the metadata is gone and the data blocks are left in place
-        wait_until_index_evicted(&cache, &index_key).await;
-        assert!(cache.get_filter(&filter_key).await.unwrap().is_none());
-        let blocks_after = cached_block_mask(&table_store, sst_id, Bytes::new()).await;
-        assert_eq!(blocks_after, blocks_before);
-
-        db.close().await.expect("close");
-    }
-
-    #[tokio::test]
-    async fn should_evict_data_blocks_of_retired_sst_when_policy_selects_them() {
-        // given
-        let policy = BlockCachePolicy::default().with_evictable_sst_targets(&[
-            CacheTarget::data::<&[u8], _>(..),
-            CacheTarget::Index,
-            CacheTarget::Filters,
-        ]);
-        let (db, sst_id, handle, cache) = open_db_with_one_cached_sst(policy).await;
-        let table_store = db.inner.table_store.clone();
-        let index_key: CachedKey = (sst_id, handle.info.index_offset).into();
-        assert!(cached_block_mask(&table_store, sst_id, Bytes::new())
-            .await
-            .iter()
-            .all(|&cached| cached));
-
-        // when
-        report_manifest_without_l0(&db);
-
-        // then
-        wait_until_index_evicted(&cache, &index_key).await;
-        let blocks_after = cached_block_mask(&table_store, sst_id, Bytes::new()).await;
-        assert!(blocks_after.iter().all(|&cached| !cached));
 
         db.close().await.expect("close");
     }

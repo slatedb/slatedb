@@ -33,12 +33,11 @@ use object_store::path::Path;
 use object_store::{parse_url_opts, ObjectStore};
 
 use crate::compactor::COMPACTOR_TASK_NAME;
-use crate::db_cache_manager::DbCacheManager;
 use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::transaction_manager::IsolationLevel;
-use crate::CloseReason;
+use crate::{db_cache_manager, CloseReason};
 use log::{debug, info, trace, warn};
 use parking_lot::RwLock;
 use std::time::Duration;
@@ -115,7 +114,6 @@ pub(crate) struct DbInner {
     pub(crate) txn_manager: Arc<TransactionManager>,
     pub(crate) snapshot_manager: Arc<SnapshotManager>,
     pub(crate) status_manager: Arc<DbStatusManager>,
-    pub(crate) cache_manager: DbCacheManager,
     /// Segment extractor (RFC-0024). When `Some`, the writer routes every
     /// key through this extractor and groups flush output into per-segment
     /// L0 SSTs. When `None`, the database is the singleton `prefix=""`
@@ -183,11 +181,6 @@ impl DbInner {
             status_manager.clone(),
         );
 
-        let mut cache_manager = DbCacheManager::new(table_store.clone());
-        cache_manager.start_eviction(
-            status_manager.subscribe(),
-            &tokio::runtime::Handle::current(),
-        );
         let db_inner = Self {
             state,
             settings,
@@ -208,7 +201,6 @@ impl DbInner {
             txn_manager,
             snapshot_manager,
             status_manager,
-            cache_manager,
             segment_extractor,
         };
         Ok(db_inner)
@@ -746,8 +738,6 @@ impl Db {
         {
             warn!("failed to shutdown writer task [error={:?}]", e);
         }
-
-        self.inner.cache_manager.stop();
 
         if let Err(e) = self.inner.table_store.close_cache().await {
             warn!("failed to close block cache [error={:?}]", e);
@@ -2060,24 +2050,20 @@ impl DbCacheManagerOps for Db {
     ) -> Result<(), crate::Error> {
         self.inner.check_closed()?;
         let manifest = self.manifest();
-        self.inner
-            .cache_manager
-            .warm_sst(manifest.core(), sst_id, targets)
+        db_cache_manager::warm_sst_impl(&self.inner.table_store, manifest.core(), sst_id, targets)
             .await
     }
 
     async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), crate::Error> {
         self.inner.check_closed()?;
         let manifest = self.manifest();
-        self.inner
-            .cache_manager
-            .evict_cached_sst(manifest.core(), sst_id)
+        db_cache_manager::evict_cached_sst_impl(&self.inner.table_store, manifest.core(), sst_id)
             .await
     }
 
     async fn flush_cache_to_disk(&self) -> Result<(), crate::Error> {
         self.inner.check_closed()?;
-        self.inner.cache_manager.flush_cache_to_disk().await
+        db_cache_manager::flush_cache_to_disk_impl(&self.inner.table_store).await
     }
 }
 

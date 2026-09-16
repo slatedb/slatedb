@@ -2,7 +2,6 @@ use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier};
 use crate::compactor_state::{CompactionSpec, SourceId};
 use crate::compactor_state_protocols::CompactorStateView;
 use crate::config::{CompactorOptions, PutOptions, WriteOptions};
-use crate::db_cache::{CachedKey, DbCache};
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType};
 use crate::error::{RetryReason, SlateDBError};
 use crate::format::row::SstRowCodecV0;
@@ -1957,17 +1956,5 @@ impl ObjectStore for RecordingObjectStore {
         options: CopyOptions,
     ) -> object_store::Result<()> {
         self.inner.copy_opts(from, to, options).await
-    }
-}
-
-/// Polls until the cache holds no index entry under `key`.
-pub(crate) async fn wait_until_index_evicted(cache: &Arc<dyn DbCache>, key: &CachedKey) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while cache.get_index(key).await.unwrap().is_some() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "index entry was not evicted in time"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }

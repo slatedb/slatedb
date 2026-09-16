@@ -494,41 +494,6 @@ impl ManifestCore {
         )
     }
 
-    /// The id of every SST that any tree of this manifest references.
-    pub(crate) fn sst_ids(&self) -> impl Iterator<Item = SsTableId> + '_ {
-        self.trees()
-            .flat_map(|tree| tree.sst_views())
-            .map(|view| view.sst.id)
-    }
-
-    /// Whether this manifest and `other` share every tree allocation. Trees
-    /// are copied on write, so a shared allocation is an unchanged tree.
-    pub(crate) fn same_trees_as(&self, other: &ManifestCore) -> bool {
-        Arc::ptr_eq(&self.tree, &other.tree)
-            && self.segments.len() == other.segments.len()
-            && self
-                .segments
-                .iter()
-                .zip(&other.segments)
-                .all(|(a, b)| Arc::ptr_eq(&a.tree, &b.tree))
-    }
-
-    /// The SSTs that `previous` references and this manifest no longer does,
-    /// each paired with the prefix of the segment that held it.
-    pub(crate) fn ssts_retired_since<'a>(
-        &self,
-        previous: &'a ManifestCore,
-    ) -> impl Iterator<Item = (Bytes, &'a SsTableHandle)> + 'a {
-        let kept: HashSet<SsTableId> = self.sst_ids().collect();
-        previous
-            .trees_with_prefix()
-            .flat_map(|(prefix, tree)| {
-                tree.sst_views()
-                    .map(move |view| (prefix.clone(), &view.sst))
-            })
-            .filter(move |(_, handle)| !kept.contains(&handle.id))
-    }
-
     /// Look up the LSM tree for a given segment prefix. An empty `prefix`
     /// returns the root tree (compatibility-encoded `prefix=""` segment);
     /// a non-empty prefix returns the named segment's tree, or `None` if no
@@ -2270,79 +2235,6 @@ mod tests {
             SsTableInfo::default(),
         );
         SsTableView::new(view_id, handle)
-    }
-
-    /// A manifest with L0 SSTs 1 and 2 and sorted-run SST 3 in the root tree,
-    /// and L0 SST 4 in segment `s`.
-    fn core_with_four_ssts() -> ManifestCore {
-        let mut core = ManifestCore::new();
-        core.tree = Arc::new(LsmTreeState {
-            l0: VecDeque::from([make_view(1), make_view(2)]),
-            compacted: vec![SortedRun::new(0, [make_view(3)])],
-            ..LsmTreeState::default()
-        });
-        core.segments.push(Segment {
-            prefix: Bytes::from_static(b"s"),
-            tree: Arc::new(LsmTreeState {
-                l0: VecDeque::from([make_view(4)]),
-                ..LsmTreeState::default()
-            }),
-        });
-        core
-    }
-
-    #[test]
-    fn test_sst_ids_covers_every_tree_and_level() {
-        let ids: HashSet<SsTableId> = core_with_four_ssts().sst_ids().collect();
-        let expected: HashSet<SsTableId> = (1..=4).map(|seed| make_view(seed).sst.id).collect();
-        assert_eq!(ids, expected);
-    }
-
-    #[test]
-    fn test_same_trees_as_is_true_for_a_clone_and_false_after_a_write() {
-        let core = core_with_four_ssts();
-        let mut clone = core.clone();
-        assert!(core.same_trees_as(&clone));
-
-        Arc::make_mut(&mut clone.tree).l0.clear();
-        assert!(!core.same_trees_as(&clone));
-
-        let mut clone = core.clone();
-        Arc::make_mut(&mut clone.segments[0].tree).l0.clear();
-        assert!(!core.same_trees_as(&clone));
-
-        let mut clone = core.clone();
-        clone.segments.push(Segment {
-            prefix: Bytes::from_static(b"t"),
-            tree: Arc::new(LsmTreeState::default()),
-        });
-        assert!(!core.same_trees_as(&clone));
-    }
-
-    #[test]
-    fn test_ssts_retired_since_lists_dropped_ssts_with_their_segment() {
-        let old = core_with_four_ssts();
-        // The new manifest keeps SSTs 2 and 3 and adds SST 5.
-        let mut new = ManifestCore::new();
-        new.tree = Arc::new(LsmTreeState {
-            l0: VecDeque::from([make_view(5), make_view(2)]),
-            compacted: vec![SortedRun::new(0, [make_view(3)])],
-            ..LsmTreeState::default()
-        });
-
-        let retired: Vec<(Bytes, SsTableId)> = new
-            .ssts_retired_since(&old)
-            .map(|(prefix, handle)| (prefix, handle.id))
-            .collect();
-
-        assert_eq!(
-            retired,
-            vec![
-                (Bytes::new(), make_view(1).sst.id),
-                (Bytes::from_static(b"s"), make_view(4).sst.id),
-            ]
-        );
-        assert_eq!(old.ssts_retired_since(&old).count(), 0);
     }
 
     #[test]
