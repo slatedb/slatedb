@@ -404,7 +404,7 @@ impl<'a> InternalSstIterator<'a> {
         self.tracing_context
             .as_ref()
             .map(|context| context.read_trace.clone())
-            .unwrap_or_else(|| ReadTrace::new(None))
+            .unwrap_or_else(ReadTrace::none)
     }
 
     fn new_owned<T: RangeBounds<Bytes>>(
@@ -1325,7 +1325,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1481,7 +1481,7 @@ mod tests {
         let existing_keys = [b"k1".as_slice(), b"k3".as_slice()];
         let sst_handle = build_single_block_sst(&table_store, &existing_keys).await;
 
-        let read_trace = ReadTrace::new(None);
+        let read_trace = ReadTrace::none();
         let filters = table_store
             .read_filters(&sst_handle.sst, true, Some(Bytes::new()), &read_trace, None)
             .await
@@ -1806,7 +1806,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -2729,7 +2729,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -2934,7 +2934,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -3086,7 +3086,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -3501,7 +3501,7 @@ mod tests {
             &[abstaining_filter(), context_parity_filter(0)],
             SsTableId::new(Ulid::new()),
             None,
-            &ReadTrace::new(None),
+            &ReadTrace::none(),
         );
 
         assert!(evaluator.is_filtered_out());
@@ -3520,7 +3520,7 @@ mod tests {
             &[abstaining_filter(), context_parity_filter(0)],
             SsTableId::new(Ulid::new()),
             None,
-            &ReadTrace::new(None),
+            &ReadTrace::none(),
         );
         assert!(!evaluator.is_filtered_out());
 
@@ -3544,7 +3544,7 @@ mod tests {
             &[context_parity_filter(0)],
             SsTableId::new(Ulid::new()),
             None,
-            &ReadTrace::new(None),
+            &ReadTrace::none(),
         );
         evaluator.notify_finished_iteration();
 
@@ -3587,7 +3587,7 @@ mod tests {
             ))],
             SsTableId::new(Ulid::new()),
             None,
-            &ReadTrace::new(None),
+            &ReadTrace::none(),
         );
 
         assert!(!evaluator.is_filtered_out());

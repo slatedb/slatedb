@@ -1082,7 +1082,7 @@ impl TableStore {
         // Best effort: if we can't read the index we can't enumerate blocks,
         // so log and skip. Remaining entries will age out under normal pressure.
         let index = match self
-            .read_index(handle, false, segment, &ReadTrace::new(None), None)
+            .read_index(handle, false, segment, &ReadTrace::none(), None)
             .await
         {
             Ok(index) => index,
@@ -1724,13 +1724,7 @@ mod tests {
 
         // Read the index
         let index = ts
-            .read_index(
-                &handle,
-                true,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
 
@@ -1742,7 +1736,7 @@ mod tests {
                 0..20,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1782,7 +1776,7 @@ mod tests {
                 0..20,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1815,7 +1809,7 @@ mod tests {
                 0..20,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1844,7 +1838,7 @@ mod tests {
                 5..10,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1858,7 +1852,7 @@ mod tests {
                 15..20,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1914,13 +1908,7 @@ mod tests {
         assert_eq!(meta_cache.entry_count(), 0);
 
         let _ = reader
-            .read_index(
-                &handle,
-                false,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
         assert!(meta_cache
@@ -1930,13 +1918,7 @@ mod tests {
             .is_none());
 
         let _ = reader
-            .read_index(
-                &handle,
-                true,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
         assert!(meta_cache
@@ -2030,7 +2012,7 @@ mod tests {
                                     &handle,
                                     true,
                                     Some(Bytes::new()),
-                                    &ReadTrace::new(None),
+                                    &ReadTrace::none(),
                                     None,
                                 )
                                 .await
@@ -2042,7 +2024,7 @@ mod tests {
                                     &handle,
                                     true,
                                     Some(Bytes::new()),
-                                    &ReadTrace::new(None),
+                                    &ReadTrace::none(),
                                     None,
                                 )
                                 .await
@@ -2151,13 +2133,7 @@ mod tests {
                     BlockCachePolicy::default(),
                 );
                 let index = reader
-                    .read_index(
-                        &handle,
-                        false,
-                        Some(Bytes::new()),
-                        &ReadTrace::new(None),
-                        None,
-                    )
+                    .read_index(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None)
                     .await
                     .unwrap();
                 let num_blocks = index.borrow().block_meta().len();
@@ -2270,13 +2246,7 @@ mod tests {
         assert_eq!(meta_cache.entry_count(), 0);
 
         let filters = reader
-            .read_filters(
-                &handle,
-                false,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_filters(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
         assert!(!filters.is_empty());
@@ -2287,13 +2257,7 @@ mod tests {
             .is_none());
 
         let _ = reader
-            .read_filters(
-                &handle,
-                true,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_filters(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
         assert!(meta_cache
@@ -2710,13 +2674,7 @@ mod tests {
         // be used and reading the index will just return an error.
         os.delete(&ts.path(&id)).await.unwrap();
         assert!(ts
-            .read_index(
-                &handle,
-                false,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None,)
             .await
             .is_err());
     }
@@ -3194,13 +3152,7 @@ mod tests {
             let handle = handle.clone();
             async move {
                 reader
-                    .read_index(
-                        &handle,
-                        true,
-                        Some(Bytes::new()),
-                        &ReadTrace::new(None),
-                        None,
-                    )
+                    .read_index(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
                     .await
             }
         });
@@ -3220,13 +3172,7 @@ mod tests {
             let handle = handle.clone();
             async move {
                 reader
-                    .read_index(
-                        &handle,
-                        true,
-                        Some(Bytes::new()),
-                        &ReadTrace::new(None),
-                        None,
-                    )
+                    .read_index(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
                     .await
             }
         };
@@ -3293,13 +3239,7 @@ mod tests {
         // sees only block reads (the fast-path takes `index` as an argument, so no
         // extra index read happens inside the race).
         let index = writer
-            .read_index(
-                &handle,
-                false,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
 
@@ -3339,7 +3279,7 @@ mod tests {
                         0..1,
                         true,
                         Some(Bytes::new()),
-                        &ReadTrace::new(None),
+                        &ReadTrace::none(),
                         None,
                     )
                     .await
@@ -3368,7 +3308,7 @@ mod tests {
                         0..1,
                         true,
                         Some(Bytes::new()),
-                        &ReadTrace::new(None),
+                        &ReadTrace::none(),
                         None,
                     )
                     .await
@@ -3451,7 +3391,7 @@ mod tests {
                 &handle,
                 false,
                 Some(segment.clone()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await

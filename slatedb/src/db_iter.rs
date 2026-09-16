@@ -764,7 +764,7 @@ mod tests {
             Some(5),
             merge.then(|| Arc::new(StringConcatMergeOperator) as MergeOperatorType),
             order,
-            ReadTrace::new(None),
+            ReadTrace::none(),
         )
         .await
         .unwrap();
@@ -792,7 +792,7 @@ mod tests {
             None,
             None,
             IterationOrder::Ascending,
-            ReadTrace::new(None),
+            ReadTrace::none(),
         )
         .await
         .unwrap();
@@ -833,7 +833,7 @@ mod tests {
             Some(100),
             None,
             IterationOrder::Ascending,
-            ReadTrace::new(None),
+            ReadTrace::none(),
         )
         .await
         .unwrap();
@@ -864,7 +864,7 @@ mod tests {
             None,
             None,
             IterationOrder::Ascending,
-            ReadTrace::new(None),
+            ReadTrace::none(),
         )
         .await
         .unwrap();
@@ -914,7 +914,7 @@ mod tests {
             None,
             None,
             IterationOrder::Ascending,
-            ReadTrace::new(None),
+            ReadTrace::none(),
         )
         .await
         .unwrap();

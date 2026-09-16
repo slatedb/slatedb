@@ -152,7 +152,7 @@ pub(crate) async fn plan_subcompaction_ranges(
                         &view.sst,
                         true,
                         Some(segment),
-                        &crate::reader::ReadTrace::new(None),
+                        &crate::reader::ReadTrace::none(),
                         None,
                     )
                     .await?;
