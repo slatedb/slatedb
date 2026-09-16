@@ -1843,7 +1843,7 @@ mod tests {
                 &view.sst,
                 false,
                 Some(Bytes::new()),
-                &crate::reader::ReadTrace::new(None),
+                &crate::reader::ReadTrace::none(),
                 None,
             )
             .await

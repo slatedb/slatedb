@@ -383,7 +383,7 @@ mod tests {
                 sst_handle,
                 true,
                 Some(Bytes::new()),
-                &crate::reader::ReadTrace::new(None),
+                &crate::reader::ReadTrace::none(),
                 None,
             )
             .await

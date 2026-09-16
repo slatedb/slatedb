@@ -73,6 +73,10 @@ impl ReadTrace {
         }
     }
 
+    pub(crate) fn none() -> Self {
+        Self::new(None)
+    }
+
     pub(crate) fn read_span(&self) -> tracing::Span {
         self.read_span.clone()
     }

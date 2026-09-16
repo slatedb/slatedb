@@ -267,7 +267,7 @@ impl SstFile {
                 &self.handle,
                 true,
                 Some(Bytes::new()),
-                &crate::reader::ReadTrace::new(None),
+                &crate::reader::ReadTrace::none(),
                 None,
             )
             .await?;
@@ -293,7 +293,7 @@ impl SstFile {
                 &self.handle,
                 true,
                 Some(Bytes::new()),
-                &crate::reader::ReadTrace::new(None),
+                &crate::reader::ReadTrace::none(),
                 None,
             )
             .await?;
@@ -311,7 +311,7 @@ impl SstFile {
                 block..block + 1,
                 true,
                 Some(Bytes::new()),
-                &crate::reader::ReadTrace::new(None),
+                &crate::reader::ReadTrace::none(),
                 None,
             )
             .await?;
