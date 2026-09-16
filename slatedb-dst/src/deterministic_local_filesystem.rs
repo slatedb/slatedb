@@ -288,7 +288,6 @@ impl DeterministicLocalFilesystem {
             .map(|prefix| self.prefix_to_filesystem(prefix))
             .unwrap_or_else(|| self.root.clone());
 
-        // Capture paths and metadata before yielding so other DST tasks cannot change the listing.
         let mut objects = Vec::new();
         let walkdir = WalkDir::new(root_path).min_depth(1).follow_links(true);
 
