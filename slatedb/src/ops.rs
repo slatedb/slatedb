@@ -8,7 +8,7 @@ use crate::config::{
 };
 use crate::db::WriteHandle;
 use crate::db_cache::CacheTarget;
-use crate::db_state::SsTableId;
+use crate::db_state::{SsTableHandle, SsTableId};
 use crate::db_status::DbStatus;
 use crate::manifest::VersionedManifest;
 use crate::transaction_manager::IsolationLevel;
@@ -651,12 +651,19 @@ pub trait DbCacheManagerOps {
         targets: &[CacheTarget],
     ) -> Result<(), crate::Error>;
 
-    /// Best-effort eviction of block-cache entries for one SST.
+    /// Best-effort removal of the cache entries of an SST named by `targets`.
     ///
-    /// If no block cache is configured, logs a warning and returns `Ok(())`.
-    /// Does not check whether the SST is still live in the current manifest —
-    /// callers own that policy.
-    async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), crate::Error>;
+    /// A [`CacheTarget::Data`] target removes the blocks whose key span
+    /// overlaps its range, which reads the SST index. The other targets each
+    /// remove one entry. [`CacheTarget::all`] removes everything.
+    ///
+    /// The handle names the entries, so the SST need not be in the current
+    /// manifest. Callers own the decision of what is safe to evict.
+    async fn evict_cached_sst(
+        &self,
+        sst: &SsTableHandle,
+        targets: &[CacheTarget],
+    ) -> Result<(), crate::Error>;
 
     /// Send this instance's cached data to disk.
     ///

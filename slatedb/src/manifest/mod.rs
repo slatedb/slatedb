@@ -494,6 +494,26 @@ impl ManifestCore {
         )
     }
 
+    /// The id of every SST that any tree of this manifest references.
+    pub(crate) fn sst_ids(&self) -> impl Iterator<Item = SsTableId> + '_ {
+        self.trees()
+            .flat_map(|tree| tree.sst_views())
+            .map(|view| view.sst.id)
+    }
+
+    /// The SSTs that `previous` references and this manifest no longer does.
+    pub(crate) fn ssts_retired_since<'a>(
+        &self,
+        previous: &'a ManifestCore,
+    ) -> impl Iterator<Item = &'a SsTableHandle> + 'a {
+        let kept: HashSet<SsTableId> = self.sst_ids().collect();
+        previous
+            .trees()
+            .flat_map(|tree| tree.sst_views())
+            .map(|view| &view.sst)
+            .filter(move |handle| !kept.contains(&handle.id))
+    }
+
     /// Look up the LSM tree for a given segment prefix. An empty `prefix`
     /// returns the root tree (compatibility-encoded `prefix=""` segment);
     /// a non-empty prefix returns the named segment's tree, or `None` if no
@@ -938,6 +958,32 @@ impl VersionedManifest {
 
     pub(crate) fn external_ssts(&self) -> HashMap<SsTableId, object_store::path::Path> {
         self.manifest.external_ssts()
+    }
+    /// Every SST view in this manifest, across the root tree and every
+    /// segment.
+    pub fn sst_views(&self) -> impl Iterator<Item = &SsTableView> {
+        self.core().trees().flat_map(|tree| tree.sst_views())
+    }
+
+    /// Whether this manifest and `other` hold the same SSTs, decided by
+    /// comparing tree allocations. Trees are copied on write, so a shared
+    /// allocation is an unchanged tree.
+    pub fn same_trees_as(&self, other: &VersionedManifest) -> bool {
+        let (a, b) = (self.core(), other.core());
+        Arc::ptr_eq(&a.tree, &b.tree)
+            && a.segments.len() == b.segments.len()
+            && a.segments
+                .iter()
+                .zip(&b.segments)
+                .all(|(x, y)| Arc::ptr_eq(&x.tree, &y.tree))
+    }
+
+    /// The SSTs that `previous` references and this manifest no longer does.
+    pub fn ssts_retired_since(&self, previous: &VersionedManifest) -> Vec<SsTableHandle> {
+        self.core()
+            .ssts_retired_since(previous.core())
+            .cloned()
+            .collect()
     }
 
     /// The named segments configured in this manifest (RFC-0024), in prefix
@@ -1608,7 +1654,7 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
-    use super::{ExternalDb, Manifest};
+    use super::{ExternalDb, Manifest, VersionedManifest};
     use crate::clone::{CloneSource, SegmentFilterFn, SegmentProjectionFn};
     use crate::config::CheckpointOptions;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
@@ -2235,6 +2281,92 @@ mod tests {
             SsTableInfo::default(),
         );
         SsTableView::new(view_id, handle)
+    }
+
+    /// A manifest with L0 SSTs 1 and 2 and sorted-run SST 3 in the root tree,
+    /// and L0 SST 4 in segment `s`.
+    fn core_with_four_ssts() -> ManifestCore {
+        let mut core = ManifestCore::new();
+        core.tree = Arc::new(LsmTreeState {
+            l0: VecDeque::from([make_view(1), make_view(2)]),
+            compacted: vec![SortedRun::new(0, [make_view(3)])],
+            ..LsmTreeState::default()
+        });
+        core.segments.push(Segment {
+            prefix: Bytes::from_static(b"s"),
+            tree: Arc::new(LsmTreeState {
+                l0: VecDeque::from([make_view(4)]),
+                ..LsmTreeState::default()
+            }),
+        });
+        core
+    }
+
+    #[test]
+    fn test_sst_ids_covers_every_tree_and_level() {
+        let ids: HashSet<SsTableId> = core_with_four_ssts().sst_ids().collect();
+        let expected: HashSet<SsTableId> = (1..=4).map(|seed| make_view(seed).sst.id).collect();
+        assert_eq!(ids, expected);
+
+        let manifest =
+            VersionedManifest::from_manifest(1, Manifest::initial(core_with_four_ssts()));
+        let ids: HashSet<SsTableId> = manifest.sst_views().map(|view| view.sst.id).collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[test]
+    fn test_same_trees_as_is_true_for_a_clone_and_false_after_a_write() {
+        let versioned =
+            |core: ManifestCore| VersionedManifest::from_manifest(1, Manifest::initial(core));
+        let core = core_with_four_ssts();
+        let manifest = versioned(core.clone());
+        assert!(manifest.same_trees_as(&manifest.clone()));
+
+        let mut root_written = core.clone();
+        Arc::make_mut(&mut root_written.tree).l0.clear();
+        assert!(!manifest.same_trees_as(&versioned(root_written)));
+
+        let mut segment_written = core.clone();
+        Arc::make_mut(&mut segment_written.segments[0].tree)
+            .l0
+            .clear();
+        assert!(!manifest.same_trees_as(&versioned(segment_written)));
+
+        let mut segment_added = core.clone();
+        segment_added.segments.push(Segment {
+            prefix: Bytes::from_static(b"t"),
+            tree: Arc::new(LsmTreeState::default()),
+        });
+        assert!(!manifest.same_trees_as(&versioned(segment_added)));
+    }
+
+    #[test]
+    fn test_ssts_retired_since_lists_ssts_dropped_from_any_tree() {
+        let old = core_with_four_ssts();
+        // The new manifest keeps SSTs 2 and 3 and adds SST 5.
+        let mut new = ManifestCore::new();
+        new.tree = Arc::new(LsmTreeState {
+            l0: VecDeque::from([make_view(5), make_view(2)]),
+            compacted: vec![SortedRun::new(0, [make_view(3)])],
+            ..LsmTreeState::default()
+        });
+
+        let retired: Vec<SsTableId> = new
+            .ssts_retired_since(&old)
+            .map(|handle| handle.id)
+            .collect();
+
+        assert_eq!(retired, vec![make_view(1).sst.id, make_view(4).sst.id]);
+        assert_eq!(old.ssts_retired_since(&old).count(), 0);
+
+        let old = VersionedManifest::from_manifest(1, Manifest::initial(old));
+        let new = VersionedManifest::from_manifest(2, Manifest::initial(new));
+        let retired: Vec<SsTableId> = new
+            .ssts_retired_since(&old)
+            .iter()
+            .map(|handle| handle.id)
+            .collect();
+        assert_eq!(retired, vec![make_view(1).sst.id, make_view(4).sst.id]);
     }
 
     #[test]
@@ -5240,7 +5372,7 @@ mod tests {
         }
     }
 
-    fn manifest_with_segments(prefixes: &[&[u8]]) -> super::VersionedManifest {
+    fn manifest_with_segments(prefixes: &[&[u8]]) -> VersionedManifest {
         let mut core = ManifestCore::new();
         if !prefixes.is_empty() {
             core.segment_extractor_name = Some("hour-bucket".to_string());
@@ -5252,7 +5384,7 @@ mod tests {
                 })
                 .collect();
         }
-        super::VersionedManifest::from_manifest(1, Manifest::initial(core))
+        VersionedManifest::from_manifest(1, Manifest::initial(core))
     }
 
     #[test]
