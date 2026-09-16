@@ -494,26 +494,6 @@ impl ManifestCore {
         )
     }
 
-    /// The id of every SST that any tree of this manifest references.
-    pub(crate) fn sst_ids(&self) -> impl Iterator<Item = SsTableId> + '_ {
-        self.trees()
-            .flat_map(|tree| tree.sst_views())
-            .map(|view| view.sst.id)
-    }
-
-    /// The SSTs that `previous` references and this manifest no longer does.
-    pub(crate) fn ssts_retired_since<'a>(
-        &self,
-        previous: &'a ManifestCore,
-    ) -> impl Iterator<Item = &'a SsTableHandle> + 'a {
-        let kept: HashSet<SsTableId> = self.sst_ids().collect();
-        previous
-            .trees()
-            .flat_map(|tree| tree.sst_views())
-            .map(|view| &view.sst)
-            .filter(move |handle| !kept.contains(&handle.id))
-    }
-
     /// Look up the LSM tree for a given segment prefix. An empty `prefix`
     /// returns the root tree (compatibility-encoded `prefix=""` segment);
     /// a non-empty prefix returns the named segment's tree, or `None` if no
@@ -980,9 +960,11 @@ impl VersionedManifest {
 
     /// The SSTs that `previous` references and this manifest no longer does.
     pub fn ssts_retired_since(&self, previous: &VersionedManifest) -> Vec<SsTableHandle> {
-        self.core()
-            .ssts_retired_since(previous.core())
-            .cloned()
+        let kept: HashSet<SsTableId> = self.sst_views().map(|view| view.sst.id).collect();
+        previous
+            .sst_views()
+            .filter(|view| !kept.contains(&view.sst.id))
+            .map(|view| view.sst.clone())
             .collect()
     }
 
@@ -2303,14 +2285,11 @@ mod tests {
     }
 
     #[test]
-    fn test_sst_ids_covers_every_tree_and_level() {
-        let ids: HashSet<SsTableId> = core_with_four_ssts().sst_ids().collect();
-        let expected: HashSet<SsTableId> = (1..=4).map(|seed| make_view(seed).sst.id).collect();
-        assert_eq!(ids, expected);
-
+    fn test_sst_views_covers_every_tree_and_level() {
         let manifest =
             VersionedManifest::from_manifest(1, Manifest::initial(core_with_four_ssts()));
         let ids: HashSet<SsTableId> = manifest.sst_views().map(|view| view.sst.id).collect();
+        let expected: HashSet<SsTableId> = (1..=4).map(|seed| make_view(seed).sst.id).collect();
         assert_eq!(ids, expected);
     }
 
@@ -2351,22 +2330,17 @@ mod tests {
             ..LsmTreeState::default()
         });
 
-        let retired: Vec<SsTableId> = new
-            .ssts_retired_since(&old)
-            .map(|handle| handle.id)
-            .collect();
-
-        assert_eq!(retired, vec![make_view(1).sst.id, make_view(4).sst.id]);
-        assert_eq!(old.ssts_retired_since(&old).count(), 0);
-
         let old = VersionedManifest::from_manifest(1, Manifest::initial(old));
         let new = VersionedManifest::from_manifest(2, Manifest::initial(new));
+
         let retired: Vec<SsTableId> = new
             .ssts_retired_since(&old)
             .iter()
             .map(|handle| handle.id)
             .collect();
+
         assert_eq!(retired, vec![make_view(1).sst.id, make_view(4).sst.id]);
+        assert!(old.ssts_retired_since(&old).is_empty());
     }
 
     #[test]
