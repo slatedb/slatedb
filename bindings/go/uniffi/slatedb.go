@@ -835,7 +835,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_db_evict_cached_sst()
 		})
-		if checksum != 13615 {
+		if checksum != 27129 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_evict_cached_sst: UniFFI API checksum mismatch")
 		}
@@ -1042,7 +1042,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_evict_cached_sst()
 		})
-		if checksum != 18747 {
+		if checksum != 58617 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_evict_cached_sst: UniFFI API checksum mismatch")
 		}
@@ -3378,7 +3378,8 @@ type DbInterface interface {
 	DeleteWithOptions(key []byte, options WriteOptions) (*WriteHandle, error)
 	// Best-effort eviction of block-cache entries for one SST.
 	//
-	// If no block cache is configured, returns `Ok(())`.
+	// If no block cache is configured, or if the SST is not reachable from
+	// the current manifest, the call is a no-op that returns `Ok(())`.
 	EvictCachedSst(sstId SsTableId) error
 	// Flushes the default storage layer.
 	Flush() error
@@ -3560,7 +3561,8 @@ func (_self *Db) DeleteWithOptions(key []byte, options WriteOptions) (*WriteHand
 
 // Best-effort eviction of block-cache entries for one SST.
 //
-// If no block cache is configured, returns `Ok(())`.
+// If no block cache is configured, or if the SST is not reachable from
+// the current manifest, the call is a no-op that returns `Ok(())`.
 func (_self *Db) EvictCachedSst(sstId SsTableId) error {
 	_pointer := _self.ffiObject.incrementPointer("*Db")
 	defer _self.ffiObject.decrementPointer()
@@ -4965,7 +4967,8 @@ func (_ FfiDestroyerDbIterator) Destroy(value *DbIterator) {
 type DbReaderInterface interface {
 	// Best-effort eviction of block-cache entries for one SST.
 	//
-	// If no block cache is configured, returns `Ok(())`.
+	// If no block cache is configured, or if the SST is not reachable from
+	// the current manifest, the call is a no-op that returns `Ok(())`.
 	EvictCachedSst(sstId SsTableId) error
 	// Sends this reader's cached data to disk.
 	//
@@ -5017,7 +5020,8 @@ type DbReader struct {
 
 // Best-effort eviction of block-cache entries for one SST.
 //
-// If no block cache is configured, returns `Ok(())`.
+// If no block cache is configured, or if the SST is not reachable from
+// the current manifest, the call is a no-op that returns `Ok(())`.
 func (_self *DbReader) EvictCachedSst(sstId SsTableId) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
 	defer _self.ffiObject.decrementPointer()
