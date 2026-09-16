@@ -9,6 +9,7 @@ use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::manifest::ManifestCore;
 use crate::paths::PathResolver;
+use crate::reader::ReadTrace;
 use crate::tablestore::TableStore;
 use bytes::{Buf, BufMut, Bytes};
 use futures::FutureExt;
@@ -170,7 +171,7 @@ pub(crate) async fn last_written_key_and_seq(
             output_sst,
             false,
             Some(segment.clone()),
-            &crate::reader::ReadTrace::none(),
+            &ReadTrace::none(),
             None,
         )
         .await?;
@@ -186,7 +187,7 @@ pub(crate) async fn last_written_key_and_seq(
             last_block_idx..last_block_idx + 1,
             false,
             Some(segment.clone()),
-            &crate::reader::ReadTrace::none(),
+            &ReadTrace::none(),
             None,
         )
         .await?;

@@ -60,6 +60,7 @@ use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::iter::IterationOrder;
 use crate::partitioned_keyspace::{partition_point, RangePartitionedKeySpace};
+use crate::reader::ReadTrace;
 use crate::sst_stats::SstStats;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::types::RowEntry;
@@ -267,7 +268,7 @@ impl SstFile {
                 &self.handle,
                 true,
                 Some(Bytes::new()),
-                &crate::reader::ReadTrace::none(),
+                &ReadTrace::none(),
                 None,
             )
             .await?;
@@ -293,7 +294,7 @@ impl SstFile {
                 &self.handle,
                 true,
                 Some(Bytes::new()),
-                &crate::reader::ReadTrace::none(),
+                &ReadTrace::none(),
                 None,
             )
             .await?;
@@ -311,7 +312,7 @@ impl SstFile {
                 block..block + 1,
                 true,
                 Some(Bytes::new()),
-                &crate::reader::ReadTrace::none(),
+                &ReadTrace::none(),
                 None,
             )
             .await?;
