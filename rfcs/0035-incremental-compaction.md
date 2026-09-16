@@ -9,14 +9,14 @@ Table of Contents:
 - [Goals](#goals)
 - [Non-Goals](#non-goals)
 - [Design](#design)
-  - [Example of partial commits](#example-of-partial-commits)
-  - [Finding durable progress](#finding-durable-progress)
-  - [Choosing what to commit](#choosing-what-to-commit)
+  - [Overview](#overview)
+  - [Example of incremental commits](#example-of-incremental-commits)
+  - [Durable progress](#durable-progress)
   - [Updating the manifest](#updating-the-manifest)
-  - [When commits happen](#when-commits-happen)
-  - [Configuration](#configuration)
   - [Stored progress and recovery](#stored-progress-and-recovery)
   - [Deleting released inputs](#deleting-released-inputs)
+  - [Commit timing and configuration](#commit-timing-and-configuration)
+  - [Changes to sorted runs](#changes-to-sorted-runs)
 - [Impact analysis](#impact-analysis)
   - [Core API & query semantics](#core-api--query-semantics)
   - [Consistency, isolation, and multi-versioning](#consistency-isolation-and-multi-versioning)
@@ -50,9 +50,11 @@ amplification during compaction. This matters for users that keep data on local
 disk, as described in
 [RFC-0034](https://github.com/slatedb/slatedb/blob/main/rfcs/0034-local-object-mirroring.md).
 
-Incremental compaction publishes compacted key intervals while workers process
-the remaining keys. This makes it possible to reclaim space from fully consumed
-input SSTs before the compaction finishes.
+A commit is an atomic manifest update. All its changes succeed or fail together.
+The commit replaces input views with output views that readers can use.
+Incremental compaction commits output for key intervals while workers process
+the remaining keys. This allows reclamation of fully consumed input SSTs before
+the compaction finishes.
 
 ## Background
 
@@ -62,15 +64,16 @@ write output to storage.
 
 [RFC-0025](0025-distributed-compaction.md) separates compaction scheduling and
 manifest commits from execution. The coordinator schedules jobs and commits
-their results. Workers claim jobs, write output SSTs, and report progress through
-`.compactions`. Workers do not publish compaction results to the manifest.
+their results. Workers claim jobs, write output SSTs, and record progress in
+`.compactions`. Recording progress does not change the manifest.
+Only the coordinator commits compaction results.
 
 [RFC-0028](0028-subcompactions.md) divides a single compaction into disjoint key
 ranges that a worker processes in parallel. These subcompactions can read
-different portions of the same input SST. Each range stores its output list
-in `.compactions`, so a replacement worker can resume from its last durable
-output. The coordinator still commits the results together after all ranges
-finish.
+different portions of the same input SST. The worker records each range's
+output list in `.compactions`, so a replacement worker can resume from its
+last recorded output SST. The coordinator still commits the results together
+after all ranges finish.
 
 ## Goals
 
@@ -84,39 +87,64 @@ finish.
 
 ## Design
 
-The incremental compaction can be achieved through partial manifest commits.
-A partial commit is a manifest write that replaces completed portions of the
-compaction inputs with the produced output in the manifest while the compaction
-is still running.
+### Overview
 
-This applies to sorted-run compactions. Compactions with L0 inputs still commit
-once at completion, which keeps L0 watermark management unchanged.
+The coordinator adds incremental commits between the start of a job and its
+final commit. An incremental commit is a manifest update that applies the
+durable progress of a compaction that has not finished. The manifest update
+itself is complete and atomic.
+A final commit applies the finished compaction's full result and removes its
+input runs.
 
-Each `SortedRun` contains `SsTableView`s with a `visible_range` projection.
-The coordinator changes these projections to show the output and hide the input
-keys it replaces. Once no visible keys remain in an input SST, the coordinator
-removes its view.
+One job moves through these steps:
 
-Two rules determine whether a partial commit is safe to publish:
+1. The worker processes each subcompaction's planned key range, uploads
+   output SSTs, and records each SST in `.compactions`. When a range
+   finishes, the worker sets a completion flag for it. See
+   [Durable progress](#durable-progress).
 
-- For each key in this compaction, reads must see the published output or the
-  retained inputs, never both.
-- Each SST must keep at most one continuous visible range, so commits do not
-  create extra views for gaps.
+2. Once per `incremental_commit_interval`, `.compactions` record is polled and
+   the coordinator derives one durable interval per subcompaction from that
+   record. A durable interval is a key range whose output is fully stored, so
+   it is safe to commit. For an unfinished range, the interval runs from the
+   range start up to the last key of the last recorded output SST, and excludes
+   that key. For a finished range, it covers the whole planned range. See
+   [Durable progress](#durable-progress).
 
-A commit can remove an input's beginning, end, or entire range. The coordinator
-adjusts proposals that leave an input view in two pieces. Such splits can occur
-when an input SST spans subcompactions.
+3. The coordinator subtracts the durable intervals from each input view.
+   Each `SortedRun` holds `SsTableView`s. Each view has its own ID and a
+   `visible_range` projection that limits the keys visible through it.
+   Subtraction can narrow a view, split it into several views of the same
+   physical SST, or remove it. The coordinator then rebuilds the output run
+   from the full recorded output list, clipped to the durable intervals. The
+   output run has a fresh ID and sits immediately before the input runs.
+   For each key, readers see the committed output or the retained input,
+   never both. See [Updating the manifest](#updating-the-manifest) and
+   [Changes to sorted runs](#changes-to-sorted-runs).
 
-Each subcompaction publishes from the start of its planned range. Its published
-progress grows as work finishes.
+4. The coordinator groups the updates of all running jobs into one batch.
+   If the batch contains only incremental updates and no physical SST loses its
+   last view, the coordinator skips the commit and keeps the recorded
+   progress for a later attempt. Otherwise, it writes the new views, the
+   output run, and a checkpoint of the previous manifest in one CAS. See
+   [Commit timing and configuration](#commit-timing-and-configuration).
 
-The coordinator considers all proposed intervals together. Adjacent intervals
-join, which can allow a shared input SST to retain one continuous view.
-[Choosing what to commit](#choosing-what-to-commit) describes how the coordinator
-adjusts proposals that still split an input view.
+5. An SST with no remaining view in the new manifest is released. GC deletes
+   it when no current or checkpointed manifest references it and its ID
+   timestamp falls below the GC cutoff. See
+   [Deleting released inputs](#deleting-released-inputs).
 
-### Example of partial commits
+6. When every subcompaction finishes, the final commit applies the full
+   output run and removes all input runs. It does not wait for the commit
+   interval or for an SST release.
+
+If the coordinator crashes, recovery rebuilds the same views from
+`.compactions`. An incremental commit that did not land repeats. See
+[Stored progress and recovery](#stored-progress-and-recovery).
+
+The next section shows steps 2 through 6 on two input runs.
+
+### Example of incremental commits
 
 One worker runs two subcompactions to merge runs A and B. Subcompaction 1
 processes `[0, 15)`, and subcompaction 2 processes `[15, 30)`. A2 and B1 cross
@@ -130,189 +158,233 @@ their shared boundary:
 | B | B1 | `[0, 20)` |
 | B | B2 | `[20, 30)` |
 
-Each diagram below shows the state after a commit. Output bars represent key
-intervals, not individual output SST boundaries.
+Step 1 shows durable intervals that do not yet justify a commit. Steps 2 and 3
+show the manifest after a commit. Output bars represent key intervals in the
+output run C, not individual output SST boundaries. The diagram rows group
+inputs and output rather than showing manifest order.
 
-#### Step 1: Publish the first prefix
+#### Step 1: Wait until a commit releases an SST
 
-Subcompaction 1 has durable output for `[0, 5)`, and subcompaction 2 has durable
-output for `[15, 18)`. The coordinator publishes `[0, 5)`. Publishing `[15, 18)`
-must wait because it cuts through A2 and B1, leaving two retained pieces in each.
+Subcompaction 1 has a durable interval of `[0, 5)`, and subcompaction 2 has one
+of `[15, 18)`. Applying these intervals leaves at least one view of every input
+SST. The coordinator skips the incremental commit and keeps the manifest unchanged.
+The recorded progress remains in `.compactions` for a later commit.
 
-![Step 1: Publish keys below 5. Retain every input SST. Output for keys 15 through 18 waits.](images/0035-partial-commit-1.svg)
+![Step 1: Skip the incremental commit because no SST loses its last view. All input views remain unchanged.](images/0035-incremental-commit-1.svg)
 
-#### Step 2: Publish subcompaction 2's range independently
+#### Step 2: Commit subcompaction 2's range independently
 
-Subcompaction 2 finishes, so the coordinator publishes `[15, 30)` and releases
-A3 and B2. A2 and B1 each retain one continuous view, while subcompaction 1
-continues.
+Subcompaction 2 finishes. The coordinator commits both `[0, 5)` and `[15, 30)`,
+including the progress retained from step 1. This releases A3 and B2.
+A2 and B1 each retain one continuous view, while subcompaction 1 continues.
 
-![Step 2: Publish subcompaction 2's range. Release A3 and B2. Retain smaller views of A1, A2, and B1.](images/0035-partial-commit-2.svg)
+![Step 2: Commit subcompaction 2's range. Release A3 and B2. Retain smaller views of A1, A2, and B1.](images/0035-incremental-commit-2.svg)
 
-#### Step 3: Publish the remaining gap
+#### Step 3: Commit the remaining gap
 
-Subcompaction 1 finishes. The final commit publishes `[5, 15)` and releases
-A1, A2, and B1.
+Subcompaction 1 finishes. The final commit covers `[0, 30)`, including the
+remaining gap `[5, 15)`. It releases A1, A2, and B1.
 
-![Step 3: Publish keys 5 through 15. Release A1, A2, and B1. Output covers the full range, and no input views remain.](images/0035-partial-commit-3.svg)
+![Step 3: Commit keys 5 through 15. Release A1, A2, and B1. Output covers the full range, and no input views remain.](images/0035-incremental-commit-3.svg)
 
-Releasing an SST removes its view from the manifest. Checkpoints and GC rules
-still determine when its physical storage can be reclaimed.
+Releasing an SST removes its last input view from the manifest. Checkpoints
+and GC rules still determine when its physical storage can be reclaimed.
 
-### Finding durable progress
+### Durable progress
 
-The worker records each subcompaction's planned range and full output list in
-`.compactions` like it's done today. A new completion flag records that all
-input in the range is processed and all output is stored. It also records
-completion for ranges that produce no output. This is useful to know that the
-last key in the range is fully processed.
+Durable intervals can extend beyond the intervals already committed to the
+manifest. The worker records each subcompaction's planned range and full output
+list in `.compactions`, as it does today. A new completion flag records that the worker finished the range
+and stored all its output. The flag also covers ranges that produce no output.
 
-For an unfinished range, the coordinator reads the last key of its last
-recorded output SST through `last_written_key_and_seq`. Call that key `B`.
+For an unfinished range, the coordinator takes the boundary key `B` from the
+last recorded output SST's `CompactedSsTable.info.last_entry` metadata. This
+avoids reading the SST's index and final block. If `last_entry` is absent,
+the coordinator falls back to `last_written_key_and_seq` and uses only the
+returned key.
+
 The durable prefix is `[range.start, B)`. It excludes `B` because more versions
-of that key can follow in later output SSTs.
+of that key can follow in later output SSTs. A commit must exclude every
+version of `B`, including versions in earlier output SSTs.
 
 As the worker records later SSTs, `B` can advance without waiting for the
 subcompaction to finish. Once the completion flag is set, the durable interval
 covers the whole planned range.
 
-### Choosing what to commit
+The coordinator joins adjacent durable intervals and applies their union to
+retained inputs. It rebuilds the output run from the full recorded output lists.
+Rebuilding these views is safe to repeat and can combine adjacent views of the
+same SST.
 
-The coordinator chooses how far each subcompaction can advance its published
-prefix. It considers all source runs and subcompactions together, so the
-proposal leaves each input view empty or with one continuous range:
+A batch groups jobs updates into one atomic manifest commit. It can contain
+updates from one or more compaction jobs. For a batch of incremental updates,
+the coordinator skips the commit if no physical SST loses its last reference
+in the manifest. Workers keep recording progress in `.compactions`, and a
+later commit uses all accumulated durable intervals.
 
-1. Start with every subcompaction's full durable interval.
-2. If the proposal splits an input view, find the subcompactions proposing
-   advances whose prefixes overlap that view. Choose the one with the highest
-   start key. Remove its new progress from the proposal, but keep its previously
-   committed prefix. Repeat until no input view splits. Each retry removes one
-   advance for this pass, so the loop needs at most one retry per subcompaction.
-3. If no prefix advances, skip the commit.
-
-Adjacent progress can make a combined proposal safe. In the example above,
- `[0, 15)` and `[15, 18)` join into `[0, 18)`, so B1 retains only `[18, 20)`.
-
-After step 1 of the example, B1 retains `[5, 20)`. Publishing subcompaction
-2's `[15, 18)` leaves two pieces: `[5, 15)` and `[18, 20)`. A smaller advance
-still leaves two pieces, so the coordinator postpones that advance. It can
-reconsider when subcompaction 2 can publish through 20, or subcompaction 1 can
-publish through 15.
+The coordinator must use progress at least as recent as its previous
+commit. Output lists only grow, and completion flags never revert.
 
 ### Updating the manifest
 
-A `CompactionCommitRecord` in the manifest stores each job's published
-intervals and final completion flag. The coordinator updates it atomically with
-the SST views. This avoids reconstructing published progress from the current
-views during partial commits and recovery.
+The manifest stores the current input views and output run. The coordinator
+uses the recorded plan and output lists in `.compactions` to rebuild these views.
+A compare-and-swap (CAS) write requires an unchanged base version.
 
-```fbs
-table CompactionCommitRecord {
-    // ID of the compaction this record belongs to.
-    compaction_id: Ulid (required);
+The scheduler reserves both input runs and the output run until the job
+reaches a terminal state in `.compactions`. Other compactions cannot consume
+or replace these runs during incremental commits. Empty input runs remain
+present until the final commit.
 
-    // Published key intervals, sorted by key without overlaps or adjacent
-    // intervals.
-    committed_intervals: [BytesRange] (required);
+The coordinator prepares the next manifest for a batch as follows.
+Steps 1 through 6 apply to each job.
 
-    // True once the final manifest commit succeeds. Kept until completion
-    // is durable in .compactions so recovery can detect that success.
-    completed: bool;
-}
-```
+1. Subtract all durable intervals from each current input view, preserving any preexisting gaps or projections.
+2. For each input view, keep one view for each remaining interval. If no interval remains, remove the view.
+3. Keep every input run, including empty runs, until the final commit.
+4. Rebuild the output run from the full recorded output list, clipped to the durable intervals.
+5. Order output run views by key, preserving version order when output SSTs share a boundary key.
+6. Update the output run's views. If the output run does not exist, insert it immediately before the first input run.
+7. If the batch contains only incremental updates and releases no SSTs, skip the commit.
+8. Add a checkpoint that references the manifest version being replaced.
+9. Write the checkpoint and run changes in one manifest CAS.
 
-Earlier partial commits leave published output alongside retained inputs in
-the destination run. The coordinator must distinguish them when it builds the
-next manifest:
+When an input view splits, one retained piece keeps its ID and the other
+pieces receive fresh view IDs. Unchanged views keep their IDs.
 
-1. Identify earlier published output by SST id. Exclude it from the input views.
-2. Remove the published keys from each retained input view. Drop empty views
-   but keep every source run until the final commit.
-3. Clip each output view to the published intervals. If an output SST does not
-   overlap any committed interval, leave it out of the manifest. Keep it in the
-   subcompaction's output list so a later commit can publish it.
-4. Combine output and retained destination inputs in key order. Keep runs in
-   descending id order and keep the destination's run id. Preserve version
-   order across output SSTs that share a boundary key.
-5. Add a checkpoint that references the manifest version being replaced.
-6. Write the checkpoint, view changes, and updated commit records in one
-  manifest CAS. [Recovery](#stored-progress-and-recovery) uses the commit records.
+For example, an input view covering `[10, 20)` can span a subcompaction
+boundary at `15`. Committing `[15, 18)` leaves views for `[10, 15)` and
+`[18, 20)`. Both views reference the same input SST, but each has its own view ID.
+The batch can commit this split when its other changes release an SST.
 
-On a CAS conflict, the coordinator refreshes the manifest and merges concurrent
-updates. It rebuilds the checkpoint against the new base version before retrying.
+On a CAS conflict, the coordinator refreshes metadata objects and rebuilds
+from the current manifest and durable job state.
 
-Empty source runs reserve their ids until the final commit. This prevents
-conflicting ids when the scheduler creates new L0 compactions.
+The final commit uses the full output list and removes all input runs.
 
-The final commit uses the full output list and removes all remaining inputs.
-It removes projections added for incremental publication but preserves
-independent ones, such as those from trivial moves. The final result must match
-compaction without incremental publication.
+### Stored progress and recovery
 
-### When commits happen
+Workers resume execution from `.compactions`. The coordinator uses that same
+state to prepare manifest updates.
 
-`CompactorOptions::incremental_commit_interval` sets one minimum interval for
-partial commits across all jobs handled by the coordinator. On its existing
-commit tick, the coordinator uses output and completion records already stored
-in `.compactions`. Final commits do not wait for this interval.
+Workers claim `Scheduled` jobs as `Running` and mark them `Compacted` after
+execution. If a heartbeat expires, the coordinator reassigns the job.
+Unfinished subcompactions resume after the `(key, seq)` cursor from their last
+recorded output SST. Workers obtain this cursor through `last_written_key_and_seq`.
+The sequence number lets workers resume between versions of the same key.
+Completed subcompactions, including empty ones, do not run again.
 
-On each commit pass, the coordinator collects the safe partial results of
-every running job. When several jobs advance, it combines them in one manifest
-CAS, with a separate commit record for each job. The write applies the whole
-batch atomically, with one checkpoint of the preceding manifest.
+Coordinator restart still sends `Scheduled` jobs through `Submitted` for
+revalidation. Revalidation preserves `ctx` in `.compactions`, including the
+range plan, full output lists, completion flags, and retention sequence.
+A worker must not clear this state after an incremental commit because some
+original input files can already be gone.
+
+Before revalidation, recovery recognizes successful final commits using the
+completion rule below. For jobs that still need execution or a manifest commit,
+revalidation requires every input run ID to remain present. It accepts the
+job's own incrementally committed output run and uses input order without that
+output run when testing consecutiveness. It preserves reservations for the
+input runs and output run.
+
+A crash before an incremental commit leaves the previous views intact. Recovery
+rebuilds views from all durable intervals and applies the same SST release rule.
+After a successful incremental commit, rebuilding unchanged views releases no SSTs,
+so recovery skips the manifest update.
+
+The coordinator writes the final manifest only after `.compactions` records
+`Compacted`, which means execution finished. It then records `Completed` in
+`.compactions`. If it crashes before the manifest write, all input run IDs
+remain available, so recovery retries the final commit.
+
+If the job is `Compacted` and all input run IDs are absent, the final manifest
+commit succeeded. Recovery records `Completed` without rerunning the job or
+changing the manifest.
+
+### Deleting released inputs
+
+A commit releases an SST when the new manifest no longer references any view
+of that physical file. The coordinator compares physical SST IDs across all
+trees in the current manifest and the new manifest for the complete batch.
+Splitting or narrowing views does not release an SST while any view still
+references it.
+
+Each commit adds a checkpoint of the preceding manifest to protect existing
+readers. In the example, step 1 skips the commit, while steps 2 and 3 each
+add a checkpoint.
+
+GC can delete a released SST only when no current or checkpointed manifest
+references any view of it. Its ID timestamp must also fall below the GC cutoff.
+[RFC-0029](0029-gc-safe-sst-ulid-timestamps.md) describes the age and watermark
+limits that set this cutoff.
+
+### Commit timing and configuration
+
+The coordinator already polls `.compactions` every `compactions_poll_interval`
+to find finished jobs, as [RFC-0025](0025-distributed-compaction.md) describes.
+`CompactorOptions::incremental_commit_interval` sets one minimum interval
+between incremental commit attempts across all jobs handled by the
+coordinator. Once that interval has elapsed since the last attempt, the
+coordinator uses its next poll to derive durable intervals from the output
+and completion records already stored in `.compactions` and to attempt a
+commit. A skipped commit counts as an attempt. Final commits happen on any
+poll that finds a `Compacted` job and do not wait for this interval.
+
+Incremental commits apply only to sorted-run compactions. Compactions with L0
+inputs commit only at completion, so L0 watermark management does not change.
+
+On each attempt, the coordinator prepares manifest updates from the durable
+intervals of every running job. These updates become committed only when the
+manifest CAS succeeds. When several jobs advance, it combines their updates
+in one manifest CAS. A batch containing only incremental updates must release at
+least one SST. A batch containing a final update commits even if it releases
+no SSTs. Each committed batch adds one checkpoint of the preceding manifest.
 
 With `incremental_commit_interval = 1 minute`, the sequence is:
 
-1. Workers upload SSTs and report durable progress with heartbeats.
-2. At most once a minute, the coordinator publishes more safe intervals and a
-   new checkpoint.
-3. Completion triggers a final commit and checkpoint without waiting for the
-   interval.
-
-### Configuration
+1. Workers upload SSTs and record progress in `.compactions` with heartbeats.
+2. At most once a minute, the coordinator commits durable intervals if the batch releases at least one SST.
+3. Completion triggers a final commit and checkpoint without waiting for the interval or an SST release.
 
 ```rust
 pub struct CompactorOptions {
     // ... existing fields ...
 
-    /// Minimum time between partial commits across all running compactions.
+    /// Minimum time between incremental commits across all running compactions.
     pub incremental_commit_interval: Option<Duration>,
 }
 ```
 
 The default is `None`, which disables incremental compaction.
 
-### Stored progress and recovery
+### Changes to sorted runs
 
-Workers resume execution from `.compactions`. The coordinator recovers
-published intervals from `CompactionCommitRecord` in the manifest.
+Incremental compaction uses separate output runs instead of merging the output
+with the oldest input run. This requires changes to ID allocation and
+manifest placement.
+These rules apply to every compaction that produces a sorted run, including
+compactions that commit only at completion.
 
-Workers claim `Scheduled` jobs as `Running` and mark them `Compacted` after
-execution. If a heartbeat expires, the coordinator reassigns the job.
-Unfinished subcompactions resume after the `(key, seq)` cursor from their last
-recorded output SST.
+Run IDs identify runs. Their positions in the manifest define data order.
+The coordinator uses those positions to keep newer data before older data.
+Compaction inputs must remain consecutive in that order.
 
-Coordinator restart still sends `Scheduled` jobs through `Submitted` for
-revalidation. Revalidation now preserves `ctx` in `.compactions`, which holds
-the range plan, full output lists, and retention sequence.
+For example, compacting runs 3 and 2 in `[5, 4, 3, 2, 1]` uses a fresh ID, 6.
+The first incremental commit inserts run 6 before its block of input runs:
+`[5, 4, 6, 3, 2, 1]`. The final commit removes the input runs and leaves
+`[5, 4, 6, 1]`. Run 6 and the retained inputs have disjoint visible key ranges.
+Unrelated runs retain their order relative to the entire block of input runs.
 
-Source validation requires the source run ids to remain present. Partial
-commits therefore keep these runs until the final commit, even when empty.
+The coordinator keeps this output run position across incremental commits.
+Compactions with only L0 inputs insert their output before the existing sorted
+runs using the existing rules for consecutive L0 inputs.
 
-The final manifest update sets `completed = true` before the coordinator records
-`Completed` in `.compactions`. If the coordinator crashes between these writes,
-recovery uses the flag to acknowledge the successful commit. Once `Completed`
-is durable in `.compactions`, a later manifest update removes the record.
+The allocator reserves output run IDs across all trees and active jobs,
+including jobs selected in the same scheduling pass. It must not reuse an ID
+referenced by a run in the manifest or an unfinished job.
 
-### Deleting released inputs
-
-Each commit keeps a checkpoint of the preceding manifest to protect its inputs
-while existing readers use them.
-
-GC can delete a released SST only when no current or checkpointed manifest
-references it. Its ID timestamp must also fall below the GC cutoff.
-[RFC-0029](0029-gc-safe-sst-ulid-timestamps.md) describes the age and watermark
-limits that set this cutoff.
+Scheduling and recovery must use manifest position for input order and
+input IDs for identity.
 
 ## Impact analysis
 
@@ -373,9 +445,10 @@ testing. The public KV API and query semantics remain unchanged.
 
 ### Performance & cost
 
-Each partial commit batch adds one manifest version and one checkpoint.
-Shorter commit intervals increase metadata writes and coordinator work.
-Conflicts require additional write attempts.
+Each committed batch adds one manifest version and one checkpoint. Skipping
+incremental batches that release no SSTs avoids metadata writes and new checkpoints.
+Shorter commit intervals increase coordinator work and can increase metadata
+writes. Conflicts require additional write attempts.
 
 Checkpoint retention and GC delays determine when released SSTs free disk space.
 
@@ -384,8 +457,15 @@ Checkpoint retention and GC delays determine when released SSTs free disk space.
 TODO
 
 ### Compatibility
-Feature is disabled by default and previous compaction states would work.
-Rolling back to an older binary is not supported while incremental compactions are unfinished or their recovery records remain.
+
+Incremental compaction is disabled by default.
+
+Existing jobs that reuse an input run ID for their output run must finish
+under the old rules before the new rules take effect. The implementation must
+support this upgrade scenario.
+
+Older binaries assume descending run IDs, so rollback is not possible after
+one new compaction.
 
 ## Testing
 
@@ -414,7 +494,7 @@ TODO
 - [RFC-0028: Subcompactions](0028-subcompactions.md), per range output SSTs and
   the resume cursor.
 - [RFC-0029: GC Safe SST ULID Timestamps](0029-gc-safe-sst-ulid-timestamps.md),
-  the compaction low watermark that protects unpublished output.
+  the compaction low watermark that protects output awaiting a commit.
 - [Maximizing Disk Utilization with Incremental
   Compaction](https://www.scylladb.com/2020/01/16/maximizing-disk-utilization-with-incremental-compaction/),
   ScyllaDB, the origin of this approach.
