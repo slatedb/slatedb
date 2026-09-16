@@ -337,6 +337,7 @@ mod tests {
     use crate::mem_table::WritableKVTable;
     use crate::merge_operator::{MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH};
     use crate::object_store::memory::InMemory;
+    use crate::reader::ReadTrace;
     use crate::test_utils::{
         lookup_merge_operator_operands, FixedThreeBytePrefixExtractor, StringConcatMergeOperator,
     };
@@ -383,7 +384,7 @@ mod tests {
                 sst_handle,
                 true,
                 Some(Bytes::new()),
-                &crate::reader::ReadTrace::none(),
+                &ReadTrace::none(),
                 None,
             )
             .await
