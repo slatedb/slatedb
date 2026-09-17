@@ -315,6 +315,7 @@ impl DbIterator {
                 // The entries in the write batch iterator have seq num u64::MAX and any merges
                 // there need to be merged with the entries from the other iterators.
                 None,
+                read_trace,
             ));
         } else {
             // When no merge operator is configured, wrap with iterator that errors on merge operands
