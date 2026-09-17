@@ -379,7 +379,13 @@ mod tests {
         let index = db
             .inner
             .table_store
-            .read_index(sst_handle, true, Some(Bytes::new()))
+            .read_index(
+                sst_handle,
+                true,
+                Some(Bytes::new()),
+                &crate::reader::ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         let block_count = index.borrow().block_meta().len();
