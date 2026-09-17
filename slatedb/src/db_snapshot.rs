@@ -261,7 +261,10 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::config::{CompactorOptions, PutOptions, Settings, WriteOptions};
+    use crate::config::{
+        CompactorOptions, DurabilityLevel, PutOptions, ReadOptions, ScanOptions, Settings,
+        WriteOptions,
+    };
     use crate::object_store::memory::InMemory;
     use crate::object_store::ObjectStore;
     use crate::oracle::Oracle;
@@ -796,5 +799,83 @@ mod tests {
         let db_result = db.get(b"key1").await?;
         assert_eq!(db_result, Some(Bytes::from("value2")));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_remote_read_is_repeatable_across_flush() {
+        // No automatic flushing: nothing reaches the object store until `db.flush()`.
+        let db = Db::builder("probe", Arc::new(InMemory::new()))
+            .with_settings(Settings {
+                flush_interval: None,
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        // The disabled flush interval keeps this committed write in memory.
+        db.put(b"foo", b"bar").await.unwrap();
+
+        let remote = ReadOptions {
+            durability_filter: DurabilityLevel::Remote,
+            dirty: false,
+            ..Default::default()
+        };
+
+        // Snapshot is taken at last_committed_seq, which includes the un-durable write.
+        let snapshot = db.snapshot().await.unwrap();
+
+        // The write has not reached remote storage, so a Remote read hides it.
+        let result = snapshot.get_with_options(b"foo", &remote).await.unwrap();
+        assert_eq!(
+            None, result,
+            "memory write should not be visible before flush"
+        );
+
+        db.flush().await.unwrap();
+
+        // The same snapshot must continue to hide the write after it becomes durable.
+        let result = snapshot.get_with_options(b"foo", &remote).await.unwrap();
+        assert_eq!(
+            None, result,
+            "memory write should not be visible after flush"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_remote_scan_is_repeatable_across_flush() {
+        // No automatic flushing: nothing reaches the object store until `db.flush()`.
+        let db = Db::builder("snapshot_remote_scan", Arc::new(InMemory::new()))
+            .with_settings(Settings {
+                flush_interval: None,
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        // The disabled flush interval keeps this committed write in memory.
+        db.put(b"foo", b"bar").await.unwrap();
+
+        let remote = ScanOptions {
+            durability_filter: DurabilityLevel::Remote,
+            dirty: false,
+            ..Default::default()
+        };
+        let snapshot = db.snapshot().await.unwrap();
+
+        let mut iter = snapshot.scan_with_options(.., &remote).await.unwrap();
+        assert!(
+            iter.next().await.unwrap().is_none(),
+            "memory write should not be visible before flush"
+        );
+
+        db.flush().await.unwrap();
+
+        let mut iter = snapshot.scan_with_options(.., &remote).await.unwrap();
+        assert!(
+            iter.next().await.unwrap().is_none(),
+            "memory write should not be visible after flush"
+        );
     }
 }
