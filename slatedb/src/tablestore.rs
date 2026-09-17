@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::ops::{Bound, Range, RangeBounds};
+use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -15,6 +15,7 @@ use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 use crate::block_cache_policy::{should_cache_data_block, BlockCachePolicy};
+use crate::bytes_range::BytesRange;
 use crate::db_cache::{CacheFetch, CacheLookup, CacheTarget};
 use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
 use crate::db_state::{SsTableHandle, SsTableId, SstType};
@@ -962,10 +963,11 @@ impl TableStore {
         let Some(ref cache) = self.cache else {
             return;
         };
-        let data_ranges: Vec<_> = targets
+        // Drop empty ranges with BytesRange::try_new.
+        let data_ranges: Vec<BytesRange> = targets
             .iter()
             .filter_map(|target| match target {
-                CacheTarget::Data(range) => Some(range),
+                CacheTarget::Data((start, end)) => BytesRange::try_new(start.clone(), end.clone()),
                 _ => None,
             })
             .collect();
@@ -1000,7 +1002,7 @@ impl TableStore {
         &self,
         cache: &Arc<dyn DbCache>,
         handle: &SsTableHandle,
-        ranges: &[&(Bound<Bytes>, Bound<Bytes>)],
+        ranges: &[BytesRange],
         segment: Option<Bytes>,
     ) {
         // Best effort: if we can't read the index we can't enumerate blocks,
@@ -1020,8 +1022,8 @@ impl TableStore {
         for range in ranges {
             let blocks = partitions_covering_range(
                 &index_borrow,
-                range.0.as_ref().map(|b| b.as_ref()),
-                range.1.as_ref().map(|b| b.as_ref()),
+                range.start_bound().map(|b| b.as_ref()),
+                range.end_bound().map(|b| b.as_ref()),
             );
             for block_num in blocks {
                 let offset = meta.get(block_num).offset();
@@ -2253,6 +2255,42 @@ mod tests {
         .await;
         let expected: Vec<bool> = (0..block_keys.len()).map(|i| i != 1).collect();
         assert_eq!(cached, expected);
+    }
+
+    /// An empty range names no blocks. Without the guard the block spanning
+    /// its start would be evicted.
+    #[tokio::test]
+    async fn evict_sst_targets_should_ignore_an_empty_data_range() {
+        let cache = Arc::new(TestCache::new());
+        let ts = Arc::new(TableStore::new(
+            Arc::new(InMemory::new()),
+            SsTableFormat::default(),
+            Path::from("/root"),
+            Some(cache.clone()),
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let id = SsTableId::from(ulid::Ulid::new());
+        let sst = build_test_sst(&ts.sst_format, 3).await;
+        let block_keys: Vec<CachedKey> = sst
+            .unconsumed_blocks
+            .iter()
+            .map(|block| (id, block.offset).into())
+            .collect();
+        let (first, _) = sst.unconsumed_blocks[1].key_span.clone().unwrap();
+        let start = [first.as_ref(), &[0u8]].concat();
+        let handle = ts.write_sst(&id, &sst, Some(Bytes::new())).await.unwrap();
+
+        ts.evict_sst_targets_from_cache(
+            &handle,
+            &[CacheTarget::data(start.as_slice()..start.as_slice())],
+            Some(Bytes::new()),
+        )
+        .await;
+
+        for key in &block_keys {
+            assert!(cache.get_block(key).await.unwrap().is_some());
+        }
     }
 
     #[rstest]
