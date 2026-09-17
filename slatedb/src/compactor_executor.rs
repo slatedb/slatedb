@@ -28,6 +28,7 @@ use crate::merge_operator::{
     MergeOperatorType,
 };
 use crate::peeking_iterator::PeekingIterator;
+use crate::reader::ReadTrace;
 use crate::retention_iterator::RetentionIterator;
 use crate::seq_tracker::SequenceTracker;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -400,6 +401,7 @@ impl TokioCompactionExecutorInner {
                     merge_iter,
                     false,
                     retention_min_seq,
+                    ReadTrace::none(),
                 ))
             } else {
                 Box::new(MergeOperatorRequiredIterator::new(merge_iter))
