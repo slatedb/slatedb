@@ -945,29 +945,6 @@ impl VersionedManifest {
         self.core().trees().flat_map(|tree| tree.sst_views())
     }
 
-    /// Whether this manifest and `other` hold the same SSTs, decided by
-    /// comparing tree allocations. Trees are copied on write, so a shared
-    /// allocation is an unchanged tree.
-    pub fn same_trees_as(&self, other: &VersionedManifest) -> bool {
-        let (a, b) = (self.core(), other.core());
-        Arc::ptr_eq(&a.tree, &b.tree)
-            && a.segments.len() == b.segments.len()
-            && a.segments
-                .iter()
-                .zip(&b.segments)
-                .all(|(x, y)| Arc::ptr_eq(&x.tree, &y.tree))
-    }
-
-    /// The SSTs that `previous` references and this manifest no longer does.
-    pub fn ssts_retired_since(&self, previous: &VersionedManifest) -> Vec<SsTableHandle> {
-        let kept: HashSet<SsTableId> = self.sst_views().map(|view| view.sst.id).collect();
-        previous
-            .sst_views()
-            .filter(|view| !kept.contains(&view.sst.id))
-            .map(|view| view.sst.clone())
-            .collect()
-    }
-
     /// The named segments configured in this manifest (RFC-0024), in prefix
     /// order. Empty when no segment extractor is configured. The unsegmented
     /// default tree is accessed via [`Self::l0`] / [`Self::compacted`] /
@@ -2291,56 +2268,6 @@ mod tests {
         let ids: HashSet<SsTableId> = manifest.sst_views().map(|view| view.sst.id).collect();
         let expected: HashSet<SsTableId> = (1..=4).map(|seed| make_view(seed).sst.id).collect();
         assert_eq!(ids, expected);
-    }
-
-    #[test]
-    fn test_same_trees_as_is_true_for_a_clone_and_false_after_a_write() {
-        let versioned =
-            |core: ManifestCore| VersionedManifest::from_manifest(1, Manifest::initial(core));
-        let core = core_with_four_ssts();
-        let manifest = versioned(core.clone());
-        assert!(manifest.same_trees_as(&manifest.clone()));
-
-        let mut root_written = core.clone();
-        Arc::make_mut(&mut root_written.tree).l0.clear();
-        assert!(!manifest.same_trees_as(&versioned(root_written)));
-
-        let mut segment_written = core.clone();
-        Arc::make_mut(&mut segment_written.segments[0].tree)
-            .l0
-            .clear();
-        assert!(!manifest.same_trees_as(&versioned(segment_written)));
-
-        let mut segment_added = core.clone();
-        segment_added.segments.push(Segment {
-            prefix: Bytes::from_static(b"t"),
-            tree: Arc::new(LsmTreeState::default()),
-        });
-        assert!(!manifest.same_trees_as(&versioned(segment_added)));
-    }
-
-    #[test]
-    fn test_ssts_retired_since_lists_ssts_dropped_from_any_tree() {
-        let old = core_with_four_ssts();
-        // The new manifest keeps SSTs 2 and 3 and adds SST 5.
-        let mut new = ManifestCore::new();
-        new.tree = Arc::new(LsmTreeState {
-            l0: VecDeque::from([make_view(5), make_view(2)]),
-            compacted: vec![SortedRun::new(0, [make_view(3)])],
-            ..LsmTreeState::default()
-        });
-
-        let old = VersionedManifest::from_manifest(1, Manifest::initial(old));
-        let new = VersionedManifest::from_manifest(2, Manifest::initial(new));
-
-        let retired: Vec<SsTableId> = new
-            .ssts_retired_since(&old)
-            .iter()
-            .map(|handle| handle.id)
-            .collect();
-
-        assert_eq!(retired, vec![make_view(1).sst.id, make_view(4).sst.id]);
-        assert!(old.ssts_retired_since(&old).is_empty());
     }
 
     #[test]
