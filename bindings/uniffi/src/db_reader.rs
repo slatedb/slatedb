@@ -149,7 +149,7 @@ impl DbReader {
     pub async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), Error> {
         let sst_id = sst_id.into_core()?;
         let manifest = self.inner.manifest();
-        let Some(view) = manifest.sst_views().find(|view| view.sst.id == sst_id) else {
+        let Some(view) = manifest.all_sst_views().find(|view| view.sst.id == sst_id) else {
             return Ok(());
         };
         self.inner

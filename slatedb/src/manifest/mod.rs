@@ -932,17 +932,18 @@ impl VersionedManifest {
         self.manifest.core.segment_extractor_name.as_deref()
     }
 
+    /// Every SST view in this manifest, across the root tree and every
+    /// segment.
+    pub fn all_sst_views(&self) -> impl Iterator<Item = &SsTableView> {
+        self.manifest.core.all_sst_views()
+    }
+
     pub(crate) fn core(&self) -> &ManifestCore {
         &self.manifest.core
     }
 
     pub(crate) fn external_ssts(&self) -> HashMap<SsTableId, object_store::path::Path> {
         self.manifest.external_ssts()
-    }
-    /// Every SST view in this manifest, across the root tree and every
-    /// segment.
-    pub fn sst_views(&self) -> impl Iterator<Item = &SsTableView> {
-        self.core().trees().flat_map(|tree| tree.sst_views())
     }
 
     /// The named segments configured in this manifest (RFC-0024), in prefix
@@ -2262,10 +2263,10 @@ mod tests {
     }
 
     #[test]
-    fn test_sst_views_covers_every_tree_and_level() {
+    fn test_all_sst_views_covers_every_tree_and_level() {
         let manifest =
             VersionedManifest::from_manifest(1, Manifest::initial(core_with_four_ssts()));
-        let ids: HashSet<SsTableId> = manifest.sst_views().map(|view| view.sst.id).collect();
+        let ids: HashSet<SsTableId> = manifest.all_sst_views().map(|view| view.sst.id).collect();
         let expected: HashSet<SsTableId> = (1..=4).map(|seed| make_view(seed).sst.id).collect();
         assert_eq!(ids, expected);
     }
