@@ -278,7 +278,7 @@ impl DeterministicLocalFilesystem {
         }
     }
 
-    async fn collect_list_with_maybe_offset(
+    fn collect_list_with_maybe_offset(
         &self,
         prefix: Option<Path>,
         maybe_offset: Option<Path>,
@@ -292,8 +292,6 @@ impl DeterministicLocalFilesystem {
         let walkdir = WalkDir::new(root_path).min_depth(1).follow_links(true);
 
         for entry_result in walkdir {
-            yield_now().await;
-
             let entry = match convert_walkdir_result(entry_result) {
                 Ok(Some(entry)) => entry,
                 Ok(None) => continue,
@@ -338,11 +336,16 @@ impl DeterministicLocalFilesystem {
         let maybe_offset = maybe_offset.cloned();
 
         stream::once(async move {
-            store
-                .collect_list_with_maybe_offset(prefix, maybe_offset)
-                .await
+            let objects = store.collect_list_with_maybe_offset(prefix, maybe_offset);
+            yield_now().await;
+            objects
         })
-        .map_ok(|objects| stream::iter(objects.into_iter().map(Ok)))
+        .map_ok(|objects| {
+            stream::iter(objects).then(|object| async move {
+                yield_now().await;
+                Ok(object)
+            })
+        })
         .try_flatten()
         .boxed()
     }
@@ -539,7 +542,6 @@ impl ObjectStore for DeterministicLocalFilesystem {
         let mut objects = Vec::new();
 
         for entry_result in walkdir {
-            yield_now().await;
             let Some(entry) = convert_walkdir_result(entry_result)? else {
                 continue;
             };
@@ -570,6 +572,7 @@ impl ObjectStore for DeterministicLocalFilesystem {
         }
 
         objects.sort_by(|left, right| left.location.cmp(&right.location));
+        yield_now().await;
         Ok(ListResult {
             common_prefixes: common_prefixes.into_iter().collect(),
             objects,
