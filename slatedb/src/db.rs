@@ -54,7 +54,7 @@ use crate::config::{
 use crate::db_common::extract_segment_prefix;
 use crate::db_iter::{DbIterator, DbRecencyIterator};
 use crate::db_snapshot::DbSnapshot;
-use crate::db_state::{collect_touched_segments, DbState, SsTableId};
+use crate::db_state::{collect_touched_segments, DbState, SsTableHandle, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::manifest::{Manifest, VersionedManifest};
@@ -2054,11 +2054,20 @@ impl DbCacheManagerOps for Db {
             .await
     }
 
-    async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), crate::Error> {
+    async fn evict_cached_sst(
+        &self,
+        sst: &SsTableHandle,
+        targets: &[CacheTarget],
+    ) -> Result<(), crate::Error> {
         self.inner.check_closed()?;
         let manifest = self.manifest();
-        db_cache_manager::evict_cached_sst_impl(&self.inner.table_store, manifest.core(), sst_id)
-            .await
+        db_cache_manager::evict_cached_sst_impl(
+            &self.inner.table_store,
+            manifest.core(),
+            sst,
+            targets,
+        )
+        .await
     }
 
     async fn flush_cache_to_disk(&self) -> Result<(), crate::Error> {
