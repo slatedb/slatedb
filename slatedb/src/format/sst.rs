@@ -222,16 +222,22 @@ pub(crate) struct EncodedSsTableBlock {
     pub(crate) offset: u64,
     /// uncompressed and untransformed block
     pub(crate) block: Arc<Block>,
-    /// compressed and transformed block
-    pub(crate) encoded_bytes: Bytes,
+    /// the encoded block (compressed and transformed, with its checksum),
+    /// followed by zero padding up to the block alignment. The padding is
+    /// empty when no alignment is set.
+    pub(crate) padded_bytes: Bytes,
+    /// length of the encoded block, which is the first `encoded_len` bytes of
+    /// `padded_bytes`; does not include the length of the padding.
+    pub(crate) encoded_len: usize,
     /// first and last key of the block. None when the producer does not track
     /// keys (WAL blocks, whose index tracks sequence numbers instead)
     pub(crate) key_span: Option<(Bytes, Bytes)>,
 }
 
 impl EncodedSsTableBlock {
-    pub(crate) fn len(&self) -> usize {
-        self.encoded_bytes.len()
+    /// The bytes the block occupies in the SST, padding included.
+    pub(crate) fn padded_len(&self) -> usize {
+        self.padded_bytes.len()
     }
 }
 
@@ -247,6 +253,9 @@ pub(crate) struct EncodedSsTableBlockBuilder {
     compression_codec: Option<CompressionCodec>,
     /// transformer for transforming the data block (e.g. encryption)
     block_transformer: Option<Arc<dyn BlockTransformer>>,
+    /// pad the encoded block to a multiple of this many bytes; None means
+    /// no alignment
+    alignment: Option<usize>,
 }
 
 impl EncodedSsTableBlockBuilder {
@@ -257,7 +266,14 @@ impl EncodedSsTableBlockBuilder {
             key_span: None,
             compression_codec: None,
             block_transformer: None,
+            alignment: None,
         }
+    }
+
+    /// Pads the encoded block with zeros to a multiple of `alignment` bytes.
+    pub(crate) fn with_alignment(mut self, alignment: usize) -> Self {
+        self.alignment = Some(alignment);
+        self
     }
 
     /// Sets the first and last key of the block
@@ -282,17 +298,22 @@ impl EncodedSsTableBlockBuilder {
         let block = self.block_builder.build()?;
         let encoded_block = block.encode();
         let mut compressed_and_transformed_block = Vec::new();
-        compress_and_transform(
+        let encoded_len = compress_and_transform(
             &mut compressed_and_transformed_block,
             encoded_block,
             self.compression_codec,
             self.block_transformer.as_ref(),
         )
         .await?;
+        if let Some(alignment) = self.alignment {
+            let padded_len = encoded_len.next_multiple_of(alignment);
+            compressed_and_transformed_block.resize(padded_len, 0);
+        }
         Ok(EncodedSsTableBlock {
             offset: self.offset,
             block: Arc::new(block),
-            encoded_bytes: Bytes::from(compressed_and_transformed_block),
+            padded_bytes: Bytes::from(compressed_and_transformed_block),
+            encoded_len,
             key_span: self.key_span,
         })
     }
@@ -500,14 +521,14 @@ impl EncodedSsTable {
     pub(crate) fn remaining_len(&self) -> usize {
         self.unconsumed_blocks
             .iter()
-            .map(|chunk| chunk.encoded_bytes.len())
+            .map(|chunk| chunk.padded_len())
             .sum::<usize>()
             + self.footer.len()
     }
 
     pub(crate) fn put_remaining<T: BufMut>(&self, buf: &mut T) {
         for chunk in self.unconsumed_blocks.iter() {
-            buf.put_slice(chunk.encoded_bytes.as_ref())
+            buf.put_slice(chunk.padded_bytes.as_ref())
         }
         buf.put_slice(self.footer.as_ref());
     }
@@ -620,6 +641,7 @@ pub(crate) type TableInfoAndVersion = (SsTableInfo, u16);
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
     pub(crate) block_size: usize,
+    pub(crate) block_alignment: Option<usize>,
     pub(crate) min_filter_keys: u32,
     pub(crate) sst_codec: Box<dyn SsTableInfoCodec>,
     pub(crate) filter_policies: Vec<Arc<dyn FilterPolicy>>,
@@ -632,6 +654,7 @@ impl Default for SsTableFormat {
     fn default() -> Self {
         Self {
             block_size: 4096,
+            block_alignment: None,
             min_filter_keys: 0,
             sst_codec: Box::new(FlatBufferSsTableInfoCodec {}),
             filter_policies: vec![Arc::new(BloomFilterPolicy::new(10))],

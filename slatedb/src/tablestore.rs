@@ -1082,7 +1082,7 @@ async fn write_sst_streaming_in_object_store(
 ) -> Result<(), SlateDBError> {
     let mut writer = tagged_buf_writer(object_store, path.clone(), tag);
     for block in &encoded_sst.unconsumed_blocks {
-        writer.put(block.encoded_bytes.clone()).await?;
+        writer.put(block.padded_bytes.clone()).await?;
     }
     writer.put(encoded_sst.footer.clone()).await?;
     writer.shutdown().await?;
@@ -1129,8 +1129,8 @@ impl EncodedSsTableWriter {
             let builder = std::mem::replace(&mut self.builder, self.table_store.table_builder());
             let encoded_sst = builder.build().await?;
             for block in &encoded_sst.unconsumed_blocks {
-                self.writer.write_all(block.encoded_bytes.as_ref()).await?;
-                self.bytes_written += block.encoded_bytes.len();
+                self.writer.write_all(block.padded_bytes.as_ref()).await?;
+                self.bytes_written += block.padded_bytes.len();
             }
             self.writer.write_all(encoded_sst.footer.as_ref()).await?;
             self.bytes_written += encoded_sst.footer.len();
@@ -1201,8 +1201,8 @@ impl EncodedSsTableWriter {
             "write-compacted-sst-io-error",
             |_| Err(slatedb_io_error())
         );
-        self.writer.write_all(block.encoded_bytes.as_ref()).await?;
-        self.bytes_written += block.encoded_bytes.len();
+        self.writer.write_all(block.padded_bytes.as_ref()).await?;
+        self.bytes_written += block.padded_bytes.len();
         if let (Some(cache), Some(key_span)) = (&self.table_store.cache, &block.key_span) {
             let targets = self.table_store.targets_to_cache(&self.id);
             if should_cache_data_block(targets, key_span) {

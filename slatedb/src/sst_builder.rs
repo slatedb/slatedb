@@ -63,8 +63,8 @@ use crate::filter_policy::{FilterBuilder, FilterPolicy, NamedFilter};
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
 use crate::format::sst::{
     BlockBuilder, BlockBuilderWithStats, EncodedSsTable, EncodedSsTableBlock,
-    EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION,
-    SST_FORMAT_VERSION_LATEST, SST_FORMAT_VERSION_V2,
+    EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat, CHECKSUM_SIZE,
+    SST_FORMAT_VERSION, SST_FORMAT_VERSION_LATEST, SST_FORMAT_VERSION_V2,
 };
 use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
@@ -118,6 +118,9 @@ impl SsTableFormat {
         if let Some(ref transformer) = self.block_transformer {
             builder = builder.with_block_transformer(transformer.clone());
         }
+        if let Some(alignment) = self.block_alignment {
+            builder = builder.with_block_alignment(alignment);
+        }
         builder
     }
 }
@@ -135,6 +138,7 @@ pub(crate) struct EncodedSsTableBuilder {
     current_len: u64,
     blocks: VecDeque<EncodedSsTableBlock>,
     block_size: usize,
+    block_alignment: Option<usize>,
     block_format: BlockFormat,
     sst_format_version: u16,
     min_filter_keys: u32,
@@ -167,6 +171,7 @@ impl EncodedSsTableBuilder {
             current_block_first_key: None,
             current_block_max_key: None,
             block_size,
+            block_alignment: None,
             block_format: BlockFormat::Latest,
             builder: BlockBuilderWithStats::new(BlockBuilder::new_latest(block_size)),
             sst_format_version: SST_FORMAT_VERSION_LATEST,
@@ -181,10 +186,16 @@ impl EncodedSsTableBuilder {
     }
 
     fn new_block_builder(&self) -> BlockBuilderWithStats {
+        // With alignment on, leave room for the checksum so that a full block
+        // does not spill four bytes into one more padding unit.
+        let capacity = match self.block_alignment {
+            Some(_) => self.block_size - CHECKSUM_SIZE,
+            None => self.block_size,
+        };
         let builder = match self.block_format {
-            BlockFormat::V1 => BlockBuilder::new_v1(self.block_size),
-            BlockFormat::V2 => BlockBuilder::new_v2(self.block_size),
-            BlockFormat::Latest => BlockBuilder::new_latest(self.block_size),
+            BlockFormat::V1 => BlockBuilder::new_v1(capacity),
+            BlockFormat::V2 => BlockBuilder::new_v2(capacity),
+            BlockFormat::Latest => BlockBuilder::new_latest(capacity),
         };
         BlockBuilderWithStats::new(builder)
     }
@@ -198,6 +209,21 @@ impl EncodedSsTableBuilder {
     /// Sets the block transformer for transforming the blocks
     fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
         self.block_transformer = Some(transformer);
+        self
+    }
+
+    /// Pads every data block with zeros to a multiple of `alignment` bytes.
+    ///
+    /// # Panics
+    /// Panics if called after data has been added to the builder, because
+    /// the earlier blocks were sized without room for the checksum.
+    fn with_block_alignment(mut self, alignment: usize) -> Self {
+        assert!(
+            self.sst_first_key.is_none(),
+            "cannot set block alignment after data has been added"
+        );
+        self.block_alignment = Some(alignment);
+        self.builder = self.new_block_builder();
         self
     }
 
@@ -303,13 +329,16 @@ impl EncodedSsTableBuilder {
         if let Some(transformer) = self.block_transformer.clone() {
             block_builder = block_builder.with_block_transformer(transformer);
         }
+        if let Some(alignment) = self.block_alignment {
+            block_builder = block_builder.with_alignment(alignment);
+        }
         let block = block_builder.build().await?;
         let block_meta = BlockMeta::create(
             &mut self.index_builder,
             &BlockMetaArgs {
                 offset: block.offset,
                 first_key: self.first_key,
-                encoded_len: u32::try_from(block.len()).expect("block length exceeds u32"),
+                encoded_len: u32::try_from(block.encoded_len).expect("block length exceeds u32"),
             },
         );
         self.block_meta.push(block_meta);
@@ -318,7 +347,7 @@ impl EncodedSsTableBuilder {
         self.stats.num_merges += block_stats.num_merges as u64;
         self.stats.block_stats.push(block_stats);
 
-        let block_size = block.len();
+        let block_size = block.padded_len();
         self.current_len += block_size as u64;
         self.blocks.push_back(block);
         self.first_key = None;
@@ -698,7 +727,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
 
         let mut raw_sst = Vec::<u8>::new();
-        raw_sst.put_slice(first_block.unwrap().encoded_bytes.as_ref());
+        raw_sst.put_slice(first_block.unwrap().padded_bytes.as_ref());
         assert_eq!(encoded.unconsumed_blocks.len(), 2);
         encoded.put_remaining(&mut raw_sst);
         let raw_sst = Bytes::copy_from_slice(raw_sst.as_slice());

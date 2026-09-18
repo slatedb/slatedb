@@ -207,12 +207,12 @@ impl EncodedWalSsTableBuilder {
             &BlockMetaArgs {
                 offset: block.offset,
                 first_key: self.first_seq,
-                encoded_len: u32::try_from(block.len()).expect("block length exceeds u32"),
+                encoded_len: u32::try_from(block.encoded_len).expect("block length exceeds u32"),
             },
         );
         self.block_meta.push(block_meta);
 
-        let block_size = block.len();
+        let block_size = block.padded_len();
         self.data_size += block_size as u64;
         self.blocks.push_back(block);
         self.first_seq = None;
@@ -693,7 +693,7 @@ mod tests {
         // When
         let mut encoded = builder.build().await.unwrap();
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
-        let encoded_bytes = &block.encoded_bytes;
+        let encoded_bytes = &block.padded_bytes;
 
         // Then
         let checksum_offset = encoded_bytes.len() - size_of::<u32>();
@@ -730,7 +730,7 @@ mod tests {
             Some(CompressionCodec::Snappy)
         );
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
-        let compressed_with_checksum = &block.encoded_bytes;
+        let compressed_with_checksum = &block.padded_bytes;
         let compressed =
             &compressed_with_checksum[..compressed_with_checksum.len() - CHECKSUM_SIZE];
         let decompressed = snap::raw::Decoder::new()
@@ -769,7 +769,7 @@ mod tests {
         // Then
         assert_eq!(encoded.info.compression_codec, Some(CompressionCodec::Lz4));
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
-        let compressed_with_checksum = &block.encoded_bytes;
+        let compressed_with_checksum = &block.padded_bytes;
         let compressed =
             &compressed_with_checksum[..compressed_with_checksum.len() - CHECKSUM_SIZE];
         let decompressed = lz4_flex::block::decompress_size_prepended(compressed).unwrap();
@@ -806,7 +806,7 @@ mod tests {
         // Then
         assert_eq!(encoded.info.compression_codec, Some(CompressionCodec::Zstd));
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
-        let compressed_with_checksum = &block.encoded_bytes;
+        let compressed_with_checksum = &block.padded_bytes;
         let compressed =
             &compressed_with_checksum[..compressed_with_checksum.len() - CHECKSUM_SIZE];
         let decompressed = zstd::stream::decode_all(compressed).unwrap();
@@ -844,7 +844,7 @@ mod tests {
         // Then
         assert_eq!(encoded.info.compression_codec, Some(CompressionCodec::Zlib));
         let block = encoded.unconsumed_blocks.pop_front().unwrap();
-        let compressed_with_checksum = &block.encoded_bytes;
+        let compressed_with_checksum = &block.padded_bytes;
         let compressed =
             &compressed_with_checksum[..compressed_with_checksum.len() - CHECKSUM_SIZE];
         let mut decoder = flate2::read::ZlibDecoder::new(compressed);
