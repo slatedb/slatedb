@@ -925,7 +925,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_db_put()
 		})
-		if checksum != 2894 {
+		if checksum != 17079 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_put: UniFFI API checksum mismatch")
 		}
@@ -3413,7 +3413,7 @@ type DbInterface interface {
 	MergeWithOptions(key []byte, operand []byte, mergeOptions MergeOptions, writeOptions WriteOptions) (*WriteHandle, error)
 	// Inserts or overwrites a value and returns metadata for the write.
 	//
-	// Keys must be non-empty and at most `u16::MAX` bytes. Values must be at
+	// Keys must be non-empty and at most `u32::MAX` bytes. Values must be at
 	// most `u32::MAX` bytes.
 	Put(key []byte, value []byte) (*WriteHandle, error)
 	// Inserts or overwrites a value using custom put and write options.
@@ -3916,7 +3916,7 @@ func (_self *Db) MergeWithOptions(key []byte, operand []byte, mergeOptions Merge
 
 // Inserts or overwrites a value and returns metadata for the write.
 //
-// Keys must be non-empty and at most `u16::MAX` bytes. Values must be at
+// Keys must be non-empty and at most `u32::MAX` bytes. Values must be at
 // most `u32::MAX` bytes.
 func (_self *Db) Put(key []byte, value []byte) (*WriteHandle, error) {
 	_pointer := _self.ffiObject.incrementPointer("*Db")

@@ -6,7 +6,7 @@ pub(crate) enum SlateDbError {
     #[error("key cannot be empty")]
     EmptyKey,
 
-    #[error("key size must be <= u16::MAX")]
+    #[error("key size must be <= u32::MAX")]
     KeyTooLarge,
 
     #[error("value size must be <= u32::MAX")]
