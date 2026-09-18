@@ -36,7 +36,7 @@ pub use batch::WriteBatch;
 pub use block_cache_policy::BlockCachePolicy;
 pub use bytes_range::ByteRangeBounds;
 pub use cached_object_store::stats as cached_object_store_stats;
-pub use checkpoint::{Checkpoint, CheckpointCreateResult};
+pub use checkpoint::{Checkpoint, CheckpointCreateResult, CheckpointHandle};
 #[cfg(feature = "compaction_filters")]
 pub use compaction_filter::{
     CompactionFilter, CompactionFilterDecision, CompactionFilterError, CompactionFilterSupplier,

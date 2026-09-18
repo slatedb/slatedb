@@ -18,7 +18,7 @@ use futures::StreamExt;
 use log::debug;
 use slatedb_common::metrics::{CounterFn, MetricsRecorderHelper};
 
-use crate::checkpoint::CheckpointCreateResult;
+use crate::checkpoint::CheckpointRequest;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::dispatcher::MessageHandler;
@@ -33,6 +33,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use ulid::Ulid;
+use uuid::Uuid;
 
 macro_rules! memtable_flush_stat_name {
     ($suffix:expr) => {
@@ -81,9 +82,13 @@ pub(crate) enum TrackerMessage {
     },
     /// Checkpoint creation request from an external caller.
     CheckpointRequest {
-        target: FlushTarget,
         options: CheckpointOptions,
-        sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
+        request: CheckpointRequest,
+    },
+    /// Requests checkpoint cancellation from its public handle.
+    CancelCheckpoint {
+        id: Uuid,
+        done: Option<oneshot::Sender<Result<(), SlateDBError>>>,
     },
     /// An upload worker completed successfully.
     UploadComplete(UploadedMemtable),
@@ -103,6 +108,7 @@ impl std::fmt::Debug for TrackerMessage {
             Self::MemtableFrozen => write!(f, "MemtableFrozen"),
             Self::FlushRequest { .. } => write!(f, "FlushRequest"),
             Self::CheckpointRequest { .. } => write!(f, "CheckpointRequest"),
+            Self::CancelCheckpoint { id, .. } => write!(f, "CancelCheckpoint({id})"),
             Self::UploadComplete(u) => {
                 write!(
                     f,
@@ -156,14 +162,12 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
                 self.stats.flush_request_count.increment(1);
                 self.handle_flush_request(target, sender).await
             }
-            TrackerMessage::CheckpointRequest {
-                target,
-                options,
-                sender,
-            } => {
+            TrackerMessage::CheckpointRequest { options, request } => {
                 self.stats.checkpoint_request_count.increment(1);
-                self.handle_checkpoint_request(target, options, sender)
-                    .await
+                self.handle_checkpoint_request(options, request).await
+            }
+            TrackerMessage::CancelCheckpoint { id, done } => {
+                self.manifest_writer.cancel_checkpoint(id, done)
             }
             TrackerMessage::UploadComplete(uploaded) => {
                 self.stats.l0_upload_count.increment(1);
@@ -217,17 +221,20 @@ impl FlushTracker {
 
     async fn handle_checkpoint_request(
         &mut self,
-        target: FlushTarget,
         options: CheckpointOptions,
-        sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
+        request: CheckpointRequest,
     ) -> Result<(), SlateDBError> {
         if let Err(err) = self.reconcile_and_dispatch().await {
-            let _ = sender.send(Err(err.clone()));
+            request.lifecycle.fail(err.clone());
             return Err(err);
         }
-        let through_seq = self.frontier.resolve_target(target);
+        fail_point!(
+            Arc::clone(&self.inner.fp_registry),
+            "checkpoint-after-reconcile",
+            |_| { Ok(()) }
+        );
         self.manifest_writer
-            .send_checkpoint(through_seq, options, sender)?;
+            .begin_checkpoint(request.boundary.through_seq, options, request)?;
         self.dispatch_ready_memtables()
     }
 
@@ -377,9 +384,15 @@ impl FlushTracker {
                 TrackerMessage::FlushRequest { sender, .. } => {
                     let _ = sender.send(Err(err.clone()));
                 }
-                TrackerMessage::CheckpointRequest { sender, .. } => {
+                TrackerMessage::CheckpointRequest { request, .. } => {
+                    request.lifecycle.fail(err.clone());
+                }
+                TrackerMessage::CancelCheckpoint {
+                    done: Some(sender), ..
+                } => {
                     let _ = sender.send(Err(err.clone()));
                 }
+                TrackerMessage::CancelCheckpoint { done: None, .. } => {}
                 TrackerMessage::PollManifest { sender } => {
                     let _ = sender.send(Err(err.clone()));
                 }
@@ -457,7 +470,6 @@ impl TrackedImmFrontier {
     /// Resolves a flush target to the sequence that must become durable.
     fn resolve_target(&self, target: FlushTarget) -> Option<u64> {
         match target {
-            FlushTarget::CurrentDurable => None,
             FlushTarget::All => self.tracked.back().map(|t| t.last_seq),
         }
     }
@@ -544,6 +556,7 @@ enum TrackedImmState {
 mod tests {
     use crate::batch_write::BatchWriterMessage;
     use crate::block_cache_policy::BlockCachePolicy;
+    use crate::checkpoint::CheckpointBoundary;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_state::{
@@ -558,8 +571,9 @@ mod tests {
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
     use crate::mem_table::{ImmutableMemtable, WritableKVTable};
+    use crate::memtable_flusher::manifest_writer::ManifestWriter;
     use crate::memtable_flusher::uploader::Uploader;
-    use crate::memtable_flusher::{FlushTarget, MemtableFlusher};
+    use crate::memtable_flusher::{FlushTarget, MemtableFlusher, TrackerMessage};
     use crate::paths::PathResolver;
     use crate::prefix_extractor::PrefixExtractor;
     use crate::tablestore::{TableStore, TableStoreKind};
@@ -583,7 +597,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;
+    use tokio::sync::oneshot;
     use tokio::time::timeout;
+    use uuid::Uuid;
 
     struct TestHarness {
         inner: Arc<DbInner>,
@@ -974,11 +990,17 @@ mod tests {
         let path = harness.path.clone();
         let object_store = Arc::clone(&harness.object_store);
         let flusher = start_flusher(harness);
-        freeze_value_imm(&flusher.inner, b"k1", b"v1", 21);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 0);
 
         let checkpoint = timeout(
             Duration::from_secs(5),
-            flusher.create_checkpoint(FlushTarget::All, CheckpointOptions::default()),
+            flusher.create_checkpoint(
+                CheckpointBoundary {
+                    through_seq: Some(1),
+                    wal_id_last_seen: Some(0),
+                },
+                CheckpointOptions::default(),
+            ),
         )
         .await
         .unwrap()
@@ -1013,12 +1035,17 @@ mod tests {
         let flusher = start_flusher(harness);
         freeze_value_imm(&flusher.inner, b"k1", b"v1", 61);
 
-        // A CurrentDurable checkpoint should complete promptly even when L0 is
-        // full — it captures whatever is already durable without waiting for
-        // the flush pipeline to drain.
+        // A durable checkpoint can finish when L0 is full. It records the
+        // current durable state without waiting for the flush pipeline.
         let checkpoint = timeout(
             Duration::from_secs(5),
-            flusher.create_checkpoint(FlushTarget::CurrentDurable, CheckpointOptions::default()),
+            flusher.create_checkpoint(
+                CheckpointBoundary {
+                    through_seq: None,
+                    wal_id_last_seen: Some(0),
+                },
+                CheckpointOptions::default(),
+            ),
         )
         .await
         .unwrap()
@@ -1145,7 +1172,13 @@ mod tests {
 
         let checkpoint_result = timeout(
             Duration::from_secs(5),
-            flusher.create_checkpoint(FlushTarget::All, CheckpointOptions::default()),
+            flusher.create_checkpoint(
+                CheckpointBoundary {
+                    through_seq: Some(1),
+                    wal_id_last_seen: Some(0),
+                },
+                CheckpointOptions::default(),
+            ),
         )
         .await
         .unwrap();
@@ -1154,6 +1187,46 @@ mod tests {
             "expected Fenced, got {:?}",
             checkpoint_result
         );
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_reports_a_closed_manifest_writer_to_the_tracker() {
+        let harness = setup_harness(
+            "/tmp/test_cancel_reports_closed_manifest_writer",
+            Settings::default(),
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let flusher = start_flusher(harness);
+        ManifestWriter::shutdown(&flusher.executor).await;
+
+        let (done_tx, done_rx) = oneshot::channel();
+        flusher
+            .flusher
+            .messages_tx
+            .send(TrackerMessage::CancelCheckpoint {
+                id: Uuid::new_v4(),
+                done: Some(done_tx),
+            })
+            .unwrap();
+
+        let cancel_result = timeout(Duration::from_secs(5), done_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(cancel_result, Err(SlateDBError::Closed)));
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(flusher.notify_memtable_frozen(), Err(SlateDBError::Closed)) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
 
         flusher.shutdown().await;
     }
@@ -1736,13 +1809,6 @@ mod tests {
             assert_eq!(frontier.resolve_target(FlushTarget::All), None);
             frontier.register([make_imm(1), make_imm(2)].into_iter());
             assert_eq!(frontier.resolve_target(FlushTarget::All), Some(2));
-        }
-
-        #[test]
-        fn resolve_target_current_durable_returns_none() {
-            let mut frontier = TrackedImmFrontier::new();
-            frontier.register(std::iter::once(make_imm(1)));
-            assert_eq!(frontier.resolve_target(FlushTarget::CurrentDurable), None);
         }
 
         #[test]

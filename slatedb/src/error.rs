@@ -191,6 +191,9 @@ pub(crate) enum SlateDBError {
     #[error("checkpoint missing. checkpoint_id=`{0}`")]
     CheckpointMissing(Uuid),
 
+    #[error("checkpoint outcome is unknown. checkpoint_id=`{0}`")]
+    CheckpointOutcomeUnknown(Uuid),
+
     #[error(
         "unsupported {format_name} format version. supported_versions=`{supported_versions:?}`, actual_version=`{actual_version}`"
     )]
@@ -738,6 +741,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::ReadChannelError(err) => Error::internal(msg).with_source(Box::new(err)),
             SlateDBError::BackgroundTaskExists(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskCancelled(_) => Error::internal(msg),
+            SlateDBError::CheckpointOutcomeUnknown(_) => Error::internal(msg),
             SlateDBError::BackgroundTaskExecutorStarted => Error::internal(msg),
             SlateDBError::UnexpectedTombstone => Error::internal(msg),
             SlateDBError::TransactionalObjectError(err) => {
