@@ -3,7 +3,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
-use crate::config::{ReadOptions, ScanOptions};
+use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db_iter::DbIterator;
 use crate::types::KeyValue;
 
@@ -48,6 +48,13 @@ impl DbSnapshot {
     #[deprecated(note = "use `DbSnapshot::memory_seq` instead")]
     pub fn seq(&self) -> u64 {
         self.memory_seq()
+    }
+
+    fn seq_for_durability(&self, durability: DurabilityLevel) -> u64 {
+        match durability {
+            DurabilityLevel::Memory => self.memory_seq,
+            DurabilityLevel::Remote => self.remote_seq,
+        }
     }
 
     /// Get a value from the snapshot with default read options.
@@ -96,10 +103,11 @@ impl DbSnapshot {
     ) -> Result<Option<KeyValue>, crate::Error> {
         self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
+        let seq = self.seq_for_durability(options.durability_filter);
         let kv = self
             .db_inner
             .reader
-            .get_key_value_with_options(key, options, &db_state, None, Some(self.memory_seq))
+            .get_key_value_with_options(key, options, &db_state, None, Some(seq))
             .await
             .map_err(crate::Error::from)?;
         Ok(kv)
@@ -204,6 +212,7 @@ impl DbSnapshot {
     ) -> Result<DbIterator, crate::Error> {
         self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
+        let seq = self.seq_for_durability(options.durability_filter);
         self.db_inner
             .reader
             .scan_with_options(
@@ -212,7 +221,7 @@ impl DbSnapshot {
                 ScanContext {
                     db_state: &db_state,
                     write_batch_iter: None,
-                    max_seq: Some(self.memory_seq),
+                    max_seq: Some(seq),
                     prefix,
                 },
             )
