@@ -65,12 +65,19 @@ keys (in sort order) are served from cache without hitting object storage.
 sort order. This is why hierarchical key designs (like `tenant:user:resource`)
 work well—related data shares prefixes and lands in the same blocks.
 
-### Forward-Only Iteration
+### Iteration Order
 
-SlateDB currently supports only forward (ascending) iteration. If your access
-pattern requires descending order (e.g., "most recent first"), you must encode
-keys to sort in reverse order. See the [Descending Order](#descending-order)
-pattern below.
+SlateDB supports both ascending and descending iteration through the
+`ScanOptions` API. Use `with_order(IterationOrder::Descending)` for
+descending scans (e.g., "most recent first").
+
+Note that the `seek` API is not yet supported for descending scans. It returns
+a `SeekNotSupportedForDescendingScan` error. If you need to reposition a
+descending iterator, you must create a new scan with an adjusted range.
+
+The [Descending Order](#descending-order) pattern below remains useful when
+you want reverse chronological ordering as the natural sort order of your
+keys, regardless of scan direction.
 
 ## Encoding Primitive Types
 

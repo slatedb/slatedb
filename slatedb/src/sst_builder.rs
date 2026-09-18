@@ -861,7 +861,13 @@ mod tests {
             .unwrap();
         assert_eq!(encoded_info, sst_handle_from_store.info);
         let index = table_store
-            .read_index(&sst_handle_from_store, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle_from_store,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         let sst_info_from_store = sst_handle_from_store.info;
@@ -928,7 +934,13 @@ mod tests {
             .await
             .unwrap();
         let index = table_store
-            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         let filters = table_store
@@ -1026,7 +1038,13 @@ mod tests {
             .await
             .unwrap();
         let index = table_store
-            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         let filters = table_store
@@ -1182,7 +1200,13 @@ mod tests {
             .unwrap();
         assert_eq!(encoded_info, sst_handle_from_store.info);
         let index = table_store
-            .read_index(&sst_handle_from_store, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle_from_store,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1426,7 +1450,13 @@ mod tests {
             .await
             .unwrap();
         let index = table_store
-            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         let filters = table_store
@@ -1497,7 +1527,13 @@ mod tests {
             .await
             .unwrap();
         let index = table_store
-            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
 

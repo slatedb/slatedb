@@ -308,6 +308,16 @@ pub enum CacheTarget {
 }
 
 impl CacheTarget {
+    /// Every target: all data blocks, the index, the filters, and the stats.
+    pub fn all() -> [Self; 4] {
+        [
+            Self::data::<&[u8], _>(..),
+            Self::Index,
+            Self::Filters,
+            Self::Stats,
+        ]
+    }
+
     /// Convenience constructor for [`CacheTarget::Data`] that accepts any
     /// [`RangeBounds`], mirroring the `Db::scan` signature. Pass `..` to
     /// select all data blocks.

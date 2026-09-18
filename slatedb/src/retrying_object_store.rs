@@ -20,6 +20,9 @@ use crate::utils::IdGenerator;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
 
+const MIN_RETRY_DELAY: Duration = Duration::from_millis(100);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(1);
+
 /// Metadata key used to store the ULID for put operations.
 /// This is used to verify if a failed put actually succeeded.
 /// There's not separator between "slatedb", "put", and "id" to avoid issues
@@ -80,8 +83,8 @@ impl RetryingObjectStore {
     #[inline]
     fn retry_builder(&self) -> ExponentialBuilder {
         let builder = ExponentialBuilder::default()
-            .with_min_delay(Duration::from_millis(100))
-            .with_max_delay(Duration::from_secs(1));
+            .with_min_delay(MIN_RETRY_DELAY)
+            .with_max_delay(MAX_RETRY_DELAY);
         match self.max_retries {
             Some(max_retries) => builder.with_max_times(max_retries as usize),
             None => builder.without_max_times(),
@@ -188,6 +191,64 @@ impl RetryingObjectStore {
 impl std::fmt::Display for RetryingObjectStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "RetryingObjectStore({})", self.inner)
+    }
+}
+
+#[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+#[derive(Debug)]
+struct RetryingObjectStorePolicy {
+    clock: Arc<dyn SystemClock>,
+    max_retries: Option<u32>,
+}
+
+#[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+#[async_trait]
+impl object_store::retry::RetryPolicy for RetryingObjectStorePolicy {
+    async fn retry(&self, context: object_store::retry::RetryContext) -> bool {
+        self.retry_failure(context.failure, context.attempt).await
+    }
+}
+
+#[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+impl RetryingObjectStorePolicy {
+    async fn retry_failure(
+        &self,
+        failure: object_store::retry::RetryFailure,
+        attempt: usize,
+    ) -> bool {
+        use object_store::retry::RetryFailure;
+
+        // These statuses map to the errors excluded by `should_retry`.
+        // TODO: Use `RetryingObjectStore::should_retry` directly when
+        // `object_store::retry::RetryContext` includes the actual `Error`.
+        if matches!(failure, RetryFailure::Status(status)
+            if matches!(status.as_u16(), 304 | 404 | 409 | 412))
+        {
+            debug!("not retrying multipart part upload [failure={:?}]", failure);
+            return false;
+        }
+        if self
+            .max_retries
+            .is_some_and(|max_retries| attempt > max_retries as usize)
+        {
+            return false;
+        }
+
+        // Double the delay for each retry, up to one second.
+        // Stop at one second so a large attempt count does not require a long loop.
+        let mut delay = MIN_RETRY_DELAY;
+        for _ in 1..attempt {
+            if delay >= MAX_RETRY_DELAY {
+                break;
+            }
+            delay = (delay * 2).min(MAX_RETRY_DELAY);
+        }
+        info!(
+            "retrying multipart part upload [failure={:?}, attempt={}, duration={:?}]",
+            failure, attempt, delay
+        );
+        self.clock.sleep(delay).await;
+        true
     }
 }
 
@@ -385,6 +446,12 @@ impl ObjectStore for RetryingObjectStore {
         location: &Path,
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        #[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+        let opts = opts.with_retry_policy(Arc::new(RetryingObjectStorePolicy {
+            clock: Arc::clone(&self.clock),
+            max_retries: self.max_retries,
+        }));
+
         let put_id = self.rand.rng().gen_ulid(self.clock.as_ref()).to_string();
         let opts_with_id = PutMultipartOptions {
             attributes: Self::with_put_id(opts.attributes.clone(), &put_id),
@@ -630,6 +697,68 @@ mod tests {
             .expect("put should succeed");
 
         assert!(result.extensions.get::<ExtensionMarker>().is_some());
+    }
+
+    #[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+    #[tokio::test]
+    async fn test_multipart_retry_delays_use_system_clock() {
+        use super::RetryingObjectStorePolicy;
+        use futures::FutureExt;
+        use object_store::client::HttpErrorKind;
+        use object_store::retry::RetryFailure;
+
+        let clock = Arc::new(MockSystemClock::new());
+        let policy = RetryingObjectStorePolicy {
+            clock: clock.clone(),
+            max_retries: None,
+        };
+
+        for (attempt, delay_ms) in [
+            (1, 100),
+            (2, 200),
+            (3, 400),
+            (4, 800),
+            (5, 1000),
+            (usize::MAX, 1000),
+        ] {
+            let mut retry = Box::pin(
+                policy.retry_failure(RetryFailure::Transport(HttpErrorKind::Timeout), attempt),
+            );
+            assert!(retry.as_mut().now_or_never().is_none());
+            clock.advance(Duration::from_millis(delay_ms - 1)).await;
+            assert!(retry.as_mut().now_or_never().is_none());
+            clock.advance(Duration::from_millis(1)).await;
+            assert_eq!(retry.now_or_never(), Some(true));
+        }
+    }
+
+    #[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+    #[rstest::rstest]
+    #[case(None, usize::MAX, true)]
+    #[case(Some(0), 1, false)]
+    #[case(Some(2), 1, true)]
+    #[case(Some(2), 2, true)]
+    #[case(Some(2), 3, false)]
+    #[tokio::test(start_paused = true)]
+    async fn test_multipart_retry_limit(
+        #[case] max_retries: Option<u32>,
+        #[case] attempt: usize,
+        #[case] expected_retry: bool,
+    ) {
+        use super::RetryingObjectStorePolicy;
+        use object_store::client::HttpErrorKind;
+        use object_store::retry::RetryFailure;
+
+        let policy = RetryingObjectStorePolicy {
+            clock: test_clock(),
+            max_retries,
+        };
+        assert_eq!(
+            policy
+                .retry_failure(RetryFailure::Transport(HttpErrorKind::Timeout), attempt)
+                .await,
+            expected_retry
+        );
     }
 
     #[tokio::test]

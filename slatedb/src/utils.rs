@@ -166,7 +166,13 @@ pub(crate) async fn last_written_key_and_seq(
     segment: &Bytes,
 ) -> Result<Option<(Bytes, u64)>, SlateDBError> {
     let index = table_store
-        .read_index(output_sst, false, Some(segment.clone()))
+        .read_index(
+            output_sst,
+            false,
+            Some(segment.clone()),
+            &crate::reader::ReadTrace::new(None),
+            None,
+        )
         .await?;
     let num_blocks = index.borrow().block_meta().len();
     if num_blocks == 0 {

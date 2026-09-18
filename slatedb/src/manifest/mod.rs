@@ -932,6 +932,12 @@ impl VersionedManifest {
         self.manifest.core.segment_extractor_name.as_deref()
     }
 
+    /// Every SST view in this manifest, across the root tree and every
+    /// segment.
+    pub fn all_sst_views(&self) -> impl Iterator<Item = &SsTableView> {
+        self.manifest.core.all_sst_views()
+    }
+
     pub(crate) fn core(&self) -> &ManifestCore {
         &self.manifest.core
     }
@@ -1608,7 +1614,7 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
-    use super::{ExternalDb, Manifest};
+    use super::{ExternalDb, Manifest, VersionedManifest};
     use crate::clone::{CloneSource, SegmentFilterFn, SegmentProjectionFn};
     use crate::config::CheckpointOptions;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
@@ -2235,6 +2241,34 @@ mod tests {
             SsTableInfo::default(),
         );
         SsTableView::new(view_id, handle)
+    }
+
+    /// A manifest with L0 SSTs 1 and 2 and sorted-run SST 3 in the root tree,
+    /// and L0 SST 4 in segment `s`.
+    fn core_with_four_ssts() -> ManifestCore {
+        let mut core = ManifestCore::new();
+        core.tree = Arc::new(LsmTreeState {
+            l0: VecDeque::from([make_view(1), make_view(2)]),
+            compacted: vec![SortedRun::new(0, [make_view(3)])],
+            ..LsmTreeState::default()
+        });
+        core.segments.push(Segment {
+            prefix: Bytes::from_static(b"s"),
+            tree: Arc::new(LsmTreeState {
+                l0: VecDeque::from([make_view(4)]),
+                ..LsmTreeState::default()
+            }),
+        });
+        core
+    }
+
+    #[test]
+    fn test_all_sst_views_covers_every_tree_and_level() {
+        let manifest =
+            VersionedManifest::from_manifest(1, Manifest::initial(core_with_four_ssts()));
+        let ids: HashSet<SsTableId> = manifest.all_sst_views().map(|view| view.sst.id).collect();
+        let expected: HashSet<SsTableId> = (1..=4).map(|seed| make_view(seed).sst.id).collect();
+        assert_eq!(ids, expected);
     }
 
     #[test]
@@ -5240,7 +5274,7 @@ mod tests {
         }
     }
 
-    fn manifest_with_segments(prefixes: &[&[u8]]) -> super::VersionedManifest {
+    fn manifest_with_segments(prefixes: &[&[u8]]) -> VersionedManifest {
         let mut core = ManifestCore::new();
         if !prefixes.is_empty() {
             core.segment_extractor_name = Some("hour-bucket".to_string());
@@ -5252,7 +5286,7 @@ mod tests {
                 })
                 .collect();
         }
-        super::VersionedManifest::from_manifest(1, Manifest::initial(core))
+        VersionedManifest::from_manifest(1, Manifest::initial(core))
     }
 
     #[test]
