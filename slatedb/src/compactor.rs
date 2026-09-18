@@ -1488,6 +1488,7 @@ mod tests {
     use crate::manifest::{LsmTreeState, Manifest, ManifestCore, Segment, VersionedManifest};
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::proptest_util::rng;
+    use crate::reader::ReadTrace;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::{
@@ -1843,7 +1844,7 @@ mod tests {
                 &view.sst,
                 false,
                 Some(Bytes::new()),
-                &crate::reader::ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await

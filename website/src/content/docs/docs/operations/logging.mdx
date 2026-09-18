@@ -26,6 +26,7 @@ SlateDB provides structured tracing spans for read operations, allowing you to t
 | `slatedb.read.read_filters` | Records reading filters for an SST. | `trace_id`, `sst_id`, `sst_level`, `cached` |
 | `slatedb.read.evaluate_filter` | Records evaluating a named filter for an SST. | `trace_id`, `sst_id`, `sst_level`, `filter_name`, `result` |
 | `slatedb.read.read_index` | Records reading the index for an SST. | `trace_id`, `sst_id`, `sst_level`, `cached` |
+| `slatedb.read.read_blocks` | Records reading data blocks for an SST. | `trace_id`, `sst_id`, `sst_level`, `cache_hits`, `cache_misses` |
 
 All `slatedb.read.*` spans are child spans of the root `slatedb.read` span.
 
@@ -35,6 +36,8 @@ Field meanings:
 - `sst_id` — The identifier of the SST involved in the span.
 - `sst_level`: The level that contains the SST is `l0` or `sorted_run:{id}`.
 - `cached`: `true` if the filter or index came from the cache or a concurrent cache lookup fetched it. Otherwise, the value is `false`. The field can be absent if the read stops before the filter or index is read.
+- `cache_hits`: The number of requested data blocks that the cache supplied, including blocks from a concurrent fetch.
+- `cache_misses`: The number of requested data blocks that SlateDB read from object storage.
 - `filter_name`: The name of the filter policy being evaluated.
 - `result` — The boolean result of evaluating the filter.
 
