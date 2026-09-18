@@ -1273,6 +1273,7 @@ mod tests {
     use crate::memtable_flusher::uploader::UploadedMemtable;
     use crate::memtable_flusher::CheckpointCursor;
     use crate::paths::PathResolver;
+    use crate::snapshot_manager::SnapshotSeqs;
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
@@ -1840,8 +1841,14 @@ mod tests {
         );
         let mut handler = new_handler_from_harness(harness);
         handler.load_manifest().await.unwrap();
-        let snapshot =
-            snapshot_seq.map(|seq| handler.db.snapshot_manager.new_snapshot(Some(seq)).0);
+        let snapshot = snapshot_seq.map(|seq| {
+            handler
+                .db
+                .snapshot_manager
+                .new_snapshot(Some(SnapshotSeqs::new(seq, seq).unwrap()))
+                .unwrap()
+                .0
+        });
         let txn = txn_seq.map(|seq| {
             handler.db.oracle.advance_committed_seq(seq);
             handler.db.txn_manager.new_transaction().0
