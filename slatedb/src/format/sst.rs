@@ -241,6 +241,17 @@ impl EncodedSsTableBlock {
     }
 }
 
+/// Bytes of entries a data block holds before it is closed.
+///
+/// With alignment on, the block leaves room for its checksum so that a full
+/// block does not spill into the next padding unit.
+pub(crate) fn block_capacity(block_size: usize, block_alignment: Option<usize>) -> usize {
+    match block_alignment {
+        Some(_) => block_size - CHECKSUM_SIZE,
+        None => block_size,
+    }
+}
+
 /// Builder for encoding a single SST block with compression and transformation.
 pub(crate) struct EncodedSsTableBlockBuilder {
     /// builder for data blocks
@@ -1070,6 +1081,8 @@ impl SsTableFormat {
     }
 
     /// The function estimates the size of the SST (Sorted String Table) without considering compression effects.
+    /// The data blocks are counted as they are written, so block padding is
+    /// included when the format sets a block alignment.
     pub(crate) fn estimate_encoded_size_compacted(
         &self,
         entry_num: usize,
@@ -1080,11 +1093,20 @@ impl SsTableFormat {
         }
         let guess_at_average_first_key_size_bytes = 12usize;
         let (entries_size_encoded, number_of_blocks) = self
-            .estimate_entry_size_encoded_and_number_of_blocks(entry_num, estimated_entries_size);
+            .estimate_entry_size_encoded_and_number_of_blocks(
+                entry_num,
+                estimated_entries_size,
+                block_capacity(self.block_size, self.block_alignment),
+            );
 
-        let mut ans = self.estimate_encoded_size_data_index_metadata(
+        let data_blocks_size = Block::estimate_size_in_sst(
             entry_num,
             entries_size_encoded,
+            number_of_blocks,
+            self.block_alignment,
+        );
+        let mut ans = self.estimate_size_index_metadata(
+            data_blocks_size,
             number_of_blocks,
             guess_at_average_first_key_size_bytes,
         );
@@ -1103,38 +1125,41 @@ impl SsTableFormat {
         if entry_num == 0 {
             return 0;
         }
+        // WAL blocks are never padded, so they fill the whole block size.
         let (entries_size_encoded, number_of_blocks) = self
-            .estimate_entry_size_encoded_and_number_of_blocks(entry_num, estimated_entries_size);
+            .estimate_entry_size_encoded_and_number_of_blocks(
+                entry_num,
+                estimated_entries_size,
+                self.block_size,
+            );
+        let data_blocks_size =
+            Block::estimate_size_in_sst(entry_num, entries_size_encoded, number_of_blocks, None);
 
-        self.estimate_encoded_size_data_index_metadata(
-            entry_num,
-            entries_size_encoded,
-            number_of_blocks,
-            SEQNUM_SIZE,
-        )
+        self.estimate_size_index_metadata(data_blocks_size, number_of_blocks, SEQNUM_SIZE)
     }
 
     fn estimate_entry_size_encoded_and_number_of_blocks(
         &self,
         entry_num: usize,
         estimated_entries_size: usize,
+        block_capacity: usize,
     ) -> (usize, usize) {
         let entries_size_encoded =
             row::SstRowCodecV0::estimate_encoded_size(entry_num, estimated_entries_size);
-        let number_of_blocks = usize::div_ceil(entries_size_encoded, self.block_size);
+        let number_of_blocks = usize::div_ceil(entries_size_encoded, block_capacity);
 
         (entries_size_encoded, number_of_blocks)
     }
 
-    fn estimate_encoded_size_data_index_metadata(
+    /// Adds the index and the metadata to `data_blocks_size`, which is what
+    /// the data blocks occupy in the SST.
+    fn estimate_size_index_metadata(
         &self,
-        entry_num: usize,
-        entries_size_encoded: usize,
+        data_blocks_size: usize,
         number_of_blocks: usize,
         average_first_key_size: usize,
     ) -> usize {
-        let mut ans =
-            Block::estimate_encoded_size(entry_num, entries_size_encoded, number_of_blocks);
+        let mut ans = data_blocks_size;
 
         // estimate sum of Index
         let guess_at_average_first_key_size_bytes = average_first_key_size;

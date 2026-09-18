@@ -718,6 +718,7 @@ impl TableStore {
     /// Returns the smallest contiguous block range, starting at `first_block` in
     /// `order`, whose encoded size is at least `target_bytes`. If the SST boundary
     /// is reached first, all remaining blocks in that direction are returned.
+    /// The size counts block padding, since the read fetches it.
     pub(crate) fn block_range_for_target_bytes(
         &self,
         handle: &SsTableHandle,

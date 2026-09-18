@@ -62,9 +62,9 @@ use crate::error::SlateDBError;
 use crate::filter_policy::{FilterBuilder, FilterPolicy, NamedFilter};
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
 use crate::format::sst::{
-    BlockBuilder, BlockBuilderWithStats, EncodedSsTable, EncodedSsTableBlock,
-    EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat, CHECKSUM_SIZE,
-    SST_FORMAT_VERSION, SST_FORMAT_VERSION_LATEST, SST_FORMAT_VERSION_V2,
+    block_capacity, BlockBuilder, BlockBuilderWithStats, EncodedSsTable, EncodedSsTableBlock,
+    EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION,
+    SST_FORMAT_VERSION_LATEST, SST_FORMAT_VERSION_V2,
 };
 use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
@@ -186,12 +186,7 @@ impl EncodedSsTableBuilder {
     }
 
     fn new_block_builder(&self) -> BlockBuilderWithStats {
-        // With alignment on, leave room for the checksum so that a full block
-        // does not spill four bytes into one more padding unit.
-        let capacity = match self.block_alignment {
-            Some(_) => self.block_size - CHECKSUM_SIZE,
-            None => self.block_size,
-        };
+        let capacity = block_capacity(self.block_size, self.block_alignment);
         let builder = match self.block_format {
             BlockFormat::V1 => BlockBuilder::new_v1(capacity),
             BlockFormat::V2 => BlockBuilder::new_v2(capacity),
