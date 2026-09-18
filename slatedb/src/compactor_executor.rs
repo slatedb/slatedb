@@ -342,6 +342,7 @@ impl TokioCompactionExecutorInner {
             None => None,
         };
         let sst_iter_options = SstIteratorOptions {
+            snapshot_lease: None,
             max_fetch_tasks: self.options.max_fetch_tasks,
             target_bytes_to_fetch: self.options.bytes_to_fetch,
             cache_blocks: false, // don't clobber the cache

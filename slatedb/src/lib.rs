@@ -159,6 +159,7 @@ mod retention_iterator;
 mod retrying_object_store;
 mod segment_iterator;
 mod single_flight;
+mod snapshot_lease;
 mod snapshot_manager;
 mod sorted_run_iterator;
 mod sst_builder;

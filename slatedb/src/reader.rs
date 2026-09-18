@@ -11,6 +11,7 @@ use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
 use crate::segment_iterator::{build_segment_iter, SegmentScanContext};
+use crate::snapshot_lease::SnapshotLease;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstTracingContext};
 use crate::tablestore::TableStore;
@@ -26,6 +27,9 @@ pub(crate) trait DbStateReader {
     fn memtable(&self) -> Arc<KVTable>;
     fn imm_memtable(&self) -> &VecDeque<Arc<ImmutableMemtable>>;
     fn core(&self) -> &ManifestCore;
+    fn snapshot_lease(&self) -> Option<Arc<SnapshotLease>> {
+        None
+    }
 }
 
 struct IteratorSources {
@@ -359,7 +363,11 @@ impl Reader {
             max_seq,
             read_trace.clone(),
         );
-        read.instrument(read_trace.read_span()).await
+        SnapshotLease::protect(
+            db_state.snapshot_lease(),
+            read.instrument(read_trace.read_span()),
+        )
+        .await
     }
 
     async fn get_key_value_with_options_inner<K: AsRef<[u8]>>(
@@ -378,6 +386,7 @@ impl Reader {
 
         let sst_iter_options = SstIteratorOptions {
             cache_blocks: options.cache_blocks,
+            snapshot_lease: db_state.snapshot_lease(),
             eager_spawn: true,
             filter_context: options.filter_context.clone(),
             ..SstIteratorOptions::default()
@@ -408,6 +417,7 @@ impl Reader {
             self.read_merge_operator.clone(),
             sst_iter_options.order,
             read_trace,
+            db_state.snapshot_lease(),
         )
         .await?;
 
@@ -444,8 +454,9 @@ impl Reader {
         ctx: ScanContext<'_>,
     ) -> Result<DbIterator, SlateDBError> {
         let read_trace = Self::read_trace(options.tracing_options.as_ref());
+        let lease = ctx.db_state.snapshot_lease();
         let read = self.scan_with_options_inner(range, options, ctx, read_trace.clone());
-        read.instrument(read_trace.read_span()).await
+        SnapshotLease::protect(lease, read.instrument(read_trace.read_span())).await
     }
 
     async fn scan_with_options_inner(
@@ -459,6 +470,7 @@ impl Reader {
         let max_seq = self.prepare_max_seq(ctx.max_seq, options.durability_filter, options.dirty);
 
         let sst_iter_options = SstIteratorOptions {
+            snapshot_lease: ctx.db_state.snapshot_lease(),
             max_fetch_tasks: options.max_fetch_tasks,
             target_bytes_to_fetch: options.read_ahead_bytes,
             cache_blocks: options.cache_blocks,
@@ -497,6 +509,7 @@ impl Reader {
             self.read_merge_operator.clone(),
             options.order,
             read_trace,
+            ctx.db_state.snapshot_lease(),
         )
         .await
     }
@@ -543,6 +556,7 @@ impl Reader {
 
         let range = BytesRange::from_prefix(prefix.as_ref());
         let sst_iter_options = SstIteratorOptions {
+            snapshot_lease: None,
             max_fetch_tasks: options.max_fetch_tasks,
             target_bytes_to_fetch: options.read_ahead_bytes,
             cache_blocks: options.cache_blocks,
