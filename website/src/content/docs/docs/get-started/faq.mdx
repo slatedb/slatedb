@@ -67,4 +67,4 @@ SlateDB does not support [column families](https://github.com/facebook/rocksdb/w
 
 ## Are there any limits to key and value sizes?
 
-Keys are limited to a maximum of 65 KiB (65,535 bytes). Values are limited to a maximum of 4 GiB (4,294,967,295 bytes). Larger values require more memory and will take longer to write, so we recommend testing performance at your expected value size to ensure it meets your requirements.
+Keys and values are limited to 4 GiB minus one byte (4,294,967,295 bytes). Large keys and values use more memory and take longer to write. Test performance with the sizes that you plan to use.
