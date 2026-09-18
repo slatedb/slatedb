@@ -479,6 +479,7 @@ mod tests {
                 &BlockMetaArgs {
                     first_key: Some(fk),
                     offset: 0u64,
+                    encoded_len: 0,
                 },
             );
             block_metas.push(block_meta);

@@ -309,6 +309,7 @@ impl EncodedSsTableBuilder {
             &BlockMetaArgs {
                 offset: block.offset,
                 first_key: self.first_key,
+                encoded_len: u32::try_from(block.len()).expect("block length exceeds u32"),
             },
         );
         self.block_meta.push(block_meta);
@@ -575,7 +576,7 @@ mod tests {
             "compacted",
             format.estimate_encoded_size_compacted(num_entries, estimated_entries_size),
             actual_size(&compacted_id).await,
-            3065,
+            2993,
         );
 
         // --- wal ---
@@ -595,7 +596,7 @@ mod tests {
             "wal",
             format.estimate_encoded_size_wal(num_entries, estimated_entries_size),
             wal_actual_size,
-            3917,
+            4005,
         );
     }
 
@@ -1210,7 +1211,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(88, index.size());
+        assert_eq!(104, index.size());
     }
 
     #[tokio::test]

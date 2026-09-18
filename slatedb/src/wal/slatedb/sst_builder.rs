@@ -207,6 +207,7 @@ impl EncodedWalSsTableBuilder {
             &BlockMetaArgs {
                 offset: block.offset,
                 first_key: self.first_seq,
+                encoded_len: u32::try_from(block.len()).expect("block length exceeds u32"),
             },
         );
         self.block_meta.push(block_meta);

@@ -642,6 +642,14 @@ impl Default for SsTableFormat {
     }
 }
 
+/// Position of SST byte `offset` within bytes fetched from `fetched_start`.
+fn fetched_index(offset: u64, fetched_start: u64) -> usize {
+    usize::try_from(offset - fetched_start).expect(
+        "attempted to read byte data with size \
+        larger than 32 bits on a 32-bit system",
+    )
+}
+
 impl SsTableFormat {
     async fn read_length_and_metadata_offset_and_version(
         &self,
@@ -955,19 +963,15 @@ impl SsTableFormat {
         let decode_futures: Vec<_> = blocks
             .map(|block| {
                 let block_meta = index.block_meta().get(block);
-                let block_bytes_start = usize::try_from(block_meta.offset() - start_range).expect(
-                    "attempted to read byte data with size \
-                        larger than 32 bits on a 32-bit system",
-                );
-                let block_bytes = if block == index.block_meta().len() - 1 {
+                let block_bytes_start = fetched_index(block_meta.offset(), start_range);
+                let block_bytes = if block_meta.encoded_len() > 0 {
+                    let block_end = block_meta.offset() + u64::from(block_meta.encoded_len());
+                    bytes.slice(block_bytes_start..fetched_index(block_end, start_range))
+                } else if block == index.block_meta().len() - 1 {
                     bytes.slice(block_bytes_start..)
                 } else {
                     let next_block_meta = index.block_meta().get(block + 1);
-                    let block_bytes_end = usize::try_from(next_block_meta.offset() - start_range)
-                        .expect(
-                            "attempted to read byte data with size \
-                            larger than 32 bits on a 32-bit system",
-                        );
+                    let block_bytes_end = fetched_index(next_block_meta.offset(), start_range);
                     bytes.slice(block_bytes_start..block_bytes_end)
                 };
                 self.decode_block(block_bytes, compression_codec)
@@ -1018,7 +1022,12 @@ impl SsTableFormat {
         sst_bytes: &Bytes,
     ) -> Result<Block, SlateDBError> {
         let index = index_owned.borrow();
-        let range = self.block_range(block..block + 1, info, &index);
+        let block_meta = index.block_meta().get(block);
+        let range = if block_meta.encoded_len() > 0 {
+            block_meta.offset()..block_meta.offset() + u64::from(block_meta.encoded_len())
+        } else {
+            self.block_range(block..block + 1, info, &index)
+        };
         let range = range.start as usize..range.end as usize;
         let bytes: Bytes = sst_bytes.slice(range);
         let compression_codec = info.compression_codec;
@@ -1106,7 +1115,8 @@ impl SsTableFormat {
 
         // estimate sum of Index
         let guess_at_average_first_key_size_bytes = average_first_key_size;
-        ans += number_of_blocks * (guess_at_average_first_key_size_bytes + OFFSET_SIZE)
+        ans += number_of_blocks
+            * (guess_at_average_first_key_size_bytes + OFFSET_SIZE + SIZEOF_U32)
             + CHECKSUM_SIZE;
 
         // estimate sum of Metadata (SsTableInfo)

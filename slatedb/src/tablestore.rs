@@ -1380,6 +1380,7 @@ mod tests {
                     &BlockMetaArgs {
                         offset: *offset,
                         first_key: Some(first_key),
+                        encoded_len: 0,
                     },
                 )
             })

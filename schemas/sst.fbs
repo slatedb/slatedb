@@ -96,6 +96,11 @@ table BlockMeta {
 
     // First key contained in the block.
     first_key: [ubyte] (required);
+
+    // Length of the encoded block at `offset`: its bytes after any
+    // compression and transformation, plus the checksum. Zero in SSTs
+    // written before this field existed.
+    encoded_len: uint;
 }
 
 table SsTableIndex {
