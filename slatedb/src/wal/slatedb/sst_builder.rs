@@ -57,7 +57,7 @@ use crate::db_state::{SsTableInfoCodec, SstType};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
 use crate::format::sst::{
-    BlockBuilder, BlockTransformer, EncodedSsTable, EncodedSsTableBlock,
+    encoded_len_for_index, BlockBuilder, BlockTransformer, EncodedSsTable, EncodedSsTableBlock,
     EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat,
     SST_FORMAT_VERSION_LATEST,
 };
@@ -207,7 +207,7 @@ impl EncodedWalSsTableBuilder {
             &BlockMetaArgs {
                 offset: block.offset,
                 first_key: self.first_seq,
-                encoded_len: u32::try_from(block.encoded_len).expect("block length exceeds u32"),
+                encoded_len: encoded_len_for_index(block.encoded_len, block.padded_len())?,
             },
         );
         self.block_meta.push(block_meta);

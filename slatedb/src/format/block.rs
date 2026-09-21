@@ -71,7 +71,7 @@ impl Block {
     ) -> usize {
         let encoded_size =
             entries_size_encoded + OFFSET_SIZE * entry_num + CHECKSUM_SIZE * number_of_blocks;
-        let Some(alignment) = alignment else {
+        let Some(alignment) = alignment.filter(|a| super::sst::pads(*a)) else {
             return encoded_size;
         };
         // Block boundaries are unknown here, so pad the average block and

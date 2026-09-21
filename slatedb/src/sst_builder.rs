@@ -62,9 +62,9 @@ use crate::error::SlateDBError;
 use crate::filter_policy::{FilterBuilder, FilterPolicy, NamedFilter};
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
 use crate::format::sst::{
-    block_capacity, BlockBuilder, BlockBuilderWithStats, EncodedSsTable, EncodedSsTableBlock,
-    EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION,
-    SST_FORMAT_VERSION_LATEST, SST_FORMAT_VERSION_V2,
+    block_capacity, encoded_len_for_index, BlockBuilder, BlockBuilderWithStats, EncodedSsTable,
+    EncodedSsTableBlock, EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat,
+    SST_FORMAT_VERSION, SST_FORMAT_VERSION_LATEST, SST_FORMAT_VERSION_V2,
 };
 use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
@@ -325,7 +325,7 @@ impl EncodedSsTableBuilder {
             block_builder = block_builder.with_block_transformer(transformer);
         }
         if let Some(alignment) = self.block_alignment {
-            block_builder = block_builder.with_alignment(alignment);
+            block_builder = block_builder.with_block_alignment(alignment);
         }
         let block = block_builder.build().await?;
         let block_meta = BlockMeta::create(
@@ -333,7 +333,7 @@ impl EncodedSsTableBuilder {
             &BlockMetaArgs {
                 offset: block.offset,
                 first_key: self.first_key,
-                encoded_len: u32::try_from(block.encoded_len).expect("block length exceeds u32"),
+                encoded_len: encoded_len_for_index(block.encoded_len, block.padded_len())?,
             },
         );
         self.block_meta.push(block_meta);
@@ -527,14 +527,25 @@ mod tests {
         assert!(padded.estimate_encoded_size_compacted(1, 32) >= 4096);
         assert!(unpadded.estimate_encoded_size_compacted(1, 32) < 4096);
 
-        // padding never lowers the estimate
+        // padding raises the estimate, it does not merely leave it alone
         for num_entries in [10, 1_000, 100_000] {
             let entries_size = num_entries * 32;
             assert!(
                 padded.estimate_encoded_size_compacted(num_entries, entries_size)
-                    >= unpadded.estimate_encoded_size_compacted(num_entries, entries_size)
+                    > unpadded.estimate_encoded_size_compacted(num_entries, entries_size),
+                "{num_entries} entries"
             );
         }
+
+        // an alignment of one pads nothing, so it must match no alignment
+        let unit = SsTableFormat {
+            block_alignment: Some(1),
+            ..unpadded.clone()
+        };
+        assert_eq!(
+            unit.estimate_encoded_size_compacted(1_000, 32_000),
+            unpadded.estimate_encoded_size_compacted(1_000, 32_000)
+        );
 
         // WAL SSTs are never padded
         assert_eq!(
@@ -1034,6 +1045,86 @@ mod tests {
             assert_eq!(blocks.len(), range.len());
             for (block, expected) in blocks.iter().zip(&expected[range]) {
                 assert!(block == expected.as_ref());
+            }
+        }
+    }
+
+    /// The production read path serves an SST whose index reports no
+    /// `encoded_len`, which is what every SST written before that field
+    /// existed looks like.
+    #[tokio::test]
+    async fn test_table_store_reads_sst_with_index_without_encoded_len() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 64,
+            ..SsTableFormat::default()
+        };
+        let table_store = TableStore::new(
+            object_store,
+            format.clone(),
+            Path::from(""),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        );
+        let mut builder = table_store.table_builder();
+        for i in 0..16u8 {
+            builder
+                .add_value(&[b'a' + i; 16], &[i; 16], None, None)
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        let id = test_sst_id(9);
+        table_store
+            .write_sst(&id, &encoded, Some(Bytes::new()))
+            .await
+            .unwrap();
+        let handle = table_store.open_sst(&id, Some(Bytes::new())).await.unwrap();
+        let index = table_store
+            .read_index(
+                &handle,
+                false,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
+            .await
+            .unwrap();
+        let num_blocks = index.borrow().block_meta().len();
+        assert!(num_blocks > 1);
+
+        // Read once with the index as written, then with `encoded_len`
+        // cleared, and compare block for block.
+        let expected = table_store
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                0..num_blocks,
+                false,
+                Some(Bytes::new()),
+            )
+            .await
+            .unwrap();
+        let legacy_index = Arc::new(index_without_encoded_len(&index));
+        for range in [0..num_blocks, 1..num_blocks - 1] {
+            let blocks = table_store
+                .read_blocks_using_index(
+                    &handle,
+                    legacy_index.clone(),
+                    range.clone(),
+                    false,
+                    Some(Bytes::new()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(blocks.len(), range.len());
+            for (i, (block, want)) in blocks
+                .iter()
+                .zip(expected.iter().skip(range.start))
+                .enumerate()
+            {
+                assert!(block == want, "block {} differs", range.start + i);
             }
         }
     }

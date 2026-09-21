@@ -241,15 +241,40 @@ impl EncodedSsTableBlock {
     }
 }
 
-/// Bytes of entries a data block holds before it is closed.
+/// The value a block of `encoded_len` bytes, occupying `padded_len` bytes on
+/// disk, puts in `BlockMeta::encoded_len`.
+///
+/// A block over 4 GiB does not fit the field. An unpadded block reports zero
+/// instead, because the reader then derives the same length from the offset
+/// of the next block. A padded block cannot, because that derivation would
+/// include the padding.
+pub(crate) fn encoded_len_for_index(
+    encoded_len: usize,
+    padded_len: usize,
+) -> Result<u32, SlateDBError> {
+    match u32::try_from(encoded_len) {
+        Ok(len) => Ok(len),
+        Err(_) if padded_len == encoded_len => Ok(0),
+        Err(_) => Err(SlateDBError::InvalidDBState),
+    }
+}
+
+/// Bytes a data block holds before it is closed, counting the entries, their
+/// offsets and the offset count.
 ///
 /// With alignment on, the block leaves room for its checksum so that a full
 /// block does not spill into the next padding unit.
 pub(crate) fn block_capacity(block_size: usize, block_alignment: Option<usize>) -> usize {
     match block_alignment {
-        Some(_) => block_size - CHECKSUM_SIZE,
-        None => block_size,
+        Some(alignment) if pads(alignment) => block_size.saturating_sub(CHECKSUM_SIZE),
+        _ => block_size,
     }
+}
+
+/// Whether an alignment moves any byte. Zero has no multiple to round up to,
+/// and every length is already a multiple of one.
+pub(crate) fn pads(alignment: usize) -> bool {
+    alignment > 1
 }
 
 /// Builder for encoding a single SST block with compression and transformation.
@@ -282,7 +307,7 @@ impl EncodedSsTableBlockBuilder {
     }
 
     /// Pads the encoded block with zeros to a multiple of `alignment` bytes.
-    pub(crate) fn with_alignment(mut self, alignment: usize) -> Self {
+    pub(crate) fn with_block_alignment(mut self, alignment: usize) -> Self {
         self.alignment = Some(alignment);
         self
     }
@@ -316,7 +341,7 @@ impl EncodedSsTableBlockBuilder {
             self.block_transformer.as_ref(),
         )
         .await?;
-        if let Some(alignment) = self.alignment {
+        if let Some(alignment) = self.alignment.filter(|a| pads(*a)) {
             let padded_len = encoded_len.next_multiple_of(alignment);
             compressed_and_transformed_block.resize(padded_len, 0);
         }
@@ -977,6 +1002,25 @@ impl SsTableFormat {
         start_offset..end_offset
     }
 
+    /// The bytes block `block` occupies, without its padding.
+    ///
+    /// `encoded_len` is zero in an SST written before that field existed, and
+    /// the length then comes from the offset of the next block.
+    pub(crate) fn block_byte_range(
+        &self,
+        info: &SsTableInfo,
+        index: &SsTableIndex,
+        block: usize,
+    ) -> Range<u64> {
+        let block_meta = index.block_meta().get(block);
+        let offset = block_meta.offset();
+        if block_meta.encoded_len() > 0 {
+            offset..offset + u64::from(block_meta.encoded_len())
+        } else {
+            self.block_range(block..block + 1, info, index)
+        }
+    }
+
     pub(crate) async fn read_blocks(
         &self,
         info: &SsTableInfo,
@@ -996,18 +1040,10 @@ impl SsTableFormat {
         let compression_codec = info.compression_codec;
         let decode_futures: Vec<_> = blocks
             .map(|block| {
-                let block_meta = index.block_meta().get(block);
-                let block_bytes_start = fetched_index(block_meta.offset(), start_range);
-                let block_bytes = if block_meta.encoded_len() > 0 {
-                    let block_end = block_meta.offset() + u64::from(block_meta.encoded_len());
-                    bytes.slice(block_bytes_start..fetched_index(block_end, start_range))
-                } else if block == index.block_meta().len() - 1 {
-                    bytes.slice(block_bytes_start..)
-                } else {
-                    let next_block_meta = index.block_meta().get(block + 1);
-                    let block_bytes_end = fetched_index(next_block_meta.offset(), start_range);
-                    bytes.slice(block_bytes_start..block_bytes_end)
-                };
+                let range = self.block_byte_range(info, &index, block);
+                let block_bytes = bytes.slice(
+                    fetched_index(range.start, start_range)..fetched_index(range.end, start_range),
+                );
                 self.decode_block(block_bytes, compression_codec)
             })
             .collect();
@@ -1056,12 +1092,7 @@ impl SsTableFormat {
         sst_bytes: &Bytes,
     ) -> Result<Block, SlateDBError> {
         let index = index_owned.borrow();
-        let block_meta = index.block_meta().get(block);
-        let range = if block_meta.encoded_len() > 0 {
-            block_meta.offset()..block_meta.offset() + u64::from(block_meta.encoded_len())
-        } else {
-            self.block_range(block..block + 1, info, &index)
-        };
+        let range = self.block_byte_range(info, &index, block);
         let range = range.start as usize..range.end as usize;
         let bytes: Bytes = sst_bytes.slice(range);
         let compression_codec = info.compression_codec;
@@ -1128,7 +1159,10 @@ impl SsTableFormat {
         if entry_num == 0 {
             return 0;
         }
-        // WAL blocks are never padded, so they fill the whole block size.
+        // WAL blocks are never padded, so their capacity is the block size,
+        // with no room reserved for a checksum. The WAL builder sizes its
+        // blocks by `WAL_BLOCK_SIZE` rather than this value, which this
+        // estimate has never modelled.
         let (entries_size_encoded, number_of_blocks) = self
             .estimate_entry_size_encoded_and_number_of_blocks(
                 entry_num,
@@ -1221,5 +1255,37 @@ impl SsTableFormat {
         let ops_stats_per_block = 3 * SIZEOF_U16;
 
         ops_stats + key_value_stats + (number_of_blocks * ops_stats_per_block) + CHECKSUM_SIZE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encoded_len_for_index() {
+        let over_u32 = u32::MAX as usize + 1;
+
+        assert_eq!(encoded_len_for_index(4096, 4096).unwrap(), 4096);
+        assert_eq!(encoded_len_for_index(3600, 4096).unwrap(), 3600);
+        // Too large for the field, but unpadded, so the next offset gives the
+        // reader the same length.
+        assert_eq!(encoded_len_for_index(over_u32, over_u32).unwrap(), 0);
+        // Too large and padded, so no value in the field is correct.
+        assert!(matches!(
+            encoded_len_for_index(over_u32, over_u32 + 4096),
+            Err(SlateDBError::InvalidDBState)
+        ));
+    }
+
+    #[test]
+    fn test_block_capacity_leaves_room_for_the_checksum() {
+        assert_eq!(block_capacity(4096, None), 4096);
+        assert_eq!(block_capacity(4096, Some(4096)), 4096 - CHECKSUM_SIZE);
+        // An alignment that pads nothing must not shrink the block.
+        assert_eq!(block_capacity(4096, Some(1)), 4096);
+        assert_eq!(block_capacity(4096, Some(0)), 4096);
+        // A block smaller than the checksum must not underflow.
+        assert_eq!(block_capacity(2, Some(4096)), 0);
     }
 }

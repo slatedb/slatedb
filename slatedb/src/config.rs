@@ -55,7 +55,6 @@
 //! l0_flush_parallelism = 4
 //! max_unflushed_bytes = 536870912
 //! metric_level = "Info"
-//! sst_block_alignment = 4096
 //!
 //! [compactor_options]
 //! poll_interval = "5s"
@@ -123,7 +122,6 @@
 //!    }
 //!  },
 //!  "compression_codec": null,
-//!  "sst_block_alignment": 4096,
 //!  "object_store_cache_options": {
 //!    "root_folder": "/tmp/slatedb-cache",
 //!    "max_cache_size_bytes": 17179869184,
@@ -177,7 +175,6 @@
 //!     max_compaction_sources: "8"
 //!     include_size_threshold: "4.0"
 //! compression_codec: null
-//! sst_block_alignment: 4096
 //! object_store_cache_options:
 //!   root_folder: /tmp/slatedb-cache
 //!   max_cache_size_bytes: 17179869184
@@ -817,7 +814,8 @@ pub struct Settings {
     pub compression_codec: Option<CompressionCodec>,
 
     /// Pads every data block of a compacted SST to a multiple of this many
-    /// bytes. Set it to the page size of the disk cache, 4096 on most systems.
+    /// bytes. Set it to the page size of the disk cache, 4096 on most
+    /// systems, and set [`Self::sst_block_size`] to the same value.
     ///
     /// A reader that predates the `encoded_len` field of the SST index fails
     /// the block checksum on a padded SST, so upgrade every reader before a
@@ -944,11 +942,13 @@ impl Settings {
             ))
             .into());
         }
-        if self.sst_block_alignment == Some(0) {
-            return Err(SlateDBError::InvalidConfiguration(
-                "sst_block_alignment must be at least 1".into(),
-            )
-            .into());
+        validate_sst_block_alignment(self.sst_block_alignment)?;
+        if let Some(worker) = self
+            .compactor_options
+            .as_ref()
+            .and_then(|compactor| compactor.worker.as_ref())
+        {
+            validate_sst_block_alignment(worker.sst_block_alignment)?;
         }
         Ok(())
     }
@@ -1453,6 +1453,18 @@ pub struct CompactionWorkerOptions {
     /// Optional metrics reporting level for standalone compaction workers.
     /// Defaults to [`MetricLevel::default`] when unset.
     pub metric_level: Option<MetricLevel>,
+}
+
+/// Rejects an alignment that a block cannot be rounded up to. Zero has no
+/// next multiple, and the writer would divide by it.
+pub(crate) fn validate_sst_block_alignment(alignment: Option<usize>) -> Result<(), crate::Error> {
+    if alignment == Some(0) {
+        return Err(SlateDBError::InvalidConfiguration(
+            "sst_block_alignment must be at least 1".into(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Default options for the compaction worker.
@@ -2299,6 +2311,22 @@ object_store_cache_options:
             ..Settings::default()
         };
         assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_sst_block_alignment_on_the_worker() {
+        let worker = CompactionWorkerOptions {
+            sst_block_alignment: Some(0),
+            ..CompactionWorkerOptions::default()
+        };
+        let settings = Settings {
+            compactor_options: Some(CompactorOptions {
+                worker: Some(worker),
+                ..CompactorOptions::default()
+            }),
+            ..Settings::default()
+        };
+        assert!(settings.validate().is_err());
     }
 
     #[test]

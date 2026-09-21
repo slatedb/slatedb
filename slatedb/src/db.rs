@@ -5605,34 +5605,49 @@ mod tests {
     }
 
     /// Asserts every block of `handle` starts on an `alignment` boundary and
-    /// is followed by padding up to the next one. Returns the number of gaps
-    /// between blocks it checked, which is zero for a single-block SST.
+    /// is followed by padding up to the next one. Returns the number of
+    /// blocks it checked.
+    ///
+    /// The last block ends where the filter starts, so every block is
+    /// checked, and the data section as a whole must end on a boundary.
     async fn assert_sst_is_padded(db: &Db, handle: &SsTableHandle, alignment: u64) -> usize {
         let layout = block_layout(db, handle).await;
+        let data_end = if handle.info.filter_len > 0 {
+            handle.info.filter_offset
+        } else {
+            handle.info.index_offset
+        };
         for (i, (offset, encoded_len)) in layout.iter().enumerate() {
             assert_eq!(offset % alignment, 0, "block {i} starts off boundary");
-            if let Some((next_offset, _)) = layout.get(i + 1) {
-                assert_eq!(
-                    next_offset - offset,
-                    encoded_len.next_multiple_of(alignment),
-                    "block {i} is not padded to a whole unit"
-                );
-            }
+            let end = layout.get(i + 1).map_or(data_end, |(next, _)| *next);
+            assert_eq!(
+                end - offset,
+                encoded_len.next_multiple_of(alignment),
+                "block {i} is not padded to a whole unit"
+            );
         }
-        layout.len().saturating_sub(1)
+        assert_eq!(
+            data_end % alignment,
+            0,
+            "the data section ends off boundary"
+        );
+        layout.len()
     }
 
     /// Asserts no block of `handle` is followed by padding. Returns the
-    /// number of gaps it checked, as `assert_sst_is_padded` does.
+    /// number of blocks it checked, as `assert_sst_is_padded` does.
     async fn assert_sst_is_unpadded(db: &Db, handle: &SsTableHandle) -> usize {
         let layout = block_layout(db, handle).await;
-        for (i, window) in layout.windows(2).enumerate() {
-            let [(offset, encoded_len), (next_offset, _)] = window else {
-                unreachable!()
-            };
-            assert_eq!(next_offset - offset, *encoded_len, "block {i} is padded");
+        let data_end = if handle.info.filter_len > 0 {
+            handle.info.filter_offset
+        } else {
+            handle.info.index_offset
+        };
+        for (i, (offset, encoded_len)) in layout.iter().enumerate() {
+            let end = layout.get(i + 1).map_or(data_end, |(next, _)| *next);
+            assert_eq!(end - offset, *encoded_len, "block {i} is padded");
         }
-        layout.len().saturating_sub(1)
+        layout.len()
     }
 
     /// A padded database serves every key after a flush, after a compaction,
@@ -5684,11 +5699,11 @@ mod tests {
 
         let l0 = db.inner.state.read().state().core().tree.l0.clone();
         assert!(l0.len() > 1, "test needs several L0 SSTs");
-        let mut gaps = 0;
+        let mut blocks = 0;
         for view in &l0 {
-            gaps += assert_sst_is_padded(&db, &view.sst, ALIGNMENT).await;
+            blocks += assert_sst_is_padded(&db, &view.sst, ALIGNMENT).await;
         }
-        assert!(gaps > 0, "test needs a multi-block SST");
+        assert!(blocks > l0.len(), "test needs a multi-block SST");
 
         should_compact.store(true, Ordering::SeqCst);
         let db_poll = db.clone();
@@ -5720,11 +5735,14 @@ mod tests {
             .flat_map(|run| run.sst_views().to_vec())
             .collect();
         assert!(!compacted_ssts.is_empty());
-        let mut gaps = 0;
+        let mut blocks = 0;
         for view in &compacted_ssts {
-            gaps += assert_sst_is_padded(&db, &view.sst, ALIGNMENT).await;
+            blocks += assert_sst_is_padded(&db, &view.sst, ALIGNMENT).await;
         }
-        assert!(gaps > 0, "test needs a multi-block SST");
+        assert!(
+            blocks > compacted_ssts.len(),
+            "test needs a multi-block SST"
+        );
 
         for i in 0..NUM_KEYS {
             assert_eq!(db.get(&key(i)).await.unwrap(), Some(Bytes::from(value(i))));
@@ -5753,6 +5771,10 @@ mod tests {
 
     /// One database holds SSTs written before and after the alignment was
     /// turned on, and reads both.
+    ///
+    /// Both kinds carry `encoded_len`, because this build writes it either
+    /// way. `test_read_blocks_from_index_without_encoded_len` covers an
+    /// index that does not, which is what an older writer leaves behind.
     #[tokio::test]
     async fn test_db_reads_mixed_padded_and_unpadded_ssts() {
         const ALIGNMENT: u64 = 512;
@@ -5819,16 +5841,16 @@ mod tests {
         let (old, new): (Vec<_>, Vec<_>) =
             l0.iter().partition(|view| unpadded_ids.contains(&view.id));
         assert!(!old.is_empty() && !new.is_empty(), "test needs both kinds");
-        let mut old_gaps = 0;
+        let mut old_blocks = 0;
         for view in &old {
-            old_gaps += assert_sst_is_unpadded(&db, &view.sst).await;
+            old_blocks += assert_sst_is_unpadded(&db, &view.sst).await;
         }
-        let mut new_gaps = 0;
+        let mut new_blocks = 0;
         for view in &new {
-            new_gaps += assert_sst_is_padded(&db, &view.sst, ALIGNMENT).await;
+            new_blocks += assert_sst_is_padded(&db, &view.sst, ALIGNMENT).await;
         }
         assert!(
-            old_gaps > 0 && new_gaps > 0,
+            old_blocks > old.len() && new_blocks > new.len(),
             "test needs a multi-block SST of each kind"
         );
 
