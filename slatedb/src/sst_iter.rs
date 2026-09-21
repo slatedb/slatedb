@@ -6,7 +6,9 @@ use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
+use tokio::task::JoinHandle;
 use tokio_util::task::AbortOnDropHandle;
+use tracing::instrument::WithSubscriber;
 
 use crate::block_iterator::DataBlockIterator;
 use crate::bytes_range::BytesRange;
@@ -495,7 +497,7 @@ impl<'a> InternalSstIterator<'a> {
                                 sst_level.as_ref(),
                             )
                             .await
-                    });
+                    }).with_current_subscriber();
                     self.fetch_tasks
                         .push_back(FetchTask::InFlight(AbortOnDropHandle::new(fetch)));
                     self.next_block_idx_to_fetch = blocks_end;
@@ -534,7 +536,7 @@ impl<'a> InternalSstIterator<'a> {
                                 sst_level.as_ref(),
                             )
                             .await
-                    });
+                    }).with_current_subscriber();
                     self.fetch_tasks
                         .push_back(FetchTask::InFlight(AbortOnDropHandle::new(fetch)));
                     self.next_block_idx_to_fetch = blocks_start;

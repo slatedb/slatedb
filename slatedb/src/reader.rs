@@ -2208,13 +2208,18 @@ mod tests {
             ReadOptions::default().with_tracing_options(Some(TracingOptions::new(trace_id)));
 
         let result = tracing::subscriber::with_default(subscriber, || {
-            tokio_test::block_on(reader.get_key_value_with_options(
-                b"sst-key",
-                &read_options,
-                &test_db_state,
-                None,
-                None,
-            ))
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(reader.get_key_value_with_options(
+                    b"sst-key",
+                    &read_options,
+                    &test_db_state,
+                    None,
+                    None,
+                ))
         })?;
 
         assert_eq!(
@@ -2226,36 +2231,46 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn should_record_read_spans_for_scan_with_tracing_options() -> Result<(), SlateDBError> {
+    #[rstest]
+    #[case::ascending(IterationOrder::Ascending)]
+    #[case::descending(IterationOrder::Descending)]
+    fn should_record_read_spans_for_scan_with_tracing_options(
+        #[case] order: IterationOrder,
+    ) -> Result<(), SlateDBError> {
         let (test_db_state, reader) = build_span_test_reader();
         let span_recorder = SpanRecorder::default();
         let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
         let trace_id = "scan-trace";
-        let scan_options =
-            ScanOptions::default().with_tracing_options(Some(TracingOptions::new(trace_id)));
+        let scan_options = ScanOptions::default()
+            .with_order(order)
+            .with_tracing_options(Some(TracingOptions::new(trace_id)));
         let range = BytesRange::from_slice(b"sst-key".as_slice()..=b"sst-key".as_slice());
 
         tracing::subscriber::with_default(subscriber, || {
-            tokio_test::block_on(async {
-                let mut iter = reader
-                    .scan_with_options(
-                        range.clone(),
-                        &scan_options,
-                        ScanContext {
-                            db_state: &test_db_state,
-                            write_batch_iter: None,
-                            max_seq: None,
-                            prefix: None,
-                        },
-                    )
-                    .await?;
-                assert_eq!(
-                    iter.next_entry().await?.map(|entry| entry.value),
-                    Some(ValueDeletable::Value(Bytes::from_static(b"value1")))
-                );
-                Ok::<_, SlateDBError>(())
-            })
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let mut iter = reader
+                        .scan_with_options(
+                            range.clone(),
+                            &scan_options,
+                            ScanContext {
+                                db_state: &test_db_state,
+                                write_batch_iter: None,
+                                max_seq: None,
+                                prefix: None,
+                            },
+                        )
+                        .await?;
+                    assert_eq!(
+                        iter.next_entry().await?.map(|entry| entry.value),
+                        Some(ValueDeletable::Value(Bytes::from_static(b"value1")))
+                    );
+                    Ok::<_, SlateDBError>(())
+                })
         })?;
 
         let expected_sst_id = sorted_run_sst_id(&test_db_state, 0);
