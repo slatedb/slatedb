@@ -439,6 +439,20 @@ mod tests {
             expected_size
         );
 
+        // With an alignment, each block rounds up to a whole unit.
+        let num_blocks = 4;
+        let total_entry_size = 100 * num_blocks;
+        let unpadded = Block::estimate_size_in_sst(num_blocks, total_entry_size, num_blocks, None);
+        assert_eq!(
+            Block::estimate_size_in_sst(num_blocks, total_entry_size, num_blocks, Some(64)),
+            num_blocks * unpadded.div_ceil(num_blocks).next_multiple_of(64)
+        );
+        // An alignment the blocks already meet adds nothing.
+        assert_eq!(
+            Block::estimate_size_in_sst(num_blocks, total_entry_size, num_blocks, Some(1)),
+            unpadded
+        );
+
         // Test with large numbers（assume 20GB and every block 4kb with 200 entries）
         let large_entry_size = 20 * 1024 * 1024 * 1024; // 20GB
         let num_entries = 200;
