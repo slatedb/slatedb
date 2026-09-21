@@ -1080,9 +1080,12 @@ impl SsTableFormat {
         Ok(data_bytes)
     }
 
-    /// The function estimates the size of the SST (Sorted String Table) without considering compression effects.
-    /// The data blocks are counted as they are written, so block padding is
-    /// included when the format sets a block alignment.
+    /// The function estimates the size of the SST (Sorted String Table)
+    /// without considering compression effects.
+    ///
+    /// The estimate includes block padding when the format sets a block
+    /// alignment. It rounds up the average block rather than each real one,
+    /// so the padding it counts is itself an estimate.
     pub(crate) fn estimate_encoded_size_compacted(
         &self,
         entry_num: usize,
@@ -1146,7 +1149,10 @@ impl SsTableFormat {
     ) -> (usize, usize) {
         let entries_size_encoded =
             row::SstRowCodecV0::estimate_encoded_size(entry_num, estimated_entries_size);
-        let number_of_blocks = usize::div_ceil(entries_size_encoded, block_capacity);
+        // A block holds the entries and their offsets, so count the offsets
+        // when dividing the entries into blocks.
+        let block_payload = entries_size_encoded + OFFSET_SIZE * entry_num;
+        let number_of_blocks = usize::div_ceil(block_payload, block_capacity);
 
         (entries_size_encoded, number_of_blocks)
     }

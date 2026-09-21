@@ -819,6 +819,10 @@ pub struct Settings {
     /// Pads every data block of a compacted SST to a multiple of this many
     /// bytes. Set it to the page size of the disk cache, 4096 on most systems.
     ///
+    /// A reader that predates the `encoded_len` field of the SST index fails
+    /// the block checksum on a padded SST, so upgrade every reader before a
+    /// writer sets this.
+    ///
     /// Default: `None`, no padding.
     #[serde(default)]
     pub sst_block_alignment: Option<usize>,
@@ -938,6 +942,12 @@ impl Settings {
                 "max_unflushed_bytes ({}) must be greater than l0_sst_size_bytes ({})",
                 self.max_unflushed_bytes, self.l0_sst_size_bytes,
             ))
+            .into());
+        }
+        if self.sst_block_alignment == Some(0) {
+            return Err(SlateDBError::InvalidConfiguration(
+                "sst_block_alignment must be at least 1".into(),
+            )
             .into());
         }
         Ok(())
@@ -2275,6 +2285,20 @@ object_store_cache_options:
             ..Settings::default()
         };
         assert!(smaller.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_sst_block_alignment() {
+        let settings = Settings {
+            sst_block_alignment: Some(0),
+            ..Settings::default()
+        };
+        assert!(settings.validate().is_err());
+        let settings = Settings {
+            sst_block_alignment: Some(4096),
+            ..Settings::default()
+        };
+        assert!(settings.validate().is_ok());
     }
 
     #[test]
