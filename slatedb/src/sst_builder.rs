@@ -127,7 +127,9 @@ impl SsTableFormat {
 
 /// Builds an SSTable from key-value pairs.
 pub(crate) struct EncodedSsTableBuilder {
-    builder: BlockBuilderWithStats,
+    /// The block being filled. `None` until the first entry arrives and
+    /// again after `finish_block` takes the block out.
+    builder: Option<BlockBuilderWithStats>,
     index_builder: flatbuffers::FlatBufferBuilder<'static, DefaultAllocator>,
     first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'static, u8>>>,
     sst_first_key: Option<Bytes>,
@@ -173,7 +175,7 @@ impl EncodedSsTableBuilder {
             block_size,
             block_alignment: None,
             block_format: BlockFormat::Latest,
-            builder: BlockBuilderWithStats::new(BlockBuilder::new_latest(block_size)),
+            builder: None,
             sst_format_version: SST_FORMAT_VERSION_LATEST,
             min_filter_keys,
             stats: SstStats::default(),
@@ -183,6 +185,15 @@ impl EncodedSsTableBuilder {
             compression_codec: None,
             block_transformer: None,
         }
+    }
+
+    fn current_block(&mut self) -> &mut BlockBuilderWithStats {
+        if self.builder.is_none() {
+            self.builder = Some(self.new_block_builder());
+        }
+        self.builder
+            .as_mut()
+            .expect("block builder was already created")
     }
 
     fn new_block_builder(&self) -> BlockBuilderWithStats {
@@ -218,7 +229,6 @@ impl EncodedSsTableBuilder {
             "cannot set block alignment after data has been added"
         );
         self.block_alignment = Some(alignment);
-        self.builder = self.new_block_builder();
         self
     }
 
@@ -235,7 +245,6 @@ impl EncodedSsTableBuilder {
         );
         self.block_format = block_format;
         self.sst_format_version = block_format.sst_format_version();
-        self.builder = self.new_block_builder();
         self
     }
 
@@ -250,7 +259,7 @@ impl EncodedSsTableBuilder {
         let is_sst_first_key = self.sst_first_key.is_none();
 
         let mut block_size = None;
-        if !self.builder.would_fit(&entry) {
+        if !self.current_block().would_fit(&entry) {
             block_size = self.finish_block().await?;
             self.first_key = Some(self.index_builder.create_vector(&index_key));
         } else if is_sst_first_key {
@@ -264,12 +273,12 @@ impl EncodedSsTableBuilder {
             self.sst_first_key = Some(entry.key.clone());
         }
         self.sst_last_key = Some(entry.key.clone());
-        if self.builder.is_empty() {
+        if self.current_block().is_empty() {
             self.current_block_first_key = Some(entry.key.clone());
         }
         self.current_block_max_key = Some(entry.key.clone());
 
-        self.builder.add(entry)?;
+        self.current_block().add(entry)?;
 
         Ok(block_size)
     }
@@ -307,8 +316,10 @@ impl EncodedSsTableBuilder {
             return Ok(None);
         }
 
-        let new_builder = self.new_block_builder();
-        let old_builder = std::mem::replace(&mut self.builder, new_builder);
+        let old_builder = self
+            .builder
+            .take()
+            .expect("a block is in progress when the builder is not drained");
         let (builder, block_stats) = old_builder.into_parts();
         let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.current_len);
         if let Some((first_key, last_key)) = self
@@ -442,7 +453,7 @@ impl EncodedSsTableBuilder {
     }
 
     pub(crate) fn is_drained(&self) -> bool {
-        self.builder.is_empty()
+        self.builder.as_ref().is_none_or(|block| block.is_empty())
     }
 }
 

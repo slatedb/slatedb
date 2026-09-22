@@ -701,14 +701,6 @@ impl Default for SsTableFormat {
     }
 }
 
-/// Position of SST byte `offset` within bytes fetched from `fetched_start`.
-fn fetched_index(offset: u64, fetched_start: u64) -> usize {
-    usize::try_from(offset - fetched_start).expect(
-        "attempted to read byte data with size \
-        larger than 32 bits on a 32-bit system",
-    )
-}
-
 impl SsTableFormat {
     async fn read_length_and_metadata_offset_and_version(
         &self,
@@ -1256,6 +1248,14 @@ impl SsTableFormat {
 
         ops_stats + key_value_stats + (number_of_blocks * ops_stats_per_block) + CHECKSUM_SIZE
     }
+}
+
+/// Position of SST byte `offset` within bytes fetched from `fetched_start`.
+fn fetched_index(offset: u64, fetched_start: u64) -> usize {
+    usize::try_from(offset - fetched_start).expect(
+        "attempted to read byte data with size \
+        larger than 32 bits on a 32-bit system",
+    )
 }
 
 #[cfg(test)]

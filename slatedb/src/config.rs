@@ -948,7 +948,7 @@ impl Settings {
             .as_ref()
             .and_then(|compactor| compactor.worker.as_ref())
         {
-            validate_sst_block_alignment(worker.sst_block_alignment)?;
+            worker.validate()?;
         }
         Ok(())
     }
@@ -1455,9 +1455,16 @@ pub struct CompactionWorkerOptions {
     pub metric_level: Option<MetricLevel>,
 }
 
+impl CompactionWorkerOptions {
+    /// Checks the options for values the worker cannot run with.
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        validate_sst_block_alignment(self.sst_block_alignment)
+    }
+}
+
 /// Rejects an alignment that a block cannot be rounded up to. Zero has no
 /// next multiple, and the writer would divide by it.
-pub(crate) fn validate_sst_block_alignment(alignment: Option<usize>) -> Result<(), crate::Error> {
+fn validate_sst_block_alignment(alignment: Option<usize>) -> Result<(), crate::Error> {
     if alignment == Some(0) {
         return Err(SlateDBError::InvalidConfiguration(
             "sst_block_alignment must be at least 1".into(),
