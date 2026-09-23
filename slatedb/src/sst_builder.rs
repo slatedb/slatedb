@@ -1173,38 +1173,6 @@ mod tests {
         }
     }
 
-    /// An alignment larger than the block size gives every block a whole
-    /// unit of its own. That is correct, and it wastes the difference.
-    #[tokio::test]
-    async fn test_alignment_larger_than_block_size_gives_each_block_a_unit() {
-        const BLOCK_SIZE: usize = 64;
-        const ALIGNMENT: usize = 256;
-        let format = SsTableFormat {
-            block_size: BLOCK_SIZE,
-            block_alignment: Some(ALIGNMENT),
-            ..SsTableFormat::default()
-        };
-
-        let sst = build_test_sst(&format, 4).await;
-
-        for block in &sst.unconsumed_blocks {
-            // Blocks are capped near `block_size`, well under one unit, and
-            // still take a whole one.
-            assert!(block.encoded_len < ALIGNMENT);
-            assert_eq!(block.padded_len(), ALIGNMENT);
-            assert_eq!(block.offset % ALIGNMENT as u64, 0);
-        }
-        let bytes = sst.remaining_as_bytes();
-        let index = format.read_index_raw(&sst.info, &bytes).await.unwrap();
-        for (i, block) in sst.unconsumed_blocks.iter().enumerate() {
-            let read_block = format
-                .read_block_raw(&sst.info, &index, i, &bytes)
-                .await
-                .unwrap();
-            assert!(*block.block == read_block);
-        }
-    }
-
     /// The estimate tracks the real SST size across block sizes, alignments
     /// and workloads. A padding term that charged a whole extra unit per
     /// block would push the ratio far above this band.

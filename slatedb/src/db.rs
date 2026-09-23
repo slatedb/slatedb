@@ -5654,7 +5654,7 @@ mod tests {
     /// and after a reopen, and the SSTs behind those reads really are padded.
     #[tokio::test]
     async fn test_db_round_trip_with_padded_ssts() {
-        const ALIGNMENT: u64 = 512;
+        const ALIGNMENT: u64 = 1024;
         const NUM_KEYS: u32 = 400;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_db_round_trip_with_padded_ssts";
@@ -5667,7 +5667,6 @@ mod tests {
             move |_state| this_should_compact.swap(false, Ordering::SeqCst),
         )));
         let settings = Settings {
-            sst_block_alignment: Some(ALIGNMENT as usize),
             // The seed writes more L0 SSTs than the default cap allows, and
             // compaction only runs once this test asks for it.
             l0_max_ssts: 64,
@@ -5678,6 +5677,7 @@ mod tests {
             Db::builder(path, object_store.clone())
                 .with_settings(settings.clone())
                 .with_sst_block_size(SstBlockSize::Block1Kib)
+                .with_sst_block_alignment(true)
                 .with_compactor_builder(
                     CompactorBuilder::new(path, object_store.clone())
                         .with_scheduler_supplier(scheduler)
@@ -5760,6 +5760,7 @@ mod tests {
         let db = Db::builder(path, object_store)
             .with_settings(settings)
             .with_sst_block_size(SstBlockSize::Block1Kib)
+            .with_sst_block_alignment(true)
             .build()
             .await
             .unwrap();
@@ -5777,25 +5778,21 @@ mod tests {
     /// index that does not, which is what an older writer leaves behind.
     #[tokio::test]
     async fn test_db_reads_mixed_padded_and_unpadded_ssts() {
-        const ALIGNMENT: u64 = 512;
+        const ALIGNMENT: u64 = 1024;
         const NUM_KEYS: u32 = 400;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_db_reads_mixed_padded_and_unpadded_ssts";
         let key = |i: u32| format!("key{i:05}").into_bytes();
         let value = |i: u32| format!("value{i:059}").into_bytes();
-        let unpadded_settings = Settings {
+        let settings = Settings {
             // No compactor runs here, so nothing drains L0.
             l0_max_ssts: 64,
             l0_max_ssts_per_key: 64,
             ..test_db_options(0, 4096, None)
         };
-        let padded_settings = Settings {
-            sst_block_alignment: Some(ALIGNMENT as usize),
-            ..unpadded_settings.clone()
-        };
 
         let db = Db::builder(path, object_store.clone())
-            .with_settings(unpadded_settings)
+            .with_settings(settings.clone())
             .with_sst_block_size(SstBlockSize::Block1Kib)
             .build()
             .await
@@ -5823,8 +5820,9 @@ mod tests {
         db.close().await.unwrap();
 
         let db = Db::builder(path, object_store)
-            .with_settings(padded_settings)
+            .with_settings(settings)
             .with_sst_block_size(SstBlockSize::Block1Kib)
+            .with_sst_block_alignment(true)
             .build()
             .await
             .unwrap();
@@ -5860,18 +5858,16 @@ mod tests {
         db.close().await.unwrap();
     }
 
-    /// `Settings::sst_block_alignment` must reach the table store that writes
-    /// SSTs, so the blocks it builds land on alignment boundaries.
+    /// `DbBuilder::with_sst_block_alignment` must reach the table store that
+    /// writes SSTs, so the blocks it builds land on block-size boundaries.
     #[tokio::test]
     async fn test_sst_block_alignment_reaches_the_table_store() {
-        const ALIGNMENT: usize = 512;
+        const ALIGNMENT: usize = 1024;
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let settings = Settings {
-            sst_block_alignment: Some(ALIGNMENT),
-            ..test_db_options(0, 1024, None)
-        };
         let db = Db::builder("/tmp/test_sst_block_alignment", object_store)
-            .with_settings(settings)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_sst_block_size(SstBlockSize::Block1Kib)
+            .with_sst_block_alignment(true)
             .build()
             .await
             .unwrap();
@@ -7841,7 +7837,6 @@ mod tests {
             max_wal_flushes_before_l0_flush: 4096,
             compactor_options,
             compression_codec: None,
-            sst_block_alignment: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             metric_level: MetricLevel::default(),

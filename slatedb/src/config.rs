@@ -813,18 +813,6 @@ pub struct Settings {
     /// The compression algorithm to use for SSTables.
     pub compression_codec: Option<CompressionCodec>,
 
-    /// Pads every data block of a compacted SST to a multiple of this many
-    /// bytes. Set it to the page size of the disk cache, 4096 on most
-    /// systems, and set [`Self::sst_block_size`] to the same value.
-    ///
-    /// A reader that predates the `encoded_len` field of the SST index fails
-    /// the block checksum on a padded SST, so upgrade every reader before a
-    /// writer sets this.
-    ///
-    /// Default: `None`, no padding.
-    #[serde(default)]
-    pub sst_block_alignment: Option<usize>,
-
     /// The object store cache options. When `root_folder` is set, the database
     /// wraps its main object store in a
     /// [`CachedObjectStore`](crate::cached_object_store::CachedObjectStore)
@@ -894,7 +882,6 @@ impl std::fmt::Debug for Settings {
             .field("l0_flush_parallelism", &self.l0_flush_parallelism)
             .field("compactor_options", &self.compactor_options)
             .field("compression_codec", &self.compression_codec)
-            .field("sst_block_alignment", &self.sst_block_alignment)
             .field(
                 "object_store_cache_options",
                 &self.object_store_cache_options,
@@ -941,14 +928,6 @@ impl Settings {
                 self.max_unflushed_bytes, self.l0_sst_size_bytes,
             ))
             .into());
-        }
-        validate_sst_block_alignment(self.sst_block_alignment)?;
-        if let Some(worker) = self
-            .compactor_options
-            .as_ref()
-            .and_then(|compactor| compactor.worker.as_ref())
-        {
-            worker.validate()?;
         }
         Ok(())
     }
@@ -1136,7 +1115,6 @@ impl Default for Settings {
             l0_flush_parallelism: 4,
             compactor_options: Some(CompactorOptions::default()),
             compression_codec: None,
-            sst_block_alignment: None,
             object_store_cache_options: ObjectStoreCacheOptions::default(),
             garbage_collector_options: Some(GarbageCollectorOptions::default()),
             metric_level: MetricLevel::default(),
@@ -1443,35 +1421,9 @@ pub struct CompactionWorkerOptions {
     /// produced by the DB.
     pub compression_codec: Option<CompressionCodec>,
 
-    /// The block alignment for SSTables the worker writes.
-    ///
-    /// Must match the writer's [`Settings::sst_block_alignment`] configuration
-    /// so that SSTs rewritten by the worker are padded like those produced by
-    /// the DB.
-    pub sst_block_alignment: Option<usize>,
-
     /// Optional metrics reporting level for standalone compaction workers.
     /// Defaults to [`MetricLevel::default`] when unset.
     pub metric_level: Option<MetricLevel>,
-}
-
-impl CompactionWorkerOptions {
-    /// Checks the options for values the worker cannot run with.
-    pub fn validate(&self) -> Result<(), crate::Error> {
-        validate_sst_block_alignment(self.sst_block_alignment)
-    }
-}
-
-/// Rejects an alignment that a block cannot be rounded up to. Zero has no
-/// next multiple, and the writer would divide by it.
-fn validate_sst_block_alignment(alignment: Option<usize>) -> Result<(), crate::Error> {
-    if alignment == Some(0) {
-        return Err(SlateDBError::InvalidConfiguration(
-            "sst_block_alignment must be at least 1".into(),
-        )
-        .into());
-    }
-    Ok(())
 }
 
 /// Default options for the compaction worker.
@@ -1488,7 +1440,6 @@ impl Default for CompactionWorkerOptions {
             max_subcompactions: 4,
             min_filter_keys: 1000,
             compression_codec: None,
-            sst_block_alignment: None,
             metric_level: None,
         }
     }
@@ -1993,7 +1944,6 @@ mod tests {
 {
     "flush_interval": "1s",
     "metric_level": "Debug",
-    "sst_block_alignment": 4096,
      "object_store_cache_options": {
         "root_folder": "/tmp/slatedb-root"
     }
@@ -2006,7 +1956,6 @@ mod tests {
                 .expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(MetricLevel::Debug, options.metric_level);
-            assert_eq!(Some(4096), options.sst_block_alignment);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -2041,7 +1990,6 @@ mod tests {
                 r#"
 flush_interval = "1s"
 metric_level = "Debug"
-sst_block_alignment = 4096
 [object_store_cache_options]
 root_folder = "/tmp/slatedb-root"
 "#,
@@ -2052,7 +2000,6 @@ root_folder = "/tmp/slatedb-root"
                 .expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(MetricLevel::Debug, options.metric_level);
-            assert_eq!(Some(4096), options.sst_block_alignment);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -2069,7 +2016,6 @@ root_folder = "/tmp/slatedb-root"
                 r#"
 flush_interval: "1s"
 metric_level: Debug
-sst_block_alignment: 4096
 object_store_cache_options:
     root_folder: "/tmp/slatedb-root"
 "#,
@@ -2080,7 +2026,6 @@ object_store_cache_options:
                 .expect("failed to load db options from environment");
             assert_eq!(Some(Duration::from_secs(1)), options.flush_interval);
             assert_eq!(MetricLevel::Debug, options.metric_level);
-            assert_eq!(Some(4096), options.sst_block_alignment);
             assert_eq!(
                 Some(PathBuf::from("/tmp/slatedb-root")),
                 options.object_store_cache_options.root_folder
@@ -2304,36 +2249,6 @@ object_store_cache_options:
             ..Settings::default()
         };
         assert!(smaller.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_sst_block_alignment() {
-        let settings = Settings {
-            sst_block_alignment: Some(0),
-            ..Settings::default()
-        };
-        assert!(settings.validate().is_err());
-        let settings = Settings {
-            sst_block_alignment: Some(4096),
-            ..Settings::default()
-        };
-        assert!(settings.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_rejects_zero_sst_block_alignment_on_the_worker() {
-        let worker = CompactionWorkerOptions {
-            sst_block_alignment: Some(0),
-            ..CompactionWorkerOptions::default()
-        };
-        let settings = Settings {
-            compactor_options: Some(CompactorOptions {
-                worker: Some(worker),
-                ..CompactorOptions::default()
-            }),
-            ..Settings::default()
-        };
-        assert!(settings.validate().is_err());
     }
 
     #[test]
