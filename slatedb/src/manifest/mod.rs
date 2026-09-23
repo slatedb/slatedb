@@ -1476,6 +1476,10 @@ impl Manifest {
 
         for source in &sources {
             core.last_l0_seq = max(core.last_l0_seq, source.manifest.core.last_l0_seq);
+            core.last_l0_clock_tick = max(
+                core.last_l0_clock_tick,
+                source.manifest.core.last_l0_clock_tick,
+            );
         }
 
         // Coalesce borrows of the same physical ancestor, keyed on (path, sst_ids) rather than
@@ -2879,6 +2883,54 @@ mod tests {
         .unwrap();
 
         assert_eq!(union.core.last_l0_seq, 200);
+    }
+
+    #[rstest]
+    #[case(100, 250, 250)]
+    #[case(250, 100, 250)]
+    #[case(i64::MIN, 250, 250)]
+    #[case(i64::MIN, i64::MIN, i64::MIN)]
+    fn test_union_propagates_last_l0_clock_tick(
+        #[case] tick1: i64,
+        #[case] tick2: i64,
+        #[case] expected: i64,
+    ) {
+        let mut manifest1 = build_manifest(
+            &SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![vec![SstEntry::projected("sr1", "a", "a".."m")]],
+            },
+            |_| SsTableId::from(Ulid::new()),
+        );
+        manifest1.core.last_l0_clock_tick = tick1;
+
+        let mut manifest2 = build_manifest(
+            &SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![vec![SstEntry::projected("sr2", "m", "m"..)]],
+            },
+            |_| SsTableId::from(Ulid::new()),
+        );
+        manifest2.core.last_l0_clock_tick = tick2;
+
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: manifest1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: manifest2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        )
+        .unwrap();
+
+        assert_eq!(union.core.last_l0_clock_tick, expected);
     }
 
     #[test]
