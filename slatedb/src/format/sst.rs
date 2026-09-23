@@ -268,24 +268,19 @@ pub(crate) fn encoded_len_for_index(
 ///
 /// With alignment on, the block leaves room for its checksum and for the
 /// transformer's declared overhead, so that a full block does not spill into
-/// the next padding unit.
+/// a second block-sized unit.
 pub(crate) fn block_capacity(
     block_size: usize,
-    block_alignment: Option<usize>,
+    block_alignment: bool,
     transformer_overhead: usize,
 ) -> usize {
-    match block_alignment {
-        Some(alignment) if pads(alignment) => block_size
+    if block_alignment {
+        block_size
             .saturating_sub(CHECKSUM_SIZE + transformer_overhead)
-            .max(1),
-        _ => block_size,
+            .max(1)
+    } else {
+        block_size
     }
-}
-
-/// Whether an alignment moves any byte. Zero has no multiple to round up to,
-/// and every length is already a multiple of one.
-pub(crate) fn pads(alignment: usize) -> bool {
-    alignment > 1
 }
 
 /// Builder for encoding a single SST block with compression and transformation.
@@ -352,7 +347,7 @@ impl EncodedSsTableBlockBuilder {
             self.block_transformer.as_ref(),
         )
         .await?;
-        if let Some(alignment) = self.alignment.filter(|a| pads(*a)) {
+        if let Some(alignment) = self.alignment {
             let padded_len = encoded_len.next_multiple_of(alignment);
             compressed_and_transformed_block.resize(padded_len, 0);
         }
@@ -688,7 +683,7 @@ pub(crate) type TableInfoAndVersion = (SsTableInfo, u16);
 #[derive(Clone)]
 pub(crate) struct SsTableFormat {
     pub(crate) block_size: usize,
-    pub(crate) block_alignment: Option<usize>,
+    pub(crate) block_alignment: bool,
     pub(crate) min_filter_keys: u32,
     pub(crate) sst_codec: Box<dyn SsTableInfoCodec>,
     pub(crate) filter_policies: Vec<Arc<dyn FilterPolicy>>,
@@ -701,7 +696,7 @@ impl Default for SsTableFormat {
     fn default() -> Self {
         Self {
             block_size: 4096,
-            block_alignment: None,
+            block_alignment: false,
             min_filter_keys: 0,
             sst_codec: Box::new(FlatBufferSsTableInfoCodec {}),
             filter_policies: vec![Arc::new(BloomFilterPolicy::new(10))],
@@ -1146,6 +1141,7 @@ impl SsTableFormat {
             entry_num,
             entries_size_encoded,
             number_of_blocks,
+            self.block_size,
             self.block_alignment,
         );
         let mut ans = self.estimate_size_index_metadata(
@@ -1179,10 +1175,15 @@ impl SsTableFormat {
                 estimated_entries_size,
                 self.block_size,
             );
-        let data_blocks_size =
-            Block::estimate_size_in_sst(entry_num, entries_size_encoded, number_of_blocks, None);
+        let data_blocks_size = Block::estimate_size_in_sst(
+            entry_num,
+            entries_size_encoded,
+            number_of_blocks,
+            self.block_size,
+            false,
+        );
 
-        self.estimate_size_index_metadata(data_blocks_size, number_of_blocks, SEQNUM_SIZE, None)
+        self.estimate_size_index_metadata(data_blocks_size, number_of_blocks, SEQNUM_SIZE, false)
     }
 
     fn estimate_entry_size_encoded_and_number_of_blocks(
@@ -1208,16 +1209,13 @@ impl SsTableFormat {
         data_blocks_size: usize,
         number_of_blocks: usize,
         average_first_key_size: usize,
-        block_alignment: Option<usize>,
+        block_alignment: bool,
     ) -> usize {
         let mut ans = data_blocks_size;
 
         // estimate sum of Index; padded blocks also record their length
         let guess_at_average_first_key_size_bytes = average_first_key_size;
-        let encoded_len_size = match block_alignment {
-            Some(alignment) if pads(alignment) => SIZEOF_U32,
-            _ => 0,
-        };
+        let encoded_len_size = if block_alignment { SIZEOF_U32 } else { 0 };
         ans += number_of_blocks
             * (guess_at_average_first_key_size_bytes + OFFSET_SIZE + encoded_len_size)
             + CHECKSUM_SIZE;
@@ -1304,17 +1302,11 @@ mod tests {
 
     #[test]
     fn test_block_capacity_leaves_room_for_the_checksum_and_transformer_overhead() {
-        assert_eq!(block_capacity(4096, None, 0), 4096);
-        assert_eq!(block_capacity(4096, Some(4096), 0), 4096 - CHECKSUM_SIZE);
-        assert_eq!(
-            block_capacity(4096, Some(4096), 28),
-            4096 - CHECKSUM_SIZE - 28
-        );
-        // An alignment that pads nothing must not shrink the block.
-        assert_eq!(block_capacity(4096, Some(1), 0), 4096);
-        assert_eq!(block_capacity(4096, Some(0), 0), 4096);
+        assert_eq!(block_capacity(4096, false, 0), 4096);
+        assert_eq!(block_capacity(4096, true, 0), 4096 - CHECKSUM_SIZE);
+        assert_eq!(block_capacity(4096, true, 28), 4096 - CHECKSUM_SIZE - 28);
         // A block smaller than its trailer keeps a capacity of one, so the
         // estimator never divides by it.
-        assert_eq!(block_capacity(2, Some(4096), 0), 1);
+        assert_eq!(block_capacity(2, true, 0), 1);
     }
 }

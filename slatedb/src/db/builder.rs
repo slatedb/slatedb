@@ -565,13 +565,12 @@ impl<P: Into<Path>> DbBuilder<P> {
                 None
             }
         };
-        let block_size = self.sst_block_size.unwrap_or_default().as_bytes();
         let sst_format = SsTableFormat {
             min_filter_keys: self.settings.min_filter_keys,
             filter_policies: self.filter_policies.clone(),
             compression_codec: self.settings.compression_codec,
-            block_size,
-            block_alignment: self.sst_block_alignment.then_some(block_size),
+            block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
+            block_alignment: self.sst_block_alignment,
             block_transformer: self.block_transformer.clone(),
             block_format,
             ..SsTableFormat::default()
@@ -1429,12 +1428,11 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             &path,
             retrying_main_object_store.clone(),
         ));
-        let block_size = self.sst_block_size.unwrap_or_default().as_bytes();
         let sst_format = SsTableFormat {
             filter_policies: self.filter_policies.clone(),
             block_transformer: self.block_transformer.clone(),
-            block_size,
-            block_alignment: self.sst_block_alignment.then_some(block_size),
+            block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
+            block_alignment: self.sst_block_alignment,
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
@@ -1665,16 +1663,15 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
         let compactions_store =
             Arc::new(CompactionsStore::new(&path, self.main_object_store.clone()));
-        let block_size = self.sst_block_size.unwrap_or_default().as_bytes();
         let table_store = Arc::new(TableStore::new(
             self.main_object_store,
             SsTableFormat {
                 filter_policies: self.filter_policies.clone(),
                 block_transformer: self.block_transformer.clone(),
-                block_size,
+                block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
                 min_filter_keys: self.options.min_filter_keys,
                 compression_codec: self.options.compression_codec,
-                block_alignment: self.sst_block_alignment.then_some(block_size),
+                block_alignment: self.sst_block_alignment,
                 ..SsTableFormat::default()
             },
             path,

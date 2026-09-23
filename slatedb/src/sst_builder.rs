@@ -105,6 +105,7 @@ impl SsTableFormat {
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
         let mut builder = EncodedSsTableBuilder::new(
             self.block_size,
+            self.block_alignment,
             self.min_filter_keys,
             self.sst_codec.clone(),
             &self.filter_policies,
@@ -118,18 +119,13 @@ impl SsTableFormat {
         if let Some(ref transformer) = self.block_transformer {
             builder = builder.with_block_transformer(transformer.clone());
         }
-        if let Some(alignment) = self.block_alignment {
-            builder = builder.with_block_alignment(alignment);
-        }
         builder
     }
 }
 
 /// Builds an SSTable from key-value pairs.
 pub(crate) struct EncodedSsTableBuilder {
-    /// The block being filled. `None` until the first entry arrives and
-    /// again after `finish_block` takes the block out.
-    builder: Option<BlockBuilderWithStats>,
+    builder: BlockBuilderWithStats,
     index_builder: flatbuffers::FlatBufferBuilder<'static, DefaultAllocator>,
     first_key: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'static, u8>>>,
     sst_first_key: Option<Bytes>,
@@ -140,7 +136,7 @@ pub(crate) struct EncodedSsTableBuilder {
     current_len: u64,
     blocks: VecDeque<EncodedSsTableBlock>,
     block_size: usize,
-    block_alignment: Option<usize>,
+    block_alignment: bool,
     block_format: BlockFormat,
     sst_format_version: u16,
     min_filter_keys: u32,
@@ -152,9 +148,11 @@ pub(crate) struct EncodedSsTableBuilder {
 }
 
 impl EncodedSsTableBuilder {
-    /// Create a builder based on target block size.
+    /// Create a builder based on target block size and whether blocks are
+    /// padded to it.
     pub(crate) fn new(
         block_size: usize,
+        block_alignment: bool,
         min_filter_keys: u32,
         sst_codec: Box<dyn SsTableInfoCodec>,
         filter_policies: &[Arc<dyn FilterPolicy>],
@@ -163,6 +161,7 @@ impl EncodedSsTableBuilder {
             .iter()
             .map(|p| (p.name().to_string(), p.builder()))
             .collect();
+        let block_format = BlockFormat::Latest;
         Self {
             current_len: 0,
             blocks: VecDeque::new(),
@@ -173,10 +172,10 @@ impl EncodedSsTableBuilder {
             current_block_first_key: None,
             current_block_max_key: None,
             block_size,
-            block_alignment: None,
-            block_format: BlockFormat::Latest,
-            builder: None,
-            sst_format_version: SST_FORMAT_VERSION_LATEST,
+            block_alignment,
+            block_format,
+            builder: Self::block_builder(block_size, block_alignment, None, block_format),
+            sst_format_version: block_format.sst_format_version(),
             min_filter_keys,
             stats: SstStats::default(),
             filter_builders,
@@ -187,29 +186,32 @@ impl EncodedSsTableBuilder {
         }
     }
 
-    fn current_block(&mut self) -> &mut BlockBuilderWithStats {
-        if self.builder.is_none() {
-            self.builder = Some(self.new_block_builder());
-        }
-        self.builder
-            .as_mut()
-            .expect("block builder was already created")
-    }
-
-    fn new_block_builder(&self) -> BlockBuilderWithStats {
+    fn block_builder(
+        block_size: usize,
+        block_alignment: bool,
+        block_transformer: Option<&Arc<dyn BlockTransformer>>,
+        block_format: BlockFormat,
+    ) -> BlockBuilderWithStats {
         let capacity = block_capacity(
-            self.block_size,
-            self.block_alignment,
-            self.block_transformer
-                .as_ref()
-                .map_or(0, |t| t.encoded_overhead()),
+            block_size,
+            block_alignment,
+            block_transformer.map_or(0, |t| t.encoded_overhead()),
         );
-        let builder = match self.block_format {
+        let builder = match block_format {
             BlockFormat::V1 => BlockBuilder::new_v1(capacity),
             BlockFormat::V2 => BlockBuilder::new_v2(capacity),
             BlockFormat::Latest => BlockBuilder::new_latest(capacity),
         };
         BlockBuilderWithStats::new(builder)
+    }
+
+    fn new_block_builder(&self) -> BlockBuilderWithStats {
+        Self::block_builder(
+            self.block_size,
+            self.block_alignment,
+            self.block_transformer.as_ref(),
+            self.block_format,
+        )
     }
 
     /// Sets the compression codec for compressing the blocks
@@ -218,23 +220,18 @@ impl EncodedSsTableBuilder {
         self
     }
 
-    /// Sets the block transformer for transforming the blocks
-    fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
-        self.block_transformer = Some(transformer);
-        self
-    }
-
-    /// Pads every data block with zeros to a multiple of `alignment` bytes.
+    /// Sets the block transformer for transforming the blocks.
     ///
     /// # Panics
     /// Panics if called after data has been added to the builder, because
-    /// the earlier blocks were sized without room for the checksum.
-    fn with_block_alignment(mut self, alignment: usize) -> Self {
+    /// the earlier blocks were sized without the transformer's overhead.
+    fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
         assert!(
             self.sst_first_key.is_none(),
-            "cannot set block alignment after data has been added"
+            "cannot set block transformer after data has been added"
         );
-        self.block_alignment = Some(alignment);
+        self.block_transformer = Some(transformer);
+        self.builder = self.new_block_builder();
         self
     }
 
@@ -251,6 +248,7 @@ impl EncodedSsTableBuilder {
         );
         self.block_format = block_format;
         self.sst_format_version = block_format.sst_format_version();
+        self.builder = self.new_block_builder();
         self
     }
 
@@ -265,7 +263,7 @@ impl EncodedSsTableBuilder {
         let is_sst_first_key = self.sst_first_key.is_none();
 
         let mut block_size = None;
-        if !self.current_block().would_fit(&entry) {
+        if !self.builder.would_fit(&entry) {
             block_size = self.finish_block().await?;
             self.first_key = Some(self.index_builder.create_vector(&index_key));
         } else if is_sst_first_key {
@@ -279,12 +277,12 @@ impl EncodedSsTableBuilder {
             self.sst_first_key = Some(entry.key.clone());
         }
         self.sst_last_key = Some(entry.key.clone());
-        if self.current_block().is_empty() {
+        if self.builder.is_empty() {
             self.current_block_first_key = Some(entry.key.clone());
         }
         self.current_block_max_key = Some(entry.key.clone());
 
-        self.current_block().add(entry)?;
+        self.builder.add(entry)?;
 
         Ok(block_size)
     }
@@ -322,10 +320,8 @@ impl EncodedSsTableBuilder {
             return Ok(None);
         }
 
-        let old_builder = self
-            .builder
-            .take()
-            .expect("a block is in progress when the builder is not drained");
+        let new_builder = self.new_block_builder();
+        let old_builder = std::mem::replace(&mut self.builder, new_builder);
         let (builder, block_stats) = old_builder.into_parts();
         let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.current_len);
         if let Some((first_key, last_key)) = self
@@ -341,8 +337,8 @@ impl EncodedSsTableBuilder {
         if let Some(transformer) = self.block_transformer.clone() {
             block_builder = block_builder.with_block_transformer(transformer);
         }
-        if let Some(alignment) = self.block_alignment {
-            block_builder = block_builder.with_block_alignment(alignment);
+        if self.block_alignment {
+            block_builder = block_builder.with_block_alignment(self.block_size);
         }
         let block = block_builder.build().await?;
         let block_meta = BlockMeta::create(
@@ -459,7 +455,7 @@ impl EncodedSsTableBuilder {
     }
 
     pub(crate) fn is_drained(&self) -> bool {
-        self.builder.as_ref().is_none_or(|block| block.is_empty())
+        self.builder.is_empty()
     }
 }
 
@@ -536,7 +532,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let padded = SsTableFormat {
-            block_alignment: Some(4096),
+            block_alignment: true,
             ..unpadded.clone()
         };
 
@@ -554,16 +550,6 @@ mod tests {
             );
         }
 
-        // an alignment of one pads nothing, so it must match no alignment
-        let unit = SsTableFormat {
-            block_alignment: Some(1),
-            ..unpadded.clone()
-        };
-        assert_eq!(
-            unit.estimate_encoded_size_compacted(1_000, 32_000),
-            unpadded.estimate_encoded_size_compacted(1_000, 32_000)
-        );
-
         // WAL SSTs are never padded
         assert_eq!(
             padded.estimate_encoded_size_wal(1_000, 32_000),
@@ -572,11 +558,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case::unpadded(None, 3089)]
-    #[case::padded(Some(64), 2747)]
+    #[case::unpadded(false, 3089)]
+    #[case::padded(true, 2491)]
     #[tokio::test]
     async fn test_estimate_vs_actual_encoded_size(
-        #[case] block_alignment: Option<usize>,
+        #[case] block_alignment: bool,
         #[case] expected_compacted_diff: i64,
     ) {
         use crate::paths::PathResolver;
@@ -889,7 +875,7 @@ mod tests {
         const ALIGNMENT: usize = 64;
         let format = SsTableFormat {
             block_size: ALIGNMENT,
-            block_alignment: Some(ALIGNMENT),
+            block_alignment: true,
             compression_codec: compression,
             ..SsTableFormat::default()
         };
@@ -934,7 +920,7 @@ mod tests {
         const ALIGNMENT: usize = 64;
         let format = SsTableFormat {
             block_size: ALIGNMENT,
-            block_alignment: Some(ALIGNMENT),
+            block_alignment: true,
             ..SsTableFormat::default()
         };
         let mut builder = format.table_builder();
@@ -960,7 +946,7 @@ mod tests {
         const ALIGNMENT: usize = 64;
         let format = SsTableFormat {
             block_size: ALIGNMENT,
-            block_alignment: Some(ALIGNMENT),
+            block_alignment: true,
             ..SsTableFormat::default()
         };
         let mut builder = format.table_builder();
@@ -985,7 +971,7 @@ mod tests {
         const ALIGNMENT: usize = 64;
         let format = SsTableFormat {
             block_size: ALIGNMENT,
-            block_alignment: Some(ALIGNMENT),
+            block_alignment: true,
             ..SsTableFormat::default()
         };
         let sst = build_test_sst(&format, 4).await;
@@ -1157,7 +1143,7 @@ mod tests {
     async fn test_wal_table_builder_ignores_block_alignment() {
         let format = SsTableFormat {
             block_size: 64,
-            block_alignment: Some(64),
+            block_alignment: true,
             ..SsTableFormat::default()
         };
         let mut builder = format.wal_table_builder();
@@ -1193,7 +1179,7 @@ mod tests {
         const WORKLOADS: [(usize, usize, usize); 4] =
             [(50, 16, 16), (500, 16, 64), (5000, 16, 16), (200, 100, 200)];
         for block_size in [1024usize, 4096] {
-            for block_alignment in [None, Some(512), Some(4096)] {
+            for block_alignment in [false, true] {
                 for (entry_num, key_len, value_len) in WORKLOADS {
                     let format = SsTableFormat {
                         block_size,
@@ -1222,7 +1208,7 @@ mod tests {
                     assert!(
                         (0.8..=1.5).contains(&ratio),
                         "estimate {estimate} is {ratio:.2} times the actual {actual} \
-                         [block_size={block_size}, alignment={block_alignment:?}, \
+                         [block_size={block_size}, alignment={block_alignment}, \
                          entries={entry_num}, key={key_len}, value={value_len}]"
                     );
                 }
