@@ -194,7 +194,8 @@ impl EncodedWalSsTableBuilder {
 
         let new_builder = BlockBuilder::new_latest(self.block_size_config);
         let builder = std::mem::replace(&mut self.block_builder, new_builder);
-        let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.data_size);
+        let mut block_builder =
+            EncodedSsTableBlockBuilder::new(builder, self.data_size, self.block_size_config, false);
         if let Some(codec) = self.compression_codec {
             block_builder = block_builder.with_compression_codec(codec);
         }

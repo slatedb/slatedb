@@ -295,27 +295,28 @@ pub(crate) struct EncodedSsTableBlockBuilder {
     compression_codec: Option<CompressionCodec>,
     /// transformer for transforming the data block (e.g. encryption)
     block_transformer: Option<Arc<dyn BlockTransformer>>,
-    /// pad the encoded block to a multiple of this many bytes; None means
-    /// no alignment
-    alignment: Option<usize>,
+    /// the block size the encoded block is padded to when aligned
+    block_size: usize,
+    /// pad the encoded block with zeros to a multiple of `block_size`
+    block_alignment: bool,
 }
 
 impl EncodedSsTableBlockBuilder {
-    pub(crate) fn new(block_builder: BlockBuilder, offset: u64) -> Self {
+    pub(crate) fn new(
+        block_builder: BlockBuilder,
+        offset: u64,
+        block_size: usize,
+        block_alignment: bool,
+    ) -> Self {
         Self {
             block_builder,
             offset,
             key_span: None,
             compression_codec: None,
             block_transformer: None,
-            alignment: None,
+            block_size,
+            block_alignment,
         }
-    }
-
-    /// Pads the encoded block with zeros to a multiple of `alignment` bytes.
-    pub(crate) fn with_block_alignment(mut self, alignment: usize) -> Self {
-        self.alignment = Some(alignment);
-        self
     }
 
     /// Sets the first and last key of the block
@@ -347,8 +348,8 @@ impl EncodedSsTableBlockBuilder {
             self.block_transformer.as_ref(),
         )
         .await?;
-        if let Some(alignment) = self.alignment {
-            let padded_len = encoded_len.next_multiple_of(alignment);
+        if self.block_alignment {
+            let padded_len = encoded_len.next_multiple_of(self.block_size);
             compressed_and_transformed_block.resize(padded_len, 0);
         }
         Ok(EncodedSsTableBlock {

@@ -323,7 +323,12 @@ impl EncodedSsTableBuilder {
         let new_builder = self.new_block_builder();
         let old_builder = std::mem::replace(&mut self.builder, new_builder);
         let (builder, block_stats) = old_builder.into_parts();
-        let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.current_len);
+        let mut block_builder = EncodedSsTableBlockBuilder::new(
+            builder,
+            self.current_len,
+            self.block_size,
+            self.block_alignment,
+        );
         if let Some((first_key, last_key)) = self
             .current_block_first_key
             .take()
@@ -336,9 +341,6 @@ impl EncodedSsTableBuilder {
         }
         if let Some(transformer) = self.block_transformer.clone() {
             block_builder = block_builder.with_block_transformer(transformer);
-        }
-        if self.block_alignment {
-            block_builder = block_builder.with_block_alignment(self.block_size);
         }
         let block = block_builder.build().await?;
         let block_meta = BlockMeta::create(
