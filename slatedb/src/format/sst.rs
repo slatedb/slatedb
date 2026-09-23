@@ -277,9 +277,9 @@ pub(crate) fn block_capacity(
     transformer_overhead: usize,
 ) -> usize {
     match block_alignment {
-        Some(alignment) if pads(alignment) => {
-            block_size.saturating_sub(CHECKSUM_SIZE + transformer_overhead)
-        }
+        Some(alignment) if pads(alignment) => block_size
+            .saturating_sub(CHECKSUM_SIZE + transformer_overhead)
+            .max(1),
         _ => block_size,
     }
 }
@@ -1308,7 +1308,8 @@ mod tests {
         // An alignment that pads nothing must not shrink the block.
         assert_eq!(block_capacity(4096, Some(1), 0), 4096);
         assert_eq!(block_capacity(4096, Some(0), 0), 4096);
-        // A block smaller than the checksum must not underflow.
-        assert_eq!(block_capacity(2, Some(4096), 0), 0);
+        // A block smaller than its trailer keeps a capacity of one, so the
+        // estimator never divides by it.
+        assert_eq!(block_capacity(2, Some(4096), 0), 1);
     }
 }
