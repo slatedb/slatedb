@@ -189,6 +189,12 @@ pub trait BlockTransformer: Send + Sync {
 
     /// Decode (inverse transform) block data after retrieval.
     async fn decode(&self, data: Bytes) -> Result<Bytes, crate::error::Error>;
+
+    /// Bytes `encode` adds to a block when that count is constant, such as a
+    /// nonce and a tag. Zero when it is not.
+    fn encoded_overhead(&self) -> usize {
+        0
+    }
 }
 
 impl SsTableInfo {
@@ -262,11 +268,18 @@ pub(crate) fn encoded_len_for_index(
 /// Bytes a data block holds before it is closed, counting the entries, their
 /// offsets and the offset count.
 ///
-/// With alignment on, the block leaves room for its checksum so that a full
-/// block does not spill into the next padding unit.
-pub(crate) fn block_capacity(block_size: usize, block_alignment: Option<usize>) -> usize {
+/// With alignment on, the block leaves room for its checksum and for the
+/// transformer's declared overhead, so that a full block does not spill into
+/// the next padding unit.
+pub(crate) fn block_capacity(
+    block_size: usize,
+    block_alignment: Option<usize>,
+    transformer_overhead: usize,
+) -> usize {
     match block_alignment {
-        Some(alignment) if pads(alignment) => block_size.saturating_sub(CHECKSUM_SIZE),
+        Some(alignment) if pads(alignment) => {
+            block_size.saturating_sub(CHECKSUM_SIZE + transformer_overhead)
+        }
         _ => block_size,
     }
 }
@@ -1122,7 +1135,13 @@ impl SsTableFormat {
             .estimate_entry_size_encoded_and_number_of_blocks(
                 entry_num,
                 estimated_entries_size,
-                block_capacity(self.block_size, self.block_alignment),
+                block_capacity(
+                    self.block_size,
+                    self.block_alignment,
+                    self.block_transformer
+                        .as_ref()
+                        .map_or(0, |t| t.encoded_overhead()),
+                ),
             );
 
         let data_blocks_size = Block::estimate_size_in_sst(
@@ -1279,13 +1298,17 @@ mod tests {
     }
 
     #[test]
-    fn test_block_capacity_leaves_room_for_the_checksum() {
-        assert_eq!(block_capacity(4096, None), 4096);
-        assert_eq!(block_capacity(4096, Some(4096)), 4096 - CHECKSUM_SIZE);
+    fn test_block_capacity_leaves_room_for_the_checksum_and_transformer_overhead() {
+        assert_eq!(block_capacity(4096, None, 0), 4096);
+        assert_eq!(block_capacity(4096, Some(4096), 0), 4096 - CHECKSUM_SIZE);
+        assert_eq!(
+            block_capacity(4096, Some(4096), 28),
+            4096 - CHECKSUM_SIZE - 28
+        );
         // An alignment that pads nothing must not shrink the block.
-        assert_eq!(block_capacity(4096, Some(1)), 4096);
-        assert_eq!(block_capacity(4096, Some(0)), 4096);
+        assert_eq!(block_capacity(4096, Some(1), 0), 4096);
+        assert_eq!(block_capacity(4096, Some(0), 0), 4096);
         // A block smaller than the checksum must not underflow.
-        assert_eq!(block_capacity(2, Some(4096)), 0);
+        assert_eq!(block_capacity(2, Some(4096), 0), 0);
     }
 }

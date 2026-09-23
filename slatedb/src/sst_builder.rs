@@ -197,7 +197,13 @@ impl EncodedSsTableBuilder {
     }
 
     fn new_block_builder(&self) -> BlockBuilderWithStats {
-        let capacity = block_capacity(self.block_size, self.block_alignment);
+        let capacity = block_capacity(
+            self.block_size,
+            self.block_alignment,
+            self.block_transformer
+                .as_ref()
+                .map_or(0, |t| t.encoded_overhead()),
+        );
         let builder = match self.block_format {
             BlockFormat::V1 => BlockBuilder::new_v1(capacity),
             BlockFormat::V2 => BlockBuilder::new_v2(capacity),

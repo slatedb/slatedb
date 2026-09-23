@@ -472,6 +472,12 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
         self.settings.validate()?;
+        if self.sst_block_alignment && self.settings.compression_codec.is_some() {
+            return Err(SlateDBError::InvalidConfiguration(
+                "sst_block_alignment cannot be combined with compression_codec".into(),
+            )
+            .into());
+        }
 
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
@@ -1649,6 +1655,12 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
     }
 
     pub async fn build(self) -> Result<CompactionWorker, crate::Error> {
+        if self.sst_block_alignment && self.options.compression_codec.is_some() {
+            return Err(SlateDBError::InvalidConfiguration(
+                "sst_block_alignment cannot be combined with compression_codec".into(),
+            )
+            .into());
+        }
         let path: Path = self.path.into();
         let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
         let compactions_store =
