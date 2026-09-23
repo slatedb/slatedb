@@ -572,7 +572,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::unpadded(None, 3021)]
+    #[case::unpadded(None, 3089)]
     #[case::padded(Some(64), 2747)]
     #[tokio::test]
     async fn test_estimate_vs_actual_encoded_size(
@@ -688,7 +688,7 @@ mod tests {
             "wal",
             format.estimate_encoded_size_wal(num_entries, estimated_entries_size),
             wal_actual_size,
-            4023,
+            3931,
         );
     }
 
@@ -910,7 +910,12 @@ mod tests {
                 .iter()
                 .all(|byte| *byte == 0));
             assert_eq!(block_metas.get(i).offset(), block.offset);
-            assert_eq!(block_metas.get(i).encoded_len() as usize, block.encoded_len);
+            let recorded_len = if block.padded_len() == block.encoded_len {
+                0
+            } else {
+                u32::try_from(block.encoded_len).unwrap()
+            };
+            assert_eq!(block_metas.get(i).encoded_len(), recorded_len);
             let read_block = format
                 .read_block_raw(&sst.info, &index, i, &bytes)
                 .await
@@ -1677,7 +1682,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(104, index.size());
+        assert_eq!(88, index.size());
     }
 
     #[tokio::test]

@@ -250,19 +250,17 @@ impl EncodedSsTableBlock {
 /// The value a block of `encoded_len` bytes, occupying `padded_len` bytes on
 /// disk, puts in `BlockMeta::encoded_len`.
 ///
-/// A block over 4 GiB does not fit the field. An unpadded block reports zero
-/// instead, because the reader then derives the same length from the offset
-/// of the next block. A padded block cannot, because that derivation would
-/// include the padding.
+/// A padded block records its length, which must fit the field. An unpadded
+/// block leaves the field at its default of zero: the reader derives its
+/// length from the offset of the next block.
 pub(crate) fn encoded_len_for_index(
     encoded_len: usize,
     padded_len: usize,
 ) -> Result<u32, SlateDBError> {
-    match u32::try_from(encoded_len) {
-        Ok(len) => Ok(len),
-        Err(_) if padded_len == encoded_len => Ok(0),
-        Err(_) => Err(SlateDBError::InvalidDBState),
+    if padded_len == encoded_len {
+        return Ok(0);
     }
+    u32::try_from(encoded_len).map_err(|_| SlateDBError::InvalidDBState)
 }
 
 /// Bytes a data block holds before it is closed, counting the entries, their
@@ -1154,6 +1152,7 @@ impl SsTableFormat {
             data_blocks_size,
             number_of_blocks,
             guess_at_average_first_key_size_bytes,
+            self.block_alignment,
         );
         ans += self.estimate_encoded_size_filter(entry_num);
 
@@ -1183,7 +1182,7 @@ impl SsTableFormat {
         let data_blocks_size =
             Block::estimate_size_in_sst(entry_num, entries_size_encoded, number_of_blocks, None);
 
-        self.estimate_size_index_metadata(data_blocks_size, number_of_blocks, SEQNUM_SIZE)
+        self.estimate_size_index_metadata(data_blocks_size, number_of_blocks, SEQNUM_SIZE, None)
     }
 
     fn estimate_entry_size_encoded_and_number_of_blocks(
@@ -1209,13 +1208,18 @@ impl SsTableFormat {
         data_blocks_size: usize,
         number_of_blocks: usize,
         average_first_key_size: usize,
+        block_alignment: Option<usize>,
     ) -> usize {
         let mut ans = data_blocks_size;
 
-        // estimate sum of Index
+        // estimate sum of Index; padded blocks also record their length
         let guess_at_average_first_key_size_bytes = average_first_key_size;
+        let encoded_len_size = match block_alignment {
+            Some(alignment) if pads(alignment) => SIZEOF_U32,
+            _ => 0,
+        };
         ans += number_of_blocks
-            * (guess_at_average_first_key_size_bytes + OFFSET_SIZE + SIZEOF_U32)
+            * (guess_at_average_first_key_size_bytes + OFFSET_SIZE + encoded_len_size)
             + CHECKSUM_SIZE;
 
         // estimate sum of Metadata (SsTableInfo)
@@ -1285,10 +1289,11 @@ mod tests {
     fn test_encoded_len_for_index() {
         let over_u32 = u32::MAX as usize + 1;
 
-        assert_eq!(encoded_len_for_index(4096, 4096).unwrap(), 4096);
+        // Padded blocks record their length; unpadded blocks record nothing,
+        // since the next offset gives the reader the same length.
         assert_eq!(encoded_len_for_index(3600, 4096).unwrap(), 3600);
-        // Too large for the field, but unpadded, so the next offset gives the
-        // reader the same length.
+        assert_eq!(encoded_len_for_index(4096, 4096).unwrap(), 0);
+        assert_eq!(encoded_len_for_index(3600, 3600).unwrap(), 0);
         assert_eq!(encoded_len_for_index(over_u32, over_u32).unwrap(), 0);
         // Too large and padded, so no value in the field is correct.
         assert!(matches!(

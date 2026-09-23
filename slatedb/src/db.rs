@@ -5619,12 +5619,16 @@ mod tests {
         };
         for (i, (offset, encoded_len)) in layout.iter().enumerate() {
             assert_eq!(offset % alignment, 0, "block {i} starts off boundary");
-            let end = layout.get(i + 1).map_or(data_end, |(next, _)| *next);
-            assert_eq!(
-                end - offset,
-                encoded_len.next_multiple_of(alignment),
-                "block {i} is not padded to a whole unit"
-            );
+            let unit = layout.get(i + 1).map_or(data_end, |(next, _)| *next) - offset;
+            assert_eq!(unit % alignment, 0, "block {i} is not a whole unit");
+            // A block that filled its unit exactly records no length.
+            if *encoded_len > 0 {
+                assert_eq!(
+                    unit,
+                    encoded_len.next_multiple_of(alignment),
+                    "block {i} is not padded to its unit"
+                );
+            }
         }
         assert_eq!(
             data_end % alignment,
@@ -5634,18 +5638,13 @@ mod tests {
         layout.len()
     }
 
-    /// Asserts no block of `handle` is followed by padding. Returns the
-    /// number of blocks it checked, as `assert_sst_is_padded` does.
+    /// Asserts no block of `handle` records a length, which only padded
+    /// blocks do. Returns the number of blocks it checked, as
+    /// `assert_sst_is_padded` does.
     async fn assert_sst_is_unpadded(db: &Db, handle: &SsTableHandle) -> usize {
         let layout = block_layout(db, handle).await;
-        let data_end = if handle.info.filter_len > 0 {
-            handle.info.filter_offset
-        } else {
-            handle.info.index_offset
-        };
-        for (i, (offset, encoded_len)) in layout.iter().enumerate() {
-            let end = layout.get(i + 1).map_or(data_end, |(next, _)| *next);
-            assert_eq!(end - offset, *encoded_len, "block {i} is padded");
+        for (i, (_, encoded_len)) in layout.iter().enumerate() {
+            assert_eq!(*encoded_len, 0, "block {i} is padded");
         }
         layout.len()
     }
@@ -5773,9 +5772,8 @@ mod tests {
     /// One database holds SSTs written before and after the alignment was
     /// turned on, and reads both.
     ///
-    /// Both kinds carry `encoded_len`, because this build writes it either
-    /// way. `test_read_blocks_from_index_without_encoded_len` covers an
-    /// index that does not, which is what an older writer leaves behind.
+    /// The SSTs written before the flag was on carry no `encoded_len`, so
+    /// they look exactly like the output of a writer that predates the field.
     #[tokio::test]
     async fn test_db_reads_mixed_padded_and_unpadded_ssts() {
         const ALIGNMENT: u64 = 1024;

@@ -97,9 +97,9 @@ table BlockMeta {
     // First key contained in the block.
     first_key: [ubyte] (required);
 
-    // Length of the encoded block at `offset`: its bytes after any
-    // compression and transformation, plus the checksum. Zero in SSTs
-    // written before this field existed.
+    // Length of the encoded block at `offset`: its bytes after any compression
+    // and transformation, plus the checksum. Unset (default to zero) when the
+    // block is not padded, so its length is the distance to the next block.
     encoded_len: uint;
 }
 
