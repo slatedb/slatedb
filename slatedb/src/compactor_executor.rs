@@ -2181,6 +2181,108 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn incremental_resume_reads_only_retained_inputs() {
+        use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
+        use crate::incremental_progress::IncrementalProgress;
+        use std::collections::HashSet;
+
+        let (executor, table_store, rx) = subcompaction_env(
+            "testdb-incremental-resume",
+            #[cfg(feature = "compaction_filters")]
+            None,
+        )
+        .await;
+        let (_, sorted_runs) = split_inputs(&table_store).await;
+        let baseline = executor
+            .inner
+            .plan_and_execute_compaction_job(job_with_subcompactions(
+                vec![],
+                sorted_runs.clone(),
+                four_ranges(),
+            ))
+            .await
+            .unwrap();
+        let expected = read_run_entries(&table_store, &baseline).await;
+        let snapshots = collect_snapshots(&rx);
+        let sources = sorted_runs
+            .iter()
+            .map(|run| SourceId::SortedRun(run.id))
+            .collect::<Vec<_>>();
+        let original_ids = sorted_runs
+            .iter()
+            .flat_map(|run| run.sst_views().iter().map(|view| view.sst.id))
+            .collect::<HashSet<_>>();
+        let mut core = ManifestCore::new();
+        Arc::make_mut(&mut core.tree).compacted = sorted_runs;
+        let mut resume_job = None;
+        let mut released = HashSet::new();
+        for snapshot in snapshots {
+            if snapshot.iter().all(|sub| sub.completed()) {
+                break;
+            }
+            let job = Compaction::new(
+                Ulid::new(),
+                CompactionSpec::new(sources.clone(), sources.last().unwrap().unwrap_sorted_run()),
+            )
+            .with_ctx(Some(CompactionContext::new(snapshot, Some(0))));
+            let progress = IncrementalProgress::from_compaction(&job);
+            progress
+                .apply_to_manifest_core(
+                    &mut core,
+                    job.spec(),
+                    &DbRand::default(),
+                    &DefaultSystemClock::new(),
+                )
+                .unwrap();
+            for order in [IterationOrder::Ascending, IterationOrder::Descending] {
+                let mut visible = Vec::new();
+                for run in &core.tree.compacted {
+                    let mut iter = SortedRunIterator::new_owned_initialized(
+                        ..,
+                        run.clone(),
+                        table_store.clone(),
+                        SstIteratorOptions {
+                            order,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    while let Some(entry) = iter.next().await.unwrap() {
+                        visible.push(entry);
+                    }
+                }
+                visible.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| b.seq.cmp(&a.seq)));
+                assert_eq!(visible, expected);
+            }
+            let retained = core
+                .all_sst_views()
+                .map(|view| view.sst.id)
+                .collect::<HashSet<_>>();
+            released = original_ids.difference(&retained).copied().collect();
+            if !released.is_empty() && job.subcompactions().iter().any(|sub| sub.completed()) {
+                resume_job = Some(job);
+                break;
+            }
+        }
+        let job = resume_job.expect("expected incremental progress that releases inputs");
+        for id in released {
+            table_store.delete_sst(&id).await.unwrap();
+        }
+        let remaining = job.get_sorted_runs(&core);
+        let resumed = executor
+            .inner
+            .plan_and_execute_compaction_job(job_with_subcompactions(
+                vec![],
+                remaining,
+                job.subcompactions().clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(read_run_entries(&table_store, &resumed).await, expected);
+    }
+
     /// When one subcompaction fails, the job must abort its sibling ranges and
     /// report the failure (rather than hanging on them or committing partial
     /// output). A compaction filter errors only on keys in the upper part of

@@ -141,6 +141,7 @@ mod flatbuffer_types;
 mod flush;
 mod format;
 mod garbage_collector;
+mod incremental_progress;
 mod instrumented_object_store;
 mod iter;
 mod mem_table;
