@@ -382,6 +382,10 @@ impl CompactionContext {
             .set_output_ssts(output_ssts);
     }
 
+    pub(crate) fn mark_completed(&mut self, subcompaction: usize) {
+        self.subcompactions[subcompaction].mark_completed();
+    }
+
     /// Returns the subcompactions of this compaction, if any.
     pub fn subcompactions(&self) -> &Vec<Subcompaction> {
         &self.subcompactions
@@ -406,6 +410,17 @@ impl CompactionContext {
             .iter()
             .zip(updated.subcompactions.iter())
         {
+            assert!(
+                !prev.completed() || next.completed(),
+                "completed subcompactions must remain complete"
+            );
+            if prev.completed() {
+                assert_eq!(
+                    prev.output_ssts().len(),
+                    next.output_ssts().len(),
+                    "completed subcompaction output SSTs must not change"
+                );
+            }
             assert_eq!(
                 prev.range(),
                 next.range(),
@@ -688,8 +703,7 @@ impl Display for Compaction {
         }
         // TODO: fix me by implementing Display for CompactionJob
         if !self.subcompactions().is_empty() {
-            // Subcompactions carry no status, so report how many ranges have
-            // produced output so far rather than a completion count.
+            // Count ranges with stored output, including unfinished ranges.
             let with_output = self
                 .subcompactions()
                 .iter()
@@ -1352,6 +1366,40 @@ mod tests {
             CompactionSpec::new(vec![SourceId::SortedRun(1)], 1),
         )
         .with_ctx(Some(CompactionContext::new(subcompactions, Some(0))))
+    }
+
+    #[test]
+    #[should_panic(expected = "completed subcompactions must remain complete")]
+    fn test_subcompaction_completion_cannot_revert() {
+        let completed = CompactionContext::new(
+            vec![Subcompaction::new(BytesRange::unbounded())
+                .with_status(crate::subcompaction::SubcompactionStatus::Completed)],
+            Some(42),
+        );
+        let incomplete =
+            CompactionContext::new(vec![Subcompaction::new(BytesRange::unbounded())], Some(42));
+        completed.validate_update(&incomplete);
+    }
+
+    #[test]
+    #[should_panic(expected = "completed subcompaction output SSTs must not change")]
+    fn test_should_panic_when_completed_subcompaction_output_ssts_change() {
+        // given: a completed subcompaction that recorded output SST "a"
+        let range = BytesRange::unbounded();
+        let sst = test_subcompaction_sst(b"a");
+        let mut compaction =
+            test_compaction_with_subcompactions(vec![Subcompaction::new(range.clone())
+                .with_output_ssts(vec![sst.clone()])
+                .with_status(crate::subcompaction::SubcompactionStatus::Completed)]);
+
+        // when/then: adding an output SST to the completed range panics, even
+        // though the new list starts with the old list
+        set_test_subcompactions(
+            &mut compaction,
+            vec![Subcompaction::new(range)
+                .with_output_ssts(vec![sst, test_subcompaction_sst(b"m")])
+                .with_status(crate::subcompaction::SubcompactionStatus::Completed)],
+        );
     }
 
     #[test]
