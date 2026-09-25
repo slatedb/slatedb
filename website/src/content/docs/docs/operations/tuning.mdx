@@ -46,7 +46,7 @@ SlateDB provides several configuration options to tune performance. See [slatedb
 * **`flush_interval`**: How long SlateDB waits before flushing the mutable WAL to object storage. Lower values reduce durable write latency but increase object-store PUT frequency.
 * **`l0_sst_size_bytes`**: The size of L0 SSTs. Larger SSTs provide better compression but take longer to upload.
 * **`max_unflushed_bytes`**: The total amount of unflushed WAL and memtable data allowed in memory before SlateDB applies backpressure to writers.
-* **`l0_max_ssts`**: The maximum number of L0 SSTs SlateDB allows before it stops flushing memtables and waits for compaction to catch up.
+* **`l0_max_ssts`**: The maximum number of L0 SSTs SlateDB allows before it stops flushing memtables and waits for compaction to catch up. When SlateDB uses the size-tiered scheduler, this value must be at least the scheduler's `min_compaction_sources` value.
 
 Writes go through a single batch-writer task, which by default runs on a worker thread, so a write from another thread pays a cross-thread hand-off. **`DbBuilder::with_write_runtime(...)`** places that task on a current-thread runtime the writing thread also drives, turning the hand-off into a task switch — a large win for single- or low-concurrency writers, with no regression as concurrency rises. See [`examples/write_runtime.rs`](https://github.com/slatedb/slatedb/blob/main/examples/src/write_runtime.rs).
 

@@ -134,6 +134,7 @@ use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
+use crate::config::SizeTieredCompactionSchedulerOptions;
 use crate::config::{CompactionWorkerOptions, CompactorOptions};
 use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
@@ -492,6 +493,12 @@ impl<P: Into<Path>> DbBuilder<P> {
             )
             .into());
         }
+        let compactor_options = match &self.compactor_builder {
+            Some(builder) if builder.scheduler_supplier.is_none() => Some(&builder.options),
+            Some(_) => None,
+            None => self.settings.compactor_options.as_ref(),
+        };
+        validate_size_tiered_l0_thresholds(&self.settings, compactor_options)?;
 
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
@@ -1216,6 +1223,25 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             self.wal_gc,
         )
     }
+}
+
+fn validate_size_tiered_l0_thresholds(
+    settings: &Settings,
+    compactor_options: Option<&CompactorOptions>,
+) -> Result<(), crate::Error> {
+    let Some(compactor_options) = compactor_options else {
+        return Ok(());
+    };
+    let scheduler_options =
+        SizeTieredCompactionSchedulerOptions::from(&compactor_options.scheduler_options);
+    if settings.l0_max_ssts < scheduler_options.min_compaction_sources {
+        return Err(SlateDBError::InvalidConfiguration(format!(
+            "l0_max_ssts ({}) must be at least min_compaction_sources ({})",
+            settings.l0_max_ssts, scheduler_options.min_compaction_sources
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 /// The compactor coordinator handler and optional embedded worker handler produced by
@@ -2555,6 +2581,64 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("max_wal_flushes_before_l0_flush must be at least 4096"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_db_builder_rejects_l0_max_ssts_below_min_compaction_sources() {
+        let result = crate::Db::builder(
+            "test_db_builder_rejects_l0_max_ssts_below_min_compaction_sources",
+            Arc::new(InMemory::new()),
+        )
+        .with_settings(Settings {
+            l0_max_ssts: 2,
+            ..Settings::default()
+        })
+        .build()
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("expected invalid l0_max_ssts to fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err.kind(), ErrorKind::Invalid));
+        assert!(
+            err.to_string()
+                .contains("l0_max_ssts (2) must be at least min_compaction_sources (4)"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_db_builder_rejects_custom_compactor_with_low_l0_max_ssts() {
+        let object_store = Arc::new(InMemory::new());
+        let result = crate::Db::builder(
+            "test_db_builder_rejects_custom_compactor_with_low_l0_max_ssts",
+            object_store.clone(),
+        )
+        .with_settings(Settings {
+            l0_max_ssts: 2,
+            compactor_options: None,
+            ..Settings::default()
+        })
+        .with_compactor_builder(crate::CompactorBuilder::new(
+            "test_db_builder_rejects_custom_compactor_with_low_l0_max_ssts",
+            object_store,
+        ))
+        .build()
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("expected invalid custom compactor to fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err.kind(), ErrorKind::Invalid));
+        assert!(
+            err.to_string()
+                .contains("l0_max_ssts (2) must be at least min_compaction_sources (4)"),
             "unexpected error: {err}"
         );
     }
