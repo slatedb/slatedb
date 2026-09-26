@@ -425,14 +425,12 @@ for older binaries.
   IDs suffice for this scope. Explicit metadata can support more complex
   dependencies in future designs.
 - Adopt Pebble-style L0 sublevels and flush splitting for independent key-range
-  compactions. This approach can fit the coordinator/worker architecture, but
+  compactions. This approach can fit the coordinator/worker architecture, and
   its inputs need not form a contiguous suffix in L0 age order. Independent
   commits therefore require a larger watermark redesign to track individual
-  removals without dropping unrelated inputs. Sublevels alone do not require
-  this redesign. Supporting those commits changes writer/compactor manifest
-  merging, recovery, and the associated GC protections. This broader
-  change to carries more implementation risk for SlateDB than ordered batches,
-  which preserve the existing watermark model.
+  removals without dropping unrelated inputs. Supporting those commits changes 
+  writer/compactor manifest merging, recovery, and the associated GC protections. 
+
 
 ## Open Questions
 
