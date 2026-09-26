@@ -370,9 +370,9 @@ SlateDB features and components that this RFC interacts with:
 
 ## Performance and cost 
 
-Users deciding to opt in to this feature should expect to see throughput increase in hot segments for L0 compactions which can also mitigate backpressure triggers during write heavy workloads. Since parallelizing L0+SR compactions is out of scope for this RFC, it is not expected that backpressure triggers would be eliminated completely, but instead cut down in occurence.
+Users deciding to opt in to this feature should expect to see throughput increase in hot segments for L0 compactions which can also mitigate backpressure triggers during write heavy workloads. Since parallelizing L0+SR compactions is out of scope for this RFC, it is not expected that backpressure triggers would be eliminated completely, but instead cut down in occurrence.
 
-Since compaction workers would have more work to claim at any point in time, the user may incurr heaftier cost-per-unit-time than running L0 compactions serially within a segment. For this reason, the option is left to the user and should not cause increase in cost-per-unit-time if opting out via `max_concurrent_l0_compactions_per_segment=1`.
+Since compaction workers would have more work to claim at any point in time, the user may incur heaftier cost-per-unit-time than running L0 compactions serially within a segment. For this reason, the option is left to the user and should not cause increase in cost-per-unit-time if opting out via `max_concurrent_l0_compactions_per_segment=1`.
 
 ## Operations
 
