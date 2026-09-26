@@ -1,10 +1,12 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::{future::BoxFuture, FutureExt};
 use log::error;
 use slatedb_common::metrics::CounterFn;
 use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
@@ -27,11 +29,15 @@ use crate::{
 
 enum FetchTask {
     InFlight(JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
+    // Exclusive iterator access polls through get_mut; no lock is held over await.
+    Inline(parking_lot::Mutex<BoxFuture<'static, Result<VecDeque<Arc<Block>>, SlateDBError>>>),
     Finished(VecDeque<Arc<Block>>),
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct SstIteratorOptions {
+    /// Only point-read callers opt in; even exact-key scans keep task prefetch.
+    pub(crate) inline_point_read: bool,
     pub(crate) max_fetch_tasks: usize,
     pub(crate) target_bytes_to_fetch: usize,
     pub(crate) cache_blocks: bool,
@@ -46,6 +52,7 @@ pub(crate) struct SstIteratorOptions {
 impl Default for SstIteratorOptions {
     fn default() -> Self {
         SstIteratorOptions {
+            inline_point_read: false,
             max_fetch_tasks: 1,
             target_bytes_to_fetch: 1,
             cache_blocks: true,
@@ -438,8 +445,9 @@ impl<'a> InternalSstIterator<'a> {
         table: &'a SsTableView,
         key: &'a [u8],
         table_store: Arc<TableStore>,
-        options: SstIteratorOptions,
+        mut options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
+        options.inline_point_read = true;
         Self::new_borrowed(
             BytesRange::from_slice(key..=key),
             table,
@@ -481,18 +489,22 @@ impl<'a> InternalSstIterator<'a> {
                     let cache_blocks = self.options.cache_blocks;
                     let segment = self.options.segment.clone();
                     let blocks_end = blocks.end;
-                    self.fetch_tasks
-                        .push_back(FetchTask::InFlight(tokio::spawn(async move {
-                            table_store
-                                .read_blocks_using_index(
-                                    &table,
-                                    index,
-                                    blocks,
-                                    cache_blocks,
-                                    segment,
-                                )
-                                .await
-                        })));
+                    let single_block = blocks.len() == 1 && self.options.target_bytes_to_fetch == 1;
+                    let read = async move {
+                        table_store
+                            .read_blocks_using_index(&table, index, blocks, cache_blocks, segment)
+                            .await
+                    };
+                    let fetch = if self.options.inline_point_read
+                        && self.view.point_key().is_some()
+                        && self.options.max_fetch_tasks == 1
+                        && single_block
+                    {
+                        FetchTask::Inline(parking_lot::Mutex::new(Box::pin(read)))
+                    } else {
+                        FetchTask::InFlight(tokio::spawn(read))
+                    };
+                    self.fetch_tasks.push_back(fetch);
                     self.next_block_idx_to_fetch = blocks_end;
                 }
             }
@@ -548,6 +560,15 @@ impl<'a> InternalSstIterator<'a> {
             }
             if let Some(fetch_task) = self.fetch_tasks.front_mut() {
                 match fetch_task {
+                    FetchTask::Inline(read) => {
+                        // Keep the future in the queue if the caller cancels this
+                        // next/init await: the block cursor has already advanced.
+                        let blocks = AssertUnwindSafe(read.get_mut())
+                            .catch_unwind()
+                            .await
+                            .map_err(|panic| block_fetch_panic_error(panic, sst_id))??;
+                        *fetch_task = FetchTask::Finished(blocks);
+                    }
                     FetchTask::InFlight(jh) => {
                         let blocks = jh
                             .await
@@ -1203,18 +1224,23 @@ impl RowEntryIterator for SstIterator<'_> {
 /// so the iterator reports the cancellation to its caller instead of panicking
 /// the task that is awaiting the fetch.
 fn block_fetch_join_error(join_err: tokio::task::JoinError, sst_id: SsTableId) -> SlateDBError {
-    let task_name = format!("sst_block_fetch[{:?}]", sst_id);
     match join_err.try_into_panic() {
-        Ok(panic_err) => {
-            error!(
-                "sst block fetch task panicked unexpectedly. [task_name={}, panic={}]",
-                task_name,
-                panic_string(&panic_err),
-            );
-            SlateDBError::BackgroundTaskPanic(task_name)
-        }
-        Err(_) => SlateDBError::BackgroundTaskCancelled(task_name),
+        Ok(panic_err) => block_fetch_panic_error(panic_err, sst_id),
+        Err(_) => SlateDBError::BackgroundTaskCancelled(format!("sst_block_fetch[{:?}]", sst_id)),
     }
+}
+
+fn block_fetch_panic_error(
+    panic_err: Box<dyn std::any::Any + Send>,
+    sst_id: SsTableId,
+) -> SlateDBError {
+    let task_name = format!("sst_block_fetch[{:?}]", sst_id);
+    error!(
+        "sst block fetch task panicked unexpectedly. [task_name={}, panic={}]",
+        task_name,
+        panic_string(&panic_err),
+    );
+    SlateDBError::BackgroundTaskPanic(task_name)
 }
 
 #[cfg(test)]
@@ -1237,7 +1263,7 @@ mod tests {
     use crate::test_utils::{assert_kv, SpanRecorder};
     use crate::types::{KeyValue, ValueDeletable};
     use object_store::path::Path;
-    use object_store::{memory::InMemory, ObjectStore};
+    use object_store::{memory::InMemory, ObjectStore, ObjectStoreExt};
     use rstest::rstest;
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
@@ -2081,6 +2107,7 @@ mod tests {
             &sst,
             table_store.clone(),
             SstIteratorOptions {
+                inline_point_read: false,
                 max_fetch_tasks: 32,
                 target_bytes_to_fetch: 256 * 128,
                 cache_blocks: true,
@@ -2101,6 +2128,7 @@ mod tests {
             &sst,
             table_store.clone(),
             SstIteratorOptions {
+                inline_point_read: false,
                 max_fetch_tasks: 1,
                 target_bytes_to_fetch: 1,
                 cache_blocks: true,
@@ -2736,6 +2764,7 @@ mod tests {
         let end_key = b"key079";
 
         let sst_iter_options = SstIteratorOptions {
+            inline_point_read: false,
             max_fetch_tasks: 3,
             target_bytes_to_fetch: 3 * 128,
             cache_blocks: true,
@@ -3042,6 +3071,7 @@ mod tests {
             &sst,
             table_store.clone(),
             SstIteratorOptions {
+                inline_point_read: false,
                 max_fetch_tasks: 1,
                 target_bytes_to_fetch: 1,
                 cache_blocks: true,
@@ -3487,5 +3517,363 @@ mod tests {
         );
         let (positives, negatives, _) = verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE);
         assert_eq!((positives, negatives), (Some(0), Some(1)));
+    }
+
+    struct PointReadCache {
+        inner: TestCache,
+        mode: std::sync::atomic::AtomicU8,
+        started: std::sync::atomic::AtomicUsize,
+        dropped: Arc<std::sync::atomic::AtomicUsize>,
+        release: tokio::sync::Notify,
+    }
+
+    struct PointReadDrop(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for PointReadDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl DbCache for PointReadCache {
+        async fn get_block(
+            &self,
+            key: &crate::db_cache::CachedKey,
+        ) -> Result<Option<crate::db_cache::CachedEntry>, crate::Error> {
+            use std::sync::atomic::Ordering::SeqCst;
+            match self.mode.load(SeqCst) {
+                1 => {
+                    self.started.fetch_add(1, SeqCst);
+                    let _drop = PointReadDrop(self.dropped.clone());
+                    self.release.notified().await;
+                }
+                2 => panic!("point block read panic control"),
+                _ => {}
+            }
+            self.inner.get_block(key).await
+        }
+        async fn get_index(
+            &self,
+            key: &crate::db_cache::CachedKey,
+        ) -> Result<Option<crate::db_cache::CachedEntry>, crate::Error> {
+            self.inner.get_index(key).await
+        }
+        async fn get_filter(
+            &self,
+            key: &crate::db_cache::CachedKey,
+        ) -> Result<Option<crate::db_cache::CachedEntry>, crate::Error> {
+            self.inner.get_filter(key).await
+        }
+        async fn get_stats(
+            &self,
+            key: &crate::db_cache::CachedKey,
+        ) -> Result<Option<crate::db_cache::CachedEntry>, crate::Error> {
+            self.inner.get_stats(key).await
+        }
+        async fn insert(
+            &self,
+            key: crate::db_cache::CachedKey,
+            value: crate::db_cache::CachedEntry,
+        ) {
+            self.inner.insert(key, value).await;
+        }
+        async fn remove(&self, key: &crate::db_cache::CachedKey) {
+            self.inner.remove(key).await;
+        }
+        fn entry_count(&self) -> u64 {
+            self.inner.entry_count()
+        }
+    }
+
+    fn point_read_cache() -> Arc<PointReadCache> {
+        Arc::new(PointReadCache {
+            inner: TestCache::new(),
+            mode: std::sync::atomic::AtomicU8::new(0),
+            started: std::sync::atomic::AtomicUsize::new(0),
+            dropped: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+
+    async fn point_read_fixture() -> (
+        Arc<TableStore>,
+        SsTableView,
+        Arc<PointReadCache>,
+        Arc<dyn ObjectStore>,
+    ) {
+        let cache = point_read_cache();
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let table_store = Arc::new(TableStore::new(
+            object_store.clone(),
+            SsTableFormat::default(),
+            Path::from("point-inline"),
+            Some(cache.clone()),
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let sst = build_single_block_sst(&table_store, &[b"k"]).await;
+        let mut warm = SstIterator::for_key_with_stats_initialized(
+            &sst,
+            b"k",
+            table_store.clone(),
+            SstIteratorOptions::default(),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(warm.next().await.unwrap().unwrap().key.as_ref(), b"k");
+        drop(warm);
+        (table_store, sst, cache, object_store)
+    }
+
+    async fn evict_point_blocks(cache: &PointReadCache) {
+        for key in cache.inner.keys() {
+            if cache
+                .inner
+                .get_block(&key)
+                .await
+                .unwrap()
+                .and_then(|entry| entry.block())
+                .is_some()
+            {
+                cache.inner.remove(&key).await;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn point_inline_retains_pending_read_when_init_is_cancelled() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (store, sst, cache, _) = point_read_fixture().await;
+        evict_point_blocks(&cache).await;
+        cache.mode.store(1, SeqCst);
+        let mut iter =
+            SstIterator::for_key_with_stats(&sst, b"k", store, SstIteratorOptions::default(), None)
+                .unwrap()
+                .unwrap();
+        {
+            let mut init = Box::pin(iter.init());
+            assert!(futures::poll!(init.as_mut()).is_pending());
+            assert_eq!(cache.started.load(SeqCst), 1);
+        }
+        assert_eq!(
+            cache.dropped.load(SeqCst),
+            0,
+            "the iterator must retain the pending block future"
+        );
+        cache.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), iter.init())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"k");
+        assert_eq!(
+            cache.started.load(SeqCst),
+            1,
+            "retry must poll the original future"
+        );
+        assert_eq!(cache.dropped.load(SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn point_inline_drop_releases_pending_read() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (store, sst, cache, _) = point_read_fixture().await;
+        cache.mode.store(1, SeqCst);
+        let mut iter =
+            SstIterator::for_key_with_stats(&sst, b"k", store, SstIteratorOptions::default(), None)
+                .unwrap()
+                .unwrap();
+        {
+            let mut init = Box::pin(iter.init());
+            assert!(futures::poll!(init.as_mut()).is_pending());
+            assert_eq!(cache.started.load(SeqCst), 1);
+        }
+        assert_eq!(cache.dropped.load(SeqCst), 0);
+        drop(iter);
+        assert_eq!(
+            cache.dropped.load(SeqCst),
+            1,
+            "dropping a point iterator must drop its direct pending read"
+        );
+    }
+
+    #[tokio::test]
+    async fn point_inline_preserves_block_panic_error() {
+        let (store, sst, cache, _) = point_read_fixture().await;
+        cache.mode.store(2, std::sync::atomic::Ordering::SeqCst);
+        let mut iter =
+            SstIterator::for_key_with_stats(&sst, b"k", store, SstIteratorOptions::default(), None)
+                .unwrap()
+                .unwrap();
+        assert!(matches!(
+            iter.init().await,
+            Err(SlateDBError::BackgroundTaskPanic(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn point_inline_preserves_missing_and_corrupt_block_errors() {
+        use futures::TryStreamExt;
+        for corrupt in [false, true] {
+            let (store, sst, cache, object_store) = point_read_fixture().await;
+            evict_point_blocks(&cache).await;
+            let objects: Vec<_> = object_store.list(None).try_collect().await.unwrap();
+            assert_eq!(objects.len(), 1);
+            let object = &objects[0];
+            if corrupt {
+                object_store
+                    .put(
+                        &object.location,
+                        Bytes::from(vec![0; object.size as usize]).into(),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                object_store.delete(&object.location).await.unwrap();
+            }
+            let mut iter = SstIterator::for_key_with_stats(
+                &sst,
+                b"k",
+                store,
+                SstIteratorOptions::default(),
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(
+                iter.init().await.is_err(),
+                "missing/corrupt data must not deliver a row"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn point_inline_keeps_scans_descending_and_prefetch_spawned() {
+        let (store, sst, _, _) = point_read_fixture().await;
+        let dead = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let handle = dead.handle().clone();
+        dead.shutdown_background();
+        let cases = [
+            (false, IterationOrder::Ascending, 1, 1),
+            (true, IterationOrder::Descending, 1, 1),
+            (true, IterationOrder::Ascending, 2, 1),
+            (true, IterationOrder::Ascending, 1, 2),
+        ];
+        for (inline_point_read, order, max_fetch_tasks, target_bytes_to_fetch) in cases {
+            let options = SstIteratorOptions {
+                inline_point_read,
+                order,
+                max_fetch_tasks,
+                target_bytes_to_fetch,
+                ..SstIteratorOptions::default()
+            };
+            let mut iter = SstIterator::new_owned(
+                Bytes::from_static(b"k")..=Bytes::from_static(b"k"),
+                sst.clone(),
+                store.clone(),
+                options,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            let result = {
+                let _entered = handle.enter();
+                iter.init().await
+            };
+            assert!(matches!(
+                result,
+                Err(SlateDBError::BackgroundTaskCancelled(_))
+            ));
+        }
+        // A broad scan clipped to this singleton SST must also stay spawned.
+        let mut scan = SstIterator::new_owned(.., sst, store, SstIteratorOptions::default(), None)
+            .unwrap()
+            .unwrap();
+        let result = {
+            let _entered = handle.enter();
+            scan.init().await
+        };
+        assert!(matches!(
+            result,
+            Err(SlateDBError::BackgroundTaskCancelled(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn point_inline_reads_all_versions_after_cancelled_next() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let cache = point_read_cache();
+        let store = Arc::new(TableStore::new(
+            Arc::new(InMemory::new()),
+            SsTableFormat {
+                block_size: 128,
+                ..SsTableFormat::default()
+            },
+            Path::from("point-versions"),
+            Some(cache.clone()),
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let mut builder = store.table_builder();
+        for seq in (1..=20).rev() {
+            builder
+                .add(RowEntry::new_value(b"k", &[seq as u8; 128], seq))
+                .await
+                .unwrap();
+        }
+        builder
+            .add(RowEntry::new_value(b"z", b"adjacent", 1))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
+        let sst = SsTableView::identity(
+            store
+                .write_sst(&test_sst_id(1), &encoded, None)
+                .await
+                .unwrap(),
+        );
+        let index = store
+            .read_index(&sst.sst, true, None, &ReadTrace::new(None), None)
+            .await
+            .unwrap();
+        assert_eq!(index.borrow().block_meta().len(), 21);
+        let mut iter = SstIterator::for_key_with_stats_initialized(
+            &sst,
+            b"k",
+            store,
+            SstIteratorOptions::default(),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(iter.next().await.unwrap().unwrap().seq, 20);
+        cache.mode.store(1, SeqCst);
+        {
+            let mut next = Box::pin(iter.next());
+            assert!(futures::poll!(next.as_mut()).is_pending());
+            assert_eq!(cache.started.load(SeqCst), 1);
+        }
+        assert_eq!(cache.dropped.load(SeqCst), 0);
+        cache.mode.store(0, SeqCst);
+        cache.release.notify_one();
+        for seq in (1..20).rev() {
+            let entry = tokio::time::timeout(std::time::Duration::from_secs(2), iter.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(entry.key.as_ref(), b"k");
+            assert_eq!(entry.seq, seq);
+        }
+        assert_eq!(cache.started.load(SeqCst), 1);
+        assert_eq!(cache.dropped.load(SeqCst), 1);
+        assert!(iter.next().await.unwrap().is_none());
     }
 }
