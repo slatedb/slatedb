@@ -177,6 +177,13 @@ impl ManifestWriter {
         )
     }
 
+    /// Enqueues a manifest poll whose completion is reported only as
+    /// [`TrackerMessage::ManifestRefreshed`].
+    pub(crate) fn request_poll(&self) -> Result<(), SlateDBError> {
+        self.commands_tx
+            .send(ManifestWriterCommand::PollManifest { done: None })
+    }
+
     /// Enqueues a manifest poll; the result is delivered to `sender` on completion.
     pub(crate) fn send_poll(
         &self,

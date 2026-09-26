@@ -35,6 +35,10 @@ use ulid::Ulid;
 
 const UPLOADER_TASK_NAME: &str = "l0_sst_uploader";
 
+/// A failed L0 upload retries after `manifest_poll_interval`, capped here so
+/// a long poll interval does not stretch upload retries.
+const MAX_UPLOAD_RETRY_BACKOFF: Duration = Duration::from_secs(1);
+
 // `BufWriter` wraps an `object_store::Error` inside `std::io::Error` through
 // `AsyncWrite`. Find the original error before applying the shared retry rule.
 // Without this step, `NotSupported` can retry forever.
@@ -164,7 +168,10 @@ impl Uploader {
         tracker_tx: SafeSender<TrackerMessage>,
     ) -> Vec<Box<dyn MessageHandler<UploadJob>>> {
         let parallelism = db.settings.l0_flush_parallelism;
-        let retry_backoff = db.settings.manifest_poll_interval;
+        let retry_backoff = db
+            .settings
+            .manifest_poll_interval
+            .min(MAX_UPLOAD_RETRY_BACKOFF);
         (0..parallelism)
             .map(|_| {
                 Box::new(UploadHandler::new(

@@ -31,8 +31,14 @@ use crate::utils::IdGenerator;
 use fail_parallel::fail_point;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::oneshot;
 use ulid::Ulid;
+
+/// While dispatch is blocked on L0 backpressure, the tracker asks the
+/// manifest writer to poll at this interval, so a freed L0 slot is seen
+/// independently of `manifest_poll_interval`.
+pub(crate) const L0_STALL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 macro_rules! memtable_flush_stat_name {
     ($suffix:expr) => {
@@ -95,6 +101,8 @@ pub(crate) enum TrackerMessage {
     PollManifest {
         sender: oneshot::Sender<Result<(), SlateDBError>>,
     },
+    /// Periodic check that polls the manifest while dispatch is L0-stalled.
+    L0StallTick,
 }
 
 impl std::fmt::Debug for TrackerMessage {
@@ -115,6 +123,7 @@ impl std::fmt::Debug for TrackerMessage {
             }
             Self::ManifestRefreshed => write!(f, "ManifestRefreshed"),
             Self::PollManifest { .. } => write!(f, "PollManifest"),
+            Self::L0StallTick => write!(f, "L0StallTick"),
         }
     }
 }
@@ -125,6 +134,10 @@ pub(super) struct FlushTracker {
     manifest_writer: ManifestWriter,
     frontier: TrackedImmFrontier,
     stats: FlushTrackerStats,
+    /// True while the oldest pending memtable is refused by `can_dispatch`.
+    l0_stalled: bool,
+    /// True from a stall poll's request until the next `ManifestRefreshed`.
+    stall_poll_in_flight: bool,
 }
 
 impl FlushTracker {
@@ -140,12 +153,29 @@ impl FlushTracker {
             manifest_writer,
             frontier: TrackedImmFrontier::new(),
             stats,
+            l0_stalled: false,
+            stall_poll_in_flight: false,
         }
     }
 }
 
 #[async_trait]
 impl MessageHandler<TrackerMessage> for FlushTracker {
+    fn tickers(&mut self) -> Vec<crate::dispatcher::MessageTickerDef<TrackerMessage>> {
+        // A writer whose poll interval is already shorter than the stall
+        // tick needs no faster tick; a longer one is capped so a stall never
+        // waits on it.
+        let interval = self
+            .inner
+            .settings
+            .manifest_poll_interval
+            .min(L0_STALL_POLL_INTERVAL);
+        vec![crate::dispatcher::MessageTickerDef::new(
+            interval,
+            Box::new(|| TrackerMessage::L0StallTick),
+        )]
+    }
+
     async fn handle(&mut self, message: TrackerMessage) -> Result<(), SlateDBError> {
         match message {
             TrackerMessage::MemtableFrozen => {
@@ -176,9 +206,17 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
             }
             TrackerMessage::ManifestRefreshed => {
                 self.stats.manifest_refresh_count.increment(1);
+                self.stall_poll_in_flight = false;
                 self.reconcile_and_dispatch().await
             }
             TrackerMessage::PollManifest { sender } => self.manifest_writer.send_poll(sender),
+            TrackerMessage::L0StallTick => {
+                if self.l0_stalled && !self.stall_poll_in_flight {
+                    self.stall_poll_in_flight = true;
+                    self.manifest_writer.request_poll()?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -341,9 +379,11 @@ impl FlushTracker {
                 .iter()
                 .position(|t| matches!(t.state, TrackedImmState::PendingDispatch));
             let Some(idx) = next_idx else {
+                self.l0_stalled = false;
                 return Ok(());
             };
             if !self.can_dispatch(&self.frontier.tracked[idx].imm_memtable) {
+                self.l0_stalled = true;
                 return Ok(());
             }
             self.frontier.tracked[idx].state = TrackedImmState::Uploading;
@@ -1202,6 +1242,56 @@ mod tests {
                 .unwrap();
             assert_eq!(result.durable_seq, 1);
         }
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_learn_of_compacted_l0_without_waiting_for_manifest_poll_interval() {
+        let settings = Settings {
+            l0_max_ssts: 1,
+            manifest_poll_interval: Duration::from_secs(60),
+            ..Settings::default()
+        };
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_l0_stall_poll",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        set_local_l0_len(&harness, 1);
+        let compacted_view = {
+            let guard = harness.inner.state.read();
+            guard.state().core().tree.l0.front().unwrap().clone()
+        };
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 41);
+
+        let flush = flusher.flush(FlushTarget::All);
+        tokio::pin!(flush);
+        assert!(timeout(Duration::from_millis(300), &mut flush)
+            .await
+            .is_err());
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        let tree = Arc::make_mut(&mut dirty.value.core.tree);
+        tree.l0.clear();
+        tree.last_compacted_l0_sst_view_id = Some(compacted_view.id);
+        tree.last_compacted_l0_sst_id = Some(compacted_view.sst.id.value());
+        stored_manifest.update(dirty).await.unwrap();
+
+        let result = timeout(Duration::from_secs(1), &mut flush)
+            .await
+            .expect("a stalled writer must learn of the compaction within the stall poll")
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
 
         flusher.shutdown().await;
     }
