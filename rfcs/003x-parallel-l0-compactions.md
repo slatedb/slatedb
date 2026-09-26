@@ -439,7 +439,8 @@ for older binaries.
 - Do Pebble-style key-range compactions improve throughput or read amplification
   enough over ordered batches to justify the larger watermark redesign and its
   implementation risk? Compactinh contiguous suffixes of l0 are not without 
-  implementation risk either e.g. head of line blocking.
+  implementation risk either e.g. head of line blocking (distributed compaction 
+  makes this more manageable).
 
 ## References
 
