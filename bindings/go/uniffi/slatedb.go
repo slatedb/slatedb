@@ -518,6 +518,33 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_run_compaction_worker()
+		})
+		if checksum != 9437 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_run_compaction_worker: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_run_compactor()
+		})
+		if checksum != 27150 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_run_compactor: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_run_gc()
+		})
+		if checksum != 41658 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_run_gc: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_admin_run_gc_once()
 		})
 		if checksum != 14634 {
@@ -811,6 +838,24 @@ func uniffiCheckChecksums() {
 		if checksum != 2290 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_cancellationtoken_cancel()
+		})
+		if checksum != 41759 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_cancellationtoken_cancel: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_cancellationtoken_is_cancelled()
+		})
+		if checksum != 63511 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_cancellationtoken_is_cancelled: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1796,6 +1841,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_cancellationtoken_new()
+		})
+		if checksum != 40185 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_cancellationtoken_new: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_foyer_cache()
 		})
 		if checksum != 16480 {
@@ -2324,6 +2378,26 @@ type AdminInterface interface {
 	ReadManifest(id *uint64) (*VersionedManifest, error)
 	// Refresh the lifetime of an existing checkpoint.
 	RefreshCheckpoint(id string, lifetimeMs *uint64) error
+	// Runs a standalone compaction worker in the foreground until
+	// `cancellation_token` is cancelled, then shuts it down and returns.
+	//
+	// The worker's options are `settings.compactor_options.worker`. When
+	// `settings` is `None`, or carries no worker options, SlateDB's default
+	// worker options are used.
+	RunCompactionWorker(cancellationToken *CancellationToken, settings **Settings) error
+	// Runs the compactor in the foreground until `cancellation_token` is
+	// cancelled, then shuts it down and returns.
+	//
+	// The compactor's options are `settings.compactor_options`, so a compactor
+	// process reads the same settings as the database it compacts. When
+	// `settings` is `None`, or carries no `compactor_options`, SlateDB's
+	// default compactor options are used.
+	RunCompactor(cancellationToken *CancellationToken, settings **Settings) error
+	// Runs the garbage collector in the foreground until `cancellation_token`
+	// is cancelled, then shuts it down and returns.
+	//
+	// When `options` is `None`, SlateDB's default garbage collector options are used.
+	RunGc(cancellationToken *CancellationToken, options *GarbageCollectorOptions) error
 	// Runs the garbage collector once with the provided options.
 	//
 	// When `options` is `None`, SlateDB's default garbage collector options are used.
@@ -2822,6 +2896,116 @@ func (_self *Admin) RefreshCheckpoint(id string, lifetimeMs *uint64) error {
 	return err
 }
 
+// Runs a standalone compaction worker in the foreground until
+// `cancellation_token` is cancelled, then shuts it down and returns.
+//
+// The worker's options are `settings.compactor_options.worker`. When
+// `settings` is `None`, or carries no worker options, SlateDB's default
+// worker options are used.
+func (_self *Admin) RunCompactionWorker(cancellationToken *CancellationToken, settings **Settings) error {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_admin_run_compaction_worker(
+			_pointer, FfiConverterCancellationTokenINSTANCE.Lower(cancellationToken), FfiConverterOptionalSettingsINSTANCE.Lower(settings)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+// Runs the compactor in the foreground until `cancellation_token` is
+// cancelled, then shuts it down and returns.
+//
+// The compactor's options are `settings.compactor_options`, so a compactor
+// process reads the same settings as the database it compacts. When
+// `settings` is `None`, or carries no `compactor_options`, SlateDB's
+// default compactor options are used.
+func (_self *Admin) RunCompactor(cancellationToken *CancellationToken, settings **Settings) error {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_admin_run_compactor(
+			_pointer, FfiConverterCancellationTokenINSTANCE.Lower(cancellationToken), FfiConverterOptionalSettingsINSTANCE.Lower(settings)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+// Runs the garbage collector in the foreground until `cancellation_token`
+// is cancelled, then shuts it down and returns.
+//
+// When `options` is `None`, SlateDB's default garbage collector options are used.
+func (_self *Admin) RunGc(cancellationToken *CancellationToken, options *GarbageCollectorOptions) error {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_admin_run_gc(
+			_pointer, FfiConverterCancellationTokenINSTANCE.Lower(cancellationToken), FfiConverterOptionalGarbageCollectorOptionsINSTANCE.Lower(options)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
 // Runs the garbage collector once with the provided options.
 //
 // When `options` is `None`, SlateDB's default garbage collector options are used.
@@ -3069,6 +3253,105 @@ func LowerToExternalAdminBuilder(value *AdminBuilder) uint64 {
 type FfiDestroyerAdminBuilder struct{}
 
 func (_ FfiDestroyerAdminBuilder) Destroy(value *AdminBuilder) {
+	value.Destroy()
+}
+
+// A handle that stops a foreground `Admin` loop such as `run_gc` or
+// `run_compactor`. Cancelling is idempotent and may happen from any thread
+// before or after the loop starts; a loop started with an already cancelled
+// token shuts down at once.
+type CancellationTokenInterface interface {
+	// Requests shutdown of every loop holding this token.
+	Cancel()
+	IsCancelled() bool
+}
+
+// A handle that stops a foreground `Admin` loop such as `run_gc` or
+// `run_compactor`. Cancelling is idempotent and may happen from any thread
+// before or after the loop starts; a loop started with an already cancelled
+// token shuts down at once.
+type CancellationToken struct {
+	ffiObject FfiObject
+}
+
+func NewCancellationToken() *CancellationToken {
+	return FfiConverterCancellationTokenINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_cancellationtoken_new(_uniffiStatus)
+	}))
+}
+
+// Requests shutdown of every loop holding this token.
+func (_self *CancellationToken) Cancel() {
+	_pointer := _self.ffiObject.incrementPointer("*CancellationToken")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_cancellationtoken_cancel(
+			_pointer, _uniffiStatus)
+		return false
+	})
+}
+
+func (_self *CancellationToken) IsCancelled() bool {
+	_pointer := _self.ffiObject.incrementPointer("*CancellationToken")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_slatedb_uniffi_fn_method_cancellationtoken_is_cancelled(
+			_pointer, _uniffiStatus)
+	}))
+}
+func (object *CancellationToken) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterCancellationToken struct{}
+
+var FfiConverterCancellationTokenINSTANCE = FfiConverterCancellationToken{}
+
+func (c FfiConverterCancellationToken) Lift(handle C.uint64_t) *CancellationToken {
+	result := &CancellationToken{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_cancellationtoken(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_cancellationtoken(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*CancellationToken).Destroy)
+	return result
+}
+
+func (c FfiConverterCancellationToken) Read(reader io.Reader) *CancellationToken {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterCancellationToken) Lower(value *CancellationToken) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*CancellationToken")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterCancellationToken) Write(writer io.Writer, value *CancellationToken) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalCancellationToken(handle uint64) *CancellationToken {
+	return FfiConverterCancellationTokenINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalCancellationToken(value *CancellationToken) uint64 {
+	return uint64(FfiConverterCancellationTokenINSTANCE.Lower(value))
+}
+
+type FfiDestroyerCancellationToken struct{}
+
+func (_ FfiDestroyerCancellationToken) Destroy(value *CancellationToken) {
 	value.Destroy()
 }
 
@@ -13766,6 +14049,47 @@ type FfiDestroyerOptionalPrefixExtractor struct{}
 func (_ FfiDestroyerOptionalPrefixExtractor) Destroy(value *PrefixExtractor) {
 	if value != nil {
 		FfiDestroyerPrefixExtractor{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalSettings struct{}
+
+var FfiConverterOptionalSettingsINSTANCE = FfiConverterOptionalSettings{}
+
+func (c FfiConverterOptionalSettings) Lift(rb RustBufferI) **Settings {
+	return LiftFromRustBuffer[**Settings](c, rb)
+}
+
+func (_ FfiConverterOptionalSettings) Read(reader io.Reader) **Settings {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterSettingsINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalSettings) Lower(value **Settings) C.RustBuffer {
+	return LowerIntoRustBuffer[**Settings](c, value)
+}
+
+func (c FfiConverterOptionalSettings) LowerExternal(value **Settings) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[**Settings](c, value))
+}
+
+func (_ FfiConverterOptionalSettings) Write(writer io.Writer, value **Settings) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterSettingsINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalSettings struct{}
+
+func (_ FfiDestroyerOptionalSettings) Destroy(value **Settings) {
+	if value != nil {
+		FfiDestroyerSettings{}.Destroy(*value)
 	}
 }
 

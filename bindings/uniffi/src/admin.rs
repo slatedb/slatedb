@@ -1,6 +1,8 @@
 use crate::builder::CloneBuilder;
+use crate::cancellation::CancellationToken;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::error::{Error, SlateDbError};
+use crate::settings::Settings;
 use crate::types::{
     try_checkpoint_id_from_str, Checkpoint, CheckpointCreateResult, CloneSourceSpec, Compaction,
     CompactionSpec, CompactorStateView, VersionedCompactions, VersionedManifest,
@@ -117,6 +119,67 @@ impl Admin {
         self.inner.run_gc_once(options).await.map_err(Into::into)
     }
 
+    /// Runs the garbage collector in the foreground until `cancellation_token`
+    /// is cancelled, then shuts it down and returns.
+    ///
+    /// When `options` is `None`, SlateDB's default garbage collector options are used.
+    pub async fn run_gc(
+        &self,
+        cancellation_token: Arc<CancellationToken>,
+        options: Option<GarbageCollectorOptions>,
+    ) -> Result<(), Error> {
+        let options = options.map_or_else(
+            slatedb::config::GarbageCollectorOptions::default,
+            Into::into,
+        );
+        self.inner
+            .run_gc_with_options(cancellation_token.inner.clone(), options)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Runs the compactor in the foreground until `cancellation_token` is
+    /// cancelled, then shuts it down and returns.
+    ///
+    /// The compactor's options are `settings.compactor_options`, so a compactor
+    /// process reads the same settings as the database it compacts. When
+    /// `settings` is `None`, or carries no `compactor_options`, SlateDB's
+    /// default compactor options are used.
+    pub async fn run_compactor(
+        &self,
+        cancellation_token: Arc<CancellationToken>,
+        settings: Option<Arc<Settings>>,
+    ) -> Result<(), Error> {
+        let options = settings
+            .and_then(|settings| settings.inner().compactor_options)
+            .unwrap_or_default();
+        self.inner
+            .run_compactor_with_options(cancellation_token.inner.clone(), options)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Runs a standalone compaction worker in the foreground until
+    /// `cancellation_token` is cancelled, then shuts it down and returns.
+    ///
+    /// The worker's options are `settings.compactor_options.worker`. When
+    /// `settings` is `None`, or carries no worker options, SlateDB's default
+    /// worker options are used.
+    pub async fn run_compaction_worker(
+        &self,
+        cancellation_token: Arc<CancellationToken>,
+        settings: Option<Arc<Settings>>,
+    ) -> Result<(), Error> {
+        let options = settings
+            .and_then(|settings| settings.inner().compactor_options)
+            .and_then(|compactor| compactor.worker)
+            .unwrap_or_default();
+        self.inner
+            .run_compaction_worker_with_options(cancellation_token.inner.clone(), options)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Looks up a timestamp for the provided sequence number.
     pub async fn get_timestamp_for_sequence(
         &self,
@@ -195,5 +258,109 @@ impl Admin {
             self.inner
                 .create_clone_builder_from_source(source.try_into()?),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builder::{AdminBuilder, DbBuilder};
+    use crate::object_store::ObjectStore;
+    use std::time::Duration;
+
+    fn memory_store() -> Arc<ObjectStore> {
+        Arc::new(ObjectStore {
+            inner: Arc::new(object_store::memory::InMemory::new()),
+        })
+    }
+
+    async fn admin_over_new_db(path: &str) -> (Arc<Admin>, Arc<ObjectStore>) {
+        let store = memory_store();
+        let db = DbBuilder::new(path.to_owned(), store.clone())
+            .build()
+            .await
+            .unwrap();
+        db.close().await.unwrap();
+        let admin = AdminBuilder::new(path.to_owned(), store.clone())
+            .build()
+            .unwrap();
+        (admin, store)
+    }
+
+    #[tokio::test]
+    async fn run_gc_returns_when_its_token_is_already_cancelled() {
+        let (admin, _) = admin_over_new_db("admin-run-gc-cancelled").await;
+        let token = CancellationToken::new();
+        token.cancel();
+        admin.run_gc(token, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_compactor_returns_when_its_token_is_already_cancelled() {
+        let (admin, _) = admin_over_new_db("admin-run-compactor-cancelled").await;
+        let token = CancellationToken::new();
+        token.cancel();
+        admin.run_compactor(token, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_compaction_worker_returns_when_its_token_is_already_cancelled() {
+        let (admin, _) = admin_over_new_db("admin-run-worker-cancelled").await;
+        let token = CancellationToken::new();
+        token.cancel();
+        admin.run_compaction_worker(token, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_gc_stops_when_cancelled_from_another_task() {
+        let (admin, _) = admin_over_new_db("admin-run-gc-cancel-later").await;
+        let token = CancellationToken::new();
+        let stopper = token.clone();
+        let stop = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            stopper.cancel();
+        });
+        tokio::time::timeout(Duration::from_secs(10), admin.run_gc(token, None))
+            .await
+            .expect("run_gc must return once its token is cancelled")
+            .unwrap();
+        stop.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_compactor_takes_its_options_from_settings() {
+        let (admin, _) = admin_over_new_db("admin-run-compactor-settings").await;
+        let settings = Settings::with_defaults();
+        settings
+            .set(
+                "compactor_options.poll_interval".to_owned(),
+                "\"250ms\"".to_owned(),
+            )
+            .unwrap();
+        settings
+            .set("compactor_options.worker".to_owned(), "null".to_owned())
+            .unwrap();
+        assert_eq!(
+            settings
+                .inner()
+                .compactor_options
+                .as_ref()
+                .map(|options| options.poll_interval),
+            Some(Duration::from_millis(250))
+        );
+        let token = CancellationToken::new();
+        let stopper = token.clone();
+        let stop = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            stopper.cancel();
+        });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            admin.run_compactor(token, Some(settings)),
+        )
+        .await
+        .expect("run_compactor must return once its token is cancelled")
+        .unwrap();
+        stop.await.unwrap();
     }
 }
