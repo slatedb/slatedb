@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::admin::Admin;
+use crate::clock::SystemClock;
 use crate::config::{ReaderMode, ReaderOptions, SstBlockSize};
 use crate::db::Db;
 use crate::db_cache::DbCache;
@@ -77,6 +78,13 @@ impl DbBuilder {
     /// uniqueness and stability across reopens.
     pub fn with_db_cache(&self, db_cache: Arc<DbCache>, db_cache_id: u64) -> Result<(), Error> {
         self.update_builder(|builder| builder.with_db_cache(db_cache.inner.clone(), db_cache_id))
+            .map_err(Into::into)
+    }
+
+    /// Reads wall time from `clock` instead of the process clock: TTL expiry,
+    /// flush and poll ticks. A mock clock makes the database's timers a test's to drive.
+    pub fn with_system_clock(&self, clock: Arc<SystemClock>) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_system_clock(clock.inner.clone()))
             .map_err(Into::into)
     }
 
@@ -212,6 +220,13 @@ impl DbReaderBuilder {
             .map_err(Into::into)
     }
 
+    /// Reads wall time from `clock` instead of the process clock: checkpoint
+    /// lifetimes, manifest polls and TTL visibility.
+    pub fn with_system_clock(&self, clock: Arc<SystemClock>) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_system_clock(clock.inner.clone()))
+            .map_err(Into::into)
+    }
+
     /// Installs an application-defined merge operator used while reading merge rows.
     pub fn with_merge_operator(&self, merge_operator: Arc<dyn MergeOperator>) -> Result<(), Error> {
         self.update_builder(|builder| {
@@ -323,6 +338,13 @@ impl AdminBuilder {
             .map_err(Into::into)
     }
 
+    /// Reads wall time from `clock` instead of the process clock: checkpoint
+    /// expiry, garbage collector and compactor schedule ticks.
+    pub fn with_system_clock(&self, clock: Arc<SystemClock>) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_system_clock(clock.inner.clone()))
+            .map_err(Into::into)
+    }
+
     /// Builds the admin handle and consumes this builder.
     pub fn build(&self) -> Result<Arc<Admin>, Error> {
         let builder = self.take_builder()?;
@@ -396,5 +418,47 @@ impl CloneBuilder {
     pub async fn build(&self) -> Result<(), Error> {
         let builder = self.take_builder()?;
         builder.build().await.map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn writes_are_stamped_by_the_installed_clock() {
+        let object_store = Arc::new(ObjectStore {
+            inner: Arc::new(object_store::memory::InMemory::new()),
+        });
+        let clock = SystemClock::mock(1_000_000);
+        let builder = DbBuilder::new("clocked".to_owned(), object_store);
+        builder.with_system_clock(clock.clone()).unwrap();
+        let db = builder.build().await.unwrap();
+        let first = db.put(b"k".to_vec(), b"v".to_vec()).await.unwrap();
+        assert_eq!(first.create_ts(), 1_000_000);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let second = db.put(b"k".to_vec(), b"w".to_vec()).await.unwrap();
+        assert_eq!(second.create_ts(), 1_000_000);
+        clock.advance(500).await.unwrap();
+        let third = db.put(b"k".to_vec(), b"x".to_vec()).await.unwrap();
+        assert_eq!(third.create_ts(), 1_000_500);
+        db.close().await.unwrap();
+    }
+
+    #[test]
+    fn consumed_builders_refuse_a_clock() {
+        let object_store = Arc::new(ObjectStore {
+            inner: Arc::new(object_store::memory::InMemory::new()),
+        });
+        let clock = SystemClock::default_clock();
+        let reader = DbReaderBuilder::new("db".to_owned(), object_store.clone());
+        reader.with_system_clock(clock.clone()).unwrap();
+        let _ = reader.take_builder().unwrap();
+        assert!(reader.with_system_clock(clock.clone()).is_err());
+        let admin = AdminBuilder::new("db".to_owned(), object_store);
+        admin.with_system_clock(clock.clone()).unwrap();
+        let _ = admin.take_builder().unwrap();
+        assert!(admin.with_system_clock(clock).is_err());
     }
 }
