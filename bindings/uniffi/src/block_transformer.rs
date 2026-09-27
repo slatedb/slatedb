@@ -78,6 +78,24 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn an_unknown_foreign_error_is_a_failed_callback_error() {
+        let error = <BlockTransformerCallbackError as uniffi::ConvertError<crate::UniFfiTag>>::try_convert_unexpected_callback_error(
+            uniffi::UnexpectedUniFFICallbackError::new("decrypt: wrong key"),
+        )
+        .expect("an unknown foreign error must convert instead of panicking the dispatcher");
+        assert!(
+            matches!(&error, BlockTransformerCallbackError::Failed { message } if message == "decrypt: wrong key"),
+            "{error:?}"
+        );
+        let unnamed =
+            BlockTransformerCallbackError::from(uniffi::UnexpectedUniFFICallbackError::new(""));
+        assert!(
+            matches!(&unnamed, BlockTransformerCallbackError::Failed { message } if !message.is_empty()),
+            "{unnamed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn adapter_round_trips_and_names_a_refusal() {
         let flip = adapt_block_transformer(Arc::new(Flip));

@@ -2,6 +2,7 @@ package slatedb_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	slatedb "slatedb.io/slatedb-go/uniffi"
@@ -90,5 +91,49 @@ func TestBlocksWrittenThroughATransformReadBackOnlyThroughIt(t *testing.T) {
 	built.Destroy()
 	if err := admin.WithBlockTransformer(flip{}); err == nil {
 		t.Fatal("a consumed AdminBuilder accepted a transform")
+	}
+}
+
+// wrongKey decodes nothing: it returns a plain Go error, not a
+// BlockTransformerCallbackError, as an application's decrypt failure would.
+type wrongKey struct{}
+
+func (wrongKey) Encode(data []byte) ([]byte, error) { return data, nil }
+
+func (wrongKey) Decode([]byte) ([]byte, error) {
+	return nil, fmt.Errorf("decrypt: wrong key")
+}
+
+// A transformer that fails with an arbitrary error makes the read a data
+// error; it never panics the Rust side.
+func TestATransformersArbitraryErrorIsADataError(t *testing.T) {
+	store := newMemoryStore(t)
+	dbHandle := openTestDB(t, store, nil)
+	if _, err := dbHandle.db.Put([]byte("k"), []byte("v")); err != nil {
+		t.Fatalf("Put(): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(): %v", err)
+	}
+
+	builder := slatedb.NewDbReaderBuilder(testDBPath, store)
+	defer builder.Destroy()
+	if err := builder.WithReaderMode(slatedb.ReaderModeFollowLatest{}); err != nil {
+		t.Fatalf("WithReaderMode(): %v", err)
+	}
+	if err := builder.WithBlockTransformer(wrongKey{}); err != nil {
+		t.Fatalf("WithBlockTransformer(): %v", err)
+	}
+	reader, err := builder.Build()
+	if err == nil {
+		_, err = reader.Get([]byte("k"))
+		_ = reader.Shutdown()
+		reader.Destroy()
+	}
+	if err == nil {
+		t.Fatal("a reader whose transformer fails read a value")
+	}
+	if !errors.Is(err, slatedb.ErrErrorData) {
+		t.Fatalf("a failing transformer surfaced %v, want a data error", err)
 	}
 }
