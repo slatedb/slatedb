@@ -3361,6 +3361,7 @@ dependencies = [
 name = "slatedb-uniffi"
 version = "0.16.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "figment",
  "log",

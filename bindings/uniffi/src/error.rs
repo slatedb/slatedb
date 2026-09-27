@@ -93,6 +93,14 @@ pub enum MergeOperatorCallbackError {
     Failed { message: String },
 }
 
+/// Error returned by a foreign [`crate::BlockTransformer`] implementation.
+#[derive(Debug, Error, uniffi::Error)]
+pub enum BlockTransformerCallbackError {
+    /// The transform failed with an application-defined message.
+    #[error("{message}")]
+    Failed { message: String },
+}
+
 /// Reason a database or reader reports itself as closed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum CloseReason {

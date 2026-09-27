@@ -31,6 +31,8 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+use crate::format::sst::BlockTransformer;
 use ulid::Ulid;
 use uuid::Uuid;
 
@@ -62,6 +64,7 @@ pub struct Admin {
     pub(crate) compaction_filter_supplier:
         Option<Arc<dyn crate::compaction_filter::CompactionFilterSupplier>>,
     pub(crate) merge_operator: Option<MergeOperatorType>,
+    pub(crate) block_transformer: Option<Arc<dyn BlockTransformer>>,
     pub(crate) wal_admin: Arc<dyn WalAdmin>,
 }
 
@@ -395,6 +398,10 @@ impl Admin {
             builder = builder.with_merge_operator(merge_operator.clone());
         }
 
+        if let Some(block_transformer) = &self.block_transformer {
+            builder = builder.with_block_transformer(block_transformer.clone());
+        }
+
         let compactor = builder.build();
 
         compactor.start().await?;
@@ -450,6 +457,10 @@ impl Admin {
         #[cfg(feature = "compaction_filters")]
         if let Some(supplier) = &self.compaction_filter_supplier {
             builder = builder.with_compaction_filter_supplier(supplier.clone());
+        }
+
+        if let Some(block_transformer) = &self.block_transformer {
+            builder = builder.with_block_transformer(block_transformer.clone());
         }
 
         let worker = builder.build().await?;

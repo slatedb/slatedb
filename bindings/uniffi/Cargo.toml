@@ -15,6 +15,7 @@ doc = false
 bench = false
 
 [dependencies]
+async-trait = { workspace = true }
 chrono = { workspace = true }
 log = { workspace = true }
 parking_lot = { workspace = true }

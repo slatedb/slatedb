@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::admin::Admin;
+use crate::block_transformer::{adapt_block_transformer, BlockTransformer};
 use crate::config::{ReaderMode, ReaderOptions, SstBlockSize};
 use crate::db::Db;
 use crate::db_cache::DbCache;
@@ -78,6 +79,19 @@ impl DbBuilder {
     pub fn with_db_cache(&self, db_cache: Arc<DbCache>, db_cache_id: u64) -> Result<(), Error> {
         self.update_builder(|builder| builder.with_db_cache(db_cache.inner.clone(), db_cache_id))
             .map_err(Into::into)
+    }
+
+    /// Transforms every SST block this database writes and reads, for
+    /// encryption at rest. Every reader, compactor and admin of the database
+    /// must carry the same transform.
+    pub fn with_block_transformer(
+        &self,
+        transformer: Arc<dyn BlockTransformer>,
+    ) -> Result<(), Error> {
+        self.update_builder(|builder| {
+            builder.with_block_transformer(adapt_block_transformer(transformer))
+        })
+        .map_err(Into::into)
     }
 
     /// Sets the seed used for SlateDB's internal random number generation.
@@ -212,6 +226,18 @@ impl DbReaderBuilder {
             .map_err(Into::into)
     }
 
+    /// Decodes every SST block this reader fetches with the transform the
+    /// database's writer encodes with.
+    pub fn with_block_transformer(
+        &self,
+        transformer: Arc<dyn BlockTransformer>,
+    ) -> Result<(), Error> {
+        self.update_builder(|builder| {
+            builder.with_block_transformer(adapt_block_transformer(transformer))
+        })
+        .map_err(Into::into)
+    }
+
     /// Installs an application-defined merge operator used while reading merge rows.
     pub fn with_merge_operator(&self, merge_operator: Arc<dyn MergeOperator>) -> Result<(), Error> {
         self.update_builder(|builder| {
@@ -323,6 +349,18 @@ impl AdminBuilder {
             .map_err(Into::into)
     }
 
+    /// The transform the database's blocks are written with, so a compactor
+    /// or compaction worker this admin runs can read and rewrite them.
+    pub fn with_block_transformer(
+        &self,
+        transformer: Arc<dyn BlockTransformer>,
+    ) -> Result<(), Error> {
+        self.update_builder(|builder| {
+            builder.with_block_transformer(adapt_block_transformer(transformer))
+        })
+        .map_err(Into::into)
+    }
+
     /// Builds the admin handle and consumes this builder.
     pub fn build(&self) -> Result<Arc<Admin>, Error> {
         let builder = self.take_builder()?;
@@ -396,5 +434,60 @@ impl CloneBuilder {
     pub async fn build(&self) -> Result<(), Error> {
         let builder = self.take_builder()?;
         builder.build().await.map_err(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_transformer::tests::Flip;
+    use crate::config::{FlushOptions, FlushType, ReaderMode};
+
+    #[tokio::test]
+    async fn blocks_written_through_a_transform_read_back_only_through_it() {
+        let object_store = Arc::new(ObjectStore {
+            inner: Arc::new(object_store::memory::InMemory::new()),
+        });
+        let builder = DbBuilder::new("transformed".to_owned(), object_store.clone());
+        builder.with_block_transformer(Arc::new(Flip)).unwrap();
+        let db = builder.build().await.unwrap();
+        db.put(b"k".to_vec(), b"v".to_vec()).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        assert_eq!(db.get(b"k".to_vec()).await.unwrap(), Some(b"v".to_vec()));
+
+        // A reader without the transform fails at its WAL replay or at its
+        // first block read; either way it reads nothing.
+        let plain = DbReaderBuilder::new("transformed".to_owned(), object_store.clone());
+        plain.with_reader_mode(ReaderMode::FollowLatest).unwrap();
+        match plain.build().await {
+            Err(error) => assert!(matches!(error, Error::Data { .. }), "{error:?}"),
+            Ok(plain) => {
+                assert!(
+                    plain.get(b"k".to_vec()).await.is_err(),
+                    "a reader without the transform read a transformed block"
+                );
+                plain.close().await.unwrap();
+            }
+        }
+
+        let flipped = DbReaderBuilder::new("transformed".to_owned(), object_store.clone());
+        flipped.with_reader_mode(ReaderMode::FollowLatest).unwrap();
+        flipped.with_block_transformer(Arc::new(Flip)).unwrap();
+        let flipped = flipped.build().await.unwrap();
+        assert_eq!(
+            flipped.get(b"k".to_vec()).await.unwrap(),
+            Some(b"v".to_vec())
+        );
+        flipped.close().await.unwrap();
+
+        let admin = AdminBuilder::new("transformed".to_owned(), object_store);
+        admin.with_block_transformer(Arc::new(Flip)).unwrap();
+        let _ = admin.take_builder().unwrap();
+        assert!(admin.with_block_transformer(Arc::new(Flip)).is_err());
+        db.close().await.unwrap();
     }
 }
