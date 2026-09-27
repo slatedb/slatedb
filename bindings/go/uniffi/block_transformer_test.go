@@ -78,20 +78,6 @@ func TestBlocksWrittenThroughATransformReadBackOnlyThroughIt(t *testing.T) {
 	if got, err := flipped.reader.Get([]byte("k")); err != nil || valueOf(got) != "v" {
 		t.Fatalf("Get() through the transforming reader = %q, %v; want v", valueOf(got), err)
 	}
-
-	admin := slatedb.NewAdminBuilder(testDBPath, store)
-	defer admin.Destroy()
-	if err := admin.WithBlockTransformer(flip{}); err != nil {
-		t.Fatalf("AdminBuilder.WithBlockTransformer(): %v", err)
-	}
-	built, err := admin.Build()
-	if err != nil {
-		t.Fatalf("AdminBuilder.Build(): %v", err)
-	}
-	built.Destroy()
-	if err := admin.WithBlockTransformer(flip{}); err == nil {
-		t.Fatal("a consumed AdminBuilder accepted a transform")
-	}
 }
 
 // wrongKey decodes nothing: it returns a plain Go error, not a

@@ -564,15 +564,6 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_block_transformer()
-		})
-		if checksum != 53343 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_block_transformer: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_seed()
 		})
 		if checksum != 52226 {
@@ -665,7 +656,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_block_transformer()
 		})
-		if checksum != 43386 {
+		if checksum != 57975 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_block_transformer: UniFFI API checksum mismatch")
 		}
@@ -3003,9 +2994,6 @@ func (_ FfiDestroyerAdmin) Destroy(value *Admin) {
 type AdminBuilderInterface interface {
 	// Builds the admin handle and consumes this builder.
 	Build() (*Admin, error)
-	// The transform the database's blocks are written with, so a compactor
-	// or compaction worker this admin runs can read and rewrite them.
-	WithBlockTransformer(transformer BlockTransformer) error
 	// Sets the seed used for SlateDB's internal random number generation.
 	WithSeed(seed uint64) error
 	// Uses a separate object store for WAL-backed administrative operations.
@@ -3040,19 +3028,6 @@ func (_self *AdminBuilder) Build() (*Admin, error) {
 	} else {
 		return FfiConverterAdminINSTANCE.Lift(_uniffiRV), nil
 	}
-}
-
-// The transform the database's blocks are written with, so a compactor
-// or compaction worker this admin runs can read and rewrite them.
-func (_self *AdminBuilder) WithBlockTransformer(transformer BlockTransformer) error {
-	_pointer := _self.ffiObject.incrementPointer("*AdminBuilder")
-	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
-		C.uniffi_slatedb_uniffi_fn_method_adminbuilder_with_block_transformer(
-			_pointer, FfiConverterBlockTransformerINSTANCE.Lower(transformer), _uniffiStatus)
-		return false
-	})
-	return _uniffiErr.AsError()
 }
 
 // Sets the seed used for SlateDB's internal random number generation.
@@ -3140,8 +3115,9 @@ func (_ FfiDestroyerAdminBuilder) Destroy(value *AdminBuilder) {
 // wrote; the engine records no transformer identity, key id or format
 // version, so a block that needs one carries it inside its own bytes.
 //
-// The methods run on the engine's runtime threads for the length of the
-// call: a transform is a block's worth of CPU, not a remote call.
+// The engine calls the methods from Tokio's blocking pool, one call per
+// block, so a slow transform holds no runtime worker but still delays the
+// block it transforms.
 type BlockTransformer interface {
 	Encode(data []byte) ([]byte, error)
 	Decode(data []byte) ([]byte, error)
@@ -3153,8 +3129,9 @@ type BlockTransformer interface {
 // wrote; the engine records no transformer identity, key id or format
 // version, so a block that needs one carries it inside its own bytes.
 //
-// The methods run on the engine's runtime threads for the length of the
-// call: a transform is a block's worth of CPU, not a remote call.
+// The engine calls the methods from Tokio's blocking pool, one call per
+// block, so a slow transform holds no runtime worker but still delays the
+// block it transforms.
 type BlockTransformerImpl struct {
 	ffiObject FfiObject
 }
@@ -4750,8 +4727,11 @@ type DbBuilderInterface interface {
 	// Opens the database and consumes this builder.
 	Build() (*Db, error)
 	// Transforms every SST block this database writes and reads, for
-	// encryption at rest. Every reader, compactor and admin of the database
-	// must carry the same transform.
+	// encryption at rest. A `DbReaderBuilder` of the database must carry the
+	// same transform. The bindings run no standalone compactor or compaction
+	// worker, so only this writer's embedded compactor rewrites the blocks;
+	// `SlateDbWalReader` takes no transform, so it cannot read this
+	// database's WAL.
 	WithBlockTransformer(transformer BlockTransformer) error
 	// Sets DB cache. `db_cache_id` isolates this database's entries from any other
 	// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
@@ -4835,8 +4815,11 @@ func (_self *DbBuilder) Build() (*Db, error) {
 }
 
 // Transforms every SST block this database writes and reads, for
-// encryption at rest. Every reader, compactor and admin of the database
-// must carry the same transform.
+// encryption at rest. A `DbReaderBuilder` of the database must carry the
+// same transform. The bindings run no standalone compactor or compaction
+// worker, so only this writer's embedded compactor rewrites the blocks;
+// `SlateDbWalReader` takes no transform, so it cannot read this
+// database's WAL.
 func (_self *DbBuilder) WithBlockTransformer(transformer BlockTransformer) error {
 	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
 	defer _self.ffiObject.decrementPointer()
@@ -12172,6 +12155,7 @@ func (_ FfiDestroyerWriteOptions) Destroy(value WriteOptions) {
 }
 
 // Error returned by a foreign [`crate::BlockTransformer`] implementation.
+// Any other error or exception the foreign method raises becomes `Failed`.
 type BlockTransformerCallbackError struct {
 	err error
 }

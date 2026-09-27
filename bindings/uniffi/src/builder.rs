@@ -82,8 +82,11 @@ impl DbBuilder {
     }
 
     /// Transforms every SST block this database writes and reads, for
-    /// encryption at rest. Every reader, compactor and admin of the database
-    /// must carry the same transform.
+    /// encryption at rest. A `DbReaderBuilder` of the database must carry the
+    /// same transform. The bindings run no standalone compactor or compaction
+    /// worker, so only this writer's embedded compactor rewrites the blocks;
+    /// `SlateDbWalReader` takes no transform, so it cannot read this
+    /// database's WAL.
     pub fn with_block_transformer(
         &self,
         transformer: Arc<dyn BlockTransformer>,
@@ -349,18 +352,6 @@ impl AdminBuilder {
             .map_err(Into::into)
     }
 
-    /// The transform the database's blocks are written with, so a compactor
-    /// or compaction worker this admin runs can read and rewrite them.
-    pub fn with_block_transformer(
-        &self,
-        transformer: Arc<dyn BlockTransformer>,
-    ) -> Result<(), Error> {
-        self.update_builder(|builder| {
-            builder.with_block_transformer(adapt_block_transformer(transformer))
-        })
-        .map_err(Into::into)
-    }
-
     /// Builds the admin handle and consumes this builder.
     pub fn build(&self) -> Result<Arc<Admin>, Error> {
         let builder = self.take_builder()?;
@@ -474,7 +465,7 @@ mod tests {
             }
         }
 
-        let flipped = DbReaderBuilder::new("transformed".to_owned(), object_store.clone());
+        let flipped = DbReaderBuilder::new("transformed".to_owned(), object_store);
         flipped.with_reader_mode(ReaderMode::FollowLatest).unwrap();
         flipped.with_block_transformer(Arc::new(Flip)).unwrap();
         let flipped = flipped.build().await.unwrap();
@@ -483,11 +474,6 @@ mod tests {
             Some(b"v".to_vec())
         );
         flipped.close().await.unwrap();
-
-        let admin = AdminBuilder::new("transformed".to_owned(), object_store);
-        admin.with_block_transformer(Arc::new(Flip)).unwrap();
-        let _ = admin.take_builder().unwrap();
-        assert!(admin.with_block_transformer(Arc::new(Flip)).is_err());
         db.close().await.unwrap();
     }
 }
