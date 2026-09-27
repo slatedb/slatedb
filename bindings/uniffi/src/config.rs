@@ -1,6 +1,7 @@
 use crate::error::{Error, SlateDbError};
 use crate::filter_policy::FilterContext;
 use crate::types::try_checkpoint_id_from_str;
+use crate::wal_reader::positive_usize;
 use std::time::Duration;
 
 /// Minimum durability level required for data returned by reads and scans.
@@ -305,8 +306,14 @@ impl TryFrom<ObjectStoreCacheOptions> for slatedb::config::ObjectStoreCacheOptio
             cache_on_flush: value.cache_on_flush,
             cache_on_compaction: value.cache_on_compaction,
             preload_disk_cache_on_startup: value.preload_disk_cache_on_startup.map(Into::into),
-            scan_interval: value.scan_interval_ms.map(Duration::from_millis),
-            max_open_file_handles: usize_of("max_open_file_handles", value.max_open_file_handles)?,
+            scan_interval: value
+                .scan_interval_ms
+                .map(|ms| positive_usize(ms, "scan_interval_ms").map(|_| Duration::from_millis(ms)))
+                .transpose()?,
+            max_open_file_handles: positive_usize(
+                value.max_open_file_handles,
+                "max_open_file_handles",
+            )?,
         })
     }
 }
@@ -832,5 +839,27 @@ mod reader_options_tests {
             ObjectStoreCacheOptions::default().part_size_bytes,
             default.part_size_bytes as u64
         );
+    }
+
+    #[test]
+    fn zero_max_open_file_handles_is_refused() {
+        let error = slatedb::config::ObjectStoreCacheOptions::try_from(ObjectStoreCacheOptions {
+            root_folder: Some("/tmp/reader-cache".to_owned()),
+            max_open_file_handles: 0,
+            ..ObjectStoreCacheOptions::default()
+        })
+        .expect_err("zero file handles must be refused before the engine panics on it");
+        assert!(matches!(error, Error::Invalid { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn zero_scan_interval_is_refused() {
+        let error = slatedb::config::ObjectStoreCacheOptions::try_from(ObjectStoreCacheOptions {
+            root_folder: Some("/tmp/reader-cache".to_owned()),
+            scan_interval_ms: Some(0),
+            ..ObjectStoreCacheOptions::default()
+        })
+        .expect_err("a zero scan interval must be refused, not spun on");
+        assert!(matches!(error, Error::Invalid { .. }), "{error:?}");
     }
 }

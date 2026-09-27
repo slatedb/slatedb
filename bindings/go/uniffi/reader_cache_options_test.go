@@ -1,6 +1,7 @@
 package slatedb_test
 
 import (
+	"errors"
 	"testing"
 
 	slatedb "slatedb.io/slatedb-go/uniffi"
@@ -47,4 +48,34 @@ func TestReaderOptionsCarryTheObjectStoreCache(t *testing.T) {
 		t.Fatalf("Get() through a reader with a disk cache = %q, %v", valueOf(got), err)
 	}
 
+}
+
+// A zero MaxOpenFileHandles, the Go zero value, is refused as an invalid
+// option instead of panicking inside the engine's file handle cache.
+func TestZeroMaxOpenFileHandlesIsInvalid(t *testing.T) {
+	store := newMemoryStore(t)
+	dbHandle := openTestDB(t, store, nil)
+	if err := dbHandle.db.Shutdown(); err != nil {
+		t.Fatalf("Shutdown(): %v", err)
+	}
+	dbHandle.open = false
+
+	root := t.TempDir()
+	cache := slatedb.ObjectStoreCacheOptions{RootFolder: &root, PartSizeBytes: 4 << 20}
+	builder := slatedb.NewDbReaderBuilder(testDBPath, store)
+	defer builder.Destroy()
+	err := builder.WithOptions(slatedb.ReaderOptions{
+		ManifestPollIntervalMs: 100, CheckpointLifetimeMs: 600_000, MaxMemtableBytes: 64 << 20,
+		ObjectStoreCacheOptions: &cache,
+	})
+	if err == nil {
+		var reader *slatedb.DbReader
+		if reader, err = builder.Build(); err == nil {
+			_ = reader.Shutdown()
+			reader.Destroy()
+		}
+	}
+	if !errors.Is(err, slatedb.ErrErrorInvalid) {
+		t.Fatalf("MaxOpenFileHandles 0 gave %v, want an invalid-argument error", err)
+	}
 }
