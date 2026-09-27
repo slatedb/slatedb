@@ -222,7 +222,7 @@ impl DbReaderBuilder {
 
     /// Applies custom reader options.
     pub fn with_options(&self, options: ReaderOptions) -> Result<(), Error> {
-        let options = options.into();
+        let options: slatedb::config::DbReaderOptions = options.try_into()?;
         self.update_builder(|builder| builder.with_options(options))
             .map_err(Into::into)
     }
