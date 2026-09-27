@@ -2746,4 +2746,25 @@ mod tests {
         );
         db.close().await.expect("failed to close db");
     }
+
+    #[tokio::test]
+    async fn admin_hands_its_hooks_to_the_compactor_and_worker_it_runs() {
+        use super::AdminBuilder;
+        use crate::config::CompactionWorkerOptions;
+        use crate::test_utils::{IdentityBlockTransformer, StringConcatMergeOperator};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let admin = AdminBuilder::new("/tmp/admin_hooks", object_store)
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .with_block_transformer(Arc::new(IdentityBlockTransformer))
+            .build();
+
+        let compactor = admin.compactor_builder(CompactorOptions::default());
+        assert!(compactor.merge_operator.is_some());
+        assert!(compactor.block_transformer.is_some());
+
+        let worker = admin.compaction_worker_builder(CompactionWorkerOptions::default());
+        assert!(worker.merge_operator.is_some());
+        assert!(worker.block_transformer.is_some());
+    }
 }

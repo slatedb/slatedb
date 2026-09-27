@@ -1382,6 +1382,19 @@ impl ObjectStore for GatedObjectStore {
     }
 }
 
+pub(crate) struct IdentityBlockTransformer;
+
+#[async_trait]
+impl crate::format::sst::BlockTransformer for IdentityBlockTransformer {
+    async fn encode(&self, data: Bytes) -> Result<Bytes, crate::Error> {
+        Ok(data)
+    }
+
+    async fn decode(&self, data: Bytes) -> Result<Bytes, crate::Error> {
+        Ok(data)
+    }
+}
+
 pub(crate) struct StringConcatMergeOperator;
 
 impl MergeOperator for StringConcatMergeOperator {

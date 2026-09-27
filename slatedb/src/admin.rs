@@ -380,29 +380,7 @@ impl Admin {
         cancellation_token: CancellationToken,
         options: crate::config::CompactorOptions,
     ) -> Result<(), crate::Error> {
-        #[allow(unused_mut)]
-        let mut builder = crate::CompactorBuilder::new(
-            self.path.clone(),
-            self.object_store(ObjectStoreType::Main).clone(),
-        )
-        .with_options(options)
-        .with_system_clock(self.system_clock.clone())
-        .with_seed(self.rand.rng().next_u64());
-
-        #[cfg(feature = "compaction_filters")]
-        if let Some(supplier) = &self.compaction_filter_supplier {
-            builder = builder.with_compaction_filter_supplier(supplier.clone());
-        }
-
-        if let Some(merge_operator) = &self.merge_operator {
-            builder = builder.with_merge_operator(merge_operator.clone());
-        }
-
-        if let Some(block_transformer) = &self.block_transformer {
-            builder = builder.with_block_transformer(block_transformer.clone());
-        }
-
-        let compactor = builder.build();
+        let compactor = self.compactor_builder(options).build();
 
         compactor.start().await?;
 
@@ -445,6 +423,56 @@ impl Admin {
         cancellation_token: CancellationToken,
         options: crate::config::CompactionWorkerOptions,
     ) -> Result<(), crate::Error> {
+        let worker = self.compaction_worker_builder(options).build().await?;
+
+        worker.start()?;
+
+        tokio::select! {
+            result = worker.join() => result,
+            _ = cancellation_token.cancelled() => {
+                worker.stop().await
+            }
+        }
+    }
+
+    /// The compactor this admin runs carries every hook the admin was built
+    /// with: the compaction filter supplier, the merge operator and the block
+    /// transformer.
+    pub(crate) fn compactor_builder(
+        &self,
+        options: crate::config::CompactorOptions,
+    ) -> crate::CompactorBuilder<Path> {
+        #[allow(unused_mut)]
+        let mut builder = crate::CompactorBuilder::new(
+            self.path.clone(),
+            self.object_store(ObjectStoreType::Main).clone(),
+        )
+        .with_options(options)
+        .with_system_clock(self.system_clock.clone())
+        .with_seed(self.rand.rng().next_u64());
+
+        #[cfg(feature = "compaction_filters")]
+        if let Some(supplier) = &self.compaction_filter_supplier {
+            builder = builder.with_compaction_filter_supplier(supplier.clone());
+        }
+
+        if let Some(merge_operator) = &self.merge_operator {
+            builder = builder.with_merge_operator(merge_operator.clone());
+        }
+
+        if let Some(block_transformer) = &self.block_transformer {
+            builder = builder.with_block_transformer(block_transformer.clone());
+        }
+
+        builder
+    }
+
+    /// The compaction worker this admin runs carries the same hooks as its
+    /// compactor.
+    pub(crate) fn compaction_worker_builder(
+        &self,
+        options: crate::config::CompactionWorkerOptions,
+    ) -> crate::CompactionWorkerBuilder<Path> {
         #[allow(unused_mut)]
         let mut builder = crate::CompactionWorkerBuilder::new(
             self.path.clone(),
@@ -459,20 +487,15 @@ impl Admin {
             builder = builder.with_compaction_filter_supplier(supplier.clone());
         }
 
+        if let Some(merge_operator) = &self.merge_operator {
+            builder = builder.with_merge_operator(merge_operator.clone());
+        }
+
         if let Some(block_transformer) = &self.block_transformer {
             builder = builder.with_block_transformer(block_transformer.clone());
         }
 
-        let worker = builder.build().await?;
-
-        worker.start()?;
-
-        tokio::select! {
-            result = worker.join() => result,
-            _ = cancellation_token.cancelled() => {
-                worker.stop().await
-            }
-        }
+        builder
     }
 
     /// Creates a checkpoint of the db stored in the object store at the specified path using the
@@ -1536,6 +1559,16 @@ mod tests {
             .build();
 
         assert!(admin.merge_operator.is_some());
+    }
+
+    #[test]
+    fn test_admin_builder_with_block_transformer() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let admin = AdminBuilder::new("/tmp/test_block_transformer", object_store)
+            .with_block_transformer(Arc::new(crate::test_utils::IdentityBlockTransformer))
+            .build();
+
+        assert!(admin.block_transformer.is_some());
     }
 
     #[tokio::test]
