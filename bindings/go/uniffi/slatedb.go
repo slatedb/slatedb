@@ -10778,17 +10778,35 @@ func (_ FfiDestroyerObjectMetadata) Destroy(value ObjectMetadata) {
 	value.Destroy()
 }
 
-// The on-disk object-store cache of one handle. `root_folder` `None`
-// disables it, as the engine's default does.
+// The on-disk object-store cache of one reader. Every default is the
+// engine's; `root_folder` `None` disables the cache.
 type ObjectStoreCacheOptions struct {
-	RootFolder                *string
-	MaxCacheSizeBytes         *uint64
-	PartSizeBytes             uint64
-	CacheOnFlush              bool
-	CacheOnCompaction         bool
+	// Directory the cached parts are written under. `None` disables the
+	// cache and every other field is ignored.
+	RootFolder *string
+	// Bytes the cache may hold before its evictor removes the least
+	// recently used parts. `None` runs no evictor, so the cache grows
+	// without limit. Default 16 GiB.
+	MaxCacheSizeBytes *uint64
+	// Size of one cached part file: a non-zero multiple of 1024 bytes, or
+	// the reader refuses to build. Default 4 MiB.
+	PartSizeBytes uint64
+	// Whether SSTs written by memtable flushes are added to the cache.
+	// Default false.
+	CacheOnFlush bool
+	// Whether SSTs written by compactions are added to the cache. Default
+	// false.
+	CacheOnCompaction bool
+	// Which SSTs to load into the cache when the reader starts, up to
+	// `max_cache_size_bytes`. `None` preloads nothing.
 	PreloadDiskCacheOnStartup *PreloadLevel
-	ScanIntervalMs            *uint64
-	MaxOpenFileHandles        uint64
+	// Milliseconds between rescans of the cache directory that rebuild the
+	// evictor's map; greater than zero. `None` scans once at startup only.
+	// Default one hour.
+	ScanIntervalMs *uint64
+	// Part files kept open in a least-recently-used cache; greater than
+	// zero. Default 1000.
+	MaxOpenFileHandles uint64
 }
 
 func (r *ObjectStoreCacheOptions) Destroy() {
@@ -13180,11 +13198,14 @@ func (_ FfiDestroyerPrefixTarget) Destroy(value PrefixTarget) {
 	value.Destroy()
 }
 
-// Which SSTs a reader loads into its disk cache at startup.
+// Which SSTs a reader loads into its disk cache at startup, up to
+// `max_cache_size_bytes`.
 type PreloadLevel uint
 
 const (
-	PreloadLevelL0Sst  PreloadLevel = 1
+	// The L0 SSTs only, the most recently written.
+	PreloadLevelL0Sst PreloadLevel = 1
+	// Every SST, L0 and compacted levels alike.
 	PreloadLevelAllSst PreloadLevel = 2
 )
 
