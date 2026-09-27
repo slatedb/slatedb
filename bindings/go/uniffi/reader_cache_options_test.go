@@ -2,6 +2,8 @@ package slatedb_test
 
 import (
 	"errors"
+	"io/fs"
+	"path/filepath"
 	"testing"
 
 	slatedb "slatedb.io/slatedb-go/uniffi"
@@ -14,8 +16,29 @@ func valueOf(got *[]byte) string {
 	return string(*got)
 }
 
-// The reader's object-store cache options reach the engine and a reader with
-// a disk cache under a fresh root serves its reads.
+// regularFilesUnder counts the files below root, however the cache lays
+// them out.
+func regularFilesUnder(t *testing.T, root string) int {
+	t.Helper()
+	files := 0
+	err := filepath.WalkDir(root, func(_ string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type().IsRegular() {
+			files++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
+	}
+	return files
+}
+
+// The reader's object-store cache options reach the engine: a read through
+// a reader with a disk cache under a fresh, empty root leaves cached parts
+// in that root.
 func TestReaderOptionsCarryTheObjectStoreCache(t *testing.T) {
 	store := newMemoryStore(t)
 	dbHandle := openTestDB(t, store, nil)
@@ -47,7 +70,9 @@ func TestReaderOptionsCarryTheObjectStoreCache(t *testing.T) {
 	if got, err := reader.reader.Get([]byte("k")); err != nil || valueOf(got) != "v" {
 		t.Fatalf("Get() through a reader with a disk cache = %q, %v", valueOf(got), err)
 	}
-
+	if files := regularFilesUnder(t, root); files == 0 {
+		t.Fatalf("the cache root %s holds no part files after a read; the cache options did not reach the engine", root)
+	}
 }
 
 // A zero MaxOpenFileHandles, the Go zero value, is refused as an invalid
