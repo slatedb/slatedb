@@ -955,6 +955,14 @@ impl TableStore {
             .any(|policy| policy.supports_range_queries())
     }
 
+    /// Whether any registered filter policy can answer a prefix query.
+    pub(crate) fn any_filter_policy_supports_prefix_queries(&self) -> bool {
+        self.sst_format
+            .filter_policies
+            .iter()
+            .any(|policy| policy.supports_prefix_queries())
+    }
+
     pub(crate) fn cache(&self) -> Option<&Arc<dyn DbCache>> {
         self.cache.as_ref()
     }

@@ -53,6 +53,14 @@ pub trait FilterPolicy: Send + Sync {
     fn supports_range_queries(&self) -> bool {
         false
     }
+
+    /// Whether this policy can answer a prefix query. A prefix scan reads an
+    /// SST's filters only when some registered policy answers `true`; a
+    /// policy that hashes whole keys cannot narrow a prefix, so fetching its
+    /// filter for one would cost an object read and prune nothing.
+    fn supports_prefix_queries(&self) -> bool {
+        true
+    }
 }
 
 /// Accumulator for entries during SST construction that produces a [`Filter`].
@@ -324,6 +332,10 @@ impl FilterPolicy for BloomFilterPolicy {
     fn estimate_size(&self, num_keys: usize) -> usize {
         let num_keys = u32::try_from(num_keys).expect("num_keys should fit in u32");
         BloomFilter::estimate_encoded_size(num_keys, self.bits_per_key)
+    }
+
+    fn supports_prefix_queries(&self) -> bool {
+        self.prefix_extractor.is_some()
     }
 }
 
@@ -1025,5 +1037,28 @@ mod tests {
             }
             other => panic!("expected Inline variant, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn a_whole_key_bloom_policy_answers_no_prefix_query() {
+        let whole = BloomFilterPolicy::new(10);
+        assert!(!whole.supports_prefix_queries());
+        assert!(!whole.supports_range_queries());
+        #[derive(Debug)]
+        struct Three;
+        impl PrefixExtractor for Three {
+            fn name(&self) -> &str {
+                "three"
+            }
+            fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
+                let bytes = match target {
+                    PrefixTarget::Point(k) => k.as_ref(),
+                    PrefixTarget::Prefix(p) => p.as_ref(),
+                };
+                (bytes.len() >= 3).then_some(3)
+            }
+        }
+        let fixed = BloomFilterPolicy::new(10).with_prefix_extractor(Arc::new(Three));
+        assert!(fixed.supports_prefix_queries());
     }
 }

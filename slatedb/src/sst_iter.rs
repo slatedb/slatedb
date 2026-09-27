@@ -970,7 +970,17 @@ impl<'a> SstIterator<'a> {
         let filter_context = internal.options.filter_context.clone();
         let filter_evaluator = match (point_key, prefix, range) {
             (Some(key), _, _) => Some(FilterEvaluator::new_point(key, filter_context, db_stats)),
-            (None, Some(p), _) => Some(FilterEvaluator::new_prefix(p, filter_context, db_stats)),
+            // A prefix scan reads this SST's filters only when there is a
+            // registered policy that can answer a prefix; a whole-key bloom
+            // filter cannot, and fetching it would prune nothing.
+            (None, Some(p), _)
+                if internal
+                    .table_store()
+                    .any_filter_policy_supports_prefix_queries() =>
+            {
+                Some(FilterEvaluator::new_prefix(p, filter_context, db_stats))
+            }
+            (None, Some(_), _) => None,
             // A plain range scan reads this SST's filters only when there is
             // a registered policy that can answer a range.
             (None, None, (lower, upper))
