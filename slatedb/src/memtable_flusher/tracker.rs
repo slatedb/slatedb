@@ -31,14 +31,8 @@ use crate::utils::IdGenerator;
 use fail_parallel::fail_point;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use ulid::Ulid;
-
-/// While dispatch is blocked on L0 backpressure, the tracker asks the
-/// manifest writer to poll at this interval, so a freed L0 slot is seen
-/// independently of `manifest_poll_interval`.
-pub(crate) const L0_STALL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 macro_rules! memtable_flush_stat_name {
     ($suffix:expr) => {
@@ -101,8 +95,6 @@ pub(crate) enum TrackerMessage {
     PollManifest {
         sender: oneshot::Sender<Result<(), SlateDBError>>,
     },
-    /// Periodic check that polls the manifest while dispatch is L0-stalled.
-    L0StallTick,
 }
 
 impl std::fmt::Debug for TrackerMessage {
@@ -123,7 +115,6 @@ impl std::fmt::Debug for TrackerMessage {
             }
             Self::ManifestRefreshed => write!(f, "ManifestRefreshed"),
             Self::PollManifest { .. } => write!(f, "PollManifest"),
-            Self::L0StallTick => write!(f, "L0StallTick"),
         }
     }
 }
@@ -134,10 +125,12 @@ pub(super) struct FlushTracker {
     manifest_writer: ManifestWriter,
     frontier: TrackedImmFrontier,
     stats: FlushTrackerStats,
-    /// True while the oldest pending memtable is refused by `can_dispatch`.
-    l0_stalled: bool,
-    /// True from a stall poll's request until the next `ManifestRefreshed`.
-    stall_poll_in_flight: bool,
+    /// Publishes the L0 stall state to the manifest writer: 0 while the
+    /// oldest pending memtable can be dispatched, otherwise an id that is
+    /// distinct for every stall.
+    l0_stall_tx: watch::Sender<u64>,
+    /// Number of stalls started so far; the source of stall ids.
+    l0_stalls: u64,
 }
 
 impl FlushTracker {
@@ -145,6 +138,7 @@ impl FlushTracker {
         inner: Arc<DbInner>,
         uploader: Uploader,
         manifest_writer: ManifestWriter,
+        l0_stall_tx: watch::Sender<u64>,
     ) -> Self {
         let stats = FlushTrackerStats::new(&inner.recorder);
         Self {
@@ -153,29 +147,14 @@ impl FlushTracker {
             manifest_writer,
             frontier: TrackedImmFrontier::new(),
             stats,
-            l0_stalled: false,
-            stall_poll_in_flight: false,
+            l0_stall_tx,
+            l0_stalls: 0,
         }
     }
 }
 
 #[async_trait]
 impl MessageHandler<TrackerMessage> for FlushTracker {
-    fn tickers(&mut self) -> Vec<crate::dispatcher::MessageTickerDef<TrackerMessage>> {
-        // A writer whose poll interval is already shorter than the stall
-        // tick needs no faster tick; a longer one is capped so a stall never
-        // waits on it.
-        let interval = self
-            .inner
-            .settings
-            .manifest_poll_interval
-            .min(L0_STALL_POLL_INTERVAL);
-        vec![crate::dispatcher::MessageTickerDef::new(
-            interval,
-            Box::new(|| TrackerMessage::L0StallTick),
-        )]
-    }
-
     async fn handle(&mut self, message: TrackerMessage) -> Result<(), SlateDBError> {
         match message {
             TrackerMessage::MemtableFrozen => {
@@ -206,17 +185,9 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
             }
             TrackerMessage::ManifestRefreshed => {
                 self.stats.manifest_refresh_count.increment(1);
-                self.stall_poll_in_flight = false;
                 self.reconcile_and_dispatch().await
             }
             TrackerMessage::PollManifest { sender } => self.manifest_writer.send_poll(sender),
-            TrackerMessage::L0StallTick => {
-                if self.l0_stalled && !self.stall_poll_in_flight {
-                    self.stall_poll_in_flight = true;
-                    self.manifest_writer.request_poll()?;
-                }
-                Ok(())
-            }
         }
     }
 
@@ -368,6 +339,25 @@ impl FlushTracker {
         true
     }
 
+    /// Publishes a stall transition. Only a change wakes the manifest
+    /// writer's stall notifier, and every stall carries a fresh id so a stall
+    /// that clears and restarts between two reads is still seen as new.
+    fn set_l0_stalled(&mut self, stalled: bool) {
+        let l0_stalls = &mut self.l0_stalls;
+        self.l0_stall_tx.send_if_modified(|state| {
+            if stalled == (*state != 0) {
+                return false;
+            }
+            *state = if stalled {
+                *l0_stalls += 1;
+                *l0_stalls
+            } else {
+                0
+            };
+            true
+        });
+    }
+
     fn dispatch_ready_memtables(&mut self) -> Result<(), SlateDBError> {
         loop {
             // Strict seq order: skipping a blocked older imm
@@ -379,11 +369,11 @@ impl FlushTracker {
                 .iter()
                 .position(|t| matches!(t.state, TrackedImmState::PendingDispatch));
             let Some(idx) = next_idx else {
-                self.l0_stalled = false;
+                self.set_l0_stalled(false);
                 return Ok(());
             };
             if !self.can_dispatch(&self.frontier.tracked[idx].imm_memtable) {
-                self.l0_stalled = true;
+                self.set_l0_stalled(true);
                 return Ok(());
             }
             self.frontier.tracked[idx].state = TrackedImmState::Uploading;
