@@ -14,7 +14,7 @@ use crate::metrics::adapt_metrics_recorder;
 use crate::object_store::ObjectStore;
 use crate::runtime;
 use crate::settings::Settings;
-use crate::types::{CloneSourceSpec, KeyRange};
+use crate::types::{BlockCachePolicy, CloneSourceSpec, KeyRange};
 use crate::MetricsRecorder;
 use parking_lot::Mutex;
 
@@ -77,6 +77,13 @@ impl DbBuilder {
     /// uniqueness and stability across reopens.
     pub fn with_db_cache(&self, db_cache: Arc<DbCache>, db_cache_id: u64) -> Result<(), Error> {
         self.update_builder(|builder| builder.with_db_cache(db_cache.inner.clone(), db_cache_id))
+            .map_err(Into::into)
+    }
+
+    /// What the block cache keeps of the SSTs this database writes, on a
+    /// memtable flush and on a compaction's output.
+    pub fn with_block_cache_policy(&self, policy: BlockCachePolicy) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_block_cache_policy(policy.into_core()))
             .map_err(Into::into)
     }
 

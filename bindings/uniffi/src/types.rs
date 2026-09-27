@@ -642,6 +642,31 @@ pub enum CacheTarget {
     Data { range: KeyRange },
 }
 
+/// What the block cache keeps of the SSTs this database writes: the targets a
+/// memtable flush caches and the targets a compaction's output caches. An
+/// empty list caches nothing on that path. The engine's default caches every
+/// data block, the index and the filters on flush, and the index and filters
+/// on compaction output.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct BlockCachePolicy {
+    pub flush_targets: Vec<CacheTarget>,
+    pub compaction_output_targets: Vec<CacheTarget>,
+}
+
+impl BlockCachePolicy {
+    pub(crate) fn into_core(self) -> slatedb::BlockCachePolicy {
+        let flush: Vec<_> = self.flush_targets.into_iter().map(CacheTarget::into_core).collect();
+        let compaction: Vec<_> = self
+            .compaction_output_targets
+            .into_iter()
+            .map(CacheTarget::into_core)
+            .collect();
+        slatedb::BlockCachePolicy::default()
+            .with_flush_targets(&flush)
+            .with_compaction_output_targets(&compaction)
+    }
+}
+
 impl CacheTarget {
     pub(crate) fn into_core(self) -> CoreCacheTarget {
         match self {
