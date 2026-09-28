@@ -366,8 +366,7 @@ impl ReadOptions {
     }
 }
 
-/// Configuration for `multi_get` calls. The fields have the same meaning as in
-/// [`ReadOptions`] and apply to the whole batch.
+/// Configuration for `multi_get` calls. The batch fields take effect with the layer walk.
 #[derive(Clone, Debug)]
 pub struct MultiGetOptions {
     /// See [`ReadOptions::durability_filter`].
@@ -380,20 +379,14 @@ pub struct MultiGetOptions {
     pub filter_context: Option<FilterContext>,
     /// See [`ReadOptions::tracing_options`].
     pub tracing_options: Option<TracingOptions>,
-    /// The maximum number of object store requests of one batch in flight.
-    /// The default is 256.
+    /// Layer walks in flight at one time. The default is 4, the window of `get`.
+    pub lookahead: usize,
+    /// Object store requests of one batch in flight. The default is 256.
     pub max_fetch_tasks: usize,
-    /// Two blocks of one SST go into one ranged GET when the gap between them
-    /// is at most this many bytes. With 0, only adjacent blocks merge. The
-    /// default is 64 KiB.
+    /// Two blocks share one ranged GET when the gap is at most this. The default is 64 KiB.
     pub coalesce_gap_bytes: usize,
     /// The upper size of one merged ranged GET. The default is 512 KiB.
     pub max_coalesced_bytes: usize,
-    /// How many candidate SSTs a key walks in one round, from the second
-    /// round on. It reads the ones with a positive filter. The first round
-    /// always reads one. A value of 0 acts as 1. The default is 4, the
-    /// lookahead of `get`.
-    pub lookahead: usize,
 }
 
 impl Default for MultiGetOptions {
@@ -404,10 +397,10 @@ impl Default for MultiGetOptions {
             cache_blocks: true,
             filter_context: None,
             tracing_options: None,
+            lookahead: 4,
             max_fetch_tasks: 256,
             coalesce_gap_bytes: 64 * 1024,
             max_coalesced_bytes: 512 * 1024,
-            lookahead: 4,
         }
     }
 }
@@ -415,6 +408,17 @@ impl Default for MultiGetOptions {
 impl MultiGetOptions {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The read options of one key of the batch.
+    pub(crate) fn read_options(&self) -> ReadOptions {
+        ReadOptions {
+            durability_filter: self.durability_filter,
+            dirty: self.dirty,
+            cache_blocks: self.cache_blocks,
+            filter_context: self.filter_context.clone(),
+            tracing_options: self.tracing_options.clone(),
+        }
     }
 
     pub fn with_dirty(self, dirty: bool) -> Self {

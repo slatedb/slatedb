@@ -14,7 +14,7 @@ use crate::segment_iterator::{build_segment_iter, SegmentScanContext};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstTracingContext};
 use crate::tablestore::TableStore;
-use crate::types::{KeyValue, RowEntry};
+use crate::types::KeyValue;
 use crate::{error::SlateDBError, DbIterator};
 
 use bytes::Bytes;
@@ -73,8 +73,7 @@ impl ReadTrace {
         }
     }
 
-    /// Same as [`Self::new`], with the batch size on the read span. The batch
-    /// records `rounds` when it ends.
+    /// Same as [`Self::new`], with the batch size on the read span.
     pub(crate) fn new_multi_get(tracing_options: Option<TracingOptions>, keys: usize) -> Self {
         let read_span = tracing_options
             .as_ref()
@@ -83,7 +82,7 @@ impl ReadTrace {
                     "slatedb.read",
                     trace_id = tracing_options.trace_id.as_str(),
                     keys,
-                    rounds = tracing::field::Empty,
+                    layers = tracing::field::Empty,
                 )
             })
             .unwrap_or_else(tracing::Span::none);
@@ -153,30 +152,6 @@ impl ReadTrace {
                 sst_level = sst_level.as_str(),
                 filter_name = filter_name.as_ref(),
                 result = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::none()
-        }
-    }
-
-    /// The span of the filter probes of one SST in a `multi_get` batch. The
-    /// batch records `keys` and `positives` as the probes happen.
-    pub(crate) fn new_evaluate_filters_span(
-        &self,
-        sst_id: SsTableId,
-        sst_level: Option<&SstTraceLevel>,
-    ) -> tracing::Span {
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
-            let sst_id = sst_id.value().to_string();
-            let sst_level = Self::format_sst_level(sst_level);
-            tracing::info_span!(
-                parent: &self.read_span,
-                "slatedb.read.evaluate_filter",
-                trace_id = tracing_options.trace_id.as_str(),
-                sst_id = sst_id.as_str(),
-                sst_level = sst_level.as_str(),
-                keys = tracing::field::Empty,
-                positives = tracing::field::Empty,
             )
         } else {
             tracing::Span::none()
@@ -394,6 +369,8 @@ impl Reader {
         write_batch_iter: Option<WriteBatchIterator>,
         max_seq: Option<u64>,
     ) -> Result<Option<KeyValue>, SlateDBError> {
+        self.db_stats.get_requests.increment(1);
+        let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let read_trace = Self::read_trace(options.tracing_options.as_ref());
         let read = self.get_key_value_with_options_inner(
             key,
@@ -406,7 +383,8 @@ impl Reader {
         read.instrument(read_trace.read_span()).await
     }
 
-    async fn get_key_value_with_options_inner<K: AsRef<[u8]>>(
+    /// Reads one key. `max_seq` is the final bound, see [`Self::prepare_max_seq`].
+    pub(crate) async fn get_key_value_with_options_inner<K: AsRef<[u8]>>(
         &self,
         key: K,
         options: &ReadOptions,
@@ -415,8 +393,6 @@ impl Reader {
         max_seq: Option<u64>,
         read_trace: ReadTrace,
     ) -> Result<Option<KeyValue>, SlateDBError> {
-        self.db_stats.get_requests.increment(1);
-        let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let key_slice = key.as_ref();
         let range = BytesRange::from_slice(key_slice..=key_slice);
 
@@ -467,8 +443,6 @@ impl Reader {
             })
             .transpose()
     }
-
-    // `multi_get_with_options` lives in `crate::multi_get`.
 
     /// Create an iterator over a key range.
     ///
@@ -681,35 +655,13 @@ impl Reader {
     }
 }
 
-/// Map resolved `multi_get` entries to bare value bytes, preserving slots.
-pub(crate) fn entries_to_values(entries: Vec<Option<RowEntry>>) -> Vec<Option<Bytes>> {
-    entries
-        .into_iter()
-        .map(|entry| entry.and_then(|entry| entry.value.as_bytes()))
-        .collect()
-}
-
-/// Map resolved `multi_get` entries to [`KeyValue`]s, preserving slots.
-pub(crate) fn entries_to_key_values(entries: Vec<Option<RowEntry>>) -> Vec<Option<KeyValue>> {
-    entries
-        .into_iter()
-        .map(|entry| entry.map(KeyValue::from))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::MultiGetOptions;
-    use crate::db_cache::test_utils::TestCache;
-    use crate::db_cache::{DbCacheWrapper, SplitCache};
     use crate::merge_operator::{
         MergeOperator, MergeOperatorError, MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH,
     };
-    use crate::test_utils::{
-        lookup_merge_operator_operands, GatedObjectStore, RecordedSpan, RecordingObjectStore,
-        SpanRecorder,
-    };
+    use crate::test_utils::{lookup_merge_operator_operands, RecordedSpan, SpanRecorder};
     use crate::types::{RowEntry, ValueDeletable};
     use bytes::Bytes;
     use rstest::rstest;
@@ -789,10 +741,7 @@ mod tests {
 
     impl TestDbState {
         async fn new() -> Self {
-            Self::with_object_store(Arc::new(InMemory::new()))
-        }
-
-        fn with_object_store(object_store: Arc<dyn ObjectStore>) -> Self {
+            let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let table_store = Arc::new(TableStore::new(
                 object_store,
                 SsTableFormat::default(),
@@ -1593,356 +1542,6 @@ mod tests {
         Ok(())
     }
 
-    fn multi_get_reader(
-        test_db_state: &TestDbState,
-        last_committed_seq: Option<u64>,
-        merge: bool,
-    ) -> Reader {
-        let recorder = MetricsRecorderHelper::noop();
-        let db_stats = DbStats::new(&recorder);
-        let test_clock = Arc::new(MockSystemClock::new());
-        let mono_clock = Arc::new(MonotonicClock::new(test_clock as Arc<dyn SystemClock>, 0));
-        let oracle = Arc::new(DbReaderOracle::new(
-            last_committed_seq.unwrap_or(u64::MAX),
-            DbStatusManager::new(0),
-        ));
-        let merge_operator = if merge {
-            Some(Arc::new(StringConcatMergeOperator) as Arc<dyn MergeOperator + Send + Sync>)
-        } else {
-            None
-        };
-        Reader::new(
-            test_db_state.table_store.clone(),
-            db_stats,
-            mono_clock,
-            oracle,
-            merge_operator,
-        )
-    }
-
-    /// Build a reader over a populated `TestDbState`, run `multi_get` for
-    /// `query_keys`, assert it agrees key-by-key with single `get` against the
-    /// same snapshot (the differential invariant), and return the batch values.
-    #[allow(clippy::too_many_arguments)]
-    async fn run_multi_get(
-        entries: Vec<TestEntry>,
-        query_keys: &[&'static [u8]],
-        dirty: bool,
-        last_committed_seq: Option<u64>,
-        max_seq: Option<u64>,
-        merge: bool,
-    ) -> Result<Vec<Option<Bytes>>, SlateDBError> {
-        let mut test_db_state = TestDbState::new().await;
-        let write_batch = populate_db_state(&mut test_db_state, entries).await?;
-        let locked_write_batch = write_batch.clone().map(parking_lot::RwLock::new);
-        let reader = multi_get_reader(&test_db_state, last_committed_seq, merge);
-        let read_options = ReadOptions::default().with_dirty(dirty);
-
-        let batch: Vec<Bytes> = query_keys
-            .iter()
-            .map(|k| Bytes::copy_from_slice(k))
-            .collect();
-        let multi = reader
-            .multi_get_with_options(
-                &batch,
-                &MultiGetOptions::default().with_dirty(dirty),
-                &test_db_state,
-                locked_write_batch.as_ref(),
-                max_seq,
-            )
-            .await?;
-        assert_eq!(multi.len(), query_keys.len());
-        let multi_vals: Vec<Option<Bytes>> = multi
-            .into_iter()
-            .map(|entry| entry.and_then(|entry| entry.value.as_bytes()))
-            .collect();
-
-        // Differential: each key resolved individually via get must match.
-        for (i, key) in query_keys.iter().enumerate() {
-            let single = reader
-                .get_key_value_with_options(
-                    *key,
-                    &read_options,
-                    &test_db_state,
-                    wb_point_iter(&write_batch, key),
-                    max_seq,
-                )
-                .await?
-                .map(|kv| kv.value);
-            assert_eq!(
-                multi_vals[i],
-                single,
-                "multi_get disagreed with get for key {:?}",
-                String::from_utf8_lossy(key)
-            );
-        }
-        Ok(multi_vals)
-    }
-
-    #[tokio::test]
-    async fn test_multi_get_drop_cancels_sst_reads() -> Result<(), SlateDBError> {
-        let recording = Arc::new(RecordingObjectStore::new(Arc::new(InMemory::new())));
-        let gated = Arc::new(GatedObjectStore::new(recording.clone()));
-        let mut test_db_state = TestDbState::with_object_store(gated.clone());
-        let entries = vec![
-            TestEntry::value(b"l0_key", b"l0_val", 70).with_location(LayerLocation::L0Sst(0)),
-            TestEntry::value(b"sr_key", b"sr_val", 50).with_location(LayerLocation::SortedRun(0)),
-        ];
-        populate_db_state(&mut test_db_state, entries).await?;
-        let reader = multi_get_reader(&test_db_state, None, false);
-        let gate = &gated.get_opts_gate;
-        gate.close();
-        let before = gate.arrivals();
-
-        let keys = [b"l0_key".as_ref(), b"sr_key".as_ref()];
-        let options = MultiGetOptions::default();
-        let batch = reader.multi_get_with_options(&keys, &options, &test_db_state, None, None);
-        // The filter load of each SST waits at the gate. Then the batch
-        // future drops.
-        tokio::select! {
-            biased;
-            _ = batch => panic!("the batch must wait at the gate"),
-            _ = gate.wait_for_arrivals(before + 2) => {}
-        }
-
-        recording.clear();
-        gate.release();
-        for _ in 0..100 {
-            tokio::task::yield_now().await;
-        }
-        assert!(recording.recorded_get_ranges(false).is_empty());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multi_get_sends_no_request_when_cached_filters_reject() -> Result<(), SlateDBError>
-    {
-        let recording = Arc::new(RecordingObjectStore::new(Arc::new(InMemory::new())));
-        let mut test_db_state = TestDbState::with_object_store(recording.clone());
-        let entries = vec![
-            TestEntry::value(b"a", b"l0_val", 70).with_location(LayerLocation::L0Sst(0)),
-            TestEntry::value(b"z", b"l0_val", 71).with_location(LayerLocation::L0Sst(0)),
-            TestEntry::value(b"a", b"sr_val", 50).with_location(LayerLocation::SortedRun(0)),
-            TestEntry::value(b"z", b"sr_val", 51).with_location(LayerLocation::SortedRun(0)),
-        ];
-        populate_db_state(&mut test_db_state, entries).await?;
-        // The store that wrote the SSTs has no cache. Read through a second
-        // store, and load only the filters into its cache.
-        let cache = SplitCache::new()
-            .with_meta_cache(Some(Arc::new(TestCache::new())))
-            .build();
-        let cache = Arc::new(DbCacheWrapper::new(
-            Arc::new(cache),
-            &MetricsRecorderHelper::noop(),
-            Arc::new(MockSystemClock::new()),
-            1,
-        ));
-        test_db_state.table_store = Arc::new(TableStore::new(
-            recording.clone(),
-            SsTableFormat::default(),
-            Path::from("/test"),
-            Some(cache),
-            TableStoreKind::Main,
-            BlockCachePolicy::default(),
-        ));
-        let trace = ReadTrace::new(None);
-        let tree = &test_db_state.core.tree;
-        let runs = tree.compacted.iter().flat_map(|run| run.sst_views());
-        for view in tree.l0.iter().chain(runs) {
-            let table_store = &test_db_state.table_store;
-            table_store
-                .read_filters(&view.sst, true, None, &trace, None)
-                .await?;
-        }
-        recording.clear();
-        let reader = multi_get_reader(&test_db_state, None, false);
-
-        // Both keys are inside the range of each SST, and no SST holds them.
-        let keys = [b"k".as_ref(), b"m".as_ref()];
-        let options = MultiGetOptions::default();
-        let values = reader
-            .multi_get_with_options(&keys, &options, &test_db_state, None, None)
-            .await?;
-
-        assert_eq!(values, [None, None]);
-        assert!(recording.recorded_get_ranges(false).is_empty());
-        Ok(())
-    }
-
-    fn l0_value(value: &'static [u8], seq: u64, sst: usize) -> TestEntry {
-        TestEntry::value(b"k", value, seq).with_location(LayerLocation::L0Sst(sst))
-    }
-
-    fn l0_merge(value: &'static [u8], seq: u64, sst: usize) -> TestEntry {
-        TestEntry::merge(b"k", value, seq).with_location(LayerLocation::L0Sst(sst))
-    }
-
-    /// One batch for the key `k` over a store with no cache. A filter, an
-    /// index, and a block cost one GET each.
-    #[rstest]
-    // The filters of all 3 SSTs load, and only the newest SST is read.
-    #[case::shadowed_versions_are_not_read(
-        vec![l0_value(b"v0", 50, 0), l0_value(b"v1", 60, 1), l0_value(b"v2", 70, 2)],
-        None, b"v2", 1, 3 + 2,
-    )]
-    // `max_seq` hides the version of round 1, so round 2 reads one more SST.
-    #[case::hidden_version_costs_a_round(
-        vec![l0_value(b"v0", 50, 0), l0_value(b"v1", 60, 1), l0_value(b"v2", 70, 2)],
-        Some(65), b"v1", 2, 3 + 2 + 2,
-    )]
-    // Merge operands do not change the limit, so each round reads one SST.
-    #[case::operand_keeps_the_limit(
-        vec![l0_value(b"v0", 50, 0), l0_merge(b"+1", 60, 1), l0_merge(b"+2", 70, 2)],
-        None, b"v0+1+2", 3, 3 + 3 * 2,
-    )]
-    #[tokio::test]
-    async fn test_multi_get_rounds(
-        #[case] entries: Vec<TestEntry>,
-        #[case] max_seq: Option<u64>,
-        #[case] expected: &'static [u8],
-        #[case] expected_rounds: i64,
-        #[case] expected_gets: usize,
-    ) -> Result<(), SlateDBError> {
-        let recording = Arc::new(RecordingObjectStore::new(Arc::new(InMemory::new())));
-        let mut test_db_state = TestDbState::with_object_store(recording.clone());
-        populate_db_state(&mut test_db_state, entries).await?;
-        recording.clear();
-        let recorder = Arc::new(DefaultMetricsRecorder::new());
-        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
-        let reader = build_reader(&test_db_state, DbStats::new(&helper), true).await;
-
-        let options = MultiGetOptions::default().with_lookahead(1);
-        let values = reader
-            .multi_get_with_options(&[b"k"], &options, &test_db_state, None, max_seq)
-            .await?;
-
-        let value = values[0].as_ref().and_then(|entry| entry.value.as_bytes());
-        assert_eq!(value, Some(Bytes::from_static(expected)));
-        let rounds = lookup_metric_with_labels(&recorder, crate::db_stats::MULTI_GET_ROUNDS, &[]);
-        assert_eq!(rounds, Some(expected_rounds));
-        assert_eq!(recording.recorded_get_ranges(false).len(), expected_gets);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multi_get_distinct_keys_across_layers() -> Result<(), SlateDBError> {
-        let entries = vec![
-            TestEntry::value(b"mem_key", b"mem_val", 90),
-            TestEntry::value(b"l0_key", b"l0_val", 70).with_location(LayerLocation::L0Sst(0)),
-            TestEntry::value(b"sr_key", b"sr_val", 50).with_location(LayerLocation::SortedRun(0)),
-            TestEntry::tombstone(b"del_key", 80).with_location(LayerLocation::L0Sst(0)),
-        ];
-        let vals = run_multi_get(
-            entries,
-            &[b"mem_key", b"l0_key", b"sr_key", b"del_key", b"absent"],
-            true,
-            None,
-            None,
-            false,
-        )
-        .await?;
-        assert_eq!(vals[0].as_deref(), Some(b"mem_val".as_ref()));
-        assert_eq!(vals[1].as_deref(), Some(b"l0_val".as_ref()));
-        assert_eq!(vals[2].as_deref(), Some(b"sr_val".as_ref()));
-        assert_eq!(vals[3], None); // tombstone
-        assert_eq!(vals[4], None); // absent
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multi_get_same_l0_sst_and_duplicates() -> Result<(), SlateDBError> {
-        // Two keys live in the same L0 SST; one key is queried twice.
-        let entries = vec![
-            TestEntry::value(b"key1", b"v1", 50).with_location(LayerLocation::L0Sst(0)),
-            TestEntry::value(b"key2", b"v2", 51).with_location(LayerLocation::L0Sst(0)),
-        ];
-        let vals = run_multi_get(
-            entries,
-            &[b"key1", b"key2", b"key1", b"absent"],
-            true,
-            None,
-            None,
-            false,
-        )
-        .await?;
-        assert_eq!(vals[0].as_deref(), Some(b"v1".as_ref()));
-        assert_eq!(vals[1].as_deref(), Some(b"v2".as_ref()));
-        assert_eq!(vals[2].as_deref(), Some(b"v1".as_ref())); // duplicate slot
-        assert_eq!(vals[3], None);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multi_get_empty_batch() -> Result<(), SlateDBError> {
-        let vals = run_multi_get(
-            vec![TestEntry::value(b"key1", b"v1", 50)],
-            &[],
-            true,
-            None,
-            None,
-            false,
-        )
-        .await?;
-        assert!(vals.is_empty());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multi_get_merge_across_layers() -> Result<(), SlateDBError> {
-        // A key whose value is built from merge operands spanning layers, plus a
-        // plain key and an absent key, resolved in one batch with a merge
-        // operator configured.
-        let entries = vec![
-            TestEntry::merge(b"acc", b"c", 90),
-            TestEntry::merge(b"acc", b"b", 80).with_location(LayerLocation::L0Sst(0)),
-            TestEntry::value(b"acc", b"a", 70).with_location(LayerLocation::SortedRun(0)),
-            TestEntry::value(b"plain", b"p", 60),
-        ];
-        let vals = run_multi_get(
-            entries,
-            &[b"acc", b"plain", b"gone"],
-            true,
-            None,
-            None,
-            true,
-        )
-        .await?;
-        assert_eq!(vals[0].as_deref(), Some(b"abc".as_ref())); // merge("a","b","c")
-        assert_eq!(vals[1].as_deref(), Some(b"p".as_ref()));
-        assert_eq!(vals[2], None);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multi_get_merge_base_shadows_older_run() -> Result<(), SlateDBError> {
-        // Merge operand in L0, base value in the newer sorted run, and a stale
-        // value in an older sorted run. The fan-out reads all three SSTs, so
-        // the rank merge must stop at the run-1 base and drop the stale run-0
-        // value. (SortedRun test IDs: 0 = oldest.)
-        let entries = vec![
-            TestEntry::merge(b"acc", b"b", 80).with_location(LayerLocation::L0Sst(0)),
-            TestEntry::value(b"acc", b"a", 70).with_location(LayerLocation::SortedRun(1)),
-            TestEntry::value(b"acc", b"stale", 30).with_location(LayerLocation::SortedRun(0)),
-        ];
-        let vals = run_multi_get(entries, &[b"acc"], true, None, None, true).await?;
-        assert_eq!(vals[0].as_deref(), Some(b"ab".as_ref())); // merge("a","b"), no "stale"
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multi_get_seq_filtering() -> Result<(), SlateDBError> {
-        // Committed-read + snapshot max_seq filtering applies across the batch:
-        // the newer (uncommitted/over-bound) version is hidden, exposing the
-        // older committed value.
-        let entries = vec![
-            TestEntry::value(b"k", b"newer", 100),
-            TestEntry::value(b"k", b"older", 40).with_location(LayerLocation::L0Sst(0)),
-        ];
-        let vals = run_multi_get(entries, &[b"k"], false, Some(50), Some(60), false).await?;
-        assert_eq!(vals[0].as_deref(), Some(b"older".as_ref()));
-        Ok(())
-    }
-
     #[test]
     fn test_scan_options_builder_pattern() {
         // Test that the builder pattern works correctly for max_fetch_tasks
@@ -2598,39 +2197,6 @@ mod tests {
         );
         let expected_sst_id = sorted_run_sst_id(&test_db_state, 0);
         assert_recorded_read_spans(&span_recorder, trace_id, &expected_sst_id);
-        Ok(())
-    }
-
-    /// A batch opens one filter span per SST, with the count of the keys
-    /// that the filters checked.
-    #[test]
-    fn should_record_one_filter_span_per_sst_for_multi_get() -> Result<(), SlateDBError> {
-        let (test_db_state, reader) = build_span_test_reader();
-        let span_recorder = SpanRecorder::default();
-        let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
-        let trace_id = "multi-get-trace";
-        let options =
-            MultiGetOptions::default().with_tracing_options(Some(TracingOptions::new(trace_id)));
-        // The memtable answers the second key, so only the first one probes.
-        let keys = [b"sst-key".as_ref(), b"memtable-key".as_ref()];
-
-        tracing::subscriber::with_default(subscriber, || {
-            tokio_test::block_on(reader.multi_get_with_options(
-                &keys,
-                &options,
-                &test_db_state,
-                None,
-                None,
-            ))
-        })?;
-
-        let span = assert_recorded_read_child_span(
-            &span_recorder,
-            "slatedb.read.evaluate_filter",
-            trace_id,
-        );
-        assert_eq!(span.fields.get("keys").map(String::as_str), Some("1"));
-        assert_eq!(span.fields.get("positives").map(String::as_str), Some("1"));
         Ok(())
     }
 

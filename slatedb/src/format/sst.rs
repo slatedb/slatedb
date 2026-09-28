@@ -998,29 +998,6 @@ impl SsTableFormat {
         Ok(Block::decode(decompressed_bytes))
     }
 
-    /// Read the byte range from the first to the last of `blocks` with one
-    /// ranged read, and decode only `blocks`. `blocks` is sorted and not
-    /// empty. The result is in the order of `blocks`.
-    pub(crate) async fn read_sparse_blocks(
-        &self,
-        info: &SsTableInfo,
-        index_owned: &SsTableIndexOwned,
-        blocks: &[usize],
-        obj: &impl ReadOnlyBlob,
-    ) -> Result<Vec<Block>, SlateDBError> {
-        let index = index_owned.borrow();
-        let (first, last) = (blocks[0], blocks[blocks.len() - 1]);
-        let range = self.block_range(first..last + 1, info, &index);
-        let bytes: Bytes = obj.read_range(range.clone()).await?;
-        let decode_futures = blocks.iter().map(|&block| {
-            let block_range = self.block_range(block..block + 1, info, &index);
-            let start = (block_range.start - range.start) as usize;
-            let end = (block_range.end - range.start) as usize;
-            self.decode_block(bytes.slice(start..end), info.compression_codec)
-        });
-        try_join_all(decode_futures).await
-    }
-
     pub(crate) async fn read_block(
         &self,
         info: &SsTableInfo,

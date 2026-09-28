@@ -64,11 +64,11 @@ use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
 use crate::paths::PathResolver;
 use crate::prefix_extractor::PrefixExtractor;
-use crate::reader::{entries_to_key_values, entries_to_values, Reader, ScanContext};
+use crate::reader::{Reader, ScanContext};
 use crate::snapshot_manager::SnapshotManager;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
-use crate::types::{KeyValue, RowEntry};
+use crate::types::KeyValue;
 use crate::utils::{format_bytes_si, SafeSender, WatchableOnceCellReader};
 use crate::wal_replay::{WalReplayIterator, WalReplayOptions};
 use crate::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbWriteOps};
@@ -235,8 +235,11 @@ impl DbInner {
         keys: &[K],
         options: &MultiGetOptions,
     ) -> Result<Vec<Option<Bytes>>, SlateDBError> {
-        let entries = self.multi_get_entries_with_options(keys, options).await?;
-        Ok(entries_to_values(entries))
+        let key_values = self.multi_get_key_value_with_options(keys, options).await?;
+        Ok(key_values
+            .into_iter()
+            .map(|kv| kv.map(|kv| kv.value))
+            .collect())
     }
 
     pub(crate) async fn multi_get_key_value_with_options<K: AsRef<[u8]> + Sync>(
@@ -244,15 +247,6 @@ impl DbInner {
         keys: &[K],
         options: &MultiGetOptions,
     ) -> Result<Vec<Option<KeyValue>>, SlateDBError> {
-        let entries = self.multi_get_entries_with_options(keys, options).await?;
-        Ok(entries_to_key_values(entries))
-    }
-
-    async fn multi_get_entries_with_options<K: AsRef<[u8]> + Sync>(
-        &self,
-        keys: &[K],
-        options: &MultiGetOptions,
-    ) -> Result<Vec<Option<RowEntry>>, SlateDBError> {
         self.check_closed()?;
         let db_state = self.state.read().view();
         self.reader

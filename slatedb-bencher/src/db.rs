@@ -44,7 +44,7 @@ use futures::{StreamExt, TryStreamExt};
 use rand::{Rng, RngCore, SeedableRng};
 use rand_xorshift::XorShiftRng;
 use slatedb::config::{FlushOptions, FlushType, MultiGetOptions, PutOptions, WriteOptions};
-use slatedb::db_stats::MULTI_GET_ROUNDS;
+use slatedb::db_stats::MULTI_GET_LAYERS;
 use slatedb::Db;
 use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue};
 use tokio::time::Instant;
@@ -789,8 +789,8 @@ struct ReadCallCounters {
     sst_bytes: u64,
     /// GET requests for all other objects, for example manifests.
     other_gets: u64,
-    /// Rounds of the `multi_get` calls.
-    rounds: u64,
+    /// Layer walks of the `multi_get` calls.
+    layers: u64,
 }
 
 impl ReadCallCounters {
@@ -805,15 +805,15 @@ impl ReadCallCounters {
             sst_gets: counters.sst_gets,
             sst_bytes: counters.sst_bytes,
             other_gets: counters.other_gets,
-            rounds: Self::rounds(recorder),
+            layers: Self::layers(recorder),
         }
     }
 
-    /// Reads the `multi_get_rounds` counter from the metrics recorder.
-    fn rounds(recorder: &DefaultMetricsRecorder) -> u64 {
+    /// Reads the `multi_get_layers` counter from the metrics recorder.
+    fn layers(recorder: &DefaultMetricsRecorder) -> u64 {
         recorder
             .snapshot()
-            .by_name(MULTI_GET_ROUNDS)
+            .by_name(MULTI_GET_LAYERS)
             .first()
             .and_then(|metric| match metric.value {
                 MetricValue::Counter(value) => Some(value),
@@ -829,7 +829,7 @@ impl ReadCallCounters {
             sst_gets: self.sst_gets - last.sst_gets,
             sst_bytes: self.sst_bytes - last.sst_bytes,
             other_gets: self.other_gets - last.other_gets,
-            rounds: self.rounds - last.rounds,
+            layers: self.layers - last.layers,
         }
     }
 
@@ -901,13 +901,13 @@ async fn dump_stats(
                     gets,
                 );
                 info!(
-                    "read calls [calls: {}, p50: {:.3} ms, p99: {:.3} ms, sst gets/call: {:.3}, sst KiB/call: {:.3}, rounds/call: {:.3}, other gets: {}]",
+                    "read calls [calls: {}, p50: {:.3} ms, p99: {:.3} ms, sst gets/call: {:.3}, sst KiB/call: {:.3}, layers/call: {:.3}, other gets: {}]",
                     call_stats.calls,
                     LatencySamples::percentile(&latencies, 0.5).as_secs_f64() * 1000.0,
                     LatencySamples::percentile(&latencies, 0.99).as_secs_f64() * 1000.0,
                     call_stats.per_call(call_stats.sst_gets),
                     call_stats.per_call(call_stats.sst_bytes) / 1024.0,
-                    call_stats.per_call(call_stats.rounds),
+                    call_stats.per_call(call_stats.layers),
                     call_stats.other_gets,
                 );
                 last_stats_dump = Some(range.end);

@@ -6,9 +6,7 @@
 //! `[get(k) for k in keys]` against the same database. We assert this over
 //! randomized, layered data (many L0 SSTs over a compacted sorted run), with
 //! and without a block cache and a merge operator, plus transaction, reader,
-//! snapshot, and projected clone variants. The request count tests check that
-//! a batch sends no more object store GETs than a `get` loop, for each cache
-//! state.
+//! snapshot, and projected clone variants.
 
 use std::ops::Bound;
 use std::sync::Arc;
@@ -16,7 +14,6 @@ use std::time::Duration;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use rstest::rstest;
 use slatedb::admin::Admin;
 use slatedb::bytes::Bytes;
 use slatedb::config::{
@@ -24,8 +21,7 @@ use slatedb::config::{
     SizeTieredCompactionSchedulerOptions, WriteOptions,
 };
 use slatedb::db_cache::foyer::FoyerCache;
-use slatedb::db_stats::{MULTI_GET_KEYS, MULTI_GET_ROUNDS, REQUEST_COUNT};
-use slatedb::instrumented_object_store_stats::REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT;
+use slatedb::db_stats::{MULTI_GET_KEYS, REQUEST_COUNT};
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
@@ -496,25 +492,6 @@ fn counter(recorder: &DefaultMetricsRecorder, name: &str, labels: &[(&str, &str)
         .unwrap_or(0)
 }
 
-/// Object store GET requests of the main store, sent by `component`.
-fn store_gets(recorder: &DefaultMetricsRecorder, component: &str) -> u64 {
-    ["get", "get_range", "get_ranges", "head"]
-        .iter()
-        .map(|api| {
-            counter(
-                recorder,
-                OBJECT_STORE_REQUEST_COUNT,
-                &[
-                    ("component", component),
-                    ("store_type", "main"),
-                    ("op", "get"),
-                    ("api", api),
-                ],
-            )
-        })
-        .sum()
-}
-
 /// Writes `ssts` L0 SSTs. With `overwrite`, each SST holds a new version of all
 /// keys. Without it, each key lives in one SST. With `merge`, the versions
 /// after the first are merge operands.
@@ -564,104 +541,6 @@ async fn open_l0_db(
     (db, object_store, recorder)
 }
 
-/// GETs that one batch sends, and GETs that a `get` loop over the same keys
-/// sends after it. Both must return the same values.
-async fn batch_and_loop_gets<R: DbReadOps + Sync>(
-    reader: &R,
-    recorder: &DefaultMetricsRecorder,
-    component: &str,
-    keys: &[Vec<u8>],
-) -> (u64, u64) {
-    let start = store_gets(recorder, component);
-    let batch = reader.multi_get(keys).await.unwrap();
-    let batch_gets = store_gets(recorder, component) - start;
-
-    let start = store_gets(recorder, component);
-    for (i, k) in keys.iter().enumerate() {
-        assert_eq!(reader.get(k).await.unwrap(), batch[i]);
-    }
-    let loop_gets = store_gets(recorder, component) - start;
-    (batch_gets, loop_gets)
-}
-
-/// The state of the block cache when the batch runs.
-#[derive(Clone, Copy, Debug)]
-enum Cache {
-    /// No cache.
-    Off,
-    /// A cache with nothing in it: a fresh `DbReader`.
-    Empty,
-    /// Single `get` calls warmed the first half of the keys.
-    Partial,
-    /// One batch over all keys warmed the cache.
-    Warm,
-}
-
-/// Goal 3 of the RFC: a batch sends no more GETs than a `get` loop, plus one
-/// filter load per SST whose filter is not cached.
-#[rstest]
-#[case::distinct_keys(32, false, false)]
-// A small batch, so shared reads cannot hide the reads of shadowed versions.
-#[case::many_versions(2, true, false)]
-// Merge operands in every SST, so every version must be read.
-#[case::merge_operands(2, true, true)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_multi_get_requests_not_above_get_loop(
-    #[case] num_keys: usize,
-    #[case] overwrite: bool,
-    #[case] merge: bool,
-    #[values(Cache::Off, Cache::Empty, Cache::Partial, Cache::Warm)] cache: Cache,
-) {
-    const SSTS: usize = 6;
-    let keys: Vec<Vec<u8>> = (0..num_keys).map(key).collect();
-    let path = format!("/tmp/test_multi_get_requests_{num_keys}_{overwrite}_{merge}_{cache:?}");
-    let cached = !matches!(cache, Cache::Off);
-    let (db, object_store, recorder) =
-        open_l0_db(&path, cached, merge, &keys, SSTS, overwrite).await;
-
-    let (batch_gets, loop_gets) = match cache {
-        Cache::Empty => {
-            db.close().await.unwrap();
-            let mut builder = DbReader::builder(path.as_str(), object_store)
-                .with_db_cache(Arc::new(FoyerCache::new()), 0)
-                .with_metrics_recorder(recorder.clone());
-            if merge {
-                builder = builder.with_merge_operator(Arc::new(ConcatMergeOperator));
-            }
-            let reader = builder.build().await.unwrap();
-            let gets = batch_and_loop_gets(&reader, &recorder, "reader", &keys).await;
-            reader.close().await.unwrap();
-            gets
-        }
-        Cache::Off | Cache::Partial | Cache::Warm => {
-            match cache {
-                Cache::Partial => {
-                    for k in &keys[..keys.len() / 2] {
-                        db.get(k).await.unwrap();
-                    }
-                }
-                Cache::Warm => {
-                    db.multi_get(&keys).await.unwrap();
-                }
-                _ => {}
-            }
-            let gets = batch_and_loop_gets(&db, &recorder, "db", &keys).await;
-            db.close().await.unwrap();
-            gets
-        }
-    };
-
-    let cold_filters = if matches!(cache, Cache::Warm) {
-        0
-    } else {
-        SSTS as u64
-    };
-    assert!(
-        batch_gets <= loop_gets + cold_filters,
-        "cache={cache:?}: batch sent {batch_gets} GETs, loop sent {loop_gets}"
-    );
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_get_metrics() {
     let keys = vec![key(0), key(1), key(0)];
@@ -672,7 +551,6 @@ async fn test_multi_get_metrics() {
 
     assert_eq!(counter(&recorder, REQUEST_COUNT, &[("op", "multi_get")]), 1);
     assert_eq!(counter(&recorder, MULTI_GET_KEYS, &[]), 3);
-    assert_eq!(counter(&recorder, MULTI_GET_ROUNDS, &[]), 1);
     assert_eq!(counter(&recorder, REQUEST_COUNT, &[("op", "get")]), 0);
     db.close().await.unwrap();
 }

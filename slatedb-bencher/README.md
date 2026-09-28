@@ -67,7 +67,7 @@ instead of one key per call. A batch goes through one of three readers:
 
 Each stats dump then has a second line with the read calls. It shows the p50
 and p99 latency of a call, the SST GET requests per call, the SST bytes per
-call, and the `multi_get` rounds per call. The GET and byte counts come from a
+call, and the `multi_get` layer walks per call. The GET and byte counts come from a
 wrapper around the object store, so they are exact.
 
 The `db` subcommand also has flags for repeatable read runs:

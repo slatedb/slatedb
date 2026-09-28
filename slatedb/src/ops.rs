@@ -115,18 +115,13 @@ pub trait DbReadOps {
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error>;
 
-    /// Get multiple values in a single snapshot-consistent batch, using default
-    /// read options.
+    /// Get multiple values in one batch, using default read options.
     ///
-    /// Results are returned in the same order as `keys`; a `None` entry marks a
-    /// key that is missing, deleted, or expired. Duplicate keys yield duplicate
-    /// (positional) results. The whole batch observes one consistent snapshot of
-    /// the database.
-    ///
-    /// This is equivalent to calling [`get`](Self::get) for each key against the
-    /// same snapshot, but resolves all keys in one pass that visits each SST
-    /// once — avoiding the repeated index/filter loads and per-key object-store
-    /// round trips a `get` loop incurs.
+    /// The result has one slot per key, in the order of `keys`. A `None` slot
+    /// marks a key that is missing, deleted, or expired. A duplicate key is
+    /// read one time and fills each of its slots. The batch reads one snapshot
+    /// of the database, so each slot holds what [`get`](Self::get) returns for
+    /// that key on the same snapshot.
     ///
     /// ## Arguments
     /// - `keys`: the keys to look up

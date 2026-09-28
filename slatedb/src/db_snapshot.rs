@@ -5,10 +5,10 @@ use uuid::Uuid;
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
 use crate::config::{MultiGetOptions, ReadOptions, ScanOptions};
 use crate::db_iter::DbIterator;
-use crate::types::{KeyValue, RowEntry};
+use crate::types::KeyValue;
 
 use crate::db::DbInner;
-use crate::reader::{entries_to_key_values, entries_to_values, ScanContext};
+use crate::reader::ScanContext;
 use crate::DbReadOps;
 
 pub struct DbSnapshot {
@@ -105,8 +105,11 @@ impl DbSnapshot {
         keys: &[K],
         options: &MultiGetOptions,
     ) -> Result<Vec<Option<Bytes>>, crate::Error> {
-        let entries = self.multi_get_entries_with_options(keys, options).await?;
-        Ok(entries_to_values(entries))
+        let key_values = self.multi_get_key_value_with_options(keys, options).await?;
+        Ok(key_values
+            .into_iter()
+            .map(|kv| kv.map(|kv| kv.value))
+            .collect())
     }
 
     /// Get multiple key-value pairs from the snapshot in one batch.
@@ -125,15 +128,6 @@ impl DbSnapshot {
         keys: &[K],
         options: &MultiGetOptions,
     ) -> Result<Vec<Option<KeyValue>>, crate::Error> {
-        let entries = self.multi_get_entries_with_options(keys, options).await?;
-        Ok(entries_to_key_values(entries))
-    }
-
-    async fn multi_get_entries_with_options<K: AsRef<[u8]> + Sync>(
-        &self,
-        keys: &[K],
-        options: &MultiGetOptions,
-    ) -> Result<Vec<Option<RowEntry>>, crate::Error> {
         self.db_inner.check_closed()?;
         let db_state = self.db_inner.state.read().view();
         self.db_inner

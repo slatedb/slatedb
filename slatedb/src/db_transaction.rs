@@ -14,9 +14,9 @@ use crate::db::WriteHandle;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
-use crate::reader::{entries_to_key_values, entries_to_values, ScanContext};
+use crate::reader::ScanContext;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
-use crate::types::{KeyValue, RowEntry};
+use crate::types::KeyValue;
 use crate::{DbReadOps, DbTransactionOps};
 
 /// A database transaction that provides atomic read-write operations with
@@ -208,8 +208,11 @@ impl DbTransaction {
         keys: &[K],
         options: &MultiGetOptions,
     ) -> Result<Vec<Option<Bytes>>, crate::Error> {
-        let entries = self.multi_get_entries_with_options(keys, options).await?;
-        Ok(entries_to_values(entries))
+        let key_values = self.multi_get_key_value_with_options(keys, options).await?;
+        Ok(key_values
+            .into_iter()
+            .map(|kv| kv.map(|kv| kv.value))
+            .collect())
     }
 
     /// Get multiple key-value pairs from the transaction in one batch.
@@ -228,15 +231,6 @@ impl DbTransaction {
         keys: &[K],
         options: &MultiGetOptions,
     ) -> Result<Vec<Option<KeyValue>>, crate::Error> {
-        let entries = self.multi_get_entries_with_options(keys, options).await?;
-        Ok(entries_to_key_values(entries))
-    }
-
-    async fn multi_get_entries_with_options<K: AsRef<[u8]> + Sync>(
-        &self,
-        keys: &[K],
-        options: &MultiGetOptions,
-    ) -> Result<Vec<Option<RowEntry>>, crate::Error> {
         self.db_inner.check_closed()?;
 
         // Track all batch keys for SSI conflict detection.

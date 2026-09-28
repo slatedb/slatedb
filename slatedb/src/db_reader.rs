@@ -22,9 +22,9 @@ use {
         oracle::DbReaderOracle,
         paths::PathResolver,
         prefix_extractor::PrefixExtractor,
-        reader::{entries_to_key_values, entries_to_values, DbStateReader, Reader, ScanContext},
+        reader::{DbStateReader, Reader, ScanContext},
         tablestore::TableStore,
-        types::{KeyValue, RowEntry},
+        types::KeyValue,
         utils::IdGenerator,
         wal::slatedb::store::WalTableStore,
         wal::WalReader as WalReaderTrait,
@@ -334,8 +334,11 @@ impl DbReaderInner {
         keys: &[K],
         options: &MultiGetOptions,
     ) -> Result<Vec<Option<Bytes>>, SlateDBError> {
-        let entries = self.multi_get_entries_with_options(keys, options).await?;
-        Ok(entries_to_values(entries))
+        let key_values = self.multi_get_key_value_with_options(keys, options).await?;
+        Ok(key_values
+            .into_iter()
+            .map(|kv| kv.map(|kv| kv.value))
+            .collect())
     }
 
     async fn multi_get_key_value_with_options<K: AsRef<[u8]> + Sync>(
@@ -343,15 +346,6 @@ impl DbReaderInner {
         keys: &[K],
         options: &MultiGetOptions,
     ) -> Result<Vec<Option<KeyValue>>, SlateDBError> {
-        let entries = self.multi_get_entries_with_options(keys, options).await?;
-        Ok(entries_to_key_values(entries))
-    }
-
-    async fn multi_get_entries_with_options<K: AsRef<[u8]> + Sync>(
-        &self,
-        keys: &[K],
-        options: &MultiGetOptions,
-    ) -> Result<Vec<Option<RowEntry>>, SlateDBError> {
         self.check_closed()?;
         let db_state = Arc::clone(&self.state.read());
         self.reader
