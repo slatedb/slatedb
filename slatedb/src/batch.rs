@@ -152,8 +152,8 @@ impl WriteBatch {
 
         assert!(!key.is_empty(), "key cannot be empty");
         assert!(
-            key.len() <= u16::MAX as usize,
-            "key size must be <= u16::MAX"
+            key.len() <= u32::MAX as usize,
+            "key size must be <= u32::MAX"
         );
         assert!(
             value.len() <= u32::MAX as usize,
@@ -165,7 +165,7 @@ impl WriteBatch {
     ///
     /// # Panics
     /// - if the key is empty
-    /// - if the key size is larger than u16::MAX
+    /// - if the key size is larger than u32::MAX
     /// - if the value size is larger than u32::MAX
     pub fn put<K, V>(&mut self, key: K, value: V)
     where
@@ -179,7 +179,7 @@ impl WriteBatch {
     ///
     /// # Panics
     /// - if the key is empty
-    /// - if the key size is larger than u16::MAX
+    /// - if the key size is larger than u32::MAX
     /// - if the value size is larger than u32::MAX
     pub fn put_with_options<K, V>(&mut self, key: K, value: V, options: &PutOptions)
     where
@@ -202,7 +202,7 @@ impl WriteBatch {
     ///
     /// # Panics
     /// - if the key is empty
-    /// - if the key size is larger than u16::MAX
+    /// - if the key size is larger than u32::MAX
     /// - if the value size is larger than u32::MAX
     pub fn put_bytes(&mut self, key: Bytes, value: Bytes) {
         self.put_bytes_with_options(key, value, &PutOptions::default())
@@ -213,7 +213,7 @@ impl WriteBatch {
     ///
     /// # Panics
     /// - if the key is empty
-    /// - if the key size is larger than u16::MAX
+    /// - if the key size is larger than u32::MAX
     /// - if the value size is larger than u32::MAX
     pub fn put_bytes_with_options(&mut self, key: Bytes, value: Bytes, options: &PutOptions) {
         self.assert_kv(&key, &value);
@@ -519,18 +519,6 @@ mod tests {
         value: None,
         options: PutOptions::default(),
     }])]
-    #[should_panic(expected = "key size must be <= u16::MAX")]
-    #[case(vec![WriteOpTestCase {
-        key: vec![b'k'; 65_536], // 2^16
-        value: None,
-        options: PutOptions::default(),
-    }])]
-    #[should_panic(expected = "value size must be <= u32::MAX")]
-    #[case(vec![WriteOpTestCase {
-        key: b"key".to_vec(),
-        value: Some(vec![b'x'; u32::MAX as usize + 1]), // 2^32
-        options: PutOptions::default(),
-    }])]
     #[should_panic(expected = "key cannot be empty")]
     #[case(vec![WriteOpTestCase {
         key: b"".to_vec(),
@@ -566,6 +554,61 @@ mod tests {
             }
         }
         assert_eq!(batch.ops, expected_ops);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn test_accepts_u32_max_key_and_value_sizes() {
+        let bytes = vec![0; u32::MAX as usize];
+        WriteBatch::new().assert_kv(&bytes, &bytes);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    #[should_panic(expected = "key size must be <= u32::MAX")]
+    fn test_put_rejects_key_larger_than_u32_max() {
+        // Keep this separate from test_put_delete_batch: put_with_options copies
+        // the key before validation. put_bytes rejects the owned, zero-filled
+        // buffer without copying 4 GiB.
+        let key = Bytes::from(vec![0; u32::MAX as usize + 1]);
+        WriteBatch::new().put_bytes(key, Bytes::from_static(b"value"));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    #[should_panic(expected = "value size must be <= u32::MAX")]
+    fn test_put_rejects_value_larger_than_u32_max() {
+        // Keep this separate from test_put_delete_batch: put_with_options copies
+        // the value before validation. put_bytes rejects the owned, zero-filled
+        // buffer without copying 4 GiB.
+        let value = Bytes::from(vec![0; u32::MAX as usize + 1]);
+        WriteBatch::new().put_bytes(Bytes::from_static(b"key"), value);
+    }
+
+    #[rstest]
+    #[case(u16::MAX as usize)]
+    #[case(u16::MAX as usize + 1)]
+    #[case(1024 * 1024)]
+    fn test_large_key_batch_operations(#[case] key_size: usize) {
+        let key = vec![b'k'; key_size];
+        let value = Bytes::from_static(b"value");
+        let mut batch = WriteBatch::new();
+
+        batch.put(&key, &value);
+        assert_eq!(
+            only_op(&batch, &key),
+            &WriteOp::Put(value.clone(), PutOptions::default())
+        );
+
+        batch.delete(&key);
+        assert_eq!(only_op(&batch, &key), &WriteOp::Delete);
+
+        let mut batch = WriteBatch::new();
+        batch.merge(&key, &value);
+        assert_eq!(
+            only_op(&batch, &key),
+            &WriteOp::Merge(value, MergeOptions::default())
+        );
     }
 
     #[test]
