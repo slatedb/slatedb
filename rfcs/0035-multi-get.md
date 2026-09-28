@@ -557,18 +557,18 @@ The work lands as a series of pull requests into `main`, each one small
 enough for a review of its own:
 
 1. This RFC.
-2. Public API and a reference implementation. The `DbReadOps` methods,
-   `MultiGetOptions`, and a loop of `get` over one state view. The
-   acceptance tests freeze here. `main` holds a correct and slow
-   `multi_get` until step 4.
-3. Bench harness. The `mget` read mode of `slatedb-bencher`, the object
+2. Public API and a naive implementation. The `DbReadOps` methods,
+   `MultiGetOptions`, and a loop of `get` over one state view. 
+3. The acceptance e2e tests. `main` holds a correct and slow `multi_get` 
+   until step 5.
+4. Bench harness. The `mget` read mode of `slatedb-bencher`, the object
    store wrapper with latency profiles and request counts, and the key
-   generators. It measures the reference implementation first.
-4. The layer walk. Walk 0, the layer walks with the window, and the SST
+   generators. It measures the naive implementation first.
+5. The layer walk. Walk 0, the layer walks with the window, and the SST
    reader with block merging.
-5. Deterministic simulation tests.
-6. Docs.
-7. Language bindings, one pull request per binding.
+6. Deterministic simulation tests.
+7. Docs.
+8. Language bindings, one pull request per binding.
 
 There are no feature flags.
 
