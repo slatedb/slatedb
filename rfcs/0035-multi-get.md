@@ -71,7 +71,7 @@ many point reads. A ranking service is a good example:
 Other stores have a call for this pattern: `MultiGet` in RocksDB, `MGET` in
 Redis, and `BatchGetItem` in DynamoDB. SlateDB does not, so the application
 must call `get` in a loop. The RFC author maintains
-[murrdb](https://github.com/murrdb/murr), which uses this pattern on RocksDB.
+[murrdb](https://github.com/murrdb/murr), which calls `MultiGet` on RocksDB.
 
 ### What a `get` in a loop repeats
 
@@ -85,7 +85,8 @@ the batch, so:
 * Two keys in adjacent blocks of one SST send two GET requests. A batch can
   send one.
 * Parallel gets hide the latency, but not the cost. Each `get` also sees its
-  own DB state, so the keys of one batch can see different states.
+  own DB state, so the keys of one batch can see different states, unless
+  the caller opens a snapshot first.
 
 In the following table, N is the number of keys, M is the number of memtables,
 and S is the number of candidate SSTs for a key:
@@ -225,8 +226,8 @@ pub struct MultiGetOptions {
     /// Max object store requests of one batch in flight. Default: 256.
     pub max_fetch_tasks: usize,
     /// Two blocks go into one ranged GET when the gap between them is at
-    /// most this many bytes. With 0, only adjacent blocks merge.
-    /// Default: 64 KiB.
+    /// most this many bytes. With 0, only adjacent blocks merge. The
+    /// blocks in a gap are not decoded or cached. Default: 64 KiB.
     pub coalesce_gap_bytes: usize,
     /// Upper size of one merged ranged GET. Default: 512 KiB.
     pub max_coalesced_bytes: usize,
@@ -248,9 +249,10 @@ Walk 0 runs before any I/O, in three steps:
 1. Setup. It takes one state view and one `max_seq` for the batch, and it
    sorts and deduplicates the keys into `Bytes`. A `get` repeats this per
    key.
-2. Memory. For each key, it reads the write batch, the memtable, and the
-   immutable memtables, newest first. A value or a tombstone answers the
-   key. A merge operand is kept, and the key stays open for its base value.
+2. Memory. For each key, it reads all versions of the key in the write
+   batch, the memtable, and the immutable memtables, newest first. The
+   first value or tombstone answers the key. A merge operand is kept, and
+   the key stays open for its base value.
 3. Hand-off. The keys that are still open become the open set of the layer
    walks.
 
@@ -267,7 +269,9 @@ starts:
 1. Candidates. It maps each key to the SST of the layer that can hold it.
    An L0 SST can hold any key. In a sorted run, the binary search of `get`
    finds the SST, or two adjacent SSTs when the versions of a key can span
-   both. This step does no I/O.
+   both. An SST is a candidate only when the key is inside its visible
+   range, which is the range test of `get` for a clone. This step does no
+   I/O.
 2. Filters. It probes the filter of each candidate SST, and it drops the
    keys that the filter rejects. Filters that are not in the cache load in
    parallel, one request per SST.
@@ -328,7 +332,9 @@ filter probes per key that the newest layer answers. The reasons:
 
 Per SST, the batch sends fewer requests than the loop. One filter load and
 one index load serve all keys of the SST, adjacent blocks go out in one
-ranged GET, and a duplicate key is read one time.
+ranged GET, and a duplicate key is read one time. One exception: a ranged
+GET of several blocks does not join the single-flight of other readers on
+the same blocks. A read of one block does, as in `get`.
 
 With `lookahead = 1` the batch sends no speculative request, and it waits
 for the slowest read of every layer in sequence. This setting measures the
@@ -525,8 +531,9 @@ as the code, see [Rollout](#rollout):
 1. Acceptance tests, with the public API. The first implementation is a
    loop of `get` over one state view. `tests/multi_get.rs` asserts against
    it that a batch agrees with a `get` loop on a `Db`, a `DbReader`, a
-   `DbSnapshot`, and a transaction, with and without a merge operator, and
-   after a compaction. These tests do not change when the layer walk lands.
+   `DbSnapshot`, a transaction, and a projected clone, with and without a
+   merge operator, and after a compaction. These tests do not change when
+   the layer walk lands.
 2. Differential tests, with the layer walk:
    - A layered fixture forces a compaction and then adds new L0 SSTs, as
      `tests/scan_model.rs` does, so one batch sees keys in L0 and in sorted
