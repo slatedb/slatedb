@@ -124,6 +124,8 @@ impl GcTask for ManifestGcTask {
             })
             .collect::<Vec<_>>();
 
+        self.stats.gc_manifest_versions.set(pre_gc_count as i64);
+
         // Advance the boundary to the latest manifest selected by the GC model. The optional GC
         // filter only gates the final deletion pass.
         if self.boundary_files_enabled {
@@ -141,8 +143,6 @@ impl GcTask for ManifestGcTask {
             .into_iter()
             .map(|manifest_metadata| manifest_metadata.id)
             .collect::<Vec<_>>();
-
-        self.stats.gc_manifest_versions.set(pre_gc_count as i64);
 
         let deleted_count = self.maybe_delete_manifests(manifest_ids_to_delete).await;
 
@@ -169,7 +169,7 @@ mod tests {
     };
     use async_trait::async_trait;
     use chrono::TimeDelta;
-    use object_store::{memory::InMemory, path::Path, ObjectStoreExt};
+    use object_store::{local::LocalFileSystem, memory::InMemory, path::Path, ObjectStoreExt};
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricsRecorderHelper,
@@ -444,6 +444,85 @@ mod tests {
             ),
             Some(3),
             "expected all 3 manifests when nothing qualifies for deletion"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_version_count_refreshes_when_boundary_advance_fails() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let object_store = Arc::new(LocalFileSystem::new_with_prefix(tempdir.path()).unwrap());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from("/root"),
+            object_store.clone(),
+        ));
+        let mut stored = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        stored
+            .update(stored.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        stored
+            .update(stored.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        manifest_store.advance_boundary(1).await.unwrap();
+
+        let metrics = Arc::new(DefaultMetricsRecorder::new());
+        let recorder = MetricsRecorderHelper::new(metrics.clone(), Default::default());
+        let stats = Arc::new(GcStats::new(&recorder));
+        stats.gc_manifest_versions.set(-1);
+        let task = ManifestGcTask::new(
+            manifest_store.clone(),
+            stats,
+            GarbageCollectorDirectoryOptions {
+                min_age: Duration::ZERO,
+                interval: None,
+                dry_run: false,
+            },
+            None,
+            true,
+        );
+
+        let error = task
+            .collect(Utc::now() + TimeDelta::hours(1))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            SlateDBError::ObjectStoreError(error)
+                if matches!(error.as_ref(), object_store::Error::NotImplemented { .. })
+        ));
+
+        let raw_boundary = object_store
+            .get(&Path::from("/root/gc/manifest.boundary"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!("1", std::str::from_utf8(&raw_boundary).unwrap());
+        assert_eq!(
+            manifest_store
+                .list_manifests(..)
+                .await
+                .unwrap()
+                .iter()
+                .map(|manifest| manifest.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            lookup_metric_with_labels(
+                &metrics,
+                crate::garbage_collector::stats::VERSION_COUNT,
+                &[("resource", "manifest")]
+            ),
+            Some(3)
         );
     }
 

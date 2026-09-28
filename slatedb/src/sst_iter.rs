@@ -642,12 +642,15 @@ impl<'a> InternalSstIterator<'a> {
 
     async fn ensure_metadata_loaded(&mut self) -> Result<(), SlateDBError> {
         if self.index.is_none() {
+            let read_trace = self.read_trace();
             let index = self
                 .table_store
                 .read_index(
                     &self.view.table_as_ref().sst,
                     self.options.cache_metadata,
                     self.options.segment.clone(),
+                    &read_trace,
+                    self.sst_level(),
                 )
                 .await?;
             let block_idx_range = partitioned_keyspace::partitions_covering_range(
@@ -1296,7 +1299,13 @@ mod tests {
             .await
             .unwrap();
         let index = table_store
-            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(index.borrow().block_meta().len(), 1);
@@ -1771,7 +1780,13 @@ mod tests {
             .await
             .unwrap();
         let index = table_store
-            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(index.borrow().block_meta().len(), 8);
@@ -2491,7 +2506,13 @@ mod tests {
 
         // Verify we have multiple blocks
         let index = table_store
-            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert!(
@@ -2690,7 +2711,13 @@ mod tests {
         let sst_handle = table_store.open_sst(&id, Some(Bytes::new())).await.unwrap();
 
         let index = table_store
-            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         let num_blocks = index.borrow().block_meta().len();
@@ -2836,7 +2863,13 @@ mod tests {
         let sst_handle = table_store.open_sst(&id, Some(Bytes::new())).await.unwrap();
 
         let index = table_store
-            .read_index(&sst_handle, true, Some(Bytes::new()))
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         let num_blocks = index.borrow().block_meta().len();

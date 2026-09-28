@@ -8,7 +8,7 @@ use {
         db_cache::CacheTarget,
         db_cache_manager,
         db_common::extract_segment_prefix,
-        db_state::{collect_touched_segments, SsTableId},
+        db_state::{collect_touched_segments, SsTableHandle, SsTableId},
         db_stats::DbStats,
         db_status::{ClosedResultWriter, DbStatus, DbStatusManager},
         dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef},
@@ -1469,11 +1469,20 @@ impl DbCacheManagerOps for DbReader {
             .await
     }
 
-    async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), crate::Error> {
+    async fn evict_cached_sst(
+        &self,
+        sst: &SsTableHandle,
+        targets: &[CacheTarget],
+    ) -> Result<(), crate::Error> {
         self.inner.check_closed()?;
         let manifest = self.manifest();
-        db_cache_manager::evict_cached_sst_impl(&self.inner.table_store, manifest.core(), sst_id)
-            .await
+        db_cache_manager::evict_cached_sst_impl(
+            &self.inner.table_store,
+            manifest.core(),
+            sst,
+            targets,
+        )
+        .await
     }
 
     async fn flush_cache_to_disk(&self) -> Result<(), crate::Error> {

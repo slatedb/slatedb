@@ -95,17 +95,24 @@ pub(crate) async fn warm_sst_impl(
 pub(crate) async fn evict_cached_sst_impl(
     table_store: &Arc<TableStore>,
     manifest: &ManifestCore,
-    sst_id: SsTableId,
+    handle: &SsTableHandle,
+    targets: &[CacheTarget],
 ) -> Result<(), crate::Error> {
     if table_store.cache().is_none() {
         warn!("evict_cached_sst called on a Db without a block cache configured");
         return Ok(());
     }
-    let (handle, segment) = match find_sst(manifest, &sst_id) {
-        Some((segment, view)) => (view.sst.clone(), Some(segment)),
-        None => (table_store.open_sst(&sst_id, None).await?, None),
+    // The segment tag is a hint for the index read that a `Data` target
+    // needs. An SST that left the manifest has none.
+    let reads_index = targets.iter().any(|t| matches!(t, CacheTarget::Data(_)));
+    let segment = if reads_index {
+        find_sst(manifest, &handle.id).map(|(segment, _)| segment)
+    } else {
+        None
     };
-    table_store.evict_sst_from_cache(&handle, segment).await;
+    table_store
+        .evict_sst_targets_from_cache(handle, targets, segment)
+        .await;
     Ok(())
 }
 
@@ -233,7 +240,13 @@ async fn ensure_index(
     let result: &Result<Arc<SsTableIndexOwned>, SlateDBError> = index_cell
         .get_or_init(|| async {
             table_store
-                .read_index(handle, true, Some(segment.clone()))
+                .read_index(
+                    handle,
+                    true,
+                    Some(segment.clone()),
+                    &ReadTrace::new(None),
+                    None,
+                )
                 .await
         })
         .await;
@@ -284,7 +297,7 @@ mod tests {
             .await
             .expect("open_sst");
         let index = table_store
-            .read_index(&handle, false, Some(segment))
+            .read_index(&handle, false, Some(segment), &ReadTrace::new(None), None)
             .await
             .expect("read_index");
         let cache = table_store.cache().expect("cache configured").clone();
@@ -304,7 +317,13 @@ mod tests {
             .await
             .expect("open_sst");
         let index = table_store
-            .read_index(&handle, false, Some(Bytes::new()))
+            .read_index(
+                &handle,
+                false,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .expect("read_index");
         let block_idx =
@@ -346,13 +365,13 @@ mod tests {
         }
     }
 
-    fn first_l0_sst_id(db: &Db) -> SsTableId {
+    fn first_l0_sst(db: &Db) -> SsTableHandle {
         let manifest = db.manifest();
         manifest
             .l0()
             .iter()
             .next()
-            .map(|v| v.sst.id)
+            .map(|v| v.sst.clone())
             .expect("expected at least one L0 SST")
     }
 
@@ -462,11 +481,14 @@ mod tests {
         let db = open_db_single_sst(os).await;
         write_keys(&db, 64).await;
         flush_to_l0(&db).await;
-        let sst_id = first_l0_sst_id(&db);
-        db.evict_cached_sst(sst_id).await.expect("evict");
+        let sst = first_l0_sst(&db);
+        let sst_id = sst.id;
+        db.evict_cached_sst(&sst, &CacheTarget::all())
+            .await
+            .expect("evict");
 
         // when
-        db.warm_sst(sst_id, &[CacheTarget::data::<&[u8], _>(..)])
+        db.warm_sst(sst.id, &[CacheTarget::data::<&[u8], _>(..)])
             .await
             .expect("warm_sst");
 
@@ -489,11 +511,14 @@ mod tests {
         let db = open_db_single_sst(os).await;
         write_keys(&db, 64).await;
         flush_to_l0(&db).await;
-        let sst_id = first_l0_sst_id(&db);
-        db.evict_cached_sst(sst_id).await.expect("evict");
+        let sst = first_l0_sst(&db);
+        let sst_id = sst.id;
+        db.evict_cached_sst(&sst, &CacheTarget::all())
+            .await
+            .expect("evict");
 
         // when: we warm only the upper half of the keyspace
-        db.warm_sst(sst_id, &[CacheTarget::data(b"key000032".as_slice()..)])
+        db.warm_sst(sst.id, &[CacheTarget::data(b"key000032".as_slice()..)])
             .await
             .expect("warm_sst");
 
@@ -517,12 +542,12 @@ mod tests {
         let db = open_db_single_sst(os).await;
         write_keys(&db, 8).await;
         flush_to_l0(&db).await;
-        let sst_id = first_l0_sst_id(&db);
+        let sst = first_l0_sst(&db);
         db.close().await.expect("close");
 
         // when / then: both ops reject the call with Closed
         let warm_err = db
-            .warm_sst(sst_id, &[CacheTarget::Index])
+            .warm_sst(sst.id, &[CacheTarget::Index])
             .await
             .expect_err("warm_sst on closed db");
         assert_eq!(
@@ -530,7 +555,7 @@ mod tests {
             crate::ErrorKind::Closed(crate::CloseReason::Clean),
         );
         let evict_err = db
-            .evict_cached_sst(sst_id)
+            .evict_cached_sst(&sst, &CacheTarget::all())
             .await
             .expect_err("evict_cached_sst on closed db");
         assert_eq!(
@@ -571,16 +596,16 @@ mod tests {
     /// Return the id of the first L0 SST in the manifest, walking root tree
     /// then named segments. Used by tests that don't care which tree the
     /// SST lives in.
-    fn first_l0_sst_id_any_tree(db: &Db) -> SsTableId {
+    fn first_l0_sst_any_tree(db: &Db) -> SsTableHandle {
         let manifest = db.manifest();
-        let id = manifest
+        let sst = manifest
             .core()
             .trees()
             .flat_map(|t| t.l0.iter())
             .next()
-            .map(|v| v.sst.id)
+            .map(|v| v.sst.clone())
             .expect("expected at least one L0 SST across root + segments");
-        id
+        sst
     }
 
     #[tokio::test]
@@ -590,8 +615,11 @@ mod tests {
         let db = open_db_single_sst(os).await;
         write_keys(&db, 64).await;
         flush_to_l0(&db).await;
-        let sst_id = first_l0_sst_id(&db);
-        db.evict_cached_sst(sst_id).await.expect("evict");
+        let sst = first_l0_sst(&db);
+        let sst_id = sst.id;
+        db.evict_cached_sst(&sst, &CacheTarget::all())
+            .await
+            .expect("evict");
 
         // and: a manifest snapshot that restricts the SST view to the upper half
         let mut manifest = db.manifest();
@@ -604,7 +632,7 @@ mod tests {
         warm_sst_impl(
             &db.inner.table_store,
             manifest.core(),
-            sst_id,
+            sst.id,
             &[CacheTarget::data::<&[u8], _>(..)],
         )
         .await
@@ -644,13 +672,16 @@ mod tests {
             "extractor-configured flush should populate at least one segment"
         );
 
-        let sst_id = first_l0_sst_id_any_tree(&db);
-        db.evict_cached_sst(sst_id).await.expect("evict");
+        let sst = first_l0_sst_any_tree(&db);
+        let sst_id = sst.id;
+        db.evict_cached_sst(&sst, &CacheTarget::all())
+            .await
+            .expect("evict");
 
         warm_sst_impl(
             &db.inner.table_store,
             manifest.core(),
-            sst_id,
+            sst.id,
             &[CacheTarget::data::<&[u8], _>(..)],
         )
         .await
@@ -698,8 +729,11 @@ mod tests {
         let db = open_db_single_sst(os).await;
         write_keys(&db, 64).await;
         flush_to_l0(&db).await;
-        let sst_id = first_l0_sst_id(&db);
-        db.evict_cached_sst(sst_id).await.expect("evict");
+        let sst = first_l0_sst(&db);
+        let sst_id = sst.id;
+        db.evict_cached_sst(&sst, &CacheTarget::all())
+            .await
+            .expect("evict");
         db.inner
             .table_store
             .delete_sst(&sst_id)
@@ -709,7 +743,7 @@ mod tests {
         // when: we warm a target whose underlying IO will fail
         let result = db
             .warm_sst(
-                sst_id,
+                sst.id,
                 &[CacheTarget::Index, CacheTarget::data::<&[u8], _>(..)],
             )
             .await;
@@ -737,16 +771,17 @@ mod tests {
             .expect("failed to open db");
         write_keys(&db, 64).await;
         flush_to_l0(&db).await;
-        let sst_id = first_l0_sst_id(&db);
-        db.evict_cached_sst(sst_id).await.expect("evict");
-
-        let table_store = db.inner.table_store.clone();
-        let handle = table_store
-            .open_sst(&sst_id, Some(Bytes::new()))
+        let sst = first_l0_sst(&db);
+        db.evict_cached_sst(&sst, &CacheTarget::all())
             .await
-            .expect("open_sst");
-        let cache = table_store.cache().expect("cache configured").clone();
-        (db, sst_id, handle, cache)
+            .expect("evict");
+        let cache = db
+            .inner
+            .table_store
+            .cache()
+            .expect("cache configured")
+            .clone();
+        (db, sst.id, sst, cache)
     }
 
     #[tokio::test]
@@ -835,6 +870,93 @@ mod tests {
         db.close().await.expect("close");
     }
 
+    /// An SST that a compaction retired is no longer in the manifest. Its
+    /// handle still names every entry, and the index read for a `Data`
+    /// target succeeds because the object still exists.
+    #[tokio::test]
+    async fn should_evict_an_sst_that_is_not_in_the_manifest() {
+        // given: one L0 SST whose blocks, index, and filter the flush cached
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(PATH, os)
+            .with_settings(Settings {
+                flush_interval: None,
+                min_filter_keys: 1,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .expect("failed to open db");
+        write_keys(&db, 64).await;
+        flush_to_l0(&db).await;
+        let sst = first_l0_sst(&db);
+        let table_store = db.inner.table_store.clone();
+        let cache = table_store.cache().expect("cache configured").clone();
+        let index_key: CachedKey = (sst.id, sst.info.index_offset).into();
+        assert!(cache.get_index(&index_key).await.unwrap().is_some());
+        assert!(cached_block_mask(&table_store, sst.id, Bytes::new())
+            .await
+            .iter()
+            .all(|&cached| cached));
+
+        // when: evicting through a manifest that does not reference the SST
+        evict_cached_sst_impl(
+            &table_store,
+            &ManifestCore::new(),
+            &sst,
+            &CacheTarget::all(),
+        )
+        .await
+        .expect("evict");
+
+        // then
+        assert!(cache.get_index(&index_key).await.unwrap().is_none());
+        assert!(cached_block_mask(&table_store, sst.id, Bytes::new())
+            .await
+            .iter()
+            .all(|&cached| !cached));
+
+        db.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn should_evict_only_the_selected_targets() {
+        // given: one L0 SST whose blocks, index, and filter the flush cached
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(PATH, os)
+            .with_settings(Settings {
+                flush_interval: None,
+                min_filter_keys: 1,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .expect("failed to open db");
+        write_keys(&db, 64).await;
+        flush_to_l0(&db).await;
+        let sst = first_l0_sst(&db);
+        let table_store = db.inner.table_store.clone();
+        let cache = table_store.cache().expect("cache configured").clone();
+        let index_key: CachedKey = (sst.id, sst.info.index_offset).into();
+        let filter_key: CachedKey = (sst.id, sst.info.filter_offset).into();
+        assert!(cache.get_index(&index_key).await.unwrap().is_some());
+        assert!(cache.get_filter(&filter_key).await.unwrap().is_some());
+        let blocks_before = cached_block_mask(&table_store, sst.id, Bytes::new()).await;
+        assert!(blocks_before.iter().all(|&cached| cached));
+
+        // when
+        db.evict_cached_sst(&sst, &[CacheTarget::Index, CacheTarget::Filters])
+            .await
+            .expect("evict");
+
+        // then: the metadata is gone and the data blocks are left in place
+        assert!(cache.get_index(&index_key).await.unwrap().is_none());
+        assert!(cache.get_filter(&filter_key).await.unwrap().is_none());
+        let blocks_after = cached_block_mask(&table_store, sst.id, Bytes::new()).await;
+        assert_eq!(blocks_after, blocks_before);
+
+        db.close().await.expect("close");
+    }
+
     #[tokio::test]
     async fn should_evict_all_blocks_from_cache() {
         // given: a warmed SST
@@ -842,8 +964,9 @@ mod tests {
         let db = open_db_single_sst(os).await;
         write_keys(&db, 64).await;
         flush_to_l0(&db).await;
-        let sst_id = first_l0_sst_id(&db);
-        db.warm_sst(sst_id, &[CacheTarget::data::<&[u8], _>(..)])
+        let sst = first_l0_sst(&db);
+        let sst_id = sst.id;
+        db.warm_sst(sst.id, &[CacheTarget::data::<&[u8], _>(..)])
             .await
             .expect("warm_sst");
         let mask_before = cached_block_mask(&db.inner.table_store, sst_id, Bytes::new()).await;
@@ -853,7 +976,9 @@ mod tests {
         );
 
         // when
-        db.evict_cached_sst(sst_id).await.expect("evict");
+        db.evict_cached_sst(&sst, &CacheTarget::all())
+            .await
+            .expect("evict");
 
         // then: no blocks remain in cache
         let mask_after = cached_block_mask(&db.inner.table_store, sst_id, Bytes::new()).await;
@@ -873,8 +998,9 @@ mod tests {
         let db = open_db_single_sst(os).await;
         write_keys(&db, 64).await;
         flush_to_l0(&db).await;
-        let sst_id = first_l0_sst_id(&db);
-        db.warm_sst(sst_id, &[CacheTarget::data::<&[u8], _>(..)])
+        let sst = first_l0_sst(&db);
+        let sst_id = sst.id;
+        db.warm_sst(sst.id, &[CacheTarget::data::<&[u8], _>(..)])
             .await
             .expect("warm_sst");
         let mask_before = cached_block_mask(&db.inner.table_store, sst_id, Bytes::new()).await;
