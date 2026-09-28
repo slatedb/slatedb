@@ -21,8 +21,8 @@ use rstest::rstest;
 use slatedb::admin::Admin;
 use slatedb::bytes::Bytes;
 use slatedb::config::{
-    CompactionWorkerOptions, CompactorOptions, FlushOptions, FlushType, MultiGetOptions,
-    PutOptions, Settings, SizeTieredCompactionSchedulerOptions, WriteOptions,
+    CompactionWorkerOptions, CompactorOptions, DbReaderOptions, FlushOptions, FlushType,
+    MultiGetOptions, PutOptions, Settings, SizeTieredCompactionSchedulerOptions, WriteOptions,
 };
 use slatedb::db_cache::foyer::FoyerCache;
 use slatedb::db_stats::{MULTI_GET_KEYS, MULTI_GET_LAYERS, REQUEST_COUNT};
@@ -507,16 +507,17 @@ fn counter(recorder: &DefaultMetricsRecorder, name: &str, labels: &[(&str, &str)
         .unwrap_or(0)
 }
 
-/// Object store GET requests of the main store, sent by `component`.
-fn store_gets(recorder: &DefaultMetricsRecorder, component: &str) -> u64 {
-    ["get", "get_range", "get_ranges", "head"]
+/// Ranged GET requests of the reader. An SST read is a ranged request, a
+/// manifest read is not.
+fn sst_reads(recorder: &DefaultMetricsRecorder) -> u64 {
+    ["get_range", "get_ranges"]
         .iter()
         .map(|api| {
             counter(
                 recorder,
                 OBJECT_STORE_REQUEST_COUNT,
                 &[
-                    ("component", component),
+                    ("component", "reader"),
                     ("store_type", "main"),
                     ("op", "get"),
                     ("api", api),
@@ -575,7 +576,8 @@ async fn open_l0_db(
     (db, object_store, recorder)
 }
 
-/// Opens a reader with an empty block cache over the SSTs of `path`.
+/// Opens a reader with an empty block cache over the SSTs of `path`. The reader
+/// does not poll the manifest or read the WAL, so only the reads count.
 async fn open_reader(
     path: &str,
     object_store: Arc<dyn ObjectStore>,
@@ -583,6 +585,12 @@ async fn open_reader(
     merge: bool,
 ) -> DbReader {
     let mut builder = DbReader::builder(path, object_store)
+        .with_options(DbReaderOptions {
+            manifest_poll_interval: Duration::from_secs(3600),
+            checkpoint_lifetime: Duration::from_secs(4 * 3600),
+            skip_wal_replay: true,
+            ..Default::default()
+        })
         .with_db_cache(Arc::new(FoyerCache::new()), 0)
         .with_metrics_recorder(recorder);
     if merge {
@@ -627,12 +635,12 @@ async fn test_multi_get_requests_not_above_get_loop(
             reader.get(k).await.unwrap();
         }
     }
-    let start = store_gets(&recorder, "reader");
+    let start = sst_reads(&recorder);
     let batch = reader
         .multi_get_with_options(&keys, &options)
         .await
         .unwrap();
-    let batch_gets = store_gets(&recorder, "reader") - start;
+    let batch_reads = sst_reads(&recorder) - start;
 
     let reader = if warm {
         reader
@@ -640,18 +648,18 @@ async fn test_multi_get_requests_not_above_get_loop(
         reader.close().await.unwrap();
         open_reader(&path, object_store, recorder.clone(), merge).await
     };
-    let start = store_gets(&recorder, "reader");
+    let start = sst_reads(&recorder);
     for (i, k) in keys.iter().enumerate() {
         assert_eq!(reader.get(k).await.unwrap(), batch[i]);
     }
-    let loop_gets = store_gets(&recorder, "reader") - start;
+    let loop_reads = sst_reads(&recorder) - start;
     reader.close().await.unwrap();
 
     // A walk in flight reads at most a filter, an index and one block before it is dropped.
     let in_flight = 3 * (lookahead as u64 - 1);
     assert!(
-        batch_gets <= loop_gets + in_flight,
-        "lookahead={lookahead} warm={warm}: batch sent {batch_gets} GETs, loop sent {loop_gets}"
+        batch_reads <= loop_reads + in_flight,
+        "lookahead={lookahead} warm={warm}: batch sent {batch_reads} reads, loop sent {loop_reads}"
     );
 }
 

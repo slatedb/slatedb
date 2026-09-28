@@ -227,7 +227,7 @@ pub struct MultiGetOptions {
     pub max_fetch_tasks: usize,
     /// Two blocks go into one ranged GET when the gap between them is at
     /// most this many bytes. With 0, only adjacent blocks merge. The
-    /// blocks in a gap are not decoded or cached. Default: 64 KiB.
+    /// blocks in a gap are decoded and cached too. Default: 64 KiB.
     pub coalesce_gap_bytes: usize,
     /// Upper size of one merged ranged GET. Default: 512 KiB.
     pub max_coalesced_bytes: usize,
@@ -263,7 +263,8 @@ in-memory tables as `get`, in the same order, with the same `max_seq`.
 
 The layers form one list in manifest order: the L0 SSTs newest first, then
 the sorted runs newest first. With segments, each key walks the list of its
-segment. One layer walk does three steps for the keys that are open when it
+segment, and a key outside every segment reaches no layer, so it resolves to
+absent. One layer walk does three steps for the keys that are open when it
 starts:
 
 1. Candidates. It maps each key to the SST of the layer that can hold it.
@@ -317,8 +318,11 @@ Most of a walk is existing code:
 
 ### Request bound
 
-A batch sends at most the requests of a loop of concurrent gets, plus three
-filter probes per key that the newest layer answers. The reasons:
+A batch sends at most the requests of a loop of concurrent gets, plus the
+reads of the walks in flight when the batch stops early. A walk in flight
+reads at most a filter, an index and one block per SST before the batch
+drops it, so the extra is at most `3 × (lookahead - 1)` requests per
+candidate SST. The reasons:
 
 - A walk starts only when the oldest walk in the window is applied, so a
   key that layer j answers is open in layers j+1 to j+3 at most. These are
@@ -327,8 +331,10 @@ filter probes per key that the newest layer answers. The reasons:
 - The one difference is the start. The batch opens the first `lookahead`
   layers at once, and `get` opens the newest SST alone. In a batch of 100
   keys, some keys always miss the newest layer, so the batch reaches the
-  next layers anyway. The extra probes belong to the keys that the newest
-  layer answers, and only a false positive turns a probe into a block read.
+  next layers anyway. The extra reads belong to the keys that the newest
+  layer answers. A dropped walk cannot stop a filter or block fetch that
+  the cache loader already started, so the fetch completes and fills the
+  cache.
 
 Per SST, the batch sends fewer requests than the loop. One filter load and
 one index load serve all keys of the SST, adjacent blocks go out in one
@@ -538,12 +544,10 @@ as the code, see [Rollout](#rollout):
    - A layered fixture forces a compaction and then adds new L0 SSTs, as
      `tests/scan_model.rs` does, so one batch sees keys in L0 and in sorted
      runs.
-   - A counting object store asserts the request bound with `lookahead` 1
-     and 4, and with a cold, a partly warm, and a warm cache.
-   - Fault tests assert that a failed read fails the batch, and that a
-     dropped batch leaves no request in flight.
-   - Unit tests cover walk 0, the candidates of one layer, the window, and
-     the read of one SST, as `rstest` tables next to the code.
+   - The request count metrics of a reader assert the request bound with
+     `lookahead` 1 and 4, and with a cold and a warm cache.
+   - Unit tests cover walk 0, the candidates of one layer, and the block
+     ranges of one SST, as `rstest` tables next to the code.
 3. Deterministic simulation. The `slatedb-dst` workload gets a `MultiGet`
    operation that asserts each slot, as `verify_get` does.
 4. Performance. `slatedb-bencher` gets an `mget` read mode, an object store
