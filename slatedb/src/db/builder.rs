@@ -409,6 +409,14 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Pads every data block of a compacted SST with zeros to the block size
     /// set by [`Self::with_sst_block_size`].
     ///
+    /// A [`BlockTransformer`] that adds bytes to a block must report them
+    /// through [`BlockTransformer::encoded_overhead`], or every full block
+    /// spills into a second block-sized unit.
+    ///
+    /// Readers that predate the `encoded_len` index field cannot read padded
+    /// SSTs, so upgrade every reader before a writer enables this. Once
+    /// padded SSTs exist, the readers cannot be rolled back.
+    ///
     /// Defaults to `false`.
     pub fn with_sst_block_alignment(mut self, aligned: bool) -> Self {
         self.sst_block_alignment = aligned;

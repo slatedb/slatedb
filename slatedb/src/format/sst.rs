@@ -191,7 +191,11 @@ pub trait BlockTransformer: Send + Sync {
     async fn decode(&self, data: Bytes) -> Result<Bytes, crate::error::Error>;
 
     /// Bytes `encode` adds to a block when that count is constant, such as a
-    /// nonce and a tag. Zero when it is not.
+    /// nonce and a tag.
+    ///
+    /// With block alignment on, the writer reserves this many bytes so a full
+    /// block still fits one unit; a transformer that adds bytes but leaves
+    /// this at zero makes every full block spill into a second unit.
     fn encoded_overhead(&self) -> usize {
         0
     }
