@@ -6,28 +6,35 @@
 //! `[get(k) for k in keys]` against the same database. We assert this over
 //! randomized, layered data (many L0 SSTs over a compacted sorted run), with
 //! and without a block cache and a merge operator, plus transaction, reader,
-//! snapshot, and projected clone variants.
+//! snapshot, and projected clone variants. The request count test checks that
+//! a batch sends no more object store GETs than a `get` loop.
 
+#[cfg(feature = "wal_disable")]
 use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use rstest::rstest;
+#[cfg(feature = "wal_disable")]
 use slatedb::admin::Admin;
 use slatedb::bytes::Bytes;
 use slatedb::config::{
-    CompactionWorkerOptions, CompactorOptions, FlushOptions, FlushType, PutOptions, Settings,
-    SizeTieredCompactionSchedulerOptions, WriteOptions,
+    CompactionWorkerOptions, CompactorOptions, FlushOptions, FlushType, MultiGetOptions,
+    PutOptions, Settings, SizeTieredCompactionSchedulerOptions, WriteOptions,
 };
 use slatedb::db_cache::foyer::FoyerCache;
-use slatedb::db_stats::{MULTI_GET_KEYS, REQUEST_COUNT};
+use slatedb::db_stats::{MULTI_GET_KEYS, MULTI_GET_LAYERS, REQUEST_COUNT};
+use slatedb::instrumented_object_store_stats::REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT;
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
+#[cfg(feature = "wal_disable")]
+use slatedb::CloneSourceSpec;
 use slatedb::{
-    CloneSourceSpec, CompactorBuilder, Db, DbReadOps, DbReader, IsolationLevel, MergeOperator,
-    MergeOperatorError, SstBlockSize,
+    CompactorBuilder, Db, DbReadOps, DbReader, IsolationLevel, MergeOperator, MergeOperatorError,
+    SstBlockSize,
 };
 use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue};
 
@@ -159,7 +166,6 @@ async fn test_multi_get_matches_get_loop_no_cache() {
     db.close().await.unwrap();
 }
 
-#[ignore = "the layer walk reads the cache, the get loop does not"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_get_matches_get_loop_with_block_cache() {
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -348,14 +354,18 @@ async fn test_multi_get_snapshot_matches_get_loop() {
     db.close().await.unwrap();
 }
 
-#[ignore = "the layer walk applies the visible range, the get loop inherits it. A projection needs a parent with no WAL"]
+/// A projection rejects a parent with WAL data, so the parent runs without a WAL.
+#[cfg(feature = "wal_disable")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_get_projected_clone_matches_get_loop() {
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let parent_path = "/tmp/test_multi_get_clone_parent";
     let clone_path = "/tmp/test_multi_get_clone";
     let db = Db::builder(parent_path, object_store.clone())
-        .with_settings(layered_settings())
+        .with_settings(Settings {
+            wal_enabled: false,
+            ..layered_settings()
+        })
         .build()
         .await
         .unwrap();
@@ -446,7 +456,6 @@ async fn compact_l0(db: &Db) {
 }
 
 /// Keys spread over L0 SSTs and sorted runs in the same query.
-#[ignore = "the layer walk walks sorted runs, the get loop does not"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_get_matches_get_loop_over_l0_and_sorted_runs() {
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -498,6 +507,25 @@ fn counter(recorder: &DefaultMetricsRecorder, name: &str, labels: &[(&str, &str)
         .unwrap_or(0)
 }
 
+/// Object store GET requests of the main store, sent by `component`.
+fn store_gets(recorder: &DefaultMetricsRecorder, component: &str) -> u64 {
+    ["get", "get_range", "get_ranges", "head"]
+        .iter()
+        .map(|api| {
+            counter(
+                recorder,
+                OBJECT_STORE_REQUEST_COUNT,
+                &[
+                    ("component", component),
+                    ("store_type", "main"),
+                    ("op", "get"),
+                    ("api", api),
+                ],
+            )
+        })
+        .sum()
+}
+
 /// Writes `ssts` L0 SSTs. With `overwrite`, each SST holds a new version of all
 /// keys. Without it, each key lives in one SST. With `merge`, the versions
 /// after the first are merge operands.
@@ -547,6 +575,86 @@ async fn open_l0_db(
     (db, object_store, recorder)
 }
 
+/// Opens a reader with an empty block cache over the SSTs of `path`.
+async fn open_reader(
+    path: &str,
+    object_store: Arc<dyn ObjectStore>,
+    recorder: Arc<DefaultMetricsRecorder>,
+    merge: bool,
+) -> DbReader {
+    let mut builder = DbReader::builder(path, object_store)
+        .with_db_cache(Arc::new(FoyerCache::new()), 0)
+        .with_metrics_recorder(recorder);
+    if merge {
+        builder = builder.with_merge_operator(Arc::new(ConcatMergeOperator));
+    }
+    builder.build().await.unwrap()
+}
+
+/// Goal 3 of the RFC: a batch sends no more GETs than a `get` loop over the
+/// same keys, plus the reads of the walks in flight when the batch stops early.
+/// Cold means a fresh reader for the batch and another one for the loop.
+#[rstest]
+#[case::distinct_keys(32, false, false)]
+// A small batch, so shared reads cannot hide the reads of shadowed versions.
+#[case::many_versions(2, true, false)]
+// Merge operands in every SST, so every version must be read.
+#[case::merge_operands(2, true, true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_multi_get_requests_not_above_get_loop(
+    #[case] num_keys: usize,
+    #[case] overwrite: bool,
+    #[case] merge: bool,
+    #[values(1, 4)] lookahead: usize,
+    #[values(false, true)] warm: bool,
+) {
+    const SSTS: usize = 6;
+    let keys: Vec<Vec<u8>> = (0..num_keys).map(key).collect();
+    let path =
+        format!("/tmp/test_multi_get_requests_{num_keys}_{overwrite}_{merge}_{lookahead}_{warm}");
+    let (db, object_store, recorder) =
+        open_l0_db(&path, false, merge, &keys, SSTS, overwrite).await;
+    db.close().await.unwrap();
+    let options = MultiGetOptions::default().with_lookahead(lookahead);
+
+    let reader = open_reader(&path, object_store.clone(), recorder.clone(), merge).await;
+    if warm {
+        reader
+            .multi_get_with_options(&keys, &options)
+            .await
+            .unwrap();
+        for k in &keys {
+            reader.get(k).await.unwrap();
+        }
+    }
+    let start = store_gets(&recorder, "reader");
+    let batch = reader
+        .multi_get_with_options(&keys, &options)
+        .await
+        .unwrap();
+    let batch_gets = store_gets(&recorder, "reader") - start;
+
+    let reader = if warm {
+        reader
+    } else {
+        reader.close().await.unwrap();
+        open_reader(&path, object_store, recorder.clone(), merge).await
+    };
+    let start = store_gets(&recorder, "reader");
+    for (i, k) in keys.iter().enumerate() {
+        assert_eq!(reader.get(k).await.unwrap(), batch[i]);
+    }
+    let loop_gets = store_gets(&recorder, "reader") - start;
+    reader.close().await.unwrap();
+
+    // A walk in flight reads at most a filter, an index and one block before it is dropped.
+    let in_flight = 3 * (lookahead as u64 - 1);
+    assert!(
+        batch_gets <= loop_gets + in_flight,
+        "lookahead={lookahead} warm={warm}: batch sent {batch_gets} GETs, loop sent {loop_gets}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_multi_get_metrics() {
     let keys = vec![key(0), key(1), key(0)];
@@ -557,6 +665,7 @@ async fn test_multi_get_metrics() {
 
     assert_eq!(counter(&recorder, REQUEST_COUNT, &[("op", "multi_get")]), 1);
     assert_eq!(counter(&recorder, MULTI_GET_KEYS, &[]), 3);
+    assert_eq!(counter(&recorder, MULTI_GET_LAYERS, &[]), 1);
     assert_eq!(counter(&recorder, REQUEST_COUNT, &[("op", "get")]), 0);
     db.close().await.unwrap();
 }

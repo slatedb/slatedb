@@ -68,7 +68,6 @@ pub(crate) struct DbStatsInner {
     pub(crate) scan_requests: Arc<dyn CounterFn>,
     pub(crate) multi_get_requests: Arc<dyn CounterFn>,
     pub(crate) multi_get_keys: Arc<dyn CounterFn>,
-    #[allow(dead_code)]
     pub(crate) multi_get_layers: Arc<dyn CounterFn>,
     pub(crate) flush_requests: Arc<dyn CounterFn>,
     pub(crate) write_batch_count: Arc<dyn CounterFn>,

@@ -366,7 +366,7 @@ impl ReadOptions {
     }
 }
 
-/// Configuration for `multi_get` calls. The batch fields take effect with the layer walk.
+/// Configuration for `multi_get` calls.
 #[derive(Clone, Debug)]
 pub struct MultiGetOptions {
     /// See [`ReadOptions::durability_filter`].
@@ -383,7 +383,8 @@ pub struct MultiGetOptions {
     pub lookahead: usize,
     /// Object store requests of one batch in flight. The default is 256.
     pub max_fetch_tasks: usize,
-    /// Two blocks share one ranged GET when the gap is at most this. The default is 64 KiB.
+    /// Two blocks share one ranged GET when the gap is at most this. The gap blocks
+    /// are cached too. The default is 64 KiB.
     pub coalesce_gap_bytes: usize,
     /// The upper size of one merged ranged GET. The default is 512 KiB.
     pub max_coalesced_bytes: usize,
@@ -408,17 +409,6 @@ impl Default for MultiGetOptions {
 impl MultiGetOptions {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// The read options of one key of the batch.
-    pub(crate) fn read_options(&self) -> ReadOptions {
-        ReadOptions {
-            durability_filter: self.durability_filter,
-            dirty: self.dirty,
-            cache_blocks: self.cache_blocks,
-            filter_context: self.filter_context.clone(),
-            tracing_options: self.tracing_options.clone(),
-        }
     }
 
     pub fn with_dirty(self, dirty: bool) -> Self {

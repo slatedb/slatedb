@@ -384,7 +384,7 @@ impl Reader {
     }
 
     /// Reads one key. `max_seq` is the final bound, see [`Self::prepare_max_seq`].
-    pub(crate) async fn get_key_value_with_options_inner<K: AsRef<[u8]>>(
+    async fn get_key_value_with_options_inner<K: AsRef<[u8]>>(
         &self,
         key: K,
         options: &ReadOptions,
