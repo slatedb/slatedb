@@ -1016,6 +1016,112 @@ mod tests {
         reader.close().await.unwrap();
     }
 
+    // A clone lists every ancestor it inherits. Once compaction has re-localized all of an
+    // ancestor's SSTs, the detach collector releases the parent's pin on that ancestor. A
+    // clone of a checkpoint taken before the release reads nothing from the ancestor, so it
+    // must not need the pin.
+    #[tokio::test]
+    async fn should_clone_checkpoint_whose_emptied_ancestor_was_detached() {
+        let mut rng = rng::new_test_rng(None);
+        let table = sample::table(&mut rng, 1000, 10);
+
+        let object_store = Arc::new(InMemory::new());
+        let grandparent_path = Path::from("/tmp/test_grandparent");
+        let parent_path = Path::from("/tmp/test_parent");
+        let clone_path = Path::from("/tmp/test_clone");
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let rand = Arc::new(DbRand::default());
+
+        // The grandparent owns no SSTs, so the parent's entry for it is empty from the start,
+        // as it is once compaction has re-localized everything the parent borrowed.
+        Db::open(grandparent_path.clone(), object_store.clone())
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        create_clone(
+            parent_path.clone(),
+            grandparent_path.clone(),
+            object_store.clone(),
+            object_store.clone(),
+            None,
+            Arc::new(FailPointRegistry::new()),
+            system_clock.clone(),
+            rand.clone(),
+        )
+        .await
+        .unwrap();
+
+        // The parent's own collector would detach the empty entry as soon as it runs; the
+        // test releases the pin itself below, after the checkpoint that still lists it.
+        let parent_db = Db::builder(parent_path.clone(), object_store.clone())
+            .with_settings(Settings {
+                garbage_collector_options: None,
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        test_utils::seed_database(&parent_db, &table, false)
+            .await
+            .unwrap();
+        parent_db
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        let checkpoint = parent_db
+            .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        parent_db.close().await.unwrap();
+
+        // Release the parent's pin on the grandparent, as the detach collector does.
+        let checkpointed = ManifestStore::new(&parent_path, object_store.clone())
+            .read_manifest(checkpoint.manifest_id)
+            .await
+            .unwrap();
+        let ancestor = checkpointed
+            .external_dbs
+            .iter()
+            .find(|e| e.path == grandparent_path.to_string())
+            .expect("the checkpoint lists the grandparent");
+        assert!(ancestor.sst_ids.is_empty());
+        let mut grandparent_manifest = StoredManifest::load(
+            Arc::new(ManifestStore::new(&grandparent_path, object_store.clone())),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+        grandparent_manifest
+            .delete_checkpoint(ancestor.final_checkpoint_id.unwrap())
+            .await
+            .unwrap();
+
+        create_clone(
+            clone_path.clone(),
+            parent_path.clone(),
+            object_store.clone(),
+            object_store.clone(),
+            Some(checkpoint.id),
+            Arc::new(FailPointRegistry::new()),
+            system_clock.clone(),
+            rand.clone(),
+        )
+        .await
+        .unwrap();
+
+        let clone_db = Db::open(clone_path.clone(), object_store.clone())
+            .await
+            .unwrap();
+        let mut db_iter = clone_db.scan(..).await.unwrap();
+        test_utils::assert_ranged_db_scan(&table, .., IterationOrder::Ascending, &mut db_iter)
+            .await;
+        clone_db.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn should_clone_from_checkpoint_wal_enabled() {
         should_clone_from_checkpoint(Settings::default()).await

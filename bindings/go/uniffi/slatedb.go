@@ -419,6 +419,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_delete_db()
+		})
+		if checksum != 56610 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_delete_db: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_admin_get_sequence_for_timestamp()
 		})
 		if checksum != 39670 {
@@ -2288,6 +2297,13 @@ type AdminInterface interface {
 	CreateDetachedCheckpoint(options CheckpointOptions) (CheckpointCreateResult, error)
 	// Deletes the checkpoint with the specified id.
 	DeleteCheckpoint(id string) error
+	// Deletes the database: releases the checkpoints it pinned in the
+	// databases it was cloned from, then removes every object under its path.
+	//
+	// With `confirm` false nothing is deleted and the paths that would be are
+	// returned. With `confirm` true the deleted paths are returned. A path that
+	// holds objects but no SlateDB manifest is refused. Idempotent.
+	DeleteDb(confirm bool) ([]string, error)
 	// Looks up a sequence number for the provided Unix UTC timestamp seconds.
 	GetSequenceForTimestamp(timestampSecs int64, roundUp bool) (*uint64, error)
 	// Looks up a timestamp for the provided sequence number.
@@ -2407,6 +2423,47 @@ func (_self *Admin) DeleteCheckpoint(id string) error {
 	}
 
 	return err
+}
+
+// Deletes the database: releases the checkpoints it pinned in the
+// databases it was cloned from, then removes every object under its path.
+//
+// With `confirm` false nothing is deleted and the paths that would be are
+// returned. With `confirm` true the deleted paths are returned. A path that
+// holds objects but no SlateDB manifest is refused. Idempotent.
+func (_self *Admin) DeleteDb(confirm bool) ([]string, error) {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) []string {
+			return FfiConverterSequenceStringINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_admin_delete_db(
+			_pointer, FfiConverterBoolINSTANCE.Lower(confirm)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
 }
 
 // Looks up a sequence number for the provided Unix UTC timestamp seconds.
@@ -14500,6 +14557,53 @@ type FfiDestroyerSequenceFloat64 struct{}
 func (FfiDestroyerSequenceFloat64) Destroy(sequence []float64) {
 	for _, value := range sequence {
 		FfiDestroyerFloat64{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceString struct{}
+
+var FfiConverterSequenceStringINSTANCE = FfiConverterSequenceString{}
+
+func (c FfiConverterSequenceString) Lift(rb RustBufferI) []string {
+	return LiftFromRustBuffer[[]string](c, rb)
+}
+
+func (c FfiConverterSequenceString) Read(reader io.Reader) []string {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]string, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterStringINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceString) Lower(value []string) C.RustBuffer {
+	return LowerIntoRustBuffer[[]string](c, value)
+}
+
+func (c FfiConverterSequenceString) LowerExternal(value []string) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]string](c, value))
+}
+
+func (c FfiConverterSequenceString) Write(writer io.Writer, value []string) {
+	if len(value) > math.MaxInt32 {
+		panic("[]string is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterStringINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceString struct{}
+
+func (FfiDestroyerSequenceString) Destroy(sequence []string) {
+	for _, value := range sequence {
+		FfiDestroyerString{}.Destroy(value)
 	}
 }
 

@@ -2171,6 +2171,104 @@ func TestAdminClone(t *testing.T) {
 	}
 }
 
+func TestAdminDeleteDb(t *testing.T) {
+	store := newMemoryStore(t)
+
+	parentPath := "admin-delete-parent"
+	parentBuilder := slatedb.NewDbBuilder(parentPath, store)
+	parent, err := parentBuilder.Build()
+	parentBuilder.Destroy()
+	if err != nil {
+		t.Fatalf("Build() parent: %v", err)
+	}
+	if _, err := parent.Put([]byte("key"), []byte("value")); err != nil {
+		t.Fatalf("Put(key): %v", err)
+	}
+	if err := parent.Flush(); err != nil {
+		t.Fatalf("Flush(): %v", err)
+	}
+	if err := parent.Shutdown(); err != nil {
+		t.Fatalf("Shutdown() parent: %v", err)
+	}
+	parent.Destroy()
+
+	openAdmin := func(path string) *slatedb.Admin {
+		builder := slatedb.NewAdminBuilder(path, store)
+		defer builder.Destroy()
+		admin, err := builder.Build()
+		if err != nil {
+			t.Fatalf("AdminBuilder.Build(%s): %v", path, err)
+		}
+		t.Cleanup(admin.Destroy)
+		return admin
+	}
+	parentAdmin := openAdmin(parentPath)
+	cloneAdmin := openAdmin("admin-delete-clone")
+
+	cloneBuilder, err := cloneAdmin.CreateCloneBuilderFromSource(slatedb.CloneSourceSpec{Path: parentPath})
+	if err != nil {
+		t.Fatalf("CreateCloneBuilderFromSource(): %v", err)
+	}
+	defer cloneBuilder.Destroy()
+	if err := cloneBuilder.Build(); err != nil {
+		t.Fatalf("CloneBuilder.Build(): %v", err)
+	}
+
+	manifest, err := cloneAdmin.ReadManifest(nil)
+	if err != nil || manifest == nil || len(manifest.ExternalDbs) != 1 || manifest.ExternalDbs[0].FinalCheckpointId == nil {
+		t.Fatalf("ReadManifest() of the clone: %+v, %v; want one external db with a final checkpoint", manifest, err)
+	}
+	pin := *manifest.ExternalDbs[0].FinalCheckpointId
+	pinned := func() bool {
+		checkpoints, err := parentAdmin.ListCheckpoints(nil)
+		if err != nil {
+			t.Fatalf("ListCheckpoints(): %v", err)
+		}
+		for _, checkpoint := range checkpoints {
+			if checkpoint.Id == pin {
+				return true
+			}
+		}
+		return false
+	}
+	if !pinned() {
+		t.Fatalf("the parent does not list the clone's checkpoint %s", pin)
+	}
+
+	listed, err := cloneAdmin.DeleteDb(false)
+	if err != nil {
+		t.Fatalf("DeleteDb(false): %v", err)
+	}
+	if len(listed) == 0 {
+		t.Fatalf("DeleteDb(false): listed no paths")
+	}
+	if !pinned() {
+		t.Fatalf("a dry run released the clone's checkpoint %s", pin)
+	}
+
+	deleted, err := cloneAdmin.DeleteDb(true)
+	if err != nil {
+		t.Fatalf("DeleteDb(true): %v", err)
+	}
+	if len(deleted) < len(listed) {
+		t.Fatalf("DeleteDb(true): deleted %d paths, the dry run listed %d", len(deleted), len(listed))
+	}
+	if pinned() {
+		t.Fatalf("the parent still lists the deleted clone's checkpoint %s", pin)
+	}
+
+	remaining, err := cloneAdmin.DeleteDb(false)
+	if err != nil {
+		t.Fatalf("DeleteDb(false) after delete: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("DeleteDb(false) after delete: %d paths remain: %v", len(remaining), remaining)
+	}
+	if _, err := cloneAdmin.DeleteDb(true); err != nil {
+		t.Fatalf("second DeleteDb(true): %v", err)
+	}
+}
+
 func TestAdminCreateDetachedCheckpointWithoutOptions(t *testing.T) {
 	store := newMemoryStore(t)
 	admin := openTestAdmin(t, store, nil)
