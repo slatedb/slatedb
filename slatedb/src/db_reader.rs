@@ -115,8 +115,6 @@ pub struct DbReader {
 }
 
 struct DbReaderInner {
-    #[cfg(test)]
-    poll_completed: tokio::sync::Notify,
     manifest_store: Arc<ManifestStore>,
     table_store: Arc<TableStore>,
     wal_reader: Arc<dyn WalReaderTrait>,
@@ -268,8 +266,6 @@ impl DbReaderInner {
         );
 
         let inner = Self {
-            #[cfg(test)]
-            poll_completed: tokio::sync::Notify::new(),
             manifest_store,
             table_store,
             wal_reader,
@@ -375,11 +371,11 @@ impl DbReaderInner {
             || latest.segments != current_state.segments
     }
 
-    async fn replace_checkpoint(
+    async fn reestablish_checkpoint(
         &self,
         stored_manifest: &mut StoredManifest,
-    ) -> Result<Checkpoint, SlateDBError> {
-        let current_checkpoint_id = self
+    ) -> Result<(), SlateDBError> {
+        let old_checkpoint_id = self
             .state
             .read()
             .checkpoint
@@ -391,14 +387,22 @@ impl DbReaderInner {
             ..CheckpointOptions::default()
         };
         let new_checkpoint_id = self.rand.rng().gen_uuid();
-        stored_manifest
-            .replace_checkpoint(current_checkpoint_id, new_checkpoint_id, &options)
-            .await
-    }
-
-    async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
-        let new_state = self.rebuild_checkpoint_state(checkpoint).await?;
+        let checkpoint = stored_manifest
+            .write_checkpoint(new_checkpoint_id, &options)
+            .await?;
+        let new_state = match self.rebuild_checkpoint_state(checkpoint.clone()).await {
+            Ok(state) => state,
+            Err(error) => {
+                if let Err(cleanup_error) = stored_manifest.delete_checkpoint(checkpoint.id).await {
+                    warn!("failed to delete unused reader checkpoint [checkpoint_id={}, error={cleanup_error:?}]", checkpoint.id);
+                }
+                return Err(error);
+            }
+        };
         self.install_state(new_state);
+        if let Err(error) = stored_manifest.delete_checkpoint(old_checkpoint_id).await {
+            warn!("failed to delete old reader checkpoint [checkpoint_id={old_checkpoint_id}, error={error:?}]");
+        }
         Ok(())
     }
 
@@ -598,8 +602,7 @@ impl DbReaderInner {
                     // GC reaped it. Re-establish a fresh checkpoint against the latest
                     // manifest instead of failing the reader permanently.
                     warn!("reader checkpoint missing, re-establishing [checkpoint_id={id}]");
-                    let checkpoint = self.replace_checkpoint(stored_manifest).await?;
-                    self.reestablish_checkpoint(checkpoint).await?;
+                    self.reestablish_checkpoint(stored_manifest).await?;
                     return Ok(());
                 }
                 Err(e) => return Err(e),
@@ -813,8 +816,6 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
                 Ok(())
             }
             DbReaderMessage::PollManifest => {
-                #[cfg(test)]
-                self.inner.poll_completed.notify_one();
                 if self.inner.mode == DbReaderMode::FollowLatest {
                     if let Err(error) = result {
                         warn!("failed to refresh reader to latest manifest [error={error:?}]");
@@ -872,8 +873,7 @@ impl ManifestPoller {
                     .inner
                     .should_reestablish_checkpoint(&latest_manifest.core)
                 {
-                    let checkpoint = self.inner.replace_checkpoint(&mut manifest).await?;
-                    self.inner.reestablish_checkpoint(checkpoint).await?;
+                    self.inner.reestablish_checkpoint(&mut manifest).await?;
                 } else {
                     self.inner.maybe_replay_new_wals().await?;
                 }
@@ -1538,7 +1538,7 @@ impl DbCacheManagerOps for DbReader {
 mod tests {
     use crate::wal::slatedb::reader::SlateDbWalReaderOptions;
     use {
-        super::{DbReaderMessage, ManifestPoller, ReaderState, WalReplayEnd},
+        super::{DbReaderMessage, ManifestPoller, ReaderState, WalReplayEnd, DB_READER_TASK_NAME},
         crate::{
             block_cache_policy::BlockCachePolicy,
             clock::MonotonicClock,
@@ -1550,7 +1550,7 @@ mod tests {
             db_state::SstType,
             db_stats::DbStats,
             db_status::DbStatusManager,
-            dispatcher::MessageHandler,
+            dispatcher::{MessageHandler, MessageHandlerExecutor},
             error::SlateDBError,
             format::sst::SsTableFormat,
             iter::IterationOrder,
@@ -1575,6 +1575,7 @@ mod tests {
         },
         bytes::Bytes,
         fail_parallel::FailPointRegistry,
+        futures::stream::BoxStream,
         object_store::{memory::InMemory, path::Path, ObjectStore, ObjectStoreExt},
         rstest::rstest,
         slatedb_common::{
@@ -1589,6 +1590,7 @@ mod tests {
             },
             time::Duration,
         },
+        tokio::runtime::Handle,
         uuid::Uuid,
     };
 
@@ -2090,35 +2092,17 @@ mod tests {
                 })
                 .await
                 .unwrap();
-                let reader = DbReader::open_internal(
-                    provider.manifest_store(),
-                    provider.table_store(),
-                    provider.wal_store(),
+                let reader = new_reader_without_timer(
+                    &provider,
                     mode,
-                    None,
-                    None,
-                    None,
                     DbReaderOptions {
                         manifest_poll_interval: Duration::from_secs(3600),
                         checkpoint_lifetime: Duration::from_secs(7200),
                         skip_wal_replay,
                         ..DbReaderOptions::default()
                     },
-                    provider.system_clock.clone(),
-                    provider.rand.clone(),
-                    slatedb_common::metrics::MetricsRecorderHelper::noop(),
                 )
-                .await
-                .unwrap();
-                // The first timer poll is immediate. Let it finish before writes
-                // or injected errors can race with it. Explicit messages do not
-                // provide this fence because the dispatcher prioritizes them.
-                tokio::time::timeout(
-                    Duration::from_secs(5),
-                    reader.inner.poll_completed.notified(),
-                )
-                .await
-                .expect("the first background poll must complete");
+                .await;
                 let manifest_id = reader.manifest().id();
                 db.put(b"key", b"after").await.unwrap();
                 db.flush_with_options(FlushOptions {
@@ -2162,6 +2146,72 @@ mod tests {
                 db.close().await.unwrap();
             }
         }
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_keeps_current_checkpoint() {
+        let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let provider = TestProvider::new(Path::from("failed-refresh-checkpoint"), objects);
+        let db = provider.new_db(Settings::default()).await.unwrap();
+        db.put(b"key", b"before").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        let reader = new_reader_without_timer(
+            &provider,
+            DbReaderMode::ManagedCheckpoint,
+            DbReaderOptions::default(),
+        )
+        .await;
+        let old_checkpoint = reader.inner.state.read().checkpoint.as_ref().unwrap().id;
+
+        db.put(b"key", b"after").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        fail_parallel::cfg(
+            Arc::clone(&provider.fp_registry),
+            "probe-wal-ssts",
+            "return",
+        )
+        .unwrap();
+        assert!(reader.refresh().await.is_err());
+        let manifest_store = provider.manifest_store();
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(manifest.manifest.core.checkpoints.len(), 1);
+        assert!(manifest
+            .manifest
+            .core
+            .find_checkpoint(old_checkpoint)
+            .is_some());
+        assert_eq!(
+            reader.inner.state.read().checkpoint.as_ref().unwrap().id,
+            old_checkpoint
+        );
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"before"))
+        );
+
+        fail_parallel::cfg(Arc::clone(&provider.fp_registry), "probe-wal-ssts", "off").unwrap();
+        reader.refresh().await.unwrap();
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(manifest.manifest.core.checkpoints.len(), 1);
+        assert!(manifest
+            .manifest
+            .core
+            .find_checkpoint(old_checkpoint)
+            .is_none());
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"after"))
+        );
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -3318,6 +3368,74 @@ mod tests {
         }
     }
 
+    struct NoTimerPoller(ManifestPoller);
+
+    #[async_trait::async_trait]
+    impl MessageHandler<DbReaderMessage> for NoTimerPoller {
+        async fn handle(&mut self, message: DbReaderMessage) -> Result<(), SlateDBError> {
+            self.0.handle(message).await
+        }
+
+        async fn cleanup(
+            &mut self,
+            messages: BoxStream<'async_trait, DbReaderMessage>,
+            result: Result<(), SlateDBError>,
+        ) -> Result<(), SlateDBError> {
+            self.0.cleanup(messages, result).await
+        }
+    }
+
+    async fn new_reader_without_timer(
+        provider: &TestProvider,
+        mode: DbReaderMode,
+        options: DbReaderOptions,
+    ) -> DbReader {
+        let manifest_store = provider.manifest_store();
+        let manifest =
+            StoredManifest::load(Arc::clone(&manifest_store), provider.system_clock.clone())
+                .await
+                .unwrap();
+        let inner = Arc::new(
+            DbReaderInner::new(
+                manifest_store,
+                provider.table_store(),
+                provider.wal_store(),
+                None,
+                options,
+                mode,
+                None,
+                None,
+                provider.system_clock.clone(),
+                provider.rand.clone(),
+                slatedb_common::metrics::MetricsRecorderHelper::noop(),
+                manifest,
+            )
+            .await
+            .unwrap(),
+        );
+        let task_executor = MessageHandlerExecutor::new(
+            Arc::new(inner.status_manager.clone()),
+            provider.system_clock.clone(),
+        );
+        let (tx, rx) = async_channel::bounded(1);
+        task_executor
+            .add_handler(
+                DB_READER_TASK_NAME.to_string(),
+                Box::new(NoTimerPoller(ManifestPoller {
+                    inner: Arc::clone(&inner),
+                })),
+                rx,
+                &Handle::current(),
+            )
+            .unwrap();
+        task_executor.monitor_on(&Handle::current()).unwrap();
+        DbReader {
+            inner,
+            task_executor,
+            refresh_tx: Some(tx),
+        }
+    }
+
     fn status_manager_for_core(core: &ManifestCore) -> DbStatusManager {
         DbStatusManager::new_with_initial_values(
             core.last_l0_seq,
@@ -3517,7 +3635,6 @@ mod tests {
         let status_manager = status_manager_for_core(&stored_manifest.manifest().core);
         let wal_reader = Arc::new(native_wal_reader(&wal_store, &status_manager));
         let inner = DbReaderInner {
-            poll_completed: tokio::sync::Notify::new(),
             manifest_store,
             table_store,
             wal_reader,
@@ -3608,7 +3725,6 @@ mod tests {
         );
         let wal_reader = Arc::new(native_wal_reader(&wal_store, &status_manager));
         DbReaderInner {
-            poll_completed: tokio::sync::Notify::new(),
             manifest_store,
             table_store,
             wal_reader,
