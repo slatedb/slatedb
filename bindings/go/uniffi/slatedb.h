@@ -639,6 +639,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_admin_create_detached_checkpoint(uint64
 uint64_t uniffi_slatedb_uniffi_fn_method_admin_delete_checkpoint(uint64_t ptr, RustBuffer id
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_DELETE_DB
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_DELETE_DB
+uint64_t uniffi_slatedb_uniffi_fn_method_admin_delete_db(uint64_t ptr, int8_t confirm
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_GET_SEQUENCE_FOR_TIMESTAMP
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_GET_SEQUENCE_FOR_TIMESTAMP
 uint64_t uniffi_slatedb_uniffi_fn_method_admin_get_sequence_for_timestamp(uint64_t ptr, int64_t timestamp_secs, int8_t round_up
@@ -2109,6 +2114,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_admin_create_detached_checkpoint(
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMIN_DELETE_CHECKPOINT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMIN_DELETE_CHECKPOINT
 uint16_t uniffi_slatedb_uniffi_checksum_method_admin_delete_checkpoint(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMIN_DELETE_DB
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMIN_DELETE_DB
+uint16_t uniffi_slatedb_uniffi_checksum_method_admin_delete_db(void
     
 );
 #endif
