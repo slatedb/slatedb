@@ -407,7 +407,9 @@ impl<P: Into<Path>> DbBuilder<P> {
     }
 
     /// Pads every data block of a compacted SST with zeros to the block size
-    /// set by [`Self::with_sst_block_size`].
+    /// set by [`Self::with_sst_block_size`]. An entry too large for a block
+    /// gets a block of its own, padded to the next multiple of the block
+    /// size.
     ///
     /// A [`BlockTransformer`] that adds bytes to a block must report them
     /// through [`BlockTransformer::encoded_overhead`], or every full block

@@ -1128,8 +1128,7 @@ impl SsTableFormat {
     /// without considering compression effects.
     ///
     /// The estimate includes block padding when the format sets a block
-    /// alignment. It rounds up the average block rather than each real one,
-    /// so the padding it counts is itself an estimate.
+    /// alignment, rounding each block up to whole `block_size` units.
     pub(crate) fn estimate_encoded_size_compacted(
         &self,
         entry_num: usize,
@@ -1212,17 +1211,17 @@ impl SsTableFormat {
     ) -> (usize, usize) {
         let entries_size_encoded =
             row::SstRowCodecV0::estimate_encoded_size(entry_num, estimated_entries_size);
-        let block_payload = if block_alignment {
-            // `Block::estimate_size_in_sst` charges a whole `block_size` per
-            // block, so a block's contents reach the estimate only through
-            // this count.
-            entries_size_encoded + OFFSET_SIZE * entry_num
+        let number_of_blocks = if block_alignment {
+            // A block holds whole entries, so an entry too large for the
+            // capacity takes a block of its own and pads past one unit.
+            let average_entry = entries_size_encoded.div_ceil(entry_num) + OFFSET_SIZE;
+            let entries_per_block = (block_capacity / average_entry).max(1);
+            entry_num.div_ceil(entries_per_block)
         } else {
             // `Block::estimate_size_in_sst` charges the offsets itself, so
             // this count only scales the per-block overhead.
-            entries_size_encoded
+            usize::div_ceil(entries_size_encoded, block_capacity)
         };
-        let number_of_blocks = usize::div_ceil(block_payload, block_capacity);
 
         (entries_size_encoded, number_of_blocks)
     }

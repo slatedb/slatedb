@@ -62,9 +62,8 @@ impl Block {
 
     /// Estimates the bytes the blocks occupy in an SST.
     ///
-    /// With `block_alignment` on, every block occupies one block-sized unit:
-    /// `number_of_blocks` is derived from a capacity that leaves room for the
-    /// checksum, so an estimated block never spills into a second unit.
+    /// With `block_alignment` on, each block pads up to a whole `block_size`
+    /// unit, and a block whose entries do not fit the capacity pads past one.
     pub(crate) fn estimate_size_in_sst(
         entry_num: usize,
         entries_size_encoded: usize,
@@ -72,10 +71,14 @@ impl Block {
         block_size: usize,
         block_alignment: bool,
     ) -> usize {
-        if block_alignment {
-            return number_of_blocks * block_size;
+        let encoded_size =
+            entries_size_encoded + OFFSET_SIZE * entry_num + CHECKSUM_SIZE * number_of_blocks;
+        if !block_alignment {
+            return encoded_size;
         }
-        entries_size_encoded + OFFSET_SIZE * entry_num + CHECKSUM_SIZE * number_of_blocks
+        // Block boundaries are unknown here, so pad the average block.
+        let average_block_size = encoded_size.div_ceil(number_of_blocks.max(1));
+        number_of_blocks * average_block_size.next_multiple_of(block_size)
     }
 }
 
@@ -436,12 +439,14 @@ mod tests {
             expected_size
         );
 
-        // With alignment on, each block occupies one whole block size.
+        // With alignment on, each block pads up to a whole block size.
         let num_blocks = 4;
         let total_entry_size = 100 * num_blocks;
+        let unpadded =
+            Block::estimate_size_in_sst(num_blocks, total_entry_size, num_blocks, 64, false);
         assert_eq!(
             Block::estimate_size_in_sst(num_blocks, total_entry_size, num_blocks, 64, true),
-            num_blocks * 64
+            num_blocks * unpadded.div_ceil(num_blocks).next_multiple_of(64)
         );
 
         // Test with large numbers（assume 20GB and every block 4kb with 200 entries）
