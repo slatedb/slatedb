@@ -37,17 +37,17 @@ impl ConflictChecker {
         checker
     }
 
+    fn check_source(&self, source: SourceId) -> bool {
+        !self.sources_used.contains(&source)
+    }
+
     fn check_compaction(&self, sources: &VecDeque<CompactionSource>, dst: u32) -> bool {
         for source in sources.iter() {
-            if self.sources_used.contains(&source.source) {
+            if !self.check_source(source.source) {
                 return false;
             }
         }
-        let dst = SourceId::SortedRun(dst);
-        if self.sources_used.contains(&dst) {
-            return false;
-        }
-        true
+        self.check_source(SourceId::SortedRun(dst))
     }
 
     fn add_compaction(&mut self, compaction: &CompactionSpec) {
@@ -86,9 +86,10 @@ impl BackpressureChecker {
         for (i, sr) in srs.iter().enumerate() {
             let sr_id = sr.source.unwrap_sorted_run();
             let compactable_run = SizeTieredCompactionScheduler::build_compactable_run(
-                include_size_threshold,
+                Some(include_size_threshold),
                 srs,
                 i,
+                None,
                 None,
             );
             longest_compactable_runs_by_sr.insert(sr_id, compactable_run);
@@ -105,9 +106,17 @@ impl BackpressureChecker {
         sources: &VecDeque<CompactionSource>,
         next_sr: Option<&CompactionSource>,
     ) -> bool {
+        let estimated_result_size = sources.iter().map(|src| src.size).sum();
+        self.check_estimated_size(estimated_result_size, next_sr)
+    }
+
+    fn check_estimated_size(
+        &self,
+        estimated_result_size: u64,
+        next_sr: Option<&CompactionSource>,
+    ) -> bool {
         // checks that we are not creating a run that itself needs to be compacted
         // with lots of runs. If we are, we should wait till those runs are compacted
-        let estimated_result_size: u64 = sources.iter().map(|src| src.size).sum();
         if let Some(next_sr) = next_sr {
             if next_sr.size <= ((estimated_result_size as f32) * self.include_size_threshold) as u64
             {
@@ -138,11 +147,23 @@ struct TreeState {
     prefix: Bytes,
     l0: Vec<CompactionSource>,
     srs: Vec<CompactionSource>,
+    projected_sorted_runs: HashSet<u32>,
     conflicts: ConflictChecker,
     bp: BackpressureChecker,
 }
 
 impl TreeState {
+    fn project_compaction(&mut self, compaction: &CompactionSpec) {
+        for source in compaction.sources() {
+            if let SourceId::SortedRun(id) = source {
+                self.projected_sorted_runs.remove(id);
+            }
+        }
+        if let Some(destination) = compaction.destination() {
+            self.projected_sorted_runs.insert(destination);
+        }
+    }
+
     fn check_compaction(
         &self,
         sources: &VecDeque<CompactionSource>,
@@ -225,13 +246,25 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
                     self.options.max_compaction_sources,
                     &srs,
                 );
-                TreeState {
+                let mut planning = TreeState {
+                    projected_sorted_runs: srs
+                        .iter()
+                        .map(|source| source.source.unwrap_sorted_run())
+                        .collect(),
                     prefix,
                     l0,
                     srs,
                     conflicts,
                     bp,
+                };
+                for compaction in active_by_segment
+                    .get(&planning.prefix)
+                    .into_iter()
+                    .flatten()
+                {
+                    planning.project_compaction(compaction);
                 }
+                planning
             })
             .collect();
         trees.sort_by_key(|t| std::cmp::Reverse(t.l0.len()));
@@ -248,6 +281,7 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
                 }
                 if let Some(compaction) = self.pick_next_compaction(tree, &mut next_fresh_sr_id) {
                     tree.conflicts.add_compaction(&compaction);
+                    tree.project_compaction(&compaction);
                     compactions.push(compaction);
                     picked_any = true;
                 }
@@ -327,9 +361,16 @@ impl CompactionScheduler for SizeTieredCompactionScheduler {
 
 impl SizeTieredCompactionScheduler {
     pub(crate) fn new(
-        options: SizeTieredCompactionSchedulerOptions,
+        mut options: SizeTieredCompactionSchedulerOptions,
         max_concurrent_compactions: usize,
     ) -> Self {
+        if options.sorted_run_consolidation_threshold == 1 {
+            warn!(
+                "sorted_run_consolidation_threshold must be 0 or at least 2. \
+                 Disabling fallback consolidation."
+            );
+            options.sorted_run_consolidation_threshold = 0;
+        }
         Self {
             options,
             max_concurrent_compactions,
@@ -358,20 +399,35 @@ impl SizeTieredCompactionScheduler {
         // try to compact the lower levels
         for i in 0..tree.srs.len() {
             let compactable_run = Self::build_compactable_run(
-                self.options.include_size_threshold,
+                Some(self.options.include_size_threshold),
                 &tree.srs,
                 i,
                 Some(tree),
+                None,
             );
             let compactable_run = self.clamp_min(compactable_run);
             if let Some(mut compactable_run) = compactable_run {
                 compactable_run = self.clamp_max(compactable_run);
-                let dst = compactable_run
-                    .back()
-                    .expect("expected non-empty compactable run")
-                    .source
-                    .unwrap_sorted_run();
-                return Some(self.create_compaction(&tree.prefix, compactable_run, dst));
+                return Some(self.create_sorted_run_compaction(&tree.prefix, compactable_run));
+            }
+        }
+
+        let threshold = self.options.sorted_run_consolidation_threshold;
+        let projected_count = tree.projected_sorted_runs.len();
+        if threshold > 0 && projected_count > threshold && self.options.max_compaction_sources >= 2
+        {
+            // Merging k sources removes k - 1 runs. Stop at the projected threshold.
+            let source_limit = self
+                .options
+                .max_compaction_sources
+                .min(projected_count - threshold + 1);
+            // Try each starting run so a busy newer run does not block older groups.
+            for i in 0..tree.srs.len() {
+                let consolidation =
+                    Self::build_compactable_run(None, &tree.srs, i, Some(tree), Some(source_limit));
+                if consolidation.len() >= 2 {
+                    return Some(self.create_sorted_run_compaction(&tree.prefix, consolidation));
+                }
             }
         }
         None
@@ -391,6 +447,19 @@ impl SizeTieredCompactionScheduler {
         sources
     }
 
+    fn create_sorted_run_compaction(
+        &self,
+        prefix: &Bytes,
+        sources: VecDeque<CompactionSource>,
+    ) -> CompactionSpec {
+        let dst = sources
+            .back()
+            .expect("expected non-empty sorted-run sources")
+            .source
+            .unwrap_sorted_run();
+        self.create_compaction(prefix, sources, dst)
+    }
+
     fn create_compaction(
         &self,
         prefix: &Bytes,
@@ -401,35 +470,56 @@ impl SizeTieredCompactionScheduler {
         CompactionSpec::for_segment(prefix.clone(), sources, dst)
     }
 
-    // looks for a series of sorted runs with similar sizes and assemble to a vecdequeue,
-    // optionally validating the resulting series
+    /// Collect consecutive sources from `start_idx`, stopping at the first rejected source.
+    ///
+    /// ## Arguments
+    /// - `size_threshold`: Optional size multiplier relative to the smallest accepted source.
+    ///   `None` disables size filtering.
+    /// - `sources`: Sources ordered from newest to oldest.
+    /// - `start_idx`: Index of the first candidate source.
+    /// - `checker`: Optional conflict and backpressure checks. With `Some`, sources must be sorted runs.
+    ///   `None` skips these checks.
+    /// - `max_sources`: Maximum number of sources to collect. `None` imposes no count limit.
     fn build_compactable_run(
-        size_threshold: f32,
+        size_threshold: Option<f32>,
         sources: &[CompactionSource],
         start_idx: usize,
         checker: Option<&TreeState>,
+        max_sources: Option<usize>,
     ) -> VecDeque<CompactionSource> {
         let mut compactable_runs = VecDeque::new();
         let mut maybe_min_sz = None;
+        let mut estimated_result_size = 0;
         for i in start_idx..sources.len() {
+            if max_sources.is_some_and(|limit| compactable_runs.len() >= limit) {
+                break;
+            }
             let src = sources[i];
-            if let Some(min_sz) = maybe_min_sz {
-                if src.size > ((min_sz as f32) * size_threshold) as u64 {
+            if let Some(size_threshold) = size_threshold {
+                if let Some(min_sz) = maybe_min_sz {
+                    if src.size > ((min_sz as f32) * size_threshold) as u64 {
+                        break;
+                    }
+                    maybe_min_sz = Some(min(min_sz, src.size));
+                } else {
+                    maybe_min_sz = Some(src.size);
+                }
+            }
+            if let Some(checker) = checker {
+                // The last sorted-run source is also the destination.
+                let dst = src.source.unwrap_sorted_run();
+                if !checker.conflicts.check_source(SourceId::SortedRun(dst)) {
                     break;
                 }
-                maybe_min_sz = Some(min(min_sz, src.size));
-            } else {
-                maybe_min_sz = Some(src.size);
+                estimated_result_size += src.size;
+                if !checker
+                    .bp
+                    .check_estimated_size(estimated_result_size, sources.get(i + 1))
+                {
+                    break;
+                }
             }
             compactable_runs.push_back(src);
-            if let Some(checker) = checker {
-                let dst = src.source.unwrap_sorted_run();
-                let next_sr = sources.get(i + 1);
-                if !checker.check_compaction(&compactable_runs, dst, next_sr) {
-                    compactable_runs.pop_back();
-                    break;
-                }
-            }
         }
         compactable_runs
     }
@@ -673,6 +763,410 @@ mod tests {
         assert_eq!(compaction.clone(), expected_compaction)
     }
 
+    #[rstest::rstest]
+    #[case::disabled(0)]
+    #[case::invalid(1)]
+    #[case::minimum_enabled(2)]
+    fn test_consolidation_threshold_validation(
+        #[case] threshold: usize,
+        #[values(false, true)] from_map: bool,
+        #[values(2, 3)] run_count: u32,
+    ) {
+        let options = SizeTieredCompactionSchedulerOptions {
+            sorted_run_consolidation_threshold: threshold,
+            ..Default::default()
+        };
+        let scheduler: Box<dyn CompactionScheduler + Send + Sync> = if from_map {
+            SizeTieredCompactionSchedulerSupplier.compaction_scheduler(&CompactorOptions {
+                scheduler_options: options.into(),
+                ..Default::default()
+            })
+        } else {
+            Box::new(SizeTieredCompactionScheduler::new(options, 4))
+        };
+        let state = create_compactor_state(create_db_state(
+            VecDeque::new(),
+            (0..run_count)
+                .rev()
+                .map(|id| create_sr2(id, 2 * 8_u64.pow(run_count - id - 1)))
+                .collect(),
+        ));
+
+        let expected = if threshold == 2 && run_count == 3 {
+            vec![create_sr_compaction(vec![2, 1])]
+        } else {
+            vec![]
+        };
+        assert_eq!(scheduler.propose(&(&state).into()), expected);
+    }
+
+    #[test]
+    fn test_consolidation_disabled_is_noop_for_dissimilar_runs() {
+        let scheduler = SizeTieredCompactionScheduler::default();
+        let state = &create_compactor_state(create_db_state(
+            VecDeque::new(),
+            vec![
+                create_sr2(4, 2),
+                create_sr2(3, 16),
+                create_sr2(2, 128),
+                create_sr2(1, 1024),
+                create_sr2(0, 8192),
+            ],
+        ));
+
+        let compactions = scheduler.propose(&state.into());
+
+        assert!(compactions.is_empty());
+    }
+
+    #[rstest::rstest]
+    #[case::below_threshold(6, false)]
+    #[case::at_threshold(5, false)]
+    #[case::above_threshold(4, true)]
+    fn test_consolidation_threshold(#[case] threshold: usize, #[case] should_consolidate: bool) {
+        let scheduler = SizeTieredCompactionScheduler::new(
+            SizeTieredCompactionSchedulerOptions {
+                sorted_run_consolidation_threshold: threshold,
+                ..SizeTieredCompactionSchedulerOptions::default()
+            },
+            4,
+        );
+        let state = &create_compactor_state(create_db_state(
+            VecDeque::new(),
+            vec![
+                create_sr2(4, 2),
+                create_sr2(3, 16),
+                create_sr2(2, 128),
+                create_sr2(1, 1024),
+                create_sr2(0, 8192),
+            ],
+        ));
+
+        let compactions = scheduler.propose(&state.into());
+
+        let expected = if should_consolidate {
+            vec![create_sr_compaction(vec![4, 3])]
+        } else {
+            vec![]
+        };
+        assert_eq!(compactions, expected);
+    }
+
+    #[rstest::rstest]
+    #[case::small_run(2)]
+    #[case::empty_run(0)]
+    fn test_consolidation_ignores_minimum_source_count_and_size_threshold(#[case] first_size: u64) {
+        let scheduler = SizeTieredCompactionScheduler::new(
+            SizeTieredCompactionSchedulerOptions {
+                sorted_run_consolidation_threshold: 2,
+                ..Default::default()
+            },
+            1,
+        );
+        let state = create_compactor_state(create_db_state(
+            VecDeque::new(),
+            vec![
+                create_sr2(2, first_size),
+                create_sr2(1, 1024),
+                create_sr2(0, 8192),
+            ],
+        ));
+
+        assert_eq!(
+            scheduler.propose(&(&state).into()),
+            vec![create_sr_compaction(vec![2, 1])]
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::zero(0)]
+    #[case::one(1)]
+    #[case::two(2)]
+    #[case::three(3)]
+    #[case::remaining_reduction(5)]
+    #[case::above_run_count(8)]
+    fn test_consolidation_source_limit_keeps_newest_sources(#[case] limit: usize) {
+        let scheduler = SizeTieredCompactionScheduler::new(
+            SizeTieredCompactionSchedulerOptions {
+                sorted_run_consolidation_threshold: 2,
+                max_compaction_sources: limit,
+                ..Default::default()
+            },
+            1,
+        );
+        let state = create_compactor_state(create_db_state(
+            VecDeque::new(),
+            vec![
+                create_sr2(5, 0),
+                create_sr2(4, 2),
+                create_sr2(3, 16),
+                create_sr2(2, 128),
+                create_sr2(1, 1024),
+                create_sr2(0, 8192),
+            ],
+        ));
+
+        let expected = if limit < 2 {
+            vec![]
+        } else {
+            vec![create_sr_compaction(
+                (0..6).rev().take(limit.min(5)).collect(),
+            )]
+        };
+        assert_eq!(scheduler.propose(&(&state).into()), expected);
+    }
+
+    #[rstest::rstest]
+    #[case::newest_busy(vec![5, 4], vec![vec![3, 2]])]
+    #[case::middle_busy(vec![3, 2], vec![vec![5, 4]])]
+    #[case::all_busy(vec![5, 4, 3, 2, 1, 0], vec![])]
+    fn test_consolidation_tries_later_groups_after_conflicts(
+        #[case] busy: Vec<u32>,
+        #[case] expected_groups: Vec<Vec<u32>>,
+    ) {
+        let scheduler = SizeTieredCompactionScheduler::new(
+            SizeTieredCompactionSchedulerOptions {
+                sorted_run_consolidation_threshold: 4,
+                ..Default::default()
+            },
+            4,
+        );
+        let mut state = create_compactor_state(create_db_state(
+            VecDeque::new(),
+            vec![
+                create_sr2(5, 2),
+                create_sr2(4, 16),
+                create_sr2(3, 128),
+                create_sr2(2, 1024),
+                create_sr2(1, 8192),
+                create_sr2(0, 65536),
+            ],
+        ));
+        state
+            .add_compaction(Compaction::new(
+                ulid::Ulid::new(),
+                create_sr_compaction(busy),
+            ))
+            .unwrap();
+
+        let compactions = scheduler.propose(&(&state).into());
+        let expected: Vec<_> = expected_groups
+            .into_iter()
+            .map(create_sr_compaction)
+            .collect();
+        assert_eq!(compactions, expected);
+        for compaction in compactions {
+            scheduler.validate(&(&state).into(), &compaction).unwrap();
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::submitted(CompactionStatus::Submitted, vec![5, 4])]
+    #[case::scheduled(CompactionStatus::Scheduled, vec![5, 4])]
+    #[case::running(CompactionStatus::Running, vec![5, 4])]
+    #[case::compacted(CompactionStatus::Compacted, vec![5, 4])]
+    #[case::completed(CompactionStatus::Completed, vec![5, 4, 3])]
+    #[case::failed(CompactionStatus::Failed, vec![5, 4, 3])]
+    fn test_consolidation_projects_only_active_compactions(
+        #[case] status: CompactionStatus,
+        #[case] expected_sources: Vec<u32>,
+    ) {
+        let scheduler = SizeTieredCompactionScheduler::new(
+            SizeTieredCompactionSchedulerOptions {
+                sorted_run_consolidation_threshold: 4,
+                ..Default::default()
+            },
+            4,
+        );
+        let mut state = create_compactor_state(create_db_state(
+            VecDeque::new(),
+            (0..6)
+                .rev()
+                .map(|id| create_sr2(id, 2 * 8_u64.pow(5 - id)))
+                .collect(),
+        ));
+        state.insert_compaction_for_test(
+            Compaction::new(ulid::Ulid::new(), create_sr_compaction(vec![3, 2]))
+                .with_status(status),
+        );
+
+        let proposed = scheduler.propose(&(&state).into());
+        assert_eq!(proposed, vec![create_sr_compaction(expected_sources)]);
+        state
+            .add_compaction(Compaction::new(ulid::Ulid::new(), proposed[0].clone()))
+            .unwrap();
+        assert!(scheduler.propose(&(&state).into()).is_empty());
+    }
+
+    #[test]
+    fn test_consolidation_stops_after_new_picks_reach_threshold() {
+        let scheduler = SizeTieredCompactionScheduler::new(
+            SizeTieredCompactionSchedulerOptions {
+                sorted_run_consolidation_threshold: 3,
+                max_compaction_sources: 3,
+                ..Default::default()
+            },
+            4,
+        );
+        let state = create_compactor_state(create_db_state(
+            VecDeque::new(),
+            (0..6)
+                .rev()
+                .map(|id| create_sr2(id, 2 * 8_u64.pow(5 - id)))
+                .collect(),
+        ));
+
+        assert_eq!(
+            scheduler.propose(&(&state).into()),
+            vec![
+                create_sr_compaction(vec![5, 4, 3]),
+                create_sr_compaction(vec![2, 1]),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_normal_compaction_can_satisfy_consolidation_threshold() {
+        let scheduler = SizeTieredCompactionScheduler::new(
+            SizeTieredCompactionSchedulerOptions {
+                sorted_run_consolidation_threshold: 4,
+                ..Default::default()
+            },
+            4,
+        );
+        let state = create_compactor_state(create_db_state(
+            VecDeque::new(),
+            vec![
+                create_sr2(5, 2),
+                create_sr2(4, 16),
+                create_sr2(3, 1024),
+                create_sr2(2, 1024),
+                create_sr2(1, 1024),
+                create_sr2(0, 1024),
+            ],
+        ));
+
+        assert_eq!(
+            scheduler.propose(&(&state).into()),
+            vec![create_sr_compaction(vec![3, 2, 1, 0])]
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::pending(true)]
+    #[case::newly_selected(false)]
+    fn test_consolidation_accounts_for_l0_output(#[case] pending: bool) {
+        let scheduler = SizeTieredCompactionScheduler::new(
+            SizeTieredCompactionSchedulerOptions {
+                sorted_run_consolidation_threshold: 3,
+                ..Default::default()
+            },
+            4,
+        );
+        let l0: Vec<_> = (0..4).map(|_| create_sst_view(1)).collect();
+        let l0_compaction = create_l0_compaction(&l0, 3);
+        let mut state = create_compactor_state(create_db_state(
+            l0.into_iter().collect(),
+            vec![create_sr2(2, 2), create_sr2(1, 16), create_sr2(0, 128)],
+        ));
+        if pending {
+            state
+                .add_compaction(Compaction::new(ulid::Ulid::new(), l0_compaction.clone()))
+                .unwrap();
+        }
+
+        let mut expected = Vec::new();
+        if !pending {
+            expected.push(l0_compaction);
+        }
+        expected.push(create_sr_compaction(vec![2, 1]));
+        assert_eq!(scheduler.propose(&(&state).into()), expected);
+    }
+
+    #[rstest::rstest]
+    #[case::sorted_run_output(false)]
+    #[case::l0_output(true)]
+    fn test_consolidation_does_not_count_committed_output_twice(#[case] l0_output: bool) {
+        let scheduler = SizeTieredCompactionScheduler::new(
+            SizeTieredCompactionSchedulerOptions {
+                sorted_run_consolidation_threshold: 4,
+                ..Default::default()
+            },
+            4,
+        );
+        let mut state = create_compactor_state(create_db_state(
+            VecDeque::new(),
+            vec![
+                create_sr2(6, 2),
+                create_sr2(5, 16),
+                create_sr2(4, 128),
+                create_sr2(3, 1024),
+                create_sr2(0, 8192),
+            ],
+        ));
+        let sources = if l0_output {
+            vec![SourceId::SstView(ulid::Ulid::new())]
+        } else {
+            vec![
+                SourceId::SortedRun(2),
+                SourceId::SortedRun(1),
+                SourceId::SortedRun(0),
+            ]
+        };
+        state.insert_compaction_for_test(
+            Compaction::new(ulid::Ulid::new(), CompactionSpec::new(sources, 0))
+                .with_status(CompactionStatus::Compacted),
+        );
+
+        assert_eq!(
+            scheduler.propose(&(&state).into()),
+            vec![create_sr_compaction(vec![6, 5])]
+        );
+    }
+
+    #[test]
+    fn test_consolidation_projects_segment_drains_separately() {
+        let scheduler = SizeTieredCompactionScheduler::new(
+            SizeTieredCompactionSchedulerOptions {
+                sorted_run_consolidation_threshold: 3,
+                ..Default::default()
+            },
+            4,
+        );
+        let mut core = create_db_state(
+            VecDeque::new(),
+            (0..5)
+                .rev()
+                .map(|id| create_sr2(id, 2 * 8_u64.pow(4 - id)))
+                .collect(),
+        );
+        core.segments = vec![segment_with(
+            b"seg/",
+            VecDeque::new(),
+            (5..10)
+                .rev()
+                .map(|id| create_sr2(id, 2 * 8_u64.pow(9 - id)))
+                .collect(),
+        )];
+        let mut state = create_compactor_state(core);
+        state.insert_compaction_for_test(Compaction::new(
+            ulid::Ulid::new(),
+            CompactionSpec::drain_segment(
+                Bytes::from_static(b"seg/"),
+                vec![
+                    SourceId::SortedRun(7),
+                    SourceId::SortedRun(6),
+                    SourceId::SortedRun(5),
+                ],
+            ),
+        ));
+
+        assert_eq!(
+            scheduler.propose(&(&state).into()),
+            vec![create_sr_compaction(vec![4, 3, 2])]
+        );
+    }
+
     #[test]
     fn test_should_not_schedule_compaction_for_source_that_is_already_compacting() {
         // given:
@@ -783,10 +1277,102 @@ mod tests {
         assert_eq!(compactions.first().unwrap(), &expected_compaction,);
     }
 
-    #[test]
-    fn test_should_apply_backpressure() {
+    #[rstest::rstest]
+    fn test_candidate_backpressure_uses_combined_size(
+        #[values(None, Some(4.0))] size_threshold: Option<f32>,
+    ) {
+        let sources = [(3, 1), (2, 1), (1, 7), (0, 7)]
+            .into_iter()
+            .map(|(id, size)| CompactionSource {
+                source: SourceId::SortedRun(id),
+                size,
+            })
+            .collect::<Vec<_>>();
+        let tree = super::TreeState {
+            prefix: Bytes::new(),
+            l0: Vec::new(),
+            projected_sorted_runs: Default::default(),
+            conflicts: super::ConflictChecker::new(std::iter::empty()),
+            bp: super::BackpressureChecker::new(4.0, 2, &sources),
+            srs: sources,
+        };
+
+        let candidate = SizeTieredCompactionScheduler::build_compactable_run(
+            size_threshold,
+            &tree.srs,
+            0,
+            Some(&tree),
+            Some(2),
+        );
+
+        // Two one-byte runs reach the next size group together, but neither does alone.
+        assert_eq!(
+            candidate
+                .iter()
+                .map(|source| source.source)
+                .collect::<Vec<_>>(),
+            vec![SourceId::SortedRun(3)]
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::busy_source(false)]
+    #[case::reserved_destination(true)]
+    fn test_candidate_stops_at_conflict(
+        #[case] reserved_destination: bool,
+        #[values(None, Some(4.0))] size_threshold: Option<f32>,
+    ) {
+        let source = if reserved_destination {
+            SourceId::SstView(ulid::Ulid::new())
+        } else {
+            SourceId::SortedRun(2)
+        };
+        let busy = CompactionSpec::new(vec![source], 2);
+        let sources = (1..=3)
+            .rev()
+            .map(|id| CompactionSource {
+                source: SourceId::SortedRun(id),
+                size: 1,
+            })
+            .collect::<Vec<_>>();
+        let tree = super::TreeState {
+            prefix: Bytes::new(),
+            l0: Vec::new(),
+            projected_sorted_runs: Default::default(),
+            conflicts: super::ConflictChecker::new(std::iter::once(&busy)),
+            bp: super::BackpressureChecker::new(4.0, 8, &sources),
+            srs: sources,
+        };
+
+        let candidate = SizeTieredCompactionScheduler::build_compactable_run(
+            size_threshold,
+            &tree.srs,
+            0,
+            Some(&tree),
+            Some(3),
+        );
+
+        assert_eq!(
+            candidate
+                .iter()
+                .map(|source| source.source)
+                .collect::<Vec<_>>(),
+            vec![SourceId::SortedRun(3)]
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::consolidation_disabled(0)]
+    #[case::consolidation_enabled(4)]
+    fn test_should_apply_backpressure(#[case] sorted_run_consolidation_threshold: usize) {
         // given:
-        let scheduler = SizeTieredCompactionScheduler::default();
+        let scheduler = SizeTieredCompactionScheduler::new(
+            SizeTieredCompactionSchedulerOptions {
+                sorted_run_consolidation_threshold,
+                ..Default::default()
+            },
+            4,
+        );
         let mut state = create_compactor_state(create_db_state(
             VecDeque::new(),
             vec![
@@ -1063,7 +1649,13 @@ mod tests {
             },
         ];
 
-        let run = SizeTieredCompactionScheduler::build_compactable_run(4.0, &sources, 0, None);
+        let run = SizeTieredCompactionScheduler::build_compactable_run(
+            Some(4.0),
+            &sources,
+            0,
+            None,
+            None,
+        );
 
         assert_eq!(
             run.len(),
