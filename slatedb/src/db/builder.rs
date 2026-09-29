@@ -192,6 +192,7 @@ pub struct DbBuilder<P: Into<Path>> {
     fp_registry: Arc<FailPointRegistry>,
     seed: Option<u64>,
     sst_block_size: Option<SstBlockSize>,
+    sst_block_alignment: bool,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
@@ -223,6 +224,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             fp_registry: Arc::new(FailPointRegistry::new()),
             seed: None,
             sst_block_size: None,
+            sst_block_alignment: false,
             merge_operator: None,
             block_transformer: None,
             filter_policies: default_filter_policies(),
@@ -404,6 +406,29 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Pads every data block of a compacted SST with zeros to the block size
+    /// set by [`Self::with_sst_block_size`]. An entry too large for a block
+    /// gets a block of its own, padded to the next multiple of the block
+    /// size.
+    ///
+    /// The padding rounds up to the block size, not to the 4KB disk block. A
+    /// block size above 4KB therefore over-pads a large entry. Keep the block
+    /// size at 4KB to pad a large entry to the tightest disk-aligned size.
+    ///
+    /// A [`BlockTransformer`] that adds bytes to a block must report them
+    /// through [`BlockTransformer::encoded_overhead`], or every full block
+    /// spills into a second block-sized unit.
+    ///
+    /// Readers that predate the `encoded_len` index field cannot read padded
+    /// SSTs, so upgrade every reader before a writer enables this. Once
+    /// padded SSTs exist, the readers cannot be rolled back.
+    ///
+    /// Defaults to `false`.
+    pub fn with_sst_block_alignment(mut self, aligned: bool) -> Self {
+        self.sst_block_alignment = aligned;
+        self
+    }
+
     /// Sets the merge operator to use for the database. The merge operator allows
     /// applications to bypass the traditional read/modify/write cycle by expressing
     /// partial updates using an associative operator.
@@ -461,6 +486,12 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
         self.settings.validate()?;
+        if self.sst_block_alignment && self.settings.compression_codec.is_some() {
+            return Err(SlateDBError::InvalidConfiguration(
+                "sst_block_alignment cannot be combined with compression_codec".into(),
+            )
+            .into());
+        }
 
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
@@ -553,6 +584,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             filter_policies: self.filter_policies.clone(),
             compression_codec: self.settings.compression_codec,
             block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
+            block_alignment: self.sst_block_alignment,
             block_transformer: self.block_transformer.clone(),
             block_format,
             ..SsTableFormat::default()
@@ -1219,6 +1251,8 @@ pub struct CompactorBuilder<P: Into<Path>> {
     fp_registry: Arc<FailPointRegistry>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
+    sst_block_size: Option<SstBlockSize>,
+    sst_block_alignment: bool,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
@@ -1240,6 +1274,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             fp_registry: Arc::new(FailPointRegistry::new()),
             block_transformer: None,
             filter_policies: default_filter_policies(),
+            sst_block_size: None,
+            sst_block_alignment: false,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
         }
@@ -1260,6 +1296,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             fp_registry: self.fp_registry,
             block_transformer: self.block_transformer,
             filter_policies: self.filter_policies,
+            sst_block_size: self.sst_block_size,
+            sst_block_alignment: self.sst_block_alignment,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: self.compaction_filter_supplier,
         }
@@ -1361,6 +1399,25 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
+    /// Sets the SST block size the worker uses when it rewrites SSTs.
+    ///
+    /// Must match the writer's `DbBuilder::with_sst_block_size` configuration
+    /// so that SSTs rewritten by the worker are encoded consistently with
+    /// those produced by the DB. Defaults to [`SstBlockSize::default`].
+    pub fn with_sst_block_size(mut self, block_size: SstBlockSize) -> Self {
+        self.sst_block_size = Some(block_size);
+        self
+    }
+
+    /// Pads every data block of a compacted SST with zeros to the block size
+    /// set by [`Self::with_sst_block_size`].
+    ///
+    /// Defaults to `false`.
+    pub fn with_sst_block_alignment(mut self, aligned: bool) -> Self {
+        self.sst_block_alignment = aligned;
+        self
+    }
+
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
@@ -1388,6 +1445,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         let sst_format = SsTableFormat {
             filter_policies: self.filter_policies.clone(),
             block_transformer: self.block_transformer.clone(),
+            block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
+            block_alignment: self.sst_block_alignment,
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
@@ -1498,6 +1557,7 @@ pub struct CompactionWorkerBuilder<P: Into<Path>> {
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
     sst_block_size: Option<SstBlockSize>,
+    sst_block_alignment: bool,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
@@ -1517,6 +1577,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             block_transformer: None,
             filter_policies: default_filter_policies(),
             sst_block_size: None,
+            sst_block_alignment: false,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
         }
@@ -1579,11 +1640,20 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
 
     /// Sets the SST block size the worker uses when it rewrites SSTs.
     ///
-    /// Must match the writer's `DbBuilder::with_sst_block_size` configuration so
-    /// that SSTs rewritten by the worker are encoded consistently with those
-    /// produced by the DB. Defaults to [`SstBlockSize::default`].
+    /// Must match the writer's `DbBuilder::with_sst_block_size` configuration
+    /// so that SSTs rewritten by the worker are encoded consistently with
+    /// those produced by the DB. Defaults to [`SstBlockSize::default`].
     pub fn with_sst_block_size(mut self, block_size: SstBlockSize) -> Self {
         self.sst_block_size = Some(block_size);
+        self
+    }
+
+    /// Pads every data block of a compacted SST with zeros to the block size
+    /// set by [`Self::with_sst_block_size`].
+    ///
+    /// Defaults to `false`.
+    pub fn with_sst_block_alignment(mut self, aligned: bool) -> Self {
+        self.sst_block_alignment = aligned;
         self
     }
 
@@ -1597,6 +1667,12 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
     }
 
     pub async fn build(self) -> Result<CompactionWorker, crate::Error> {
+        if self.sst_block_alignment && self.options.compression_codec.is_some() {
+            return Err(SlateDBError::InvalidConfiguration(
+                "sst_block_alignment cannot be combined with compression_codec".into(),
+            )
+            .into());
+        }
         let path: Path = self.path.into();
         let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
         let compactions_store =
@@ -1609,6 +1685,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
                 block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
                 min_filter_keys: self.options.min_filter_keys,
                 compression_codec: self.options.compression_codec,
+                block_alignment: self.sst_block_alignment,
                 ..SsTableFormat::default()
             },
             path,
