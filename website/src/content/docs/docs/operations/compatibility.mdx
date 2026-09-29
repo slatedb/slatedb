@@ -12,3 +12,39 @@ Shared deployments should move one release at a time. If several processes read 
 A single database can contain a mix of older and newer SST files during normal operation. Readers and compactors must understand every format already present in the bucket. SlateDB version-checks its persistent formats and fails fast when it sees a version it does not understand.
 
 Compression is part of compatibility too. A process can only read compressed SSTs for codecs that were compiled into that binary. If one deployment writes Zstd-compressed SSTs, every reader and compactor that touches that database needs the `zstd` feature enabled. [Compression](/docs/design/compression) covers the codec feature flags.
+
+## Upgrade databases with union clones
+
+A union clone combines views from several databases into one database.
+Older builds can give several L0 views the same ID after a split and union.
+Compaction can then read one view and remove other views that it never read.
+Even with unique view IDs, the old compaction boundary logic can discard unread views that share a physical SST.
+
+Do not mix old and fixed writers or compactors on these databases.
+The stored format remains readable, but an old process can still apply the faulty boundary logic.
+The general guidance about adjacent releases does not make this combination safe.
+
+Use this upgrade procedure for databases that use union clones:
+
+1. Pause application writes and union clone creation.
+2. Stop all writer, compactor, and compaction worker processes for the affected databases.
+3. Deploy the union-clone data-loss fix to all writer, clone creation, compactor, and compaction worker processes.
+4. Open each affected database with a fixed writer and its normal compaction configuration.
+5. Wait for each database open operation to succeed.
+6. For standalone compaction, start the fixed compactor and worker processes.
+7. Resume application writes and union clone creation.
+
+The writer repairs duplicate L0 view IDs during open, before it starts embedded compaction.
+The repair also runs when `Settings::compactor_options` is `None`.
+Opening a `DbReader` or starting a standalone compactor does not perform this repair.
+Until a fixed writer opens the database, the fixed compactor rejects requests that reference duplicate IDs.
+Other compactions can still proceed.
+
+The repair changes view IDs while preserving physical SSTs, visible ranges, and L0 order.
+It also increments `compactor_epoch`, the generation counter that controls compactor writes, in the same manifest update.
+This fences the current compactor, which blocks further manifest updates from that instance with `Fenced`.
+After a repair, restart any fenced standalone compactor with the fixed build.
+Fencing does not prevent an old binary from restarting and acquiring a new epoch.
+
+The repair prevents further loss from duplicate IDs.
+It does not restore keys that an earlier compaction already removed from the manifest.

@@ -1202,4 +1202,159 @@ mod tests {
         // the successful retry.
         assert_eq!(final_id, start_id + 4);
     }
+
+    #[rstest::rstest]
+    #[case::before_checkpoint(0)]
+    #[case::before_manifest_update(1)]
+    #[tokio::test]
+    async fn union_id_repair_fences_in_flight_compaction_commit(#[case] admitted_writes: usize) {
+        use crate::compactor_state::SourceId;
+        use crate::config::{FlushOptions, FlushType, Settings};
+        use crate::db::Db;
+        use crate::db_state::SortedRun;
+
+        let inner_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated_store = Arc::new(GatedObjectStore::new(inner_store.clone()));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(ROOT), gated_store.clone()));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            gated_store.clone(),
+        ));
+        let clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let settings = Settings {
+            compactor_options: None,
+            garbage_collector_options: None,
+            manifest_poll_interval: Duration::from_secs(3600),
+            ..Default::default()
+        };
+        let keys = [b"a", b"b", b"n", b"z"];
+        let db = Db::builder(ROOT, inner_store.clone())
+            .with_settings(settings.clone())
+            .build()
+            .await
+            .unwrap();
+        for key in keys {
+            db.put(key, key).await.unwrap();
+        }
+        db.flush().await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+
+        let mut stored = StoredManifest::load(manifest_store.clone(), clock.clone())
+            .await
+            .unwrap();
+        let mut dirty = stored.prepare_dirty().unwrap();
+        assert_eq!(dirty.value.core.tree.l0.len(), 1);
+        let shared = dirty.value.core.tree.l0[0].clone();
+        let left = shared.with_visible_range(BytesRange::from_ref("a".."m"));
+        let right = shared.with_visible_range(BytesRange::from_ref("m"..));
+        Arc::make_mut(&mut dirty.value.core.tree).l0 = [left.clone(), right.clone()].into();
+        stored.update(dirty).await.unwrap();
+
+        let mut compactor = CompactorStateWriter::new(
+            manifest_store.clone(),
+            compactions_store.clone(),
+            clock,
+            &CompactorOptions::default(),
+            Arc::new(DbRand::new(7)),
+        )
+        .await
+        .unwrap();
+        let old_epoch = compactor.state.manifest().value.compactor_epoch;
+        let compaction_id = Ulid::new();
+        let spec = CompactionSpec::new(vec![SourceId::SstView(shared.id); 2], 0);
+        compactor.state.insert_compaction_for_test(
+            Compaction::new(compaction_id, spec).with_status(CompactionStatus::Compacted),
+        );
+        compactor.write_compactions_safely().await.unwrap();
+        let pending_compactions = compactions_store.read_latest_compactions().await.unwrap();
+
+        // Model the old lookup: it reads only the right view, then removes both inputs.
+        // Bypass the new source validation so this test exercises the commit fence.
+        compactor
+            .state
+            .finish_compaction(compaction_id, SortedRun::new(0, [right.clone()]));
+        assert!(compactor.state.db_state().tree.l0.is_empty());
+        assert_eq!(
+            compactor.state.db_state().tree.compacted[0].sst_views(),
+            std::slice::from_ref(&right)
+        );
+
+        let baseline_puts = gated_store.put_opts_gate.arrivals();
+        gated_store.put_opts_gate.close();
+        gated_store.put_opts_gate.admit(admitted_writes);
+        let commit = tokio::spawn(async move { compactor.write_state_safely().await });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            gated_store
+                .put_opts_gate
+                .wait_for_arrivals(baseline_puts + admitted_writes + 1),
+        )
+        .await
+        .expect("compactor did not reach the commit gate");
+
+        // The writer uses the same store without the gate and repairs the stored views.
+        let writer = Db::builder(ROOT, inner_store.clone())
+            .with_settings(settings.clone())
+            .build()
+            .await
+            .unwrap();
+        let repaired = manifest_store.read_latest_manifest().await.unwrap();
+        let tree = &repaired.manifest.core.tree;
+        assert!(tree.compacted.is_empty());
+        assert_eq!(tree.l0.len(), 2);
+        assert_ne!(tree.l0[0].id, tree.l0[1].id);
+        for (view, original) in tree.l0.iter().zip([left, right]) {
+            assert_ne!(view.id, shared.id);
+            let mut restored = view.clone();
+            restored.id = original.id;
+            assert_eq!(restored, original);
+        }
+        for key in keys {
+            assert_eq!(
+                writer.get(key).await.unwrap().as_deref(),
+                Some(key.as_slice())
+            );
+        }
+
+        gated_store.put_opts_gate.release();
+        let result = tokio::time::timeout(Duration::from_secs(10), commit)
+            .await
+            .expect("stale compactor did not stop")
+            .unwrap();
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
+        assert_eq!(repaired.manifest.compactor_epoch, old_epoch + 1);
+        assert_eq!(
+            manifest_store.read_latest_manifest().await.unwrap(),
+            repaired
+        );
+        assert_eq!(
+            compactions_store.read_latest_compactions().await.unwrap(),
+            pending_compactions
+        );
+        writer.refresh_manifest().await.unwrap();
+        for key in keys {
+            assert_eq!(
+                writer.get(key).await.unwrap().as_deref(),
+                Some(key.as_slice())
+            );
+        }
+        writer.close().await.unwrap();
+        let reopened = Db::builder(ROOT, inner_store)
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+        for key in keys {
+            assert_eq!(
+                reopened.get(key).await.unwrap().as_deref(),
+                Some(key.as_slice())
+            );
+        }
+        reopened.close().await.unwrap();
+    }
 }

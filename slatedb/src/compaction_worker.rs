@@ -445,7 +445,7 @@ impl CompactionWorkerHandler {
             .spec()
             .destination()
             .ok_or(SlateDBError::InvalidCompaction)?;
-        let l0_sst_views = compaction.get_l0_sst_views(db_state);
+        let l0_sst_views = compaction.get_l0_sst_views(db_state)?;
         let sorted_runs = compaction.get_sorted_runs(db_state);
 
         // Reject drain specs (workers only execute tiered compactions; drain

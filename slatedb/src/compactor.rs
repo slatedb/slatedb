@@ -706,8 +706,12 @@ impl CompactorEventHandler {
     ) -> Option<u64> {
         let tree = db_state.tree_for_segment(compaction.spec().segment())?;
 
-        let views_by_id: HashMap<Ulid, &SsTableView> =
-            tree.l0.iter().map(|view| (view.id, view)).collect();
+        let l0_bytes: u64 = compaction
+            .get_l0_sst_views(db_state)
+            .ok()?
+            .iter()
+            .map(SsTableView::estimate_visible_size)
+            .sum();
         let srs_by_id: HashMap<u32, &SortedRun> =
             tree.compacted.iter().map(|sr| (sr.id, sr)).collect();
 
@@ -715,12 +719,9 @@ impl CompactorEventHandler {
             .spec()
             .sources()
             .iter()
-            .try_fold(0, |total, source| {
-                let source_bytes = match source {
-                    SourceId::SstView(id) => views_by_id.get(id)?.estimate_visible_size(),
-                    SourceId::SortedRun(id) => srs_by_id.get(id)?.estimate_visible_size(),
-                };
-                Some(total + source_bytes)
+            .filter_map(SourceId::maybe_unwrap_sorted_run)
+            .try_fold(l0_bytes, |total, id| {
+                Some(total + srs_by_id.get(&id)?.estimate_visible_size())
             })
     }
 
@@ -972,7 +973,8 @@ impl CompactorEventHandler {
             );
             return Err(SlateDBError::InvalidCompaction);
         };
-        let l0_view_ids = tree.l0.iter().map(|view| view.id).collect::<HashSet<_>>();
+        // Reject missing or ambiguous L0 sources before execution and before commit.
+        compaction.get_l0_sst_views(db_state)?;
         let sr_ids = tree
             .compacted
             .iter()
@@ -980,7 +982,7 @@ impl CompactorEventHandler {
             .collect::<HashSet<_>>();
 
         if let Some(missing) = spec.sources().iter().find(|source| match source {
-            SourceId::SstView(id) => !l0_view_ids.contains(id),
+            SourceId::SstView(_) => false,
             SourceId::SortedRun(id) => !sr_ids.contains(id),
         }) {
             debug!("compaction source missing from db state: {:?}", missing);
@@ -3949,6 +3951,37 @@ mod tests {
         assert_eq!(actual, None);
     }
 
+    #[rstest::rstest]
+    #[case::ambiguous_view(true)]
+    #[case::repeated_source(false)]
+    fn test_calculate_estimated_source_bytes_rejects_duplicate_l0_ids(
+        #[case] duplicate_view: bool,
+    ) {
+        let view = SsTableView::identity(SsTableHandle::new(
+            SsTableId::new(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo {
+                index_offset: 100,
+                ..SsTableInfo::default()
+            },
+        ));
+        let mut core = ManifestCore::new();
+        let tree = Arc::make_mut(&mut core.tree);
+        tree.l0.push_back(view.clone());
+        let mut sources = vec![SourceId::SstView(view.id)];
+        if duplicate_view {
+            tree.l0.push_back(view);
+        } else {
+            sources.push(SourceId::SstView(view.id));
+        }
+        let compaction = Compaction::new(Ulid::new(), CompactionSpec::new(sources, 1));
+
+        assert_eq!(
+            CompactorEventHandler::calculate_estimated_source_bytes(&compaction, &core),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn test_should_track_per_job_throughput() {
         let start_time_ms = 1000u64;
@@ -4908,7 +4941,7 @@ mod tests {
             let scheduled = self.get_scheduled_compactions().await;
             for compaction in scheduled {
                 let destination = compaction.spec().destination().expect("tiered spec");
-                let l0_sst_views = compaction.get_l0_sst_views(db_state);
+                let l0_sst_views = compaction.get_l0_sst_views(db_state).unwrap();
                 let sorted_runs = compaction.get_sorted_runs(db_state);
                 let is_dest_last_run = match db_state.tree_for_segment(compaction.spec().segment())
                 {
@@ -5668,6 +5701,47 @@ mod tests {
             .validate_compaction(&Compaction::new(Ulid::new(), c))
             .unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    #[tokio::test]
+    async fn test_union_duplicate_l0_source_rejected_before_execution_and_commit() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.write_l0().await;
+        fixture.handler.handle_ticker().await.unwrap();
+        let spec = fixture.build_l0_compaction().await;
+        let manifest = fixture.handler.state_mut().manifest_mut_for_test();
+        let tree = Arc::make_mut(&mut manifest.value.core.tree);
+        tree.l0.push_back(tree.l0[0].clone());
+
+        // The spec names the ID only once, but two views carry that ID.
+        for status in [CompactionStatus::Submitted, CompactionStatus::Compacted] {
+            let compaction = Compaction::new(Ulid::new(), spec.clone()).with_status(status);
+            assert!(matches!(
+                fixture.handler.validate_compaction(&compaction),
+                Err(SlateDBError::InvalidCompaction)
+            ));
+            assert!(compaction
+                .get_l0_sst_views(fixture.handler.state().db_state())
+                .is_err());
+            assert!(compaction
+                .trivial_move_output(fixture.handler.state().db_state())
+                .is_none());
+        }
+        assert!(fixture
+            .handler
+            .state_mut()
+            .manifest_mut_for_test()
+            .value
+            .core
+            .repair_duplicate_l0_view_ids(&DbRand::new(42)));
+        for status in [CompactionStatus::Submitted, CompactionStatus::Compacted] {
+            let stale = Compaction::new(Ulid::new(), spec.clone()).with_status(status);
+            assert!(matches!(
+                fixture.handler.validate_compaction(&stale),
+                Err(SlateDBError::InvalidCompaction)
+            ));
+        }
+        fixture.db.close().await.unwrap();
     }
 
     #[tokio::test]

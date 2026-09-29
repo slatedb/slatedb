@@ -346,7 +346,7 @@ async fn build_source<R: RangeBounds<Bytes> + Clone>(
     manifest_at_checkpoint = if config.is_noop() {
         manifest_at_checkpoint
     } else {
-        Manifest::projected(&manifest_at_checkpoint, &config)?
+        Manifest::projected(&manifest_at_checkpoint, &config, rand)?
     };
 
     Ok(CloneSource {
@@ -731,6 +731,202 @@ mod tests {
             None,
         )
         .await
+    }
+
+    #[rstest::rstest]
+    #[case::full(8, false)]
+    #[case::partial(5, false)]
+    #[case::stored_full(8, true)]
+    #[case::stored_partial(5, true)]
+    #[tokio::test]
+    async fn should_preserve_union_data_after_compaction_and_reopen(
+        #[case] max_sources: usize,
+        #[case] stored_duplicates: bool,
+    ) {
+        use crate::config::{CompactionWorkerOptions, CompactorOptions};
+        use std::collections::{HashMap, HashSet};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let clock = Arc::new(DefaultSystemClock::new());
+        let rand = Arc::new(DbRand::new(42));
+        let fp = Arc::new(FailPointRegistry::new());
+        let settings = Settings {
+            compactor_options: None,
+            garbage_collector_options: None,
+            ..Default::default()
+        };
+        let parent = Db::builder("parent", object_store.clone())
+            .with_settings(settings.clone())
+            .build()
+            .await
+            .unwrap();
+        let mut expected = BTreeMap::new();
+        for i in 0..256u16 {
+            let key = (i * 2).to_be_bytes();
+            parent.put(key, b"parent").await.unwrap();
+            expected.insert(key.to_vec(), b"parent".to_vec());
+        }
+        parent.flush().await.unwrap();
+        parent
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        assert_eq!(parent.manifest().manifest.core.tree.l0.len(), 1);
+        let parent_view = parent.manifest().manifest.core.tree.l0[0].clone();
+        parent.close().await.unwrap();
+
+        let mut sources = Vec::new();
+        let mut projected_ids = HashSet::new();
+        for shard in 0..4u16 {
+            let path = Path::from(format!("child-{shard}"));
+            let start = shard * 128;
+            let end = start + 128;
+            let range = (
+                Bound::Included(Bytes::copy_from_slice(&start.to_be_bytes())),
+                Bound::Excluded(Bytes::copy_from_slice(&end.to_be_bytes())),
+            );
+            create_native_clone(
+                vec![CloneSourceSpec::new("parent")],
+                path.clone(),
+                object_store.clone(),
+                object_store.clone(),
+                fp.clone(),
+                clock.clone(),
+                rand.clone(),
+                Some(range),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            let child = Db::builder(path.clone(), object_store.clone())
+                .with_settings(settings.clone())
+                .build()
+                .await
+                .unwrap();
+            let projected_view = child.manifest().manifest.core.tree.l0[0].clone();
+            assert_eq!(projected_view.sst, parent_view.sst);
+            assert_ne!(projected_view.id, parent_view.id);
+            assert!(projected_ids.insert(projected_view.id));
+            child.put(start.to_be_bytes(), b"updated").await.unwrap();
+            child.put((start + 1).to_be_bytes(), b"new").await.unwrap();
+            child.delete((start + 2).to_be_bytes()).await.unwrap();
+            expected.insert(start.to_be_bytes().to_vec(), b"updated".to_vec());
+            expected.insert((start + 1).to_be_bytes().to_vec(), b"new".to_vec());
+            expected.remove((start + 2).to_be_bytes().as_slice());
+            child.flush().await.unwrap();
+            child
+                .flush_with_options(FlushOptions {
+                    flush_type: FlushType::MemTable,
+                })
+                .await
+                .unwrap();
+            assert_eq!(child.manifest().manifest.core.tree.l0.len(), 2);
+            child.close().await.unwrap();
+            sources.push(CloneSourceSpec::new(path));
+        }
+        create_native_clone(
+            sources,
+            "union",
+            object_store.clone(),
+            object_store.clone(),
+            fp,
+            clock.clone(),
+            rand,
+            None::<(Bound<Bytes>, Bound<Bytes>)>,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let store = Arc::new(ManifestStore::new(
+            &Path::from("union"),
+            object_store.clone(),
+        ));
+        let initial = store.read_latest_manifest().await.unwrap();
+        let views = &initial.manifest.core.tree.l0;
+        assert_eq!(views.len(), 8);
+        assert_eq!(views.iter().map(|v| v.id).collect::<HashSet<_>>().len(), 8);
+        if stored_duplicates {
+            // Model a union written before view IDs became unique.
+            let mut stored = StoredManifest::load(store.clone(), clock).await.unwrap();
+            let mut dirty = stored.prepare_dirty().unwrap();
+            for view in &mut Arc::make_mut(&mut dirty.value.core.tree).l0 {
+                view.id = view.sst.id.value();
+            }
+            stored.update(dirty).await.unwrap();
+        }
+
+        async fn assert_contents(db: &Db, expected: &BTreeMap<Vec<u8>, Vec<u8>>) {
+            let mut scan = db.scan(..).await.unwrap();
+            let mut actual = BTreeMap::new();
+            while let Some(entry) = scan.next().await.unwrap() {
+                actual.insert(entry.key.to_vec(), entry.value.to_vec());
+            }
+            assert_eq!(&actual, expected);
+            for (key, value) in expected {
+                assert_eq!(
+                    db.get(key).await.unwrap().as_deref(),
+                    Some(value.as_slice())
+                );
+            }
+            for shard in 0..4u16 {
+                assert_eq!(db.get((shard * 128 + 2).to_be_bytes()).await.unwrap(), None);
+            }
+        }
+
+        let before = Db::builder("union", object_store.clone())
+            .with_settings(settings.clone())
+            .build()
+            .await
+            .unwrap();
+        assert_contents(&before, &expected).await;
+        before.close().await.unwrap();
+        let compacting_settings = Settings {
+            compactor_options: Some(CompactorOptions {
+                poll_interval: Duration::from_millis(10),
+                commit_compacted_interval: Duration::from_millis(10),
+                scheduler_options: HashMap::from([(
+                    "max_compaction_sources".into(),
+                    max_sources.to_string(),
+                )]),
+                worker: Some(CompactionWorkerOptions {
+                    compactions_poll_interval: Duration::from_millis(10),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..settings.clone()
+        };
+        let db = Db::builder("union", object_store.clone())
+            .with_settings(compacting_settings)
+            .build()
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let current = store.read_latest_manifest().await.unwrap();
+                if !current.manifest.core.tree.compacted.is_empty() {
+                    assert_eq!(current.manifest.core.tree.l0.len(), 8 - max_sources);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("union compaction did not finish");
+        db.refresh_manifest().await.unwrap();
+        assert_contents(&db, &expected).await;
+        db.close().await.unwrap();
+        let reopened = Db::builder("union", object_store)
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+        assert_contents(&reopened, &expected).await;
+        reopened.close().await.unwrap();
     }
 
     #[tokio::test]

@@ -32,6 +32,25 @@ pub(crate) struct FenceableManifest {
 // the relevant epoch when initialized. It also detects when the current writer has been
 // fenced and fails all operations with SlateDBError::Fenced.
 impl FenceableManifest {
+    /// Repair stored L0 view IDs before the writer starts to merge manifests.
+    pub(crate) async fn repair_duplicate_l0_view_ids(
+        &mut self,
+        rand: &slatedb_common::DbRand,
+    ) -> Result<(), SlateDBError> {
+        self.maybe_apply_update(|manifest| {
+            let mut dirty = manifest.prepare_dirty()?;
+            if !dirty.value.core.repair_duplicate_l0_view_ids(rand) {
+                return Ok(None);
+            }
+            // Fence the old coordinator in the same write as the repair. Its
+            // in-memory results can refer to the old, ambiguous view IDs.
+            dirty.value.compactor_epoch += 1;
+            log::warn!("repaired duplicate L0 view IDs; restart any standalone compactor");
+            Ok(Some(dirty))
+        })
+        .await
+    }
+
     pub(crate) async fn init_writer(
         stored_manifest: StoredManifest,
         manifest_update_timeout: Duration,
@@ -606,6 +625,52 @@ mod tests {
     use std::time::Duration;
 
     const ROOT: &str = "/root/path";
+
+    #[tokio::test]
+    async fn test_union_id_repair_persists_and_fences_old_compactor() {
+        let ms = new_memory_manifest_store();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let view = bounded_sst_view(10, b"a", b"z");
+        let mut core = ManifestCore::new();
+        Arc::make_mut(&mut core.tree).l0 = [view.clone(), view.clone()].into();
+        let stored = StoredManifest::create_new_db(ms.clone(), core, clock.clone())
+            .await
+            .unwrap();
+        let mut compactor =
+            FenceableManifest::init_compactor(stored, Duration::from_secs(10), clock.clone())
+                .await
+                .unwrap();
+        let stale = compactor.prepare_dirty().unwrap();
+        let stored = StoredManifest::load(ms.clone(), clock.clone())
+            .await
+            .unwrap();
+        let mut writer = FenceableManifest::init_writer(stored, Duration::from_secs(10), clock)
+            .await
+            .unwrap();
+        writer
+            .repair_duplicate_l0_view_ids(&DbRand::new(42))
+            .await
+            .unwrap();
+        let repaired = ms.read_latest_manifest().await.unwrap();
+        let l0 = &repaired.manifest.core.tree.l0;
+        assert_eq!(l0.len(), 2);
+        assert_ne!(l0[0].id, l0[1].id);
+        assert!(l0.iter().all(|v| v.id != view.id && v.sst == view.sst));
+        assert_eq!(
+            repaired.manifest.compactor_epoch,
+            stale.value.compactor_epoch + 1
+        );
+        assert!(matches!(
+            compactor.refresh().await,
+            Err(SlateDBError::Fenced)
+        ));
+        assert!(compactor.update(stale).await.is_err());
+        writer
+            .repair_duplicate_l0_view_ids(&DbRand::new(42))
+            .await
+            .unwrap();
+        assert_eq!(ms.read_latest_manifest().await.unwrap(), repaired);
+    }
 
     #[tokio::test]
     async fn test_should_fail_write_on_version_conflict() {

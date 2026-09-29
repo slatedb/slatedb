@@ -38,3 +38,6 @@ The design is described in detail in [RFC 0004](/rfcs/0004-checkpoints).
 ## Constraints
 
 The clone path must be different from the source path. Clone creation also fails if the source database uses a separate WAL object store. Today, clones only support databases whose WAL and main data share the same object-store root.
+
+For databases that use union clones, follow the [union-clone upgrade procedure](/docs/operations/compatibility/#upgrade-databases-with-union-clones).
+The procedure covers duplicate view IDs and the required writer and compactor upgrade order.
