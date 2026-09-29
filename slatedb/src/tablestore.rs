@@ -774,6 +774,22 @@ impl TableStore {
     /// It can optionally cache newly read blocks.
     /// `segment` is a hint attached to the [`ObjectStoreCallTag`] for
     /// object-store routing.
+    /// The block from the cache, or `None` when it is not there. No load.
+    pub(crate) async fn cached_block(
+        &self,
+        handle: &SsTableHandle,
+        index: &SsTableIndexOwned,
+        block: usize,
+    ) -> Option<Arc<Block>> {
+        let cache = self.cache_for_reads()?;
+        let offset = index.borrow().block_meta().get(block).offset();
+        cache
+            .get_block(&(handle.id, offset).into())
+            .await
+            .unwrap_or(None)
+            .and_then(|entry| entry.block())
+    }
+
     pub(crate) async fn read_blocks_using_index(
         &self,
         handle: &SsTableHandle,

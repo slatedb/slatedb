@@ -59,6 +59,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         create_cleanup_lock(object_store.clone(), &path).await?;
     }
 
+    // With BENCHER_PPROF=<prefix>, sample the CPU at 999 Hz and write
+    // <prefix>.svg and <prefix>.folded at the end of the run.
+    let pprof_prefix = std::env::var("BENCHER_PPROF").ok();
+    let profiler = pprof_prefix.as_ref().map(|_| {
+        pprof::ProfilerGuardBuilder::default()
+            .frequency(999)
+            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+            .build()
+            .expect("start pprof")
+    });
+
     match args.command {
         BencherCommands::Db(subcommand_args) => {
             exec_benchmark_db(path.clone(), object_store.clone(), subcommand_args).await;
@@ -73,10 +84,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     monitor.stop();
 
+    if let (Some(prefix), Some(profiler)) = (pprof_prefix, profiler) {
+        write_profile(&prefix, &profiler)?;
+    }
+
     if args.clean {
         cleanup_data(object_store, &path).await?;
     }
 
+    Ok(())
+}
+
+/// Write the samples of `profiler` as a flamegraph and as folded stacks
+/// (one line per stack, root first, then the sample count).
+fn write_profile(prefix: &str, profiler: &pprof::ProfilerGuard) -> Result<(), Box<dyn Error>> {
+    let report = profiler.report().build()?;
+    report.flamegraph(std::fs::File::create(format!("{prefix}.svg"))?)?;
+    let mut folded = String::new();
+    for (frames, count) in &report.data {
+        let mut names: Vec<String> = Vec::new();
+        for frame in frames.frames.iter().rev() {
+            for symbol in frame.iter().rev() {
+                names.push(symbol.name());
+            }
+        }
+        folded.push_str(&format!("{} {}\n", names.join(";"), count));
+    }
+    std::fs::write(format!("{prefix}.folded"), folded)?;
+    info!("wrote pprof profile to {prefix}.svg and {prefix}.folded");
     Ok(())
 }
 

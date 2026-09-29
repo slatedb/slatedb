@@ -242,6 +242,11 @@ impl SsTableView {
         Some(range)
     }
 
+    /// Whether the view can hold `key`, with no allocation.
+    pub(crate) fn covers_key(&self, key: &[u8]) -> bool {
+        self.effective_range.contains(key)
+    }
+
     /// Returns an estimate of the underlying SST's on-disk size in bytes.
     pub fn estimate_size(&self) -> u64 {
         self.sst.estimate_size()

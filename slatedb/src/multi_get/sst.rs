@@ -1,7 +1,7 @@
 //! One SST of a layer walk: the filter probe, the index, the block reads and the entries.
 
 use std::collections::{BTreeSet, HashMap};
-use std::ops::{Bound, Range};
+use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -19,7 +19,7 @@ use crate::flatbuffer_types::{SsTableIndex, SsTableIndexOwned};
 use crate::format::block::Block;
 use crate::iter::IterationOrder;
 use crate::manifest::SsTableView;
-use crate::partitioned_keyspace::partitions_covering_range;
+use crate::partitioned_keyspace::{partition_point, RangePartitionedKeySpace};
 use crate::reader::{ReadTrace, SstTraceLevel};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
@@ -116,11 +116,7 @@ impl SstRead {
         let key_blocks: Vec<(OpenKey, Range<usize>)> = keys
             .into_iter()
             .map(|key| {
-                let blocks = partitions_covering_range(
-                    &index.borrow(),
-                    Bound::Included(key.key.as_ref()),
-                    Bound::Included(key.key.as_ref()),
-                );
+                let blocks = blocks_of_key(&index.borrow(), &key.key);
                 (key, blocks)
             })
             .collect();
@@ -195,9 +191,27 @@ impl SstRead {
             .iter()
             .flat_map(|(_, blocks)| blocks.clone())
             .collect();
+        // A cached block is a plain lookup, only the misses become requests.
+        let mut blocks = HashMap::new();
+        let mut misses = Vec::new();
+        for block in wanted {
+            match ctx
+                .table_store
+                .cached_block(&self.view.sst, index, block)
+                .await
+            {
+                Some(cached) => {
+                    blocks.insert(block, cached);
+                }
+                None => misses.push(block),
+            }
+        }
+        if misses.is_empty() {
+            return Ok(blocks);
+        }
         let ranges = {
             let borrowed = index.borrow();
-            let blocks: Vec<BlockBytes> = wanted
+            let blocks: Vec<BlockBytes> = misses
                 .into_iter()
                 .map(|block| BlockBytes {
                     block,
@@ -225,7 +239,6 @@ impl SstRead {
                 .await?;
             Ok::<_, SlateDBError>((range.start, read))
         });
-        let mut blocks = HashMap::new();
         for (start, read) in try_join_all(reads).await? {
             for (offset, block) in read.into_iter().enumerate() {
                 blocks.insert(start + offset, block);
@@ -279,6 +292,21 @@ impl SstRead {
     }
 }
 
+/// The blocks that can hold `key`, as `partitions_covering_range` finds them for a point,
+/// with one search: the last block that starts at or before the key, and the block before
+/// every block that starts with the key, since only a key that spills over a boundary is in two.
+fn blocks_of_key<T: RangePartitionedKeySpace>(keyspace: &T, key: &[u8]) -> Range<usize> {
+    let end = partition_point(keyspace, |first_key| first_key <= key);
+    if end == 0 {
+        return 0..0;
+    }
+    let mut start = end - 1;
+    while start > 0 && keyspace.partition_first_key(start) == key {
+        start -= 1;
+    }
+    start..end
+}
+
 /// One wanted block and its byte range in the SST.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BlockBytes {
@@ -329,7 +357,51 @@ impl IntoIterator for BlockRanges {
 mod tests {
     use rstest::rstest;
 
+    use std::ops::Bound;
+
     use super::*;
+    use crate::partitioned_keyspace::partitions_covering_range;
+
+    /// A key space of the first keys of its blocks.
+    struct FirstKeys(Vec<&'static [u8]>);
+
+    impl RangePartitionedKeySpace for FirstKeys {
+        fn partitions(&self) -> usize {
+            self.0.len()
+        }
+
+        fn partition_first_key(&self, partition: usize) -> &[u8] {
+            self.0[partition]
+        }
+    }
+
+    #[test]
+    fn test_blocks_of_key_with_no_blocks_is_empty() {
+        assert_eq!(blocks_of_key(&FirstKeys(vec![]), b"c"), 0..0);
+    }
+
+    #[rstest]
+    #[case::before_first(&[b"b", b"d"], b"a", 0..0)]
+    #[case::inside_block(&[b"b", b"d", b"f"], b"c", 0..1)]
+    #[case::starts_first_block(&[b"b", b"d"], b"b", 0..1)]
+    #[case::spills_over_boundary(&[b"b", b"d", b"f"], b"d", 0..2)]
+    #[case::spills_over_two_boundaries(&[b"b", b"d", b"d", b"f"], b"d", 0..3)]
+    #[case::after_last(&[b"b", b"d"], b"z", 1..2)]
+    fn test_blocks_of_key_matches_partitions_covering_range(
+        #[case] first_keys: &[&'static [u8; 1]],
+        #[case] key: &[u8; 1],
+        #[case] expected: Range<usize>,
+    ) {
+        let keyspace = FirstKeys(first_keys.iter().map(|key| key.as_slice()).collect());
+
+        let blocks = blocks_of_key(&keyspace, key);
+
+        assert_eq!(blocks, expected);
+        assert_eq!(
+            blocks,
+            partitions_covering_range(&keyspace, Bound::Included(key), Bound::Included(key))
+        );
+    }
 
     fn blocks(bytes: &[(usize, Range<u64>)]) -> Vec<BlockBytes> {
         bytes

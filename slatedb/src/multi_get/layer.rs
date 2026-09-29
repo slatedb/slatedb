@@ -41,13 +41,12 @@ impl Layer {
     pub(super) fn candidates(&self, keys: Vec<OpenKey>) -> Vec<SstRead> {
         let mut reads: Vec<SstRead> = Vec::new();
         for open in keys {
-            let point = BytesRange::from_slice(open.key.as_ref()..=open.key.as_ref());
             let views: &[SsTableView] = match &self.kind {
                 LayerKind::L0(view) => std::slice::from_ref(view),
-                LayerKind::SortedRun(run) => run.tables_covering_point_key(&open.key),
+                LayerKind::SortedRun(run) => Self::run_views_of_key(run.sst_views(), &open.key),
             };
             for view in views {
-                if view.calculate_view_range(point.clone()).is_none() {
+                if !view.covers_key(&open.key) {
                     continue;
                 }
                 // The keys are sorted, so the SSTs of one key follow the SSTs of the key before.
@@ -63,6 +62,17 @@ impl Layer {
             }
         }
         reads
+    }
+
+    /// The views of a sorted run that can hold `key`: the last view that starts at or before
+    /// the key, and the views before it that end at the key. Byte compares only, no allocation.
+    fn run_views_of_key<'a>(views: &'a [SsTableView], key: &[u8]) -> &'a [SsTableView] {
+        let last = views.partition_point(|view| view.compacted_effective_start_key() <= key);
+        let mut first = last;
+        while first > 0 && views[first - 1].covers_key(key) {
+            first -= 1;
+        }
+        &views[first..last]
     }
 
     /// Reads every candidate SST of the layer and returns the entries in SST order.
