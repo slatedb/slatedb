@@ -38,60 +38,74 @@ Authors:
 
 ## Summary
 
-This RFC adds `multi_get`, a call that reads a batch of keys at one time. Today
-an application that needs 1000 keys calls `get` 1000 times. Each call repeats
-the same setup, and reads the same filters and indexes again.
+This RFC proposes to add a `multi_get` support to be able to perform batched reads 
+across many keys at once. The benefit of such approach is moving all the shared 
+per-key work outside of the hot read loop: this should result it better throughput
+and latency on large batches.
 
-`multi_get` walks the tree one layer at a time, and not one key at a time. A
-layer is one L0 SST or one sorted run. The walk has these steps:
+The implementation in this RFC is influenced by the RocksDB layer walk approach:
+* instead of iterating per each key, we iterate over layers. 
+  So we read each SST at most once, checking it for keys it might contain.
+* this approach scales with number of SSTs and not keys, which suits well 
+  for the batch read access pattern.
 
-- It answers what it can from the write batch and the memtables.
-- It reads each layer, newest first, for the keys that are still open, with
-  one filter probe, one index, and one read per SST.
-- A key leaves the walk when a layer answers it.
+Unlike RocksDB (in the default build as for 11.7) which has an explicit barrier 
+between layers, we propose to walk N layers speculatively to compensate for much 
+higher S3 read latency, the same way a regular `get` in SlateDB already works.
 
-Up to `lookahead` layers are in flight at one time, default 4, which is the
-window that `get` uses over SSTs. So a batch sends no more object store
-requests than a loop of gets.
-
-Each key returns the same value as a `get`, and all keys of a batch read from
-one state view. The change is additive: `get`, the SST format, and the
-manifest stay as they are. It has one breaking change: external types that
-implement `DbReadOps` must add the new methods.
+The layer walk has these steps:
+* Step 0. Do all the up-front work possible without touching storage: check write batch 
+  and memtables for requested keys. All missing keys are scheduled to the next step.
+* Step 1. Start walking L0..Ln layers at the same time. Missing keys stay in the
+  pool and scheduled for lower levels.
+* Step 2. When the walk for a layer is finished, we start speculatively checking next 
+  layer within a constant pool of in-flight slots until we reach the last one.
 
 ## Motivation
 
-A typical read pattern of an ML feature store is to fan out one request into
-many point reads. A ranking service is a good example:
-* It gets a list of candidate keys, usually 100 to 1000 of them.
-* It loads a set of features for each candidate. The dataset is usually
-  100+ GB.
-* It runs the ML inference.
+Many ML/AI systems for a real-time inference need a way to get a batch
+of data across many keys with lowest possible latency. Such systems include
+AdTech real-time-bidding platforms, search ranking and ML feature stores 
+in general.
 
-Other stores have a call for this pattern: `MultiGet` in RocksDB, `MGET` in
-Redis, and `BatchGetItem` in DynamoDB. SlateDB does not, so the application
-must call `get` in a loop. The RFC author maintains
-[murrdb](https://github.com/murrdb/murr), which calls `MultiGet` on RocksDB.
+Let's take the search ranking as an example:
+* ranker receives a list of candidate documents, usually in a range of 100-1000 
+  items out of a bigger corpus.
+* the ranking ML model needs a set of features for each candidate document, 
+  so it fans out parallel/batch reads to read them.
+* when a complete batch is ready, the ML model is invoked and we get the 
+  ranking scores.
 
-### What a `get` in a loop repeats
+Databases used in these areas often support a low-latency bulk read APIs:
+* RocksDB: [MultiGet](https://github.com/facebook/rocksdb/wiki/MultiGet-Performance)
+* Redis: [MGET](https://redis.io/docs/latest/commands/mget/)
+* DynamoDB: [BatchGetItem](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_BatchGetItem.html)
 
-Random keys spread over the whole key space, so the SSTs at the top of the
-tree serve many keys of one batch. An L0 SST covers the whole key space, and
-it is a candidate for each key. A `get` knows nothing about the other keys of
-the batch, so:
-* Each `get` takes its own state view, builds its own iterators, and reads
-  the same filters and indexes again. This work scales with the number of
-  keys, and not with the number of SSTs.
-* Two keys in adjacent blocks of one SST send two GET requests. A batch can
-  send one.
-* Parallel gets hide the latency, but not the cost. Each `get` also sees its
-  own DB state, so the keys of one batch can see different states, unless
-  the caller opens a snapshot first.
+Bulk read APIs operate on multiple keys at once and achieve better overall 
+throughput due to a dedicated planning phase, where all the shared per-key
+work is done just once.
 
-In the following table, N is the number of keys, M is the number of memtables,
+Without such an API application developers have to fallback for multiple `get` 
+calls in a loop, which usually has much higher overhead.
+
+### Shared per-key work
+
+A typical fall-back for databases without batch read API uses a get in a loop 
+approach, which does multiple duplicated per-SST actions which can be done more
+effectively if done in batch.
+
+Each get:
+* takes its own state view, builds its own iterators and probes same filters
+  and indexes again. It scales with the number of keys, and not with the number
+  of SSTs.
+* has no idea about other keys in the batch, so two keys in adjacent blocks of 
+  one SST send two GET requests. A batch can send just one.
+
+In the following table, we estimate the amount of shared work and how it can be reduced
+with batch reads. N is the number of keys, M is the number of memtables,
 and S is the number of candidate SSTs for a key:
 
-| Step of `get`                     | Loop of N gets | One batch needs      |
+| Step of `get`                     | Loop of N      | One batch            |
 |-----------------------------------|----------------|----------------------|
 | State view, `max_seq`, trace span | N              | 1                    |
 | Iterator per memtable and SST     | N × (M + S)    | 0                    |
@@ -575,6 +589,11 @@ enough for a review of its own:
 8. Language bindings, one pull request per binding.
 
 There are no feature flags.
+
+We also propose a couple of optional quality-of-life improvements into the API:
+1. Streaming support. Current API waits till the last key being read. In cases
+   when TTFB is more important than the TTLB, we can return a stream of keys
+   as soon as they're ready. With an extra flag we can return unordered results.
 
 ## Alternatives
 
