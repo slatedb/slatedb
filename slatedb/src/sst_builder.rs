@@ -560,7 +560,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::unpadded(false, 3089)]
+    #[case::unpadded(false, 3065)]
     #[case::padded(true, 2491)]
     #[tokio::test]
     async fn test_estimate_vs_actual_encoded_size(
@@ -676,7 +676,7 @@ mod tests {
             "wal",
             format.estimate_encoded_size_wal(num_entries, estimated_entries_size),
             wal_actual_size,
-            3931,
+            3917,
         );
     }
 

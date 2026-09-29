@@ -344,7 +344,17 @@ impl EncodedSsTableBlockBuilder {
     pub(crate) async fn build(self) -> Result<EncodedSsTableBlock, SlateDBError> {
         let block = self.block_builder.build()?;
         let encoded_block = block.encode();
-        let mut compressed_and_transformed_block = Vec::new();
+        let mut compressed_and_transformed_block = if self.block_alignment {
+            let overhead = self
+                .block_transformer
+                .as_ref()
+                .map_or(0, |t| t.encoded_overhead());
+            let padded_len =
+                (encoded_block.len() + overhead + CHECKSUM_SIZE).next_multiple_of(self.block_size);
+            Vec::with_capacity(padded_len)
+        } else {
+            Vec::new()
+        };
         let encoded_len = compress_and_transform(
             &mut compressed_and_transformed_block,
             encoded_block,
@@ -1140,6 +1150,7 @@ impl SsTableFormat {
                         .as_ref()
                         .map_or(0, |t| t.encoded_overhead()),
                 ),
+                self.block_alignment,
             );
 
         let data_blocks_size = Block::estimate_size_in_sst(
@@ -1179,6 +1190,7 @@ impl SsTableFormat {
                 entry_num,
                 estimated_entries_size,
                 self.block_size,
+                false,
             );
         let data_blocks_size = Block::estimate_size_in_sst(
             entry_num,
@@ -1196,12 +1208,20 @@ impl SsTableFormat {
         entry_num: usize,
         estimated_entries_size: usize,
         block_capacity: usize,
+        block_alignment: bool,
     ) -> (usize, usize) {
         let entries_size_encoded =
             row::SstRowCodecV0::estimate_encoded_size(entry_num, estimated_entries_size);
-        // A block holds the entries and their offsets, so count the offsets
-        // when dividing the entries into blocks.
-        let block_payload = entries_size_encoded + OFFSET_SIZE * entry_num;
+        let block_payload = if block_alignment {
+            // `Block::estimate_size_in_sst` charges a whole `block_size` per
+            // block, so a block's contents reach the estimate only through
+            // this count.
+            entries_size_encoded + OFFSET_SIZE * entry_num
+        } else {
+            // `Block::estimate_size_in_sst` charges the offsets itself, so
+            // this count only scales the per-block overhead.
+            entries_size_encoded
+        };
         let number_of_blocks = usize::div_ceil(block_payload, block_capacity);
 
         (entries_size_encoded, number_of_blocks)
