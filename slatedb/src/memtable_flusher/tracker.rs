@@ -18,7 +18,7 @@ use futures::StreamExt;
 use log::debug;
 use slatedb_common::metrics::{CounterFn, MetricsRecorderHelper};
 
-use crate::checkpoint::CheckpointCreateResult;
+use crate::checkpoint::CheckpointRequest;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::dispatcher::MessageHandler;
@@ -81,9 +81,8 @@ pub(crate) enum TrackerMessage {
     },
     /// Checkpoint creation request from an external caller.
     CheckpointRequest {
-        target: FlushTarget,
         options: CheckpointOptions,
-        sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
+        request: CheckpointRequest,
     },
     /// An upload worker completed successfully.
     UploadComplete(UploadedMemtable),
@@ -156,14 +155,9 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
                 self.stats.flush_request_count.increment(1);
                 self.handle_flush_request(target, sender).await
             }
-            TrackerMessage::CheckpointRequest {
-                target,
-                options,
-                sender,
-            } => {
+            TrackerMessage::CheckpointRequest { options, request } => {
                 self.stats.checkpoint_request_count.increment(1);
-                self.handle_checkpoint_request(target, options, sender)
-                    .await
+                self.handle_checkpoint_request(options, request).await
             }
             TrackerMessage::UploadComplete(uploaded) => {
                 self.stats.l0_upload_count.increment(1);
@@ -217,17 +211,20 @@ impl FlushTracker {
 
     async fn handle_checkpoint_request(
         &mut self,
-        target: FlushTarget,
         options: CheckpointOptions,
-        sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
+        request: CheckpointRequest,
     ) -> Result<(), SlateDBError> {
         if let Err(err) = self.reconcile_and_dispatch().await {
-            let _ = sender.send(Err(err.clone()));
+            request.lifecycle.fail(err.clone());
             return Err(err);
         }
-        let through_seq = self.frontier.resolve_target(target);
+        fail_point!(
+            Arc::clone(&self.inner.fp_registry),
+            "checkpoint-after-reconcile",
+            |_| { Ok(()) }
+        );
         self.manifest_writer
-            .send_checkpoint(through_seq, options, sender)?;
+            .begin_checkpoint(request.boundary.through_seq, options, request)?;
         self.dispatch_ready_memtables()
     }
 
@@ -377,8 +374,8 @@ impl FlushTracker {
                 TrackerMessage::FlushRequest { sender, .. } => {
                     let _ = sender.send(Err(err.clone()));
                 }
-                TrackerMessage::CheckpointRequest { sender, .. } => {
-                    let _ = sender.send(Err(err.clone()));
+                TrackerMessage::CheckpointRequest { request, .. } => {
+                    request.lifecycle.fail(err.clone());
                 }
                 TrackerMessage::PollManifest { sender } => {
                     let _ = sender.send(Err(err.clone()));
@@ -457,7 +454,6 @@ impl TrackedImmFrontier {
     /// Resolves a flush target to the sequence that must become durable.
     fn resolve_target(&self, target: FlushTarget) -> Option<u64> {
         match target {
-            FlushTarget::CurrentDurable => None,
             FlushTarget::All => self.tracked.back().map(|t| t.last_seq),
         }
     }
@@ -544,6 +540,7 @@ enum TrackedImmState {
 mod tests {
     use crate::batch_write::BatchWriterMessage;
     use crate::block_cache_policy::BlockCachePolicy;
+    use crate::checkpoint::CheckpointBoundary;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_state::{
@@ -974,11 +971,17 @@ mod tests {
         let path = harness.path.clone();
         let object_store = Arc::clone(&harness.object_store);
         let flusher = start_flusher(harness);
-        freeze_value_imm(&flusher.inner, b"k1", b"v1", 21);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 0);
 
         let checkpoint = timeout(
             Duration::from_secs(5),
-            flusher.create_checkpoint(FlushTarget::All, CheckpointOptions::default()),
+            flusher.create_checkpoint(
+                CheckpointBoundary {
+                    through_seq: Some(1),
+                    wal_id_last_seen: Some(0),
+                },
+                CheckpointOptions::default(),
+            ),
         )
         .await
         .unwrap()
@@ -1013,12 +1016,17 @@ mod tests {
         let flusher = start_flusher(harness);
         freeze_value_imm(&flusher.inner, b"k1", b"v1", 61);
 
-        // A CurrentDurable checkpoint should complete promptly even when L0 is
-        // full — it captures whatever is already durable without waiting for
-        // the flush pipeline to drain.
+        // A durable checkpoint can finish when L0 is full. It records the
+        // current durable state without waiting for the flush pipeline.
         let checkpoint = timeout(
             Duration::from_secs(5),
-            flusher.create_checkpoint(FlushTarget::CurrentDurable, CheckpointOptions::default()),
+            flusher.create_checkpoint(
+                CheckpointBoundary {
+                    through_seq: None,
+                    wal_id_last_seen: Some(0),
+                },
+                CheckpointOptions::default(),
+            ),
         )
         .await
         .unwrap()
@@ -1145,7 +1153,13 @@ mod tests {
 
         let checkpoint_result = timeout(
             Duration::from_secs(5),
-            flusher.create_checkpoint(FlushTarget::All, CheckpointOptions::default()),
+            flusher.create_checkpoint(
+                CheckpointBoundary {
+                    through_seq: Some(1),
+                    wal_id_last_seen: Some(0),
+                },
+                CheckpointOptions::default(),
+            ),
         )
         .await
         .unwrap();
@@ -1736,13 +1750,6 @@ mod tests {
             assert_eq!(frontier.resolve_target(FlushTarget::All), None);
             frontier.register([make_imm(1), make_imm(2)].into_iter());
             assert_eq!(frontier.resolve_target(FlushTarget::All), Some(2));
-        }
-
-        #[test]
-        fn resolve_target_current_durable_returns_none() {
-            let mut frontier = TrackedImmFrontier::new();
-            frontier.register(std::iter::once(make_imm(1)));
-            assert_eq!(frontier.resolve_target(FlushTarget::CurrentDurable), None);
         }
 
         #[test]

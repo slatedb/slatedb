@@ -29,6 +29,53 @@ A new checkpoint can also be created from an existing checkpoint through [`Check
 
 [`CheckpointOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.CheckpointOptions.html) lets you set a lifetime, a source checkpoint, and an optional name. Names are labels for listing checkpoints. They are not unique.
 
+## Start and Wait Separately
+
+`Db::begin_checkpoint` returns a `CheckpointHandle` after the database records the checkpoint boundary.
+With `CheckpointScope::All`, SlateDB freezes the in-memory write buffer before returning the handle.
+The checkpoint can include concurrent writes made before the handle returns.
+The checkpoint excludes writes issued after that return, including later WAL writes.
+Call `handle.wait().await` to wait for durable checkpoint creation.
+The handle also reports WAL upload completion and errors.
+`Db::create_checkpoint` combines these two calls.
+
+The database owns the checkpoint request.
+Dropping the handle or its waiting future does not cancel or delete the checkpoint.
+Dropping the `begin_checkpoint` future also leaves any submitted request active.
+Save `handle.id()` before waiting if recovery needs the identifier.
+If the result channel closes, SlateDB reports an unknown outcome because the checkpoint can already exist.
+
+## Retention Across Failures
+
+Use a finite `CheckpointOptions::lifetime` when abandoned checkpoints need automatic cleanup.
+SlateDB calculates expiration from its clock when it constructs the checkpoint for a manifest write.
+The lifetime does not limit how long a request waits for storage work.
+A slow manifest write can consume part of that lifetime before `wait()` returns.
+Garbage collection removes expired checkpoints when it runs.
+With `lifetime: None`, checkpoints remain until explicit deletion, even if their handles disappear.
+
+For checkpoints that must become permanent, use this sequence:
+
+1. Create the checkpoint with a finite lifetime.
+2. Wait for durable creation.
+3. Durably record the checkpoint ID in the application ownership record.
+4. Call `Admin::refresh_checkpoint(id, None)` to remove expiration.
+5. Delete the checkpoint with `Admin::delete_checkpoint(id)` when the application releases it.
+
+Completion of `wait()` does not transfer application ownership or remove expiration.
+The application ownership record must identify checkpoints that recovery will retain.
+For a Flink integration, use the JobManager's durable completed-checkpoint record for this decision.
+A task acknowledgment alone does not establish ownership.
+Completion notifications can be skipped after a failure, so recovery must also consult the durable ownership record.
+See the [Flink CheckpointListener contract](https://nightlies.apache.org/flink/flink-docs-stable/api/java/org/apache/flink/api/common/state/CheckpointListener.html).
+
+The application record and the SlateDB update are separate writes.
+If the application stops between them, recovery must retry `refresh_checkpoint(id, None)` before expiration.
+Repeating that update is safe.
+Choose a lifetime that covers coordination, storage delays, and recovery, and extend it while ownership remains unresolved.
+If garbage collection removes the checkpoint, refreshing its ID fails and does not restore the checkpoint.
+This sequence therefore requires a bound on recovery time.
+
 ## Readers and Background Tasks
 
 [`DbReader`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html) uses checkpoints to separate reader lifetime from writer lifetime. You choose how the reader tracks database state by passing a [`DbReaderMode`](https://docs.rs/slatedb/latest/slatedb/enum.DbReaderMode.html):
