@@ -411,6 +411,10 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// gets a block of its own, padded to the next multiple of the block
     /// size.
     ///
+    /// The padding rounds up to the block size, not to the 4KB disk block. A
+    /// block size above 4KB therefore over-pads a large entry. Keep the block
+    /// size at 4KB to pad a large entry to the tightest disk-aligned size.
+    ///
     /// A [`BlockTransformer`] that adds bytes to a block must report them
     /// through [`BlockTransformer::encoded_overhead`], or every full block
     /// spills into a second block-sized unit.
