@@ -1,0 +1,15 @@
+[package]
+name = "slatedb-mirror"
+description = "Local whole-object mirror for an object store."
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+object_store = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

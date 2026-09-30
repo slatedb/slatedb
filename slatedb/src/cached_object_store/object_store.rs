@@ -19,7 +19,7 @@ use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 use slatedb_common::DbRand;
 use std::{ops::Range, sync::Arc};
 
-use crate::single_flight::SingleFlight;
+use slatedb_common::single_flight::SingleFlight;
 
 use crate::cached_object_store::storage::{LocalCacheStorage, PartID};
 use crate::error::SlateDBError;

@@ -3245,6 +3245,7 @@ dependencies = [
  "serde_json",
  "siphasher",
  "slatedb-common",
+ "slatedb-mirror",
  "slatedb-txn-obj",
  "smallvec",
  "snap",
@@ -3308,6 +3309,7 @@ dependencies = [
  "chrono",
  "log",
  "object_store",
+ "parking_lot",
  "rand 0.9.4",
  "rand_xoshiro",
  "serde",
@@ -3338,6 +3340,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
+]
+
+[[package]]
+name = "slatedb-mirror"
+version = "0.17.0"
+dependencies = [
+ "object_store",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

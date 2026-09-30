@@ -6,6 +6,7 @@ members = [
     "slatedb",
     "slatedb-dst",
     "slatedb-common",
+    "slatedb-mirror",
     "slatedb-bencher",
     "slatedb-cli",
     "slatedb-txn-obj",
@@ -71,6 +72,7 @@ siphasher = "1"
 smallvec = "1.15.1"
 slatedb = { path = "slatedb", version = "0.17.0" }
 slatedb-common = { path = "slatedb-common", version = "0.17.0" }
+slatedb-mirror = { path = "slatedb-mirror", version = "0.17.0" }
 slatedb-txn-obj = { path = "slatedb-txn-obj", version = "0.17.0" }
 snap = "1.1.1"
 sysinfo = "0.35.2"

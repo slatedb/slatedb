@@ -1179,10 +1179,7 @@ impl EncodedSsTableWriter {
         if self.shutdown_started {
             return Ok(());
         }
-        self.writer
-            .abort()
-            .await
-            .map_err(|e| SlateDBError::ObjectStoreError(Arc::new(e)))
+        self.writer.abort().await.map_err(SlateDBError::from)
     }
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {

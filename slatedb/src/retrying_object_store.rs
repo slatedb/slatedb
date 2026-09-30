@@ -19,6 +19,7 @@ use object_store::{
 use crate::utils::IdGenerator;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
+use slatedb_mirror::MirrorError;
 
 const MIN_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -116,7 +117,7 @@ impl RetryingObjectStore {
                 | object_store::Error::NotFound { .. }
                 | object_store::Error::NotImplemented { .. }
                 | object_store::Error::NotSupported { .. }
-        );
+        ) && MirrorError::find(err).is_none();
         if !retry {
             debug!("not retrying object store operation [error={:?}]", err);
         }
@@ -646,6 +647,7 @@ mod tests {
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use slatedb_common::DbRand;
     use slatedb_common::MockSystemClock;
+    use slatedb_mirror::MirrorError;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -908,6 +910,26 @@ mod tests {
             e => panic!("unexpected error: {e:?}"),
         }
         assert_eq!(failing.put_attempts(), 1);
+    }
+
+    #[test]
+    fn test_should_not_retry_mirror_errors() {
+        let generic = object_store::Error::Generic {
+            store: "S3",
+            source: Box::new(std::io::Error::other("timeout")),
+        };
+        assert!(RetryingObjectStore::should_retry(&generic));
+
+        let write_committed = object_store::Error::from(MirrorError::WriteCommitted {
+            path: Path::from("manifest/00000000000000000001.manifest"),
+            source: Box::new(std::io::Error::other("disk full")),
+        });
+        assert!(!RetryingObjectStore::should_retry(&write_committed));
+
+        let not_local = object_store::Error::from(MirrorError::NotLocal {
+            path: Path::from("compacted/01K.sst"),
+        });
+        assert!(!RetryingObjectStore::should_retry(&not_local));
     }
 
     #[tokio::test]
