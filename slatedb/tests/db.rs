@@ -21,6 +21,24 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::fmt::format::FmtSpan;
 
+#[tokio::test]
+async fn test_key_larger_than_u16_round_trips_through_sst() {
+    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let key = vec![b'k'; u16::MAX as usize + 1];
+    let value = b"value";
+    let path = "/large-key-round-trip";
+
+    let db = Db::open(path, object_store.clone()).await.unwrap();
+    db.put(&key, value).await.unwrap();
+    db.flush().await.unwrap();
+    db.close().await.unwrap();
+
+    let db = Db::open(path, object_store).await.unwrap();
+    let actual = db.get(&key).await.unwrap().unwrap();
+    assert_eq!(actual.as_ref(), value);
+    db.close().await.unwrap();
+}
+
 /// Verify that writes succeed after WAL replay when replayed immutable
 /// memtables have not yet been flushed to L0. Previously, the WAL buffer's
 /// recent_flushed_wal_id lagged behind the imm_memtable WAL IDs, causing

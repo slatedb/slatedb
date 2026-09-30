@@ -148,7 +148,13 @@ pub(crate) async fn plan_subcompaction_ranges(
             let segment = segment.clone();
             async move {
                 let index = table_store
-                    .read_index(&view.sst, true, Some(segment))
+                    .read_index(
+                        &view.sst,
+                        true,
+                        Some(segment),
+                        &crate::reader::ReadTrace::new(None),
+                        None,
+                    )
                     .await?;
                 // `filter_offset` marks the end of the data-block region: the
                 // filter, index, and stats blocks all follow it, and when the
@@ -342,6 +348,7 @@ mod tests {
                     &BlockMetaArgs {
                         offset: *offset,
                         first_key: Some(first_key),
+                        encoded_len: 0,
                     },
                 )
             })

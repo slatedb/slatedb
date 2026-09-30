@@ -370,6 +370,34 @@ static void call_UniffiForeignFutureCompleteVoid(
 
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_BLOCK_TRANSFORMER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_BLOCK_TRANSFORMER_METHOD0
+typedef void (*UniffiCallbackInterfaceBlockTransformerMethod0)(uint64_t uniffi_handle, RustBuffer data, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
+
+// Making function static works arround:
+// https://github.com/golang/go/issues/11263
+static void call_UniffiCallbackInterfaceBlockTransformerMethod0(
+				UniffiCallbackInterfaceBlockTransformerMethod0 cb, uint64_t uniffi_handle, RustBuffer data, RustBuffer* uniffi_out_return, RustCallStatus* callStatus )
+{
+	return cb(uniffi_handle, data, uniffi_out_return, callStatus );
+}
+
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_BLOCK_TRANSFORMER_METHOD1
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_BLOCK_TRANSFORMER_METHOD1
+typedef void (*UniffiCallbackInterfaceBlockTransformerMethod1)(uint64_t uniffi_handle, RustBuffer data, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
+
+// Making function static works arround:
+// https://github.com/golang/go/issues/11263
+static void call_UniffiCallbackInterfaceBlockTransformerMethod1(
+				UniffiCallbackInterfaceBlockTransformerMethod1 cb, uint64_t uniffi_handle, RustBuffer data, RustBuffer* uniffi_out_return, RustCallStatus* callStatus )
+{
+	return cb(uniffi_handle, data, uniffi_out_return, callStatus );
+}
+
+
+#endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_PREFIX_EXTRACTOR_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PREFIX_EXTRACTOR_METHOD0
 typedef void (*UniffiCallbackInterfacePrefixExtractorMethod0)(uint64_t uniffi_handle, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
@@ -538,6 +566,16 @@ static void call_UniffiCallbackInterfaceUpDownCounterMethod0(
 
 
 #endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_BLOCK_TRANSFORMER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_BLOCK_TRANSFORMER
+typedef struct UniffiVTableCallbackInterfaceBlockTransformer {
+    UniffiCallbackInterfaceFree uniffiFree;
+    UniffiCallbackInterfaceClone uniffiClone;
+    UniffiCallbackInterfaceBlockTransformerMethod0 encode;
+    UniffiCallbackInterfaceBlockTransformerMethod1 decode;
+} UniffiVTableCallbackInterfaceBlockTransformer;
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_PREFIX_EXTRACTOR
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_PREFIX_EXTRACTOR
 typedef struct UniffiVTableCallbackInterfacePrefixExtractor {
@@ -639,6 +677,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_admin_create_detached_checkpoint(uint64
 uint64_t uniffi_slatedb_uniffi_fn_method_admin_delete_checkpoint(uint64_t ptr, RustBuffer id
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_DELETE_DB
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_DELETE_DB
+uint64_t uniffi_slatedb_uniffi_fn_method_admin_delete_db(uint64_t ptr, int8_t confirm
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_GET_SEQUENCE_FOR_TIMESTAMP
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_GET_SEQUENCE_FOR_TIMESTAMP
 uint64_t uniffi_slatedb_uniffi_fn_method_admin_get_sequence_for_timestamp(uint64_t ptr, int64_t timestamp_secs, int8_t round_up
@@ -697,6 +740,31 @@ uint64_t uniffi_slatedb_uniffi_fn_method_admin_run_gc_once(uint64_t ptr, RustBuf
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_SUBMIT_COMPACTION
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_ADMIN_SUBMIT_COMPACTION
 uint64_t uniffi_slatedb_uniffi_fn_method_admin_submit_compaction(uint64_t ptr, RustBuffer spec
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_BLOCKTRANSFORMER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_BLOCKTRANSFORMER
+uint64_t uniffi_slatedb_uniffi_fn_clone_blocktransformer(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_BLOCKTRANSFORMER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_BLOCKTRANSFORMER
+void uniffi_slatedb_uniffi_fn_free_blocktransformer(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_BLOCKTRANSFORMER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_BLOCKTRANSFORMER
+void uniffi_slatedb_uniffi_fn_init_callback_vtable_blocktransformer(UniffiVTableCallbackInterfaceBlockTransformer* vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_BLOCKTRANSFORMER_ENCODE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_BLOCKTRANSFORMER_ENCODE
+RustBuffer uniffi_slatedb_uniffi_fn_method_blocktransformer_encode(uint64_t ptr, RustBuffer data, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_BLOCKTRANSFORMER_DECODE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_BLOCKTRANSFORMER_DECODE
+RustBuffer uniffi_slatedb_uniffi_fn_method_blocktransformer_decode(uint64_t ptr, RustBuffer data, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_ADMINBUILDER
@@ -794,6 +862,11 @@ uint64_t uniffi_slatedb_uniffi_fn_constructor_dbbuilder_new(RustBuffer path, uin
 uint64_t uniffi_slatedb_uniffi_fn_method_dbbuilder_build(uint64_t ptr
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_BLOCK_TRANSFORMER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_BLOCK_TRANSFORMER
+void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_block_transformer(uint64_t ptr, uint64_t transformer, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_DB_CACHE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBBUILDER_WITH_DB_CACHE
 void uniffi_slatedb_uniffi_fn_method_dbbuilder_with_db_cache(uint64_t ptr, uint64_t db_cache, uint64_t db_cache_id, RustCallStatus *out_status
@@ -862,6 +935,11 @@ uint64_t uniffi_slatedb_uniffi_fn_constructor_dbreaderbuilder_new(RustBuffer pat
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_BUILD
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_BUILD
 uint64_t uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_build(uint64_t ptr
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_BLOCK_TRANSFORMER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_BLOCK_TRANSFORMER
+void uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_block_transformer(uint64_t ptr, uint64_t transformer, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADERBUILDER_WITH_DB_CACHE
@@ -2112,6 +2190,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_admin_delete_checkpoint(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMIN_DELETE_DB
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMIN_DELETE_DB
+uint16_t uniffi_slatedb_uniffi_checksum_method_admin_delete_db(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMIN_GET_SEQUENCE_FOR_TIMESTAMP
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMIN_GET_SEQUENCE_FOR_TIMESTAMP
 uint16_t uniffi_slatedb_uniffi_checksum_method_admin_get_sequence_for_timestamp(void
@@ -2184,6 +2268,18 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_admin_submit_compaction(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_BLOCKTRANSFORMER_ENCODE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_BLOCKTRANSFORMER_ENCODE
+uint16_t uniffi_slatedb_uniffi_checksum_method_blocktransformer_encode(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_BLOCKTRANSFORMER_DECODE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_BLOCKTRANSFORMER_DECODE
+uint16_t uniffi_slatedb_uniffi_checksum_method_blocktransformer_decode(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMINBUILDER_BUILD
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_ADMINBUILDER_BUILD
 uint16_t uniffi_slatedb_uniffi_checksum_method_adminbuilder_build(void
@@ -2250,6 +2346,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_build(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_BLOCK_TRANSFORMER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_BLOCK_TRANSFORMER
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_block_transformer(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_DB_CACHE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBBUILDER_WITH_DB_CACHE
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache(void
@@ -2313,6 +2415,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store(v
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_BUILD
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_BUILD
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_BLOCK_TRANSFORMER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADERBUILDER_WITH_BLOCK_TRANSFORMER
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_block_transformer(void
     
 );
 #endif
@@ -3163,6 +3271,10 @@ uint32_t ffi_slatedb_uniffi_uniffi_contract_version(void
 );
 #endif
 
+ void slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerMethod0(uint64_t uniffi_handle, RustBuffer data, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerMethod1(uint64_t uniffi_handle, RustBuffer data, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerFree(uint64_t handle);
+uint64_t slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerClone(uint64_t handle);
  void slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod0(uint64_t uniffi_handle, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
  void slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorMethod1(uint64_t uniffi_handle, RustBuffer target, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
  void slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorFree(uint64_t handle);

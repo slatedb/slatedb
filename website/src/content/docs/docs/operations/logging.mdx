@@ -19,13 +19,29 @@ Here's a basic example showing how to consume tracing logs with `tracing_subscri
 
 SlateDB provides structured tracing spans for read operations, allowing you to track and measure the performance of individual reads. When enabled, SlateDB creates a hierarchy of spans that wrap different parts of the read path:
 
-- `slatedb.read` — The root span that wraps the entire read operation (get, scan, or scan_prefix_by_recency)
-- `slatedb.read.memtable` — A child span that wraps each memtable lookup
+| Span | Description | Fields |
+| --- | --- | --- |
+| `slatedb.read` | Root span for a read operation (`get`, `scan`, or `scan_prefix_by_recency`). | `trace_id` |
+| `slatedb.read.memtable` | Records each memtable lookup. | `trace_id` |
+| `slatedb.read.read_filters` | Records reading filters for an SST. | `trace_id`, `sst_id`, `sst_level`, `cached` |
+| `slatedb.read.evaluate_filter` | Records evaluating a named filter for an SST. | `trace_id`, `sst_id`, `sst_level`, `filter_name`, `result` |
+| `slatedb.read.read_index` | Records reading the index for an SST. | `trace_id`, `sst_id`, `sst_level`, `cached` |
+
+All `slatedb.read.*` spans are child spans of the root `slatedb.read` span.
+
+Field meanings:
+
+- `trace_id` — The value from `TracingOptions`, used to correlate spans from the same read operation.
+- `sst_id` — The identifier of the SST involved in the span.
+- `sst_level`: The level that contains the SST is `l0` or `sorted_run:{id}`.
+- `cached`: `true` if the filter or index came from the cache or a concurrent cache lookup fetched it. Otherwise, the value is `false`. The field can be absent if the read stops before the filter or index is read.
+- `filter_name`: The name of the filter policy being evaluated.
+- `result` — The boolean result of evaluating the filter.
 
 These spans are only created when you provide `TracingOptions` to the read operation.
 
-The spans `slatedb.read` are created at tracing level `INFO`.
-Due to the potential huge number of spans `slatedb.read.memtable` created during scan operations, spans `slatedb.read.memtable` are created at tracing level `DEBUG`.
+All spans listed above are created at tracing level `INFO`, except for `slatedb.read.memtable`.
+Due to the potential huge number of spans `slatedb.read.memtable` created during scan operations, `slatedb.read.memtable` spans are created at tracing level `DEBUG`.
 
 ### Configuring TracingOptions
 

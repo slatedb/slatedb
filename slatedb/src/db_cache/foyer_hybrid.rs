@@ -71,7 +71,9 @@
 //!
 
 use crate::{
-    db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache},
+    db_cache::{
+        instrumented_loader, CacheFetch, CacheLoader, CacheLookup, CachedEntry, CachedKey, DbCache,
+    },
     error::SlateDBError,
     utils::format_bytes_si,
 };
@@ -171,7 +173,7 @@ impl DbCache for FoyerHybridCache {
         &self,
         key: CachedKey,
         loader: CacheLoader,
-    ) -> Result<CachedEntry, crate::Error> {
+    ) -> Result<CacheFetch, crate::Error> {
         self.dedup_fetch(key, loader).await
     }
 
@@ -179,7 +181,7 @@ impl DbCache for FoyerHybridCache {
         &self,
         key: CachedKey,
         loader: CacheLoader,
-    ) -> Result<CachedEntry, crate::Error> {
+    ) -> Result<CacheFetch, crate::Error> {
         self.dedup_fetch(key, loader).await
     }
 
@@ -187,7 +189,7 @@ impl DbCache for FoyerHybridCache {
         &self,
         key: CachedKey,
         loader: CacheLoader,
-    ) -> Result<CachedEntry, crate::Error> {
+    ) -> Result<CacheFetch, crate::Error> {
         self.dedup_fetch(key, loader).await
     }
 
@@ -195,7 +197,7 @@ impl DbCache for FoyerHybridCache {
         &self,
         key: CachedKey,
         loader: CacheLoader,
-    ) -> Result<CachedEntry, crate::Error> {
+    ) -> Result<CacheFetch, crate::Error> {
         self.dedup_fetch(key, loader).await
     }
 }
@@ -208,12 +210,20 @@ impl FoyerHybridCache {
         &self,
         key: CachedKey,
         loader: CacheLoader,
-    ) -> Result<CachedEntry, crate::Error> {
+    ) -> Result<CacheFetch, crate::Error> {
+        let (loader, loader_ran) = instrumented_loader(loader);
         let fetch = self
             .inner
             .get_or_fetch(&key, move || async move { loader().await });
         match fetch.await {
-            Ok(entry) => Ok(entry.value().clone()),
+            Ok(entry) => Ok(CacheFetch {
+                entry: entry.value().clone(),
+                lookup: if loader_ran.was_called() {
+                    CacheLookup::Miss
+                } else {
+                    CacheLookup::Hit
+                },
+            }),
             Err(err) => Err(SlateDBError::FoyerError(Arc::new(err)).into()),
         }
     }
@@ -281,6 +291,25 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let cache = open_cache(tempdir.path()).await;
         (cache, tempdir)
+    }
+
+    #[tokio::test]
+    async fn test_fetch_lookup_from_memory_and_disk() {
+        use crate::db_cache::{CacheLoader, CacheLookup};
+
+        let (cache, _tempdir) = setup().await;
+        let key = CachedKey::from((SsTableId::new(Ulid::new()), 0));
+        let loader = || -> CacheLoader { Box::new(|| Box::pin(async { Ok(build_block()) })) };
+        let first = cache.fetch_block(key.clone(), loader()).await.unwrap();
+        assert_eq!(first.lookup, CacheLookup::Miss);
+        let second = cache.fetch_block(key.clone(), loader()).await.unwrap();
+        assert_eq!(second.lookup, CacheLookup::Hit);
+        cache.flush_scope(0).await.unwrap();
+        assert!(cache.inner.memory().get(&key).is_none());
+        let third = cache.fetch_block(key, loader()).await.unwrap();
+        assert_eq!(third.lookup, CacheLookup::Hit);
+        assert_eq!(third.entry.size(), first.entry.size());
+        cache.close().await.unwrap();
     }
 
     async fn open_cache(path: &std::path::Path) -> FoyerHybridCache {

@@ -186,11 +186,13 @@ pub struct DbBuilder<P: Into<Path>> {
     block_cache_policy: BlockCachePolicy,
     system_clock: Option<Arc<dyn SystemClock>>,
     gc_runtime: Option<Handle>,
+    write_runtime: Option<Handle>,
     compactor_builder: Option<CompactorBuilder<Path>>,
     gc_builder: Option<GarbageCollectorBuilder<Path>>,
     fp_registry: Arc<FailPointRegistry>,
     seed: Option<u64>,
     sst_block_size: Option<SstBlockSize>,
+    sst_block_alignment: bool,
     merge_operator: Option<MergeOperatorType>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
@@ -216,11 +218,13 @@ impl<P: Into<Path>> DbBuilder<P> {
             block_cache_policy: BlockCachePolicy::default(),
             system_clock: None,
             gc_runtime: None,
+            write_runtime: None,
             compactor_builder: None,
             gc_builder: None,
             fp_registry: Arc::new(FailPointRegistry::new()),
             seed: None,
             sst_block_size: None,
+            sst_block_alignment: false,
             merge_operator: None,
             block_transformer: None,
             filter_policies: default_filter_policies(),
@@ -324,6 +328,20 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Runs the batch-writer task on `runtime` instead of the one the database is built on; all
+    /// other components stay put. On a current-thread runtime the writing threads drive
+    /// themselves, a write becomes a task switch rather than a cross-thread wake-up.
+    ///
+    /// The caller must drive `runtime` for every write, [`Db::flush`], [`Db::close`] and
+    /// [`Db::create_checkpoint`] — they go through the batch-writer and otherwise hang; reads do
+    /// not. Build it with [`enable_time`] and no IO driver, which would cost a syscall per write.
+    ///
+    /// [`enable_time`]: tokio::runtime::Builder::enable_time
+    pub fn with_write_runtime(mut self, runtime: Handle) -> Self {
+        self.write_runtime = Some(runtime);
+        self
+    }
+
     /// Sets a custom CompactorBuilder for compaction orchestration.
     ///
     /// Setting a [`CompactorBuilder`] will ignore any previous
@@ -388,6 +406,29 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Pads every data block of a compacted SST with zeros to the block size
+    /// set by [`Self::with_sst_block_size`]. An entry too large for a block
+    /// gets a block of its own, padded to the next multiple of the block
+    /// size.
+    ///
+    /// The padding rounds up to the block size, not to the 4KB disk block. A
+    /// block size above 4KB therefore over-pads a large entry. Keep the block
+    /// size at 4KB to pad a large entry to the tightest disk-aligned size.
+    ///
+    /// A [`BlockTransformer`] that adds bytes to a block must report them
+    /// through [`BlockTransformer::encoded_overhead`], or every full block
+    /// spills into a second block-sized unit.
+    ///
+    /// Readers that predate the `encoded_len` index field cannot read padded
+    /// SSTs, so upgrade every reader before a writer enables this. Once
+    /// padded SSTs exist, the readers cannot be rolled back.
+    ///
+    /// Defaults to `false`.
+    pub fn with_sst_block_alignment(mut self, aligned: bool) -> Self {
+        self.sst_block_alignment = aligned;
+        self
+    }
+
     /// Sets the merge operator to use for the database. The merge operator allows
     /// applications to bypass the traditional read/modify/write cycle by expressing
     /// partial updates using an associative operator.
@@ -445,6 +486,12 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
         self.settings.validate()?;
+        if self.sst_block_alignment && self.settings.compression_codec.is_some() {
+            return Err(SlateDBError::InvalidConfiguration(
+                "sst_block_alignment cannot be combined with compression_codec".into(),
+            )
+            .into());
+        }
 
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
@@ -481,8 +528,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // producing the same layering as a caller-built
         // [`CachedObjectStore`] passed to [`DbBuilder::new`]: the cache sits
         // under the retry and instrumentation layers, so the same cache
-        // instance can be shared with the compactor and GC below while each
-        // component keeps its own layers.
+        // instance can be shared with the WAL store, compactor, and GC.
         let cached_object_store = CachedObjectStore::from_config(
             self.main_object_store.clone(),
             &self.settings.object_store_cache_options,
@@ -538,6 +584,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             filter_policies: self.filter_policies.clone(),
             compression_codec: self.settings.compression_codec,
             block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
+            block_alignment: self.sst_block_alignment,
             block_transformer: self.block_transformer.clone(),
             block_format,
             ..SsTableFormat::default()
@@ -701,7 +748,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             WRITE_BATCH_TASK_NAME.to_string(),
             Box::new(WriteBatchEventHandler::new(inner.clone(), wal_writer)),
             write_rx,
-            &tokio_handle,
+            self.write_runtime.as_ref().unwrap_or(&tokio_handle),
         )?;
 
         // Selects the store a background component (compactor, GC) reads and
@@ -885,6 +932,7 @@ pub struct AdminBuilder<P: Into<Path>> {
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
     merge_operator: Option<MergeOperatorType>,
+    block_transformer: Option<Arc<dyn BlockTransformer>>,
 }
 
 impl<P: Into<Path>> AdminBuilder<P> {
@@ -901,6 +949,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
             merge_operator: None,
+            block_transformer: None,
         }
     }
 
@@ -952,6 +1001,13 @@ impl<P: Into<Path>> AdminBuilder<P> {
         self
     }
 
+    /// Sets the block transformer the database's SSTs are written with, so the
+    /// compactor and compaction worker this admin runs can read and rewrite them.
+    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
+        self.block_transformer = Some(block_transformer);
+        self
+    }
+
     /// Builds and returns an Admin instance.
     pub fn build(self) -> Admin {
         // Store the raw object stores here. Admin wraps them in a
@@ -987,6 +1043,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: self.compaction_filter_supplier,
             merge_operator: self.merge_operator,
+            block_transformer: self.block_transformer,
         }
     }
 }
@@ -1204,6 +1261,8 @@ pub struct CompactorBuilder<P: Into<Path>> {
     fp_registry: Arc<FailPointRegistry>,
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
+    sst_block_size: Option<SstBlockSize>,
+    sst_block_alignment: bool,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
@@ -1225,6 +1284,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             fp_registry: Arc::new(FailPointRegistry::new()),
             block_transformer: None,
             filter_policies: default_filter_policies(),
+            sst_block_size: None,
+            sst_block_alignment: false,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
         }
@@ -1245,6 +1306,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             fp_registry: self.fp_registry,
             block_transformer: self.block_transformer,
             filter_policies: self.filter_policies,
+            sst_block_size: self.sst_block_size,
+            sst_block_alignment: self.sst_block_alignment,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: self.compaction_filter_supplier,
         }
@@ -1346,6 +1409,25 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         self
     }
 
+    /// Sets the SST block size the worker uses when it rewrites SSTs.
+    ///
+    /// Must match the writer's `DbBuilder::with_sst_block_size` configuration
+    /// so that SSTs rewritten by the worker are encoded consistently with
+    /// those produced by the DB. Defaults to [`SstBlockSize::default`].
+    pub fn with_sst_block_size(mut self, block_size: SstBlockSize) -> Self {
+        self.sst_block_size = Some(block_size);
+        self
+    }
+
+    /// Pads every data block of a compacted SST with zeros to the block size
+    /// set by [`Self::with_sst_block_size`].
+    ///
+    /// Defaults to `false`.
+    pub fn with_sst_block_alignment(mut self, aligned: bool) -> Self {
+        self.sst_block_alignment = aligned;
+        self
+    }
+
     /// Builds and returns a Compactor instance.
     pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
@@ -1373,6 +1455,8 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         let sst_format = SsTableFormat {
             filter_policies: self.filter_policies.clone(),
             block_transformer: self.block_transformer.clone(),
+            block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
+            block_alignment: self.sst_block_alignment,
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
@@ -1483,6 +1567,7 @@ pub struct CompactionWorkerBuilder<P: Into<Path>> {
     block_transformer: Option<Arc<dyn BlockTransformer>>,
     filter_policies: Vec<Arc<dyn FilterPolicy>>,
     sst_block_size: Option<SstBlockSize>,
+    sst_block_alignment: bool,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
 }
@@ -1502,6 +1587,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             block_transformer: None,
             filter_policies: default_filter_policies(),
             sst_block_size: None,
+            sst_block_alignment: false,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
         }
@@ -1564,11 +1650,20 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
 
     /// Sets the SST block size the worker uses when it rewrites SSTs.
     ///
-    /// Must match the writer's `DbBuilder::with_sst_block_size` configuration so
-    /// that SSTs rewritten by the worker are encoded consistently with those
-    /// produced by the DB. Defaults to [`SstBlockSize::default`].
+    /// Must match the writer's `DbBuilder::with_sst_block_size` configuration
+    /// so that SSTs rewritten by the worker are encoded consistently with
+    /// those produced by the DB. Defaults to [`SstBlockSize::default`].
     pub fn with_sst_block_size(mut self, block_size: SstBlockSize) -> Self {
         self.sst_block_size = Some(block_size);
+        self
+    }
+
+    /// Pads every data block of a compacted SST with zeros to the block size
+    /// set by [`Self::with_sst_block_size`].
+    ///
+    /// Defaults to `false`.
+    pub fn with_sst_block_alignment(mut self, aligned: bool) -> Self {
+        self.sst_block_alignment = aligned;
         self
     }
 
@@ -1582,6 +1677,12 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
     }
 
     pub async fn build(self) -> Result<CompactionWorker, crate::Error> {
+        if self.sst_block_alignment && self.options.compression_codec.is_some() {
+            return Err(SlateDBError::InvalidConfiguration(
+                "sst_block_alignment cannot be combined with compression_codec".into(),
+            )
+            .into());
+        }
         let path: Path = self.path.into();
         let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
         let compactions_store =
@@ -1594,6 +1695,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
                 block_size: self.sst_block_size.unwrap_or_default().as_bytes(),
                 min_filter_keys: self.options.min_filter_keys,
                 compression_codec: self.options.compression_codec,
+                block_alignment: self.sst_block_alignment,
                 ..SsTableFormat::default()
             },
             path,
@@ -2294,6 +2396,8 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
+    // Aliased because `tempfile::Builder` is also used below.
+    use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
     struct EmptyWalIterator;
 
@@ -2663,5 +2767,81 @@ mod tests {
             Some(b"v1".as_ref())
         );
         db.close().await.expect("failed to close db");
+    }
+
+    // Not a `#[tokio::test]`: the caller has to own both runtimes.
+    #[test]
+    fn test_write_runtime_serves_writes_and_close() {
+        let background = Runtime::new().expect("failed to build background runtime");
+        let writer = RuntimeBuilder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("failed to build writer runtime");
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = background
+            .block_on(
+                crate::Db::builder(
+                    Path::from("test_write_runtime_serves_writes_and_close"),
+                    object_store,
+                )
+                .with_write_runtime(writer.handle().clone())
+                .build(),
+            )
+            .expect("failed to build db");
+
+        writer
+            .block_on(db.put(b"k1", b"v1"))
+            .expect("failed to put");
+
+        // Reads do not go through the batch-writer.
+        let value = background
+            .block_on(db.get(b"k1"))
+            .expect("failed to get")
+            .expect("expected the written value");
+        assert_eq!(value.as_ref(), b"v1");
+
+        // Close flushes through the batch-writer and joins it.
+        writer.block_on(db.close()).expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn test_write_runtime_defaults_to_the_build_runtime() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::builder(
+            Path::from("test_write_runtime_defaults_to_the_build_runtime"),
+            object_store,
+        )
+        .build()
+        .await
+        .expect("failed to build db");
+
+        db.put(b"k1", b"v1").await.expect("failed to put");
+        assert_eq!(
+            db.get(b"k1").await.expect("failed to get").as_deref(),
+            Some(b"v1".as_ref())
+        );
+        db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn admin_hands_its_hooks_to_the_compactor_and_worker_it_runs() {
+        use super::AdminBuilder;
+        use crate::config::CompactionWorkerOptions;
+        use crate::test_utils::{IdentityBlockTransformer, StringConcatMergeOperator};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let admin = AdminBuilder::new("/tmp/admin_hooks", object_store)
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .with_block_transformer(Arc::new(IdentityBlockTransformer))
+            .build();
+
+        let compactor = admin.compactor_builder(CompactorOptions::default());
+        assert!(compactor.merge_operator.is_some());
+        assert!(compactor.block_transformer.is_some());
+
+        let worker = admin.compaction_worker_builder(CompactionWorkerOptions::default());
+        assert!(worker.merge_operator.is_some());
+        assert!(worker.block_transformer.is_some());
     }
 }

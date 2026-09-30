@@ -210,6 +210,9 @@ pub(crate) enum SlateDBError {
     #[error("cannot seek to a key less than the last returned key")]
     SeekKeyLessThanLastReturnedKey,
 
+    #[error("seek is not supported for descending scans")]
+    SeekNotSupportedForDescendingScan,
+
     #[error(
         "parent path must be different from the clone's path. parent_path=`{0}`, clone_path=`{0}`"
     )]
@@ -241,9 +244,6 @@ pub(crate) enum SlateDBError {
         lifetime: Duration,
         interval: Duration,
     },
-
-    #[error("invalid sst batch size. size=`{0}`")]
-    InvalidSSTBatchSize(usize),
 
     #[error("invalid configuration: {0}")]
     InvalidConfiguration(String),
@@ -666,13 +666,13 @@ impl From<SlateDBError> for Error {
             }
             SlateDBError::InvalidObjectStorePath(_) => Error::invalid(msg),
             SlateDBError::UnknownConfigurationFormat(_) => Error::invalid(msg),
-            SlateDBError::InvalidSSTBatchSize(_) => Error::invalid(msg),
             SlateDBError::InvalidConfiguration(_) => Error::invalid(msg),
             SlateDBError::InvalidCheckpointLifetime(_) => Error::invalid(msg),
             SlateDBError::InvalidManifestPollInterval(_) => Error::invalid(msg),
             SlateDBError::CheckpointLifetimeTooShort { .. } => Error::invalid(msg),
             SlateDBError::SeekKeyOutOfRange { .. } => Error::invalid(msg),
             SlateDBError::SeekKeyLessThanLastReturnedKey => Error::invalid(msg),
+            SlateDBError::SeekNotSupportedForDescendingScan => Error::invalid(msg),
             SlateDBError::IdenticalClonePaths { .. } => Error::invalid(msg),
             SlateDBError::DuplicatedCloneSourcePath(_) => Error::invalid(msg),
             SlateDBError::InvalidCloneSourceWithWal { .. } => Error::invalid(msg),

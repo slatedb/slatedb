@@ -54,7 +54,7 @@ use crate::config::{
 use crate::db_common::extract_segment_prefix;
 use crate::db_iter::{DbIterator, DbRecencyIterator};
 use crate::db_snapshot::DbSnapshot;
-use crate::db_state::{collect_touched_segments, DbState, SsTableId};
+use crate::db_state::{collect_touched_segments, DbState, SsTableHandle, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::manifest::{Manifest, VersionedManifest};
@@ -2054,11 +2054,20 @@ impl DbCacheManagerOps for Db {
             .await
     }
 
-    async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), crate::Error> {
+    async fn evict_cached_sst(
+        &self,
+        sst: &SsTableHandle,
+        targets: &[CacheTarget],
+    ) -> Result<(), crate::Error> {
         self.inner.check_closed()?;
         let manifest = self.manifest();
-        db_cache_manager::evict_cached_sst_impl(&self.inner.table_store, manifest.core(), sst_id)
-            .await
+        db_cache_manager::evict_cached_sst_impl(
+            &self.inner.table_store,
+            manifest.core(),
+            sst,
+            targets,
+        )
+        .await
     }
 
     async fn flush_cache_to_disk(&self) -> Result<(), crate::Error> {
@@ -2595,6 +2604,39 @@ mod tests {
         assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"b");
         assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"a");
         assert_eq!(iter.next().await.unwrap(), None);
+
+        kv_store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_seek_rejected_for_descending_scan() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let kv_store = Db::builder("/tmp/test_seek_descending_rejected", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+
+        kv_store.put(b"a", b"v0").await.unwrap();
+        kv_store.put(b"b", b"v1").await.unwrap();
+        kv_store.put(b"c", b"v2").await.unwrap();
+
+        let scan_options = ScanOptions::default().with_order(IterationOrder::Descending);
+        let mut iter = kv_store.scan_with_options(.., &scan_options).await.unwrap();
+        let err = iter.seek(b"b").await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+        assert!(
+            err.to_string().contains("descending"),
+            "unexpected error: {err}"
+        );
+
+        // the scan itself still works
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"c");
+
+        // ascending scans still seek
+        let mut iter = kv_store.scan(..).await.unwrap();
+        iter.seek(b"b").await.unwrap();
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"b");
 
         kv_store.close().await.unwrap();
     }
@@ -3866,7 +3908,13 @@ mod tests {
         let index = db
             .inner
             .table_store
-            .read_index(&view.sst, true, Some(Bytes::new()))
+            .read_index(
+                &view.sst,
+                true,
+                Some(Bytes::new()),
+                &crate::reader::ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert!(!index.borrow().block_meta().is_empty());
@@ -5532,6 +5580,311 @@ mod tests {
 
         let db_state = db.inner.state.read().view();
         assert_eq!(db_state.state.imm_memtable.len(), 1);
+    }
+
+    /// Offsets and unpadded lengths of every block in `handle`.
+    async fn block_layout(db: &Db, handle: &SsTableHandle) -> Vec<(u64, u64)> {
+        let index = db
+            .inner
+            .table_store
+            .read_index(
+                handle,
+                true,
+                Some(Bytes::new()),
+                &crate::reader::ReadTrace::new(None),
+                None,
+            )
+            .await
+            .unwrap();
+        let borrowed = index.borrow();
+        borrowed
+            .block_meta()
+            .iter()
+            .map(|meta| (meta.offset(), u64::from(meta.encoded_len())))
+            .collect()
+    }
+
+    /// Asserts every block of `handle` starts on an `alignment` boundary and
+    /// is followed by padding up to the next one. Returns the number of
+    /// blocks it checked.
+    ///
+    /// The last block ends where the filter starts, so every block is
+    /// checked, and the data section as a whole must end on a boundary.
+    async fn assert_sst_is_padded(db: &Db, handle: &SsTableHandle, alignment: u64) -> usize {
+        let layout = block_layout(db, handle).await;
+        let data_end = if handle.info.filter_len > 0 {
+            handle.info.filter_offset
+        } else {
+            handle.info.index_offset
+        };
+        for (i, (offset, encoded_len)) in layout.iter().enumerate() {
+            assert_eq!(offset % alignment, 0, "block {i} starts off boundary");
+            let unit = layout.get(i + 1).map_or(data_end, |(next, _)| *next) - offset;
+            assert_eq!(unit % alignment, 0, "block {i} is not a whole unit");
+            // A block that filled its unit exactly records no length.
+            if *encoded_len > 0 {
+                assert_eq!(
+                    unit,
+                    encoded_len.next_multiple_of(alignment),
+                    "block {i} is not padded to its unit"
+                );
+            }
+        }
+        assert_eq!(
+            data_end % alignment,
+            0,
+            "the data section ends off boundary"
+        );
+        layout.len()
+    }
+
+    /// Asserts no block of `handle` records a length, which only padded
+    /// blocks do. Returns the number of blocks it checked, as
+    /// `assert_sst_is_padded` does.
+    async fn assert_sst_is_unpadded(db: &Db, handle: &SsTableHandle) -> usize {
+        let layout = block_layout(db, handle).await;
+        for (i, (_, encoded_len)) in layout.iter().enumerate() {
+            assert_eq!(*encoded_len, 0, "block {i} is padded");
+        }
+        layout.len()
+    }
+
+    /// A padded database serves every key after a flush, after a compaction,
+    /// and after a reopen, and the SSTs behind those reads really are padded.
+    #[tokio::test]
+    async fn test_db_round_trip_with_padded_ssts() {
+        const ALIGNMENT: u64 = 1024;
+        const NUM_KEYS: u32 = 400;
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_db_round_trip_with_padded_ssts";
+        let key = |i: u32| format!("key{i:05}").into_bytes();
+        let value = |i: u32| format!("value{i:059}").into_bytes();
+
+        let should_compact = Arc::new(AtomicBool::new(false));
+        let this_should_compact = should_compact.clone();
+        let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            move |_state| this_should_compact.swap(false, Ordering::SeqCst),
+        )));
+        let settings = Settings {
+            // The seed writes more L0 SSTs than the default cap allows, and
+            // compaction only runs once this test asks for it.
+            l0_max_ssts: 64,
+            l0_max_ssts_per_key: 64,
+            ..test_db_options(0, 4096, None)
+        };
+        let db = Arc::new(
+            Db::builder(path, object_store.clone())
+                .with_settings(settings.clone())
+                .with_sst_block_size(SstBlockSize::Block1Kib)
+                .with_sst_block_alignment(true)
+                .with_compactor_builder(
+                    CompactorBuilder::new(path, object_store.clone())
+                        .with_scheduler_supplier(scheduler)
+                        .with_options(fast_compactor_options()),
+                )
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        for i in 0..NUM_KEYS {
+            db.put(&key(i), &value(i)).await.unwrap();
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let l0 = db.inner.state.read().state().core().tree.l0.clone();
+        assert!(l0.len() > 1, "test needs several L0 SSTs");
+        let mut blocks = 0;
+        for view in &l0 {
+            blocks += assert_sst_is_padded(&db, &view.sst, ALIGNMENT).await;
+        }
+        assert!(blocks > l0.len(), "test needs a multi-block SST");
+
+        should_compact.store(true, Ordering::SeqCst);
+        let db_poll = db.clone();
+        tokio::time::timeout(Duration::from_secs(10), async move {
+            loop {
+                if !db_poll
+                    .inner
+                    .state
+                    .read()
+                    .state()
+                    .core()
+                    .tree
+                    .compacted
+                    .is_empty()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // Compaction runs through the same table store, so its output is
+        // padded too.
+        let compacted = db.inner.state.read().state().core().tree.compacted.clone();
+        let compacted_ssts: Vec<_> = compacted
+            .iter()
+            .flat_map(|run| run.sst_views().to_vec())
+            .collect();
+        assert!(!compacted_ssts.is_empty());
+        let mut blocks = 0;
+        for view in &compacted_ssts {
+            blocks += assert_sst_is_padded(&db, &view.sst, ALIGNMENT).await;
+        }
+        assert!(
+            blocks > compacted_ssts.len(),
+            "test needs a multi-block SST"
+        );
+
+        for i in 0..NUM_KEYS {
+            assert_eq!(db.get(&key(i)).await.unwrap(), Some(Bytes::from(value(i))));
+        }
+        // Scans iterate the padded blocks rather than loading them one by one.
+        let mut scan = db.scan(..).await.unwrap();
+        for i in 0..NUM_KEYS {
+            let entry = scan.next().await.unwrap().expect("scan ended early");
+            assert_eq!(entry.key, Bytes::from(key(i)));
+            assert_eq!(entry.value, Bytes::from(value(i)));
+        }
+        assert!(scan.next().await.unwrap().is_none());
+        db.close().await.unwrap();
+
+        let db = Db::builder(path, object_store)
+            .with_settings(settings)
+            .with_sst_block_size(SstBlockSize::Block1Kib)
+            .with_sst_block_alignment(true)
+            .build()
+            .await
+            .unwrap();
+        for i in 0..NUM_KEYS {
+            assert_eq!(db.get(&key(i)).await.unwrap(), Some(Bytes::from(value(i))));
+        }
+        db.close().await.unwrap();
+    }
+
+    /// One database holds SSTs written before and after the alignment was
+    /// turned on, and reads both.
+    ///
+    /// The SSTs written before the flag was on carry no `encoded_len`, so
+    /// they look exactly like the output of a writer that predates the field.
+    #[tokio::test]
+    async fn test_db_reads_mixed_padded_and_unpadded_ssts() {
+        const ALIGNMENT: u64 = 1024;
+        const NUM_KEYS: u32 = 400;
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_db_reads_mixed_padded_and_unpadded_ssts";
+        let key = |i: u32| format!("key{i:05}").into_bytes();
+        let value = |i: u32| format!("value{i:059}").into_bytes();
+        let settings = Settings {
+            // No compactor runs here, so nothing drains L0.
+            l0_max_ssts: 64,
+            l0_max_ssts_per_key: 64,
+            ..test_db_options(0, 4096, None)
+        };
+
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings.clone())
+            .with_sst_block_size(SstBlockSize::Block1Kib)
+            .build()
+            .await
+            .unwrap();
+        for i in 0..NUM_KEYS / 2 {
+            db.put(&key(i), &value(i)).await.unwrap();
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        let unpadded_ids: Vec<_> = db
+            .inner
+            .state
+            .read()
+            .state()
+            .core()
+            .tree
+            .l0
+            .iter()
+            .map(|view| view.id)
+            .collect();
+        assert!(!unpadded_ids.is_empty());
+        db.close().await.unwrap();
+
+        let db = Db::builder(path, object_store)
+            .with_settings(settings)
+            .with_sst_block_size(SstBlockSize::Block1Kib)
+            .with_sst_block_alignment(true)
+            .build()
+            .await
+            .unwrap();
+        for i in NUM_KEYS / 2..NUM_KEYS {
+            db.put(&key(i), &value(i)).await.unwrap();
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let l0 = db.inner.state.read().state().core().tree.l0.clone();
+        let (old, new): (Vec<_>, Vec<_>) =
+            l0.iter().partition(|view| unpadded_ids.contains(&view.id));
+        assert!(!old.is_empty() && !new.is_empty(), "test needs both kinds");
+        let mut old_blocks = 0;
+        for view in &old {
+            old_blocks += assert_sst_is_unpadded(&db, &view.sst).await;
+        }
+        let mut new_blocks = 0;
+        for view in &new {
+            new_blocks += assert_sst_is_padded(&db, &view.sst, ALIGNMENT).await;
+        }
+        assert!(
+            old_blocks > old.len() && new_blocks > new.len(),
+            "test needs a multi-block SST of each kind"
+        );
+
+        for i in 0..NUM_KEYS {
+            assert_eq!(db.get(&key(i)).await.unwrap(), Some(Bytes::from(value(i))));
+        }
+        db.close().await.unwrap();
+    }
+
+    /// `DbBuilder::with_sst_block_alignment` must reach the table store that
+    /// writes SSTs, so the blocks it builds land on block-size boundaries.
+    #[tokio::test]
+    async fn test_sst_block_alignment_reaches_the_table_store() {
+        const ALIGNMENT: usize = 1024;
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_sst_block_alignment", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_sst_block_size(SstBlockSize::Block1Kib)
+            .with_sst_block_alignment(true)
+            .build()
+            .await
+            .unwrap();
+
+        let mut builder = db.inner.table_store.table_builder();
+        for i in 0..64u8 {
+            builder
+                .add_value(&[b'a', i], &[i; 64], None, None)
+                .await
+                .unwrap();
+        }
+        let sst = builder.build().await.unwrap();
+
+        assert!(!sst.unconsumed_blocks.is_empty());
+        for block in &sst.unconsumed_blocks {
+            assert_eq!(block.offset % ALIGNMENT as u64, 0);
+            assert_eq!(block.padded_len() % ALIGNMENT, 0);
+        }
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -9465,10 +9818,23 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        // A descending scan visits the SR's SSTs back to front, so the key's
+        // versions arrive out of sequence order unless the SR iterator
+        // reassembles them across the boundary.
+        let desc_options = ScanOptions::default().with_order(IterationOrder::Descending);
+        let data_scan_desc = db
+            .scan_with_options(b"k".as_slice().., &desc_options)
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
         info!("data: {:?}", data);
         info!("data (scan): {:?}", data_scan.value);
         assert_eq!(data, expected);
         assert_eq!(data_scan.value, expected);
+        assert_eq!(data_scan_desc.value, expected);
     }
 
     #[cfg(feature = "wal_disable")]
@@ -9621,10 +9987,23 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        // Same key, scanned the other way: the merge operands must still be
+        // applied newest last, which requires the SR iterator to pull the
+        // key's earlier SST before emitting anything.
+        let desc_options = ScanOptions::default().with_order(IterationOrder::Descending);
+        let data_scan_desc = db
+            .scan_with_options(b"k".as_slice().., &desc_options)
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
         info!("data: {:?}", data);
         info!("data (scan): {:?}", data_scan.value);
         assert_eq!(data, expected);
         assert_eq!(data_scan.value, expected);
+        assert_eq!(data_scan_desc.value, expected);
     }
 
     #[tokio::test]

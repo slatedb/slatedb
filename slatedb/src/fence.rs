@@ -487,11 +487,9 @@ mod tests {
             .replay_after_wal_id;
         h.run_gc(replay_after_wal_id).await;
 
-        // resume the fencer. re-issuing "pause" wakes the current pause and
-        // keeps the action set to "pause" so the next toggled event also
-        // pauses.
-        fail_parallel::cfg(h.fp_registry.clone(), "LoadEmptyWalId", "pause").unwrap();
-        fail_parallel::cfg(h.fp_registry.clone(), case.pause_event, "pause").unwrap();
+        // Resume the fencer, but keep the case's pause active until the new writer takes ownership.
+        // Setting "pause" again can release the fencer if it already reached that pause.
+        fail_parallel::cfg(h.fp_registry.clone(), "LoadEmptyWalId", "off").unwrap();
 
         // wait for the case's pause event. fp_notify sends an event for every
         // failpoint regardless of whether it pauses, so drain intermediate
@@ -528,7 +526,6 @@ mod tests {
         }
 
         // resume the fencer
-        fail_parallel::cfg(h.fp_registry.clone(), "LoadEmptyWalId", "off").unwrap();
         fail_parallel::cfg(h.fp_registry.clone(), case.pause_event, "off").unwrap();
 
         // validate that its fenced — the fencer's manifest.refresh sees the new db's

@@ -1649,6 +1649,7 @@ mod tests {
             min_compaction_sources: 1,
             max_compaction_sources: 999,
             include_size_threshold: 4.0,
+            sorted_run_consolidation_threshold: 0,
         }
         .into();
         options
@@ -1839,7 +1840,13 @@ mod tests {
 
         let (_, _, table_store) = build_test_stores(os);
         let index = table_store
-            .read_index(&view.sst, false, Some(Bytes::new()))
+            .read_index(
+                &view.sst,
+                false,
+                Some(Bytes::new()),
+                &crate::reader::ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         let block_metas = index.borrow().block_meta();
@@ -1984,6 +1991,7 @@ mod tests {
             min_compaction_sources: 2,
             max_compaction_sources: 999,
             include_size_threshold: 4.0,
+            sorted_run_consolidation_threshold: 0,
         }
         .into();
         let compactor_opts = options
@@ -2167,6 +2175,7 @@ mod tests {
             min_compaction_sources: 2,
             max_compaction_sources: 999,
             include_size_threshold: 4.0,
+            sorted_run_consolidation_threshold: 0,
         }
         .into();
         let compactor_opts = options
@@ -3537,6 +3546,7 @@ mod tests {
             min_compaction_sources: 2,
             max_compaction_sources: 2,
             include_size_threshold: 4.0,
+            sorted_run_consolidation_threshold: 0,
         }
         .into();
         let mut options = db_options(Some(compactor_options()));
@@ -3652,6 +3662,7 @@ mod tests {
             min_compaction_sources: 2,
             max_compaction_sources: 2,
             include_size_threshold: 4.0,
+            sorted_run_consolidation_threshold: 0,
         }
         .into();
         let mut options = db_options(Some(compactor_options()));
@@ -5603,6 +5614,7 @@ mod tests {
             min_compaction_sources: 1,
             max_compaction_sources: 999,
             include_size_threshold: 4.0,
+            sorted_run_consolidation_threshold: 0,
         }
         .into();
         let mut options = db_options(Some(compactor_options()));

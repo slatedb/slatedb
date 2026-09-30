@@ -15,7 +15,8 @@ use tokio::io::AsyncWriteExt;
 use ulid::Ulid;
 
 use crate::block_cache_policy::{should_cache_data_block, BlockCachePolicy};
-use crate::db_cache::CacheTarget;
+use crate::bytes_range::BytesRange;
+use crate::db_cache::{CacheFetch, CacheLookup, CacheTarget};
 use crate::db_cache::{CacheLoader, CachedEntry, CachedKey, DbCache, EncodedCachedFilter};
 use crate::db_state::{SsTableHandle, SsTableId, SstType};
 use crate::error::SlateDBError;
@@ -26,13 +27,16 @@ use crate::format::sst::{EncodedSsTable, EncodedSsTableBlock, SsTableFormat};
 use crate::iter::IterationOrder;
 use crate::object_store_tag::ObjectStoreCallTag;
 pub(crate) use crate::object_store_tag::TableStoreKind;
+use crate::partitioned_keyspace::partitions_covering_range;
 use crate::paths::PathResolver;
+use crate::reader::{ReadTrace, SstTraceLevel};
 use crate::sst_builder::EncodedSsTableBuilder;
 #[cfg(test)]
 use crate::sst_io::MAX_VALIDATION_RETRIES;
 use crate::sst_io::{read_obj, read_with_validation_retry, ReadOnlyObject};
 use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
+use tracing::Instrument;
 
 pub(crate) struct TableStore {
     object_store: Arc<dyn ObjectStore>,
@@ -46,6 +50,13 @@ pub(crate) struct TableStore {
     block_cache_policy: BlockCachePolicy,
     /// Which component owns this store. Tagged on compacted-SST calls.
     kind: TableStoreKind,
+}
+
+fn record_read_cached(span: &tracing::Span, lookup: CacheLookup) {
+    match lookup {
+        CacheLookup::Hit => span.record("cached", true),
+        CacheLookup::Miss => span.record("cached", false),
+    };
 }
 
 impl TableStore {
@@ -114,6 +125,8 @@ impl TableStore {
                 ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&id), segment),
             ),
             table_store: self.clone(),
+            bytes_written: 0,
+            shutdown_started: false,
             #[cfg(test)]
             blocks_written: 0,
         }
@@ -125,6 +138,7 @@ impl TableStore {
 
     /// Writes an SST. `segment` is a hint attached to the
     /// [`ObjectStoreCallTag`] for object-store routing.
+    #[cfg(test)]
     pub(crate) async fn write_sst(
         &self,
         id: &SsTableId,
@@ -386,6 +400,8 @@ impl TableStore {
         handle: &SsTableHandle,
         cache_blocks: bool,
         segment: Option<Bytes>,
+        trace: &ReadTrace,
+        sst_level: Option<&SstTraceLevel>,
     ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         // No filter exists for this SST (either no policies configured, or the
         // SST was built below `min_filter_keys`). Return an empty slice without
@@ -394,6 +410,18 @@ impl TableStore {
         if self.sst_format.filter_policies.is_empty() || handle.info.filter_len == 0 {
             return Ok(Arc::from([]));
         }
+        let span = trace.new_read_filter_span(handle.id, sst_level);
+        let read = self.read_filters_inner(handle, cache_blocks, segment, span.clone());
+        read.instrument(span).await
+    }
+
+    async fn read_filters_inner(
+        &self,
+        handle: &SsTableHandle,
+        cache_blocks: bool,
+        segment: Option<Bytes>,
+        span: tracing::Span,
+    ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         let cache_key: CachedKey = (handle.id, handle.info.filter_offset).into();
         if let Some(cache) = self.cache_for_reads() {
             // cache_blocks=true: dedup-aware fetch; concurrent callers collapse onto
@@ -402,7 +430,7 @@ impl TableStore {
             // we intentionally don't re-insert there — `fetch_X` errors are almost
             // always the smuggled loader error (so the direct retry will also fail),
             // and on the rare foyer-machinery error an insert would likely fail too.
-            let entry = if cache_blocks {
+            let fetch = if cache_blocks {
                 cache
                     .fetch_filter(
                         cache_key.clone(),
@@ -411,22 +439,29 @@ impl TableStore {
                     .await
                     .ok()
             } else {
-                cache.get_filter(&cache_key).await.unwrap_or(None)
+                cache
+                    .get_filter(&cache_key)
+                    .await
+                    .unwrap_or(None)
+                    .map(CacheFetch::hit)
             };
-            if let Some(entry) = entry {
+            if let Some(CacheFetch { entry, lookup }) = fetch {
                 // Already decoded.
                 if let Some(filters) = entry.filters() {
+                    record_read_cached(&span, lookup);
                     return Ok(filters);
                 }
                 // Encoded form from disk-cache deserialize. Decode and overwrite
                 // the cache entry with the decoded form.
                 if let Some(encoded) = entry.encoded_filters() {
+                    record_read_cached(&span, lookup);
                     return Ok(self
                         .decode_and_refresh_filter(cache, cache_key, &encoded)
                         .await);
                 }
             }
         }
+        record_read_cached(&span, CacheLookup::Miss);
         read_obj!(
             &self.object_store,
             self.path(&handle.id),
@@ -463,6 +498,7 @@ impl TableStore {
                     )
                     .await
                     .ok()
+                    .map(|fetch| fetch.entry)
             } else {
                 cache.get_stats(&cache_key).await.unwrap_or(None)
             };
@@ -486,16 +522,32 @@ impl TableStore {
     /// - `cache_blocks`: Whether to cache the index blocks after reading them.
     /// - `segment`: A hint attached to the [`ObjectStoreCallTag`] for
     ///   object-store routing.
+    /// - `trace`: The read trace that owns the index span, if tracing is enabled.
+    /// - `sst_level`: The level that contains the SST, if known.
     pub(crate) async fn read_index(
         &self,
         handle: &SsTableHandle,
         cache_blocks: bool,
         segment: Option<Bytes>,
+        trace: &ReadTrace,
+        sst_level: Option<&SstTraceLevel>,
+    ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
+        let span = trace.new_read_index_span(handle.id, sst_level);
+        let read = self.read_index_inner(handle, cache_blocks, segment, span.clone());
+        read.instrument(span).await
+    }
+
+    async fn read_index_inner(
+        &self,
+        handle: &SsTableHandle,
+        cache_blocks: bool,
+        segment: Option<Bytes>,
+        span: tracing::Span,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         let cache_key = (handle.id, handle.info.index_offset).into();
         if let Some(cache) = self.cache_for_reads() {
             // See `read_filters` for the rationale on the fall-through path.
-            let entry = if cache_blocks {
+            let fetch = if cache_blocks {
                 cache
                     .fetch_index(
                         cache_key,
@@ -504,12 +556,20 @@ impl TableStore {
                     .await
                     .ok()
             } else {
-                cache.get_index(&cache_key).await.unwrap_or(None)
+                cache
+                    .get_index(&cache_key)
+                    .await
+                    .unwrap_or(None)
+                    .map(CacheFetch::hit)
             };
-            if let Some(index) = entry.and_then(|e| e.sst_index()) {
-                return Ok(index);
+            if let Some(CacheFetch { entry, lookup }) = fetch {
+                if let Some(index) = entry.sst_index() {
+                    record_read_cached(&span, lookup);
+                    return Ok(index);
+                }
             }
         }
+        record_read_cached(&span, CacheLookup::Miss);
         let index = read_obj!(
             &self.object_store,
             self.path(&handle.id),
@@ -658,6 +718,7 @@ impl TableStore {
     /// Returns the smallest contiguous block range, starting at `first_block` in
     /// `order`, whose encoded size is at least `target_bytes`. If the SST boundary
     /// is reached first, all remaining blocks in that direction are returned.
+    /// The size counts block padding, since the read fetches it.
     pub(crate) fn block_range_for_target_bytes(
         &self,
         handle: &SsTableHandle,
@@ -734,8 +795,8 @@ impl TableStore {
                 let offset = index.borrow().block_meta().get(block_num).offset();
                 let cache_key: CachedKey = (handle.id, offset).into();
                 let loader = self.block_loader(handle, index.clone(), block_num, segment.clone());
-                if let Ok(entry) = cache.fetch_block(cache_key, loader).await {
-                    if let Some(block) = entry.block() {
+                if let Ok(fetch) = cache.fetch_block(cache_key, loader).await {
+                    if let Some(block) = fetch.entry.block() {
                         let mut result = VecDeque::with_capacity(1);
                         result.push_back(block);
                         return Ok(result);
@@ -887,6 +948,14 @@ impl TableStore {
             .estimate_encoded_size_compacted(num_entries, size_entries)
     }
 
+    /// Whether any registered filter policy can answer a range query.
+    pub(crate) fn any_filter_policy_supports_range_queries(&self) -> bool {
+        self.sst_format
+            .filter_policies
+            .iter()
+            .any(|policy| policy.supports_range_queries())
+    }
+
     pub(crate) fn cache(&self) -> Option<&Arc<dyn DbCache>> {
         self.cache.as_ref()
     }
@@ -905,55 +974,89 @@ impl TableStore {
         }
     }
 
-    /// Best-effort removal of all cache entries associated with the given SST:
-    /// data blocks, index, filters, and stats. Returns the offsets whose
-    /// cache removal was attempted.
-    /// Evicts an SST from the block cache. `segment` is a hint attached to the
-    /// [`ObjectStoreCallTag`] if reading its index is required for eviction.
-    pub(crate) async fn evict_sst_from_cache(
+    /// Best-effort removal of the cache entries of an SST named by `targets`.
+    ///
+    /// A [`CacheTarget::Data`] target removes the blocks whose key span
+    /// overlaps its range, which needs the SST index. `segment` is a hint
+    /// attached to the [`ObjectStoreCallTag`] of that index read.
+    pub(crate) async fn evict_sst_targets_from_cache(
         &self,
         handle: &SsTableHandle,
+        targets: &[CacheTarget],
         segment: Option<Bytes>,
     ) {
         let Some(ref cache) = self.cache else {
             return;
         };
+        // Drop empty ranges with BytesRange::try_new.
+        let data_ranges: Vec<BytesRange> = targets
+            .iter()
+            .filter_map(|target| match target {
+                CacheTarget::Data((start, end)) => BytesRange::try_new(start.clone(), end.clone()),
+                _ => None,
+            })
+            .collect();
+        if !data_ranges.is_empty() {
+            self.evict_blocks_from_cache(cache, handle, &data_ranges, segment)
+                .await;
+        }
+        if targets.contains(&CacheTarget::Index) {
+            cache
+                .remove(&(handle.id, handle.info.index_offset).into())
+                .await;
+        }
+        // Only evict filter/stats when those sections exist. Otherwise
+        // SsTableInfo's filter_offset collides with index_offset (filter_len
+        // == 0) and stats_offset collides with the first data block
+        // (stats_offset == 0).
+        if targets.contains(&CacheTarget::Filters) && handle.info.filter_len > 0 {
+            cache
+                .remove(&(handle.id, handle.info.filter_offset).into())
+                .await;
+        }
+        if targets.contains(&CacheTarget::Stats) && handle.info.stats_len > 0 {
+            cache
+                .remove(&(handle.id, handle.info.stats_offset).into())
+                .await;
+        }
+    }
+
+    /// Removes the data blocks of an SST whose key span overlaps any of
+    /// `ranges` from `cache`.
+    async fn evict_blocks_from_cache(
+        &self,
+        cache: &Arc<dyn DbCache>,
+        handle: &SsTableHandle,
+        ranges: &[BytesRange],
+        segment: Option<Bytes>,
+    ) {
         // Best effort: if we can't read the index we can't enumerate blocks,
         // so log and skip. Remaining entries will age out under normal pressure.
-        let index = match self.read_index(handle, false, segment).await {
+        let index = match self
+            .read_index(handle, false, segment, &ReadTrace::new(None), None)
+            .await
+        {
             Ok(index) => index,
             Err(e) => {
                 warn!(
-                    "evict_sst_from_cache: failed to read index for SST {:?}: {}",
+                    "evict_blocks_from_cache: failed to read index for SST {:?}: {}",
                     handle.id, e
                 );
                 return;
             }
         };
-        {
-            let index_borrow = index.borrow();
-            let meta = index_borrow.block_meta();
-            for block_num in 0..meta.len() {
+        let index_borrow = index.borrow();
+        let meta = index_borrow.block_meta();
+        for range in ranges {
+            let blocks = partitions_covering_range(
+                &index_borrow,
+                range.start_bound().map(|b| b.as_ref()),
+                range.end_bound().map(|b| b.as_ref()),
+            );
+            for block_num in blocks {
                 let offset = meta.get(block_num).offset();
                 cache.remove(&(handle.id, offset).into()).await;
             }
-        }
-        cache
-            .remove(&(handle.id, handle.info.index_offset).into())
-            .await;
-        // Only evict filter/stats when those sections exist. Otherwise
-        // SsTableInfo's filter_offset collides with index_offset (filter_len
-        // == 0) and stats_offset collides with the first data block
-        // (stats_offset == 0).
-        if handle.info.filter_len > 0 {
-            cache
-                .remove(&(handle.id, handle.info.filter_offset).into())
-                .await;
-        }
-        if handle.info.stats_len > 0 {
-            cache
-                .remove(&(handle.id, handle.info.stats_offset).into())
-                .await;
         }
     }
 }
@@ -971,6 +1074,7 @@ fn tagged_buf_writer(
     BufWriter::new(object_store, path).with_extensions(tag.into())
 }
 
+#[cfg(test)]
 async fn write_sst_streaming_in_object_store(
     object_store: Arc<dyn ObjectStore>,
     path: &Path,
@@ -979,7 +1083,7 @@ async fn write_sst_streaming_in_object_store(
 ) -> Result<(), SlateDBError> {
     let mut writer = tagged_buf_writer(object_store, path.clone(), tag);
     for block in &encoded_sst.unconsumed_blocks {
-        writer.put(block.encoded_bytes.clone()).await?;
+        writer.put(block.padded_bytes.clone()).await?;
     }
     writer.put(encoded_sst.footer.clone()).await?;
     writer.shutdown().await?;
@@ -991,6 +1095,8 @@ pub(crate) struct EncodedSsTableWriter {
     builder: EncodedSsTableBuilder,
     writer: BufWriter,
     table_store: Arc<TableStore>,
+    bytes_written: usize,
+    shutdown_started: bool,
     #[cfg(test)]
     blocks_written: usize,
 }
@@ -1005,28 +1111,78 @@ impl EncodedSsTableWriter {
         Ok(block_size)
     }
 
-    pub(crate) async fn close(mut self) -> Result<SsTableHandle, SlateDBError> {
-        let encoded_sst = self.builder.build().await?;
-        for block in &encoded_sst.unconsumed_blocks {
-            self.writer.write_all(block.encoded_bytes.as_ref()).await?;
-        }
-        self.writer.write_all(encoded_sst.footer.as_ref()).await?;
-        self.writer.shutdown().await?;
+    /// Finish this SST: write the last block, write the footer, close
+    /// the upload.
+    ///
+    /// On success, returns the finished SST handle and the exact
+    /// number of bytes written.
+    ///
+    /// On failure, aborts the upload before returning the error. This
+    /// discards any blocks already sent to object storage for this
+    /// SST.
+    pub(crate) async fn close(mut self) -> Result<(SsTableHandle, u64), SlateDBError> {
+        let result = async {
+            fail_point!(
+                self.table_store.fp_registry.clone(),
+                "write-compacted-sst-io-error",
+                |_| Err(slatedb_io_error())
+            );
+            let builder = std::mem::replace(&mut self.builder, self.table_store.table_builder());
+            let encoded_sst = builder.build().await?;
+            for block in &encoded_sst.unconsumed_blocks {
+                self.writer.write_all(block.padded_bytes.as_ref()).await?;
+                self.bytes_written += block.padded_bytes.len();
+            }
+            self.writer.write_all(encoded_sst.footer.as_ref()).await?;
+            self.bytes_written += encoded_sst.footer.len();
+            self.shutdown_started = true;
+            self.writer.shutdown().await?;
 
-        // Cache inserts happen after writer shutdown so an SST whose upload
-        // fails contributes no metadata entries.
-        //
-        // Blocks drained while entries were added are cached by `write_block`,
-        // so the only data block left for `cache_on_sst_write` is the tail
-        // block that `build` finished.
-        self.table_store
-            .cache_on_sst_write(self.id, &encoded_sst)
-            .await;
-        Ok(SsTableHandle::new(
-            self.id,
-            encoded_sst.format_version,
-            encoded_sst.info,
-        ))
+            // Cache inserts happen after writer shutdown so an SST whose upload
+            // fails contributes no metadata entries.
+            //
+            // Blocks drained while entries were added are cached by `write_block`,
+            // so the only data block left for `cache_on_sst_write` is the tail
+            // block that `build` finished.
+            self.table_store
+                .cache_on_sst_write(self.id, &encoded_sst)
+                .await;
+            Ok((
+                SsTableHandle::new(self.id, encoded_sst.format_version, encoded_sst.info),
+                self.bytes_written as u64,
+            ))
+        }
+        .await;
+
+        if result.is_err() {
+            if let Err(abort_err) = self.abort().await {
+                warn!(
+                    "failed to abort sst writer after error [id={:?}, error={:?}]",
+                    self.id, abort_err
+                );
+            }
+        }
+        result
+    }
+
+    /// Tell object storage to discard this SST's upload.
+    ///
+    /// If the upload never grew past the small in-memory buffer,
+    /// nothing reached object storage yet, so this is a no-op.
+    /// Otherwise this cancels the multipart upload and asks object
+    /// storage to delete the parts already stored.
+    ///
+    /// Once shutdown has started this is a no-op: the underlying
+    /// `BufWriter` panics if aborted after shutdown, and a failed
+    /// shutdown leaves nothing this can usefully cancel.
+    pub(crate) async fn abort(&mut self) -> Result<(), SlateDBError> {
+        if self.shutdown_started {
+            return Ok(());
+        }
+        self.writer
+            .abort()
+            .await
+            .map_err(|e| SlateDBError::ObjectStoreError(Arc::new(e)))
     }
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {
@@ -1041,7 +1197,13 @@ impl EncodedSsTableWriter {
     }
 
     async fn write_block(&mut self, block: EncodedSsTableBlock) -> Result<(), SlateDBError> {
-        self.writer.write_all(block.encoded_bytes.as_ref()).await?;
+        fail_point!(
+            self.table_store.fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            |_| Err(slatedb_io_error())
+        );
+        self.writer.write_all(block.padded_bytes.as_ref()).await?;
+        self.bytes_written += block.padded_bytes.len();
         if let (Some(cache), Some(key_span)) = (&self.table_store.cache, &block.key_span) {
             let targets = self.table_store.targets_to_cache(&self.id);
             if should_cache_data_block(targets, key_span) {
@@ -1077,15 +1239,18 @@ fn slatedb_io_error() -> SlateDBError {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::TracingOptions;
+    use crate::reader::{ReadTrace, SstTraceLevel};
     use crate::types::KeyValue;
     use bytes::Bytes;
     use futures::future;
     use futures::StreamExt;
     use object_store::{memory::InMemory, path::Path, ObjectStore, ObjectStoreExt};
     use rstest::rstest;
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::ops::Range;
     use std::sync::Arc;
+    use tracing_subscriber::layer::SubscriberExt;
 
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::db_cache::test_utils::TestCache;
@@ -1104,8 +1269,7 @@ mod tests {
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
-    use crate::test_utils::FlakyObjectStore;
-    use crate::test_utils::{assert_iterator, build_test_sst};
+    use crate::test_utils::{assert_iterator, build_test_sst, FlakyObjectStore, SpanRecorder};
     use crate::types::{RowEntry, ValueDeletable};
     use crate::{block_iterator::BlockIteratorLatest, db_state::SsTableId, iter::RowEntryIterator};
     use slatedb_common::clock::DefaultSystemClock;
@@ -1217,6 +1381,7 @@ mod tests {
                     &BlockMetaArgs {
                         offset: *offset,
                         first_key: Some(first_key),
+                        encoded_len: 0,
                     },
                 )
             })
@@ -1287,7 +1452,7 @@ mod tests {
             .add(RowEntry::new_value(&[b'd'; 16], &[4u8; 16], 0))
             .await
             .unwrap();
-        let sst = writer.close().await.unwrap();
+        let (sst, _) = writer.close().await.unwrap();
 
         let sst_iter_options = SstIteratorOptions {
             eager_spawn: true,
@@ -1359,6 +1524,47 @@ mod tests {
         // then:
         assert_eq!(os.put_attempts(), 0);
         assert_eq!(os.multipart_attempts(), 1);
+        ts.open_sst(&id, Some(Bytes::new())).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_surfaces_error_instead_of_panicking_when_shutdown_fails() {
+        // A small SST flushes as a single put during shutdown. Failing
+        // that put must come back as an error the caller can retry, not a
+        // panic from aborting a BufWriter that has already shut down.
+        let os = Arc::new(FlakyObjectStore::new(Arc::new(InMemory::new()), 1));
+        let format = SsTableFormat {
+            block_size: 32,
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let ts = Arc::new(TableStore::new(
+            os.clone(),
+            format,
+            Path::from(ROOT),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let id = SsTableId::from(ulid::Ulid::new());
+
+        let mut writer = ts.table_writer(id, Some(Bytes::new()));
+        writer
+            .add(RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0))
+            .await
+            .unwrap();
+        let result = writer.close().await;
+        assert!(
+            result.is_err(),
+            "a failed shutdown must surface as an error, not a panic"
+        );
+
+        let mut writer = ts.table_writer(id, Some(Bytes::new()));
+        writer
+            .add(RowEntry::new_value(&[b'a'; 16], &[1u8; 16], 0))
+            .await
+            .unwrap();
+        writer.close().await.unwrap();
         ts.open_sst(&id, Some(Bytes::new())).await.unwrap();
     }
 
@@ -1465,11 +1671,17 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
 
         // Read the index
         let index = ts
-            .read_index(&handle, true, Some(Bytes::new()))
+            .read_index(
+                &handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1613,7 +1825,13 @@ mod tests {
         assert_eq!(meta_cache.entry_count(), 0);
 
         let _ = reader
-            .read_index(&handle, false, Some(Bytes::new()))
+            .read_index(
+                &handle,
+                false,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert!(meta_cache
@@ -1623,7 +1841,13 @@ mod tests {
             .is_none());
 
         let _ = reader
-            .read_index(&handle, true, Some(Bytes::new()))
+            .read_index(
+                &handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert!(meta_cache
@@ -1631,6 +1855,162 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum MetadataRead {
+        Filters,
+        Index,
+    }
+
+    #[rstest]
+    #[case::cache_enabled_with_caching_hit(true, true, true)]
+    #[case::cache_enabled_with_caching_miss(true, true, false)]
+    #[case::cache_enabled_without_caching_hit(true, false, true)]
+    #[case::cache_enabled_without_caching_miss(true, false, false)]
+    #[case::cache_disabled_without_caching(false, false, false)]
+    #[test]
+    fn test_read_filter_and_index_span_fields(
+        #[values(MetadataRead::Filters, MetadataRead::Index)] metadata_read: MetadataRead,
+        #[values(SstTraceLevel::SortedRun(7), SstTraceLevel::L0)] sst_level: SstTraceLevel,
+        #[case] cache_enabled: bool,
+        #[case] cache_blocks: bool,
+        #[case] cache_hit: bool,
+    ) {
+        const TRACE_ID: &str = "metadata-read-trace";
+
+        let span_name = match metadata_read {
+            MetadataRead::Filters => "slatedb.read.read_filters",
+            MetadataRead::Index => "slatedb.read.read_index",
+        };
+        let span_recorder = SpanRecorder::for_name(span_name);
+        let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
+        let id = tracing::subscriber::with_default(subscriber, || {
+            tokio_test::block_on(async {
+                let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+                let format = SsTableFormat {
+                    min_filter_keys: 1,
+                    ..SsTableFormat::default()
+                };
+                let writer = TableStore::new(
+                    main_store.clone(),
+                    format.clone(),
+                    Path::from(ROOT),
+                    None,
+                    TableStoreKind::Main,
+                    BlockCachePolicy::default(),
+                );
+                let mut builder = writer.table_builder();
+                builder
+                    .add(RowEntry::new_value(b"key1", b"value1", 0))
+                    .await
+                    .unwrap();
+                builder
+                    .add(RowEntry::new_value(b"key2", b"value2", 0))
+                    .await
+                    .unwrap();
+                let id = SsTableId::from(ulid::Ulid::new());
+                let handle = writer
+                    .write_sst(&id, &builder.build().await.unwrap(), Some(Bytes::new()))
+                    .await
+                    .unwrap();
+
+                let meta_cache = Arc::new(TestCache::new());
+                let cache: Option<Arc<dyn DbCache>> = if cache_enabled {
+                    Some(Arc::new(
+                        SplitCache::new().with_meta_cache(Some(meta_cache)).build(),
+                    ))
+                } else {
+                    None
+                };
+                let reader = TableStore::new(
+                    main_store,
+                    format,
+                    Path::from(ROOT),
+                    cache,
+                    TableStoreKind::Main,
+                    BlockCachePolicy::default(),
+                );
+
+                // Fill the cache before the traced read.
+                if cache_hit {
+                    match metadata_read {
+                        MetadataRead::Filters => {
+                            reader
+                                .read_filters(
+                                    &handle,
+                                    true,
+                                    Some(Bytes::new()),
+                                    &ReadTrace::new(None),
+                                    None,
+                                )
+                                .await
+                                .unwrap();
+                        }
+                        MetadataRead::Index => {
+                            reader
+                                .read_index(
+                                    &handle,
+                                    true,
+                                    Some(Bytes::new()),
+                                    &ReadTrace::new(None),
+                                    None,
+                                )
+                                .await
+                                .unwrap();
+                        }
+                    }
+                }
+
+                let trace = ReadTrace::new(Some(TracingOptions::new(TRACE_ID)));
+                match metadata_read {
+                    MetadataRead::Filters => {
+                        let filters = reader
+                            .read_filters(
+                                &handle,
+                                cache_blocks,
+                                Some(Bytes::new()),
+                                &trace,
+                                Some(&sst_level),
+                            )
+                            .await
+                            .unwrap();
+                        assert!(!filters.is_empty());
+                    }
+                    MetadataRead::Index => {
+                        let index = reader
+                            .read_index(
+                                &handle,
+                                cache_blocks,
+                                Some(Bytes::new()),
+                                &trace,
+                                Some(&sst_level),
+                            )
+                            .await
+                            .unwrap();
+                        assert!(!index.borrow().block_meta().is_empty());
+                    }
+                }
+                id
+            })
+        });
+
+        let span = span_recorder.only_span();
+        assert_eq!(
+            span.fields,
+            HashMap::from([
+                ("trace_id".to_string(), TRACE_ID.to_string()),
+                ("sst_id".to_string(), id.value().to_string()),
+                (
+                    "sst_level".to_string(),
+                    match sst_level {
+                        SstTraceLevel::SortedRun(level) => format!("sorted_run:{level}"),
+                        SstTraceLevel::L0 => "l0".to_string(),
+                    }
+                ),
+                ("cached".to_string(), cache_hit.to_string()),
+            ])
+        );
     }
 
     #[tokio::test]
@@ -1681,7 +2061,13 @@ mod tests {
         assert_eq!(meta_cache.entry_count(), 0);
 
         let filters = reader
-            .read_filters(&handle, false, Some(Bytes::new()))
+            .read_filters(
+                &handle,
+                false,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert!(!filters.is_empty());
@@ -1692,7 +2078,13 @@ mod tests {
             .is_none());
 
         let _ = reader
-            .read_filters(&handle, true, Some(Bytes::new()))
+            .read_filters(
+                &handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
         assert!(meta_cache
@@ -1916,6 +2308,146 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn evict_sst_targets_should_remove_only_blocks_in_the_data_range() {
+        let cache = Arc::new(TestCache::new());
+        let ts = Arc::new(TableStore::new(
+            Arc::new(InMemory::new()),
+            SsTableFormat::default(),
+            Path::from("/root"),
+            Some(cache.clone()),
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let id = SsTableId::from(ulid::Ulid::new());
+        let sst = build_test_sst(&ts.sst_format, 3).await;
+        let block_keys: Vec<CachedKey> = sst
+            .unconsumed_blocks
+            .iter()
+            .map(|block| (id, block.offset).into())
+            .collect();
+        // A range inside the second block. It starts just after the block's
+        // first key, because a range that starts on a block boundary also
+        // covers the block before it.
+        let (first, last) = sst.unconsumed_blocks[1].key_span.clone().unwrap();
+        let start = [first.as_ref(), &[0u8]].concat();
+        let handle = ts.write_sst(&id, &sst, Some(Bytes::new())).await.unwrap();
+        for key in &block_keys {
+            assert!(cache.get_block(key).await.unwrap().is_some());
+        }
+
+        ts.evict_sst_targets_from_cache(
+            &handle,
+            &[CacheTarget::data(start.as_slice()..=last.as_ref())],
+            Some(Bytes::new()),
+        )
+        .await;
+
+        let cached: Vec<bool> = future::join_all(
+            block_keys
+                .iter()
+                .map(|key| async { cache.get_block(key).await.unwrap().is_some() }),
+        )
+        .await;
+        let expected: Vec<bool> = (0..block_keys.len()).map(|i| i != 1).collect();
+        assert_eq!(cached, expected);
+    }
+
+    /// An empty range names no blocks. Without the guard the block spanning
+    /// its start would be evicted.
+    #[tokio::test]
+    async fn evict_sst_targets_should_ignore_an_empty_data_range() {
+        let cache = Arc::new(TestCache::new());
+        let ts = Arc::new(TableStore::new(
+            Arc::new(InMemory::new()),
+            SsTableFormat::default(),
+            Path::from("/root"),
+            Some(cache.clone()),
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let id = SsTableId::from(ulid::Ulid::new());
+        let sst = build_test_sst(&ts.sst_format, 3).await;
+        let block_keys: Vec<CachedKey> = sst
+            .unconsumed_blocks
+            .iter()
+            .map(|block| (id, block.offset).into())
+            .collect();
+        let (first, _) = sst.unconsumed_blocks[1].key_span.clone().unwrap();
+        let start = [first.as_ref(), &[0u8]].concat();
+        let handle = ts.write_sst(&id, &sst, Some(Bytes::new())).await.unwrap();
+
+        ts.evict_sst_targets_from_cache(
+            &handle,
+            &[CacheTarget::data(start.as_slice()..start.as_slice())],
+            Some(Bytes::new()),
+        )
+        .await;
+
+        for key in &block_keys {
+            assert!(cache.get_block(key).await.unwrap().is_some());
+        }
+    }
+
+    #[rstest]
+    #[case::nothing(&[])]
+    #[case::metadata(&[CacheTarget::Index, CacheTarget::Filters, CacheTarget::Stats])]
+    #[case::data_only(&[CacheTarget::data::<&[u8], _>(..)])]
+    #[case::all(&[
+        CacheTarget::data::<&[u8], _>(..),
+        CacheTarget::Filters,
+        CacheTarget::Index,
+        CacheTarget::Stats,
+    ])]
+    #[tokio::test]
+    async fn evict_sst_targets_should_remove_only_selected_components(
+        #[case] selected: &[CacheTarget],
+    ) {
+        let cache = Arc::new(TestCache::new());
+        let all = [
+            CacheTarget::data::<&[u8], _>(..),
+            CacheTarget::Filters,
+            CacheTarget::Index,
+            CacheTarget::Stats,
+        ];
+        let ts = Arc::new(TableStore::new(
+            Arc::new(InMemory::new()),
+            SsTableFormat::default(),
+            Path::from("/root"),
+            Some(cache.clone()),
+            TableStoreKind::Main,
+            BlockCachePolicy::default().with_flush_targets(&all),
+        ));
+        let id = SsTableId::from(ulid::Ulid::new());
+        let sst = build_test_sst(&ts.sst_format, 3).await;
+        let data_key: CachedKey = (id, sst.unconsumed_blocks[0].offset).into();
+        let index_key: CachedKey = (id, sst.info.index_offset).into();
+        let filter_key: CachedKey = (id, sst.info.filter_offset).into();
+        let stats_key: CachedKey = (id, sst.info.stats_offset).into();
+        let handle = ts.write_sst(&id, &sst, Some(Bytes::new())).await.unwrap();
+        assert_eq!(cache.entry_count(), 3 + sst.unconsumed_blocks.len() as u64);
+
+        ts.evict_sst_targets_from_cache(&handle, selected, Some(Bytes::new()))
+            .await;
+
+        assert_eq!(
+            cache.get_block(&data_key).await.unwrap().is_none(),
+            selected.iter().any(|c| matches!(c, CacheTarget::Data(_)))
+        );
+        assert_eq!(
+            cache.get_index(&index_key).await.unwrap().is_none(),
+            selected.contains(&CacheTarget::Index)
+        );
+        assert_eq!(
+            cache.get_filter(&filter_key).await.unwrap().is_none(),
+            selected.contains(&CacheTarget::Filters)
+        );
+        assert_eq!(
+            cache.get_stats(&stats_key).await.unwrap().is_none(),
+            selected.contains(&CacheTarget::Stats)
+        );
+    }
+
+    #[tokio::test]
     async fn streaming_writer_should_use_block_cache_but_skip_compactor_reads() {
         let os = Arc::new(InMemory::new());
         let cache = Arc::new(TestCache::new());
@@ -1945,7 +2477,7 @@ mod tests {
                 .unwrap();
         }
 
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
         let index_key: CachedKey = (id, handle.info.index_offset).into();
         let filter_key: CachedKey = (id, handle.info.filter_offset).into();
         let stats_key: CachedKey = (id, handle.info.stats_offset).into();
@@ -1969,7 +2501,13 @@ mod tests {
         // be used and reading the index will just return an error.
         os.delete(&ts.path(&id)).await.unwrap();
         assert!(ts
-            .read_index(&handle, false, Some(Bytes::new()))
+            .read_index(
+                &handle,
+                false,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .is_err());
     }
@@ -2044,7 +2582,7 @@ mod tests {
                 .unwrap();
         }
 
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
 
         let index_key: CachedKey = (id, handle.info.index_offset).into();
         let index = cache
@@ -2086,7 +2624,7 @@ mod tests {
             .await
             .unwrap();
 
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
 
         assert_eq!(cache.entry_count(), 2);
         assert!(cache
@@ -2445,7 +2983,17 @@ mod tests {
         let handle_a = tokio::spawn({
             let reader = reader.clone();
             let handle = handle.clone();
-            async move { reader.read_index(&handle, true, Some(Bytes::new())).await }
+            async move {
+                reader
+                    .read_index(
+                        &handle,
+                        true,
+                        Some(Bytes::new()),
+                        &ReadTrace::new(None),
+                        None,
+                    )
+                    .await
+            }
         });
 
         // wait until A's read has reached the object store and is paused
@@ -2461,7 +3009,17 @@ mod tests {
         let task_b = {
             let reader = reader.clone();
             let handle = handle.clone();
-            async move { reader.read_index(&handle, true, Some(Bytes::new())).await }
+            async move {
+                reader
+                    .read_index(
+                        &handle,
+                        true,
+                        Some(Bytes::new()),
+                        &ReadTrace::new(None),
+                        None,
+                    )
+                    .await
+            }
         };
         let release_task = {
             let release = release.clone();
@@ -2526,7 +3084,13 @@ mod tests {
         // sees only block reads (the fast-path takes `index` as an argument, so no
         // extra index read happens inside the race).
         let index = writer
-            .read_index(&handle, false, Some(Bytes::new()))
+            .read_index(
+                &handle,
+                false,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
             .await
             .unwrap();
 
@@ -2616,6 +3180,7 @@ mod tests {
         use crate::db_state::{SsTableId, SstType};
         use crate::error::{RetryReason, SlateDBError};
         use crate::format::sst::SsTableFormat;
+        use crate::reader::ReadTrace;
         use crate::tablestore::TableStore;
         use crate::test_utils::{build_test_sst, RecordingObjectStore};
         use bytes::Bytes;
@@ -2657,9 +3222,15 @@ mod tests {
                 .unwrap();
 
             recording.clear();
-            ts.read_index(&handle, false, Some(segment.clone()))
-                .await
-                .unwrap();
+            ts.read_index(
+                &handle,
+                false,
+                Some(segment.clone()),
+                &ReadTrace::new(None),
+                None,
+            )
+            .await
+            .unwrap();
 
             let kinds = recording.get_kinds(false);
             assert!(!kinds.is_empty(), "expected at least one range read");

@@ -1,3 +1,4 @@
+use std::ops::Bound;
 use std::sync::Arc;
 
 use bytes::{BufMut, Bytes};
@@ -42,6 +43,16 @@ pub trait FilterPolicy: Send + Sync {
     /// This is a hint used by the SST builder to reserve buffer space before
     /// the filter is built. It does not need to be exact.
     fn estimate_size(&self, num_keys: usize) -> usize;
+
+    /// Whether filters from this policy can answer [`FilterTarget::Range`]
+    /// queries.
+    ///
+    /// A plain range scan reads an SST's filters only when some registered
+    /// policy says yes here. Defaults to `false`, so a policy that indexes
+    /// keys alone, such as a bloom filter, costs a range scan nothing.
+    fn supports_range_queries(&self) -> bool {
+        false
+    }
 }
 
 /// Accumulator for entries during SST construction that produces a [`Filter`].
@@ -83,8 +94,8 @@ pub trait Filter: Send + Sync {
 /// A membership query passed to [`Filter::might_match`].
 #[derive(Clone, Debug)]
 pub struct FilterQuery {
-    /// The target of this query (a specific key or a prefix).
-    pub target: PrefixTarget,
+    /// The target of this query (a specific key, a prefix, or a range).
+    pub target: FilterTarget,
     /// Opaque, caller-supplied context forwarded from
     /// [`crate::config::ScanOptions::filter_context`] or
     /// [`crate::config::ReadOptions::filter_context`].
@@ -96,11 +107,37 @@ pub struct FilterQuery {
     pub context: Option<FilterContext>,
 }
 
+/// The target of a filter query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterTarget {
+    /// Tests whether a specific key might exist in the SST.
+    Point(Bytes),
+    /// Tests whether any key with the given prefix might exist in the SST.
+    Prefix(Bytes),
+    /// Tests whether any key within the given bounds might exist in the SST.
+    Range {
+        lower: Bound<Bytes>,
+        upper: Bound<Bytes>,
+    },
+}
+
+impl FilterTarget {
+    /// The equivalent [`PrefixTarget`], or `None` for a target a
+    /// [`PrefixExtractor`] cannot describe.
+    pub fn as_prefix_target(&self) -> Option<PrefixTarget> {
+        match self {
+            Self::Point(key) => Some(PrefixTarget::Point(key.clone())),
+            Self::Prefix(prefix) => Some(PrefixTarget::Prefix(prefix.clone())),
+            Self::Range { .. } => None,
+        }
+    }
+}
+
 impl FilterQuery {
     /// Creates a point-lookup query for the given key.
     pub fn point(key: Bytes) -> Self {
         Self {
-            target: PrefixTarget::Point(key),
+            target: FilterTarget::Point(key),
             context: None,
         }
     }
@@ -108,7 +145,15 @@ impl FilterQuery {
     /// Creates a prefix-scan query for the given prefix.
     pub fn prefix(prefix: Bytes) -> Self {
         Self {
-            target: PrefixTarget::Prefix(prefix),
+            target: FilterTarget::Prefix(prefix),
+            context: None,
+        }
+    }
+
+    /// Creates a range-scan query over the given bounds.
+    pub fn range(lower: Bound<Bytes>, upper: Bound<Bytes>) -> Self {
+        Self {
+            target: FilterTarget::Range { lower, upper },
             context: None,
         }
     }

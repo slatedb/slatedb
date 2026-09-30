@@ -177,6 +177,16 @@ impl Admin {
             .map_err(Into::into)
     }
 
+    /// Deletes the database: releases the checkpoints it pinned in the
+    /// databases it was cloned from, then removes every object under its path.
+    ///
+    /// With `confirm` false nothing is deleted and the paths that would be are
+    /// returned. With `confirm` true the deleted paths are returned. A path that
+    /// holds objects but no SlateDB manifest is refused. Idempotent.
+    pub async fn delete_db(&self, confirm: bool) -> Result<Vec<String>, Error> {
+        self.inner.delete_db(confirm).await.map_err(Into::into)
+    }
+
     pub fn create_clone_builder_from_source(
         &self,
         source: CloneSourceSpec,

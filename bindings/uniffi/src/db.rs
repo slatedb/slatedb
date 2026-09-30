@@ -144,7 +144,7 @@ impl Db {
 
     /// Inserts or overwrites a value and returns metadata for the write.
     ///
-    /// Keys must be non-empty and at most `u16::MAX` bytes. Values must be at
+    /// Keys must be non-empty and at most `u32::MAX` bytes. Values must be at
     /// most `u32::MAX` bytes.
     pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<Arc<WriteHandle>, Error> {
         validate_key_value(&key, &value)?;
@@ -284,10 +284,17 @@ impl Db {
 
     /// Best-effort eviction of block-cache entries for one SST.
     ///
-    /// If no block cache is configured, returns `Ok(())`.
+    /// If no block cache is configured, or if the SST is not reachable from
+    /// the current manifest, the call is a no-op that returns `Ok(())`.
     pub async fn evict_cached_sst(&self, sst_id: SsTableId) -> Result<(), Error> {
         let sst_id = sst_id.into_core()?;
-        self.inner.evict_cached_sst(sst_id).await?;
+        let manifest = self.inner.manifest();
+        let Some(view) = manifest.all_sst_views().find(|view| view.sst.id == sst_id) else {
+            return Ok(());
+        };
+        self.inner
+            .evict_cached_sst(&view.sst, &slatedb::CacheTarget::all())
+            .await?;
         Ok(())
     }
 

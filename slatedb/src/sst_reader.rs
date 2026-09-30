@@ -263,7 +263,13 @@ impl SstFile {
     pub async fn index(&self) -> Result<SstIndex, crate::Error> {
         let inner = self
             .table_store
-            .read_index(&self.handle, true, Some(Bytes::new()))
+            .read_index(
+                &self.handle,
+                true,
+                Some(Bytes::new()),
+                &crate::reader::ReadTrace::new(None),
+                None,
+            )
             .await?;
         Ok(SstIndex { inner })
     }
@@ -283,7 +289,13 @@ impl SstFile {
     pub async fn read_block(&self, block: usize) -> Result<Vec<RowEntry>, crate::Error> {
         let index = self
             .table_store
-            .read_index(&self.handle, true, Some(Bytes::new()))
+            .read_index(
+                &self.handle,
+                true,
+                Some(Bytes::new()),
+                &crate::reader::ReadTrace::new(None),
+                None,
+            )
             .await?;
         let num_blocks = index.borrow().block_meta().len();
         if block >= num_blocks {

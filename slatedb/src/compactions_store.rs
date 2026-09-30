@@ -1,3 +1,6 @@
+mod invariants;
+
+use self::invariants::compactions_invariants;
 use crate::compactor_state::{Compactions, VersionedCompactions};
 use crate::error::SlateDBError;
 #[allow(dead_code)]
@@ -25,6 +28,12 @@ pub(crate) struct StoredCompactions {
 }
 
 impl StoredCompactions {
+    fn new(inner: SimpleTransactionalObject<Compactions>) -> Self {
+        Self {
+            inner: inner.with_invariants(compactions_invariants()),
+        }
+    }
+
     async fn init(
         store: Arc<CompactionsStore>,
         compactions: Compactions,
@@ -35,7 +44,7 @@ impl StoredCompactions {
             compactions.clone(),
         )
         .await?;
-        Ok(Self { inner })
+        Ok(Self::new(inner))
     }
 
     /// Create a new compactions record with the supplied compactor epoch and no compactions.
@@ -60,7 +69,7 @@ impl StoredCompactions {
         else {
             return Ok(None);
         };
-        Ok(Some(Self { inner }))
+        Ok(Some(Self::new(inner)))
     }
 
     /// Load the current compactions state from the supplied compactions store. If successful,
@@ -68,11 +77,9 @@ impl StoredCompactions {
     /// If no compactions could be found, the error [`LatestTransactionalObjectVersionMissing`] is returned.
     #[cfg(test)]
     pub(crate) async fn load(store: Arc<CompactionsStore>) -> Result<Self, SlateDBError> {
-        SimpleTransactionalObject::<Compactions>::try_load(Arc::clone(&store.inner)
-            as Arc<dyn TransactionalStorageProtocol<Compactions, MonotonicId>>)
-        .await?
-        .map(|inner| Self { inner })
-        .ok_or(LatestTransactionalObjectVersionMissing)
+        Self::try_load(store)
+            .await?
+            .ok_or(LatestTransactionalObjectVersionMissing)
     }
 
     #[allow(dead_code)]
@@ -276,6 +283,8 @@ impl CompactionsStore {
 mod tests {
     use super::*;
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
+    use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo};
+    use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
     use object_store::memory::InMemory;
@@ -345,6 +354,25 @@ mod tests {
         sc.update(dirty).await.unwrap();
 
         assert!(sc.compactions().contains(&compaction.id()));
+    }
+
+    #[tokio::test]
+    async fn test_should_enforce_compactions_invariants_after_create() {
+        let store = new_memory_compactions_store();
+        let mut sc = create_compactions_with_job(store.clone(), 100).await;
+
+        assert_compactions_invariants_reject_updates(&mut sc).await;
+        assert_eq!(store.read_latest_compactions().await.unwrap().id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_should_enforce_compactions_invariants_after_load() {
+        let store = new_memory_compactions_store();
+        create_compactions_with_job(store.clone(), 100).await;
+        let mut sc = StoredCompactions::load(store.clone()).await.unwrap();
+
+        assert_compactions_invariants_reject_updates(&mut sc).await;
+        assert_eq!(store.read_latest_compactions().await.unwrap().id, 2);
     }
 
     #[tokio::test]
@@ -522,6 +550,63 @@ mod tests {
         Compaction::new(
             Ulid::new(),
             CompactionSpec::new(vec![SourceId::SortedRun(0)], 0),
+        )
+    }
+
+    async fn create_compactions_with_job(
+        store: Arc<CompactionsStore>,
+        timestamp_ms: u64,
+    ) -> StoredCompactions {
+        let mut sc = StoredCompactions::create(store, 0).await.unwrap();
+        let mut dirty = sc.prepare_dirty().unwrap();
+        dirty.value.insert(compaction_at(timestamp_ms));
+        sc.update(dirty).await.unwrap();
+        sc
+    }
+
+    async fn assert_compactions_invariants_reject_updates(sc: &mut StoredCompactions) {
+        let mut dirty = sc.prepare_dirty().unwrap();
+        dirty.value.insert(compaction_at(50));
+        let result = sc.update(dirty).await;
+        assert!(matches!(
+            result,
+            Err(SlateDBError::InvalidClockTick {
+                last_tick: 100,
+                next_tick: 50,
+            })
+        ));
+
+        let job_id = Ulid::from_parts(100, 0);
+        let mut dirty = sc.prepare_dirty().unwrap();
+        let updated = dirty
+            .value
+            .get(&job_id)
+            .unwrap()
+            .clone()
+            .with_output_ssts(vec![output_sst_at(50)]);
+        dirty.value.insert(updated);
+        let result = sc.update(dirty).await;
+        assert!(matches!(
+            result,
+            Err(SlateDBError::InvalidClockTick {
+                last_tick: 100,
+                next_tick: 50,
+            })
+        ));
+    }
+
+    fn compaction_at(timestamp_ms: u64) -> Compaction {
+        Compaction::new(
+            Ulid::from_parts(timestamp_ms, 0),
+            CompactionSpec::new(vec![SourceId::SortedRun(0)], 0),
+        )
+    }
+
+    fn output_sst_at(timestamp_ms: u64) -> SsTableHandle {
+        SsTableHandle::new(
+            SsTableId::from(Ulid::from_parts(timestamp_ms, 0)),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo::default(),
         )
     }
 
