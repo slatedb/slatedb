@@ -20,7 +20,7 @@ use crate::dispatcher::{MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::flush::SegmentedSstHandle;
 use crate::mem_table::ImmutableMemtable;
-use crate::retrying_object_store::RetryingObjectStore;
+use crate::retrying_object_store::{RetryingObjectStore, MAX_RETRY_DELAY};
 use crate::utils::SafeSender;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -34,10 +34,6 @@ use tokio::runtime::Handle;
 use ulid::Ulid;
 
 const UPLOADER_TASK_NAME: &str = "l0_sst_uploader";
-
-/// A failed L0 upload retries after `manifest_poll_interval`, capped here so
-/// a long poll interval does not stretch upload retries with it.
-const MAX_UPLOAD_RETRY_BACKOFF: Duration = Duration::from_secs(1);
 
 // `BufWriter` wraps an `object_store::Error` inside `std::io::Error` through
 // `AsyncWrite`. Find the original error before applying the shared retry rule.
@@ -168,10 +164,9 @@ impl Uploader {
         tracker_tx: SafeSender<TrackerMessage>,
     ) -> Vec<Box<dyn MessageHandler<UploadJob>>> {
         let parallelism = db.settings.l0_flush_parallelism;
-        let retry_backoff = db
-            .settings
-            .manifest_poll_interval
-            .min(MAX_UPLOAD_RETRY_BACKOFF);
+        // A failed upload retries after `manifest_poll_interval`, capped so a
+        // long poll interval does not stretch upload retries with it.
+        let retry_backoff = db.settings.manifest_poll_interval.min(MAX_RETRY_DELAY);
         (0..parallelism)
             .map(|_| {
                 Box::new(UploadHandler::new(
@@ -296,9 +291,7 @@ impl MessageHandler<UploadJob> for UploadHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        should_retry_upload_error, TrackerMessage, UploadJob, Uploader, MAX_UPLOAD_RETRY_BACKOFF,
-    };
+    use super::{should_retry_upload_error, TrackerMessage, UploadJob, Uploader};
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::config::Settings;
     use crate::db::DbInner;
@@ -313,6 +306,7 @@ mod tests {
     use crate::manifest::ManifestCore;
     use crate::mem_table::ImmutableMemtable;
     use crate::paths::PathResolver;
+    use crate::retrying_object_store::MAX_RETRY_DELAY;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::FixedThreeBytePrefixExtractor;
@@ -713,7 +707,7 @@ mod tests {
             .expect("a failed upload must retry within the backoff cap, not the poll interval")
             .unwrap();
         assert!(
-            started.elapsed() >= MAX_UPLOAD_RETRY_BACKOFF,
+            started.elapsed() >= MAX_RETRY_DELAY,
             "expected the job to wait out one capped retry backoff before succeeding"
         );
         let TrackerMessage::UploadComplete(event) = msg else {
