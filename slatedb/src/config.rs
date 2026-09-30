@@ -365,6 +365,110 @@ impl ReadOptions {
         }
     }
 }
+
+/// Configuration for `multi_get` calls.
+#[derive(Clone, Debug)]
+pub struct MultiGetOptions {
+    /// See [`ReadOptions::durability_filter`].
+    pub durability_filter: DurabilityLevel,
+    /// See [`ReadOptions::dirty`].
+    pub dirty: bool,
+    /// See [`ReadOptions::cache_blocks`].
+    pub cache_blocks: bool,
+    /// See [`ReadOptions::filter_context`].
+    pub filter_context: Option<FilterContext>,
+    /// See [`ReadOptions::tracing_options`].
+    pub tracing_options: Option<TracingOptions>,
+    /// Layer walks in flight at one time. The default is 4, the window of `get`.
+    pub lookahead: usize,
+    /// Object store requests of one batch in flight. The default is 256.
+    pub max_fetch_tasks: usize,
+    /// Two blocks share one ranged GET when the gap is at most this. The gap blocks
+    /// are cached too. The default is 64 KiB.
+    pub coalesce_gap_bytes: usize,
+    /// The upper size of one merged ranged GET. The default is 512 KiB.
+    pub max_coalesced_bytes: usize,
+}
+
+impl Default for MultiGetOptions {
+    fn default() -> Self {
+        Self {
+            durability_filter: DurabilityLevel::default(),
+            dirty: false,
+            cache_blocks: true,
+            filter_context: None,
+            tracing_options: None,
+            lookahead: 4,
+            max_fetch_tasks: 256,
+            coalesce_gap_bytes: 64 * 1024,
+            max_coalesced_bytes: 512 * 1024,
+        }
+    }
+}
+
+impl MultiGetOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_dirty(self, dirty: bool) -> Self {
+        Self { dirty, ..self }
+    }
+
+    pub fn with_durability_filter(self, durability_filter: DurabilityLevel) -> Self {
+        Self {
+            durability_filter,
+            ..self
+        }
+    }
+
+    pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
+        Self {
+            cache_blocks,
+            ..self
+        }
+    }
+
+    pub fn with_filter_context(self, filter_context: Option<FilterContext>) -> Self {
+        Self {
+            filter_context,
+            ..self
+        }
+    }
+
+    pub fn with_tracing_options(self, tracing_options: Option<TracingOptions>) -> Self {
+        Self {
+            tracing_options,
+            ..self
+        }
+    }
+
+    pub fn with_max_fetch_tasks(self, max_fetch_tasks: usize) -> Self {
+        Self {
+            max_fetch_tasks,
+            ..self
+        }
+    }
+
+    pub fn with_coalesce_gap_bytes(self, coalesce_gap_bytes: usize) -> Self {
+        Self {
+            coalesce_gap_bytes,
+            ..self
+        }
+    }
+
+    pub fn with_max_coalesced_bytes(self, max_coalesced_bytes: usize) -> Self {
+        Self {
+            max_coalesced_bytes,
+            ..self
+        }
+    }
+
+    pub fn with_lookahead(self, lookahead: usize) -> Self {
+        Self { lookahead, ..self }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
     /// Specifies the minimum durability level for data returned by this scan. For example,

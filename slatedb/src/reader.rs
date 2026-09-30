@@ -73,6 +73,25 @@ impl ReadTrace {
         }
     }
 
+    /// Same as [`Self::new`], with the batch size on the read span.
+    pub(crate) fn new_multi_get(tracing_options: Option<TracingOptions>, keys: usize) -> Self {
+        let read_span = tracing_options
+            .as_ref()
+            .map(|tracing_options| {
+                tracing::info_span!(
+                    "slatedb.read",
+                    trace_id = tracing_options.trace_id.as_str(),
+                    keys,
+                    layers = tracing::field::Empty,
+                )
+            })
+            .unwrap_or_else(tracing::Span::none);
+        Self {
+            tracing_options,
+            read_span,
+        }
+    }
+
     pub(crate) fn read_span(&self) -> tracing::Span {
         self.read_span.clone()
     }
@@ -225,7 +244,7 @@ impl Reader {
     ///
     /// Returns the minimum sequence number that satisfies all constraints, or None (read without filtering max seq)
     /// if no constraints apply.
-    fn prepare_max_seq(
+    pub(crate) fn prepare_max_seq(
         &self,
         max_seq_by_user: Option<u64>,
         durability_filter: DurabilityLevel,
@@ -350,6 +369,8 @@ impl Reader {
         write_batch_iter: Option<WriteBatchIterator>,
         max_seq: Option<u64>,
     ) -> Result<Option<KeyValue>, SlateDBError> {
+        self.db_stats.get_requests.increment(1);
+        let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let read_trace = Self::read_trace(options.tracing_options.as_ref());
         let read = self.get_key_value_with_options_inner(
             key,
@@ -362,6 +383,7 @@ impl Reader {
         read.instrument(read_trace.read_span()).await
     }
 
+    /// Reads one key. `max_seq` is the final bound, see [`Self::prepare_max_seq`].
     async fn get_key_value_with_options_inner<K: AsRef<[u8]>>(
         &self,
         key: K,
@@ -371,8 +393,6 @@ impl Reader {
         max_seq: Option<u64>,
         read_trace: ReadTrace,
     ) -> Result<Option<KeyValue>, SlateDBError> {
-        self.db_stats.get_requests.increment(1);
-        let max_seq = self.prepare_max_seq(max_seq, options.durability_filter, options.dirty);
         let key_slice = key.as_ref();
         let range = BytesRange::from_slice(key_slice..=key_slice);
 

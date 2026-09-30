@@ -9,11 +9,15 @@ use slatedb::config::{DurabilityLevel, MergeOptions, PutOptions, ReadOptions, Wr
 use slatedb::{Error, IterationOrder, MergeOperator, MergeOperatorError, WriteBatch};
 use tracing::instrument;
 
-use crate::{utils::build_scan_options, Actor, ActorCtx};
+use crate::{
+    utils::{build_multi_get_options, build_scan_options},
+    Actor, ActorCtx,
+};
 
 use super::PROGRESS_LOG_INTERVAL;
 
 const WORKLOAD_VALUE_VERSION_SIZE: usize = std::mem::size_of::<u64>();
+const MAX_MULTI_GET_KEYS: u64 = 16;
 
 /// Configuration for the mixed DST workload actor.
 #[derive(Clone, Debug)]
@@ -127,26 +131,29 @@ enum WorkloadOperation {
     Put,
     Merge,
     WriteBatch,
+    MultiGet,
 }
 
 impl WorkloadOperation {
     fn sample(rand_value: u64, merge_enabled: bool) -> Self {
         if merge_enabled {
-            match rand_value % 6 {
+            match rand_value % 7 {
                 0 => Self::Get,
                 1 => Self::Scan,
                 2 => Self::Delete,
                 3 => Self::Put,
                 4 => Self::Merge,
-                _ => Self::WriteBatch,
+                5 => Self::WriteBatch,
+                _ => Self::MultiGet,
             }
         } else {
-            match rand_value % 5 {
+            match rand_value % 6 {
                 0 => Self::Get,
                 1 => Self::Scan,
                 2 => Self::Delete,
                 3 => Self::Put,
-                _ => Self::WriteBatch,
+                4 => Self::WriteBatch,
+                _ => Self::MultiGet,
             }
         }
     }
@@ -286,6 +293,27 @@ impl Actor for WorkloadActor {
 
                 ctx.db().write_with_options(batch, &write_options).await?;
             }
+            WorkloadOperation::MultiGet => {
+                let batch_len = 1 + (ctx.rand().rng().next_u64() % MAX_MULTI_GET_KEYS) as usize;
+                // Duplicate keys can occur, and the batch must accept them.
+                let keys: Vec<Bytes> = (0..batch_len)
+                    .map(|_| {
+                        workload_key(
+                            &key_prefix,
+                            ctx.rand().rng().next_u64(),
+                            self.options.key_count,
+                        )
+                    })
+                    .collect();
+                verify_multi_get(
+                    ctx,
+                    self.step,
+                    &keys,
+                    self.options.read_durability,
+                    &mut self.observed,
+                )
+                .await?;
+            }
         }
 
         self.step += 1;
@@ -337,6 +365,43 @@ async fn verify_get(
     {
         Some(value) => observe_present(ctx, step, key, &value, observed),
         None => observe_absent(key, observed),
+    }
+    Ok(())
+}
+
+async fn verify_multi_get(
+    ctx: &ActorCtx,
+    step: u64,
+    keys: &[Bytes],
+    read_durability: DurabilityLevel,
+    observed: &mut BTreeMap<Bytes, Observation>,
+) -> Result<(), Error> {
+    let options = build_multi_get_options(ctx.rand(), read_durability);
+    let values = ctx.db().multi_get_with_options(keys, &options).await?;
+    assert_eq!(
+        values.len(),
+        keys.len(),
+        "multi_get must return one result per key [name={}, step={}]",
+        ctx.name(),
+        step
+    );
+
+    // A batch reads one snapshot, so equal keys must have equal results.
+    let mut seen: BTreeMap<&Bytes, &Option<Bytes>> = BTreeMap::new();
+    for (key, value) in keys.iter().zip(&values) {
+        let first = *seen.entry(key).or_insert(value);
+        assert_eq!(
+            first,
+            value,
+            "multi_get returned different results for one key [name={}, step={}, key={:?}]",
+            ctx.name(),
+            step,
+            key
+        );
+        match value {
+            Some(value) => observe_present(ctx, step, key, value, observed),
+            None => observe_absent(key, observed),
+        }
     }
     Ok(())
 }

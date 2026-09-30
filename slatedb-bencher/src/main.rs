@@ -3,11 +3,11 @@
 use crate::args::BencherArgs;
 use args::{
     BencherCommands, BenchmarkCompactionArgs, BenchmarkDbArgs, BenchmarkTransactionArgs,
-    CompactionSubcommands, KeyGeneratorSupplier,
+    CompactionSubcommands, DbMode, KeyGeneratorSupplier,
 };
 use bytes::Bytes;
 use clap::Parser;
-use db::DbBench;
+use db::{wait_for_compaction, DbBench, ManifestShape, ReadMode};
 use futures::StreamExt;
 use futures::TryStreamExt;
 use object_store::path::Path;
@@ -20,6 +20,7 @@ use slatedb::admin;
 use slatedb::compaction_execute_bench::CompactionExecuteBench;
 use slatedb::config::WriteOptions;
 use slatedb::Db;
+use slatedb_common::metrics::DefaultMetricsRecorder;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +30,7 @@ use tracing_subscriber::EnvFilter;
 use transactions::TransactionBench;
 
 mod args;
+pub mod bench_object_store;
 pub mod db;
 pub mod stats;
 pub mod system_monitor;
@@ -57,6 +59,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         create_cleanup_lock(object_store.clone(), &path).await?;
     }
 
+    // With BENCHER_PPROF=<prefix>, sample the CPU at 999 Hz and write
+    // <prefix>.svg and <prefix>.folded at the end of the run.
+    let pprof_prefix = std::env::var("BENCHER_PPROF").ok();
+    let profiler = pprof_prefix.as_ref().map(|_| {
+        pprof::ProfilerGuardBuilder::default()
+            .frequency(999)
+            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+            .build()
+            .expect("start pprof")
+    });
+
     match args.command {
         BencherCommands::Db(subcommand_args) => {
             exec_benchmark_db(path.clone(), object_store.clone(), subcommand_args).await;
@@ -71,6 +84,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     monitor.stop();
 
+    if let (Some(prefix), Some(profiler)) = (pprof_prefix, profiler) {
+        write_profile(&prefix, &profiler)?;
+    }
+
     if args.clean {
         cleanup_data(object_store, &path).await?;
     }
@@ -78,20 +95,56 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Write the samples of `profiler` as a flamegraph and as folded stacks
+/// (one line per stack, root first, then the sample count).
+fn write_profile(prefix: &str, profiler: &pprof::ProfilerGuard) -> Result<(), Box<dyn Error>> {
+    let report = profiler.report().build()?;
+    report.flamegraph(std::fs::File::create(format!("{prefix}.svg"))?)?;
+    let mut folded = String::new();
+    for (frames, count) in &report.data {
+        let mut names: Vec<String> = Vec::new();
+        for frame in frames.frames.iter().rev() {
+            for symbol in frame.iter().rev() {
+                names.push(symbol.name());
+            }
+        }
+        folded.push_str(&format!("{} {}\n", names.join(";"), count));
+    }
+    std::fs::write(format!("{prefix}.folded"), folded)?;
+    info!("wrote pprof profile to {prefix}.svg and {prefix}.folded");
+    Ok(())
+}
+
 async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args: BenchmarkDbArgs) {
-    let (mut config, memory_cache) = args.db_args.config().unwrap();
+    let (mut config, db_cache) = args.db_args.config().await.unwrap();
     if args.no_compactor {
         config.compactor_options = None;
     }
     let write_options = WriteOptions::default();
+    let store = args.db_args.wrap_store(object_store);
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
 
-    let mut builder = Db::builder(path.clone(), object_store.clone()).with_settings(config);
+    let mut builder = Db::builder(path.clone(), store.clone())
+        .with_settings(config)
+        .with_metrics_recorder(recorder.clone());
 
-    if let Some(memory_cache) = memory_cache {
-        builder = builder.with_db_cache(memory_cache, 0);
+    if let Some(cache) = &db_cache {
+        builder = builder.with_db_cache(cache.clone(), 0);
     }
 
     let db = Arc::new(builder.build().await.unwrap());
+    ManifestShape::of(&db).log();
+    let read_mode = match &args.mode {
+        None => ReadMode::Get,
+        Some(DbMode::Mget(mget)) => {
+            info!(reader = %mget.reader, batch_size = mget.batch_size, "using batch reads");
+            ReadMode::Mget {
+                reader: mget.reader,
+                batch_size: mget.batch_size,
+                options: mget.mget_options(),
+            }
+        }
+    };
     let bencher = DbBench::new(
         args.key_gen_supplier(),
         args.val_len,
@@ -102,11 +155,23 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
         args.duration.map(|d| Duration::from_secs(d as u64)),
         args.put_percentage,
         args.get_hit_percentage,
+        read_mode,
         db.clone(),
+        store,
+        recorder,
     );
     bencher.run().await;
 
+    if args.wait_compaction {
+        wait_for_compaction(&db, Duration::from_secs(30 * 60)).await;
+    }
     db.close().await.expect("failed to close db");
+    // The benchmark owns the cache, so SlateDB does not close it. A close
+    // moves the memory tier of a hybrid cache to disk, so the next run over
+    // the same directory starts warm.
+    if let Some(cache) = db_cache {
+        cache.close().await.expect("failed to close the db cache");
+    }
 }
 
 async fn exec_benchmark_compaction(
@@ -153,13 +218,14 @@ async fn exec_benchmark_transaction(
     object_store: Arc<dyn ObjectStore>,
     args: BenchmarkTransactionArgs,
 ) {
-    let (config, memory_cache) = args.db_args.config().unwrap();
+    let (config, db_cache) = args.db_args.config().await.unwrap();
     let write_options = WriteOptions::default();
+    let store = args.db_args.wrap_store(object_store);
 
-    let mut builder = Db::builder(path.clone(), object_store.clone()).with_settings(config);
+    let mut builder = Db::builder(path.clone(), store).with_settings(config);
 
-    if let Some(memory_cache) = memory_cache {
-        builder = builder.with_db_cache(memory_cache, 0);
+    if let Some(db_cache) = db_cache {
+        builder = builder.with_db_cache(db_cache, 0);
     }
 
     let db = Arc::new(builder.build().await.unwrap());

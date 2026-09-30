@@ -17,14 +17,18 @@ path = "src/main.rs"
 bench = false
 
 [dependencies]
+async-trait = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["derive"] }
 chrono = { workspace = true, features = ["serde"] }
+foyer = { workspace = true }
 futures = { workspace = true }
 object_store = { workspace = true }
+pprof = { version = "0.14.0", features = ["flamegraph"] }
 rand = { workspace = true }
 rand_xorshift = { workspace = true }
 slatedb = { workspace = true, features = ["aws", "azure", "bencher", "wal_disable", "foyer", "zstd"] }
+slatedb-common = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }

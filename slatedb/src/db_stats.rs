@@ -15,6 +15,8 @@ macro_rules! db_stat_name {
 }
 
 pub const REQUEST_COUNT: &str = db_stat_name!("request_count");
+pub const MULTI_GET_KEYS: &str = db_stat_name!("multi_get_keys");
+pub const MULTI_GET_LAYERS: &str = db_stat_name!("multi_get_layers");
 pub const WRITE_OPS: &str = db_stat_name!("write_ops");
 pub const WRITE_BATCH_COUNT: &str = db_stat_name!("write_batch_count");
 pub const BACKPRESSURE_COUNT: &str = db_stat_name!("backpressure_count");
@@ -64,6 +66,9 @@ pub(crate) struct DbStatsInner {
     pub(crate) l0_stall_count_num_ssts_per_key: Arc<dyn CounterFn>,
     pub(crate) get_requests: Arc<dyn CounterFn>,
     pub(crate) scan_requests: Arc<dyn CounterFn>,
+    pub(crate) multi_get_requests: Arc<dyn CounterFn>,
+    pub(crate) multi_get_keys: Arc<dyn CounterFn>,
+    pub(crate) multi_get_layers: Arc<dyn CounterFn>,
     pub(crate) flush_requests: Arc<dyn CounterFn>,
     pub(crate) write_batch_count: Arc<dyn CounterFn>,
     pub(crate) write_ops: Arc<dyn CounterFn>,
@@ -151,6 +156,12 @@ impl DbStats {
                 .counter(REQUEST_COUNT)
                 .labels(&[("op", "scan")])
                 .register(),
+            multi_get_requests: recorder
+                .counter(REQUEST_COUNT)
+                .labels(&[("op", "multi_get")])
+                .register(),
+            multi_get_keys: recorder.counter(MULTI_GET_KEYS).register(),
+            multi_get_layers: recorder.counter(MULTI_GET_LAYERS).register(),
             flush_requests: recorder
                 .counter(REQUEST_COUNT)
                 .labels(&[("op", "flush")])

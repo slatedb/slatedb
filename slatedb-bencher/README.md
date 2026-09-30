@@ -56,6 +56,52 @@ following environment variables before benchmarking:
 - `AWS_ALLOW_HTTP` (optional), if your AWS_ENDPOINT uses HTTP instead of HTTPS.
 - `AWS_SESSION_TOKEN` (optional), if you are using temporary credentials. 
 
+### Batch reads with `mget`
+
+The `db` subcommand has an optional mode, `mget`. It reads keys in batches
+instead of one key per call. A batch goes through one of three readers:
+
+- `seq`: one `get` after the other.
+- `concurrent`: up to `--read-concurrency` gets at the same time.
+- `multi-get`: one `multi_get` call.
+
+Each stats dump then has a second line with the read calls. It shows the p50
+and p99 latency of a call, the SST GET requests per call, the SST bytes per
+call, and the `multi_get` layer walks per call. The GET and byte counts come from a
+wrapper around the object store, so they are exact.
+
+The `db` subcommand also has flags for repeatable read runs:
+
+- `--seed <N>`: the fixed key set and the key picks come from this seed. Two
+  runs with the same seed and key count use the same keys.
+- `--wait-compaction`: flush the memtable and wait until the manifest stops to
+  change before the database closes. Use it in the load run.
+- `--delay-profile <s3|s3x>`: add a delay to each object store read. The
+  delay is sampled from the measured GET latency of S3 or of S3 Express One
+  Zone. `--delay-ms <N>` adds a fixed delay instead.
+- `--disk-cache`: keep the object store disk cache from `SlateDb.toml`. The
+  benchmark disables it by default, so reads reach the object store.
+
+A typical flow loads a key set, then reads it with each reader. The load run
+uses no delay, because the compactor reads through the same store:
+
+```bash
+export CLOUD_PROVIDER=local LOCAL_PATH=/tmp/slatedb-bench
+cargo run -r --package slatedb-bencher -- --path /mget db \
+  --seed 42 --key-count 200000 --put-percentage 100 --num-rows 200000 \
+  --concurrency 1 --wait-compaction
+
+for reader in seq concurrent multi-get; do
+  cargo run -r --package slatedb-bencher -- --path /mget db \
+    --seed 42 --key-count 200000 --put-percentage 0 --no-compactor \
+    --block-cache-size 8388608 --meta-cache-size 268435456 \
+    --delay-profile s3 --concurrency 1 --duration 120 \
+    mget --reader $reader --batch-size 100
+done
+```
+
+The `seq` reader with a delay is slow, so its percentiles come from few calls.
+
 ## `benchmark-db.sh`
 
 There is also a shell script which runs a series of benchmarks and records

@@ -6,7 +6,9 @@ use uuid::Uuid;
 
 use crate::batch::{WriteBatch, WriteBatchIterator};
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
-use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
+use crate::config::{
+    MergeOptions, MultiGetOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
+};
 use crate::db::DbInner;
 use crate::db::WriteHandle;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
@@ -187,6 +189,73 @@ impl DbTransaction {
             .await
             .map_err(crate::Error::from)?;
         Ok(kv)
+    }
+
+    /// Get multiple values from the transaction in one batch, in input order.
+    /// In SSI mode every key is tracked for conflict detection.
+    pub async fn multi_get<K: AsRef<[u8]> + Send + Sync>(
+        &self,
+        keys: &[K],
+    ) -> Result<Vec<Option<Bytes>>, crate::Error> {
+        self.multi_get_with_options(keys, &MultiGetOptions::default())
+            .await
+    }
+
+    /// Get multiple values from the transaction in one batch with custom read
+    /// options. In SSI mode every key is tracked for conflict detection.
+    pub async fn multi_get_with_options<K: AsRef<[u8]> + Send + Sync>(
+        &self,
+        keys: &[K],
+        options: &MultiGetOptions,
+    ) -> Result<Vec<Option<Bytes>>, crate::Error> {
+        let key_values = self.multi_get_key_value_with_options(keys, options).await?;
+        Ok(key_values
+            .into_iter()
+            .map(|kv| kv.map(|kv| kv.value))
+            .collect())
+    }
+
+    /// Get multiple key-value pairs from the transaction in one batch.
+    pub async fn multi_get_key_value<K: AsRef<[u8]> + Send + Sync>(
+        &self,
+        keys: &[K],
+    ) -> Result<Vec<Option<KeyValue>>, crate::Error> {
+        self.multi_get_key_value_with_options(keys, &MultiGetOptions::default())
+            .await
+    }
+
+    /// Get multiple key-value pairs from the transaction in one batch with
+    /// custom read options.
+    pub async fn multi_get_key_value_with_options<K: AsRef<[u8]> + Send + Sync>(
+        &self,
+        keys: &[K],
+        options: &MultiGetOptions,
+    ) -> Result<Vec<Option<KeyValue>>, crate::Error> {
+        self.db_inner.check_closed()?;
+
+        // Track all batch keys for SSI conflict detection.
+        if self.isolation_level == IsolationLevel::SerializableSnapshot {
+            let read_keys: HashSet<Bytes> = keys
+                .iter()
+                .map(|k| Bytes::copy_from_slice(k.as_ref()))
+                .collect();
+            self.txn_manager.track_read_keys(&self.txn_id, read_keys);
+        }
+
+        let db_state = self.db_inner.state.read().view();
+        // The reader looks up each key under the read guard, as `get` does, so
+        // the write batch is never cloned.
+        self.db_inner
+            .reader
+            .multi_get_with_options(
+                keys,
+                options,
+                &db_state,
+                Some(&self.write_batch),
+                Some(self.started_seq),
+            )
+            .await
+            .map_err(crate::Error::from)
     }
 
     /// Scan a range of keys using the default scan options.
@@ -656,6 +725,22 @@ impl DbReadOps for DbTransaction {
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
         DbTransaction::get_key_value_with_options(self, key, options).await
+    }
+
+    async fn multi_get_with_options<K: AsRef<[u8]> + Send + Sync>(
+        &self,
+        keys: &[K],
+        options: &MultiGetOptions,
+    ) -> Result<Vec<Option<Bytes>>, crate::Error> {
+        DbTransaction::multi_get_with_options(self, keys, options).await
+    }
+
+    async fn multi_get_key_value_with_options<K: AsRef<[u8]> + Send + Sync>(
+        &self,
+        keys: &[K],
+        options: &MultiGetOptions,
+    ) -> Result<Vec<Option<KeyValue>>, crate::Error> {
+        DbTransaction::multi_get_key_value_with_options(self, keys, options).await
     }
 
     async fn scan_with_options<T>(

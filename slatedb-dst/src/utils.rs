@@ -6,7 +6,7 @@ use rand::Rng;
 use slatedb::config::{
     CompactionWorkerOptions, CompactorOptions, CompressionCodec, DbReaderOptions, DurabilityLevel,
     GarbageCollectorDirectoryOptions, GarbageCollectorOptions, GarbageCollectorScheduleOptions,
-    ScanOptions, SizeTieredCompactionSchedulerOptions,
+    MultiGetOptions, ScanOptions, SizeTieredCompactionSchedulerOptions,
 };
 use slatedb::{DbRand, IterationOrder, Settings};
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -105,6 +105,21 @@ pub fn build_scan_options(rand: &DbRand, read_durability: DurabilityLevel) -> Sc
         .with_cache_blocks(rng.random_bool(0.5))
         .with_max_fetch_tasks(rng.random_range(1..=4))
         .with_order(order)
+}
+
+/// Builds randomized deterministic multi-get options for DST scenarios.
+pub fn build_multi_get_options(rand: &DbRand, read_durability: DurabilityLevel) -> MultiGetOptions {
+    let mut rng = rand.rng();
+    let coalesce_gap_options = [0, 4 * 1024, 64 * 1024, MIB_1];
+
+    MultiGetOptions::new()
+        .with_durability_filter(read_durability)
+        .with_cache_blocks(rng.random_bool(0.5))
+        .with_max_fetch_tasks(rng.random_range(1..=4))
+        .with_coalesce_gap_bytes(
+            coalesce_gap_options[rng.random_range(0..coalesce_gap_options.len())],
+        )
+        .with_lookahead(rng.random_range(0..=4))
 }
 
 /// Builds randomized deterministic compactor options for DST scenarios.

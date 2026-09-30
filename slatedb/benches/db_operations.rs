@@ -1,10 +1,10 @@
 // our microbenchmarks use pprof, but it doesn't work on windows
 #![cfg(not(windows))]
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use object_store::memory::InMemory;
 use pprof::criterion::{Output, PProfProfiler};
-use slatedb::config::{PutOptions, WriteOptions};
+use slatedb::config::{PutOptions, Settings, WriteOptions};
 use slatedb::Db;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -40,6 +40,78 @@ fn criterion_benchmark(c: &mut Criterion) {
             db.close().await.expect("close failed");
         })
     });
+
+    bench_batch_reads(c, &runtime);
+}
+
+/// Compare a single batched `multi_get` against an equivalent loop of `get`s
+/// over a database whose keys span many L0 SSTs with no block cache — the case
+/// where multi_get's per-SST batching (load index/filter once, coalesce block
+/// reads) wins most.
+fn bench_batch_reads(c: &mut Criterion, runtime: &Runtime) {
+    let object_store = Arc::new(InMemory::new());
+    let settings = Settings {
+        //l0_sst_size_bytes: 4096,
+        min_filter_keys: 0,
+        ..Default::default()
+    };
+    let db = runtime.block_on(async {
+        let db = Db::builder("/tmp/bench_multi_get", object_store)
+            .with_settings(settings)
+            .build()
+            .await
+            .expect("open failed");
+        for i in 0..1000000u32 {
+            let key = format!("key{i:06}");
+            let value = format!("value{i:06}");
+            db.put_with_options(
+                key.as_bytes(),
+                value.as_bytes(),
+                &PutOptions::default(),
+                &WriteOptions::default(),
+            )
+            .await
+            .expect("put failed");
+            if i % 250 == 249 {
+                db.flush().await.expect("flush failed");
+            }
+        }
+        db.flush().await.expect("flush failed");
+        db
+    });
+
+    // Keys spread across the key space (so they land in many distinct SSTs).
+    let make_keys = |n: u32| -> Vec<Vec<u8>> {
+        (0..n)
+            .map(|i| format!("key{:06}", i * 4).into_bytes())
+            .collect()
+    };
+
+    let mut multi_get = c.benchmark_group("multi_get");
+    for &n in &[1u32, 100, 1000] {
+        let keys = make_keys(n);
+        multi_get.bench_with_input(BenchmarkId::from_parameter(n), &keys, |b, keys| {
+            b.to_async(runtime).iter(|| async {
+                black_box(db.multi_get(keys).await.expect("multi_get failed"));
+            })
+        });
+    }
+    multi_get.finish();
+
+    let mut get_loop = c.benchmark_group("get_loop");
+    for &n in &[1u32, 100, 1000] {
+        let keys = make_keys(n);
+        get_loop.bench_with_input(BenchmarkId::from_parameter(n), &keys, |b, keys| {
+            b.to_async(runtime).iter(|| async {
+                let mut out = Vec::with_capacity(keys.len());
+                for key in keys {
+                    out.push(db.get(key).await.expect("get failed"));
+                }
+                black_box(out);
+            })
+        });
+    }
+    get_loop.finish();
 }
 
 criterion_group! {
