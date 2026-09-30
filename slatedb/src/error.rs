@@ -708,9 +708,11 @@ impl From<SlateDBError> for Error {
                     // close with this error, and reopening runs `observe`
                     // again (RFC 0034).
                     Some(MirrorError::WriteCommitted { .. }) => Error::data(msg),
-                    Some(MirrorError::Policy { .. } | MirrorError::Unsupported { .. }) => {
-                        Error::invalid(msg)
-                    }
+                    Some(
+                        MirrorError::Policy { .. }
+                        | MirrorError::Unsupported { .. }
+                        | MirrorError::InvalidConfig { .. },
+                    ) => Error::invalid(msg),
                     _ => Error::unavailable(msg),
                 };
                 error.with_source(Box::new(err))
@@ -884,6 +886,12 @@ mod tests {
         );
         assert_eq!(
             mirror_error_kind(MirrorError::Unsupported { operation: "copy" }),
+            ErrorKind::Invalid
+        );
+        assert_eq!(
+            mirror_error_kind(MirrorError::InvalidConfig {
+                message: "download_concurrency must be greater than zero".to_string(),
+            }),
             ErrorKind::Invalid
         );
     }

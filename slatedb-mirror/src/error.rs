@@ -36,10 +36,17 @@ pub enum MirrorError {
         source: Box<dyn Error + Send + Sync>,
     },
 
-    /// The mirror doesn't support this operation (COPY, RENAME, or an
-    /// `Observe` multipart upload).
+    /// The mirror doesn't support this operation: COPY, RENAME, an `Observe`
+    /// multipart upload, or a local copy of an object whose file name (last
+    /// path segment) is empty, ends in `.meta` or `.<digits>`, or is `meta` or
+    /// all digits. Those names collide with the mirror's metadata and temp
+    /// files.
     #[error("operation not supported by the mirror. operation=`{operation}`")]
     Unsupported { operation: &'static str },
+
+    /// `ObjectStoreMirrorBuilder::build` was given an invalid option.
+    #[error("invalid mirror configuration. message=`{message}`")]
+    InvalidConfig { message: String },
 }
 
 impl MirrorError {

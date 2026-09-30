@@ -19,6 +19,25 @@
     )
 )]
 
+mod download;
 pub mod error;
+mod handle;
+mod inner;
+mod layout;
+mod mirror;
+mod multipart;
+mod ordering;
+mod policy;
+mod retry;
+mod scan;
+mod startup;
+pub mod vfs;
 
 pub use error::MirrorError;
+pub use handle::MirrorHandle;
+pub use mirror::{
+    ObjectStoreMirror, ObjectStoreMirrorBuilder, DEFAULT_DOWNLOAD_CONCURRENCY,
+    DEFAULT_REMOTE_SCAN_INTERVAL,
+};
+pub use policy::{MirrorPolicy, ReadRoute, WriteRoute};
+pub use vfs::{StdVfs, Vfs, VfsEntry, VfsLock, VfsWriter};

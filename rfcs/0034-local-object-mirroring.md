@@ -167,8 +167,12 @@ pub struct MirrorHandle { /* Arc<Inner> */ }
 impl MirrorHandle {
     /// Downloads any paths that aren't local. The request is ordered when this
     /// is called, not when the returned future is first polled. See
-    /// [Ordering](#ordering).
-    pub fn fetch(&self, paths: impl IntoIterator<Item = Path>) -> Fetch;
+    /// [Ordering](#ordering). Resolves when every path is local, or one
+    /// download fails.
+    pub fn fetch(
+        &self,
+        paths: impl IntoIterator<Item = Path>,
+    ) -> impl Future<Output = Result<()>> + Send + 'static;
     /// Downloads in the background, best effort.
     pub fn prefetch(&self, paths: impl IntoIterator<Item = Path>);
     /// Queues removal of local copies. Never touches the remote store.
@@ -177,10 +181,6 @@ impl MirrorHandle {
     /// The wrapped store. Calls made here skip the policy.
     pub fn remote(&self) -> &Arc<dyn ObjectStore>;
 }
-
-/// Resolves when every requested path is local, or one download fails.
-pub struct Fetch { /* ... */ }
-impl Future for Fetch { type Output = Result<()>; }
 
 impl ObjectStoreMirror {
     pub fn builder(
@@ -203,6 +203,15 @@ impl ObjectStoreMirrorBuilder {
     /// objects deleted remotely. The default is
     /// `Some(Duration::from_secs(600))`. `None` disables the scan.
     pub fn with_remote_scan_interval(self, interval: Option<Duration>) -> Self;
+
+    /// Sets the clock used for retry backoff, the remote scan, and the
+    /// last-modified time of mirrored writes. The default uses Tokio's clock.
+    pub fn with_system_clock(self, clock: Arc<dyn SystemClock>) -> Self;
+
+    /// Sets how many times the mirror retries a transient error from its own
+    /// remote calls. The default, `None`, retries forever, like SlateDB's
+    /// `object_store_max_retries`.
+    pub fn with_max_retries(self, max_retries: Option<u32>) -> Self;
 
     /// Validates the configuration, acquires the cache-directory lock, cleans
     /// invalid local entries, and spawns `MirrorPolicy::run`.
@@ -298,7 +307,10 @@ Four types of files exist under the cache root:
   byte identical to the remote object.
 - `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.1234567890`: A temporary file that is being
   written to either for uploading or downloading purposes. The suffix is an
-  atomic counter unique to the process.
+  atomic counter owned by the mirror. Only one mirror can hold a directory's
+  `LOCK`, so the suffix is unique within the directory. A per-mirror counter
+  (rather than a process-wide one) keeps file names deterministic across
+  simulation runs in one process.
 - `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.meta`: Metadata for the object, including its
   canonical object path, ETag, version, and attributes. The path is used to
   recover the remote location after restart and verify the filename hash.
@@ -308,6 +320,14 @@ object path ends with. Each object-related file is prefixed with an MD5-encoding
 of its object path with the filename stripped. This protects against filename
 collisions between directories (for example, external databases) and keeps the
 cache root flat.
+
+A file name that ends in `.meta` or `.<digits>` (including a bare `meta` or
+`7`) can't be told apart from a metadata or temporary file. Object `foo.meta`
+would even share a local name with the metadata of object `foo`. The mirror
+refuses to keep local copies of such names: a `Local`, `Refetch`, or `Mirror`
+route for one, or a `fetch` of one, fails with `MirrorError::Unsupported`
+before anything reaches the wrapped store. SlateDB's SST names aren't
+affected.
 
 The mirror maintains an in-memory map from each MD5 prefix to its canonical
 parent path. Startup reconstructs the map from `.meta` files. Each installation
@@ -418,7 +438,14 @@ A `Mirror` write returns only after the remote upload succeeds, its `.meta`
 file is written, and the complete local file is atomically renamed. A remote
 failure removes the temporary file and returns the remote error. A local
 failure after the upload succeeds returns `MirrorError::WriteCommitted` (see
-[Errors and Retries](#errors-and-retries)). Remote objects that already
+[Errors and Retries](#errors-and-retries)). A single PUT writes the temporary
+file and uploads at the same time, so any local failure there surfaces as
+`WriteCommitted` once the upload succeeds. A multipart upload isn't visible
+remotely until `complete`, so a local failure in a part or in `complete`
+aborts the upload and returns `MirrorError::Local`.
+
+The local copy's last-modified time comes from the mirror's clock, not the
+remote store's, since a PUT doesn't return it. Remote objects that already
 completed are left for the remote store's owner to clean up (for SlateDB, the
 garbage collector).
 
@@ -442,9 +469,12 @@ pub enum MirrorError {
     WriteCommitted { path: Path, source: Box<dyn Error + Send + Sync> },
     /// The policy returned an error from a route or `observe` call.
     Policy { source: Box<dyn Error + Send + Sync> },
-    /// The mirror doesn't support this operation (COPY, RENAME, or an
-    /// `Observe` multipart upload).
+    /// The mirror doesn't support this operation (COPY, RENAME, an
+    /// `Observe` multipart upload, or a local copy of a reserved file name).
     Unsupported { operation: &'static str },
+    /// `ObjectStoreMirrorBuilder::build` was given an invalid option, such as
+    /// a download concurrency of zero.
+    InvalidConfig { message: String },
 }
 ```
 
@@ -485,7 +515,14 @@ if manifest N's eviction of it was already running. At worst the eviction
 removes the file and the fetch downloads it again. This holds as long as the
 policy issues N's evictions before N+1's fetches.
 `fetch` registers its request when it's called, not when the returned future
-is polled.
+is polled. A fetch future that is never polled holds its paths' place in line until
+it is dropped.
+
+Adjacent downloads of the same path (`fetch`, `prefetch`, and `Refetch`) run
+together rather than one after another, and single-flight collapses them into
+one remote GET. This matters most for `Refetch`: several readers that hit the
+same corrupt file share one download instead of queueing a full download each.
+Writes, deletes, and evictions still run alone.
 
 `Local` reads don't take part in this ordering. A read that races with an
 eviction may get `NotLocal`. For SlateDB, this only affects reads of SSTs that
@@ -516,12 +553,16 @@ An object can be deleted by a client that doesn't go through the mirror, for
 example a garbage collector running in another process. It can also be written
 through the mirror and then abandoned before anything references it, for
 example after a crash, a process restart, or a failed compaction job. The
-mirror periodically scans the remote store to find these cases. The scan runs
-every ten minutes by default:
+mirror periodically scans the remote store to find these cases. The first scan runs
+when the mirror is built, then every ten minutes by default:
 
-- Snapshot the local file list.
-- Read their canonical object paths from `.meta` and group them by remote parent
-  prefix.
+- Snapshot the local file list from disk, not the in-memory entry map, so a
+  local file the map lost track of still gets cleaned up.
+- Recover each file's object path. The MD5-to-parent map covers every prefix
+  the mirror has installed or recovered, so the path usually comes straight
+  from the file name. For an unknown prefix, the scan reads the path from
+  `.meta`.
+- Group the paths by remote parent prefix.
 - LIST each distinct parent prefix on the wrapped remote store.
 - Delete any local file absent from the remote result.
 
@@ -793,10 +834,13 @@ On startup, `ObjectStoreMirrorBuilder::build`:
 1. Validates options
 2. Makes the local directory if it does not exist
 3. Acquires the exclusive `LOCK` file lock
-4. Removes any `.[tmp_num]` files (incomplete uploads or downloads)
+4. Removes any `.[tmp_num]` files (incomplete uploads or downloads). Files
+   without an MD5 prefix aren't part of the layout and are left alone, so
+   pointing the mirror at the wrong directory doesn't delete anything
 5. Scans object and `.meta` pairs, deleting entries with a missing partner,
    malformed metadata, a canonical path that does not match the local filename,
-   or a conflicting MD5-to-parent-path mapping
+   a file size that does not match the metadata (a torn write), or a
+   conflicting MD5-to-parent-path mapping
 6. Reconstructs the in-memory path and object metadata maps from valid pairs
 7. Starts the remote scan and spawns `MirrorPolicy::run`
 
@@ -1048,6 +1092,12 @@ There is, however, an open question around the CPU cost of computing the MD5 pre
 
 ## Updates
 
+- Aligned with the `slatedb-mirror` implementation. Reserved file names
+  (`.meta` and `.<digits>` suffixes) can't be mirrored. Added
+  `MirrorError::InvalidConfig`, `with_system_clock`, and `with_max_retries`.
+  Adjacent downloads of a path share one GET. Documented how route and
+  `observe` errors reach callers, how PUT and multipart tees report local
+  failures, and that the temporary-file counter is per mirror.
 - Warm every manifest returned to a caller, including older checkpoint
   manifests. Only newer manifests advance retention, and older manifests only
   warm SSTs that are already retained. `observe` no longer holds its lock

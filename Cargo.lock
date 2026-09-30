@@ -3346,8 +3346,22 @@ dependencies = [
 name = "slatedb-mirror"
 version = "0.17.0"
 dependencies = [
+ "async-trait",
+ "backon",
+ "bytes",
+ "chrono",
+ "futures",
+ "log",
+ "md-5",
  "object_store",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "slatedb-common",
+ "tempfile",
  "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
