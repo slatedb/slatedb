@@ -1249,8 +1249,7 @@ impl CompactorEventHandler {
                 // worker can claim it without consulting the coordinator. A
                 // `Scheduled` entry is therefore already spoken for and counts
                 // against the limit alongside `Running`. Leave the entry
-                // `Submitted` when the limit is full so a later tick promotes it,
-                // rather than failing work a client asked for.
+                // `Submitted` when the limit is full.
                 let claimed_compaction_count = self
                     .state()
                     .active_compactions()
