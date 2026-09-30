@@ -93,6 +93,26 @@ pub enum MergeOperatorCallbackError {
     Failed { message: String },
 }
 
+/// Error returned by a foreign [`crate::BlockTransformer`] implementation.
+/// Any other error or exception the foreign method raises becomes `Failed`.
+#[derive(Debug, Error, uniffi::Error)]
+pub enum BlockTransformerCallbackError {
+    /// The transform failed with an application-defined message.
+    #[error("{message}")]
+    Failed { message: String },
+}
+
+impl From<uniffi::UnexpectedUniFFICallbackError> for BlockTransformerCallbackError {
+    fn from(error: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        let message = if error.reason.is_empty() {
+            "foreign transformer failed without a message".to_owned()
+        } else {
+            error.reason
+        };
+        Self::Failed { message }
+    }
+}
+
 /// Reason a database or reader reports itself as closed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum CloseReason {
