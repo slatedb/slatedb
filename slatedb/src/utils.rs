@@ -154,8 +154,10 @@ pub(crate) fn merge_options<T>(
 ///
 /// In an application using only log without a subscriber, spawning a task for a future with
 /// the current subscriber attached, i.e.,
-/// ```rust
-/// tokio::spawn(future.with_current_subscriber())
+/// ```rust,no_run
+/// # use tracing::instrument::WithSubscriber;
+/// # let future = async {};
+/// tokio::spawn(future.with_current_subscriber());
 /// ```
 /// sets tracing::dispatcher::has_been_set() and permanently disables tracing-to-log forwarding,
 /// even with query tracing disabled. That means, logging messages with
