@@ -1113,6 +1113,8 @@ mod tests {
                 0..num_blocks,
                 false,
                 Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
             )
             .await
             .unwrap();
@@ -1125,6 +1127,8 @@ mod tests {
                     range.clone(),
                     false,
                     Some(Bytes::new()),
+                    &ReadTrace::none(),
+                    None,
                 )
                 .await
                 .unwrap();

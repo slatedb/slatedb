@@ -25,6 +25,8 @@ use uuid::Uuid;
 
 use futures::StreamExt;
 use std::collections::VecDeque;
+use tracing::instrument::WithSubscriber;
+use tracing::subscriber::NoSubscriber;
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
@@ -145,6 +147,42 @@ pub(crate) fn merge_options<T>(
         (Some(current), Some(next)) => Some(f(current, next)),
         (None, next) => next,
         (current, None) => current,
+    }
+}
+
+/// Attaches the current subscriber only if a subscriber is set.
+///
+/// In an application using only log without a subscriber, spawning a task for a future with
+/// the current subscriber attached, i.e.,
+/// ```rust
+/// tokio::spawn(future.with_current_subscriber())
+/// ```
+/// sets tracing::dispatcher::has_been_set() and permanently disables tracing-to-log forwarding,
+/// even with query tracing disabled. That means, logging messages with
+/// ```rust
+/// tracing::info!("message");
+/// ```
+/// does not work anymore after the spawning.
+/// However, direct logging (not tracing-to-log forwarding) with
+/// ```rust
+/// log::info!("message");
+/// ```
+/// still works.
+///
+/// To avoid disabling tracing-to-log forwarding, this helper checks if a subscriber is set, if a
+/// subscriber is set the subscriber is attached to the future, else `.with_current_subscriber()`
+/// is not called.
+pub(crate) fn spawn_with_optional_subscriber<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+
+    if dispatch.is::<NoSubscriber>() {
+        tokio::spawn(future)
+    } else {
+        tokio::spawn(future.with_subscriber(dispatch))
     }
 }
 
