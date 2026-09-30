@@ -31,7 +31,7 @@ use crate::utils::IdGenerator;
 use fail_parallel::fail_point;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use ulid::Ulid;
 
 macro_rules! memtable_flush_stat_name {
@@ -125,6 +125,12 @@ pub(super) struct FlushTracker {
     manifest_writer: ManifestWriter,
     frontier: TrackedImmFrontier,
     stats: FlushTrackerStats,
+    /// Publishes the L0 stall state to the manifest writer: 0 while the
+    /// oldest pending memtable can be dispatched, otherwise an id that is
+    /// distinct for every stall.
+    l0_stall_tx: watch::Sender<u64>,
+    /// Number of stalls started so far; the source of stall ids.
+    l0_stalls: u64,
 }
 
 impl FlushTracker {
@@ -132,6 +138,7 @@ impl FlushTracker {
         inner: Arc<DbInner>,
         uploader: Uploader,
         manifest_writer: ManifestWriter,
+        l0_stall_tx: watch::Sender<u64>,
     ) -> Self {
         let stats = FlushTrackerStats::new(&inner.recorder);
         Self {
@@ -140,6 +147,8 @@ impl FlushTracker {
             manifest_writer,
             frontier: TrackedImmFrontier::new(),
             stats,
+            l0_stall_tx,
+            l0_stalls: 0,
         }
     }
 }
@@ -330,6 +339,25 @@ impl FlushTracker {
         true
     }
 
+    /// Publishes a stall transition. Only a change wakes the manifest
+    /// writer's stall notifier, and every stall carries a fresh id so a stall
+    /// that clears and restarts between two reads is still seen as new.
+    fn set_l0_stalled(&mut self, stalled: bool) {
+        let l0_stalls = &mut self.l0_stalls;
+        self.l0_stall_tx.send_if_modified(|state| {
+            if stalled == (*state != 0) {
+                return false;
+            }
+            *state = if stalled {
+                *l0_stalls += 1;
+                *l0_stalls
+            } else {
+                0
+            };
+            true
+        });
+    }
+
     fn dispatch_ready_memtables(&mut self) -> Result<(), SlateDBError> {
         loop {
             // Strict seq order: skipping a blocked older imm
@@ -341,9 +369,11 @@ impl FlushTracker {
                 .iter()
                 .position(|t| matches!(t.state, TrackedImmState::PendingDispatch));
             let Some(idx) = next_idx else {
+                self.set_l0_stalled(false);
                 return Ok(());
             };
             if !self.can_dispatch(&self.frontier.tracked[idx].imm_memtable) {
+                self.set_l0_stalled(true);
                 return Ok(());
             }
             self.frontier.tracked[idx].state = TrackedImmState::Uploading;
@@ -1202,6 +1232,56 @@ mod tests {
                 .unwrap();
             assert_eq!(result.durable_seq, 1);
         }
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_learn_of_compacted_l0_without_waiting_for_manifest_poll_interval() {
+        let settings = Settings {
+            l0_max_ssts: 1,
+            manifest_poll_interval: Duration::from_secs(60),
+            ..Settings::default()
+        };
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_l0_stall_poll",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        set_local_l0_len(&harness, 1);
+        let compacted_view = {
+            let guard = harness.inner.state.read();
+            guard.state().core().tree.l0.front().unwrap().clone()
+        };
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 41);
+
+        let flush = flusher.flush(FlushTarget::All);
+        tokio::pin!(flush);
+        assert!(timeout(Duration::from_millis(300), &mut flush)
+            .await
+            .is_err());
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        let tree = Arc::make_mut(&mut dirty.value.core.tree);
+        tree.l0.clear();
+        tree.last_compacted_l0_sst_view_id = Some(compacted_view.id);
+        tree.last_compacted_l0_sst_id = Some(compacted_view.sst.id.value());
+        stored_manifest.update(dirty).await.unwrap();
+
+        let result = timeout(Duration::from_secs(1), &mut flush)
+            .await
+            .expect("a stalled writer must learn of the compaction within the stall poll")
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
 
         flusher.shutdown().await;
     }

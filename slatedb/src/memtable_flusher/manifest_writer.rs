@@ -33,6 +33,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use parking_lot::RwLockWriteGuard;
+use slatedb_common::clock::SystemClock;
 use slatedb_txn_obj::DirtyObject;
 use std::cmp;
 use std::collections::{BTreeMap, HashSet};
@@ -96,6 +97,11 @@ impl std::fmt::Debug for ManifestWriterCommand {
 
 pub(super) const MANIFEST_WRITER_TASK_NAME: &str = "l0_manifest_writer";
 
+/// First delay between manifest polls while the flush tracker is stalled on L0.
+const MIN_L0_STALL_POLL_BACKOFF: Duration = Duration::from_millis(50);
+/// Longest delay between manifest polls while the flush tracker is stalled on L0.
+const MAX_L0_STALL_POLL_BACKOFF: Duration = Duration::from_secs(1);
+
 /// Ordered L0 retirement and manifest update subsystem.
 pub(crate) struct ManifestWriter {
     commands_tx: SafeSender<ManifestWriterCommand>,
@@ -111,10 +117,17 @@ impl ManifestWriter {
         executor: &crate::dispatcher::MessageHandlerExecutor,
         tokio_handle: &Handle,
         tracker_tx: SafeSender<TrackerMessage>,
+        l0_stall_rx: watch::Receiver<u64>,
     ) -> Result<Self, SlateDBError> {
         let (commands_tx, commands_rx) =
             SafeSender::unbounded_channel(closed_result.result_reader());
-        let handler = ManifestWriterHandler::new(db, manifest, manifest_poll_interval, tracker_tx);
+        let handler = ManifestWriterHandler::new(
+            db,
+            manifest,
+            manifest_poll_interval,
+            tracker_tx,
+            l0_stall_rx,
+        );
         executor.add_handler(
             MANIFEST_WRITER_TASK_NAME.to_string(),
             Box::new(handler),
@@ -211,6 +224,9 @@ struct ManifestWriterHandler {
     /// Watches the database status so the manifest write can wait for
     /// WAL durability without blocking uploads.
     db_status_rx: watch::Receiver<crate::db_status::DbStatus>,
+    /// Watches the flush tracker's L0 stall state so the manifest is polled
+    /// while a writer is stalled. See [`L0StallPollNotifier`].
+    l0_stall_rx: watch::Receiver<u64>,
     pending_flushes: Vec<PendingFlush>,
     pending_checkpoints: Vec<PendingCheckpoint>,
     pending_manifest_refreshes: Vec<oneshot::Sender<Result<(), SlateDBError>>>,
@@ -226,9 +242,16 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
     }
 
     fn notifiers(&mut self) -> Vec<Box<dyn crate::dispatcher::Notifier<ManifestWriterCommand>>> {
-        vec![Box::new(DurableSeqNotifier {
-            rx: self.db_status_rx.clone(),
-        })]
+        vec![
+            Box::new(DurableSeqNotifier {
+                rx: self.db_status_rx.clone(),
+            }),
+            Box::new(L0StallPollNotifier::new(
+                self.l0_stall_rx.clone(),
+                Arc::clone(&self.db.system_clock),
+                self.manifest_poll_interval,
+            )),
+        ]
     }
 
     async fn handle(&mut self, command: ManifestWriterCommand) -> Result<(), SlateDBError> {
@@ -288,6 +311,7 @@ impl ManifestWriterHandler {
         manifest: FenceableManifest,
         manifest_poll_interval: Duration,
         tracker_tx: SafeSender<TrackerMessage>,
+        l0_stall_rx: watch::Receiver<u64>,
     ) -> Self {
         let durable_seq = db.oracle.last_remote_persisted_seq();
         let db_status_rx = db.status_manager.subscribe();
@@ -300,6 +324,7 @@ impl ManifestWriterHandler {
             ready: BTreeMap::new(),
             durable_seq,
             db_status_rx,
+            l0_stall_rx,
             pending_checkpoints: Vec::new(),
             pending_manifest_refreshes: Vec::new(),
         }
@@ -885,9 +910,80 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
     }
 }
 
+/// Polls the manifest while the flush tracker is stalled on L0, so a slot
+/// freed by compaction is seen before the next `manifest_poll_interval` tick.
+///
+/// `rx` carries 0 while dispatch is not stalled and an id that is distinct
+/// for every stall otherwise. A new id polls at once and restarts the
+/// backoff; while the same id persists, each poll waits twice as long as
+/// the one before, up to `max_backoff`. Nothing runs while `rx` is 0.
+struct L0StallPollNotifier {
+    rx: watch::Receiver<u64>,
+    clock: Arc<dyn SystemClock>,
+    max_backoff: Duration,
+    /// The stall being polled and the delay before its next poll.
+    /// `None` while not stalled.
+    stall: Option<(u64, Duration)>,
+}
+
+impl L0StallPollNotifier {
+    fn new(
+        rx: watch::Receiver<u64>,
+        clock: Arc<dyn SystemClock>,
+        manifest_poll_interval: Duration,
+    ) -> Self {
+        Self {
+            rx,
+            clock,
+            max_backoff: MAX_L0_STALL_POLL_BACKOFF.min(manifest_poll_interval),
+            stall: None,
+        }
+    }
+}
+
+#[async_trait]
+impl crate::dispatcher::Notifier<ManifestWriterCommand> for L0StallPollNotifier {
+    async fn notify(&mut self) -> ManifestWriterCommand {
+        loop {
+            let stall_id = *self.rx.borrow_and_update();
+            if stall_id == 0 {
+                self.stall = None;
+                // As in DurableSeqNotifier, Err means the sender is gone and
+                // the database is closing.
+                if self.rx.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+                continue;
+            }
+            let delay = match self.stall {
+                Some((id, delay)) if id == stall_id => delay,
+                _ => {
+                    let first = MIN_L0_STALL_POLL_BACKOFF.min(self.max_backoff);
+                    self.stall = Some((stall_id, first));
+                    return ManifestWriterCommand::PollManifest { done: None };
+                }
+            };
+            tokio::select! {
+                _ = self.clock.sleep(delay) => {
+                    self.stall = Some((stall_id, (delay * 2).min(self.max_backoff)));
+                    return ManifestWriterCommand::PollManifest { done: None };
+                }
+                changed = self.rx.changed() => {
+                    if changed.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ManifestWriter, ManifestWriterCommand, ManifestWriterHandler, TrackerMessage};
+    use super::{
+        L0StallPollNotifier, ManifestWriter, ManifestWriterCommand, ManifestWriterHandler,
+        TrackerMessage,
+    };
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
@@ -903,6 +999,7 @@ mod tests {
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
 
+    use crate::dispatcher::Notifier;
     use crate::wal::test_utils::FakeWalWriter;
     use crate::wal::WalWriter;
     use bytes::Bytes;
@@ -910,14 +1007,13 @@ mod tests {
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
-    use slatedb_common::clock::DefaultSystemClock;
-    use slatedb_common::clock::SystemClock;
+    use slatedb_common::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
     use slatedb_common::metrics::MetricsRecorderHelper;
     use slatedb_common::DbRand;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;
-    use tokio::sync::oneshot;
+    use tokio::sync::{oneshot, watch};
     use tokio::time::timeout;
 
     struct StartedManifestWriter {
@@ -925,6 +1021,7 @@ mod tests {
         executor: crate::dispatcher::MessageHandlerExecutor,
         tracker_rx: async_channel::Receiver<TrackerMessage>,
         closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
+        _l0_stall_tx: watch::Sender<u64>,
     }
 
     impl StartedManifestWriter {
@@ -958,6 +1055,7 @@ mod tests {
         );
         let (tracker_tx, tracker_rx) =
             crate::utils::SafeSender::unbounded_channel(closed_result.result_reader());
+        let (l0_stall_tx, l0_stall_rx) = watch::channel(0);
         let writer = ManifestWriter::start(
             inner,
             manifest,
@@ -966,6 +1064,7 @@ mod tests {
             &executor,
             &Handle::current(),
             tracker_tx,
+            l0_stall_rx,
         )
         .unwrap();
         executor.monitor_on(&Handle::current()).unwrap();
@@ -974,7 +1073,143 @@ mod tests {
             executor,
             tracker_rx,
             closed_result,
+            _l0_stall_tx: l0_stall_tx,
         }
+    }
+
+    fn stall_notifier(
+        clock: Arc<MockSystemClock>,
+        manifest_poll_interval: Duration,
+    ) -> (watch::Sender<u64>, L0StallPollNotifier) {
+        let (tx, rx) = watch::channel(0);
+        (
+            tx,
+            L0StallPollNotifier::new(rx, clock, manifest_poll_interval),
+        )
+    }
+
+    /// Drives one `notify` call on the mock clock: it must stay pending until
+    /// the clock has advanced by `expected`, then produce a `PollManifest`
+    /// with no reply channel. A zero `expected` demands a poll at once.
+    async fn assert_poll_after(
+        notifier: &mut L0StallPollNotifier,
+        clock: &MockSystemClock,
+        expected: Duration,
+    ) {
+        let notify = notifier.notify();
+        tokio::pin!(notify);
+        if !expected.is_zero() {
+            assert!(timeout(Duration::from_millis(20), &mut notify)
+                .await
+                .is_err());
+            clock.advance(expected - Duration::from_millis(1)).await;
+            assert!(
+                timeout(Duration::from_millis(20), &mut notify)
+                    .await
+                    .is_err(),
+                "polled before {expected:?} elapsed"
+            );
+            clock.advance(Duration::from_millis(1)).await;
+        }
+        let command = timeout(Duration::from_secs(5), &mut notify)
+            .await
+            .unwrap_or_else(|_| panic!("no poll after {expected:?}"));
+        assert!(matches!(
+            command,
+            ManifestWriterCommand::PollManifest { done: None }
+        ));
+    }
+
+    #[tokio::test]
+    async fn l0_stall_notifier_is_idle_while_not_stalled() {
+        let clock = Arc::new(MockSystemClock::new());
+        let (_tx, mut notifier) = stall_notifier(Arc::clone(&clock), Duration::from_secs(60));
+        let notify = notifier.notify();
+        tokio::pin!(notify);
+        assert!(timeout(Duration::from_millis(50), &mut notify)
+            .await
+            .is_err());
+        clock.advance(Duration::from_secs(120)).await;
+        assert!(timeout(Duration::from_millis(50), &mut notify)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn l0_stall_notifier_polls_at_once_then_backs_off_to_the_cap() {
+        let clock = Arc::new(MockSystemClock::new());
+        let (tx, mut notifier) = stall_notifier(Arc::clone(&clock), Duration::from_secs(60));
+        tx.send(1).unwrap();
+        assert_poll_after(&mut notifier, &clock, Duration::ZERO).await;
+        for millis in [50, 100, 200, 400, 800, 1000, 1000] {
+            assert_poll_after(&mut notifier, &clock, Duration::from_millis(millis)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn l0_stall_notifier_backoff_is_capped_at_manifest_poll_interval() {
+        let clock = Arc::new(MockSystemClock::new());
+        let (tx, mut notifier) = stall_notifier(Arc::clone(&clock), Duration::from_millis(20));
+        tx.send(1).unwrap();
+        assert_poll_after(&mut notifier, &clock, Duration::ZERO).await;
+        for _ in 0..3 {
+            assert_poll_after(&mut notifier, &clock, Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn l0_stall_notifier_goes_idle_when_the_stall_clears_and_restarts_backoff() {
+        let clock = Arc::new(MockSystemClock::new());
+        let (tx, mut notifier) = stall_notifier(Arc::clone(&clock), Duration::from_secs(60));
+        tx.send(1).unwrap();
+        assert_poll_after(&mut notifier, &clock, Duration::ZERO).await;
+        assert_poll_after(&mut notifier, &clock, Duration::from_millis(50)).await;
+        assert_poll_after(&mut notifier, &clock, Duration::from_millis(100)).await;
+
+        {
+            // The stall clears while the 200 ms sleep is in flight: the sleep
+            // is abandoned and no poll follows, however far the clock moves.
+            let notify = notifier.notify();
+            tokio::pin!(notify);
+            assert!(timeout(Duration::from_millis(20), &mut notify)
+                .await
+                .is_err());
+            tx.send(0).unwrap();
+            assert!(timeout(Duration::from_millis(20), &mut notify)
+                .await
+                .is_err());
+            clock.advance(Duration::from_secs(10)).await;
+            assert!(timeout(Duration::from_millis(50), &mut notify)
+                .await
+                .is_err());
+
+            // A new stall polls at once.
+            tx.send(2).unwrap();
+            let command = timeout(Duration::from_secs(5), &mut notify).await.unwrap();
+            assert!(matches!(
+                command,
+                ManifestWriterCommand::PollManifest { done: None }
+            ));
+        }
+        // And the backoff starts over.
+        assert_poll_after(&mut notifier, &clock, Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn l0_stall_notifier_restarts_backoff_for_a_stall_it_never_saw_clear() {
+        let clock = Arc::new(MockSystemClock::new());
+        let (tx, mut notifier) = stall_notifier(Arc::clone(&clock), Duration::from_secs(60));
+        tx.send(1).unwrap();
+        assert_poll_after(&mut notifier, &clock, Duration::ZERO).await;
+        assert_poll_after(&mut notifier, &clock, Duration::from_millis(50)).await;
+        assert_poll_after(&mut notifier, &clock, Duration::from_millis(100)).await;
+
+        // Between two notify calls the stall clears and a new one starts; the
+        // notifier only ever reads the new id.
+        tx.send(0).unwrap();
+        tx.send(2).unwrap();
+        assert_poll_after(&mut notifier, &clock, Duration::ZERO).await;
+        assert_poll_after(&mut notifier, &clock, Duration::from_millis(50)).await;
     }
 
     async fn assert_no_flush_event(
@@ -1028,6 +1263,7 @@ mod tests {
             harness.manifest,
             Duration::from_secs(3600),
             tracker_tx,
+            watch::channel(0).1,
         )
     }
 
