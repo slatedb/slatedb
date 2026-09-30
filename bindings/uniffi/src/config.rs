@@ -863,9 +863,10 @@ mod reader_options_tests {
         assert_eq!(cache.max_open_file_handles, default.max_open_file_handles);
     }
 
-    /// The `#[uniffi(default = ...)]` literals are what Python, Kotlin and
-    /// Swift callers get when they leave a field out; they must be the
-    /// engine's defaults, field for field, as the Rust `Default` is.
+    /// The `#[uniffi(default = ...)]` literals are what Node, Python,
+    /// Go and Java callers get when they leave a field out; they must
+    /// be the engine's defaults, field for field, as the Rust
+    /// `Default` is.
     #[test]
     fn the_defaults_foreign_callers_see_are_the_engines() {
         use uniffi_meta::{DefaultValueMetadata, LiteralMetadata, Metadata};
