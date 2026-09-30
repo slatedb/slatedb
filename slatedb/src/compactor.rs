@@ -728,12 +728,34 @@ impl CompactorEventHandler {
     /// Handles a polling tick by refreshing compactions and the manifest, then possibly scheduling compactions.
     async fn handle_ticker(&mut self) -> Result<(), SlateDBError> {
         self.state_writer.refresh().await?;
+        self.fail_compactions_with_invalid_sources().await?;
         self.reclaim_stale_workers().await?;
         self.update_distributed_compaction_metrics();
         self.commit_compacted_entries().await?;
         self.maybe_schedule_compactions().await?;
         self.maybe_validate_submitted_compactions().await?;
         Ok(())
+    }
+
+    /// Retire jobs whose inputs disappeared, including IDs replaced during repair.
+    async fn fail_compactions_with_invalid_sources(&mut self) -> Result<(), SlateDBError> {
+        let invalid: Vec<_> = self
+            .state()
+            .compactions_with_status(&[CompactionStatus::Scheduled, CompactionStatus::Running])
+            .filter(|c| Self::validate_compaction_sources(c, self.state().db_state()).is_err())
+            .map(Compaction::id)
+            .collect();
+        if invalid.is_empty() {
+            return Ok(());
+        }
+        for id in invalid {
+            warn!("compaction sources are invalid, marking Failed [id={}]", id);
+            self.state_mut().update_compaction(&id, |c| {
+                c.set_status(CompactionStatus::Failed);
+                c.set_worker(None);
+            });
+        }
+        self.state_writer.write_compactions_safely().await
     }
 
     /// Reclaims `Running` compactions whose workers have not emitted a heartbeat
@@ -973,21 +995,7 @@ impl CompactorEventHandler {
             );
             return Err(SlateDBError::InvalidCompaction);
         };
-        // Reject missing or ambiguous L0 sources before execution and before commit.
-        compaction.get_l0_sst_views(db_state)?;
-        let sr_ids = tree
-            .compacted
-            .iter()
-            .map(|sr| sr.id)
-            .collect::<HashSet<_>>();
-
-        if let Some(missing) = spec.sources().iter().find(|source| match source {
-            SourceId::SstView(_) => false,
-            SourceId::SortedRun(id) => !sr_ids.contains(id),
-        }) {
-            debug!("compaction source missing from db state: {:?}", missing);
-            return Err(SlateDBError::InvalidCompaction);
-        }
+        Self::validate_compaction_sources(compaction, db_state)?;
 
         // Validate L0-only compactions create a new SR after every SR that matters
         // for their lifecycle stage. Submitted specs reserve a fresh globally
@@ -1059,6 +1067,38 @@ impl CompactorEventHandler {
         self.scheduler
             .validate(&self.state().into(), spec)
             .map_err(|_e| SlateDBError::InvalidCompaction)
+    }
+
+    /// Check source identity without applying scheduling or destination rules.
+    fn validate_compaction_sources(
+        compaction: &Compaction,
+        db_state: &ManifestCore,
+    ) -> Result<(), SlateDBError> {
+        let tree = db_state
+            .tree_for_segment(compaction.spec().segment())
+            .ok_or(SlateDBError::InvalidCompaction)?;
+        // Reject missing or ambiguous L0 sources before execution and before commit.
+        compaction.get_l0_sst_views(db_state)?;
+        let sr_ids = tree
+            .compacted
+            .iter()
+            .map(|sr| sr.id)
+            .collect::<HashSet<_>>();
+
+        if let Some(missing) = compaction
+            .spec()
+            .sources()
+            .iter()
+            .find(|source| match source {
+                SourceId::SstView(_) => false,
+                SourceId::SortedRun(id) => !sr_ids.contains(id),
+            })
+        {
+            debug!("compaction source missing from db state: {:?}", missing);
+            return Err(SlateDBError::InvalidCompaction);
+        }
+
+        Ok(())
     }
 
     /// Rejects a tiered compaction whose destination SR id already exists as a
@@ -4731,6 +4771,7 @@ mod tests {
     }
 
     struct CompactorEventHandlerTestFixture {
+        object_store: Arc<InMemory>,
         manifest: StoredManifest,
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
@@ -4799,6 +4840,7 @@ mod tests {
                     .await
                     .unwrap();
             Self {
+                object_store: os,
                 manifest,
                 manifest_store,
                 compactions_store,
@@ -4870,6 +4912,7 @@ mod tests {
                 .await
                 .unwrap();
             Self {
+                object_store: os,
                 manifest,
                 manifest_store,
                 compactions_store,
@@ -6641,6 +6684,136 @@ mod tests {
             manifest_id_after, manifest_id_before,
             "validation-only failures must not checkpoint or rewrite the manifest"
         );
+    }
+
+    #[rstest::rstest]
+    #[case::running(CompactionStatus::Running)]
+    #[case::scheduled(CompactionStatus::Scheduled)]
+    #[tokio::test]
+    async fn test_repair_retires_stale_jobs_after_restart(#[case] status: CompactionStatus) {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        for key in [b"a", b"z"] {
+            fixture.db.put(key, b"value").await.unwrap();
+        }
+        fixture
+            .db
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        fixture.db.close().await.unwrap();
+
+        fixture.manifest.refresh().await.unwrap();
+        let mut dirty = fixture.manifest.prepare_dirty().unwrap();
+        let tree = Arc::make_mut(&mut dirty.value.core.tree);
+        let shared = tree.l0[0].clone();
+        tree.l0 = VecDeque::from([
+            shared.with_visible_range(BytesRange::from_ref("a".."m")),
+            shared.with_visible_range(BytesRange::from_ref("m"..)),
+        ]);
+        fixture.manifest.update(dirty).await.unwrap();
+
+        fixture.handler.state_writer.refresh().await.unwrap();
+        let stale_id = Ulid::new();
+        let stale = Compaction::new(
+            stale_id,
+            CompactionSpec::new(vec![SourceId::SstView(shared.id)], 0),
+        )
+        .with_status(CompactionStatus::Running)
+        .with_worker(Some(WorkerSpec::new("stopped-worker".into(), 0)));
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(stale);
+        fixture
+            .handler
+            .state_writer
+            .write_compactions_safely()
+            .await
+            .unwrap();
+
+        let db = Db::builder(PATH, fixture.object_store.clone())
+            .with_settings(fixture.options.clone())
+            .build()
+            .await
+            .unwrap();
+        let repaired = fixture.manifest_store.read_latest_manifest().await.unwrap();
+        assert!(repaired
+            .core()
+            .tree
+            .l0
+            .iter()
+            .all(|view| view.id != shared.id));
+        fixture.handler = CompactorEventHandler::new(
+            fixture.manifest_store.clone(),
+            fixture.compactions_store.clone(),
+            Arc::new(CompactorOptions {
+                enable_trivial_move: false,
+                ..compactor_options()
+            }),
+            fixture.scheduler.clone(),
+            Arc::new(DbRand::new(42)),
+            fixture.handler.stats.clone(),
+            Arc::new(DefaultSystemClock::new()),
+            MetricsRecorderHelper::noop(),
+        )
+        .await
+        .unwrap();
+        if status == CompactionStatus::Scheduled {
+            // Model a worker releasing the invalid claim after coordinator startup.
+            fixture
+                .handler
+                .state_mut()
+                .update_compaction(&stale_id, |c| {
+                    c.set_status(status);
+                    c.set_worker(None);
+                });
+            fixture
+                .handler
+                .state_writer
+                .write_compactions_safely()
+                .await
+                .unwrap();
+        }
+
+        fixture.scheduler.inject_compaction(CompactionSpec::new(
+            repaired
+                .core()
+                .tree
+                .l0
+                .iter()
+                .map(|view| SourceId::SstView(view.id))
+                .collect(),
+            0,
+        ));
+        fixture.handler.handle_ticker().await.unwrap();
+        let stored = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap();
+        let stale = stored.compactions.get(&stale_id).unwrap();
+        assert_eq!(stale.status(), CompactionStatus::Failed);
+        assert!(stale.worker().is_none());
+        assert_eq!(fixture.get_scheduled_compactions().await.len(), 1);
+
+        fixture.simulate_worker_completes().await;
+        fixture.handler.handle_ticker().await.unwrap();
+        assert!(fixture.latest_db_state().await.tree.l0.is_empty());
+        db.close().await.unwrap();
+        let reopened = Db::builder(PATH, fixture.object_store.clone())
+            .with_settings(fixture.options.clone())
+            .build()
+            .await
+            .unwrap();
+        for key in [b"a", b"z"] {
+            assert_eq!(
+                reopened.get(key).await.unwrap(),
+                Some(Bytes::from_static(b"value"))
+            );
+        }
+        reopened.close().await.unwrap();
     }
 
     /// A Running compaction whose heartbeat is older than the timeout must be

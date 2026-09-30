@@ -457,6 +457,14 @@ impl ManifestCore {
     /// Assign fresh IDs to every occurrence of a repeated L0 view ID in each tree.
     /// Retire the old ID so that stored compaction specs cannot select a different view.
     pub(crate) fn repair_duplicate_l0_view_ids(&mut self, rand: &DbRand) -> bool {
+        for tree in self.trees() {
+            if let Some(watermark) = tree.last_compacted_l0_sst_view_id {
+                assert!(
+                    tree.l0.iter().all(|view| view.id != watermark),
+                    "L0 view watermark references an active view: {watermark}"
+                );
+            }
+        }
         let mut repaired = false;
         for tree in std::iter::once(&mut self.tree)
             .chain(self.segments.iter_mut().map(|segment| &mut segment.tree))
@@ -2400,6 +2408,38 @@ mod tests {
         let before = union.clone();
         assert!(!union.core.repair_duplicate_l0_view_ids(&DbRand::new(42)));
         assert_eq!(union, before);
+    }
+
+    #[rstest]
+    #[case::root_duplicate(false, true)]
+    #[case::root_unique(false, false)]
+    #[case::segment_duplicate(true, true)]
+    #[case::segment_unique(true, false)]
+    #[should_panic(expected = "L0 view watermark references an active view")]
+    fn test_repair_rejects_active_watermark(#[case] segmented: bool, #[case] duplicate: bool) {
+        let view = SsTableView::identity(SsTableHandle::new(
+            SsTableId::from(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo::default(),
+        ));
+        let mut tree = LsmTreeState {
+            last_compacted_l0_sst_view_id: Some(view.id),
+            l0: VecDeque::from([view.clone()]),
+            ..Default::default()
+        };
+        if duplicate {
+            tree.l0.push_back(view);
+        }
+        let mut core = ManifestCore::new();
+        if segmented {
+            core.segments.push(Segment {
+                prefix: Bytes::from_static(b"a/"),
+                tree: Arc::new(tree),
+            });
+        } else {
+            core.tree = Arc::new(tree);
+        }
+        core.repair_duplicate_l0_view_ids(&DbRand::new(42));
     }
 
     #[test]
