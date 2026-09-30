@@ -14,16 +14,21 @@ Authors:
 
 ## Summary
 
-This RFC adds `ObjectStoreMirror`, a whole-file local mirror for compacted SSTs.
-It is separate from the existing part-based `CachedObjectStore`, which we will
-deprecate and remove.
+This RFC adds `ObjectStoreMirror`, a generic whole-file local mirror for object
+storage, and `SlateDbMirrorPolicy`, which uses it to mirror compacted SSTs. The
+mirror is separate from the existing part-based `CachedObjectStore`, which we
+will deprecate and remove.
 
-`ObjectStoreMirror` supports local-only reads, write-through mirroring, cache
-warming, and garbage collection. It guarantees all compacted SST reads are from
-local files and all writes are durable to object storage before returning
-success.
+The mirror decides how objects are kept locally. A `MirrorPolicy` decides which
+objects are kept. `ObjectStoreMirror` lives in its own crate and knows nothing
+about SlateDB. `SlateDbMirrorPolicy` holds all of SlateDB's rules.
 
-Each `ObjectStoreMirror` serves one database root. The root is detected from
+With `SlateDbMirrorPolicy`, the mirror supports local-only reads, write-through
+mirroring, cache warming, and garbage collection. It guarantees all compacted
+SST reads are from local files and all writes are durable to object storage
+before returning success.
+
+Each `SlateDbMirrorPolicy` serves one database root. The root is detected from
 the first `.manifest` read or write. Subsequent `.manifest` operations for a
 different root are rejected. External SSTs referenced by the database remain
 supported and may reside under other roots.
@@ -66,8 +71,13 @@ cases:
   to one file unlink.
 
 Rather than change the existing `CachedObjectStore` in place, this RFC adds
-`ObjectStoreMirror` under `slatedb/src/object_store_mirror` to address these
-issues.
+`ObjectStoreMirror` to address these issues.
+
+Most of a local mirror has nothing to do with SlateDB. File layout, downloads,
+write-through, and cleaning up after remote deletes are useful to any
+`object_store` user. Only the choice of which objects to keep, and when to drop
+them, depends on SlateDB's manifests. Putting that choice behind a trait keeps
+the SlateDB logic in one small place and lets other projects reuse the mirror.
 
 ## Goals
 
@@ -75,6 +85,7 @@ issues.
 - Support local-only reads, write-through mirroring, and cache warming.
 - Garbage collect obsolete local SSTs promptly without duplicating GC
   eligibility.
+- Keep the mirror generic, with SlateDB's rules in a pluggable policy.
 - Make the new cache additive so existing users are unaffected.
 
 ## Non-Goals
@@ -82,22 +93,100 @@ issues.
 - Changing the runtime behavior of `CachedObjectStore`.
 - Caching WALs, manifests, or other coordination objects.
 - Providing size-based eviction, write-back, or a best-effort caching.
+- Mirroring objects that are overwritten in place. The mirror assumes every
+  mirrored path is written once. See [Guarantees](#guarantees).
 
 ## Design
 
+### Crates
+
+- `slatedb-mirror` is a new workspace crate containing `ObjectStoreMirror`,
+  `MirrorPolicy`, `MirrorHandle`, `MirrorError`, and `Vfs`. It doesn't depend
+  on `slatedb`. A crate boundary is the only thing that keeps the mirror truly
+  generic, because it can't reach `ManifestCore` even by accident.
+- `single_flight.rs` moves out of `slatedb`, into either `slatedb-mirror` or
+  `slatedb-common`.
+- `SlateDbMirrorPolicy` lives in `slatedb`.
+
 ### Public API
 
-`ObjectStoreMirror` is a normal `ObjectStore` implementation in
-`slatedb/src/object_store_mirror`. Users construct it with a local cache root
-and remote store, then pass it through the existing
-`DbBuilder::new`/`Db::builder`/`DbReaderBuilder::builder` object store
-parameter.
-
 ```rust
+pub enum ReadRoute {
+    /// Wrapped store only.
+    Remote,
+    /// Wrapped store. The whole object goes to `MirrorPolicy::observe` before
+    /// the caller gets a result.
+    Observe,
+    /// Local copy only. A miss is an error.
+    Local,
+    /// Download the whole object again, replace the local copy, and serve the
+    /// request from it.
+    Refetch,
+}
+
+pub enum WriteRoute {
+    /// Wrapped store only.
+    Remote,
+    /// Wrapped store, then the payload goes to `MirrorPolicy::observe`.
+    Observe,
+    /// Write to both. Returns after the upload succeeds and the local file is
+    /// in place.
+    Mirror,
+}
+
+#[async_trait]
+pub trait MirrorPolicy: Send + Sync + 'static {
+    /// Runs on every GET and HEAD. `options.head` is true for HEAD. Must be
+    /// cheap.
+    fn read_route(&self, path: &Path, options: &GetOptions) -> Result<ReadRoute>;
+
+    /// Runs on every PUT. Must be cheap.
+    fn put_route(&self, path: &Path, options: &PutOptions) -> Result<WriteRoute>;
+
+    /// Runs on every multipart upload. Must be cheap. `Observe` isn't
+    /// supported here and fails the upload.
+    fn put_multipart_route(
+        &self,
+        path: &Path,
+        options: &PutMultipartOptions,
+    ) -> Result<WriteRoute>;
+
+    /// Runs for `Observe` routes, after the remote call succeeds and before the
+    /// caller gets the result.
+    async fn observe(&self, path: &Path, bytes: &Bytes, mirror: &MirrorHandle) -> Result<()> {
+        Ok(())
+    }
+
+    /// Background work. `build()` spawns it; dropping the mirror cancels it.
+    async fn run(self: Arc<Self>, mirror: MirrorHandle) {}
+}
+
+#[derive(Clone)]
+pub struct MirrorHandle { /* Arc<Inner> */ }
+
+impl MirrorHandle {
+    /// Downloads any paths that aren't local. The request is ordered when this
+    /// is called, not when the returned future is first polled. See
+    /// [Ordering](#ordering).
+    pub fn fetch(&self, paths: impl IntoIterator<Item = Path>) -> Fetch;
+    /// Downloads in the background, best effort.
+    pub fn prefetch(&self, paths: impl IntoIterator<Item = Path>);
+    /// Queues removal of local copies. Never touches the remote store.
+    pub fn evict(&self, paths: impl IntoIterator<Item = Path>);
+    pub fn contains(&self, path: &Path) -> bool;
+    /// The wrapped store. Calls made here skip the policy.
+    pub fn remote(&self) -> &Arc<dyn ObjectStore>;
+}
+
+/// Resolves when every requested path is local, or one download fails.
+pub struct Fetch { /* ... */ }
+impl Future for Fetch { type Output = Result<()>; }
+
 impl ObjectStoreMirror {
     pub fn builder(
         local_dir: impl Into<PathBuf>,
         object_store: Arc<dyn ObjectStore>,
+        policy: Arc<dyn MirrorPolicy>,
     ) -> ObjectStoreMirrorBuilder;
 }
 
@@ -106,10 +195,34 @@ impl ObjectStoreMirrorBuilder {
     /// `StdVfs`.
     pub fn with_vfs(self, vfs: Arc<dyn Vfs>) -> Self;
 
-    /// Sets the maximum number of concurrent downloads used for manifest
-    /// warming, `.compactions` prefetching, and refetches. The default is 8.
+    /// Sets the maximum number of concurrent downloads used by `fetch`,
+    /// `prefetch`, and `Refetch`. The default is 8.
     pub fn with_download_concurrency(self, concurrency: usize) -> Self;
 
+    /// Sets the interval of the remote scan that removes local copies of
+    /// objects deleted remotely. The default is
+    /// `Some(Duration::from_secs(600))`. `None` disables the scan.
+    pub fn with_remote_scan_interval(self, interval: Option<Duration>) -> Self;
+
+    /// Validates the configuration, acquires the cache-directory lock, cleans
+    /// invalid local entries, and spawns `MirrorPolicy::run`.
+    pub async fn build(self) -> Result<Arc<ObjectStoreMirror>, Error>;
+}
+
+#[async_trait]
+impl ObjectStore for ObjectStoreMirror {
+    // Standard ObjectStore methods delegate to local and remote storage.
+}
+```
+
+`SlateDbMirrorPolicy` has its own builder in `slatedb`:
+
+```rust
+impl SlateDbMirrorPolicy {
+    pub fn builder() -> SlateDbMirrorPolicyBuilder;
+}
+
+impl SlateDbMirrorPolicyBuilder {
     /// Sets the predicate used to select which segments are mirrored.
     ///
     /// The predicate receives the latest manifest and the segment prefix being
@@ -120,27 +233,13 @@ impl ObjectStoreMirrorBuilder {
         predicate: impl Fn(&ManifestCore, &[u8]) -> bool + Send + Sync + 'static,
     ) -> Self;
 
-    /// Sets the interval at which the mirror scans remote storage to GC
-    /// obsolete local SSTs. The default is `Some(Duration::from_secs(600))`.
-    /// Passing `None` disables periodic GC but not metadata-driven GC.
-    pub fn with_gc_interval(
-        self,
-        interval: Option<Duration>,
-    ) -> Self;
-
-    /// Validates the configuration, acquires the cache-directory lock, cleans
-    /// invalid local entries, and starts background workers. The database root
-    /// is detected from the first `.manifest` read or write.
-    pub async fn build(self) -> Result<Arc<ObjectStoreMirror>, Error>;
-}
-
-#[async_trait]
-impl ObjectStore for ObjectStoreMirror {
-    // Standard ObjectStore methods delegate to local and remote storage.
+    pub fn build(self) -> Arc<SlateDbMirrorPolicy>;
 }
 ```
 
-A complete instantiation looks like this:
+Users pass the mirror through the existing
+`DbBuilder::new`/`Db::builder`/`DbReaderBuilder::builder` object store
+parameter. A complete instantiation looks like this:
 
 ```rust
 let remote: Arc<dyn ObjectStore> = Arc::new(
@@ -148,13 +247,46 @@ let remote: Arc<dyn ObjectStore> = Arc::new(
         .with_bucket_name("my-bucket")
         .build()?,
 );
-let cache = ObjectStoreMirror::builder("/var/lib/slatedb/cache", remote)
-    .with_download_concurrency(8)
-    .with_reclamation_interval(Some(Duration::from_secs(600)))
-    .build()
-    .await?;
-let db = Db::builder(db_path, cache).build().await?;
+let mirror = ObjectStoreMirror::builder(
+    "/var/lib/slatedb/mirror",
+    remote,
+    SlateDbMirrorPolicy::builder().build(),
+)
+.with_download_concurrency(8)
+.with_remote_scan_interval(Some(Duration::from_secs(600)))
+.build()
+.await?;
+let db = Db::builder(db_path, mirror).build().await?;
 ```
+
+### ObjectStoreMirror Responsibilities
+
+- File layout, `.meta` files, temporary files, `LOCK`, startup cleanup, and
+  `Vfs`.
+- Download deduplication (single-flight), the download concurrency limit, and
+  the in-memory metadata used for HEAD.
+- DELETE removes the local copy too. COPY and RENAME are rejected. LIST goes to
+  the remote store.
+- The periodic remote scan, which removes local copies of remotely deleted
+  objects. This is not a policy decision.
+- Per-path ordering of downloads, write-throughs, evictions, and deletes.
+- Typed `MirrorError`s, wrapped in `object_store::Error::Generic`.
+
+### Guarantees
+
+The mirror guarantees the following on its own, whatever the policy does:
+
+- A local copy is byte-for-byte identical to the remote object at the time it
+  was downloaded or written through the mirror.
+- A DELETE through the mirror removes the local copy.
+- When the remote scan is enabled, local copies of objects that other clients
+  deleted are removed within one scan interval (plus scan time).
+- Operations on the same path apply in the order they were issued. See
+  [Ordering](#ordering).
+
+The mirror only supports write-once paths. Policies must only
+route paths that are never overwritten to `Local`, `Refetch`, or `Mirror`.
+SlateDB SSTs meet this: their names are ULIDs and they are never rewritten.
 
 ### Filesystem layout
 
@@ -162,22 +294,24 @@ Four types of files exist under the cache root:
 
 - `LOCK`: A persistent lock file held exclusively for the lifetime of the
   mirror.
-- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst`: The complete SST file, which is byte-for
+- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst`: The complete object, which is byte-for
   byte identical to the remote object.
 - `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.1234567890`: A temporary file that is being
   written to either for uploading or downloading purposes. The suffix is an
   atomic counter unique to the process.
-- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.meta`: Metadata for the SST, including its
+- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.meta`: Metadata for the object, including its
   canonical object path, ETag, version, and attributes. The path is used to
   recover the remote location after restart and verify the filename hash.
 
-Each SST-related file is prefixed with an MD5-encoding of its object path with
-the filename stripped. This protects against filename collisions between
-external databases and keeps the cache root flat.
+The examples use SlateDB SST names, but the mirror stores whatever file name the
+object path ends with. Each object-related file is prefixed with an MD5-encoding
+of its object path with the filename stripped. This protects against filename
+collisions between directories (for example, external databases) and keeps the
+cache root flat.
 
 The mirror maintains an in-memory map from each MD5 prefix to its canonical
 parent path. Startup reconstructs the map from `.meta` files. Each installation
-atomically checks or inserts the mapping before publishing the SST and rejects
+atomically checks or inserts the mapping before publishing the file and rejects
 a conflicting path.
 
 A directory might look like this:
@@ -206,202 +340,374 @@ The `4e7dc5d27c63e00966170758c2ff14bf` prefix has one partially downloaded SST
 fully downloaded and renamed.
 
 Upload and download files are undifferentiated. No collision is possible
-because the temporary file suffix is unique to the process. Multiple operations
-for the same SST should never be in flight.
+because the temporary file suffix is unique to the process. Downloads are
+deduplicated with `single_flight.rs`, and operations on the same path are
+serialized (see [Ordering](#ordering)), so multiple operations for the same
+object are never in flight.
 
 `build()` takes an exclusive operating-system lock on `LOCK` and holds it until
 the mirror is dropped. The file is not removed when the lock is released. If
 another mirror owns the cache directory, `build()` fails.
 
-### Warming
+### Reads
 
-The mirror is warmed continuously as new `.manifest` files are read and
-written. `ObjectStoreMirror` inspects the path for each object and looks for
-`.manifest` files. When it sees one, it decodes the manifest and compares its
-referenced SSTs with its own local state. Any missing SSTs are downloaded
-synchronously. This happens after the `.manifest` call is forwarded to the
-wrapped store, but before returning to the caller.
+The policy's `read_route` picks one of four routes for each GET and HEAD:
 
-A large compaction job can finish and update the `.manifest` with gigabytes,
-or even terabytes of new SSTs. Blocking the manifest update to download the
-entire set could take minutes or even hours. To prevent large stalls, once the
-database root is detected, `ObjectStoreMirror` derives its
-`.compactions` path and periodically polls it for in-flight job output. It downloads any missing SSTs in the
-background. The `.manifest` blocking is therefore a final true-up rather than a
-complete download of all output from completed compaction jobs.
+- `Remote` reads directly from the wrapped store and does not use the local
+  mirror.
+- `Observe` reads from the wrapped store, then passes the whole object to
+  `MirrorPolicy::observe` before returning to the caller.
+- `Local` reads from the local mirror and returns `NotLocal` if the object is
+  missing. It does not fall back to the wrapped store.
+- `Refetch` forces a synchronous remote read of the full object, overwriting
+  the local copy if it exists. Returns only the requested range to the caller.
+  This is used to repair corrupt files.
 
-This behavior implicitly warms a database when it is first opened. Builders
-always read and write manifests in their `build` function. `DbReader`s also
-benefit from this approach. As new manifests are polled, the mirror will
-download any missing SSTs before forwarding the manifest read. This guarantees
-that all reads will come from local disk.
+`SlateDbMirrorPolicy` combines `Observe` and `Local` to keep the mirror warm.
+Every `.manifest` read and write is routed through `Observe`. The policy decodes
+the manifest, downloads any referenced SSTs that aren't local yet, and only
+then lets the manifest return to the caller. SlateDB only reads compacted SSTs
+that it found in a manifest or wrote itself through a `Mirror` write, so by the
+time it issues a compacted SST read, the file is already on disk.
+Large compaction outputs are prefetched in the background by polling
+`.compactions`, so the manifest download is a final true-up rather than the
+whole job's output. See [Warming](#warming) for details.
 
-Referenced SSTs are every SST returned by `ManifestCore::all_sst_views()`. This
-includes L0 and compacted SSTs in the root tree and all named segments. SST IDs
-found in `ExternalDb.sst_ids` are resolved under the external database's path;
-all others are resolved under the mirror's database root.
+`observe` always sees the whole object:
 
-SSTs referenced by the manifest's checkpoints are not considered referenced
-since readers only need read SSTs from the current manifest. (Mirror garbage
-collection still retains checkpointed SSTs until the checkpoint expires.)
+- A ranged GET with the `Observe` route downloads the whole object, calls
+  `observe`, and returns only the requested range.
+- A HEAD with the `Observe` route goes to the wrapped store and does not call
+  `observe`. It returns no content, so there's nothing for the caller to act
+  on.
+- A conditional GET that returns no body (for example, `NotModified`) does not
+  call `observe`.
+
+The mirror buffers the whole object in memory for `observe`, so policies should
+only use `Observe` for small objects.
+
+`Refetch` applies to HEAD the same way as to GET: it downloads the whole object
+again and returns its metadata.
+
+Object metadata (ETag, version, attributes, and so on) is stored with each
+local object so `GetResult` and `PutResult` always contain accurate data. On
+startup, object metadata is loaded from disk and stored in memory. As new
+`.meta` files are written, the mirror updates its in-memory metadata cache.
+Metadata-only reads for `Local` objects are served from the in-memory cache.
 
 ### Writes
 
-Tagged compacted SST writes are write-through. Single-PUT and multipart writes
-tee bytes to the remote store and its temporary file.
+The policy's `put_route` and `put_multipart_route` pick one of three routes for
+each PUT and multipart upload:
 
-The write returns only after the remote upload succeeds, its `.meta` file is
-written, and the complete local file is atomically renamed. A remote failure
-removes the temporary file and returns the remote error. A local failure returns
-`LocalCacheError`. Remote SSTs that already completed are left unreferenced for
-garbage collection. `RetryingObjectStore` is updated to avoid retrying
-`LocalCacheError`. Disk errors are treated as terminal. `Db`'s closed status
-will be set with a `Data` error.
+- `Remote` writes directly to the wrapped store.
+- `Observe` writes to the wrapped store, then passes the payload to
+  `MirrorPolicy::observe` before returning to the caller.
+- `Mirror` tees bytes to the wrapped store and a local temporary file
+  (`<name>.<counter>`, see [Filesystem layout](#filesystem-layout)). The
+  temporary file is renamed to `<name>` only after the upload succeeds, so a
+  partial or failed write never looks like a complete local copy.
 
-Tagged WAL and untagged writes pass through to remote storage. Manifest,
-compactions, WAL, and GC boundary PUTs retain their existing conditional-write,
-fencing, and publication ordering.
+`Observe` isn't supported for multipart uploads. If `put_multipart_route`
+returns it, `put_multipart` fails with `MirrorError::Unsupported` before
+anything reaches the wrapped store. Supporting it would mean buffering every
+part in memory, and `Observe` is meant for small objects that go through a
+single PUT anyway. SlateDB writes manifests with a single PUT.
 
-`ObjectStoreMirror` will watch for `.manifest` writes. When it sees an object
-with a `.manifest` extension, it will decode the manifest and synchronously
-download any compacted SSTs missing from the local cache.
+A `Mirror` write returns only after the remote upload succeeds, its `.meta`
+file is written, and the complete local file is atomically renamed. A remote
+failure removes the temporary file and returns the remote error. A local
+failure after the upload succeeds returns `MirrorError::WriteCommitted` (see
+[Errors and Retries](#errors-and-retries)). Remote objects that already
+completed are left for the remote store's owner to clean up (for SlateDB, the
+garbage collector).
 
-All downloads use `single_flight.rs` to avoid duplicate downloads.
+Conditional-write modes pass through to the wrapped store unchanged, so
+manifest, compactions, WAL, and GC boundary PUTs retain their existing
+conditional-write, fencing, and publication ordering.
 
-### Reads
+### Errors and Retries
 
-`ObjectStoreMirror` has three internal read modes:
+The mirror returns its own errors wrapped in `object_store::Error::Generic`,
+with a `MirrorError` as the source:
 
-- `Bypass` reads directly from the wrapped store and does not use the local
-  mirror.
-- `Local` reads SSTs from the local filesystem mirror and returns an error
-  if any are missing.
-- `Refetch` forces a synchronous remote read of the full SST, overwriting the
-  local copy if it exists. Returns only the requested range to the caller. This
-  is used to repair corrupt files.
+```rust
+pub enum MirrorError {
+    /// A `Local` route missed.
+    NotLocal { path: Path },
+    /// Local disk I/O failed. Nothing was written remotely.
+    Local { source: std::io::Error },
+    /// A write reached the remote store, but `observe` or local installation
+    /// failed afterwards. The remote object exists.
+    WriteCommitted { path: Path, source: Box<dyn Error + Send + Sync> },
+    /// The policy returned an error from a route or `observe` call.
+    Policy { source: Box<dyn Error + Send + Sync> },
+    /// The mirror doesn't support this operation (COPY, RENAME, or an
+    /// `Observe` multipart upload).
+    Unsupported { operation: &'static str },
+}
+```
 
-`ObjectStoreCallTag` is inspected to determine which mode to use.
+`RetryingObjectStore::should_retry` is updated to never retry a `MirrorError`.
+Today it retries every `Generic` error. For `WriteCommitted`, that would be
+wrong: a retried manifest PUT hits `AlreadyExists`, `verify_put_succeeded`
+finds our ULID, and the retry reports success even though warming never
+finished. The caller must see the failure.
 
-| Request | Routing |
-|---|---|
-| Untagged or tagged WAL | `Bypass` |
-| Tagged compacted with `tag.retry.is_some()` | `Refetch` |
-| Other tagged compacted | `Local` |
+Because the mirror sits beneath `RetryingObjectStore`, that wrapper doesn't
+cover the mirror's own remote calls (`fetch`, `prefetch`, and `Refetch`). The
+mirror retries transient remote errors on those calls itself, with the same
+backoff defaults as `RetryingObjectStore`. An error that reaches the caller has
+already been retried.
 
-Object metadata (ETag, version, attributes, and so on) are cached as part of
-the local SST data so `GetResult` and `PutResult` always contain accurate data.
-On cache warm, object metadata is loaded from disk (or the remote store if the
-SST is missing) and stored in memory. As new `.meta` files are written, the
-mirror updates its in-memory metadata cache.  Metadata-only reads are served
-from the in-memory cache.
+`observe` failures are handled by call type:
 
-### Deletes
+- **Reads.** The error goes to the caller. Nothing was committed, so a caller
+  that retries the read runs `observe` again.
+- **Writes.** The mirror returns `WriteCommitted`. The object is durable, but
+  the policy's follow-up work didn't finish, so the caller has to treat the
+  write as having happened. SlateDB treats it as fatal: `Db` and the compactor
+  close with a `Data` error, the same as local disk errors. On reopen, the
+  manifest is read again and `observe` runs again.
+
+### Ordering
+
+The mirror serializes operations per path in the order they were issued. The
+operations are `fetch`, `prefetch`, `evict`, `Refetch` downloads, `Mirror`
+writes, and deletes. When a fetch, prefetch, or write is issued for a path
+with a pending eviction:
+
+- If the eviction hasn't started, it's canceled.
+- If it has started, the new operation waits for it to finish, then runs.
+
+So when manifest N+1's fetch of an object completes, the object is local, even
+if manifest N's eviction of it was already running. At worst the eviction
+removes the file and the fetch downloads it again. This holds as long as the
+policy issues N's evictions before N+1's fetches.
+`fetch` registers its request when it's called, not when the returned future
+is polled.
+
+`Local` reads don't take part in this ordering. A read that races with an
+eviction may get `NotLocal`. For SlateDB, this only affects reads of SSTs that
+no manifest or active checkpoint references (see
+[Compactor Checkpoint Retention](#compactor-checkpoint-retention)).
+
+### Deletes, Copies, Renames, and Lists
 
 Delete operations pass through to the wrapped store. Local files that match the
 deleted path are removed if they exist. Local and remote deletions are done in
-parallel, and a failure in one does not affect the other.
+parallel, and a failure in one does not affect the other. Deletions also remove
+any in-memory state for the deleted object.
 
 This means a client running a local garbage collector inherits the GC's delete
 calls locally. Garbage collectors that run remotely do not directly remove
-local files, though. To support remote garbage collection, the mirror needs to
-periodically scan the remote store for files that are no longer present.
+local files, though. The [remote scan](#remote-scan) handles that case.
 
-Deletions also remove any in-memory cache state for the deleted object.
+COPY and RENAME fail with `MirrorError::Unsupported` and never reach the
+wrapped store. Either one can overwrite a path the policy mirrors, which breaks
+the write-once assumption (see [Guarantees](#guarantees)), and a RENAME also
+leaves the source's local copy behind. SlateDB doesn't copy or rename SSTs. Its
+only COPY is in WAL cloning, so cloning a database with WAL files needs an
+`Admin` built on the unwrapped store. LIST always goes to the wrapped store.
 
-### Garbage collection
+### Remote Scan
 
-`ObjectStoreMirror` has two garbage collection phases: an optimistic immediate
-metadata-driven phase and a pessimistic periodic exhaustive remote scan.
+An object can be deleted by a client that doesn't go through the mirror, for
+example a garbage collector running in another process. It can also be written
+through the mirror and then abandoned before anything references it, for
+example after a crash, a process restart, or a failed compaction job. The
+mirror periodically scans the remote store to find these cases. The scan runs
+every ten minutes by default:
 
-The optimistic approach is required to keep disk usage low in high-throughput
-workloads. Without an active deletion mechanism, even a minute of writes and
-compaction churn can generate hundreds of outdated files. This is not a concern
-for object storage, but is for local disks.
-
-Pessimistic GC is required to handle the case where a local SST is
-written successfully and then lost before it is recorded in metadata. This can
-be caused by a crash, a process restart, a failed compaction job, and so on.
-These are rare cases, but they can leave a local SST that is no longer
-referenced and should be deleted. Pessimistic GC is effectively a
-cheap way to copy the garbage collector's logic without running it in two
-places.
-
-Garbage collection also removes any in-memory cache state for the deleted
-object.
-
-#### Optimistic garbage collection
-
-`ObjectStoreMirror` uses `.manifest` transitions to detect when a local SST is
-no longer referenced. If an old `.manifest` references an SST and a new one no
-longer does, that SST is safe for deletion. It queues these SSTs for deletion
-and removes them in the background.
-
-The mirror keeps the newest `.manifest` state it observes. Reads and writes
-update the state and apply this rule:
-
-- Build full object paths for every SST referenced by the latest manifest and
-  its active checkpoint manifests. Queue (for deletion) paths present in the
-  old reference set but absent from the new one.
-- Remove any in-memory manifests that are no longer referenced by the latest
-  manifest or its active checkpoints.
-
-"Reference" here means every SST returned by `ManifestCore::all_sst_views()`
-for the latest manifest and each active checkpoint manifest. This includes L0
-and compacted SSTs in the root tree and all named segments. SST IDs found in
-`ExternalDb.sst_ids` are resolved under the external database's path; all
-others are resolved under the mirror's database root.
-
-Missing checkpoint manifests are fetched from the remote store.
-
-On both reads and writes, this is done synchronously after the `.manifest`
-is read/written but before it is returned. The return is blocked until both are
-complete.
-
-#### Pessimistic garbage collection
-
-An SST can be written successfully and then lost before it is recorded in
-`.compactions` or `.manifest` files. Metadata diffs cannot discover such files.
-A full remote scan runs every ten minutes by default to collect these cases:
-
-- Snapshot the local `.sst` file list.
+- Snapshot the local file list.
 - Read their canonical object paths from `.meta` and group them by remote parent
   prefix.
 - LIST each distinct parent prefix on the wrapped remote store.
 - Delete any local file absent from the remote result.
 
-The periodic scan only deletes files after remote GC has removed them. This
-implies that local pessimistic garbage collection will not delete anything younger
-than the GC's compacted SST `min_age` setting. It also means the
- `ObjectStoreMirror` will inherit all of the GC's rules.
+The snapshot is taken before the LIST, and files are only installed after they
+exist remotely, so a file installed during the scan is never mistaken for a
+deleted one. Deletions go through the mirror's per-path
+[ordering](#ordering), like evictions.
 
-Pessimistic garbage collection is not necessary if the garbage collector is running
-in the same process. The GC's delete calls will remove local files directly
-(see Delete Semantics, above). Users may disable the periodic scan by passing `None` to
-`ObjectStoreMirrorBuilder::with_reclamation_interval`.
+The scan only deletes files after they've been removed remotely. For SlateDB,
+this means it won't delete anything younger than the garbage collector's
+compacted SST `min_age` setting, and it inherits all of the garbage collector's
+rules. It's a cheap way to reuse the garbage collector's logic without running
+it in two places.
+
+The scan is not necessary if the garbage collector is running in the same
+process, since the GC's delete calls remove local files directly. Users may
+disable it by passing `None` to
+`ObjectStoreMirrorBuilder::with_remote_scan_interval`.
 
 > [!IMPORTANT]
 > This design requires a bucket and endpoint with strongly consistent object
-> reads, writes, deletes, and listings. Garbage collection treats confirmed remote
+> reads, writes, deletes, and listings. The remote scan treats confirmed remote
 > absence as authoritative and may delete the only local copy, so it must be
 > disabled when these guarantees are unavailable. In particular:
 >
 > - Tigris global and dual-region buckets are strongly consistent for requests
 >   within one region but eventually consistent across regions. All writers and
->   caches performing garbage collection must access such a bucket from the same
+>   mirrors running the remote scan must access such a bucket from the same
 >   region; Tigris
 >   multi-region and single-region buckets provide strong consistency globally.
 > - Azure RA-GRS and RA-GZRS secondary endpoints are eventually consistent with
->   the primary. Garbage collection must use the primary endpoint and remain
+>   the primary. The remote scan must use the primary endpoint and remain
 >   disabled while reads are directed to a secondary endpoint.
 
-### Segment Support
+### SlateDB Policy
 
-`ObjectStoreMirror` supports segment-based routing. This requires two changes:
+`SlateDbMirrorPolicy` holds all of SlateDB's mirroring rules. With the split
+above, it fits in one fairly small file.
+
+#### Routing
+
+`SlateDbMirrorPolicy` reads `ObjectStoreCallTag` from the `Extensions` in the
+call's options. It ignores the other option fields, except that it returns an
+error instead of `Mirror` for a `PutMode::Update` write:
+
+| Call | Route |
+|---|---|
+| GET or PUT of `*.manifest` | `Observe` (error if the database root doesn't match) |
+| Tagged compacted SST in a selected segment, with `tag.retry.is_some()` | `Refetch` |
+| Tagged compacted SST in a selected segment | `Local` for reads, `Mirror` for writes |
+| Everything else (untagged, WAL, unselected segments) | `Remote` |
+
+#### Manifest Processing
+
+The policy keeps this state behind a mutex:
+
+- The database root, recorded from the first manifest it sees.
+- The ID of the newest manifest it has processed.
+- `retain`: the SST paths that must not be evicted.
+- Decoded checkpoint manifests, cached by ID. Manifests are immutable, so these
+  never go stale.
+
+`retain` only controls eviction. It doesn't cause anything to be downloaded,
+and an SST in `retain` isn't necessarily on disk. Downloads happen only through
+`fetch`.
+
+In short, a newer manifest sets `retain` to its own SSTs plus those of its
+active checkpoints, fetches its own SSTs, and evicts anything no longer
+retained. An older manifest leaves `retain` alone and fetches whichever of its
+SSTs are still retained. That second path is how checkpoint readers get warmed.
+
+`observe` for manifest `M`:
+
+1. Decode `M` and build `warm`: `M`'s SSTs, counting only selected segments.
+2. Take the lock and check whether `M` is newer than the newest processed
+   manifest (or none has been processed yet). If it is, take references to
+   the cached manifests of `M`'s active checkpoints and note which ones aren't
+   cached. Release the lock.
+3. If `M` is newer, read the uncached checkpoint manifests through
+   `mirror.remote()` so the reads don't loop back into `observe`.
+4. Take the lock.
+5. If `M` is still newer than the newest processed manifest:
+   1. Add the checkpoint manifests read in step 3 to the cache.
+   2. Build the new `retain`: `warm` plus the selected SSTs of each active
+      checkpoint.
+   3. `mirror.evict(old_retain - retain)`.
+   4. Save the new `retain` and `M`'s ID. Drop cached checkpoint manifests
+      that are no longer active.
+6. Otherwise, leave `retain` alone and narrow `warm` to `warm & retain`.
+7. Release the lock.
+8. Call `mirror.fetch(warm)` and await it. Paths that are already local are
+   skipped.
+
+The SSTs in a manifest are every SST returned by `ManifestCore::all_sst_views()`.
+This includes L0 and compacted SSTs in the root tree and all named segments.
+SST IDs found in `ExternalDb.sst_ids` are resolved under the external
+database's path; all others are resolved under the database root.
+
+Only newer manifests move `retain` forward, so a late or out-of-order read
+can't roll eviction state back. An older manifest only warms SSTs that are
+already retained. Anything that neither the latest processed manifest nor one
+of its active checkpoints references is eligible for GC, so there's no reason
+to download or keep it.
+
+Step 8 fetches only `M`'s own SSTs, so on a newer manifest, SSTs referenced
+only by its checkpoints are retained but not downloaded. They're fetched when
+something reads the checkpoint's manifest. A `DbReader` opened on a checkpoint
+does this (`DbReaderInner::new`). The checkpoint's manifest is usually older
+than the latest one, so it takes the step 6 path, and `warm & retain` is the
+checkpoint's SSTs minus anything that's no longer retained. A caller holding
+an older manifest that isn't a checkpoint may get `NotLocal` for SSTs that are
+no longer retained, the same as any read of an unreferenced SST (see
+[Ordering](#ordering)).
+
+Evictions are issued in step 5 under the lock, so they reach the mirror in
+manifest order. Fetches are issued in step 8, after the lock is released.
+`observe` for manifest N+1 can only reach step 8 after it has held the lock,
+which is after N's evictions were issued. Together with the mirror's
+[per-path ordering](#ordering), this means an eviction for manifest N can't
+delete an SST that manifest N+1 retains again.
+
+The reverse race is allowed. `observe` for N can issue its fetch after
+`observe` for N+1 has evicted some of the same SSTs, which downloads SSTs that
+are no longer retained. The policy never evicts them again, since they're not
+in `retain`. Nothing references them either, so the garbage collector deletes
+them remotely and the [remote scan](#remote-scan) removes the local copies.
+
+The lock is never held across a remote call. A slow checkpoint manifest read
+in step 3 or a slow download in step 8 would otherwise stall every other
+manifest read and write, including the writer's manifest PUT. The reads don't need the lock: `M`'s active
+checkpoints depend only on `M`, and manifests are immutable, so nothing read in
+step 3 can go stale. If another `observe` processes a newer manifest while the
+reads are in flight, step 5's re-check fails and `M` takes the step 6 path.
+Step 2 keeps references to the cached checkpoint manifests it needs, so a
+concurrent `observe` pruning the cache can't leave step 5 missing one. Two
+`observe` calls that race on the same new checkpoint may both read it. This is
+rare, and a per-ID `OnceCell` could dedupe the reads if it matters.
+
+#### Warming
+
+The mirror is warmed continuously as new `.manifest` files are read and
+written. `observe` downloads any missing SSTs synchronously (step 8). This
+happens after the `.manifest` call is forwarded to the wrapped store, but
+before returning to the caller.
+
+A large compaction job can finish and update the `.manifest` with gigabytes,
+or even terabytes of new SSTs. Blocking the manifest update to download the
+entire set could take minutes or even hours. To prevent large stalls,
+`SlateDbMirrorPolicy::run` waits until the database root is known, then polls
+the `.compactions` file for in-flight job output and calls
+`mirror.prefetch(outputs)`. The `.manifest` blocking is therefore a final
+true-up rather than a complete download of all output from completed
+compaction jobs.
+
+This behavior implicitly warms a database when it is first opened. Builders
+always read and write manifests in their `build` function. `DbReader`s also
+benefit from this approach. As new manifests are polled, the mirror will
+download any missing SSTs before returning the manifest. This guarantees that
+all reads will come from local disk.
+
+SSTs referenced only by the latest manifest's checkpoints are not warmed from
+it, since readers of the latest manifest don't need them. They're still
+retained until the checkpoint expires. A reader opened on a checkpoint warms
+them by reading the checkpoint's manifest.
+
+#### Garbage Collection
+
+Manifest transitions (step 5) are the fast path. If an old manifest retains an
+SST and the new one no longer does, the SST is evicted in the background. This
+keeps disk usage low in high-throughput workloads. Without an active deletion
+mechanism, even a minute of writes and compaction churn can generate hundreds
+of outdated files. This is not a concern for object storage, but is for local
+disks.
+
+The mirror's [remote scan](#remote-scan) is the backstop. It handles SSTs that
+were written locally and then lost before they were recorded in `.compactions`
+or `.manifest` files. Manifest transitions can't discover such files.
+
+#### Segment Support
+
+Segment-based routing requires two changes:
 
 1. `ObjectStoreCallTag` needs a new `segment` field to indicate the segment prefix for routing.
-2. `ObjectStoreMirrorBuilder` needs a new `with_segment_predicate` method to allow users to specify which segments should be mirrored.
+2. `SlateDbMirrorPolicyBuilder` needs a `with_segment_predicate` method to allow users to specify which segments should be mirrored.
 
-The segment field is required because a new SST may not appear in the manifest yet. The `ObjectStoreMirror` needs to know the segment prefix to evaluate the predicate and decide whether to mirror the SST.
+The segment field is required because a new SST may not appear in the manifest yet. The policy needs to know the segment prefix to evaluate the predicate and decide whether to mirror the SST.
 
 ```rs
 pub struct ObjectStoreCallTag {
@@ -416,29 +722,21 @@ pub struct ObjectStoreCallTag {
 
 The `TableStore` must be updated to receive the field in its read and write SST functions. This touches a wide range of files, but the changes are mechanical and straightforward.
 
-`ObjectStoreMirrorBuilder` accepts an optional segment predicate:
+The predicate receives a manifest and the segment prefix being evaluated. It selects every segment by default. An empty prefix identifies the root segment.
 
-```rust
-Fn(&ManifestCore, &[u8]) -> bool + Send + Sync + 'static
-```
+When processing a manifest, the policy evaluates the predicate against the incoming `ManifestCore`. It warms newly selected SSTs before returning the manifest, then evicts SSTs that are no longer selected as part of manifest-driven garbage collection (see above).
 
-The predicate receives the last seen manifest and the segment prefix being evaluated. It selects every segment by default. An empty prefix identifies the root segment.
+For `.compactions` entries, reads, and writes, the predicate receives the last manifest observed by the policy. The segment prefix is passed separately, so the predicate can select a new segment before it appears in the manifest. For example, a date-based predicate can recognize a new `YYYYMMDD` prefix when the day rolls over.
 
-When processing a manifest, the mirror evaluates the predicate against the incoming `ManifestCore`. It warms newly selected SSTs before returning the manifest, publishes the new set of mirrored paths, then removes SSTs that are no longer selected as part of optimistic garbage collection (see above).
+Selected reads are routed to the local mirror, and unselected reads to the wrapped object store. Selected writes are written locally and remotely. Unselected writes go directly to the wrapped object store. Only SSTs in selected segments are retained, so an SST whose segment stops being selected is evicted on the next manifest transition. If a later manifest selects it again, the mirror's [ordering](#ordering) cancels the pending eviction or fetches the SST again.
 
-For `.compactions` entries and writes, the predicate receives the last manifest observed by the mirror. The segment prefix is passed separately, so the predicate can select a new segment before it appears in the manifest. For example, a date-based predicate can recognize a new `YYYYMMDD` prefix when the day rolls over.
-
-Reads also run through the predicate. If the segment is selected, the read is routed to the local mirror. If it is not selected, the read is routed to the wrapped object store. A missing local mirror file is treated as a `LocalCacheError` and does not fall back to the wrapped store.
-
-Selected writes are written locally and remotely. Unselected writes go directly to the wrapped object store. Local garbage collection only retains SSTs referenced by selected segments.
-
-### Compactor Checkpoint Retention
+#### Compactor Checkpoint Retention
 
 We add a new `CompactorOptions::checkpoint_lifetime` configuration that sets
 the (currently hardcoded) checkpoint written before compaction inputs are
 removed from the manifest. The default stays 15 minutes (the currently
-hardcoded value). Manifest-driven reclamation keeps SSTs referenced by these
-checkpoints.
+hardcoded value). Manifest-driven garbage collection keeps SSTs referenced by
+these checkpoints.
 
 The checkpoint protects scans, gets, snapshots, and transactions that began
 before the compaction's manifest update. Shortening it reduces the mirror's
@@ -470,7 +768,7 @@ abstracts the local filesystem operations used by the mirror.
 
 ### Retries and metrics
 
-The user supplies the cache as the main object store. SlateDB then applies its
+The user supplies the mirror as the main object store. SlateDB then applies its
 existing internal wrappers. The base-to-outer construction order is:
 
 ```text
@@ -490,17 +788,17 @@ they appear in.
 
 ### Startup
 
-On startup, `ObjectStoreMirrorBuilder::build` :
+On startup, `ObjectStoreMirrorBuilder::build`:
 
 1. Validates options
 2. Makes the local directory if it does not exist
 3. Acquires the exclusive `LOCK` file lock
-4. Removes any `.sst.[tmp_num]` files (incomplete uploads or downloads)
-5. Scans `.sst` and `.meta` pairs, deleting entries with a missing partner,
+4. Removes any `.[tmp_num]` files (incomplete uploads or downloads)
+5. Scans object and `.meta` pairs, deleting entries with a missing partner,
    malformed metadata, a canonical path that does not match the local filename,
    or a conflicting MD5-to-parent-path mapping
 6. Reconstructs the in-memory path and object metadata maps from valid pairs
-7. Starts background workers
+7. Starts the remote scan and spawns `MirrorPolicy::run`
 
 ## Impact Analysis
 
@@ -558,16 +856,17 @@ apply.
 - [x] Language bindings (Go/Python/etc)
 - [ ] Observability (metrics/logging/tracing)
 
-A binding wrapper will be provided for `ObjectStoreMirror`.
+A binding wrapper will be provided for `ObjectStoreMirror` with
+`SlateDbMirrorPolicy`.
 
 ## Operations
 
 ### Performance and Cost
 
 Local hits perform range reads from one whole SST file. A local miss returns
-`LocalCacheError` without remote fallback. `Refetch` validation retries and
-warming reads remote storage explicitly. WAL and untagged coordination reads
-always use remote storage.
+`NotLocal` without remote fallback. `Refetch` validation retries and warming
+read remote storage explicitly. WAL and untagged coordination reads always use
+remote storage.
 
 Compacted SST writes stream to local and remote storage concurrently and return
 after the remote write succeeds and the local file is installed. WAL writes
@@ -576,21 +875,21 @@ remain on the remote path.
 Cache warming reads the latest manifest and issues one full-object GET
 for each referenced SST not already local. It may therefore transfer the full
 live compacted data set when starting with an empty cache. Existing local SSTs
-avoid those GETs. The utility shares the cache's remote-read concurrency with
-background refetches and returns only after every SST in its manifest snapshot
-is installed or one fails.
+avoid those GETs. Warming shares the mirror's download concurrency with
+prefetches and refetches and returns only after every SST in its manifest
+snapshot is installed or one fails.
 
-Metadata transitions reclaim normal compaction churn without remote SST LISTs.
-Every ten minutes by default, the fallback issues one LIST per distinct remote
-parent prefix represented locally. Setting the reclamation interval to
+Manifest transitions reclaim normal compaction churn without remote SST LISTs.
+Every ten minutes by default, the remote scan issues one LIST per distinct
+remote parent prefix represented locally. Setting the remote scan interval to
 `None` eliminates these periodic LISTs.
 
 ### Capacity
 
-The cache has no maximum-size eviction setting in this proposal. It cannot
-discard an SST and preserve its `Local` contract, so operators must size the
-volume to store the entire database, including in-flight compaction SSTs and
-ungarbage-collected SSTs.
+The mirror has no maximum-size eviction setting in this proposal.
+`SlateDbMirrorPolicy` can't discard an SST and preserve its `Local` contract,
+so operators must size the volume to store the entire database, including
+in-flight compaction SSTs and ungarbage-collected SSTs.
 
 ### Observability
 
@@ -625,11 +924,49 @@ SR7 is dropped and disk usage shrinks to 75 GiB.
 ScyllaDB has a similar problem and solves it with [incremental compaction](https://www.scylladb.com/2020/01/16/maximizing-disk-utilization-with-incremental-compaction/). We could implement a similar
 design.
 
-### Generalized Public API
-
-The current `ObjectStoreMirror` API is designed for SlateDB's use case. We could generalize it to support other use cases. To do so, I think we'd need to make the warming and caching strategies pluggable. Perhaps we could use an event-based approach where the user can register callbacks for certain events (e.g., manifest read, SST write) and implement their own warming and caching logic. This is left to future work if we find demand for it.
-
 ## Alternatives
+
+### SlateDB-Specific Mirror
+
+An earlier draft of this RFC put all of the logic, including manifest decoding,
+in one `ObjectStoreMirror` inside `slatedb`. That's less code up front, but it
+ties the file layout, downloads, and remote scan to SlateDB's metadata, and
+nobody else could use it.
+
+### Mirrored ObjectStore Instead of a Vfs
+
+We considered replacing the `Vfs` with a second `ObjectStore` that holds the
+local copies: `builder(remote, mirrored, policy)`. Users wanting a local mirror
+would pass `object_store`'s `LocalFileSystem`. This had real appeal:
+
+- `ObjectStore` already covers range reads, atomic puts, deletes, and listing.
+  `LocalFileSystem` writes through staging files and renames them into place,
+  so the mirror wouldn't manage temporary files itself.
+- Tests could use `InMemory`, and DST could reuse `DeterministicLocalFilesystem`
+  and `FailingObjectStore` instead of a new `SimulatedVfs`.
+- `LocalFileSystem`'s automatic cleanup removes empty directories, which would
+  allow a nested layout and drop the MD5 prefix.
+- The mirrored store wouldn't have to be local. For example, S3 Express One
+  Zone could mirror S3 Standard.
+
+We rejected it because of locking. The mirror has to be the only writer of its
+local copies. Its in-memory state (the contains map, metadata, per-path
+ordering, and single-flight downloads) assumes nothing else changes them. A
+second mirror on the same store would evict copies the first one is serving,
+and its startup cleanup would delete the first one's files. The first mirror
+would then return `NotLocal`, and since its in-memory map still says the copies
+are there, later fetches would skip them until it restarts.
+
+`ObjectStore` can't express the lock this needs. The lock must be released when
+the process dies, which an OS file lock gives us for free. A lock object written
+with `PutMode::Create` survives a crash and has to be removed by hand. Expiring
+it needs a lease and a heartbeat, and renewing a lease needs `PutMode::Update`,
+which `LocalFileSystem` doesn't support. Even a working lease isn't safe on its
+own: a process that stalls past its lease keeps writing, and `ObjectStore` has
+no way to fence arbitrary puts and deletes against an epoch. For a non-local
+mirrored store, exclusivity would come down to the operator deploying it
+correctly.
+
 
 ### CachedObjectStore With Eviction Disabled
 
@@ -674,6 +1011,18 @@ barriers, and additional failure handling.
 
 ## Open Questions
 
+### Read-Through Route
+
+A `ReadThrough` read route would download the whole object on a local miss and
+serve it. It's small to add and would make the crate usable as a plain
+whole-file cache. SlateDB doesn't need it, so we'd wait until someone asks.
+
+### Size-Based Eviction
+
+A policy could already enforce a size limit from `run` if `MirrorHandle`
+exposed entries with their sizes. LRU (least recently used) eviction would need
+a hook on every read, which we'd leave out.
+
 ### Nested Directory Structure
 
 This RFC used to propose a nested directory structure for the local mirror. The
@@ -699,6 +1048,18 @@ There is, however, an open question around the CPU cost of computing the MD5 pre
 
 ## Updates
 
+- Warm every manifest returned to a caller, including older checkpoint
+  manifests. Only newer manifests advance retention, and older manifests only
+  warm SSTs that are already retained. `observe` no longer holds its lock
+  while reading checkpoint manifests or fetching SSTs. Replaced the
+  "subset of remote" guarantee with eventual cleanup and scoped the mirror to
+  write-once paths. Added per-path ordering of fetches and evictions, a
+  non-retryable `WriteCommitted` error, and whole-object rules for `Observe`.
+  COPY, RENAME, and `Observe` multipart uploads now fail with
+  `MirrorError::Unsupported`.
+- Split the design into a generic `ObjectStoreMirror` crate and a pluggable
+  `MirrorPolicy`, with SlateDB's rules in `SlateDbMirrorPolicy`. Renamed the
+  periodic GC setting to `with_remote_scan_interval`.
 - Added metadata-driven reclamation with a periodic remote reclamation
   backstop and configurable compactor checkpoint retention.
 - Added `with_vfs` and a minimal virtual filesystem abstraction.
