@@ -26,10 +26,6 @@ use crate::{
 };
 
 enum FetchTask {
-    /// Aborted on drop: a fetch whose iterator is gone (a cancelled scan, or a
-    /// `seek` that discards its prefetches) would otherwise keep running with
-    /// nobody awaiting it, retrying for as long as the object store's retry
-    /// policy allows — forever when `object_store_max_retries` is `None`.
     InFlight(AbortOnDropHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
     Finished(VecDeque<Arc<Block>>),
 }
