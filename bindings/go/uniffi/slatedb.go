@@ -573,6 +573,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_system_clock()
+		})
+		if checksum != 11928 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_system_clock: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_wal_object_store()
 		})
 		if checksum != 18899 {
@@ -753,6 +762,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_system_clock()
+		})
+		if checksum != 2584 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_system_clock: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store()
 		})
 		if checksum != 4790 {
@@ -852,11 +870,56 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_system_clock()
+		})
+		if checksum != 15259 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_system_clock: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store()
 		})
 		if checksum != 2290 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_systemclock_advance()
+		})
+		if checksum != 53270 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_systemclock_advance: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_systemclock_is_mock()
+		})
+		if checksum != 2441 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_systemclock_is_mock: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_systemclock_now_millis()
+		})
+		if checksum != 3506 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_systemclock_now_millis: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_systemclock_set()
+		})
+		if checksum != 60259 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_systemclock_set: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1838,6 +1901,24 @@ func uniffiCheckChecksums() {
 		if checksum != 20397 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbreaderbuilder_new: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_systemclock_default_clock()
+		})
+		if checksum != 17122 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_systemclock_default_clock: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_systemclock_mock()
+		})
+		if checksum != 18253 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_systemclock_mock: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -3005,6 +3086,11 @@ type AdminBuilderInterface interface {
 	Build() (*Admin, error)
 	// Sets the seed used for SlateDB's internal random number generation.
 	WithSeed(seed uint64) error
+	// Reads wall time from `clock` instead of the process clock. Every timer
+	// follows it: checkpoint expiry, garbage collector and compactor schedule
+	// ticks and the object-store retry backoff. On a frozen mock those wait
+	// until the test advances the clock.
+	WithSystemClock(clock *SystemClock) error
 	// Uses a separate object store for WAL-backed administrative operations.
 	WithWalObjectStore(walObjectStore *ObjectStore) error
 }
@@ -3046,6 +3132,21 @@ func (_self *AdminBuilder) WithSeed(seed uint64) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_adminbuilder_with_seed(
 			_pointer, FfiConverterUint64INSTANCE.Lower(seed), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Reads wall time from `clock` instead of the process clock. Every timer
+// follows it: checkpoint expiry, garbage collector and compactor schedule
+// ticks and the object-store retry backoff. On a frozen mock those wait
+// until the test advances the clock.
+func (_self *AdminBuilder) WithSystemClock(clock *SystemClock) error {
+	_pointer := _self.ffiObject.incrementPointer("*AdminBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_adminbuilder_with_system_clock(
+			_pointer, FfiConverterSystemClockINSTANCE.Lower(clock), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -4774,6 +4875,11 @@ type DbBuilderInterface interface {
 	WithSettings(settings *Settings) error
 	// Sets the SSTable block size used for newly written tables.
 	WithSstBlockSize(sstBlockSize SstBlockSize) error
+	// Reads wall time from `clock` instead of the process clock. Every timer
+	// follows it: TTL expiry, flush and poll ticks, the object-store retry
+	// backoff and the flush timeout. On a frozen mock those wait until the
+	// test advances the clock.
+	WithSystemClock(clock *SystemClock) error
 	// Uses a separate object store for WAL files.
 	WithWalObjectStore(walObjectStore *ObjectStore) error
 }
@@ -4970,6 +5076,21 @@ func (_self *DbBuilder) WithSstBlockSize(sstBlockSize SstBlockSize) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_sst_block_size(
 			_pointer, FfiConverterSstBlockSizeINSTANCE.Lower(sstBlockSize), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Reads wall time from `clock` instead of the process clock. Every timer
+// follows it: TTL expiry, flush and poll ticks, the object-store retry
+// backoff and the flush timeout. On a frozen mock those wait until the
+// test advances the clock.
+func (_self *DbBuilder) WithSystemClock(clock *SystemClock) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_system_clock(
+			_pointer, FfiConverterSystemClockINSTANCE.Lower(clock), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -5919,6 +6040,11 @@ type DbReaderBuilderInterface interface {
 	// database must configure an extractor matching the one the database
 	// was created with.
 	WithSegmentExtractor(extractor PrefixExtractor) error
+	// Reads wall time from `clock` instead of the process clock. Every timer
+	// follows it: checkpoint lifetimes, manifest polls, TTL visibility and
+	// the object-store retry backoff. On a frozen mock those wait until the
+	// test advances the clock.
+	WithSystemClock(clock *SystemClock) error
 	// Uses a separate object store for WAL files.
 	WithWalObjectStore(walObjectStore *ObjectStore) error
 }
@@ -6083,6 +6209,21 @@ func (_self *DbReaderBuilder) WithSegmentExtractor(extractor PrefixExtractor) er
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_segment_extractor(
 			_pointer, FfiConverterPrefixExtractorINSTANCE.Lower(extractor), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Reads wall time from `clock` instead of the process clock. Every timer
+// follows it: checkpoint lifetimes, manifest polls, TTL visibility and
+// the object-store retry backoff. On a frozen mock those wait until the
+// test advances the clock.
+func (_self *DbReaderBuilder) WithSystemClock(clock *SystemClock) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_system_clock(
+			_pointer, FfiConverterSystemClockINSTANCE.Lower(clock), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -9331,6 +9472,182 @@ func LowerToExternalSlateDbWalReader(value *SlateDbWalReader) uint64 {
 type FfiDestroyerSlateDbWalReader struct{}
 
 func (_ FfiDestroyerSlateDbWalReader) Destroy(value *SlateDbWalReader) {
+	value.Destroy()
+}
+
+// The clock a `Db`, `DbReader` or `Admin` reads wall time from. Every engine
+// timer follows it: TTL expiry, checkpoint lifetimes, flush and poll ticks,
+// the object-store retry backoff and the flush timeout.
+type SystemClockInterface interface {
+	// Moves a mock clock forward by `millis`. Engine tasks sleeping on the
+	// clock see the new time when the runtime next polls them; `advance`
+	// returns without waiting for that, so a test must wait for the effect it
+	// expects (an expired key, a completed flush) rather than assert it at
+	// once. Refused on the default clock and when the result is not a
+	// representable timestamp.
+	Advance(millis uint64) error
+	IsMock() bool
+	// The clock's current time in milliseconds since the Unix epoch.
+	NowMillis() int64
+	// Sets a mock clock to `ts_millis`. The engine's tickers require a
+	// monotonic clock, so a time before the clock's current one is refused,
+	// as is one that is not a representable timestamp. Refused on the default
+	// clock.
+	Set(tsMillis int64) error
+}
+
+// The clock a `Db`, `DbReader` or `Admin` reads wall time from. Every engine
+// timer follows it: TTL expiry, checkpoint lifetimes, flush and poll ticks,
+// the object-store retry backoff and the flush timeout.
+type SystemClock struct {
+	ffiObject FfiObject
+}
+
+// The process clock.
+func SystemClockDefaultClock() *SystemClock {
+	return FfiConverterSystemClockINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_systemclock_default_clock(_uniffiStatus)
+	}))
+}
+
+// A clock frozen at `initial_ts_millis` (milliseconds since the Unix
+// epoch) that moves only through `advance` and `set`. Refused when
+// `initial_ts_millis` is not a representable timestamp.
+func SystemClockMock(initialTsMillis int64) (*SystemClock, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_systemclock_mock(FfiConverterInt64INSTANCE.Lower(initialTsMillis), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *SystemClock
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterSystemClockINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+// Moves a mock clock forward by `millis`. Engine tasks sleeping on the
+// clock see the new time when the runtime next polls them; `advance`
+// returns without waiting for that, so a test must wait for the effect it
+// expects (an expired key, a completed flush) rather than assert it at
+// once. Refused on the default clock and when the result is not a
+// representable timestamp.
+func (_self *SystemClock) Advance(millis uint64) error {
+	_pointer := _self.ffiObject.incrementPointer("*SystemClock")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_systemclock_advance(
+			_pointer, FfiConverterUint64INSTANCE.Lower(millis)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+func (_self *SystemClock) IsMock() bool {
+	_pointer := _self.ffiObject.incrementPointer("*SystemClock")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_slatedb_uniffi_fn_method_systemclock_is_mock(
+			_pointer, _uniffiStatus)
+	}))
+}
+
+// The clock's current time in milliseconds since the Unix epoch.
+func (_self *SystemClock) NowMillis() int64 {
+	_pointer := _self.ffiObject.incrementPointer("*SystemClock")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterInt64INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_systemclock_now_millis(
+			_pointer, _uniffiStatus)
+	}))
+}
+
+// Sets a mock clock to `ts_millis`. The engine's tickers require a
+// monotonic clock, so a time before the clock's current one is refused,
+// as is one that is not a representable timestamp. Refused on the default
+// clock.
+func (_self *SystemClock) Set(tsMillis int64) error {
+	_pointer := _self.ffiObject.incrementPointer("*SystemClock")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_systemclock_set(
+			_pointer, FfiConverterInt64INSTANCE.Lower(tsMillis), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+func (object *SystemClock) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterSystemClock struct{}
+
+var FfiConverterSystemClockINSTANCE = FfiConverterSystemClock{}
+
+func (c FfiConverterSystemClock) Lift(handle C.uint64_t) *SystemClock {
+	result := &SystemClock{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_systemclock(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_systemclock(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*SystemClock).Destroy)
+	return result
+}
+
+func (c FfiConverterSystemClock) Read(reader io.Reader) *SystemClock {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterSystemClock) Lower(value *SystemClock) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*SystemClock")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterSystemClock) Write(writer io.Writer, value *SystemClock) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalSystemClock(handle uint64) *SystemClock {
+	return FfiConverterSystemClockINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalSystemClock(value *SystemClock) uint64 {
+	return uint64(FfiConverterSystemClockINSTANCE.Lower(value))
+}
+
+type FfiDestroyerSystemClock struct{}
+
+func (_ FfiDestroyerSystemClock) Destroy(value *SystemClock) {
 	value.Destroy()
 }
 
