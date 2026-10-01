@@ -1,5 +1,7 @@
 mod admin;
+mod block_transformer;
 mod builder;
+mod clock;
 mod config;
 mod db;
 mod db_cache;
@@ -23,7 +25,9 @@ mod write_batch;
 mod write_handle;
 
 pub use admin::Admin;
+pub use block_transformer::BlockTransformer;
 pub use builder::{AdminBuilder, CloneBuilder, DbBuilder, DbReaderBuilder};
+pub use clock::SystemClock;
 pub use config::{
     CloseOptions, DurabilityLevel, FlushOptions, FlushType, GarbageCollectorDirectoryOptions,
     GarbageCollectorOptions, GarbageCollectorScheduleOptions, IsolationLevel, IterationOrder,
@@ -34,7 +38,7 @@ pub use db::Db;
 pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
-pub use error::{CloseReason, Error, MergeOperatorCallbackError};
+pub use error::{BlockTransformerCallbackError, CloseReason, Error, MergeOperatorCallbackError};
 pub use filter_policy::{
     BloomFilterOptions, FilterContext, FilterPolicy, PrefixExtractor, PrefixTarget,
 };

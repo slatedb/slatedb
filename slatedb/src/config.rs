@@ -390,8 +390,12 @@ pub struct ScanOptions {
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters. See [`FilterContext`].
     ///
-    /// Consulted by `scan_prefix`, and by `scan` only when a registered
-    /// policy reports [`crate::filter_policy::FilterPolicy::supports_range_queries`].
+    /// Consulted by `scan` only when a registered policy reports
+    /// [`crate::filter_policy::FilterPolicy::supports_range_queries`], and by
+    /// `scan_prefix` only when a registered policy reports
+    /// [`crate::filter_policy::FilterPolicy::supports_prefix_queries`] or,
+    /// failing that, `supports_range_queries`, in which case the prefix's key
+    /// range is what the filters are asked about.
     pub filter_context: Option<FilterContext>,
     /// Optional caller-provided tracing settings.
     pub tracing_options: Option<TracingOptions>,
