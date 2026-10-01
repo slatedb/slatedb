@@ -2321,6 +2321,8 @@ object_store_cache_options:
         assert!(options.validate_l0_limit(5).is_ok());
 
         let err = options.validate_l0_limit(3).expect_err("expected error");
-        assert!(err.to_string().contains("l0_max_ssts (3) must be at least min_compaction_sources (4)"));
+        assert!(err
+            .to_string()
+            .contains("l0_max_ssts (3) must be at least min_compaction_sources (4)"));
     }
 }
