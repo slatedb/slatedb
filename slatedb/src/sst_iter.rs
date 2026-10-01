@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::block_iterator::DataBlockIterator;
 use crate::bytes_range::BytesRange;
@@ -26,7 +26,11 @@ use crate::{
 };
 
 enum FetchTask {
-    InFlight(JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
+    /// Aborted on drop: a fetch whose iterator is gone (a cancelled scan, or a
+    /// `seek` that discards its prefetches) would otherwise keep running with
+    /// nobody awaiting it, retrying for as long as the object store's retry
+    /// policy allows — forever when `object_store_max_retries` is `None`.
+    InFlight(AbortOnDropHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
     Finished(VecDeque<Arc<Block>>),
 }
 
@@ -481,18 +485,13 @@ impl<'a> InternalSstIterator<'a> {
                     let cache_blocks = self.options.cache_blocks;
                     let segment = self.options.segment.clone();
                     let blocks_end = blocks.end;
+                    let fetch = tokio::spawn(async move {
+                        table_store
+                            .read_blocks_using_index(&table, index, blocks, cache_blocks, segment)
+                            .await
+                    });
                     self.fetch_tasks
-                        .push_back(FetchTask::InFlight(tokio::spawn(async move {
-                            table_store
-                                .read_blocks_using_index(
-                                    &table,
-                                    index,
-                                    blocks,
-                                    cache_blocks,
-                                    segment,
-                                )
-                                .await
-                        })));
+                        .push_back(FetchTask::InFlight(AbortOnDropHandle::new(fetch)));
                     self.next_block_idx_to_fetch = blocks_end;
                 }
             }
@@ -515,18 +514,13 @@ impl<'a> InternalSstIterator<'a> {
                     let cache_blocks = self.options.cache_blocks;
                     let segment = self.options.segment.clone();
                     let blocks_start = blocks.start;
+                    let fetch = tokio::spawn(async move {
+                        table_store
+                            .read_blocks_using_index(&table, index, blocks, cache_blocks, segment)
+                            .await
+                    });
                     self.fetch_tasks
-                        .push_back(FetchTask::InFlight(tokio::spawn(async move {
-                            table_store
-                                .read_blocks_using_index(
-                                    &table,
-                                    index,
-                                    blocks,
-                                    cache_blocks,
-                                    segment,
-                                )
-                                .await
-                        })));
+                        .push_back(FetchTask::InFlight(AbortOnDropHandle::new(fetch)));
                     self.next_block_idx_to_fetch = blocks_start;
                 }
             }
@@ -1839,6 +1833,203 @@ mod tests {
 
         let next = iter.next().await.unwrap().map(KeyValue::from);
         assert!(next.is_none());
+    }
+
+    /// Never answers data-block reads (ranged reads that end at or before
+    /// `hold_below`, the SST's index offset), like an unresponsive endpoint.
+    /// Counts the held reads that started and the ones whose future was
+    /// dropped, which only happens if the task awaiting it is aborted.
+    #[derive(Debug)]
+    struct HoldReadsStore {
+        inner: Arc<dyn ObjectStore>,
+        hold_below: std::sync::atomic::AtomicU64,
+        started: std::sync::atomic::AtomicUsize,
+        dropped: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl std::fmt::Display for HoldReadsStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "HoldReadsStore({})", self.inner)
+        }
+    }
+
+    /// Counts its own drop: a held read is dropped only when cancelled.
+    struct DropCounter(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for HoldReadsStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            let hold_below = self.hold_below.load(std::sync::atomic::Ordering::SeqCst);
+            let is_data_block = matches!(
+                &options.range,
+                Some(object_store::GetRange::Bounded(r)) if r.end <= hold_below
+            );
+            if is_data_block {
+                self.started
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _counter = DropCounter(Arc::clone(&self.dropped));
+                return std::future::pending().await;
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// Dropping an iterator must abort its in-flight block fetches. Before the
+    /// fix they kept running detached; against a store that never answers (or
+    /// a retrying store whose `object_store_max_retries` is `None`) they never
+    /// ended. https://github.com/slatedb/slatedb/issues/2139
+    #[tokio::test]
+    async fn test_dropping_iterator_aborts_in_flight_fetches() {
+        let store = Arc::new(HoldReadsStore {
+            inner: Arc::new(InMemory::new()),
+            hold_below: std::sync::atomic::AtomicU64::new(0),
+            started: std::sync::atomic::AtomicUsize::new(0),
+            dropped: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let format = SsTableFormat {
+            min_filter_keys: 3,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            Path::from(""),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let mut builder = table_store.table_builder();
+        for i in 0..1000 {
+            builder
+                .add_value(
+                    format!("key{}", i).as_bytes(),
+                    format!("value{}", i).as_bytes(),
+                    Some(i),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        table_store
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
+            .await
+            .unwrap();
+        let sst_handle = table_store
+            .open_sst(&test_sst_id(0), Some(Bytes::new()))
+            .await
+            .unwrap();
+
+        // Hold every data-block read: the store accepts the request and never
+        // answers, like an unresponsive endpoint.
+        store.hold_below.store(
+            sst_handle.info.index_offset,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+
+        // One block per fetch and three fetches in flight, uncached, so every
+        // data-block read reaches the store.
+        let options = SstIteratorOptions {
+            max_fetch_tasks: 3,
+            target_bytes_to_fetch: 1,
+            cache_blocks: false,
+            ..SstIteratorOptions::default()
+        };
+        // Initialization spawns the first fetches and waits on the held read;
+        // the deadline gives up, dropping the iterator mid-scan.
+        let opened = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            SstIterator::new_owned_initialized(
+                ..,
+                SsTableView::identity(sst_handle),
+                table_store.clone(),
+                options,
+            ),
+        )
+        .await;
+        assert!(opened.is_err(), "the held read must block the scan");
+        let started = store.started.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(started > 0, "the scan must have started block fetches");
+
+        // Every held read belongs to a fetch the dropped iterator owned, so
+        // each must be cancelled rather than left waiting. Aborts land on the
+        // runtime's next turn; without them `dropped` stays 0 forever.
+        let all_dropped = async {
+            while store.dropped.load(std::sync::atomic::Ordering::SeqCst) < started {
+                tokio::task::yield_now().await;
+            }
+        };
+        let aborted = tokio::time::timeout(std::time::Duration::from_secs(5), all_dropped).await;
+        assert!(
+            aborted.is_ok(),
+            "every in-flight fetch must be aborted when the iterator drops: {} of {} were",
+            store.dropped.load(std::sync::atomic::Ordering::SeqCst),
+            started,
+        );
+        assert_eq!(
+            store.dropped.load(std::sync::atomic::Ordering::SeqCst),
+            started,
+            "only the dropped iterator's fetches are cancelled"
+        );
     }
 
     #[tokio::test]
