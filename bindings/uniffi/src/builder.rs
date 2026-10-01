@@ -81,10 +81,12 @@ impl DbBuilder {
             .map_err(Into::into)
     }
 
-    /// Reads wall time from `clock` instead of the process clock: TTL expiry,
-    /// flush and poll ticks. A mock clock makes the database's timers a test's to drive.
+    /// Reads wall time from `clock` instead of the process clock. Every timer
+    /// follows it: TTL expiry, flush and poll ticks, the object-store retry
+    /// backoff and the flush timeout. On a frozen mock those wait until the
+    /// test advances the clock.
     pub fn with_system_clock(&self, clock: Arc<SystemClock>) -> Result<(), Error> {
-        self.update_builder(|builder| builder.with_system_clock(clock.inner.clone()))
+        self.update_builder(|builder| builder.with_system_clock(clock.inner()))
             .map_err(Into::into)
     }
 
@@ -220,10 +222,12 @@ impl DbReaderBuilder {
             .map_err(Into::into)
     }
 
-    /// Reads wall time from `clock` instead of the process clock: checkpoint
-    /// lifetimes, manifest polls and TTL visibility.
+    /// Reads wall time from `clock` instead of the process clock. Every timer
+    /// follows it: checkpoint lifetimes, manifest polls, TTL visibility and
+    /// the object-store retry backoff. On a frozen mock those wait until the
+    /// test advances the clock.
     pub fn with_system_clock(&self, clock: Arc<SystemClock>) -> Result<(), Error> {
-        self.update_builder(|builder| builder.with_system_clock(clock.inner.clone()))
+        self.update_builder(|builder| builder.with_system_clock(clock.inner()))
             .map_err(Into::into)
     }
 
@@ -338,10 +342,12 @@ impl AdminBuilder {
             .map_err(Into::into)
     }
 
-    /// Reads wall time from `clock` instead of the process clock: checkpoint
-    /// expiry, garbage collector and compactor schedule ticks.
+    /// Reads wall time from `clock` instead of the process clock. Every timer
+    /// follows it: checkpoint expiry, garbage collector and compactor schedule
+    /// ticks and the object-store retry backoff. On a frozen mock those wait
+    /// until the test advances the clock.
     pub fn with_system_clock(&self, clock: Arc<SystemClock>) -> Result<(), Error> {
-        self.update_builder(|builder| builder.with_system_clock(clock.inner.clone()))
+        self.update_builder(|builder| builder.with_system_clock(clock.inner()))
             .map_err(Into::into)
     }
 
@@ -431,7 +437,7 @@ mod tests {
         let object_store = Arc::new(ObjectStore {
             inner: Arc::new(object_store::memory::InMemory::new()),
         });
-        let clock = SystemClock::mock(1_000_000);
+        let clock = SystemClock::mock(1_000_000).unwrap();
         let builder = DbBuilder::new("clocked".to_owned(), object_store);
         builder.with_system_clock(clock.clone()).unwrap();
         let db = builder.build().await.unwrap();

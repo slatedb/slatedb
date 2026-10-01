@@ -2,6 +2,7 @@ package slatedb_test
 
 import (
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -12,7 +13,10 @@ import (
 // alone: time moves only when the test advances it.
 func TestDbFollowsTheInstalledSystemClock(t *testing.T) {
 	store := newMemoryStore(t)
-	clock := slatedb.SystemClockMock(1_000_000)
+	clock, err := slatedb.SystemClockMock(1_000_000)
+	if err != nil {
+		t.Fatalf("SystemClockMock(1_000_000): %v", err)
+	}
 	defer clock.Destroy()
 	if !clock.IsMock() || clock.NowMillis() != 1_000_000 {
 		t.Fatalf("SystemClockMock(1_000_000): IsMock=%v NowMillis=%d", clock.IsMock(), clock.NowMillis())
@@ -56,18 +60,46 @@ func TestDbFollowsTheInstalledSystemClock(t *testing.T) {
 	if got := third.CreateTs(); got != 1_000_500 {
 		t.Fatalf("CreateTs() after Advance(500) = %d, want 1000500", got)
 	}
+	if err := clock.Set(1_000_000); !errors.Is(err, slatedb.ErrErrorInvalid) {
+		t.Fatalf("Set() backwards on a mock clock: got %v, want an invalid error", err)
+	}
+	if got := clock.NowMillis(); got != 1_000_500 {
+		t.Fatalf("NowMillis() after a refused Set() = %d, want 1000500", got)
+	}
 	if err := dbHandle.db.Shutdown(); err != nil {
 		t.Fatalf("Shutdown(): %v", err)
 	}
 	dbHandle.open = false
 }
 
+// A mock clock refuses a time chrono cannot represent, at construction and
+// when moved.
+func TestSystemClockMockStaysInRange(t *testing.T) {
+	if _, err := slatedb.SystemClockMock(math.MaxInt64); !errors.Is(err, slatedb.ErrErrorInvalid) {
+		t.Fatalf("SystemClockMock(MaxInt64): got %v, want an invalid error", err)
+	}
+	clock, err := slatedb.SystemClockMock(1_000)
+	if err != nil {
+		t.Fatalf("SystemClockMock(1_000): %v", err)
+	}
+	defer clock.Destroy()
+	if err := clock.Set(1 << 62); !errors.Is(err, slatedb.ErrErrorInvalid) {
+		t.Fatalf("Set(1<<62): got %v, want an invalid error", err)
+	}
+	if err := clock.Advance(math.MaxUint64); !errors.Is(err, slatedb.ErrErrorInvalid) {
+		t.Fatalf("Advance(MaxUint64): got %v, want an invalid error", err)
+	}
+	if got := clock.NowMillis(); got != 1_000 {
+		t.Fatalf("NowMillis() after refused moves = %d, want 1000", got)
+	}
+}
+
 // The default clock cannot be driven, and a consumed builder refuses a clock.
 func TestSystemClockDefaultRefusesToBeDriven(t *testing.T) {
-	clock := slatedb.SystemClockDefault()
+	clock := slatedb.SystemClockDefaultClock()
 	defer clock.Destroy()
 	if clock.IsMock() {
-		t.Fatal("SystemClockDefault().IsMock() = true")
+		t.Fatal("SystemClockDefaultClock().IsMock() = true")
 	}
 	if err := clock.Advance(1); !errors.Is(err, slatedb.ErrErrorInvalid) {
 		t.Fatalf("Advance() on the default clock: got %v, want an invalid error", err)
