@@ -692,11 +692,10 @@ impl<P: Into<Path>> DbBuilder<P> {
             self.wal_writer_init,
         );
         let WriterFenceResult {
-            mut manifest,
+            manifest,
             replay_iterator,
             mut wal_writer,
         } = fencer.fence(stored_manifest).await?;
-        manifest.repair_duplicate_l0_view_ids(&rand).await?;
         let (wal_writer, wal_observer) = if DbInner::wal_enabled_in_options(&self.settings) {
             let wal_observer = wal_writer.observer();
             (Some(wal_writer), wal_observer)

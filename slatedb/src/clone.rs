@@ -734,15 +734,10 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::full(8, false)]
-    #[case::partial(5, false)]
-    #[case::stored_full(8, true)]
-    #[case::stored_partial(5, true)]
+    #[case::full(8)]
+    #[case::partial(5)]
     #[tokio::test]
-    async fn should_preserve_union_data_after_compaction_and_reopen(
-        #[case] max_sources: usize,
-        #[case] stored_duplicates: bool,
-    ) {
+    async fn should_preserve_union_data_after_compaction_and_reopen(#[case] max_sources: usize) {
         use crate::config::{CompactionWorkerOptions, CompactorOptions};
         use std::collections::{HashMap, HashSet};
 
@@ -849,16 +844,6 @@ mod tests {
         let views = &initial.manifest.core.tree.l0;
         assert_eq!(views.len(), 8);
         assert_eq!(views.iter().map(|v| v.id).collect::<HashSet<_>>().len(), 8);
-        if stored_duplicates {
-            // Model a union written before view IDs became unique.
-            let mut stored = StoredManifest::load(store.clone(), clock).await.unwrap();
-            let mut dirty = stored.prepare_dirty().unwrap();
-            for view in &mut Arc::make_mut(&mut dirty.value.core.tree).l0 {
-                view.id = view.sst.id.value();
-            }
-            stored.update(dirty).await.unwrap();
-        }
-
         async fn assert_contents(db: &Db, expected: &BTreeMap<Vec<u8>, Vec<u8>>) {
             let mut scan = db.scan(..).await.unwrap();
             let mut actual = BTreeMap::new();

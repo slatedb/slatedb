@@ -454,51 +454,6 @@ pub(crate) struct ManifestCore {
 }
 
 impl ManifestCore {
-    /// Assign fresh IDs to every occurrence of a repeated L0 view ID in each tree.
-    /// Retire the old ID so that stored compaction specs cannot select a different view.
-    pub(crate) fn repair_duplicate_l0_view_ids(&mut self, rand: &DbRand) -> bool {
-        for tree in self.trees() {
-            if let Some(watermark) = tree.last_compacted_l0_sst_view_id {
-                assert!(
-                    tree.l0.iter().all(|view| view.id != watermark),
-                    "L0 view watermark references an active view: {watermark}"
-                );
-            }
-        }
-        let mut repaired = false;
-        for tree in std::iter::once(&mut self.tree)
-            .chain(self.segments.iter_mut().map(|segment| &mut segment.tree))
-        {
-            let mut used = HashSet::new();
-            let duplicates: HashSet<_> = tree
-                .l0
-                .iter()
-                .filter_map(|view| (!used.insert(view.id)).then_some(view.id))
-                .collect();
-            if duplicates.is_empty() {
-                continue;
-            }
-            used.extend(tree.last_compacted_l0_sst_view_id);
-            for view in &mut Arc::make_mut(tree).l0 {
-                if duplicates.contains(&view.id) {
-                    loop {
-                        // Keep the timestamp because GC also uses view watermarks.
-                        let id = ulid::Ulid::from_parts(
-                            view.id.timestamp_ms(),
-                            rand.rng().random::<u128>(),
-                        );
-                        if used.insert(id) {
-                            view.id = id;
-                            break;
-                        }
-                    }
-                    repaired = true;
-                }
-            }
-        }
-        repaired
-    }
-
     pub(crate) fn new() -> Self {
         Self {
             initialized: true,
@@ -1476,6 +1431,38 @@ impl Manifest {
         external_dbs
     }
 
+    /// Assign unique L0 view IDs when sources share IDs in a new union clone.
+    fn assign_union_l0_view_ids(core: &mut ManifestCore, rand: &DbRand) {
+        for tree in std::iter::once(&mut core.tree)
+            .chain(core.segments.iter_mut().map(|segment| &mut segment.tree))
+        {
+            let mut used = HashSet::new();
+            let duplicates: HashSet<_> = tree
+                .l0
+                .iter()
+                .filter_map(|view| (!used.insert(view.id)).then_some(view.id))
+                .collect();
+            if duplicates.is_empty() {
+                continue;
+            }
+            for view in &mut Arc::make_mut(tree).l0 {
+                if duplicates.contains(&view.id) {
+                    loop {
+                        // Keep the timestamp because GC also uses view watermarks.
+                        let id = ulid::Ulid::from_parts(
+                            view.id.timestamp_ms(),
+                            rand.rng().random::<u128>(),
+                        );
+                        if used.insert(id) {
+                            view.id = id;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Reassign every sorted run in `core` a fresh sequential id. The
     /// union concatenates per-source `compacted` lists across the
     /// unsegmented tree and every segment, so ids must be regenerated
@@ -1532,9 +1519,7 @@ impl Manifest {
             Self::build_segmented_lsm_state(&mut core, segments);
         }
         Self::renumber_union_sorted_runs(&mut core);
-        if core.repair_duplicate_l0_view_ids(&rand) {
-            warn!("assigned fresh IDs to duplicate L0 views in union clone");
-        }
+        Self::assign_union_l0_view_ids(&mut core, &rand);
 
         for source in &sources {
             core.last_l0_seq = max(core.last_l0_seq, source.manifest.core.last_l0_seq);
@@ -2348,7 +2333,7 @@ mod tests {
     #[rstest]
     #[case(false)]
     #[case(true)]
-    fn test_union_repairs_shared_l0_view_ids(#[case] segmented: bool) {
+    fn test_union_assigns_unique_l0_view_ids(#[case] segmented: bool) {
         let shared_id = Ulid::from_parts(10, 1);
         let shared = SsTableView::new(
             shared_id,
@@ -2406,40 +2391,8 @@ mod tests {
             assert_eq!(restored, original);
         }
         let before = union.clone();
-        assert!(!union.core.repair_duplicate_l0_view_ids(&DbRand::new(42)));
+        Manifest::assign_union_l0_view_ids(&mut union.core, &DbRand::new(42));
         assert_eq!(union, before);
-    }
-
-    #[rstest]
-    #[case::root_duplicate(false, true)]
-    #[case::root_unique(false, false)]
-    #[case::segment_duplicate(true, true)]
-    #[case::segment_unique(true, false)]
-    #[should_panic(expected = "L0 view watermark references an active view")]
-    fn test_repair_rejects_active_watermark(#[case] segmented: bool, #[case] duplicate: bool) {
-        let view = SsTableView::identity(SsTableHandle::new(
-            SsTableId::from(Ulid::new()),
-            SST_FORMAT_VERSION_LATEST,
-            SsTableInfo::default(),
-        ));
-        let mut tree = LsmTreeState {
-            last_compacted_l0_sst_view_id: Some(view.id),
-            l0: VecDeque::from([view.clone()]),
-            ..Default::default()
-        };
-        if duplicate {
-            tree.l0.push_back(view);
-        }
-        let mut core = ManifestCore::new();
-        if segmented {
-            core.segments.push(Segment {
-                prefix: Bytes::from_static(b"a/"),
-                tree: Arc::new(tree),
-            });
-        } else {
-            core.tree = Arc::new(tree);
-        }
-        core.repair_duplicate_l0_view_ids(&DbRand::new(42));
     }
 
     #[test]
