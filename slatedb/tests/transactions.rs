@@ -53,7 +53,7 @@ async fn test_concurrent_bank_transfers() {
                         to = rng.random_range(0..num_accounts);
                     }
                     loop {
-                        let txn = db.begin(slatedb::IsolationLevel::Snapshot).await.unwrap();
+                        let txn = db.begin(slatedb::IsolationLevel::Snapshot).unwrap();
                         let from_bal = get_balance(&txn, &account_key(from)).await;
                         let to_bal = get_balance(&txn, &account_key(to)).await;
                         let amount = rng.random_range(1..=100u64).min(from_bal);

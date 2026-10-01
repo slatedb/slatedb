@@ -417,10 +417,7 @@ pub trait DbWriteOps {
     ///
     /// ## Returns
     /// - `Result<Self::Transaction, Error>`: the transaction handle
-    async fn begin(
-        &self,
-        isolation_level: IsolationLevel,
-    ) -> Result<Self::Transaction, crate::Error>;
+    fn begin(&self, isolation_level: IsolationLevel) -> Result<Self::Transaction, crate::Error>;
 }
 
 /// Trait for transactional database operations.

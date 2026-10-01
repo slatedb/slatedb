@@ -111,10 +111,10 @@ impl LsmTreeState {
                     .take_while(|view| {
                         // Match by view ID first (V2 manifests), then fall back
                         // to SST ID (V1).
+                        // A physical SST can have several views. Use its ID only
+                        // when the manifest has no view watermark.
                         if let Some(id) = last_compacted_view {
-                            if view.id == id {
-                                return false;
-                            }
+                            return view.id != id;
                         }
                         if let Some(id) = last_compacted_sst {
                             if view.sst.id.value() == id {
@@ -2123,6 +2123,39 @@ mod tests {
         let union = Manifest::cloned_from_union(sources, rand).unwrap();
 
         assert_manifest_equal(&union, &expected_manifest, &sst_ids);
+    }
+
+    #[rstest]
+    #[case(true)]
+    #[case(false)]
+    fn test_watermark_matches_view_not_shared_sst(#[case] watermark_present: bool) {
+        let sst = SsTableHandle::new(
+            SsTableId::from(Ulid::from_parts(1, 0)),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo::default(),
+        );
+        let left = SsTableView::new(Ulid::from_parts(1, 1), sst.clone());
+        let child = SsTableView::identity(SsTableHandle::new(
+            SsTableId::from(Ulid::from_parts(2, 0)),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo::default(),
+        ));
+        let right = SsTableView::new(Ulid::from_parts(1, 2), sst.clone());
+        let mut writer = LsmTreeState {
+            l0: VecDeque::from([left.clone(), child.clone()]),
+            ..Default::default()
+        };
+        if watermark_present {
+            writer.l0.push_back(right.clone());
+        }
+        let compactor = LsmTreeState {
+            last_compacted_l0_sst_view_id: Some(right.id),
+            last_compacted_l0_sst_id: Some(sst.id.value()),
+            ..Default::default()
+        };
+        let expected = VecDeque::from([left, child]);
+        assert_eq!(writer.merge_from_compactor(&compactor).l0, expected);
+        assert_eq!(compactor.merge_from_writer(&writer).l0, expected);
     }
 
     #[test]

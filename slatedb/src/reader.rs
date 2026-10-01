@@ -377,7 +377,6 @@ impl Reader {
         let range = BytesRange::from_slice(key_slice..=key_slice);
 
         let sst_iter_options = SstIteratorOptions {
-            inline_point_read: true,
             cache_blocks: options.cache_blocks,
             eager_spawn: true,
             filter_context: options.filter_context.clone(),
@@ -460,7 +459,6 @@ impl Reader {
         let max_seq = self.prepare_max_seq(ctx.max_seq, options.durability_filter, options.dirty);
 
         let sst_iter_options = SstIteratorOptions {
-            inline_point_read: false,
             max_fetch_tasks: options.max_fetch_tasks,
             target_bytes_to_fetch: options.read_ahead_bytes,
             cache_blocks: options.cache_blocks,
@@ -545,7 +543,6 @@ impl Reader {
 
         let range = BytesRange::from_prefix(prefix.as_ref());
         let sst_iter_options = SstIteratorOptions {
-            inline_point_read: false,
             max_fetch_tasks: options.max_fetch_tasks,
             target_bytes_to_fetch: options.read_ahead_bytes,
             cache_blocks: options.cache_blocks,
@@ -2701,7 +2698,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn point_inline_actual_get_progresses_without_block_task_executor() {
+    async fn point_reads_progress_without_block_task_executor() {
         use crate::config::{FlushOptions, FlushType};
         use crate::db_cache::test_utils::TestCache;
         let db = crate::Db::builder("point-inline-get", Arc::new(InMemory::new()))
@@ -2730,7 +2727,8 @@ mod tests {
             db.get(b"k").await
         };
         assert_eq!(result.unwrap(), Some(Bytes::from_static(b"value")));
-        // Exact-key scans use the same Reader but must not opt into point-read scheduling.
+        // An exact-key scan with one fetch task is the same single-block read,
+        // so it is polled inline as well.
         let result = {
             let _entered = handle.enter();
             async {
@@ -2748,9 +2746,9 @@ mod tests {
             }
             .await
         };
-        assert!(
-            result.is_err(),
-            "an exact-key scan must retain its spawned block read"
+        assert_eq!(
+            result.unwrap().map(|kv| kv.value),
+            Some(Bytes::from_static(b"value"))
         );
         db.close().await.unwrap();
     }

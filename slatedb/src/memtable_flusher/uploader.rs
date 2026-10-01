@@ -20,7 +20,7 @@ use crate::dispatcher::{MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
 use crate::flush::SegmentedSstHandle;
 use crate::mem_table::ImmutableMemtable;
-use crate::retrying_object_store::RetryingObjectStore;
+use crate::retrying_object_store::{RetryingObjectStore, MAX_RETRY_DELAY};
 use crate::utils::SafeSender;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -164,7 +164,9 @@ impl Uploader {
         tracker_tx: SafeSender<TrackerMessage>,
     ) -> Vec<Box<dyn MessageHandler<UploadJob>>> {
         let parallelism = db.settings.l0_flush_parallelism;
-        let retry_backoff = db.settings.manifest_poll_interval;
+        // A failed upload retries after `manifest_poll_interval`, capped so a
+        // long poll interval does not stretch upload retries with it.
+        let retry_backoff = db.settings.manifest_poll_interval.min(MAX_RETRY_DELAY);
         (0..parallelism)
             .map(|_| {
                 Box::new(UploadHandler::new(
@@ -304,6 +306,7 @@ mod tests {
     use crate::manifest::ManifestCore;
     use crate::mem_table::ImmutableMemtable;
     use crate::paths::PathResolver;
+    use crate::retrying_object_store::MAX_RETRY_DELAY;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::FixedThreeBytePrefixExtractor;
@@ -364,6 +367,22 @@ mod tests {
         setup_db_with_extractor(path, fp_registry, None).await
     }
 
+    async fn setup_db_with_settings(
+        path: &str,
+        fp_registry: Arc<FailPointRegistry>,
+        settings: Settings,
+    ) -> Arc<DbInner> {
+        setup_db_with_cache_policy(
+            path,
+            fp_registry,
+            settings,
+            None,
+            None,
+            BlockCachePolicy::default(),
+        )
+        .await
+    }
+
     async fn setup_db_with_extractor(
         path: &str,
         fp_registry: Arc<FailPointRegistry>,
@@ -372,6 +391,7 @@ mod tests {
         setup_db_with_cache_policy(
             path,
             fp_registry,
+            Settings::default(),
             segment_extractor,
             None,
             BlockCachePolicy::default(),
@@ -382,12 +402,12 @@ mod tests {
     async fn setup_db_with_cache_policy(
         path: &str,
         fp_registry: Arc<FailPointRegistry>,
+        settings: Settings,
         segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
         cache: Option<Arc<dyn DbCache>>,
         block_cache_policy: BlockCachePolicy,
     ) -> Arc<DbInner> {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let settings = Settings::default();
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand = Arc::new(DbRand::new(42));
         let db_metrics = MetricsRecorderHelper::noop();
@@ -599,6 +619,7 @@ mod tests {
         let db = setup_db_with_cache_policy(
             "/tmp/test_parallel_l0_flush_cache_policy",
             Arc::new(FailPointRegistry::new()),
+            Settings::default(),
             None,
             Some(cache.clone()),
             BlockCachePolicy::default().with_flush_targets(&[CacheTarget::Filters]),
@@ -646,6 +667,48 @@ mod tests {
         assert!(
             started.elapsed() >= db.settings.manifest_poll_interval,
             "expected the job to wait out at least one retry backoff before succeeding"
+        );
+        let TrackerMessage::UploadComplete(event) = msg else {
+            panic!("expected UploadComplete");
+        };
+        assert_eq!(event.first_seq, 1);
+        assert_eq!(event.last_seq, 1);
+
+        test.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_cap_retry_backoff_below_a_long_manifest_poll_interval() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        fail_parallel::cfg(
+            Arc::clone(&fp_registry),
+            "write-compacted-sst-io-error",
+            "1*return->off",
+        )
+        .unwrap();
+        let settings = Settings {
+            manifest_poll_interval: Duration::from_secs(60),
+            ..Settings::default()
+        };
+        let db = setup_db_with_settings(
+            "/tmp/test_parallel_l0_flush_uploader_retry_backoff_cap",
+            fp_registry,
+            settings,
+        )
+        .await;
+        let job = next_upload_job(&db, b"key", b"value", 1);
+
+        let test = start_test_uploader(&db);
+        let started = std::time::Instant::now();
+        test.submit(job).unwrap();
+
+        let msg = timeout(Duration::from_secs(5), test.tracker_rx.recv())
+            .await
+            .expect("a failed upload must retry within the backoff cap, not the poll interval")
+            .unwrap();
+        assert!(
+            started.elapsed() >= MAX_RETRY_DELAY,
+            "expected the job to wait out one capped retry backoff before succeeding"
         );
         let TrackerMessage::UploadComplete(event) = msg else {
             panic!("expected UploadComplete");

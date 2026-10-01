@@ -8,7 +8,7 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::block_iterator::DataBlockIterator;
 use crate::bytes_range::BytesRange;
@@ -28,16 +28,18 @@ use crate::{
 };
 
 enum FetchTask {
-    InFlight(JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
-    // Exclusive iterator access polls through get_mut; no lock is held over await.
+    InFlight(AbortOnDropHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
+    /// A single-block point read, polled by the iterator itself: one block, one
+    /// task and no read-ahead leave a spawn nothing to overlap, and `init`
+    /// awaits the first block either way. Dropping the future cancels the read,
+    /// as aborting the handle does. The mutex is only for `Sync`; polling goes
+    /// through `get_mut`, so no lock is held across an await.
     Inline(parking_lot::Mutex<BoxFuture<'static, Result<VecDeque<Arc<Block>>, SlateDBError>>>),
     Finished(VecDeque<Arc<Block>>),
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct SstIteratorOptions {
-    /// Only point-read callers opt in; even exact-key scans keep task prefetch.
-    pub(crate) inline_point_read: bool,
     pub(crate) max_fetch_tasks: usize,
     pub(crate) target_bytes_to_fetch: usize,
     pub(crate) cache_blocks: bool,
@@ -52,7 +54,6 @@ pub(crate) struct SstIteratorOptions {
 impl Default for SstIteratorOptions {
     fn default() -> Self {
         SstIteratorOptions {
-            inline_point_read: false,
             max_fetch_tasks: 1,
             target_bytes_to_fetch: 1,
             cache_blocks: true,
@@ -445,9 +446,8 @@ impl<'a> InternalSstIterator<'a> {
         table: &'a SsTableView,
         key: &'a [u8],
         table_store: Arc<TableStore>,
-        mut options: SstIteratorOptions,
+        options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
-        options.inline_point_read = true;
         Self::new_borrowed(
             BytesRange::from_slice(key..=key),
             table,
@@ -489,20 +489,19 @@ impl<'a> InternalSstIterator<'a> {
                     let cache_blocks = self.options.cache_blocks;
                     let segment = self.options.segment.clone();
                     let blocks_end = blocks.end;
-                    let single_block = blocks.len() == 1 && self.options.target_bytes_to_fetch == 1;
+                    let single_block = blocks.len() == 1;
                     let read = async move {
                         table_store
                             .read_blocks_using_index(&table, index, blocks, cache_blocks, segment)
                             .await
                     };
-                    let fetch = if self.options.inline_point_read
-                        && self.view.point_key().is_some()
+                    let fetch = if self.view.point_key().is_some()
                         && self.options.max_fetch_tasks == 1
                         && single_block
                     {
                         FetchTask::Inline(parking_lot::Mutex::new(Box::pin(read)))
                     } else {
-                        FetchTask::InFlight(tokio::spawn(read))
+                        FetchTask::InFlight(AbortOnDropHandle::new(tokio::spawn(read)))
                     };
                     self.fetch_tasks.push_back(fetch);
                     self.next_block_idx_to_fetch = blocks_end;
@@ -527,18 +526,13 @@ impl<'a> InternalSstIterator<'a> {
                     let cache_blocks = self.options.cache_blocks;
                     let segment = self.options.segment.clone();
                     let blocks_start = blocks.start;
+                    let fetch = tokio::spawn(async move {
+                        table_store
+                            .read_blocks_using_index(&table, index, blocks, cache_blocks, segment)
+                            .await
+                    });
                     self.fetch_tasks
-                        .push_back(FetchTask::InFlight(tokio::spawn(async move {
-                            table_store
-                                .read_blocks_using_index(
-                                    &table,
-                                    index,
-                                    blocks,
-                                    cache_blocks,
-                                    segment,
-                                )
-                                .await
-                        })));
+                        .push_back(FetchTask::InFlight(AbortOnDropHandle::new(fetch)));
                     self.next_block_idx_to_fetch = blocks_start;
                 }
             }
@@ -991,10 +985,22 @@ impl<'a> SstIterator<'a> {
         let filter_context = internal.options.filter_context.clone();
         let filter_evaluator = match (point_key, prefix, range) {
             (Some(key), _, _) => Some(FilterEvaluator::new_point(key, filter_context, db_stats)),
-            (None, Some(p), _) => Some(FilterEvaluator::new_prefix(p, filter_context, db_stats)),
-            // A plain range scan reads this SST's filters only when there is
-            // a registered policy that can answer a range.
-            (None, None, (lower, upper))
+            // A prefix scan reads this SST's filters only when there is a
+            // registered policy that can answer a prefix; a whole-key bloom
+            // filter cannot, and fetching it would prune nothing.
+            (None, Some(p), _)
+                if internal
+                    .table_store()
+                    .any_filter_policy_supports_prefix_queries() =>
+            {
+                Some(FilterEvaluator::new_prefix(p, filter_context, db_stats))
+            }
+            // No policy answers a prefix, but one answers a range: a prefix
+            // scan's bounds are the prefix's key range, so the range evaluator
+            // prunes the same SSTs a range scan over those bounds would.
+            // Likewise a plain range scan reads this SST's filters only when
+            // there is a registered policy that can answer a range.
+            (None, _, (lower, upper))
                 if internal
                     .table_store()
                     .any_filter_policy_supports_range_queries() =>
@@ -1006,7 +1012,7 @@ impl<'a> SstIterator<'a> {
                     db_stats,
                 ))
             }
-            (None, None, _) => None,
+            (None, _, _) => None,
         };
         let delegate = match filter_evaluator {
             Some(fe) => SstIteratorDelegate::Filter(FilterIterator::new(internal, fe)),
@@ -1855,6 +1861,203 @@ mod tests {
         assert!(next.is_none());
     }
 
+    /// Never answers data-block reads (ranged reads that end at or before
+    /// `hold_below`, the SST's index offset), like an unresponsive endpoint.
+    /// Counts the held reads that started and the ones whose future was
+    /// dropped, which only happens if the task awaiting it is aborted.
+    #[derive(Debug)]
+    struct HoldReadsStore {
+        inner: Arc<dyn ObjectStore>,
+        hold_below: std::sync::atomic::AtomicU64,
+        started: std::sync::atomic::AtomicUsize,
+        dropped: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl std::fmt::Display for HoldReadsStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "HoldReadsStore({})", self.inner)
+        }
+    }
+
+    /// Counts its own drop: a held read is dropped only when cancelled.
+    struct DropCounter(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for HoldReadsStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            let hold_below = self.hold_below.load(std::sync::atomic::Ordering::SeqCst);
+            let is_data_block = matches!(
+                &options.range,
+                Some(object_store::GetRange::Bounded(r)) if r.end <= hold_below
+            );
+            if is_data_block {
+                self.started
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _counter = DropCounter(Arc::clone(&self.dropped));
+                return std::future::pending().await;
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// Dropping an iterator must abort its in-flight block fetches. Before the
+    /// fix they kept running detached; against a store that never answers (or
+    /// a retrying store whose `object_store_max_retries` is `None`) they never
+    /// ended. https://github.com/slatedb/slatedb/issues/2139
+    #[tokio::test]
+    async fn test_dropping_iterator_aborts_in_flight_fetches() {
+        let store = Arc::new(HoldReadsStore {
+            inner: Arc::new(InMemory::new()),
+            hold_below: std::sync::atomic::AtomicU64::new(0),
+            started: std::sync::atomic::AtomicUsize::new(0),
+            dropped: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let format = SsTableFormat {
+            min_filter_keys: 3,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            Path::from(""),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let mut builder = table_store.table_builder();
+        for i in 0..1000 {
+            builder
+                .add_value(
+                    format!("key{}", i).as_bytes(),
+                    format!("value{}", i).as_bytes(),
+                    Some(i),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        table_store
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
+            .await
+            .unwrap();
+        let sst_handle = table_store
+            .open_sst(&test_sst_id(0), Some(Bytes::new()))
+            .await
+            .unwrap();
+
+        // Hold every data-block read: the store accepts the request and never
+        // answers, like an unresponsive endpoint.
+        store.hold_below.store(
+            sst_handle.info.index_offset,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+
+        // One block per fetch and three fetches in flight, uncached, so every
+        // data-block read reaches the store.
+        let options = SstIteratorOptions {
+            max_fetch_tasks: 3,
+            target_bytes_to_fetch: 1,
+            cache_blocks: false,
+            ..SstIteratorOptions::default()
+        };
+        // Initialization spawns the first fetches and waits on the held read;
+        // the deadline gives up, dropping the iterator mid-scan.
+        let opened = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            SstIterator::new_owned_initialized(
+                ..,
+                SsTableView::identity(sst_handle),
+                table_store.clone(),
+                options,
+            ),
+        )
+        .await;
+        assert!(opened.is_err(), "the held read must block the scan");
+        let started = store.started.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(started > 0, "the scan must have started block fetches");
+
+        // Every held read belongs to a fetch the dropped iterator owned, so
+        // each must be cancelled rather than left waiting. Aborts land on the
+        // runtime's next turn; without them `dropped` stays 0 forever.
+        let all_dropped = async {
+            while store.dropped.load(std::sync::atomic::Ordering::SeqCst) < started {
+                tokio::task::yield_now().await;
+            }
+        };
+        let aborted = tokio::time::timeout(std::time::Duration::from_secs(5), all_dropped).await;
+        assert!(
+            aborted.is_ok(),
+            "every in-flight fetch must be aborted when the iterator drops: {} of {} were",
+            store.dropped.load(std::sync::atomic::Ordering::SeqCst),
+            started,
+        );
+        assert_eq!(
+            store.dropped.load(std::sync::atomic::Ordering::SeqCst),
+            started,
+            "only the dropped iterator's fetches are cancelled"
+        );
+    }
+
     #[tokio::test]
     async fn test_iter_from_key() {
         let root_path = Path::from("");
@@ -2107,7 +2310,6 @@ mod tests {
             &sst,
             table_store.clone(),
             SstIteratorOptions {
-                inline_point_read: false,
                 max_fetch_tasks: 32,
                 target_bytes_to_fetch: 256 * 128,
                 cache_blocks: true,
@@ -2128,7 +2330,6 @@ mod tests {
             &sst,
             table_store.clone(),
             SstIteratorOptions {
-                inline_point_read: false,
                 max_fetch_tasks: 1,
                 target_bytes_to_fetch: 1,
                 cache_blocks: true,
@@ -2764,7 +2965,6 @@ mod tests {
         let end_key = b"key079";
 
         let sst_iter_options = SstIteratorOptions {
-            inline_point_read: false,
             max_fetch_tasks: 3,
             target_bytes_to_fetch: 3 * 128,
             cache_blocks: true,
@@ -3071,7 +3271,6 @@ mod tests {
             &sst,
             table_store.clone(),
             SstIteratorOptions {
-                inline_point_read: false,
                 max_fetch_tasks: 1,
                 target_bytes_to_fetch: 1,
                 cache_blocks: true,
@@ -3432,6 +3631,10 @@ mod tests {
         fn supports_range_queries(&self) -> bool {
             true
         }
+
+        fn supports_prefix_queries(&self) -> bool {
+            false
+        }
     }
 
     struct RangeCapableBuilder;
@@ -3750,8 +3953,12 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn point_inline_keeps_scans_descending_and_prefetch_spawned() {
+    /// Inline is decided by the shape of the read alone: a point range, one
+    /// fetch task, one block. Read-ahead over a one-block SST is still one
+    /// block. Descending reads and read-ahead across tasks keep their spawned
+    /// fetch, so on a dead runtime only they fail.
+    #[tokio::test]
+    async fn point_read_inline_is_detected_from_the_read_shape() {
         let (store, sst, _, _) = point_read_fixture().await;
         let dead = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -3759,39 +3966,42 @@ mod tests {
             .unwrap();
         let handle = dead.handle().clone();
         dead.shutdown_background();
+        let point = Bytes::from_static(b"k")..=Bytes::from_static(b"k");
         let cases = [
-            (false, IterationOrder::Ascending, 1, 1),
-            (true, IterationOrder::Descending, 1, 1),
-            (true, IterationOrder::Ascending, 2, 1),
-            (true, IterationOrder::Ascending, 1, 2),
+            (IterationOrder::Ascending, 1, 1, true),
+            (IterationOrder::Ascending, 1, 2, true),
+            (IterationOrder::Descending, 1, 1, false),
+            (IterationOrder::Ascending, 2, 1, false),
         ];
-        for (inline_point_read, order, max_fetch_tasks, target_bytes_to_fetch) in cases {
+        for (order, max_fetch_tasks, target_bytes_to_fetch, inline) in cases {
             let options = SstIteratorOptions {
-                inline_point_read,
                 order,
                 max_fetch_tasks,
                 target_bytes_to_fetch,
                 ..SstIteratorOptions::default()
             };
-            let mut iter = SstIterator::new_owned(
-                Bytes::from_static(b"k")..=Bytes::from_static(b"k"),
-                sst.clone(),
-                store.clone(),
-                options,
-                None,
-            )
-            .unwrap()
-            .unwrap();
+            let mut iter =
+                SstIterator::new_owned(point.clone(), sst.clone(), store.clone(), options, None)
+                    .unwrap()
+                    .unwrap();
             let result = {
                 let _entered = handle.enter();
                 iter.init().await
             };
-            assert!(matches!(
-                result,
-                Err(SlateDBError::BackgroundTaskCancelled(_))
-            ));
+            assert_eq!(
+                result.is_ok(),
+                inline,
+                "{order:?} tasks={max_fetch_tasks} bytes={target_bytes_to_fetch}: {result:?}"
+            );
+            if !inline {
+                assert!(matches!(
+                    result,
+                    Err(SlateDBError::BackgroundTaskCancelled(_))
+                ));
+            }
         }
-        // A broad scan clipped to this singleton SST must also stay spawned.
+        // A broad scan is clipped to the SST's own key range, so over a one-key
+        // SST it is the same single-block read and is inline too.
         let mut scan = SstIterator::new_owned(.., sst, store, SstIteratorOptions::default(), None)
             .unwrap()
             .unwrap();
@@ -3799,10 +4009,7 @@ mod tests {
             let _entered = handle.enter();
             scan.init().await
         };
-        assert!(matches!(
-            result,
-            Err(SlateDBError::BackgroundTaskCancelled(_))
-        ));
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[tokio::test]
@@ -3875,5 +4082,96 @@ mod tests {
         assert_eq!(cache.started.load(SeqCst), 1);
         assert_eq!(cache.dropped.load(SeqCst), 1);
         assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_not_read_filters_for_a_prefix_when_no_policy_supports_prefixes() {
+        // A whole-key bloom filter cannot answer a prefix or a range, so a
+        // bloom-only database must build no evaluator for a prefix scan and
+        // must not read the SST's filters.
+        for filter_context in [context(0), None] {
+            let (recorder, db_stats) = stats();
+            let table_store = bloom_filter_enabled_table_store(10);
+            let table = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
+            let options = SstIteratorOptions {
+                prefix: Some(Bytes::from_static(b"k")),
+                filter_context,
+                ..Default::default()
+            };
+
+            let iter = SstIterator::new_owned_initialized_with_stats(
+                BytesRange::from_prefix_and_subrange(b"k", ..),
+                table,
+                table_store,
+                options,
+                None,
+                Some(db_stats),
+            )
+            .await
+            .unwrap();
+            assert!(iter.is_some(), "nothing rejected the SST");
+            for kind in [
+                crate::db_stats::FILTER_KIND_PREFIX,
+                crate::db_stats::FILTER_KIND_RANGE,
+            ] {
+                assert_eq!(
+                    verdicts(&recorder, kind),
+                    (Some(0), Some(0), Some(0)),
+                    "no evaluator should have been built"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn should_prune_a_prefix_by_its_range_when_only_a_range_policy_exists() {
+        // No policy answers a prefix, but one answers a range: the prefix
+        // scan's bounds are the prefix's key range, so the range evaluator
+        // prunes the same SSTs a range scan over those bounds would.
+        let (recorder, db_stats) = stats();
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            filter_policies: vec![Arc::new(RangeCapablePolicy)],
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path,
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        assert!(!table_store.any_filter_policy_supports_prefix_queries());
+        assert!(table_store.any_filter_policy_supports_range_queries());
+        let table = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
+
+        let iter = SstIterator::new_owned_initialized_with_stats(
+            BytesRange::from_prefix_and_subrange(b"k", ..),
+            table,
+            table_store,
+            SstIteratorOptions {
+                prefix: Some(Bytes::from_static(b"k")),
+                ..Default::default()
+            },
+            None,
+            Some(db_stats),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            iter.is_none(),
+            "the policy rejects every range, so the prefix's range skips the SST"
+        );
+        let (positives, negatives, _) = verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE);
+        assert_eq!((positives, negatives), (Some(0), Some(1)));
+        assert_eq!(
+            verdicts(&recorder, crate::db_stats::FILTER_KIND_PREFIX),
+            (Some(0), Some(0), Some(0)),
+            "no prefix evaluator exists without a prefix-capable policy"
+        );
     }
 }
