@@ -2433,7 +2433,7 @@ mod tests {
         db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
 
         // Create a snapshot after first flush. This protects seq >= 1
-        let _snapshot = db.snapshot().await.unwrap();
+        let _snapshot = db.snapshot().unwrap();
         db.flush().await.unwrap();
 
         // Compact L0 to L1
