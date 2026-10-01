@@ -498,7 +498,11 @@ impl<P: Into<Path>> DbBuilder<P> {
             Some(_) => None,
             None => self.settings.compactor_options.as_ref(),
         };
-        validate_size_tiered_l0_thresholds(&self.settings, compactor_options)?;
+        if let Some(compactor_options) = compactor_options {
+            let scheduler_options =
+                SizeTieredCompactionSchedulerOptions::from(&compactor_options.scheduler_options);
+            scheduler_options.validate_l0_limit(self.settings.l0_max_ssts)?;
+        }
 
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
@@ -1223,25 +1227,6 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
             self.wal_gc,
         )
     }
-}
-
-fn validate_size_tiered_l0_thresholds(
-    settings: &Settings,
-    compactor_options: Option<&CompactorOptions>,
-) -> Result<(), crate::Error> {
-    let Some(compactor_options) = compactor_options else {
-        return Ok(());
-    };
-    let scheduler_options =
-        SizeTieredCompactionSchedulerOptions::from(&compactor_options.scheduler_options);
-    if settings.l0_max_ssts < scheduler_options.min_compaction_sources {
-        return Err(SlateDBError::InvalidConfiguration(format!(
-            "l0_max_ssts ({}) must be at least min_compaction_sources ({})",
-            settings.l0_max_ssts, scheduler_options.min_compaction_sources
-        ))
-        .into());
-    }
-    Ok(())
 }
 
 /// The compactor coordinator handler and optional embedded worker handler produced by

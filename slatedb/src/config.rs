@@ -1494,6 +1494,19 @@ pub struct SizeTieredCompactionSchedulerOptions {
     pub sorted_run_consolidation_threshold: usize,
 }
 
+impl SizeTieredCompactionSchedulerOptions {
+    pub(crate) fn validate_l0_limit(&self, l0_max_ssts: usize) -> Result<(), crate::Error> {
+        if l0_max_ssts < self.min_compaction_sources {
+            return Err(SlateDBError::InvalidConfiguration(format!(
+                "l0_max_ssts ({}) must be at least min_compaction_sources ({})",
+                l0_max_ssts, self.min_compaction_sources
+            ))
+            .into());
+        }
+        Ok(())
+    }
+}
+
 impl Default for SizeTieredCompactionSchedulerOptions {
     fn default() -> Self {
         Self {
@@ -2296,5 +2309,18 @@ object_store_cache_options:
             ..Settings::default()
         };
         assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn test_size_tiered_options_validate_l0_limit() {
+        let options = SizeTieredCompactionSchedulerOptions {
+            min_compaction_sources: 4,
+            ..Default::default()
+        };
+        assert!(options.validate_l0_limit(4).is_ok());
+        assert!(options.validate_l0_limit(5).is_ok());
+
+        let err = options.validate_l0_limit(3).expect_err("expected error");
+        assert!(err.to_string().contains("l0_max_ssts (3) must be at least min_compaction_sources (4)"));
     }
 }
