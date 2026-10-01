@@ -9,15 +9,6 @@ use crate::error::{Error, SlateDbError};
 /// The clock a `Db`, `DbReader` or `Admin` reads wall time from. Every engine
 /// timer follows it: TTL expiry, checkpoint lifetimes, flush and poll ticks,
 /// the object-store retry backoff and the flush timeout.
-///
-/// `default_clock` follows the process clock. `mock` starts at
-/// `initial_ts_millis` and moves only forward, through `advance` and `set`, so
-/// a test drives every timer from outside the engine; a retry backoff or flush
-/// timeout on a frozen mock waits until the test moves the clock past it.
-/// Engine tasks sleeping on a mock poll it by yielding, so a handle built on
-/// one keeps the runtime's workers busy: a mock is for tests only. One clock
-/// may be shared by several handles; a `Db` and the `DbReader` following it
-/// read the same time.
 #[derive(uniffi::Object)]
 pub struct SystemClock {
     inner: Inner,
