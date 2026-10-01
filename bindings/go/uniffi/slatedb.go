@@ -654,6 +654,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_block_cache_policy()
+		})
+		if checksum != 18548 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_block_cache_policy: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_block_transformer()
 		})
 		if checksum != 57975 {
@@ -4726,6 +4735,9 @@ func (_ FfiDestroyerDb) Destroy(value *Db) {
 type DbBuilderInterface interface {
 	// Opens the database and consumes this builder.
 	Build() (*Db, error)
+	// What the block cache keeps of the SSTs this database writes, on a
+	// memtable flush and on a compaction's output.
+	WithBlockCachePolicy(policy BlockCachePolicy) error
 	// Transforms every SST block this database writes and reads, for
 	// encryption at rest. A `DbReaderBuilder` of the database must carry the
 	// same transform. The bindings run no standalone compactor or compaction
@@ -4812,6 +4824,19 @@ func (_self *DbBuilder) Build() (*Db, error) {
 	}
 
 	return res, err
+}
+
+// What the block cache keeps of the SSTs this database writes, on a
+// memtable flush and on a compaction's output.
+func (_self *DbBuilder) WithBlockCachePolicy(policy BlockCachePolicy) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_block_cache_policy(
+			_pointer, FfiConverterBlockCachePolicyINSTANCE.Lower(policy), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
 }
 
 // Transforms every SST block this database writes and reads, for
@@ -9711,6 +9736,55 @@ func LowerToExternalWriteHandle(value *WriteHandle) uint64 {
 type FfiDestroyerWriteHandle struct{}
 
 func (_ FfiDestroyerWriteHandle) Destroy(value *WriteHandle) {
+	value.Destroy()
+}
+
+// What the block cache keeps of the SSTs this database writes: the targets a
+// memtable flush caches and the targets a compaction's output caches. An
+// empty list caches nothing on that path. The engine's default caches every
+// data block, the index and the filters on flush, and the index and filters
+// on compaction output.
+type BlockCachePolicy struct {
+	FlushTargets            []CacheTarget
+	CompactionOutputTargets []CacheTarget
+}
+
+func (r *BlockCachePolicy) Destroy() {
+	FfiDestroyerSequenceCacheTarget{}.Destroy(r.FlushTargets)
+	FfiDestroyerSequenceCacheTarget{}.Destroy(r.CompactionOutputTargets)
+}
+
+type FfiConverterBlockCachePolicy struct{}
+
+var FfiConverterBlockCachePolicyINSTANCE = FfiConverterBlockCachePolicy{}
+
+func (c FfiConverterBlockCachePolicy) Lift(rb RustBufferI) BlockCachePolicy {
+	return LiftFromRustBuffer[BlockCachePolicy](c, rb)
+}
+
+func (c FfiConverterBlockCachePolicy) Read(reader io.Reader) BlockCachePolicy {
+	return BlockCachePolicy{
+		FfiConverterSequenceCacheTargetINSTANCE.Read(reader),
+		FfiConverterSequenceCacheTargetINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterBlockCachePolicy) Lower(value BlockCachePolicy) C.RustBuffer {
+	return LowerIntoRustBuffer[BlockCachePolicy](c, value)
+}
+
+func (c FfiConverterBlockCachePolicy) LowerExternal(value BlockCachePolicy) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[BlockCachePolicy](c, value))
+}
+
+func (c FfiConverterBlockCachePolicy) Write(writer io.Writer, value BlockCachePolicy) {
+	FfiConverterSequenceCacheTargetINSTANCE.Write(writer, value.FlushTargets)
+	FfiConverterSequenceCacheTargetINSTANCE.Write(writer, value.CompactionOutputTargets)
+}
+
+type FfiDestroyerBlockCachePolicy struct{}
+
+func (_ FfiDestroyerBlockCachePolicy) Destroy(value BlockCachePolicy) {
 	value.Destroy()
 }
 
