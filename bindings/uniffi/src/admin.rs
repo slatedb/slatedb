@@ -2,6 +2,7 @@ use crate::builder::CloneBuilder;
 use crate::cancellation::CancellationToken;
 use crate::config::{CheckpointOptions, GarbageCollectorOptions};
 use crate::error::{Error, SlateDbError};
+use crate::runtime;
 use crate::settings::Settings;
 use crate::types::{
     try_checkpoint_id_from_str, Checkpoint, CheckpointCreateResult, CloneSourceSpec, Compaction,
@@ -132,10 +133,16 @@ impl Admin {
             slatedb::config::GarbageCollectorOptions::default,
             Into::into,
         );
-        self.inner
-            .run_gc_with_options(cancellation_token.inner.clone(), options)
-            .await
-            .map_err(Into::into)
+        // The engine captures `Handle::current()` for the loop's tasks, so enter
+        // the dedicated runtime as the builders do; otherwise the loop runs on
+        // UniFFI's current-thread runtime.
+        runtime::enter(async move {
+            self.inner
+                .run_gc_with_options(cancellation_token.inner.clone(), options)
+                .await
+                .map_err(Into::into)
+        })
+        .await
     }
 
     /// Runs the compactor in the foreground until `cancellation_token` is
@@ -153,10 +160,13 @@ impl Admin {
         let options = settings
             .and_then(|settings| settings.inner().compactor_options)
             .unwrap_or_default();
-        self.inner
-            .run_compactor_with_options(cancellation_token.inner.clone(), options)
-            .await
-            .map_err(Into::into)
+        runtime::enter(async move {
+            self.inner
+                .run_compactor_with_options(cancellation_token.inner.clone(), options)
+                .await
+                .map_err(Into::into)
+        })
+        .await
     }
 
     /// Runs a standalone compaction worker in the foreground until
@@ -174,10 +184,13 @@ impl Admin {
             .and_then(|settings| settings.inner().compactor_options)
             .and_then(|compactor| compactor.worker)
             .unwrap_or_default();
-        self.inner
-            .run_compaction_worker_with_options(cancellation_token.inner.clone(), options)
-            .await
-            .map_err(Into::into)
+        runtime::enter(async move {
+            self.inner
+                .run_compaction_worker_with_options(cancellation_token.inner.clone(), options)
+                .await
+                .map_err(Into::into)
+        })
+        .await
     }
 
     /// Looks up a timestamp for the provided sequence number.
