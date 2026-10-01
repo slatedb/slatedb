@@ -267,8 +267,10 @@ pub struct ObjectStoreCacheOptions {
     pub root_folder: Option<String>,
     /// Bytes the cache may hold before its evictor removes the least
     /// recently used parts. `None` runs no evictor, so the cache grows
-    /// without limit. Default 16 GiB.
-    #[uniffi(default = Some(17179869184))]
+    /// without limit. Default 16 GiB, or `usize::MAX` on a 32-bit target
+    /// where 16 GiB does not fit, as the engine's.
+    #[cfg_attr(target_pointer_width = "32", uniffi(default = Some(4294967295)))]
+    #[cfg_attr(not(target_pointer_width = "32"), uniffi(default = Some(17179869184)))]
     pub max_cache_size_bytes: Option<u64>,
     /// Size of one cached part file: a non-zero multiple of 1024 bytes, or
     /// the reader refuses to build. Default 4 MiB.
