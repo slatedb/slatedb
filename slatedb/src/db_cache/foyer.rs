@@ -92,11 +92,12 @@ impl FoyerCache {
         Self { inner: cache }
     }
 
-    /// Wraps a cache the caller built, so admission, eviction and sharding are
-    /// the caller's: a FIFO cache with a filter gives a hard ceiling on indexed
-    /// weight, which `new_with_opts` does not. The cache must weigh entries with
-    /// `|_, v| v.size()`, or its capacity counts entries rather than bytes. Keep
-    /// a clone of the `foyer::Cache` to read `usage()`.
+    /// Wraps a Foyer cache configured by the caller.
+    ///
+    /// To measure capacity in bytes, use
+    /// `.with_weighter(|_, v: &CachedEntry| v.size())`. Without a custom
+    /// weigher, capacity counts entries. Keep a clone of the cache to read
+    /// `usage()` after passing it here.
     ///
     /// ```
     /// use slatedb::db_cache::foyer::FoyerCache;
