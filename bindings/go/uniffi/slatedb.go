@@ -10786,7 +10786,8 @@ type ObjectStoreCacheOptions struct {
 	RootFolder *string
 	// Bytes the cache may hold before its evictor removes the least
 	// recently used parts. `None` runs no evictor, so the cache grows
-	// without limit. Default 16 GiB.
+	// without limit. Default 16 GiB, or `usize::MAX` on a 32-bit target
+	// where 16 GiB does not fit, as the engine's.
 	MaxCacheSizeBytes *uint64
 	// Size of one cached part file: a non-zero multiple of 1024 bytes, or
 	// the reader refuses to build. Default 4 MiB.
