@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 /// A handle that stops a foreground `Admin` loop such as `run_gc` or
 /// `run_compactor`. Cancelling is idempotent and may happen from any thread
-/// before or after the loop starts; a loop started with an already cancelled
-/// token shuts down at once.
+/// before or after the loop starts; a loop given an already cancelled token
+/// returns without starting. Dropping a loop's future stops the loop as well.
 #[derive(uniffi::Object)]
 pub struct CancellationToken {
     pub(crate) inner: tokio_util::sync::CancellationToken,

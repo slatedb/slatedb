@@ -31,10 +31,11 @@ pub use builder::{AdminBuilder, CloneBuilder, DbBuilder, DbReaderBuilder};
 pub use cancellation::CancellationToken;
 pub use clock::SystemClock;
 pub use config::{
-    CloseOptions, DurabilityLevel, FlushOptions, FlushType, GarbageCollectorDirectoryOptions,
-    GarbageCollectorOptions, GarbageCollectorScheduleOptions, IsolationLevel, IterationOrder,
-    MergeOptions, PutOptions, ReadOptions, ReaderMode, ReaderOptions, ScanOptions, SstBlockSize,
-    TracingOptions, Ttl, WriteOptions,
+    CloseOptions, CompactionWorkerOptions, CompactorOptions, DurabilityLevel, FlushOptions,
+    FlushType, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    GarbageCollectorScheduleOptions, IsolationLevel, IterationOrder, MergeOptions, PutOptions,
+    ReadOptions, ReaderMode, ReaderOptions, ScanOptions, SstBlockSize, TracingOptions, Ttl,
+    WriteOptions,
 };
 pub use db::Db;
 pub use db_reader::DbReader;

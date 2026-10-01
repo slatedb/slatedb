@@ -1,14 +1,16 @@
 use crate::builder::CloneBuilder;
 use crate::cancellation::CancellationToken;
-use crate::config::{CheckpointOptions, GarbageCollectorOptions};
+use crate::config::{
+    CheckpointOptions, CompactionWorkerOptions, CompactorOptions, GarbageCollectorOptions,
+};
 use crate::error::{Error, SlateDbError};
 use crate::runtime;
-use crate::settings::Settings;
 use crate::types::{
     try_checkpoint_id_from_str, Checkpoint, CheckpointCreateResult, CloneSourceSpec, Compaction,
     CompactionSpec, CompactorStateView, VersionedCompactions, VersionedManifest,
 };
 use chrono::{DateTime, Utc};
+use std::future::Future;
 use std::ops::Bound;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +29,7 @@ fn into_u64_bounds(
 /// Administrative read/query handle for SlateDB.
 #[derive(uniffi::Object)]
 pub struct Admin {
-    pub(crate) inner: slatedb::admin::Admin,
+    pub(crate) inner: Arc<slatedb::admin::Admin>,
 }
 
 #[uniffi::export(async_runtime = "tokio")]
@@ -133,14 +135,8 @@ impl Admin {
             slatedb::config::GarbageCollectorOptions::default,
             Into::into,
         );
-        // The engine captures `Handle::current()` for the loop's tasks, so enter
-        // the dedicated runtime as the builders do; otherwise the loop runs on
-        // UniFFI's current-thread runtime.
-        runtime::enter(async move {
-            self.inner
-                .run_gc_with_options(cancellation_token.inner.clone(), options)
-                .await
-                .map_err(Into::into)
+        self.run_loop(&cancellation_token, |admin, token| async move {
+            admin.run_gc_with_options(token, options).await
         })
         .await
     }
@@ -148,23 +144,20 @@ impl Admin {
     /// Runs the compactor in the foreground until `cancellation_token` is
     /// cancelled, then shuts it down and returns.
     ///
-    /// The compactor's options are `settings.compactor_options`, so a compactor
-    /// process reads the same settings as the database it compacts. When
-    /// `settings` is `None`, or carries no `compactor_options`, SlateDB's
-    /// default compactor options are used.
+    /// When `options` is `None`, SlateDB's default compactor options are used,
+    /// which embed a compaction worker. A deployment whose workers are
+    /// separate processes passes options with `worker` unset.
     pub async fn run_compactor(
         &self,
         cancellation_token: Arc<CancellationToken>,
-        settings: Option<Arc<Settings>>,
+        options: Option<CompactorOptions>,
     ) -> Result<(), Error> {
-        let options = settings
-            .and_then(|settings| settings.inner().compactor_options)
+        let options = options
+            .map(slatedb::config::CompactorOptions::try_from)
+            .transpose()?
             .unwrap_or_default();
-        runtime::enter(async move {
-            self.inner
-                .run_compactor_with_options(cancellation_token.inner.clone(), options)
-                .await
-                .map_err(Into::into)
+        self.run_loop(&cancellation_token, |admin, token| async move {
+            admin.run_compactor_with_options(token, options).await
         })
         .await
     }
@@ -172,23 +165,20 @@ impl Admin {
     /// Runs a standalone compaction worker in the foreground until
     /// `cancellation_token` is cancelled, then shuts it down and returns.
     ///
-    /// The worker's options are `settings.compactor_options.worker`. When
-    /// `settings` is `None`, or carries no worker options, SlateDB's default
-    /// worker options are used.
+    /// When `options` is `None`, SlateDB's default worker options are used.
     pub async fn run_compaction_worker(
         &self,
         cancellation_token: Arc<CancellationToken>,
-        settings: Option<Arc<Settings>>,
+        options: Option<CompactionWorkerOptions>,
     ) -> Result<(), Error> {
-        let options = settings
-            .and_then(|settings| settings.inner().compactor_options)
-            .and_then(|compactor| compactor.worker)
+        let options = options
+            .map(slatedb::config::CompactionWorkerOptions::try_from)
+            .transpose()?
             .unwrap_or_default();
-        runtime::enter(async move {
-            self.inner
-                .run_compaction_worker_with_options(cancellation_token.inner.clone(), options)
+        self.run_loop(&cancellation_token, |admin, token| async move {
+            admin
+                .run_compaction_worker_with_options(token, options)
                 .await
-                .map_err(Into::into)
         })
         .await
     }
@@ -274,11 +264,48 @@ impl Admin {
     }
 }
 
+impl Admin {
+    /// Runs one of the engine's foreground loops as a task on the dedicated
+    /// runtime, under a child of the caller's token. An already cancelled
+    /// token returns before the loop starts: the engine's loops start, and
+    /// the compactor claims its epoch, before they look at the token. The
+    /// loop is a task rather than part of this future because the engine
+    /// stops a loop only through `stop()` in its `select!`; a loop dropped
+    /// with a cancelled foreign future would leave its tasks running on the
+    /// process-wide runtime with nothing able to reach them. Instead,
+    /// dropping this future cancels the child token and the loop shuts
+    /// itself down.
+    async fn run_loop<F, Fut>(
+        &self,
+        cancellation_token: &CancellationToken,
+        run: F,
+    ) -> Result<(), Error>
+    where
+        F: FnOnce(Arc<slatedb::admin::Admin>, tokio_util::sync::CancellationToken) -> Fut,
+        Fut: Future<Output = Result<(), slatedb::Error>> + Send + 'static,
+    {
+        if cancellation_token.is_cancelled() {
+            return Ok(());
+        }
+        let token = cancellation_token.inner.child_token();
+        let _stop_on_drop = token.clone().drop_guard();
+        match runtime::spawn(run(self.inner.clone(), token)).await {
+            Ok(result) => result.map_err(Into::into),
+            Err(join) => Err(Error::Internal {
+                message: format!("foreground loop task failed: {join}"),
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::builder::{AdminBuilder, DbBuilder};
+    use crate::config::{FlushOptions, FlushType};
     use crate::object_store::ObjectStore;
+    use crate::settings::Settings;
+    use std::collections::HashMap;
     use std::time::Duration;
 
     fn memory_store() -> Arc<ObjectStore> {
@@ -340,40 +367,110 @@ mod tests {
         stop.await.unwrap();
     }
 
+    /// Dropping a loop's future, as a cancelled foreign task does, cancels the
+    /// token the loop watches while the loop itself runs on to shut down; a
+    /// loop dropped mid-poll would never reach its `stop()`.
     #[tokio::test]
-    async fn run_compactor_takes_its_options_from_settings() {
-        let (admin, _) = admin_over_new_db("admin-run-compactor-settings").await;
+    async fn dropping_a_loop_future_cancels_its_token_and_lets_it_finish() {
+        let (admin, _) = admin_over_new_db("admin-run-loop-dropped").await;
+        let token = CancellationToken::new();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let running = tokio::spawn({
+            let admin = admin.clone();
+            let token = token.clone();
+            async move {
+                admin
+                    .run_loop(&token, move |_, loop_token| async move {
+                        started_tx.send(()).unwrap();
+                        loop_token.cancelled().await;
+                        finished_tx.send(()).unwrap();
+                        Ok(())
+                    })
+                    .await
+            }
+        });
+        started_rx.await.unwrap();
+        running.abort();
+        assert!(running.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(5), finished_rx)
+            .await
+            .expect("the loop never saw its token cancelled")
+            .expect("the loop was dropped before it could shut down");
+        assert!(
+            !token.is_cancelled(),
+            "only the loop's child token is cancelled"
+        );
+    }
+
+    /// Two L0 SSTs under a database that runs no compactor of its own: below
+    /// the scheduler's default minimum of four sources, so only a compactor
+    /// told to accept two has anything to schedule.
+    async fn admin_over_two_l0s(path: &str) -> Arc<Admin> {
+        let store = memory_store();
         let settings = Settings::with_defaults();
         settings
-            .set(
-                "compactor_options.poll_interval".to_owned(),
-                "\"250ms\"".to_owned(),
-            )
+            .set("compactor_options".to_owned(), "null".to_owned())
             .unwrap();
-        settings
-            .set("compactor_options.worker".to_owned(), "null".to_owned())
+        let builder = DbBuilder::new(path.to_owned(), store.clone());
+        builder.with_settings(settings).unwrap();
+        let db = builder.build().await.unwrap();
+        for i in 0..2u8 {
+            db.put(vec![i], vec![i]).await.unwrap();
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
             .unwrap();
-        assert_eq!(
-            settings
-                .inner()
-                .compactor_options
-                .as_ref()
-                .map(|options| options.poll_interval),
-            Some(Duration::from_millis(250))
-        );
+        }
+        db.close().await.unwrap();
+        AdminBuilder::new(path.to_owned(), store).build().unwrap()
+    }
+
+    /// The compactor schedules a compaction over two L0 SSTs only because the
+    /// options it was given lower the scheduler's minimum; a loop that fell
+    /// back to the engine's defaults would schedule nothing.
+    #[tokio::test]
+    async fn run_compactor_uses_the_options_it_is_given() {
+        let admin = admin_over_two_l0s("admin-run-compactor-options").await;
         let token = CancellationToken::new();
-        let stopper = token.clone();
-        let stop = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            stopper.cancel();
+        let compactor = tokio::spawn({
+            let admin = admin.clone();
+            let token = token.clone();
+            async move {
+                admin
+                    .run_compactor(
+                        token,
+                        Some(CompactorOptions {
+                            poll_interval_ms: 50,
+                            scheduler_options: HashMap::from([(
+                                "min_compaction_sources".to_owned(),
+                                "2".to_owned(),
+                            )]),
+                            worker: None,
+                            ..CompactorOptions::default()
+                        }),
+                    )
+                    .await
+            }
         });
-        tokio::time::timeout(
-            Duration::from_secs(10),
-            admin.run_compactor(token, Some(settings)),
-        )
-        .await
-        .expect("run_compactor must return once its token is cancelled")
-        .unwrap();
-        stop.await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let compactions = admin.read_compactions(None).await.unwrap();
+            if compactions.is_some_and(|c| !c.recent_compactions.is_empty()) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the compactor scheduled nothing over two L0 SSTs"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(10), compactor)
+            .await
+            .expect("run_compactor must return once its token is cancelled")
+            .unwrap()
+            .unwrap();
     }
 }
