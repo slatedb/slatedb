@@ -21,7 +21,9 @@ use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
 
 const MIN_RETRY_DELAY: Duration = Duration::from_millis(100);
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(1);
+/// Also caps the L0 uploader's retry backoff, so a long `manifest_poll_interval`
+/// does not stretch upload retries with it.
+pub(crate) const MAX_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Metadata key used to store the ULID for put operations.
 /// This is used to verify if a failed put actually succeeded.
