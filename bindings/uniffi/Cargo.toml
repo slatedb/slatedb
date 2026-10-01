@@ -35,6 +35,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
+uniffi_meta = { workspace = true }
 
 [lints]
 workspace = true

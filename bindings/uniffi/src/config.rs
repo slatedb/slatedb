@@ -1,6 +1,7 @@
 use crate::error::{Error, SlateDbError};
 use crate::filter_policy::FilterContext;
 use crate::types::try_checkpoint_id_from_str;
+use crate::wal_reader::positive_usize;
 use std::time::Duration;
 
 /// Minimum durability level required for data returned by reads and scans.
@@ -219,6 +220,9 @@ pub struct ReaderOptions {
     /// up after `n` retries and surfaces the underlying error.
     #[uniffi(default = None)]
     pub object_store_max_retries: Option<u32>,
+    /// The reader's object-store cache. `None` is the engine's default.
+    #[uniffi(default = None)]
+    pub object_store_cache_options: Option<ObjectStoreCacheOptions>,
 }
 
 impl Default for ReaderOptions {
@@ -229,20 +233,136 @@ impl Default for ReaderOptions {
             max_memtable_bytes: 64 * 1024 * 1024,
             skip_wal_replay: false,
             object_store_max_retries: None,
+            object_store_cache_options: None,
         }
     }
 }
 
-impl From<ReaderOptions> for slatedb::config::DbReaderOptions {
-    fn from(value: ReaderOptions) -> Self {
-        slatedb::config::DbReaderOptions {
+/// Which SSTs a reader loads into its disk cache at startup, up to
+/// `max_cache_size_bytes`.
+#[derive(Clone, Copy, Debug, uniffi::Enum)]
+pub enum PreloadLevel {
+    /// The L0 SSTs only, the most recently written.
+    L0Sst,
+    /// Every SST, L0 and compacted levels alike.
+    AllSst,
+}
+
+impl From<PreloadLevel> for slatedb::config::PreloadLevel {
+    fn from(value: PreloadLevel) -> Self {
+        match value {
+            PreloadLevel::L0Sst => Self::L0Sst,
+            PreloadLevel::AllSst => Self::AllSst,
+        }
+    }
+}
+
+/// The on-disk object-store cache of one reader. Every default is the
+/// engine's; `root_folder` `None` disables the cache.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct ObjectStoreCacheOptions {
+    /// Directory the cached parts are written under. `None` disables the
+    /// cache and every other field is ignored.
+    #[uniffi(default = None)]
+    pub root_folder: Option<String>,
+    /// Bytes the cache may hold before its evictor removes the least
+    /// recently used parts. `None` runs no evictor, so the cache grows
+    /// without limit. Default 16 GiB, or `usize::MAX` on a 32-bit target
+    /// where 16 GiB does not fit, as the engine's.
+    #[cfg_attr(target_pointer_width = "32", uniffi(default = Some(4294967295)))]
+    #[cfg_attr(not(target_pointer_width = "32"), uniffi(default = Some(17179869184)))]
+    pub max_cache_size_bytes: Option<u64>,
+    /// Size of one cached part file: a non-zero multiple of 1024 bytes, or
+    /// the reader refuses to build. Default 4 MiB.
+    #[uniffi(default = 4194304)]
+    pub part_size_bytes: u64,
+    /// Whether SSTs written by memtable flushes are added to the cache.
+    /// Default false.
+    #[uniffi(default = false)]
+    pub cache_on_flush: bool,
+    /// Whether SSTs written by compactions are added to the cache. Default
+    /// false.
+    #[uniffi(default = false)]
+    pub cache_on_compaction: bool,
+    /// Which SSTs to load into the cache when the reader starts, up to
+    /// `max_cache_size_bytes`. `None` preloads nothing.
+    #[uniffi(default = None)]
+    pub preload_disk_cache_on_startup: Option<PreloadLevel>,
+    /// Milliseconds between rescans of the cache directory that rebuild the
+    /// evictor's map; greater than zero. `None` scans once at startup only.
+    /// Default one hour.
+    #[uniffi(default = Some(3600000))]
+    pub scan_interval_ms: Option<u64>,
+    /// Part files kept open in a least-recently-used cache; greater than
+    /// zero. Default 1000.
+    #[uniffi(default = 1000)]
+    pub max_open_file_handles: u64,
+}
+
+impl Default for ObjectStoreCacheOptions {
+    fn default() -> Self {
+        let engine = slatedb::config::ObjectStoreCacheOptions::default();
+        Self {
+            root_folder: None,
+            max_cache_size_bytes: engine.max_cache_size_bytes.map(|v| v as u64),
+            part_size_bytes: engine.part_size_bytes as u64,
+            cache_on_flush: engine.cache_on_flush,
+            cache_on_compaction: engine.cache_on_compaction,
+            preload_disk_cache_on_startup: None,
+            scan_interval_ms: engine.scan_interval.map(|d| d.as_millis() as u64),
+            max_open_file_handles: engine.max_open_file_handles as u64,
+        }
+    }
+}
+
+impl TryFrom<ObjectStoreCacheOptions> for slatedb::config::ObjectStoreCacheOptions {
+    type Error = Error;
+
+    fn try_from(value: ObjectStoreCacheOptions) -> Result<Self, Error> {
+        let usize_of = |field: &'static str, v: u64| {
+            usize::try_from(v)
+                .map_err(|_| Error::from(SlateDbError::ValueTooLargeForUsize { field }))
+        };
+        Ok(Self {
+            root_folder: value.root_folder.map(std::path::PathBuf::from),
+            max_cache_size_bytes: value
+                .max_cache_size_bytes
+                .map(|v| usize_of("max_cache_size_bytes", v))
+                .transpose()?,
+            part_size_bytes: usize_of("part_size_bytes", value.part_size_bytes)?,
+            cache_on_flush: value.cache_on_flush,
+            cache_on_compaction: value.cache_on_compaction,
+            preload_disk_cache_on_startup: value.preload_disk_cache_on_startup.map(Into::into),
+            scan_interval: value
+                .scan_interval_ms
+                .map(|ms| positive_usize(ms, "scan_interval_ms").map(|_| Duration::from_millis(ms)))
+                .transpose()?,
+            max_open_file_handles: positive_usize(
+                value.max_open_file_handles,
+                "max_open_file_handles",
+            )?,
+        })
+    }
+}
+
+impl TryFrom<ReaderOptions> for slatedb::config::DbReaderOptions {
+    type Error = Error;
+
+    fn try_from(value: ReaderOptions) -> Result<Self, Error> {
+        let object_store_cache_options = value
+            .object_store_cache_options
+            .map(TryInto::try_into)
+            .transpose()?
+            .unwrap_or_default();
+        Ok(slatedb::config::DbReaderOptions {
             manifest_poll_interval: Duration::from_millis(value.manifest_poll_interval_ms),
             checkpoint_lifetime: Duration::from_millis(value.checkpoint_lifetime_ms),
             max_memtable_bytes: value.max_memtable_bytes,
             skip_wal_replay: value.skip_wal_replay,
             object_store_max_retries: value.object_store_max_retries,
+            object_store_cache_options,
             ..Default::default()
-        }
+        })
     }
 }
 
@@ -639,7 +759,7 @@ mod tests {
 
     #[test]
     fn reader_object_store_max_retries_defaults_to_unbounded() {
-        let reader: slatedb::config::DbReaderOptions = ReaderOptions::default().into();
+        let reader: slatedb::config::DbReaderOptions = ReaderOptions::default().try_into().unwrap();
 
         assert_eq!(reader.object_store_max_retries, None);
     }
@@ -650,7 +770,8 @@ mod tests {
             object_store_max_retries: Some(5),
             ..ReaderOptions::default()
         }
-        .into();
+        .try_into()
+        .unwrap();
 
         assert_eq!(reader.object_store_max_retries, Some(5));
     }
@@ -688,5 +809,178 @@ impl TryFrom<&CheckpointOptions> for slatedb::config::CheckpointOptions {
                 .transpose()?,
             name: value.name.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod reader_options_tests {
+    use super::*;
+
+    #[test]
+    fn reader_options_carry_the_object_store_cache() {
+        let engine: slatedb::config::DbReaderOptions = ReaderOptions {
+            object_store_cache_options: Some(ObjectStoreCacheOptions {
+                root_folder: Some("/tmp/reader-cache".to_owned()),
+                max_cache_size_bytes: Some(1 << 30),
+                part_size_bytes: 1 << 20,
+                cache_on_flush: true,
+                cache_on_compaction: false,
+                preload_disk_cache_on_startup: Some(PreloadLevel::L0Sst),
+                scan_interval_ms: Some(60_000),
+                max_open_file_handles: 64,
+            }),
+            ..ReaderOptions::default()
+        }
+        .try_into()
+        .unwrap();
+        let cache = engine.object_store_cache_options;
+        assert_eq!(
+            cache.root_folder,
+            Some(std::path::PathBuf::from("/tmp/reader-cache"))
+        );
+        assert_eq!(cache.max_cache_size_bytes, Some(1 << 30));
+        assert_eq!(cache.part_size_bytes, 1 << 20);
+        assert!(cache.cache_on_flush);
+        assert!(!cache.cache_on_compaction);
+        assert!(matches!(
+            cache.preload_disk_cache_on_startup,
+            Some(slatedb::config::PreloadLevel::L0Sst)
+        ));
+        assert_eq!(cache.scan_interval, Some(Duration::from_secs(60)));
+        assert_eq!(cache.max_open_file_handles, 64);
+    }
+
+    #[test]
+    fn absent_cache_options_are_the_engines_default() {
+        let engine: slatedb::config::DbReaderOptions = ReaderOptions::default().try_into().unwrap();
+        let default = slatedb::config::ObjectStoreCacheOptions::default();
+        let cache = engine.object_store_cache_options;
+        assert_eq!(cache.root_folder, default.root_folder);
+        assert_eq!(cache.max_cache_size_bytes, default.max_cache_size_bytes);
+        assert_eq!(cache.part_size_bytes, default.part_size_bytes);
+        assert_eq!(cache.cache_on_flush, default.cache_on_flush);
+        assert_eq!(cache.cache_on_compaction, default.cache_on_compaction);
+        assert!(cache.preload_disk_cache_on_startup.is_none());
+        assert_eq!(cache.scan_interval, default.scan_interval);
+        assert_eq!(cache.max_open_file_handles, default.max_open_file_handles);
+    }
+
+    /// The `#[uniffi(default = ...)]` literals are what Node, Python,
+    /// Go and Java callers get when they leave a field out; they must
+    /// be the engine's defaults, field for field, as the Rust
+    /// `Default` is.
+    #[test]
+    fn the_defaults_foreign_callers_see_are_the_engines() {
+        use uniffi_meta::{DefaultValueMetadata, LiteralMetadata, Metadata};
+
+        let Metadata::Record(record) =
+            uniffi_meta::read_metadata(&UNIFFI_META_SLATEDB_UNIFFI_RECORD_OBJECTSTORECACHEOPTIONS)
+                .unwrap()
+        else {
+            panic!("ObjectStoreCacheOptions is a record");
+        };
+        let literal = |name: &str| -> LiteralMetadata {
+            let field = record
+                .fields
+                .iter()
+                .find(|field| field.name == name)
+                .unwrap_or_else(|| panic!("no field {name}"));
+            match field.default.clone() {
+                Some(DefaultValueMetadata::Literal(literal)) => literal,
+                other => panic!("{name} has no literal uniffi default: {other:?}"),
+            }
+        };
+        let uint = |literal: LiteralMetadata| -> u64 {
+            match literal {
+                LiteralMetadata::UInt(value, _, _) => value,
+                other => panic!("not an unsigned literal: {other:?}"),
+            }
+        };
+        let some_uint = |literal: LiteralMetadata| -> Option<u64> {
+            match literal {
+                LiteralMetadata::None => None,
+                LiteralMetadata::Some { inner } => match *inner {
+                    DefaultValueMetadata::Literal(inner) => Some(uint(inner)),
+                    other => panic!("not a literal: {other:?}"),
+                },
+                other => panic!("not an optional literal: {other:?}"),
+            }
+        };
+        let boolean = |literal: LiteralMetadata| -> bool {
+            match literal {
+                LiteralMetadata::Boolean(value) => value,
+                other => panic!("not a boolean literal: {other:?}"),
+            }
+        };
+
+        let engine = slatedb::config::ObjectStoreCacheOptions::default();
+        let rust = ObjectStoreCacheOptions::default();
+        assert!(matches!(literal("root_folder"), LiteralMetadata::None));
+        assert_eq!(
+            some_uint(literal("max_cache_size_bytes")),
+            engine.max_cache_size_bytes.map(|v| v as u64)
+        );
+        assert_eq!(
+            rust.max_cache_size_bytes,
+            some_uint(literal("max_cache_size_bytes"))
+        );
+        assert_eq!(
+            uint(literal("part_size_bytes")),
+            engine.part_size_bytes as u64
+        );
+        assert_eq!(rust.part_size_bytes, uint(literal("part_size_bytes")));
+        assert_eq!(boolean(literal("cache_on_flush")), engine.cache_on_flush);
+        assert_eq!(rust.cache_on_flush, boolean(literal("cache_on_flush")));
+        assert_eq!(
+            boolean(literal("cache_on_compaction")),
+            engine.cache_on_compaction
+        );
+        assert_eq!(
+            rust.cache_on_compaction,
+            boolean(literal("cache_on_compaction"))
+        );
+        assert!(matches!(
+            literal("preload_disk_cache_on_startup"),
+            LiteralMetadata::None
+        ));
+        assert!(engine.preload_disk_cache_on_startup.is_none());
+        assert_eq!(
+            some_uint(literal("scan_interval_ms")),
+            engine.scan_interval.map(|d| d.as_millis() as u64)
+        );
+        assert_eq!(
+            rust.scan_interval_ms,
+            some_uint(literal("scan_interval_ms"))
+        );
+        assert_eq!(
+            uint(literal("max_open_file_handles")),
+            engine.max_open_file_handles as u64
+        );
+        assert_eq!(
+            rust.max_open_file_handles,
+            uint(literal("max_open_file_handles"))
+        );
+    }
+
+    #[test]
+    fn zero_max_open_file_handles_is_refused() {
+        let error = slatedb::config::ObjectStoreCacheOptions::try_from(ObjectStoreCacheOptions {
+            root_folder: Some("/tmp/reader-cache".to_owned()),
+            max_open_file_handles: 0,
+            ..ObjectStoreCacheOptions::default()
+        })
+        .expect_err("zero file handles must be refused before the engine panics on it");
+        assert!(matches!(error, Error::Invalid { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn zero_scan_interval_is_refused() {
+        let error = slatedb::config::ObjectStoreCacheOptions::try_from(ObjectStoreCacheOptions {
+            root_folder: Some("/tmp/reader-cache".to_owned()),
+            scan_interval_ms: Some(0),
+            ..ObjectStoreCacheOptions::default()
+        })
+        .expect_err("a zero scan interval must be refused, not spun on");
+        assert!(matches!(error, Error::Invalid { .. }), "{error:?}");
     }
 }
