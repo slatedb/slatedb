@@ -21,10 +21,11 @@ log = { workspace = true }
 parking_lot = { workspace = true }
 object_store = { workspace = true }
 slatedb = { workspace = true, features = ["all"] }
-slatedb-common = { workspace = true }
+slatedb-common = { workspace = true, features = ["test-util"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-log = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
@@ -35,6 +36,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
+uniffi_meta = { workspace = true }
 
 [lints]
 workspace = true

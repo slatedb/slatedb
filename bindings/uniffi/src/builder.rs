@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::admin::Admin;
 use crate::block_transformer::{adapt_block_transformer, BlockTransformer};
+use crate::clock::SystemClock;
 use crate::config::{ReaderMode, ReaderOptions, SstBlockSize};
 use crate::db::Db;
 use crate::db_cache::DbCache;
@@ -15,7 +16,7 @@ use crate::metrics::adapt_metrics_recorder;
 use crate::object_store::ObjectStore;
 use crate::runtime;
 use crate::settings::Settings;
-use crate::types::{CloneSourceSpec, KeyRange};
+use crate::types::{BlockCachePolicy, CloneSourceSpec, KeyRange};
 use crate::MetricsRecorder;
 use parking_lot::Mutex;
 
@@ -78,6 +79,22 @@ impl DbBuilder {
     /// uniqueness and stability across reopens.
     pub fn with_db_cache(&self, db_cache: Arc<DbCache>, db_cache_id: u64) -> Result<(), Error> {
         self.update_builder(|builder| builder.with_db_cache(db_cache.inner.clone(), db_cache_id))
+            .map_err(Into::into)
+    }
+
+    /// Reads wall time from `clock` instead of the process clock. Every timer
+    /// follows it: TTL expiry, flush and poll ticks, the object-store retry
+    /// backoff and the flush timeout. On a frozen mock those wait until the
+    /// test advances the clock.
+    pub fn with_system_clock(&self, clock: Arc<SystemClock>) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_system_clock(clock.inner()))
+            .map_err(Into::into)
+    }
+
+    /// What the block cache keeps of the SSTs this database writes, on a
+    /// memtable flush and on a compaction's output.
+    pub fn with_block_cache_policy(&self, policy: BlockCachePolicy) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_block_cache_policy(policy.into_core()))
             .map_err(Into::into)
     }
 
@@ -229,6 +246,15 @@ impl DbReaderBuilder {
             .map_err(Into::into)
     }
 
+    /// Reads wall time from `clock` instead of the process clock. Every timer
+    /// follows it: checkpoint lifetimes, manifest polls, TTL visibility and
+    /// the object-store retry backoff. On a frozen mock those wait until the
+    /// test advances the clock.
+    pub fn with_system_clock(&self, clock: Arc<SystemClock>) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_system_clock(clock.inner()))
+            .map_err(Into::into)
+    }
+
     /// Decodes every SST block this reader fetches with the transform the
     /// database's writer encodes with.
     pub fn with_block_transformer(
@@ -251,7 +277,7 @@ impl DbReaderBuilder {
 
     /// Applies custom reader options.
     pub fn with_options(&self, options: ReaderOptions) -> Result<(), Error> {
-        let options = options.into();
+        let options: slatedb::config::DbReaderOptions = options.try_into()?;
         self.update_builder(|builder| builder.with_options(options))
             .map_err(Into::into)
     }
@@ -352,11 +378,22 @@ impl AdminBuilder {
             .map_err(Into::into)
     }
 
+    /// Reads wall time from `clock` instead of the process clock. Every timer
+    /// follows it: checkpoint expiry, garbage collector and compactor schedule
+    /// ticks and the object-store retry backoff. On a frozen mock those wait
+    /// until the test advances the clock.
+    pub fn with_system_clock(&self, clock: Arc<SystemClock>) -> Result<(), Error> {
+        self.update_builder(|builder| builder.with_system_clock(clock.inner()))
+            .map_err(Into::into)
+    }
+
     /// Builds the admin handle and consumes this builder.
     pub fn build(&self) -> Result<Arc<Admin>, Error> {
         let builder = self.take_builder()?;
         let admin = builder.build();
-        Ok(Arc::new(Admin { inner: admin }))
+        Ok(Arc::new(Admin {
+            inner: Arc::new(admin),
+        }))
     }
 }
 
@@ -433,6 +470,27 @@ mod tests {
     use super::*;
     use crate::block_transformer::tests::Flip;
     use crate::config::{FlushOptions, FlushType, ReaderMode};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn writes_are_stamped_by_the_installed_clock() {
+        let object_store = Arc::new(ObjectStore {
+            inner: Arc::new(object_store::memory::InMemory::new()),
+        });
+        let clock = SystemClock::mock(1_000_000).unwrap();
+        let builder = DbBuilder::new("clocked".to_owned(), object_store);
+        builder.with_system_clock(clock.clone()).unwrap();
+        let db = builder.build().await.unwrap();
+        let first = db.put(b"k".to_vec(), b"v".to_vec()).await.unwrap();
+        assert_eq!(first.create_ts(), 1_000_000);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let second = db.put(b"k".to_vec(), b"w".to_vec()).await.unwrap();
+        assert_eq!(second.create_ts(), 1_000_000);
+        clock.advance(500).await.unwrap();
+        let third = db.put(b"k".to_vec(), b"x".to_vec()).await.unwrap();
+        assert_eq!(third.create_ts(), 1_000_500);
+        db.close().await.unwrap();
+    }
 
     #[tokio::test]
     async fn blocks_written_through_a_transform_read_back_only_through_it() {

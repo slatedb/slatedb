@@ -36,6 +36,15 @@ pub(crate) enum SlateDbError {
     #[error("invalid timestamp seconds: {timestamp_secs}")]
     InvalidTimestampSeconds { timestamp_secs: i64 },
 
+    #[error("invalid timestamp millis: {ts_millis}")]
+    InvalidTimestampMillis { ts_millis: i64 },
+
+    #[error("mock clock cannot move backwards from {now_millis} to {ts_millis}")]
+    ClockMovedBackwards { ts_millis: i64, now_millis: i64 },
+
+    #[error("only a mock clock can be advanced or set")]
+    ClockNotMock,
+
     #[error("range start must not be greater than range end")]
     RangeStartGreaterThanEnd,
 

@@ -3372,11 +3372,13 @@ dependencies = [
  "slatedb-common",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-log",
  "tracing-subscriber",
  "ulid",
  "uniffi",
+ "uniffi_meta",
  "url",
  "uuid",
 ]
