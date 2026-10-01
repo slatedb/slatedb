@@ -243,13 +243,17 @@ mod tests {
         }))
     }
 
-    /// A caller-built FIFO cache that refuses any entry heavier than `capacity`.
-    fn bounded(capacity: usize) -> FoyerCache {
+    /// A caller-built FIFO cache that refuses any entry heavier than a shard's share of
+    /// `capacity`. Foyer splits capacity evenly across shards and indexes an entry heavier
+    /// than its shard anyway, so a filter keyed to the whole capacity only holds the
+    /// ceiling with one shard.
+    fn bounded(capacity: usize, shards: usize) -> FoyerCache {
+        let share = capacity / shards;
         FoyerCache::new_with_cache(
             foyer::CacheBuilder::new(capacity)
                 .with_weighter(|_, v: &CachedEntry| v.size().max(1))
-                .with_filter(move |_, v: &CachedEntry| v.size().max(1) <= capacity)
-                .with_shards(1)
+                .with_filter(move |_, v: &CachedEntry| v.size().max(1) <= share)
+                .with_shards(shards)
                 .with_eviction_config(foyer::FifoConfig::default())
                 .build(),
         )
@@ -291,7 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_with_cache_keeps_the_callers_admission_and_eviction() {
-        let cache = bounded(10);
+        let cache = bounded(10, 1);
         cache.insert(key(0), block(6)).await;
         assert_eq!(cache.inner.usage(), 6);
         assert!(cache.get_block(&key(0)).await.unwrap().is_some());
@@ -308,6 +312,25 @@ mod tests {
         assert_eq!(cache.inner.usage(), 6);
     }
 
+    /// Keys hash to shards, so the ceiling must hold whichever shard an entry lands in.
+    #[tokio::test]
+    async fn new_with_cache_holds_the_ceiling_across_shards() {
+        let cache = bounded(10, 2);
+
+        // Lighter than the cache but heavier than a shard: refused rather than indexed
+        // over the shard's share.
+        cache.insert(key(0), block(6)).await;
+        assert!(cache.get_block(&key(0)).await.unwrap().is_none());
+        assert_eq!(cache.inner.usage(), 0);
+
+        // Every shard ends up holding one entry of its share and no more.
+        for id in 1..=64 {
+            cache.insert(key(id), block(5)).await;
+            assert!(cache.inner.usage() <= 10);
+        }
+        assert_eq!(cache.inner.usage(), 10);
+    }
+
     /// A refused value must still reach every waiter, loaded once, for each entry kind.
     #[tokio::test]
     async fn fetches_deduplicate_and_return_values_the_filter_refuses() {
@@ -315,7 +338,7 @@ mod tests {
             let weight = entry.size().max(1);
             assert!(weight > 1);
             for admit in [true, false] {
-                let cache = Arc::new(bounded(if admit { weight } else { weight - 1 }));
+                let cache = Arc::new(bounded(if admit { weight } else { weight - 1 }, 1));
                 let loads = Arc::new(AtomicUsize::new(0));
                 let (release, ready) = watch::channel(false);
                 let mut pending = Vec::new();
