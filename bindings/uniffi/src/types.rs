@@ -655,7 +655,11 @@ pub struct BlockCachePolicy {
 
 impl BlockCachePolicy {
     pub(crate) fn into_core(self) -> slatedb::BlockCachePolicy {
-        let flush: Vec<_> = self.flush_targets.into_iter().map(CacheTarget::into_core).collect();
+        let flush: Vec<_> = self
+            .flush_targets
+            .into_iter()
+            .map(CacheTarget::into_core)
+            .collect();
         let compaction: Vec<_> = self
             .compaction_output_targets
             .into_iter()
