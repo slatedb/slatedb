@@ -243,20 +243,7 @@ async fn test_range_scan(db: &Db, output: &CapturedOutput) {
     assert_no_span(&scan_log, "slatedb.read.read_filters", "range-scan");
     assert_no_span(&scan_log, "slatedb.read.evaluate_filter", "range-scan");
     for level in ["l0", "sorted_run:"] {
-        assert_sst_span(
-            &scan_log,
-            "slatedb.read.read_index",
-            "range-scan",
-            level,
-            has_cache_flag,
-        );
-        assert_sst_span(
-            &scan_log,
-            "slatedb.read.read_blocks",
-            "range-scan",
-            level,
-            has_block_activity,
-        );
+        assert_sst_index_and_data(&scan_log, "range-scan", level);
     }
 }
 
@@ -281,8 +268,10 @@ async fn test_prefix_scan(db: &Db, output: &CapturedOutput) {
     assert_root(&prefix_log, "prefix-scan");
     assert_span(&prefix_log, "slatedb.read.memtable", "prefix-scan", &[]);
     assert_merge_spans(&prefix_log, "prefix-scan");
+    assert_no_span(&prefix_log, "slatedb.read.read_filters", "prefix-scan");
+    assert_no_span(&prefix_log, "slatedb.read.evaluate_filter", "prefix-scan");
     for level in ["l0", "sorted_run:"] {
-        assert_sst_spans(&prefix_log, "prefix-scan", level);
+        assert_sst_index_and_data(&prefix_log, "prefix-scan", level);
     }
 }
 
@@ -308,8 +297,10 @@ async fn test_recency_scan(db: &Db, output: &CapturedOutput) {
     assert_root(&recency_log, "recency-scan");
     assert_span(&recency_log, "slatedb.read.memtable", "recency-scan", &[]);
     assert_no_span(&recency_log, "slatedb.read.merge", "recency-scan");
+    assert_no_span(&recency_log, "slatedb.read.read_filters", "recency-scan");
+    assert_no_span(&recency_log, "slatedb.read.evaluate_filter", "recency-scan");
     for level in ["l0", "sorted_run:"] {
-        assert_sst_spans(&recency_log, "recency-scan", level);
+        assert_sst_index_and_data(&recency_log, "recency-scan", level);
     }
 }
 
@@ -450,6 +441,10 @@ fn assert_sst_spans(log: &str, trace_id: &str, level: &str) {
         level,
         |fields| fields.get("filter_name") == Some(&"_bf") && fields.get("result") == Some(&"true"),
     );
+    assert_sst_index_and_data(log, trace_id, level);
+}
+
+fn assert_sst_index_and_data(log: &str, trace_id: &str, level: &str) {
     assert_sst_span(
         log,
         "slatedb.read.read_index",
