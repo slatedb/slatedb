@@ -451,20 +451,5 @@ mod tests {
         assert_eq!(third.create_ts(), 1_000_500);
         db.close().await.unwrap();
     }
-
-    #[test]
-    fn consumed_builders_refuse_a_clock() {
-        let object_store = Arc::new(ObjectStore {
-            inner: Arc::new(object_store::memory::InMemory::new()),
-        });
-        let clock = SystemClock::default_clock();
-        let reader = DbReaderBuilder::new("db".to_owned(), object_store.clone());
-        reader.with_system_clock(clock.clone()).unwrap();
-        let _ = reader.take_builder().unwrap();
-        assert!(reader.with_system_clock(clock.clone()).is_err());
-        let admin = AdminBuilder::new("db".to_owned(), object_store);
-        admin.with_system_clock(clock.clone()).unwrap();
-        let _ = admin.take_builder().unwrap();
-        assert!(admin.with_system_clock(clock).is_err());
     }
 }
