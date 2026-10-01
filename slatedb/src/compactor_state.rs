@@ -2569,7 +2569,10 @@ mod tests {
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
         let opts = Settings {
-            l0_sst_size_bytes: 256,
+            // The two seeded puts must land in one L0 SST, so this sits
+            // between the estimated size of a one entry and a two entry
+            // memtable.
+            l0_sst_size_bytes: 300,
             // make sure to run with the compactor disabled. The tests will explicitly
             // manage compaction execution and assert the associated state mutations.
             compactor_options: None,

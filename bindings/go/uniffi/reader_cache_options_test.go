@@ -9,13 +9,6 @@ import (
 	slatedb "slatedb.io/slatedb-go/uniffi"
 )
 
-func valueOf(got *[]byte) string {
-	if got == nil {
-		return "<nil>"
-	}
-	return string(*got)
-}
-
 // regularFilesUnder counts the files below root, however the cache lays
 // them out.
 func regularFilesUnder(t *testing.T, root string) int {

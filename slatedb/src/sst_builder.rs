@@ -62,9 +62,9 @@ use crate::error::SlateDBError;
 use crate::filter_policy::{FilterBuilder, FilterPolicy, NamedFilter};
 use crate::flatbuffer_types::{BlockMeta, BlockMetaArgs};
 use crate::format::sst::{
-    BlockBuilder, BlockBuilderWithStats, EncodedSsTable, EncodedSsTableBlock,
-    EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat, SST_FORMAT_VERSION,
-    SST_FORMAT_VERSION_LATEST, SST_FORMAT_VERSION_V2,
+    block_capacity, encoded_len_for_index, BlockBuilder, BlockBuilderWithStats, EncodedSsTable,
+    EncodedSsTableBlock, EncodedSsTableBlockBuilder, EncodedSsTableFooterBuilder, SsTableFormat,
+    SST_FORMAT_VERSION, SST_FORMAT_VERSION_LATEST, SST_FORMAT_VERSION_V2,
 };
 use crate::sst_stats::SstStats;
 use crate::types::RowEntry;
@@ -105,6 +105,7 @@ impl SsTableFormat {
     pub(crate) fn table_builder(&self) -> EncodedSsTableBuilder {
         let mut builder = EncodedSsTableBuilder::new(
             self.block_size,
+            self.block_alignment,
             self.min_filter_keys,
             self.sst_codec.clone(),
             &self.filter_policies,
@@ -135,6 +136,7 @@ pub(crate) struct EncodedSsTableBuilder {
     current_len: u64,
     blocks: VecDeque<EncodedSsTableBlock>,
     block_size: usize,
+    block_alignment: bool,
     block_format: BlockFormat,
     sst_format_version: u16,
     min_filter_keys: u32,
@@ -146,9 +148,11 @@ pub(crate) struct EncodedSsTableBuilder {
 }
 
 impl EncodedSsTableBuilder {
-    /// Create a builder based on target block size.
+    /// Create a builder based on target block size and whether blocks are
+    /// padded to it.
     pub(crate) fn new(
         block_size: usize,
+        block_alignment: bool,
         min_filter_keys: u32,
         sst_codec: Box<dyn SsTableInfoCodec>,
         filter_policies: &[Arc<dyn FilterPolicy>],
@@ -157,6 +161,7 @@ impl EncodedSsTableBuilder {
             .iter()
             .map(|p| (p.name().to_string(), p.builder()))
             .collect();
+        let block_format = BlockFormat::Latest;
         Self {
             current_len: 0,
             blocks: VecDeque::new(),
@@ -167,9 +172,10 @@ impl EncodedSsTableBuilder {
             current_block_first_key: None,
             current_block_max_key: None,
             block_size,
-            block_format: BlockFormat::Latest,
-            builder: BlockBuilderWithStats::new(BlockBuilder::new_latest(block_size)),
-            sst_format_version: SST_FORMAT_VERSION_LATEST,
+            block_alignment,
+            block_format,
+            builder: Self::block_builder(block_size, block_alignment, None, block_format),
+            sst_format_version: block_format.sst_format_version(),
             min_filter_keys,
             stats: SstStats::default(),
             filter_builders,
@@ -180,13 +186,32 @@ impl EncodedSsTableBuilder {
         }
     }
 
-    fn new_block_builder(&self) -> BlockBuilderWithStats {
-        let builder = match self.block_format {
-            BlockFormat::V1 => BlockBuilder::new_v1(self.block_size),
-            BlockFormat::V2 => BlockBuilder::new_v2(self.block_size),
-            BlockFormat::Latest => BlockBuilder::new_latest(self.block_size),
+    fn block_builder(
+        block_size: usize,
+        block_alignment: bool,
+        block_transformer: Option<&Arc<dyn BlockTransformer>>,
+        block_format: BlockFormat,
+    ) -> BlockBuilderWithStats {
+        let capacity = block_capacity(
+            block_size,
+            block_alignment,
+            block_transformer.map_or(0, |t| t.encoded_overhead()),
+        );
+        let builder = match block_format {
+            BlockFormat::V1 => BlockBuilder::new_v1(capacity),
+            BlockFormat::V2 => BlockBuilder::new_v2(capacity),
+            BlockFormat::Latest => BlockBuilder::new_latest(capacity),
         };
         BlockBuilderWithStats::new(builder)
+    }
+
+    fn new_block_builder(&self) -> BlockBuilderWithStats {
+        Self::block_builder(
+            self.block_size,
+            self.block_alignment,
+            self.block_transformer.as_ref(),
+            self.block_format,
+        )
     }
 
     /// Sets the compression codec for compressing the blocks
@@ -195,9 +220,18 @@ impl EncodedSsTableBuilder {
         self
     }
 
-    /// Sets the block transformer for transforming the blocks
+    /// Sets the block transformer for transforming the blocks.
+    ///
+    /// # Panics
+    /// Panics if called after data has been added to the builder, because
+    /// the earlier blocks were sized without the transformer's overhead.
     fn with_block_transformer(mut self, transformer: Arc<dyn BlockTransformer>) -> Self {
+        assert!(
+            self.sst_first_key.is_none(),
+            "cannot set block transformer after data has been added"
+        );
         self.block_transformer = Some(transformer);
+        self.builder = self.new_block_builder();
         self
     }
 
@@ -289,7 +323,12 @@ impl EncodedSsTableBuilder {
         let new_builder = self.new_block_builder();
         let old_builder = std::mem::replace(&mut self.builder, new_builder);
         let (builder, block_stats) = old_builder.into_parts();
-        let mut block_builder = EncodedSsTableBlockBuilder::new(builder, self.current_len);
+        let mut block_builder = EncodedSsTableBlockBuilder::new(
+            builder,
+            self.current_len,
+            self.block_size,
+            self.block_alignment,
+        );
         if let Some((first_key, last_key)) = self
             .current_block_first_key
             .take()
@@ -309,6 +348,7 @@ impl EncodedSsTableBuilder {
             &BlockMetaArgs {
                 offset: block.offset,
                 first_key: self.first_key,
+                encoded_len: encoded_len_for_index(block.encoded_len, block.padded_len())?,
             },
         );
         self.block_meta.push(block_meta);
@@ -317,7 +357,7 @@ impl EncodedSsTableBuilder {
         self.stats.num_merges += block_stats.num_merges as u64;
         self.stats.block_stats.push(block_stats);
 
-        let block_size = block.len();
+        let block_size = block.padded_len();
         self.current_len += block_size as u64;
         self.blocks.push_back(block);
         self.first_key = None;
@@ -441,6 +481,7 @@ mod tests {
     use crate::bytes_range::BytesRange;
     use crate::db_state::{SsTableId, SsTableView};
     use crate::filter_policy::{BloomFilterPolicy, FilterQuery};
+    use crate::flatbuffer_types::{SsTableIndex, SsTableIndexArgs, SsTableIndexOwned};
     use crate::format::block::Block;
     use crate::prefix_extractor::PrefixExtractor;
     use crate::reader::ReadTrace;
@@ -486,14 +527,53 @@ mod tests {
     /// This test is a reminder to update
     /// [`SsTableFormat::estimate_encoded_size_compacted`] and
     /// [`SsTableFormat::estimate_encoded_size_wal`].
+    #[test]
+    fn test_estimate_encoded_size_compacted_with_alignment() {
+        let unpadded = SsTableFormat {
+            block_size: 4096,
+            ..SsTableFormat::default()
+        };
+        let padded = SsTableFormat {
+            block_alignment: true,
+            ..unpadded.clone()
+        };
+
+        // one small entry still fills one padding unit
+        assert!(padded.estimate_encoded_size_compacted(1, 32) >= 4096);
+        assert!(unpadded.estimate_encoded_size_compacted(1, 32) < 4096);
+
+        // padding raises the estimate, it does not merely leave it alone
+        for num_entries in [10, 1_000, 100_000] {
+            let entries_size = num_entries * 32;
+            assert!(
+                padded.estimate_encoded_size_compacted(num_entries, entries_size)
+                    > unpadded.estimate_encoded_size_compacted(num_entries, entries_size),
+                "{num_entries} entries"
+            );
+        }
+
+        // WAL SSTs are never padded
+        assert_eq!(
+            padded.estimate_encoded_size_wal(1_000, 32_000),
+            unpadded.estimate_encoded_size_wal(1_000, 32_000)
+        );
+    }
+
+    #[rstest]
+    #[case::unpadded(false, 3065)]
+    #[case::padded(true, 2491)]
     #[tokio::test]
-    async fn test_estimate_vs_actual_encoded_size() {
+    async fn test_estimate_vs_actual_encoded_size(
+        #[case] block_alignment: bool,
+        #[case] expected_compacted_diff: i64,
+    ) {
         use crate::paths::PathResolver;
         use crate::types::ValueDeletable;
         use object_store::ObjectStoreExt;
 
         let format = SsTableFormat {
             block_size: 1024,
+            block_alignment,
             min_filter_keys: 0, // always build a filter
             ..SsTableFormat::default()
         };
@@ -550,10 +630,10 @@ mod tests {
             async move { object_store.head(&path).await.unwrap().size as usize }
         };
 
-        let report = |label: &str, estimate: usize, actual: usize, expected_diff: usize| {
+        let report = |label: &str, estimate: usize, actual: usize, expected_diff: i64| {
             assert_eq!(
                 estimate as i64 - actual as i64,
-                expected_diff as i64,
+                expected_diff,
                 "If this test fails the size of {label} SSTs changed. \
                 This is a reminder to update SsTableFormat::estimate_encoded_size_{label}() \
                 and/or this test, if needed."
@@ -575,7 +655,7 @@ mod tests {
             "compacted",
             format.estimate_encoded_size_compacted(num_entries, estimated_entries_size),
             actual_size(&compacted_id).await,
-            3065,
+            expected_compacted_diff,
         );
 
         // --- wal ---
@@ -591,6 +671,7 @@ mod tests {
             .await
             .unwrap()
             .size as usize;
+        // WAL SSTs are never padded, so the alignment does not move this.
         report(
             "wal",
             format.estimate_encoded_size_wal(num_entries, estimated_entries_size),
@@ -697,7 +778,7 @@ mod tests {
         let encoded = builder.build().await.unwrap();
 
         let mut raw_sst = Vec::<u8>::new();
-        raw_sst.put_slice(first_block.unwrap().encoded_bytes.as_ref());
+        raw_sst.put_slice(first_block.unwrap().padded_bytes.as_ref());
         assert_eq!(encoded.unconsumed_blocks.len(), 2);
         encoded.put_remaining(&mut raw_sst);
         let raw_sst = Bytes::copy_from_slice(raw_sst.as_slice());
@@ -755,6 +836,385 @@ mod tests {
                 .await
                 .unwrap();
             assert!(*encoded_block.block == read_block);
+        }
+    }
+
+    /// Rebuilds `index` with every `encoded_len` zeroed, as an SST written
+    /// before that field existed reports it.
+    fn index_without_encoded_len(index: &SsTableIndexOwned) -> SsTableIndexOwned {
+        let borrowed = index.borrow();
+        let mut builder = flatbuffers::FlatBufferBuilder::new();
+        let mut block_metas = Vec::new();
+        for block_meta in borrowed.block_meta().iter() {
+            let first_key = builder.create_vector(block_meta.first_key().bytes());
+            block_metas.push(BlockMeta::create(
+                &mut builder,
+                &BlockMetaArgs {
+                    offset: block_meta.offset(),
+                    first_key: Some(first_key),
+                    encoded_len: 0,
+                },
+            ));
+        }
+        let block_metas = builder.create_vector(&block_metas);
+        let index_wip = SsTableIndex::create(
+            &mut builder,
+            &SsTableIndexArgs {
+                block_meta: Some(block_metas),
+            },
+        );
+        builder.finish(index_wip, None);
+        SsTableIndexOwned::new(Bytes::copy_from_slice(builder.finished_data())).unwrap()
+    }
+
+    #[rstest]
+    #[case::uncompressed(None)]
+    #[cfg_attr(feature = "snappy", case::snappy(Some(CompressionCodec::Snappy)))]
+    #[tokio::test]
+    async fn test_builder_should_pad_blocks_to_alignment(
+        #[case] compression: Option<CompressionCodec>,
+    ) {
+        const ALIGNMENT: usize = 64;
+        let format = SsTableFormat {
+            block_size: ALIGNMENT,
+            block_alignment: true,
+            compression_codec: compression,
+            ..SsTableFormat::default()
+        };
+
+        let sst = build_test_sst(&format, 4).await;
+
+        let bytes = sst.remaining_as_bytes();
+        let index = format.read_index_raw(&sst.info, &bytes).await.unwrap();
+        let block_metas = index.borrow().block_meta();
+        assert_eq!(block_metas.len(), sst.unconsumed_blocks.len());
+        for (i, block) in sst.unconsumed_blocks.iter().enumerate() {
+            assert_eq!(block.offset % ALIGNMENT as u64, 0);
+            assert_eq!(
+                block.padded_len(),
+                block.encoded_len.next_multiple_of(ALIGNMENT)
+            );
+            assert!(block.padded_bytes[block.encoded_len..]
+                .iter()
+                .all(|byte| *byte == 0));
+            assert_eq!(block_metas.get(i).offset(), block.offset);
+            let recorded_len = if block.padded_len() == block.encoded_len {
+                0
+            } else {
+                u32::try_from(block.encoded_len).unwrap()
+            };
+            assert_eq!(block_metas.get(i).encoded_len(), recorded_len);
+            let read_block = format
+                .read_block_raw(&sst.info, &index, i, &bytes)
+                .await
+                .unwrap();
+            assert!(*block.block == read_block);
+        }
+        // The data section ends on a boundary, so the filter starts on one.
+        assert_eq!(sst.info.filter_offset % ALIGNMENT as u64, 0);
+        let blob = BytesBlob { bytes };
+        let (_, version) = format.read_info_and_version(&blob).await.unwrap();
+        assert_eq!(version, SST_FORMAT_VERSION_V2);
+    }
+
+    #[tokio::test]
+    async fn test_builder_should_keep_full_blocks_within_one_alignment_unit() {
+        const ALIGNMENT: usize = 64;
+        let format = SsTableFormat {
+            block_size: ALIGNMENT,
+            block_alignment: true,
+            ..SsTableFormat::default()
+        };
+        let mut builder = format.table_builder();
+        // With a capacity of `block_size`, these entries fill a block to 61
+        // bytes, which spills into a second unit once the checksum is added.
+        for i in 0..64u8 {
+            builder
+                .add_value(&[b'a', i], &[i; 15], None, None)
+                .await
+                .unwrap();
+        }
+        let sst = builder.build().await.unwrap();
+
+        assert!(sst.unconsumed_blocks.len() > 1);
+        for block in &sst.unconsumed_blocks {
+            assert!(block.encoded_len <= ALIGNMENT);
+            assert_eq!(block.padded_len(), ALIGNMENT);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_builder_should_pad_oversized_block_to_next_unit() {
+        const ALIGNMENT: usize = 64;
+        let format = SsTableFormat {
+            block_size: ALIGNMENT,
+            block_alignment: true,
+            ..SsTableFormat::default()
+        };
+        let mut builder = format.table_builder();
+        builder
+            .add_value(b"key", &[1u8; 100], None, None)
+            .await
+            .unwrap();
+        let sst = builder.build().await.unwrap();
+
+        assert_eq!(sst.unconsumed_blocks.len(), 1);
+        let block = &sst.unconsumed_blocks[0];
+        assert!(block.encoded_len > ALIGNMENT);
+        assert_eq!(block.padded_len(), 2 * ALIGNMENT);
+        assert_eq!(sst.info.filter_offset, 2 * ALIGNMENT as u64);
+    }
+
+    /// A padded SST reads back the same whether the reader sets an alignment
+    /// or not, and an index without `encoded_len`, as older writers left it,
+    /// still resolves every block.
+    #[tokio::test]
+    async fn test_read_blocks_from_padded_sst() {
+        const ALIGNMENT: usize = 64;
+        let format = SsTableFormat {
+            block_size: ALIGNMENT,
+            block_alignment: true,
+            ..SsTableFormat::default()
+        };
+        let sst = build_test_sst(&format, 4).await;
+        let bytes = sst.remaining_as_bytes();
+        let index = format.read_index_raw(&sst.info, &bytes).await.unwrap();
+        let expected: Vec<Arc<Block>> = sst
+            .unconsumed_blocks
+            .iter()
+            .map(|block| Arc::clone(&block.block))
+            .collect();
+        let num_blocks = expected.len();
+        assert!(num_blocks > 1);
+        let blob = BytesBlob { bytes };
+
+        let reader = SsTableFormat {
+            block_size: ALIGNMENT,
+            ..SsTableFormat::default()
+        };
+        let blocks = reader
+            .read_blocks(&sst.info, &index, 0..num_blocks, &blob)
+            .await
+            .unwrap();
+        assert_eq!(blocks.len(), num_blocks);
+        for (block, expected) in blocks.iter().zip(&expected) {
+            assert!(block == expected.as_ref());
+        }
+
+        // A range that starts past the first block fetches from an offset
+        // of its own, so the blocks are cut relative to that start.
+        let blocks = reader
+            .read_blocks(&sst.info, &index, 1..num_blocks, &blob)
+            .await
+            .unwrap();
+        assert_eq!(blocks.len(), num_blocks - 1);
+        for (block, expected) in blocks.iter().zip(&expected[1..]) {
+            assert!(block == expected.as_ref());
+        }
+
+        // Without `encoded_len` a reader derives the length from the next
+        // offset, so it decodes the padding as part of the block and fails
+        // the checksum.
+        let legacy_index = index_without_encoded_len(&index);
+        let result = reader
+            .read_blocks(&sst.info, &legacy_index, 0..num_blocks, &blob)
+            .await;
+        assert!(
+            matches!(result, Err(SlateDBError::ChecksumMismatch { .. })),
+            "padding must break the checksum without encoded_len"
+        );
+    }
+
+    /// An SST written before `BlockMeta::encoded_len` existed reports zero
+    /// there, and the reader falls back to the next block's offset.
+    #[tokio::test]
+    async fn test_read_blocks_from_index_without_encoded_len() {
+        let format = SsTableFormat {
+            block_size: 64,
+            ..SsTableFormat::default()
+        };
+        let sst = build_test_sst(&format, 4).await;
+        let bytes = sst.remaining_as_bytes();
+        let index = format.read_index_raw(&sst.info, &bytes).await.unwrap();
+        let expected: Vec<Arc<Block>> = sst
+            .unconsumed_blocks
+            .iter()
+            .map(|block| Arc::clone(&block.block))
+            .collect();
+        let num_blocks = expected.len();
+        assert!(num_blocks > 1);
+        let legacy_index = index_without_encoded_len(&index);
+        let blob = BytesBlob { bytes };
+
+        // the whole SST, and a range that leaves out the first and last block
+        for range in [0..num_blocks, 1..num_blocks - 1] {
+            let blocks = format
+                .read_blocks(&sst.info, &legacy_index, range.clone(), &blob)
+                .await
+                .unwrap();
+            assert_eq!(blocks.len(), range.len());
+            for (block, expected) in blocks.iter().zip(&expected[range]) {
+                assert!(block == expected.as_ref());
+            }
+        }
+    }
+
+    /// The production read path serves an SST whose index reports no
+    /// `encoded_len`, which is what every SST written before that field
+    /// existed looks like.
+    #[tokio::test]
+    async fn test_table_store_reads_sst_with_index_without_encoded_len() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 64,
+            ..SsTableFormat::default()
+        };
+        let table_store = TableStore::new(
+            object_store,
+            format.clone(),
+            Path::from(""),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        );
+        let mut builder = table_store.table_builder();
+        for i in 0..16u8 {
+            builder
+                .add_value(&[b'a' + i; 16], &[i; 16], None, None)
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        let id = test_sst_id(9);
+        table_store
+            .write_sst(&id, &encoded, Some(Bytes::new()))
+            .await
+            .unwrap();
+        let handle = table_store.open_sst(&id, Some(Bytes::new())).await.unwrap();
+        let index = table_store
+            .read_index(
+                &handle,
+                false,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
+            .await
+            .unwrap();
+        let num_blocks = index.borrow().block_meta().len();
+        assert!(num_blocks > 1);
+
+        // Read once with the index as written, then with `encoded_len`
+        // cleared, and compare block for block.
+        let expected = table_store
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                0..num_blocks,
+                false,
+                Some(Bytes::new()),
+            )
+            .await
+            .unwrap();
+        let legacy_index = Arc::new(index_without_encoded_len(&index));
+        for range in [0..num_blocks, 1..num_blocks - 1] {
+            let blocks = table_store
+                .read_blocks_using_index(
+                    &handle,
+                    legacy_index.clone(),
+                    range.clone(),
+                    false,
+                    Some(Bytes::new()),
+                )
+                .await
+                .unwrap();
+            assert_eq!(blocks.len(), range.len());
+            for (i, (block, want)) in blocks
+                .iter()
+                .zip(expected.iter().skip(range.start))
+                .enumerate()
+            {
+                assert!(block == want, "block {} differs", range.start + i);
+            }
+        }
+    }
+
+    /// WAL SSTs are not padded, so their blocks stay contiguous even when the
+    /// format sets an alignment.
+    #[tokio::test]
+    async fn test_wal_table_builder_ignores_block_alignment() {
+        let format = SsTableFormat {
+            block_size: 64,
+            block_alignment: true,
+            ..SsTableFormat::default()
+        };
+        let mut builder = format.wal_table_builder();
+        // WAL blocks are sized by the WAL builder, not by `block_size`, so
+        // this writes enough bytes to fill more than one of them.
+        for i in 0..64u16 {
+            builder
+                .add(RowEntry::new_value(
+                    &i.to_be_bytes(),
+                    &[0u8; 2048],
+                    u64::from(i),
+                ))
+                .await
+                .unwrap();
+        }
+        let sst = builder.build().await.unwrap();
+
+        assert!(sst.unconsumed_blocks.len() > 1);
+        let mut offset = 0u64;
+        for block in &sst.unconsumed_blocks {
+            assert_eq!(block.padded_len(), block.encoded_len);
+            assert_eq!(block.offset, offset);
+            offset += block.padded_len() as u64;
+        }
+    }
+
+    /// The estimate tracks the real SST size across block sizes, alignments
+    /// and workloads. A padding term that charged a whole extra unit per
+    /// block would push the ratio far above this band.
+    #[tokio::test]
+    async fn test_estimate_stays_close_to_actual_size() {
+        // (entry count, key length, value length)
+        const WORKLOADS: [(usize, usize, usize); 4] =
+            [(50, 16, 16), (500, 16, 64), (5000, 16, 16), (200, 100, 200)];
+        for block_size in [1024usize, 4096] {
+            for block_alignment in [false, true] {
+                for (entry_num, key_len, value_len) in WORKLOADS {
+                    let format = SsTableFormat {
+                        block_size,
+                        block_alignment,
+                        min_filter_keys: 0,
+                        ..SsTableFormat::default()
+                    };
+                    let mut builder = format.table_builder();
+                    let mut entries_size = 0;
+                    for i in 0..entry_num {
+                        // Spread the keys so that prefix compression, which
+                        // the estimate does not model, stays out of the way.
+                        let mut key = vec![0u8; key_len];
+                        let spread = (i as u64).reverse_bits().to_be_bytes();
+                        let prefix = key_len.min(spread.len());
+                        key[..prefix].copy_from_slice(&spread[..prefix]);
+                        let entry = RowEntry::new_value(&key, &vec![7u8; value_len], 0);
+                        entries_size += entry.estimated_size();
+                        builder.add(entry).await.unwrap();
+                    }
+                    let sst = builder.build().await.unwrap();
+
+                    let actual = sst.remaining_len();
+                    let estimate = format.estimate_encoded_size_compacted(entry_num, entries_size);
+                    let ratio = estimate as f64 / actual as f64;
+                    assert!(
+                        (0.8..=1.5).contains(&ratio),
+                        "estimate {estimate} is {ratio:.2} times the actual {actual} \
+                         [block_size={block_size}, alignment={block_alignment}, \
+                         entries={entry_num}, key={key_len}, value={value_len}]"
+                    );
+                }
+            }
         }
     }
 

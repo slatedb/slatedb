@@ -359,6 +359,7 @@ func readFloat64(reader io.Reader) float64 {
 
 func init() {
 
+	FfiConverterBlockTransformerINSTANCE.register()
 	FfiConverterCounterINSTANCE.register()
 	FfiConverterGaugeINSTANCE.register()
 	FfiConverterHistogramINSTANCE.register()
@@ -536,6 +537,24 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_blocktransformer_encode()
+		})
+		if checksum != 55862 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_blocktransformer_encode: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_blocktransformer_decode()
+		})
+		if checksum != 16013 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_blocktransformer_decode: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_build()
 		})
 		if checksum != 46255 {
@@ -550,6 +569,15 @@ func uniffiCheckChecksums() {
 		if checksum != 52226 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_seed: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_system_clock()
+		})
+		if checksum != 11928 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_adminbuilder_with_system_clock: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -635,6 +663,24 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_block_cache_policy()
+		})
+		if checksum != 18548 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_block_cache_policy: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_block_transformer()
+		})
+		if checksum != 57975 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_block_transformer: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_db_cache()
 		})
 		if checksum != 47822 {
@@ -716,6 +762,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_system_clock()
+		})
+		if checksum != 2584 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_system_clock: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbbuilder_with_wal_object_store()
 		})
 		if checksum != 4790 {
@@ -730,6 +785,15 @@ func uniffiCheckChecksums() {
 		if checksum != 11741 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_build: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_block_transformer()
+		})
+		if checksum != 44011 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_block_transformer: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -806,11 +870,56 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_system_clock()
+		})
+		if checksum != 15259 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_system_clock: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store()
 		})
 		if checksum != 2290 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreaderbuilder_with_wal_object_store: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_systemclock_advance()
+		})
+		if checksum != 53270 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_systemclock_advance: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_systemclock_is_mock()
+		})
+		if checksum != 2441 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_systemclock_is_mock: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_systemclock_now_millis()
+		})
+		if checksum != 3506 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_systemclock_now_millis: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_systemclock_set()
+		})
+		if checksum != 60259 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_systemclock_set: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1792,6 +1901,24 @@ func uniffiCheckChecksums() {
 		if checksum != 20397 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbreaderbuilder_new: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_systemclock_default_clock()
+		})
+		if checksum != 17122 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_systemclock_default_clock: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_systemclock_mock()
+		})
+		if checksum != 18253 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_systemclock_mock: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -2959,6 +3086,11 @@ type AdminBuilderInterface interface {
 	Build() (*Admin, error)
 	// Sets the seed used for SlateDB's internal random number generation.
 	WithSeed(seed uint64) error
+	// Reads wall time from `clock` instead of the process clock. Every timer
+	// follows it: checkpoint expiry, garbage collector and compactor schedule
+	// ticks and the object-store retry backoff. On a frozen mock those wait
+	// until the test advances the clock.
+	WithSystemClock(clock *SystemClock) error
 	// Uses a separate object store for WAL-backed administrative operations.
 	WithWalObjectStore(walObjectStore *ObjectStore) error
 }
@@ -3000,6 +3132,21 @@ func (_self *AdminBuilder) WithSeed(seed uint64) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_adminbuilder_with_seed(
 			_pointer, FfiConverterUint64INSTANCE.Lower(seed), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Reads wall time from `clock` instead of the process clock. Every timer
+// follows it: checkpoint expiry, garbage collector and compactor schedule
+// ticks and the object-store retry backoff. On a frozen mock those wait
+// until the test advances the clock.
+func (_self *AdminBuilder) WithSystemClock(clock *SystemClock) error {
+	_pointer := _self.ffiObject.incrementPointer("*AdminBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_adminbuilder_with_system_clock(
+			_pointer, FfiConverterSystemClockINSTANCE.Lower(clock), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -3070,6 +3217,284 @@ type FfiDestroyerAdminBuilder struct{}
 
 func (_ FfiDestroyerAdminBuilder) Destroy(value *AdminBuilder) {
 	value.Destroy()
+}
+
+// Application-provided reversible transform of every SST block, data,
+// index, filter and stats alike, applied after compression and before the
+// checksum. `decode` must invert `encode` for every block the database
+// wrote; the engine records no transformer identity, key id or format
+// version, so a block that needs one carries it inside its own bytes.
+//
+// The engine calls the methods from Tokio's blocking pool, one call per
+// block, so a slow transform holds no runtime worker but still delays the
+// block it transforms.
+type BlockTransformer interface {
+	Encode(data []byte) ([]byte, error)
+	Decode(data []byte) ([]byte, error)
+}
+
+// Application-provided reversible transform of every SST block, data,
+// index, filter and stats alike, applied after compression and before the
+// checksum. `decode` must invert `encode` for every block the database
+// wrote; the engine records no transformer identity, key id or format
+// version, so a block that needs one carries it inside its own bytes.
+//
+// The engine calls the methods from Tokio's blocking pool, one call per
+// block, so a slow transform holds no runtime worker but still delays the
+// block it transforms.
+type BlockTransformerImpl struct {
+	ffiObject FfiObject
+}
+
+func (_self *BlockTransformerImpl) Encode(data []byte) ([]byte, error) {
+	_pointer := _self.ffiObject.incrementPointer("BlockTransformer")
+	defer _self.ffiObject.decrementPointer()
+	_uniffiRV, _uniffiErr := rustCallWithError[*BlockTransformerCallbackError](FfiConverterBlockTransformerCallbackError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_blocktransformer_encode(
+				_pointer, FfiConverterBytesINSTANCE.Lower(data), _uniffiStatus),
+		}
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue []byte
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterBytesINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+func (_self *BlockTransformerImpl) Decode(data []byte) ([]byte, error) {
+	_pointer := _self.ffiObject.incrementPointer("BlockTransformer")
+	defer _self.ffiObject.decrementPointer()
+	_uniffiRV, _uniffiErr := rustCallWithError[*BlockTransformerCallbackError](FfiConverterBlockTransformerCallbackError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_blocktransformer_decode(
+				_pointer, FfiConverterBytesINSTANCE.Lower(data), _uniffiStatus),
+		}
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue []byte
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterBytesINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+func (object *BlockTransformerImpl) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterBlockTransformer struct {
+	handleMap *concurrentHandleMap[BlockTransformer]
+}
+
+var FfiConverterBlockTransformerINSTANCE = FfiConverterBlockTransformer{
+	handleMap: newConcurrentHandleMap[BlockTransformer](),
+}
+
+func (c FfiConverterBlockTransformer) Lift(handle C.uint64_t) BlockTransformer {
+	if uint64(handle)&1 == 0 {
+		// Rust-generated handle (even), construct a new object wrapping the handle
+		result := &BlockTransformerImpl{
+			newFfiObject(
+				handle,
+				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+					return C.uniffi_slatedb_uniffi_fn_clone_blocktransformer(handle, status)
+				},
+				func(handle C.uint64_t, status *C.RustCallStatus) {
+					C.uniffi_slatedb_uniffi_fn_free_blocktransformer(handle, status)
+				},
+			),
+		}
+		runtime.SetFinalizer(result, (*BlockTransformerImpl).Destroy)
+		return result
+	} else {
+		// Go-generated handle (odd), retrieve from the handle map
+		val, ok := c.handleMap.tryGet(uint64(handle))
+		if !ok {
+			panic(fmt.Errorf("no callback in handle map: %d", handle))
+		}
+		c.handleMap.remove(uint64(handle))
+		return val
+	}
+}
+
+func (c FfiConverterBlockTransformer) Read(reader io.Reader) BlockTransformer {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterBlockTransformer) Lower(value BlockTransformer) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	if val, ok := value.(*BlockTransformerImpl); ok {
+		// Rust-backed object, clone the handle
+		handle := val.ffiObject.incrementPointer("BlockTransformer")
+		defer val.ffiObject.decrementPointer()
+		return handle
+	} else {
+		// Go-backed object, insert into handle map
+		return C.uint64_t(c.handleMap.insert(value))
+	}
+}
+
+func (c FfiConverterBlockTransformer) Write(writer io.Writer, value BlockTransformer) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalBlockTransformer(handle uint64) BlockTransformer {
+	return FfiConverterBlockTransformerINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalBlockTransformer(value BlockTransformer) uint64 {
+	return uint64(FfiConverterBlockTransformerINSTANCE.Lower(value))
+}
+
+type FfiDestroyerBlockTransformer struct{}
+
+func (_ FfiDestroyerBlockTransformer) Destroy(value BlockTransformer) {
+	if val, ok := value.(*BlockTransformerImpl); ok {
+		val.Destroy()
+	}
+}
+
+type uniffiCallbackResult C.int8_t
+
+const (
+	uniffiIdxCallbackFree               uniffiCallbackResult = 0
+	uniffiCallbackResultSuccess         uniffiCallbackResult = 0
+	uniffiCallbackResultError           uniffiCallbackResult = 1
+	uniffiCallbackUnexpectedResultError uniffiCallbackResult = 2
+	uniffiCallbackCancelled             uniffiCallbackResult = 3
+)
+
+type concurrentHandleMap[T any] struct {
+	handles       map[uint64]T
+	currentHandle uint64
+	lock          sync.RWMutex
+}
+
+func newConcurrentHandleMap[T any]() *concurrentHandleMap[T] {
+	return &concurrentHandleMap[T]{
+		handles:       map[uint64]T{},
+		currentHandle: 1,
+	}
+}
+
+func (cm *concurrentHandleMap[T]) insert(obj T) uint64 {
+	cm.lock.Lock()
+	defer cm.lock.Unlock()
+
+	handle := cm.currentHandle
+	cm.currentHandle = cm.currentHandle + 2
+	cm.handles[handle] = obj
+	return handle
+}
+
+func (cm *concurrentHandleMap[T]) remove(handle uint64) {
+	cm.lock.Lock()
+	defer cm.lock.Unlock()
+
+	delete(cm.handles, handle)
+}
+
+func (cm *concurrentHandleMap[T]) tryGet(handle uint64) (T, bool) {
+	cm.lock.RLock()
+	defer cm.lock.RUnlock()
+
+	val, ok := cm.handles[handle]
+	return val, ok
+}
+
+//export slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerMethod0
+func slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerMethod0(uniffiHandle C.uint64_t, data C.RustBuffer, uniffiOutReturn *C.RustBuffer, callStatus *C.RustCallStatus) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterBlockTransformerINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+
+	res, err :=
+		uniffiObj.Encode(
+			FfiConverterBytesINSTANCE.Lift(GoRustBuffer{
+				inner: data,
+			}),
+		)
+
+	if err != nil {
+		var actualError *BlockTransformerCallbackError
+		if errors.As(err, &actualError) {
+			*callStatus = C.RustCallStatus{
+				code:     C.int8_t(uniffiCallbackResultError),
+				errorBuf: FfiConverterBlockTransformerCallbackErrorINSTANCE.Lower(actualError),
+			}
+		} else {
+			*callStatus = C.RustCallStatus{
+				code: C.int8_t(uniffiCallbackUnexpectedResultError),
+			}
+		}
+		return
+	}
+
+	*uniffiOutReturn = FfiConverterBytesINSTANCE.Lower(res)
+}
+
+//export slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerMethod1
+func slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerMethod1(uniffiHandle C.uint64_t, data C.RustBuffer, uniffiOutReturn *C.RustBuffer, callStatus *C.RustCallStatus) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterBlockTransformerINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+
+	res, err :=
+		uniffiObj.Decode(
+			FfiConverterBytesINSTANCE.Lift(GoRustBuffer{
+				inner: data,
+			}),
+		)
+
+	if err != nil {
+		var actualError *BlockTransformerCallbackError
+		if errors.As(err, &actualError) {
+			*callStatus = C.RustCallStatus{
+				code:     C.int8_t(uniffiCallbackResultError),
+				errorBuf: FfiConverterBlockTransformerCallbackErrorINSTANCE.Lower(actualError),
+			}
+		} else {
+			*callStatus = C.RustCallStatus{
+				code: C.int8_t(uniffiCallbackUnexpectedResultError),
+			}
+		}
+		return
+	}
+
+	*uniffiOutReturn = FfiConverterBytesINSTANCE.Lower(res)
+}
+
+var UniffiVTableCallbackInterfaceBlockTransformerINSTANCE = C.UniffiVTableCallbackInterfaceBlockTransformer{
+	uniffiFree:  (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerFree),
+	uniffiClone: (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerClone),
+	encode:      (C.UniffiCallbackInterfaceBlockTransformerMethod0)(C.slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerMethod0),
+	decode:      (C.UniffiCallbackInterfaceBlockTransformerMethod1)(C.slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerMethod1),
+}
+
+//export slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerFree
+func slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerFree(handle C.uint64_t) {
+	FfiConverterBlockTransformerINSTANCE.handleMap.remove(uint64(handle))
+}
+
+//export slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerClone
+func slatedb_uniffi_block_transformer_cgo_dispatchCallbackInterfaceBlockTransformerClone(handle C.uint64_t) C.uint64_t {
+	val, ok := FfiConverterBlockTransformerINSTANCE.handleMap.tryGet(uint64(handle))
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+	return C.uint64_t(FfiConverterBlockTransformerINSTANCE.handleMap.insert(val))
+}
+
+func (c FfiConverterBlockTransformer) register() {
+	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_blocktransformer(&UniffiVTableCallbackInterfaceBlockTransformerINSTANCE)
 }
 
 type CloneBuilderInterface interface {
@@ -3337,54 +3762,6 @@ func (_ FfiDestroyerCounter) Destroy(value Counter) {
 	if val, ok := value.(*CounterImpl); ok {
 		val.Destroy()
 	}
-}
-
-type uniffiCallbackResult C.int8_t
-
-const (
-	uniffiIdxCallbackFree               uniffiCallbackResult = 0
-	uniffiCallbackResultSuccess         uniffiCallbackResult = 0
-	uniffiCallbackResultError           uniffiCallbackResult = 1
-	uniffiCallbackUnexpectedResultError uniffiCallbackResult = 2
-	uniffiCallbackCancelled             uniffiCallbackResult = 3
-)
-
-type concurrentHandleMap[T any] struct {
-	handles       map[uint64]T
-	currentHandle uint64
-	lock          sync.RWMutex
-}
-
-func newConcurrentHandleMap[T any]() *concurrentHandleMap[T] {
-	return &concurrentHandleMap[T]{
-		handles:       map[uint64]T{},
-		currentHandle: 1,
-	}
-}
-
-func (cm *concurrentHandleMap[T]) insert(obj T) uint64 {
-	cm.lock.Lock()
-	defer cm.lock.Unlock()
-
-	handle := cm.currentHandle
-	cm.currentHandle = cm.currentHandle + 2
-	cm.handles[handle] = obj
-	return handle
-}
-
-func (cm *concurrentHandleMap[T]) remove(handle uint64) {
-	cm.lock.Lock()
-	defer cm.lock.Unlock()
-
-	delete(cm.handles, handle)
-}
-
-func (cm *concurrentHandleMap[T]) tryGet(handle uint64) (T, bool) {
-	cm.lock.RLock()
-	defer cm.lock.RUnlock()
-
-	val, ok := cm.handles[handle]
-	return val, ok
 }
 
 //export slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceCounterMethod0
@@ -4459,6 +4836,16 @@ func (_ FfiDestroyerDb) Destroy(value *Db) {
 type DbBuilderInterface interface {
 	// Opens the database and consumes this builder.
 	Build() (*Db, error)
+	// What the block cache keeps of the SSTs this database writes, on a
+	// memtable flush and on a compaction's output.
+	WithBlockCachePolicy(policy BlockCachePolicy) error
+	// Transforms every SST block this database writes and reads, for
+	// encryption at rest. A `DbReaderBuilder` of the database must carry the
+	// same transform. The bindings run no standalone compactor or compaction
+	// worker, so only this writer's embedded compactor rewrites the blocks;
+	// `SlateDbWalReader` takes no transform, so it cannot read this
+	// database's WAL.
+	WithBlockTransformer(transformer BlockTransformer) error
 	// Sets DB cache. `db_cache_id` isolates this database's entries from any other
 	// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
 	// uniqueness and stability across reopens.
@@ -4488,6 +4875,11 @@ type DbBuilderInterface interface {
 	WithSettings(settings *Settings) error
 	// Sets the SSTable block size used for newly written tables.
 	WithSstBlockSize(sstBlockSize SstBlockSize) error
+	// Reads wall time from `clock` instead of the process clock. Every timer
+	// follows it: TTL expiry, flush and poll ticks, the object-store retry
+	// backoff and the flush timeout. On a frozen mock those wait until the
+	// test advances the clock.
+	WithSystemClock(clock *SystemClock) error
 	// Uses a separate object store for WAL files.
 	WithWalObjectStore(walObjectStore *ObjectStore) error
 }
@@ -4538,6 +4930,36 @@ func (_self *DbBuilder) Build() (*Db, error) {
 	}
 
 	return res, err
+}
+
+// What the block cache keeps of the SSTs this database writes, on a
+// memtable flush and on a compaction's output.
+func (_self *DbBuilder) WithBlockCachePolicy(policy BlockCachePolicy) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_block_cache_policy(
+			_pointer, FfiConverterBlockCachePolicyINSTANCE.Lower(policy), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Transforms every SST block this database writes and reads, for
+// encryption at rest. A `DbReaderBuilder` of the database must carry the
+// same transform. The bindings run no standalone compactor or compaction
+// worker, so only this writer's embedded compactor rewrites the blocks;
+// `SlateDbWalReader` takes no transform, so it cannot read this
+// database's WAL.
+func (_self *DbBuilder) WithBlockTransformer(transformer BlockTransformer) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_block_transformer(
+			_pointer, FfiConverterBlockTransformerINSTANCE.Lower(transformer), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
 }
 
 // Sets DB cache. `db_cache_id` isolates this database's entries from any other
@@ -4654,6 +5076,21 @@ func (_self *DbBuilder) WithSstBlockSize(sstBlockSize SstBlockSize) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_sst_block_size(
 			_pointer, FfiConverterSstBlockSizeINSTANCE.Lower(sstBlockSize), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Reads wall time from `clock` instead of the process clock. Every timer
+// follows it: TTL expiry, flush and poll ticks, the object-store retry
+// backoff and the flush timeout. On a frozen mock those wait until the
+// test advances the clock.
+func (_self *DbBuilder) WithSystemClock(clock *SystemClock) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbbuilder_with_system_clock(
+			_pointer, FfiConverterSystemClockINSTANCE.Lower(clock), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -5576,6 +6013,9 @@ func (_ FfiDestroyerDbReader) Destroy(value *DbReader) {
 type DbReaderBuilderInterface interface {
 	// Opens the reader and consumes this builder.
 	Build() (*DbReader, error)
+	// Decodes every SST block this reader fetches with the transform the
+	// database's writer encodes with.
+	WithBlockTransformer(transformer BlockTransformer) error
 	// Sets DB cache. `db_cache_id` isolates this reader's entries from any other
 	// `Db`/`DbReader` sharing the same cache; the caller is responsible for its
 	// uniqueness and stability across reopens.
@@ -5600,6 +6040,11 @@ type DbReaderBuilderInterface interface {
 	// database must configure an extractor matching the one the database
 	// was created with.
 	WithSegmentExtractor(extractor PrefixExtractor) error
+	// Reads wall time from `clock` instead of the process clock. Every timer
+	// follows it: checkpoint lifetimes, manifest polls, TTL visibility and
+	// the object-store retry backoff. On a frozen mock those wait until the
+	// test advances the clock.
+	WithSystemClock(clock *SystemClock) error
 	// Uses a separate object store for WAL files.
 	WithWalObjectStore(walObjectStore *ObjectStore) error
 }
@@ -5650,6 +6095,19 @@ func (_self *DbReaderBuilder) Build() (*DbReader, error) {
 	}
 
 	return res, err
+}
+
+// Decodes every SST block this reader fetches with the transform the
+// database's writer encodes with.
+func (_self *DbReaderBuilder) WithBlockTransformer(transformer BlockTransformer) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_block_transformer(
+			_pointer, FfiConverterBlockTransformerINSTANCE.Lower(transformer), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
 }
 
 // Sets DB cache. `db_cache_id` isolates this reader's entries from any other
@@ -5751,6 +6209,21 @@ func (_self *DbReaderBuilder) WithSegmentExtractor(extractor PrefixExtractor) er
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_segment_extractor(
 			_pointer, FfiConverterPrefixExtractorINSTANCE.Lower(extractor), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Reads wall time from `clock` instead of the process clock. Every timer
+// follows it: checkpoint lifetimes, manifest polls, TTL visibility and
+// the object-store retry backoff. On a frozen mock those wait until the
+// test advances the clock.
+func (_self *DbReaderBuilder) WithSystemClock(clock *SystemClock) error {
+	_pointer := _self.ffiObject.incrementPointer("*DbReaderBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_dbreaderbuilder_with_system_clock(
+			_pointer, FfiConverterSystemClockINSTANCE.Lower(clock), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -9002,6 +9475,182 @@ func (_ FfiDestroyerSlateDbWalReader) Destroy(value *SlateDbWalReader) {
 	value.Destroy()
 }
 
+// The clock a `Db`, `DbReader` or `Admin` reads wall time from. Every engine
+// timer follows it: TTL expiry, checkpoint lifetimes, flush and poll ticks,
+// the object-store retry backoff and the flush timeout.
+type SystemClockInterface interface {
+	// Moves a mock clock forward by `millis`. Engine tasks sleeping on the
+	// clock see the new time when the runtime next polls them; `advance`
+	// returns without waiting for that, so a test must wait for the effect it
+	// expects (an expired key, a completed flush) rather than assert it at
+	// once. Refused on the default clock and when the result is not a
+	// representable timestamp.
+	Advance(millis uint64) error
+	IsMock() bool
+	// The clock's current time in milliseconds since the Unix epoch.
+	NowMillis() int64
+	// Sets a mock clock to `ts_millis`. The engine's tickers require a
+	// monotonic clock, so a time before the clock's current one is refused,
+	// as is one that is not a representable timestamp. Refused on the default
+	// clock.
+	Set(tsMillis int64) error
+}
+
+// The clock a `Db`, `DbReader` or `Admin` reads wall time from. Every engine
+// timer follows it: TTL expiry, checkpoint lifetimes, flush and poll ticks,
+// the object-store retry backoff and the flush timeout.
+type SystemClock struct {
+	ffiObject FfiObject
+}
+
+// The process clock.
+func SystemClockDefaultClock() *SystemClock {
+	return FfiConverterSystemClockINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_systemclock_default_clock(_uniffiStatus)
+	}))
+}
+
+// A clock frozen at `initial_ts_millis` (milliseconds since the Unix
+// epoch) that moves only through `advance` and `set`. Refused when
+// `initial_ts_millis` is not a representable timestamp.
+func SystemClockMock(initialTsMillis int64) (*SystemClock, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_systemclock_mock(FfiConverterInt64INSTANCE.Lower(initialTsMillis), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *SystemClock
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterSystemClockINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+// Moves a mock clock forward by `millis`. Engine tasks sleeping on the
+// clock see the new time when the runtime next polls them; `advance`
+// returns without waiting for that, so a test must wait for the effect it
+// expects (an expired key, a completed flush) rather than assert it at
+// once. Refused on the default clock and when the result is not a
+// representable timestamp.
+func (_self *SystemClock) Advance(millis uint64) error {
+	_pointer := _self.ffiObject.incrementPointer("*SystemClock")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_systemclock_advance(
+			_pointer, FfiConverterUint64INSTANCE.Lower(millis)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+func (_self *SystemClock) IsMock() bool {
+	_pointer := _self.ffiObject.incrementPointer("*SystemClock")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_slatedb_uniffi_fn_method_systemclock_is_mock(
+			_pointer, _uniffiStatus)
+	}))
+}
+
+// The clock's current time in milliseconds since the Unix epoch.
+func (_self *SystemClock) NowMillis() int64 {
+	_pointer := _self.ffiObject.incrementPointer("*SystemClock")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterInt64INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_systemclock_now_millis(
+			_pointer, _uniffiStatus)
+	}))
+}
+
+// Sets a mock clock to `ts_millis`. The engine's tickers require a
+// monotonic clock, so a time before the clock's current one is refused,
+// as is one that is not a representable timestamp. Refused on the default
+// clock.
+func (_self *SystemClock) Set(tsMillis int64) error {
+	_pointer := _self.ffiObject.incrementPointer("*SystemClock")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_systemclock_set(
+			_pointer, FfiConverterInt64INSTANCE.Lower(tsMillis), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+func (object *SystemClock) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterSystemClock struct{}
+
+var FfiConverterSystemClockINSTANCE = FfiConverterSystemClock{}
+
+func (c FfiConverterSystemClock) Lift(handle C.uint64_t) *SystemClock {
+	result := &SystemClock{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_systemclock(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_systemclock(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*SystemClock).Destroy)
+	return result
+}
+
+func (c FfiConverterSystemClock) Read(reader io.Reader) *SystemClock {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterSystemClock) Lower(value *SystemClock) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*SystemClock")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterSystemClock) Write(writer io.Writer, value *SystemClock) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalSystemClock(handle uint64) *SystemClock {
+	return FfiConverterSystemClockINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalSystemClock(value *SystemClock) uint64 {
+	return uint64(FfiConverterSystemClockINSTANCE.Lower(value))
+}
+
+type FfiDestroyerSystemClock struct{}
+
+func (_ FfiDestroyerSystemClock) Destroy(value *SystemClock) {
+	value.Destroy()
+}
+
 // Handle for an up/down counter metric.
 type UpDownCounter interface {
 	// Adds `value` to the counter.
@@ -9404,6 +10053,55 @@ func LowerToExternalWriteHandle(value *WriteHandle) uint64 {
 type FfiDestroyerWriteHandle struct{}
 
 func (_ FfiDestroyerWriteHandle) Destroy(value *WriteHandle) {
+	value.Destroy()
+}
+
+// What the block cache keeps of the SSTs this database writes: the targets a
+// memtable flush caches and the targets a compaction's output caches. An
+// empty list caches nothing on that path. The engine's default caches every
+// data block, the index and the filters on flush, and the index and filters
+// on compaction output.
+type BlockCachePolicy struct {
+	FlushTargets            []CacheTarget
+	CompactionOutputTargets []CacheTarget
+}
+
+func (r *BlockCachePolicy) Destroy() {
+	FfiDestroyerSequenceCacheTarget{}.Destroy(r.FlushTargets)
+	FfiDestroyerSequenceCacheTarget{}.Destroy(r.CompactionOutputTargets)
+}
+
+type FfiConverterBlockCachePolicy struct{}
+
+var FfiConverterBlockCachePolicyINSTANCE = FfiConverterBlockCachePolicy{}
+
+func (c FfiConverterBlockCachePolicy) Lift(rb RustBufferI) BlockCachePolicy {
+	return LiftFromRustBuffer[BlockCachePolicy](c, rb)
+}
+
+func (c FfiConverterBlockCachePolicy) Read(reader io.Reader) BlockCachePolicy {
+	return BlockCachePolicy{
+		FfiConverterSequenceCacheTargetINSTANCE.Read(reader),
+		FfiConverterSequenceCacheTargetINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterBlockCachePolicy) Lower(value BlockCachePolicy) C.RustBuffer {
+	return LowerIntoRustBuffer[BlockCachePolicy](c, value)
+}
+
+func (c FfiConverterBlockCachePolicy) LowerExternal(value BlockCachePolicy) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[BlockCachePolicy](c, value))
+}
+
+func (c FfiConverterBlockCachePolicy) Write(writer io.Writer, value BlockCachePolicy) {
+	FfiConverterSequenceCacheTargetINSTANCE.Write(writer, value.FlushTargets)
+	FfiConverterSequenceCacheTargetINSTANCE.Write(writer, value.CompactionOutputTargets)
+}
+
+type FfiDestroyerBlockCachePolicy struct{}
+
+func (_ FfiDestroyerBlockCachePolicy) Destroy(value BlockCachePolicy) {
 	value.Destroy()
 }
 
@@ -11939,6 +12637,116 @@ type FfiDestroyerWriteOptions struct{}
 
 func (_ FfiDestroyerWriteOptions) Destroy(value WriteOptions) {
 	value.Destroy()
+}
+
+// Error returned by a foreign [`crate::BlockTransformer`] implementation.
+// Any other error or exception the foreign method raises becomes `Failed`.
+type BlockTransformerCallbackError struct {
+	err error
+}
+
+// Convience method to turn *BlockTransformerCallbackError into error
+// Avoiding treating nil pointer as non nil error interface
+func (err *BlockTransformerCallbackError) AsError() error {
+	if err == nil {
+		return nil
+	} else {
+		return err
+	}
+}
+
+func (err BlockTransformerCallbackError) Error() string {
+	return fmt.Sprintf("BlockTransformerCallbackError: %s", err.err.Error())
+}
+
+func (err BlockTransformerCallbackError) Unwrap() error {
+	return err.err
+}
+
+// Err* are used for checking error type with `errors.Is`
+var ErrBlockTransformerCallbackErrorFailed = fmt.Errorf("BlockTransformerCallbackErrorFailed")
+
+// Variant structs
+// The transform failed with an application-defined message.
+type BlockTransformerCallbackErrorFailed struct {
+	Message string
+}
+
+// The transform failed with an application-defined message.
+func NewBlockTransformerCallbackErrorFailed(
+	message string,
+) *BlockTransformerCallbackError {
+	return &BlockTransformerCallbackError{err: &BlockTransformerCallbackErrorFailed{
+		Message: message}}
+}
+
+func (e BlockTransformerCallbackErrorFailed) destroy() {
+	FfiDestroyerString{}.Destroy(e.Message)
+}
+
+func (err BlockTransformerCallbackErrorFailed) Error() string {
+	return fmt.Sprint("Failed",
+		": ",
+
+		"Message=",
+		err.Message,
+	)
+}
+
+func (self BlockTransformerCallbackErrorFailed) Is(target error) bool {
+	return target == ErrBlockTransformerCallbackErrorFailed
+}
+
+type FfiConverterBlockTransformerCallbackError struct{}
+
+var FfiConverterBlockTransformerCallbackErrorINSTANCE = FfiConverterBlockTransformerCallbackError{}
+
+func (c FfiConverterBlockTransformerCallbackError) Lift(eb RustBufferI) *BlockTransformerCallbackError {
+	return LiftFromRustBuffer[*BlockTransformerCallbackError](c, eb)
+}
+
+func (c FfiConverterBlockTransformerCallbackError) Lower(value *BlockTransformerCallbackError) C.RustBuffer {
+	return LowerIntoRustBuffer[*BlockTransformerCallbackError](c, value)
+}
+
+func (c FfiConverterBlockTransformerCallbackError) LowerExternal(value *BlockTransformerCallbackError) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*BlockTransformerCallbackError](c, value))
+}
+
+func (c FfiConverterBlockTransformerCallbackError) Read(reader io.Reader) *BlockTransformerCallbackError {
+	errorID := readUint32(reader)
+
+	switch errorID {
+	case 1:
+		return &BlockTransformerCallbackError{&BlockTransformerCallbackErrorFailed{
+			Message: FfiConverterStringINSTANCE.Read(reader),
+		}}
+	default:
+		panic(fmt.Sprintf("Unknown error code %d in FfiConverterBlockTransformerCallbackError.Read()", errorID))
+	}
+}
+
+func (c FfiConverterBlockTransformerCallbackError) Write(writer io.Writer, value *BlockTransformerCallbackError) {
+	switch variantValue := value.err.(type) {
+	case *BlockTransformerCallbackErrorFailed:
+		writeInt32(writer, 1)
+		FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
+	default:
+		_ = variantValue
+		panic(fmt.Sprintf("invalid error value `%v` in FfiConverterBlockTransformerCallbackError.Write", value))
+	}
+}
+
+type FfiDestroyerBlockTransformerCallbackError struct{}
+
+func (_ FfiDestroyerBlockTransformerCallbackError) Destroy(value *BlockTransformerCallbackError) {
+	switch variantValue := value.err.(type) {
+	case BlockTransformerCallbackErrorFailed:
+		variantValue.destroy()
+	default:
+		_ = variantValue
+		panic(fmt.Sprintf("invalid error value `%v` in FfiDestroyerBlockTransformerCallbackError.Destroy", value))
+	}
 }
 
 // Cache content that [`crate::Db::warm_sst`] should populate.
