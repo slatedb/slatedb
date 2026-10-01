@@ -18,9 +18,6 @@ use crate::utils::panic_string;
 
 enum FetchTask {
     InFlight {
-        /// Aborted on drop, so a fetch never outlives the iterator — or the
-        /// limiter guards beside it, which would otherwise free their budget
-        /// while the fetch they account for is still running.
         join_handle: AbortOnDropHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>,
         _fetch_guard: ResourceGuard,
         _buffer_guard: ResourceGuard,
