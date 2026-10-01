@@ -82,6 +82,7 @@ tracing-log = "0.2"
 tracing-subscriber = { version = "0.3" }
 thread_local = "1.1.9"
 uniffi = "0.31.0"
+uniffi_meta = "0.31.0"
 ulid = "1.2.1"
 uuid = "1.18.0"
 url = "2.5.8"

@@ -11940,6 +11940,95 @@ func (_ FfiDestroyerObjectMetadata) Destroy(value ObjectMetadata) {
 	value.Destroy()
 }
 
+// The on-disk object-store cache of one reader. Every default is the
+// engine's; `root_folder` `None` disables the cache.
+type ObjectStoreCacheOptions struct {
+	// Directory the cached parts are written under. `None` disables the
+	// cache and every other field is ignored.
+	RootFolder *string
+	// Bytes the cache may hold before its evictor removes the least
+	// recently used parts. `None` runs no evictor, so the cache grows
+	// without limit. Default 16 GiB, or `usize::MAX` on a 32-bit target
+	// where 16 GiB does not fit, as the engine's.
+	MaxCacheSizeBytes *uint64
+	// Size of one cached part file: a non-zero multiple of 1024 bytes, or
+	// the reader refuses to build. Default 4 MiB.
+	PartSizeBytes uint64
+	// Whether SSTs written by memtable flushes are added to the cache.
+	// Default false.
+	CacheOnFlush bool
+	// Whether SSTs written by compactions are added to the cache. Default
+	// false.
+	CacheOnCompaction bool
+	// Which SSTs to load into the cache when the reader starts, up to
+	// `max_cache_size_bytes`. `None` preloads nothing.
+	PreloadDiskCacheOnStartup *PreloadLevel
+	// Milliseconds between rescans of the cache directory that rebuild the
+	// evictor's map; greater than zero. `None` scans once at startup only.
+	// Default one hour.
+	ScanIntervalMs *uint64
+	// Part files kept open in a least-recently-used cache; greater than
+	// zero. Default 1000.
+	MaxOpenFileHandles uint64
+}
+
+func (r *ObjectStoreCacheOptions) Destroy() {
+	FfiDestroyerOptionalString{}.Destroy(r.RootFolder)
+	FfiDestroyerOptionalUint64{}.Destroy(r.MaxCacheSizeBytes)
+	FfiDestroyerUint64{}.Destroy(r.PartSizeBytes)
+	FfiDestroyerBool{}.Destroy(r.CacheOnFlush)
+	FfiDestroyerBool{}.Destroy(r.CacheOnCompaction)
+	FfiDestroyerOptionalPreloadLevel{}.Destroy(r.PreloadDiskCacheOnStartup)
+	FfiDestroyerOptionalUint64{}.Destroy(r.ScanIntervalMs)
+	FfiDestroyerUint64{}.Destroy(r.MaxOpenFileHandles)
+}
+
+type FfiConverterObjectStoreCacheOptions struct{}
+
+var FfiConverterObjectStoreCacheOptionsINSTANCE = FfiConverterObjectStoreCacheOptions{}
+
+func (c FfiConverterObjectStoreCacheOptions) Lift(rb RustBufferI) ObjectStoreCacheOptions {
+	return LiftFromRustBuffer[ObjectStoreCacheOptions](c, rb)
+}
+
+func (c FfiConverterObjectStoreCacheOptions) Read(reader io.Reader) ObjectStoreCacheOptions {
+	return ObjectStoreCacheOptions{
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterOptionalPreloadLevelINSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterObjectStoreCacheOptions) Lower(value ObjectStoreCacheOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[ObjectStoreCacheOptions](c, value)
+}
+
+func (c FfiConverterObjectStoreCacheOptions) LowerExternal(value ObjectStoreCacheOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ObjectStoreCacheOptions](c, value))
+}
+
+func (c FfiConverterObjectStoreCacheOptions) Write(writer io.Writer, value ObjectStoreCacheOptions) {
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.RootFolder)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.MaxCacheSizeBytes)
+	FfiConverterUint64INSTANCE.Write(writer, value.PartSizeBytes)
+	FfiConverterBoolINSTANCE.Write(writer, value.CacheOnFlush)
+	FfiConverterBoolINSTANCE.Write(writer, value.CacheOnCompaction)
+	FfiConverterOptionalPreloadLevelINSTANCE.Write(writer, value.PreloadDiskCacheOnStartup)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.ScanIntervalMs)
+	FfiConverterUint64INSTANCE.Write(writer, value.MaxOpenFileHandles)
+}
+
+type FfiDestroyerObjectStoreCacheOptions struct{}
+
+func (_ FfiDestroyerObjectStoreCacheOptions) Destroy(value ObjectStoreCacheOptions) {
+	value.Destroy()
+}
+
 // Options applied to a put operation.
 type PutOptions struct {
 	// TTL policy for the inserted value.
@@ -12061,6 +12150,8 @@ type ReaderOptions struct {
 	// `None` (default) retries transient errors indefinitely; `Some(n)` gives
 	// up after `n` retries and surfaces the underlying error.
 	ObjectStoreMaxRetries *uint32
+	// The reader's object-store cache. `None` is the engine's default.
+	ObjectStoreCacheOptions *ObjectStoreCacheOptions
 }
 
 func (r *ReaderOptions) Destroy() {
@@ -12069,6 +12160,7 @@ func (r *ReaderOptions) Destroy() {
 	FfiDestroyerUint64{}.Destroy(r.MaxMemtableBytes)
 	FfiDestroyerBool{}.Destroy(r.SkipWalReplay)
 	FfiDestroyerOptionalUint32{}.Destroy(r.ObjectStoreMaxRetries)
+	FfiDestroyerOptionalObjectStoreCacheOptions{}.Destroy(r.ObjectStoreCacheOptions)
 }
 
 type FfiConverterReaderOptions struct{}
@@ -12086,6 +12178,7 @@ func (c FfiConverterReaderOptions) Read(reader io.Reader) ReaderOptions {
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterOptionalUint32INSTANCE.Read(reader),
+		FfiConverterOptionalObjectStoreCacheOptionsINSTANCE.Read(reader),
 	}
 }
 
@@ -12103,6 +12196,7 @@ func (c FfiConverterReaderOptions) Write(writer io.Writer, value ReaderOptions) 
 	FfiConverterUint64INSTANCE.Write(writer, value.MaxMemtableBytes)
 	FfiConverterBoolINSTANCE.Write(writer, value.SkipWalReplay)
 	FfiConverterOptionalUint32INSTANCE.Write(writer, value.ObjectStoreMaxRetries)
+	FfiConverterOptionalObjectStoreCacheOptionsINSTANCE.Write(writer, value.ObjectStoreCacheOptions)
 }
 
 type FfiDestroyerReaderOptions struct{}
@@ -14377,6 +14471,46 @@ func (_ FfiDestroyerPrefixTarget) Destroy(value PrefixTarget) {
 	value.Destroy()
 }
 
+// Which SSTs a reader loads into its disk cache at startup, up to
+// `max_cache_size_bytes`.
+type PreloadLevel uint
+
+const (
+	// The L0 SSTs only, the most recently written.
+	PreloadLevelL0Sst PreloadLevel = 1
+	// Every SST, L0 and compacted levels alike.
+	PreloadLevelAllSst PreloadLevel = 2
+)
+
+type FfiConverterPreloadLevel struct{}
+
+var FfiConverterPreloadLevelINSTANCE = FfiConverterPreloadLevel{}
+
+func (c FfiConverterPreloadLevel) Lift(rb RustBufferI) PreloadLevel {
+	return LiftFromRustBuffer[PreloadLevel](c, rb)
+}
+
+func (c FfiConverterPreloadLevel) Lower(value PreloadLevel) C.RustBuffer {
+	return LowerIntoRustBuffer[PreloadLevel](c, value)
+}
+
+func (c FfiConverterPreloadLevel) LowerExternal(value PreloadLevel) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[PreloadLevel](c, value))
+}
+func (FfiConverterPreloadLevel) Read(reader io.Reader) PreloadLevel {
+	id := readInt32(reader)
+	return PreloadLevel(id)
+}
+
+func (FfiConverterPreloadLevel) Write(writer io.Writer, value PreloadLevel) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerPreloadLevel struct{}
+
+func (_ FfiDestroyerPreloadLevel) Destroy(value PreloadLevel) {
+}
+
 // Determines how a [`crate::DbReader`] chooses and refreshes database state.
 type ReaderMode interface {
 	Destroy()
@@ -15451,6 +15585,47 @@ func (_ FfiDestroyerOptionalMetric) Destroy(value *Metric) {
 	}
 }
 
+type FfiConverterOptionalObjectStoreCacheOptions struct{}
+
+var FfiConverterOptionalObjectStoreCacheOptionsINSTANCE = FfiConverterOptionalObjectStoreCacheOptions{}
+
+func (c FfiConverterOptionalObjectStoreCacheOptions) Lift(rb RustBufferI) *ObjectStoreCacheOptions {
+	return LiftFromRustBuffer[*ObjectStoreCacheOptions](c, rb)
+}
+
+func (_ FfiConverterOptionalObjectStoreCacheOptions) Read(reader io.Reader) *ObjectStoreCacheOptions {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterObjectStoreCacheOptionsINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalObjectStoreCacheOptions) Lower(value *ObjectStoreCacheOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[*ObjectStoreCacheOptions](c, value)
+}
+
+func (c FfiConverterOptionalObjectStoreCacheOptions) LowerExternal(value *ObjectStoreCacheOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*ObjectStoreCacheOptions](c, value))
+}
+
+func (_ FfiConverterOptionalObjectStoreCacheOptions) Write(writer io.Writer, value *ObjectStoreCacheOptions) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterObjectStoreCacheOptionsINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalObjectStoreCacheOptions struct{}
+
+func (_ FfiDestroyerOptionalObjectStoreCacheOptions) Destroy(value *ObjectStoreCacheOptions) {
+	if value != nil {
+		FfiDestroyerObjectStoreCacheOptions{}.Destroy(*value)
+	}
+}
+
 type FfiConverterOptionalTracingOptions struct{}
 
 var FfiConverterOptionalTracingOptionsINSTANCE = FfiConverterOptionalTracingOptions{}
@@ -15817,6 +15992,47 @@ type FfiDestroyerOptionalIterationOrder struct{}
 func (_ FfiDestroyerOptionalIterationOrder) Destroy(value *IterationOrder) {
 	if value != nil {
 		FfiDestroyerIterationOrder{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalPreloadLevel struct{}
+
+var FfiConverterOptionalPreloadLevelINSTANCE = FfiConverterOptionalPreloadLevel{}
+
+func (c FfiConverterOptionalPreloadLevel) Lift(rb RustBufferI) *PreloadLevel {
+	return LiftFromRustBuffer[*PreloadLevel](c, rb)
+}
+
+func (_ FfiConverterOptionalPreloadLevel) Read(reader io.Reader) *PreloadLevel {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterPreloadLevelINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalPreloadLevel) Lower(value *PreloadLevel) C.RustBuffer {
+	return LowerIntoRustBuffer[*PreloadLevel](c, value)
+}
+
+func (c FfiConverterOptionalPreloadLevel) LowerExternal(value *PreloadLevel) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*PreloadLevel](c, value))
+}
+
+func (_ FfiConverterOptionalPreloadLevel) Write(writer io.Writer, value *PreloadLevel) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterPreloadLevelINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalPreloadLevel struct{}
+
+func (_ FfiDestroyerOptionalPreloadLevel) Destroy(value *PreloadLevel) {
+	if value != nil {
+		FfiDestroyerPreloadLevel{}.Destroy(*value)
 	}
 }
 
