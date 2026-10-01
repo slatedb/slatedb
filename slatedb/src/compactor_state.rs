@@ -573,6 +573,16 @@ impl Compaction {
         self.status
     }
 
+    /// Returns whether a worker can claim this compaction but has not yet.
+    pub(crate) fn scheduled(&self) -> bool {
+        matches!(self.status, CompactionStatus::Scheduled)
+    }
+
+    /// Returns whether a worker has claimed this compaction and is executing it.
+    pub(crate) fn running(&self) -> bool {
+        matches!(self.status, CompactionStatus::Running)
+    }
+
     /// Returns all output SSTs produced by this compaction.
     pub fn output_ssts(&self) -> Vec<SsTableHandle> {
         self.output_ssts.clone()
