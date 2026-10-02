@@ -267,7 +267,7 @@ impl StoredManifest {
         Ok(self.inner.refresh().await?)
     }
 
-    fn new_checkpoint(
+    pub(crate) fn new_checkpoint(
         manifest: &Manifest,
         current_id: u64,
         clock: &dyn SystemClock,
@@ -350,77 +350,6 @@ impl StoredManifest {
                 result
             })
             .await?)
-    }
-
-    /// Replace an existing checkpoint with a new checkpoint. If the old checkpoint
-    /// is missing, the new checkpoint will still be added. This helps avoid
-    /// issuing two manifest updates when creating a new checkpoint.
-    pub(crate) async fn replace_checkpoint(
-        &mut self,
-        old_checkpoint_id: Uuid,
-        new_checkpoint_id: Uuid,
-        new_checkpoint_options: &CheckpointOptions,
-    ) -> Result<Checkpoint, SlateDBError> {
-        let clock = Arc::clone(&self.clock);
-        self.inner
-            .maybe_apply_update(|sr| {
-                let mut new_val = sr.object().clone();
-                // compute new checkpoint
-                let checkpoint = Self::new_checkpoint(
-                    &new_val,
-                    sr.id().into(),
-                    clock.as_ref(),
-                    new_checkpoint_id,
-                    new_checkpoint_options,
-                )?;
-                new_val
-                    .core
-                    .checkpoints
-                    .retain(|cp| cp.id != old_checkpoint_id);
-                new_val.core.checkpoints.push(checkpoint);
-                let mut dirty = sr.prepare_dirty()?;
-                dirty.value = new_val;
-                let result: Result<Option<DirtyObject<Manifest>>, SlateDBError> = Ok(Some(dirty));
-                result
-            })
-            .await?;
-        let new_checkpoint = self
-            .db_state()
-            .find_checkpoint(new_checkpoint_id)
-            .expect("update applied but checkpoint not found")
-            .clone();
-        Ok(new_checkpoint)
-    }
-
-    pub(crate) async fn refresh_checkpoint(
-        &mut self,
-        checkpoint_id: Uuid,
-        new_lifetime: Duration,
-    ) -> Result<Checkpoint, SlateDBError> {
-        let clock = Arc::clone(&self.clock);
-        self.inner
-            .maybe_apply_update(|sr| {
-                let mut new_val = sr.object().clone();
-                let Some(cp) = new_val
-                    .core
-                    .checkpoints
-                    .iter_mut()
-                    .find(|c| c.id == checkpoint_id)
-                else {
-                    return Err(CheckpointMissing(checkpoint_id));
-                };
-                cp.expire_time = Some(clock.now() + new_lifetime);
-                let mut dirty = sr.prepare_dirty()?;
-                dirty.value = new_val;
-                Ok(Some(dirty))
-            })
-            .await?;
-        let checkpoint = self
-            .db_state()
-            .find_checkpoint(checkpoint_id)
-            .expect("update applied but checkpoint not found")
-            .clone();
-        Ok(checkpoint)
     }
 
     pub(crate) async fn update(
@@ -1324,127 +1253,6 @@ mod tests {
             ms.delete_manifest(checkpoint1.manifest_id).await,
             Err(SlateDBError::InvalidDeletion)
         ));
-    }
-
-    #[tokio::test]
-    async fn should_refresh_checkpoint() {
-        let ms = new_memory_manifest_store();
-        let state = ManifestCore::new();
-        let mut sm = StoredManifest::create_new_db(
-            ms.clone(),
-            state.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        )
-        .await
-        .unwrap();
-
-        let options = CheckpointOptions {
-            lifetime: Some(Duration::from_secs(100)),
-            ..CheckpointOptions::default()
-        };
-
-        let checkpoint = sm
-            .write_checkpoint(uuid::Uuid::new_v4(), &options)
-            .await
-            .unwrap();
-        let expire_time = checkpoint.expire_time.unwrap();
-
-        let refreshed_checkpoint = sm
-            .refresh_checkpoint(checkpoint.id, Duration::from_secs(500))
-            .await
-            .unwrap();
-        let refreshed_expire_time = refreshed_checkpoint.expire_time.unwrap();
-        assert!(refreshed_expire_time > expire_time);
-
-        assert_eq!(
-            Some(&refreshed_checkpoint),
-            sm.manifest().core.find_checkpoint(checkpoint.id)
-        );
-    }
-
-    #[tokio::test]
-    async fn should_fail_refresh_if_checkpoint_missing() {
-        let ms = new_memory_manifest_store();
-        let state = ManifestCore::new();
-        let mut sm = StoredManifest::create_new_db(
-            ms.clone(),
-            state.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        )
-        .await
-        .unwrap();
-
-        let checkpoint_id = uuid::Uuid::new_v4();
-        let result = sm
-            .refresh_checkpoint(checkpoint_id, Duration::from_secs(100))
-            .await;
-
-        if let Err(SlateDBError::CheckpointMissing(missing_id)) = result {
-            assert_eq!(checkpoint_id, missing_id);
-        } else {
-            panic!("Unexpected result {result:?}")
-        }
-    }
-
-    #[tokio::test]
-    async fn should_replace_checkpoint() {
-        let ms = new_memory_manifest_store();
-        let state = ManifestCore::new();
-        let mut sm = StoredManifest::create_new_db(
-            ms.clone(),
-            state.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        )
-        .await
-        .unwrap();
-
-        let checkpoint = sm
-            .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
-            .await
-            .unwrap();
-
-        let replaced_checkpoint = sm
-            .replace_checkpoint(
-                checkpoint.id,
-                uuid::Uuid::new_v4(),
-                &CheckpointOptions::default(),
-            )
-            .await
-            .unwrap();
-        assert_ne!(checkpoint.id, replaced_checkpoint.id);
-        assert_eq!(None, sm.manifest().core.find_checkpoint(checkpoint.id));
-        assert_eq!(
-            Some(&replaced_checkpoint),
-            sm.manifest().core.find_checkpoint(replaced_checkpoint.id),
-        );
-    }
-
-    #[tokio::test]
-    async fn should_ignore_missing_checkpoint_if_replacing() {
-        let ms = new_memory_manifest_store();
-        let state = ManifestCore::new();
-        let mut sm = StoredManifest::create_new_db(
-            ms.clone(),
-            state.clone(),
-            Arc::new(DefaultSystemClock::new()),
-        )
-        .await
-        .unwrap();
-
-        let missing_checkpoint_id = uuid::Uuid::new_v4();
-        let replaced_checkpoint = sm
-            .replace_checkpoint(
-                uuid::Uuid::new_v4(),
-                missing_checkpoint_id,
-                &CheckpointOptions::default(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            Some(&replaced_checkpoint),
-            sm.manifest().core.find_checkpoint(replaced_checkpoint.id),
-        );
     }
 
     #[tokio::test]
