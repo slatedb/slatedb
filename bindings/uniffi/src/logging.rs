@@ -132,12 +132,6 @@ pub fn init_logging(level: LogLevel, callback: Option<Arc<dyn LogCallback>>) -> 
         return Err(logging_already_initialized_error());
     }
 
-    if tracing::dispatcher::has_been_set() {
-        return Err(invalid_logging_error(
-            "global tracing subscriber already initialized by another library",
-        ));
-    }
-
     install_log_tracer(level)?;
     install_subscriber(level, callback)?;
 

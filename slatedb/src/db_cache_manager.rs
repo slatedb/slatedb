@@ -177,6 +177,8 @@ async fn warm_data(
                 block_range,
                 true,
                 Some(segment.clone()),
+                &ReadTrace::none(),
+                None,
             )
             .await?;
     }
@@ -208,7 +210,7 @@ async fn warm_filters(
             handle,
             true,
             Some(segment.clone()),
-            &ReadTrace::new(None),
+            &ReadTrace::none(),
             None,
         )
         .await?;
@@ -244,7 +246,7 @@ async fn ensure_index(
                     handle,
                     true,
                     Some(segment.clone()),
-                    &ReadTrace::new(None),
+                    &ReadTrace::none(),
                     None,
                 )
                 .await
@@ -297,7 +299,7 @@ mod tests {
             .await
             .expect("open_sst");
         let index = table_store
-            .read_index(&handle, false, Some(segment), &ReadTrace::new(None), None)
+            .read_index(&handle, false, Some(segment), &ReadTrace::none(), None)
             .await
             .expect("read_index");
         let cache = table_store.cache().expect("cache configured").clone();
@@ -317,13 +319,7 @@ mod tests {
             .await
             .expect("open_sst");
         let index = table_store
-            .read_index(
-                &handle,
-                false,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .expect("read_index");
         let block_idx =

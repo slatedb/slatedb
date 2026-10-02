@@ -17,6 +17,7 @@ use crate::filter_policy::{FilterContext, FilterQuery, FilterTarget, NamedFilter
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
 use crate::reader::{ReadTrace, SstTraceLevel};
+use crate::utils::spawn_with_optional_subscriber;
 use crate::{
     iter::{IterationOrder, RowEntryIterator},
     partitioned_keyspace,
@@ -404,7 +405,7 @@ impl<'a> InternalSstIterator<'a> {
         self.tracing_context
             .as_ref()
             .map(|context| context.read_trace.clone())
-            .unwrap_or_else(|| ReadTrace::new(None))
+            .unwrap_or_else(ReadTrace::none)
     }
 
     fn new_owned<T: RangeBounds<Bytes>>(
@@ -480,10 +481,20 @@ impl<'a> InternalSstIterator<'a> {
                     let index = index.clone();
                     let cache_blocks = self.options.cache_blocks;
                     let segment = self.options.segment.clone();
+                    let read_trace = self.read_trace();
+                    let sst_level = self.sst_level().cloned();
                     let blocks_end = blocks.end;
-                    let fetch = tokio::spawn(async move {
+                    let fetch = spawn_with_optional_subscriber(async move {
                         table_store
-                            .read_blocks_using_index(&table, index, blocks, cache_blocks, segment)
+                            .read_blocks_using_index(
+                                &table,
+                                index,
+                                blocks,
+                                cache_blocks,
+                                segment,
+                                &read_trace,
+                                sst_level.as_ref(),
+                            )
                             .await
                     });
                     self.fetch_tasks
@@ -509,10 +520,20 @@ impl<'a> InternalSstIterator<'a> {
                     let index = index.clone();
                     let cache_blocks = self.options.cache_blocks;
                     let segment = self.options.segment.clone();
+                    let read_trace = self.read_trace();
+                    let sst_level = self.sst_level().cloned();
                     let blocks_start = blocks.start;
-                    let fetch = tokio::spawn(async move {
+                    let fetch = spawn_with_optional_subscriber(async move {
                         table_store
-                            .read_blocks_using_index(&table, index, blocks, cache_blocks, segment)
+                            .read_blocks_using_index(
+                                &table,
+                                index,
+                                blocks,
+                                cache_blocks,
+                                segment,
+                                &read_trace,
+                                sst_level.as_ref(),
+                            )
                             .await
                     });
                     self.fetch_tasks
@@ -1305,7 +1326,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1461,7 +1482,7 @@ mod tests {
         let existing_keys = [b"k1".as_slice(), b"k3".as_slice()];
         let sst_handle = build_single_block_sst(&table_store, &existing_keys).await;
 
-        let read_trace = ReadTrace::new(None);
+        let read_trace = ReadTrace::none();
         let filters = table_store
             .read_filters(&sst_handle.sst, true, Some(Bytes::new()), &read_trace, None)
             .await
@@ -1786,7 +1807,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -2709,7 +2730,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -2914,7 +2935,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -3066,7 +3087,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -3481,7 +3502,7 @@ mod tests {
             &[abstaining_filter(), context_parity_filter(0)],
             SsTableId::new(Ulid::new()),
             None,
-            &ReadTrace::new(None),
+            &ReadTrace::none(),
         );
 
         assert!(evaluator.is_filtered_out());
@@ -3500,7 +3521,7 @@ mod tests {
             &[abstaining_filter(), context_parity_filter(0)],
             SsTableId::new(Ulid::new()),
             None,
-            &ReadTrace::new(None),
+            &ReadTrace::none(),
         );
         assert!(!evaluator.is_filtered_out());
 
@@ -3524,7 +3545,7 @@ mod tests {
             &[context_parity_filter(0)],
             SsTableId::new(Ulid::new()),
             None,
-            &ReadTrace::new(None),
+            &ReadTrace::none(),
         );
         evaluator.notify_finished_iteration();
 
@@ -3567,7 +3588,7 @@ mod tests {
             ))],
             SsTableId::new(Ulid::new()),
             None,
-            &ReadTrace::new(None),
+            &ReadTrace::none(),
         );
 
         assert!(!evaluator.is_filtered_out());

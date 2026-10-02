@@ -9,6 +9,7 @@ use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::manifest::ManifestCore;
 use crate::paths::PathResolver;
+use crate::reader::ReadTrace;
 use crate::tablestore::TableStore;
 use bytes::{Buf, BufMut, Bytes};
 use futures::FutureExt;
@@ -24,6 +25,8 @@ use uuid::Uuid;
 
 use futures::StreamExt;
 use std::collections::VecDeque;
+use tracing::instrument::WithSubscriber;
+use tracing::subscriber::NoSubscriber;
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
@@ -147,6 +150,44 @@ pub(crate) fn merge_options<T>(
     }
 }
 
+/// Attaches the current subscriber only if a subscriber is set.
+///
+/// In an application using only log without a subscriber, spawning a task for a future with
+/// the current subscriber attached, i.e.,
+/// ```rust,no_run
+/// # use tracing::instrument::WithSubscriber;
+/// # let future = async {};
+/// tokio::spawn(future.with_current_subscriber());
+/// ```
+/// sets tracing::dispatcher::has_been_set() and permanently disables tracing-to-log forwarding,
+/// even with query tracing disabled. That means, logging messages with
+/// ```rust
+/// tracing::info!("message");
+/// ```
+/// does not work anymore after the spawning.
+/// However, direct logging (not tracing-to-log forwarding) with
+/// ```rust
+/// log::info!("message");
+/// ```
+/// still works.
+///
+/// To avoid disabling tracing-to-log forwarding, this helper checks if a subscriber is set, if a
+/// subscriber is set the subscriber is attached to the future, else `.with_current_subscriber()`
+/// is not called.
+pub(crate) fn spawn_with_optional_subscriber<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+
+    if dispatch.is::<NoSubscriber>() {
+        tokio::spawn(future)
+    } else {
+        tokio::spawn(future.with_subscriber(dispatch))
+    }
+}
+
 /// Determines the last key and sequence number written by an output SST.
 ///
 /// ## Arguments
@@ -170,7 +211,7 @@ pub(crate) async fn last_written_key_and_seq(
             output_sst,
             false,
             Some(segment.clone()),
-            &crate::reader::ReadTrace::new(None),
+            &ReadTrace::none(),
             None,
         )
         .await?;
@@ -186,6 +227,8 @@ pub(crate) async fn last_written_key_and_seq(
             last_block_idx..last_block_idx + 1,
             false,
             Some(segment.clone()),
+            &ReadTrace::none(),
+            None,
         )
         .await?;
     let Some(block) = blocks.pop_front() else {
