@@ -1494,8 +1494,8 @@ impl Manifest {
                 source.manifest.core.last_l0_clock_tick,
             );
         }
-        // The union starts without source snapshots. Reclaim older versions
-        // without waiting for the clone to flush new writes.
+        // The union does not inherit source snapshots, so compaction can drop
+        // older versions without waiting for new writes to flush.
         core.recent_snapshot_min_seq = core.last_l0_seq;
 
         // Coalesce borrows of the same physical ancestor, keyed on (path, sst_ids) rather than
