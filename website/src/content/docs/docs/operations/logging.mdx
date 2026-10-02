@@ -27,6 +27,7 @@ SlateDB provides structured tracing spans for read operations, allowing you to t
 | `slatedb.read.evaluate_filter` | Records evaluating a named filter for an SST. | `trace_id`, `sst_id`, `sst_level`, `filter_name`, `result` |
 | `slatedb.read.read_index` | Records reading the index for an SST. | `trace_id`, `sst_id`, `sst_level`, `cached` |
 | `slatedb.read.read_blocks` | Records reading data blocks for an SST. | `trace_id`, `sst_id`, `sst_level`, `cache_hits`, `cache_misses` |
+| `slatedb.read.merge` | Records a call to the merge operator during a read. | `trace_id`, `num_operands` |
 
 All `slatedb.read.*` spans are child spans of the root `slatedb.read` span.
 
@@ -40,6 +41,11 @@ Field meanings:
 - `cache_misses`: The number of requested data blocks that SlateDB read from object storage.
 - `filter_name`: The name of the filter policy being evaluated.
 - `result` — The boolean result of evaluating the filter.
+- `num_operands`: The number of input values for the merge.
+
+A merge batch is a group of merge operands processed together. SlateDB creates one `slatedb.read.merge` span for each batch.
+SlateDB creates a final span when it combines the batch results with an optional base value.
+In the final span, `num_operands` includes the base value when the base value is present.
 
 These spans are only created when you provide `TracingOptions` to the read operation.
 
