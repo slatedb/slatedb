@@ -12,6 +12,7 @@ use crate::seq_tracker::SequenceTracker;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
 use log::{debug, warn};
+use rand::Rng;
 use serde::Serialize;
 use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
@@ -1044,6 +1045,7 @@ impl Manifest {
     pub(crate) fn projected(
         source_manifest: &Manifest,
         config: &ProjectionConfig,
+        rand: &DbRand,
     ) -> Result<Manifest, SlateDBError> {
         if config.is_noop() {
             return Ok(source_manifest.clone());
@@ -1055,7 +1057,7 @@ impl Manifest {
         match Self::resolve_segment_action(b"", config)? {
             SegmentAction::Drop => projected.core.tree = Arc::new(LsmTreeState::default()),
             SegmentAction::Project(range) => {
-                Self::project_tree_in_place(Arc::make_mut(&mut projected.core.tree), &range)
+                Self::project_tree_in_place(Arc::make_mut(&mut projected.core.tree), &range, rand)
             }
             SegmentAction::PassThrough => {}
         }
@@ -1074,7 +1076,7 @@ impl Manifest {
             match Self::resolve_segment_action(&segment.prefix, config)? {
                 SegmentAction::Drop => { /* filtered out */ }
                 SegmentAction::Project(range) => {
-                    Self::project_tree_in_place(Arc::make_mut(&mut segment.tree), &range);
+                    Self::project_tree_in_place(Arc::make_mut(&mut segment.tree), &range, rand);
                     if !segment.tree.l0.is_empty() || !segment.tree.compacted.is_empty() {
                         kept.push(segment);
                     }
@@ -1160,11 +1162,18 @@ impl Manifest {
     /// Filter `tree.l0` and `tree.compacted` views against `range` in place.
     /// Sorted runs that lose all views are removed. Watermark fields are
     /// untouched (the caller decides whether to keep them).
-    fn project_tree_in_place(tree: &mut LsmTreeState, range: &BytesRange) {
-        let l0: VecDeque<SsTableView> = Self::filter_view_handles(&tree.l0, true, range).into();
+    fn project_tree_in_place(tree: &mut LsmTreeState, range: &BytesRange, rand: &DbRand) {
+        if let Some(watermark) = tree.last_compacted_l0_sst_view_id {
+            assert!(
+                tree.l0.iter().all(|view| view.id != watermark),
+                "L0 view watermark references an active view: {watermark}"
+            );
+        }
+        let l0: VecDeque<SsTableView> =
+            Self::filter_view_handles(&tree.l0, true, range, rand).into();
         let mut sorted_runs_filtered = vec![];
         for sr in &tree.compacted {
-            let sst_views = Self::filter_view_handles(sr.sst_views().iter(), false, range);
+            let sst_views = Self::filter_view_handles(sr.sst_views().iter(), false, range, rand);
             if !sst_views.is_empty() {
                 sorted_runs_filtered.push(SortedRun::new(sr.id, sst_views));
             }
@@ -1177,6 +1186,7 @@ impl Manifest {
         views: T,
         views_overlap: bool,
         projection_range: &BytesRange,
+        rand: &DbRand,
     ) -> Vec<SsTableView>
     where
         T: IntoIterator<Item = &'a SsTableView>,
@@ -1197,7 +1207,7 @@ impl Manifest {
                 // gap beyond this SST's physical keys. `try_with_visible_range`
                 // drops the SST in that case instead of panicking on an empty
                 // physical/visible intersection.
-                if let Some(view) = current_handle.try_with_visible_range(intersection) {
+                if let Some(view) = current_handle.try_with_visible_range(intersection, rand) {
                     filtered_handles.push(view);
                 }
             }
@@ -1427,6 +1437,47 @@ impl Manifest {
         external_dbs
     }
 
+    /// Assign unique L0 view IDs when sources share IDs in a new union clone.
+    fn assign_union_l0_view_ids(core: &mut ManifestCore, rand: &DbRand) {
+        for tree in core.trees() {
+            if let Some(watermark) = tree.last_compacted_l0_sst_view_id {
+                assert!(
+                    tree.l0.iter().all(|view| view.id != watermark),
+                    "L0 view watermark references an active view: {watermark}"
+                );
+            }
+        }
+        for tree in std::iter::once(&mut core.tree)
+            .chain(core.segments.iter_mut().map(|segment| &mut segment.tree))
+        {
+            let mut used = HashSet::new();
+            let duplicates: HashSet<_> = tree
+                .l0
+                .iter()
+                .filter_map(|view| (!used.insert(view.id)).then_some(view.id))
+                .collect();
+            if duplicates.is_empty() {
+                continue;
+            }
+            used.extend(tree.last_compacted_l0_sst_view_id);
+            for view in &mut Arc::make_mut(tree).l0 {
+                if duplicates.contains(&view.id) {
+                    loop {
+                        // Keep the timestamp because GC also uses view watermarks.
+                        let id = ulid::Ulid::from_parts(
+                            view.id.timestamp_ms(),
+                            rand.rng().random::<u128>(),
+                        );
+                        if used.insert(id) {
+                            view.id = id;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Reassign every sorted run in `core` a fresh sequential id. The
     /// union concatenates per-source `compacted` lists across the
     /// unsegmented tree and every segment, so ids must be regenerated
@@ -1483,6 +1534,7 @@ impl Manifest {
             Self::build_segmented_lsm_state(&mut core, segments);
         }
         Self::renumber_union_sorted_runs(&mut core);
+        Self::assign_union_l0_view_ids(&mut core, &rand);
 
         for source in &sources {
             core.last_l0_seq = max(core.last_l0_seq, source.manifest.core.last_l0_seq);
@@ -2009,12 +2061,51 @@ mod tests {
         let projected = Manifest::projected(
             &initial_manifest,
             &ProjectionConfig::from_global_range(BytesRange::from_ref(test_case.visible_range)),
+            &DbRand::new(42),
         )
         .unwrap();
 
-        let expected_manifest = build_manifest(&test_case.expected_manifest, |alias| {
+        let source_ids: HashSet<_> = initial_manifest
+            .core
+            .all_sst_views()
+            .map(|view| view.id)
+            .collect();
+        let mut projected_view_ids = HashSet::new();
+        for view in projected.core.all_sst_views() {
+            assert!(projected_view_ids.insert(view.id));
+            let original = initial_manifest
+                .core
+                .all_sst_views()
+                .find(|original| original.sst.id == view.sst.id)
+                .unwrap();
+            if view.visible_range == original.visible_range {
+                assert_eq!(view.id, original.id);
+            } else {
+                assert!(!source_ids.contains(&view.id));
+            }
+        }
+
+        let mut expected_manifest = build_manifest(&test_case.expected_manifest, |alias| {
             *sst_ids.get(alias).unwrap()
         });
+        let projected_ids: HashMap<_, _> = projected
+            .core
+            .all_sst_views()
+            .map(|view| (view.sst.id, view.id))
+            .collect();
+        let expected_tree = Arc::make_mut(&mut expected_manifest.core.tree);
+        for view in &mut expected_tree.l0 {
+            view.id = projected_ids[&view.sst.id];
+        }
+        for sr in &mut expected_tree.compacted {
+            *sr = SortedRun::new(
+                sr.id,
+                sr.sst_views().iter().cloned().map(|mut view| {
+                    view.id = projected_ids[&view.sst.id];
+                    view
+                }),
+            );
+        }
 
         assert_manifest_equal(&projected, &expected_manifest, &sst_ids);
     }
@@ -2117,10 +2208,21 @@ mod tests {
             })
             .collect();
 
-        let expected_manifest =
+        let mut expected_manifest =
             build_manifest(&test_case.expected, |alias| *sst_ids.get(alias).unwrap());
 
         let union = Manifest::cloned_from_union(sources, rand).unwrap();
+
+        let ids: HashSet<_> = union.core.tree.l0.iter().map(|view| view.id).collect();
+        assert_eq!(ids.len(), union.core.tree.l0.len());
+        // Union views have their own IDs. Compare their SSTs and ranges below.
+        for (expected, actual) in Arc::make_mut(&mut expected_manifest.core.tree)
+            .l0
+            .iter_mut()
+            .zip(&union.core.tree.l0)
+        {
+            expected.id = actual.id;
+        }
 
         assert_manifest_equal(&union, &expected_manifest, &sst_ids);
     }
@@ -2248,6 +2350,199 @@ mod tests {
             let merged_via_writer_side = compactor.merge_from_writer(&writer);
             assert_eq!(merged, merged_via_writer_side);
         });
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn test_union_assigns_unique_l0_view_ids(#[case] segmented: bool) {
+        let shared_id = Ulid::from_parts(10, 1);
+        let shared = SsTableView::new(
+            shared_id,
+            SsTableHandle::new(
+                SsTableId::from(Ulid::from_parts(10, 0)),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo {
+                    first_entry: Some(Bytes::from_static(b"a/0")),
+                    last_entry: Some(Bytes::from_static(b"a/z")),
+                    ..Default::default()
+                },
+            ),
+        );
+        let views = [
+            shared.with_visible_range(BytesRange::from_ref("a/0".."a/m")),
+            shared.with_visible_range(BytesRange::from_ref("a/m".."a/z")),
+        ];
+        let sources = views
+            .iter()
+            .enumerate()
+            .map(|(i, view)| {
+                let tree = Arc::new(LsmTreeState {
+                    l0: VecDeque::from([view.clone()]),
+                    ..Default::default()
+                });
+                let mut core = ManifestCore::new();
+                if segmented {
+                    core.segment_extractor_name = Some("test".into());
+                    core.segments.push(Segment {
+                        prefix: Bytes::from_static(b"a/"),
+                        tree,
+                    });
+                } else {
+                    core.tree = tree;
+                }
+                CloneSource {
+                    manifest: Manifest::initial(core),
+                    path: Path::from(format!("/child-{i}")),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                }
+            })
+            .collect();
+        let union = Manifest::cloned_from_union(sources, Arc::new(DbRand::new(42))).unwrap();
+        let tree = if segmented {
+            &union.core.segments[0].tree
+        } else {
+            &union.core.tree
+        };
+        assert_ne!(tree.l0[0].id, tree.l0[1].id);
+        for (actual, original) in tree.l0.iter().zip(views) {
+            assert_ne!(actual.id, shared_id);
+            assert_eq!(actual.id.timestamp_ms(), shared_id.timestamp_ms());
+            let mut restored = actual.clone();
+            restored.id = original.id;
+            assert_eq!(restored, original);
+        }
+    }
+
+    #[rstest]
+    #[case::empty(vec![])]
+    #[case::unique(vec![1, 2, 3])]
+    #[case::pair(vec![1, 1])]
+    #[case::all_shared(vec![1, 1, 1])]
+    #[case::mixed(vec![1, 2, 1, 3])]
+    #[case::multiple_groups(vec![1, 2, 1, 2, 3])]
+    fn test_assign_union_l0_view_ids(#[case] ids: Vec<u128>) {
+        let views: VecDeque<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let mut view = crate::test_utils::bounded_sst_view(i as u64 + 1, b"a", b"z")
+                    .with_visible_range(BytesRange::from_ref("a".."m"));
+                view.id = Ulid::from_parts(10, *id);
+                view
+            })
+            .collect();
+        let tree = Arc::new(LsmTreeState {
+            l0: views,
+            compacted: vec![SortedRun::new(
+                0,
+                [crate::test_utils::bounded_sst_view(20, b"a", b"z")],
+            )],
+            last_compacted_l0_sst_view_id: Some(Ulid::from_parts(10, 99)),
+            last_compacted_l0_sst_id: Some(Ulid::from_parts(9, 0)),
+        });
+        let mut core = ManifestCore::new();
+        core.tree = tree.clone();
+        core.segments = [b"a/", b"b/"]
+            .into_iter()
+            .map(|prefix| Segment {
+                prefix: Bytes::copy_from_slice(prefix),
+                tree: tree.clone(),
+            })
+            .collect();
+        let rand = DbRand::new(42);
+
+        Manifest::assign_union_l0_view_ids(&mut core, &rand);
+
+        for actual in core.trees() {
+            assert_eq!(actual.l0.len(), ids.len());
+            let assigned: HashSet<_> = actual.l0.iter().map(|view| view.id).collect();
+            assert_eq!(assigned.len(), ids.len());
+            assert!(!assigned.contains(&actual.last_compacted_l0_sst_view_id.unwrap()));
+            let mut restored = actual.clone();
+            for (view, source) in restored.l0.iter_mut().zip(&tree.l0) {
+                let repeated = tree.l0.iter().filter(|v| v.id == source.id).count() > 1;
+                if repeated {
+                    assert!(tree.l0.iter().all(|v| v.id != view.id));
+                } else {
+                    assert_eq!(view.id, source.id);
+                }
+                assert_eq!(view.id.timestamp_ms(), source.id.timestamp_ms());
+                view.id = source.id;
+            }
+            assert_eq!(restored, *tree);
+        }
+        let once = core.clone();
+        Manifest::assign_union_l0_view_ids(&mut core, &rand);
+        assert_eq!(core, once);
+    }
+
+    #[rstest]
+    #[case::projection(false)]
+    #[case::union(true)]
+    #[should_panic(expected = "L0 view watermark references an active view")]
+    fn test_view_id_changes_reject_active_watermark(
+        #[case] union: bool,
+        #[values(false, true)] segmented: bool,
+        #[values(false, true)] duplicate: bool,
+    ) {
+        let view = crate::test_utils::bounded_sst_view(10, b"a", b"z");
+        let mut tree = LsmTreeState {
+            l0: VecDeque::from([view.clone()]),
+            last_compacted_l0_sst_view_id: Some(view.id),
+            ..Default::default()
+        };
+        if duplicate {
+            tree.l0.push_back(view);
+        }
+        let mut core = ManifestCore::new();
+        if segmented {
+            core.segments.push(Segment {
+                prefix: Bytes::from_static(b"a"),
+                tree: Arc::new(tree),
+            });
+        } else {
+            core.tree = Arc::new(tree);
+        }
+        let rand = DbRand::new(42);
+        if union {
+            Manifest::assign_union_l0_view_ids(&mut core, &rand);
+        } else {
+            Manifest::projected(
+                &Manifest::initial(core),
+                &ProjectionConfig::from_global_range(BytesRange::from_ref("a".."m")),
+                &rand,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn test_projection_preserves_compacted_watermarks() {
+        let view = crate::test_utils::bounded_sst_view(10, b"a", b"z");
+        let mut tree = LsmTreeState {
+            l0: VecDeque::from([view.clone()]),
+            last_compacted_l0_sst_view_id: Some(Ulid::from_parts(9, 0)),
+            last_compacted_l0_sst_id: Some(view.sst.id.value()),
+            ..Default::default()
+        };
+        let original = tree.clone();
+
+        Manifest::project_tree_in_place(
+            &mut tree,
+            &BytesRange::from_ref("a".."m"),
+            &DbRand::new(42),
+        );
+
+        assert_ne!(tree.l0[0].id, view.id);
+        assert_eq!(
+            tree.last_compacted_l0_sst_view_id,
+            original.last_compacted_l0_sst_view_id
+        );
+        assert_eq!(
+            tree.last_compacted_l0_sst_id,
+            original.last_compacted_l0_sst_id
+        );
     }
 
     #[test]
@@ -3389,6 +3684,7 @@ mod tests {
         let projected = Manifest::projected(
             &manifest,
             &ProjectionConfig::from_global_range(projection_range),
+            &DbRand::new(42),
         )
         .unwrap();
 
@@ -5031,6 +5327,7 @@ mod tests {
         let projected = Manifest::projected(
             &manifest,
             &ProjectionConfig::from_global_range(BytesRange::from_ref("z"..)),
+            &DbRand::new(42),
         )
         .unwrap();
         assert!(projected.core.segments.is_empty());
@@ -5114,6 +5411,7 @@ mod tests {
         let projected = Manifest::projected(
             &manifest,
             &ProjectionConfig::from_global_range(BytesRange::from_ref("a".."m")),
+            &DbRand::new(42),
         )
         .unwrap();
 
@@ -5172,6 +5470,7 @@ mod tests {
         let projected = Manifest::projected(
             &manifest,
             &ProjectionConfig::from_global_range(BytesRange::from_ref("e".."g")),
+            &DbRand::new(42),
         )
         .unwrap();
         assert!(projected.core.tree.compacted.is_empty());
@@ -5186,6 +5485,7 @@ mod tests {
         let projected = Manifest::projected(
             &manifest,
             &ProjectionConfig::from_global_range(BytesRange::from_ref("b".."f")),
+            &DbRand::new(42),
         )
         .unwrap();
         assert_eq!(projected.core.tree.compacted.len(), 1);
@@ -5204,6 +5504,7 @@ mod tests {
         let projected = Manifest::projected(
             &manifest,
             &ProjectionConfig::from_global_range(BytesRange::from_ref("a".."m")),
+            &DbRand::new(42),
         )
         .unwrap();
         assert_eq!(
@@ -5259,6 +5560,7 @@ mod tests {
         let projected = Manifest::projected(
             &manifest,
             &ProjectionConfig::from_global_range(BytesRange::from_ref("a".."m")),
+            &DbRand::new(42),
         )
         .unwrap();
         assert!(
@@ -5325,7 +5627,7 @@ mod tests {
             segment_projection: Some(projector),
         };
 
-        let projected = Manifest::projected(&manifest, &config).unwrap();
+        let projected = Manifest::projected(&manifest, &config, &DbRand::new(42)).unwrap();
         assert_eq!(projected.core.segments.len(), 2);
         let s11 = &projected.core.segments[0];
         let s12 = &projected.core.segments[1];
@@ -5333,6 +5635,8 @@ mod tests {
         assert_eq!(s12.prefix.as_ref(), b"hour=12/");
         let s11_view = &s11.tree.l0[0];
         let s12_view = &s12.tree.l0[0];
+        assert_ne!(s11_view.id, manifest.core.segments[0].tree.l0[0].id);
+        assert_eq!(s12_view.id, manifest.core.segments[1].tree.l0[0].id);
         assert_eq!(
             s11_view.visible_range().unwrap().start_bound(),
             Bound::Included(&Bytes::from("hour=11/a"))
@@ -5357,7 +5661,7 @@ mod tests {
             segment_filter: Some(filter),
             segment_projection: None,
         };
-        let projected = Manifest::projected(&manifest, &config).unwrap();
+        let projected = Manifest::projected(&manifest, &config, &DbRand::new(42)).unwrap();
         assert_eq!(projected.core.segments.len(), 1);
         assert_eq!(projected.core.segments[0].prefix.as_ref(), b"hour=11/");
     }
@@ -5374,7 +5678,7 @@ mod tests {
             segment_filter: Some(filter),
             segment_projection: None,
         };
-        let projected = Manifest::projected(&manifest, &config).unwrap();
+        let projected = Manifest::projected(&manifest, &config, &DbRand::new(42)).unwrap();
         assert!(projected.core.tree.l0.is_empty());
         assert!(projected.core.tree.compacted.is_empty());
     }
@@ -5392,7 +5696,7 @@ mod tests {
             segment_filter: None,
             segment_projection: Some(projector),
         };
-        let projected = Manifest::projected(&manifest, &config).unwrap();
+        let projected = Manifest::projected(&manifest, &config, &DbRand::new(42)).unwrap();
         let view = &projected.core.segments[0].tree.l0[0];
         assert_eq!(
             view.visible_range().unwrap().start_bound(),
@@ -5424,7 +5728,7 @@ mod tests {
             segment_projection: Some(projector),
         };
 
-        let projected = Manifest::projected(&manifest, &config).unwrap();
+        let projected = Manifest::projected(&manifest, &config, &DbRand::new(42)).unwrap();
         assert_eq!(projected.core.segments.len(), 1);
         assert_eq!(projected.core.segments[0].prefix.as_ref(), b"hour=12/");
     }
@@ -5439,7 +5743,7 @@ mod tests {
             segment_filter: None,
             segment_projection: Some(projector),
         };
-        let err = Manifest::projected(&manifest, &config).unwrap_err();
+        let err = Manifest::projected(&manifest, &config, &DbRand::new(42)).unwrap_err();
         match err {
             SlateDBError::InvalidProjection { prefix, .. } => {
                 assert_eq!(prefix.as_ref(), b"hour=11/");
