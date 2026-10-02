@@ -4137,20 +4137,33 @@ mod tests {
     }
 
     #[rstest]
-    #[case::uncached(None)]
+    #[case::uncached_ascending(None, IterationOrder::Ascending)]
+    #[case::uncached_descending(None, IterationOrder::Descending)]
     #[cfg_attr(
         feature = "foyer",
-        case::foyer(Some(Arc::new(crate::db_cache::foyer::FoyerCache::new()) as Arc<dyn crate::db_cache::DbCache>))
+        case::foyer_ascending(
+            Some(Arc::new(crate::db_cache::foyer::FoyerCache::new()) as Arc<dyn crate::db_cache::DbCache>),
+            IterationOrder::Ascending,
+        )
+    )]
+    #[cfg_attr(
+        feature = "foyer",
+        case::foyer_descending(
+            Some(Arc::new(crate::db_cache::foyer::FoyerCache::new()) as Arc<dyn crate::db_cache::DbCache>),
+            IterationOrder::Descending,
+        )
     )]
     #[tokio::test]
     async fn managed_close_completes_with_a_retained_pending_next(
         #[case] cache: Option<Arc<dyn crate::db_cache::DbCache>>,
+        #[case] order: IterationOrder,
     ) {
         let (reader, gated, _) = gated_managed_reader_with_cache(cache).await;
         let mut scan = reader
             .scan_with_options(
                 ..,
                 &crate::config::ScanOptions {
+                    order,
                     cache_blocks: true,
                     max_fetch_tasks: 1,
                     read_ahead_bytes: 1,

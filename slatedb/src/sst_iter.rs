@@ -983,10 +983,22 @@ impl<'a> SstIterator<'a> {
         let filter_context = internal.options.filter_context.clone();
         let filter_evaluator = match (point_key, prefix, range) {
             (Some(key), _, _) => Some(FilterEvaluator::new_point(key, filter_context, db_stats)),
-            (None, Some(p), _) => Some(FilterEvaluator::new_prefix(p, filter_context, db_stats)),
-            // A plain range scan reads this SST's filters only when there is
-            // a registered policy that can answer a range.
-            (None, None, (lower, upper))
+            // A prefix scan reads this SST's filters only when there is a
+            // registered policy that can answer a prefix; a whole-key bloom
+            // filter cannot, and fetching it would prune nothing.
+            (None, Some(p), _)
+                if internal
+                    .table_store()
+                    .any_filter_policy_supports_prefix_queries() =>
+            {
+                Some(FilterEvaluator::new_prefix(p, filter_context, db_stats))
+            }
+            // No policy answers a prefix, but one answers a range: a prefix
+            // scan's bounds are the prefix's key range, so the range evaluator
+            // prunes the same SSTs a range scan over those bounds would.
+            // Likewise a plain range scan reads this SST's filters only when
+            // there is a registered policy that can answer a range.
+            (None, _, (lower, upper))
                 if internal
                     .table_store()
                     .any_filter_policy_supports_range_queries() =>
@@ -998,7 +1010,7 @@ impl<'a> SstIterator<'a> {
                     db_stats,
                 ))
             }
-            (None, None, _) => None,
+            (None, _, _) => None,
         };
         let delegate = match filter_evaluator {
             Some(fe) => SstIteratorDelegate::Filter(FilterIterator::new(internal, fe)),
@@ -1840,6 +1852,207 @@ mod tests {
 
         let next = iter.next().await.unwrap().map(KeyValue::from);
         assert!(next.is_none());
+    }
+
+    /// Never answers data-block reads (ranged reads that end at or before
+    /// `hold_below`, the SST's index offset), like an unresponsive endpoint.
+    /// Counts the held reads that started and the ones whose future was
+    /// dropped, which only happens if the task awaiting it is aborted.
+    #[derive(Debug)]
+    struct HoldReadsStore {
+        inner: Arc<dyn ObjectStore>,
+        hold_below: std::sync::atomic::AtomicU64,
+        started: std::sync::atomic::AtomicUsize,
+        dropped: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl std::fmt::Display for HoldReadsStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "HoldReadsStore({})", self.inner)
+        }
+    }
+
+    /// Counts its own drop: a held read is dropped only when cancelled.
+    struct DropCounter(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for HoldReadsStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            let hold_below = self.hold_below.load(std::sync::atomic::Ordering::SeqCst);
+            let is_data_block = matches!(
+                &options.range,
+                Some(object_store::GetRange::Bounded(r)) if r.end <= hold_below
+            );
+            if is_data_block {
+                self.started
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _counter = DropCounter(Arc::clone(&self.dropped));
+                return std::future::pending().await;
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// Dropping an iterator must abort its in-flight block fetches. Before the
+    /// fix they kept running detached; against a store that never answers (or
+    /// a retrying store whose `object_store_max_retries` is `None`) they never
+    /// ended. https://github.com/slatedb/slatedb/issues/2139
+    #[rstest]
+    #[case::ascending(IterationOrder::Ascending)]
+    #[case::descending(IterationOrder::Descending)]
+    #[tokio::test]
+    async fn test_dropping_iterator_aborts_in_flight_fetches(#[case] order: IterationOrder) {
+        let store = Arc::new(HoldReadsStore {
+            inner: Arc::new(InMemory::new()),
+            hold_below: std::sync::atomic::AtomicU64::new(0),
+            started: std::sync::atomic::AtomicUsize::new(0),
+            dropped: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let format = SsTableFormat {
+            min_filter_keys: 3,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            Path::from(""),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let mut builder = table_store.table_builder();
+        for i in 0..1000 {
+            builder
+                .add_value(
+                    format!("key{}", i).as_bytes(),
+                    format!("value{}", i).as_bytes(),
+                    Some(i),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        table_store
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
+            .await
+            .unwrap();
+        let sst_handle = table_store
+            .open_sst(&test_sst_id(0), Some(Bytes::new()))
+            .await
+            .unwrap();
+
+        // Hold every data-block read: the store accepts the request and never
+        // answers, like an unresponsive endpoint.
+        store.hold_below.store(
+            sst_handle.info.index_offset,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+
+        // One block per fetch and three fetches in flight, uncached, so every
+        // data-block read reaches the store.
+        let options = SstIteratorOptions {
+            order,
+            max_fetch_tasks: 3,
+            target_bytes_to_fetch: 1,
+            cache_blocks: false,
+            ..SstIteratorOptions::default()
+        };
+        // Initialization spawns the first fetches and waits on the held read;
+        // the deadline gives up, dropping the iterator mid-scan.
+        let opened = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            SstIterator::new_owned_initialized(
+                ..,
+                SsTableView::identity(sst_handle),
+                table_store.clone(),
+                options,
+            ),
+        )
+        .await;
+        assert!(opened.is_err(), "the held read must block the scan");
+        let started = store.started.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(started > 0, "the scan must have started block fetches");
+
+        // Every held read belongs to a fetch the dropped iterator owned, so
+        // each must be cancelled rather than left waiting. Aborts land on the
+        // runtime's next turn; without them `dropped` stays 0 forever.
+        let all_dropped = async {
+            while store.dropped.load(std::sync::atomic::Ordering::SeqCst) < started {
+                tokio::task::yield_now().await;
+            }
+        };
+        let aborted = tokio::time::timeout(std::time::Duration::from_secs(5), all_dropped).await;
+        assert!(
+            aborted.is_ok(),
+            "every in-flight fetch must be aborted when the iterator drops: {} of {} were",
+            store.dropped.load(std::sync::atomic::Ordering::SeqCst),
+            started,
+        );
+        assert_eq!(
+            store.dropped.load(std::sync::atomic::Ordering::SeqCst),
+            started,
+            "only the dropped iterator's fetches are cancelled"
+        );
     }
 
     #[tokio::test]
@@ -3419,6 +3632,10 @@ mod tests {
         fn supports_range_queries(&self) -> bool {
             true
         }
+
+        fn supports_prefix_queries(&self) -> bool {
+            false
+        }
     }
 
     struct RangeCapableBuilder;
@@ -3504,5 +3721,96 @@ mod tests {
         );
         let (positives, negatives, _) = verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE);
         assert_eq!((positives, negatives), (Some(0), Some(1)));
+    }
+
+    #[tokio::test]
+    async fn should_not_read_filters_for_a_prefix_when_no_policy_supports_prefixes() {
+        // A whole-key bloom filter cannot answer a prefix or a range, so a
+        // bloom-only database must build no evaluator for a prefix scan and
+        // must not read the SST's filters.
+        for filter_context in [context(0), None] {
+            let (recorder, db_stats) = stats();
+            let table_store = bloom_filter_enabled_table_store(10);
+            let table = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
+            let options = SstIteratorOptions {
+                prefix: Some(Bytes::from_static(b"k")),
+                filter_context,
+                ..Default::default()
+            };
+
+            let iter = SstIterator::new_owned_initialized_with_stats(
+                BytesRange::from_prefix_and_subrange(b"k", ..),
+                table,
+                table_store,
+                options,
+                None,
+                Some(db_stats),
+            )
+            .await
+            .unwrap();
+            assert!(iter.is_some(), "nothing rejected the SST");
+            for kind in [
+                crate::db_stats::FILTER_KIND_PREFIX,
+                crate::db_stats::FILTER_KIND_RANGE,
+            ] {
+                assert_eq!(
+                    verdicts(&recorder, kind),
+                    (Some(0), Some(0), Some(0)),
+                    "no evaluator should have been built"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn should_prune_a_prefix_by_its_range_when_only_a_range_policy_exists() {
+        // No policy answers a prefix, but one answers a range: the prefix
+        // scan's bounds are the prefix's key range, so the range evaluator
+        // prunes the same SSTs a range scan over those bounds would.
+        let (recorder, db_stats) = stats();
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            filter_policies: vec![Arc::new(RangeCapablePolicy)],
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path,
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        assert!(!table_store.any_filter_policy_supports_prefix_queries());
+        assert!(table_store.any_filter_policy_supports_range_queries());
+        let table = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
+
+        let iter = SstIterator::new_owned_initialized_with_stats(
+            BytesRange::from_prefix_and_subrange(b"k", ..),
+            table,
+            table_store,
+            SstIteratorOptions {
+                prefix: Some(Bytes::from_static(b"k")),
+                ..Default::default()
+            },
+            None,
+            Some(db_stats),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            iter.is_none(),
+            "the policy rejects every range, so the prefix's range skips the SST"
+        );
+        let (positives, negatives, _) = verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE);
+        assert_eq!((positives, negatives), (Some(0), Some(1)));
+        assert_eq!(
+            verdicts(&recorder, crate::db_stats::FILTER_KIND_PREFIX),
+            (Some(0), Some(0), Some(0)),
+            "no prefix evaluator exists without a prefix-capable policy"
+        );
     }
 }

@@ -111,10 +111,10 @@ impl LsmTreeState {
                     .take_while(|view| {
                         // Match by view ID first (V2 manifests), then fall back
                         // to SST ID (V1).
+                        // A physical SST can have several views. Use its ID only
+                        // when the manifest has no view watermark.
                         if let Some(id) = last_compacted_view {
-                            if view.id == id {
-                                return false;
-                            }
+                            return view.id != id;
                         }
                         if let Some(id) = last_compacted_sst {
                             if view.sst.id.value() == id {
@@ -997,8 +997,14 @@ impl Manifest {
     ) -> Self {
         let mut clone_external_dbs = vec![];
 
-        // Carry over each inherited external_db with a fresh final_checkpoint_id.
-        for parent_external_db in &parent_manifest.external_dbs {
+        // Carry over each inherited external_db that still holds SSTs, with a fresh
+        // final_checkpoint_id. An entry whose SSTs were all re-localized contributes nothing,
+        // and the detach collector may already have released the checkpoint it pinned.
+        for parent_external_db in parent_manifest
+            .external_dbs
+            .iter()
+            .filter(|external_db| !external_db.sst_ids.is_empty())
+        {
             clone_external_dbs.push(ExternalDb {
                 path: parent_external_db.path.clone(),
                 // don't depend on the original source_checkpoint: it was supplied by the user and
@@ -1385,14 +1391,18 @@ impl Manifest {
     }
 
     /// Build the union's `external_dbs` list. Forwards every source's
-    /// inherited `external_dbs` and adds one entry per source that owns
-    /// SSTs directly. `final_checkpoint_id` is left as `None`; it is
+    /// inherited `external_dbs` that still hold SSTs and adds one entry per
+    /// source that owns SSTs directly. `final_checkpoint_id` is left as `None`; it is
     /// regenerated after the post-loop deduplication.
     fn build_external_dbs(sources: &[&CloneSource]) -> Vec<ExternalDb> {
         let mut external_dbs = vec![];
         for source in sources {
             let manifest = &source.manifest;
-            for parent_external_db in &manifest.external_dbs {
+            for parent_external_db in manifest
+                .external_dbs
+                .iter()
+                .filter(|external_db| !external_db.sst_ids.is_empty())
+            {
                 external_dbs.push(ExternalDb {
                     path: parent_external_db.path.clone(),
                     // don't depend on the original source_checkpoint: it was supplied by the user and
@@ -1476,6 +1486,10 @@ impl Manifest {
 
         for source in &sources {
             core.last_l0_seq = max(core.last_l0_seq, source.manifest.core.last_l0_seq);
+            core.last_l0_clock_tick = max(
+                core.last_l0_clock_tick,
+                source.manifest.core.last_l0_clock_tick,
+            );
         }
 
         // Coalesce borrows of the same physical ancestor, keyed on (path, sst_ids) rather than
@@ -1777,6 +1791,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_cloned_drops_emptied_ancestor() {
+        // Once compaction has re-localized every SST a parent borrowed from an ancestor, the
+        // parent's entry for it is empty, and the detach collector may release the ancestor's
+        // pin. A clone reads nothing from that ancestor, so it must not carry the entry:
+        // carrying it asks the ancestor to pin a checkpoint that may no longer exist.
+        let rand = Arc::new(DbRand::default());
+        let parent_owned_sst = SsTableId::from(Ulid::new());
+        let mut parent = build_manifest(
+            &SimpleManifest {
+                l0: vec![SstEntry::projected("parent_owned", "a", "a"..)],
+                sorted_runs: vec![],
+            },
+            |_| parent_owned_sst,
+        );
+        parent.external_dbs.push(ExternalDb {
+            path: "/tmp/grandparent".to_string(),
+            source_checkpoint_id: Uuid::new_v4(),
+            final_checkpoint_id: Some(Uuid::new_v4()),
+            sst_ids: vec![],
+        });
+
+        let cloned = Manifest::cloned(&parent, "/tmp/parent".to_string(), Uuid::new_v4(), rand);
+
+        assert!(
+            cloned
+                .external_dbs
+                .iter()
+                .all(|e| e.path != "/tmp/grandparent"),
+            "an ancestor entry with no SSTs must not be carried over"
+        );
+        let parent_entry = cloned
+            .external_dbs
+            .iter()
+            .find(|e| e.path == "/tmp/parent")
+            .expect("the immediate parent is always an entry");
+        assert_eq!(parent_entry.sst_ids, vec![parent_owned_sst]);
+    }
+
     #[tokio::test]
     async fn test_write_new_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -2070,6 +2123,39 @@ mod tests {
         let union = Manifest::cloned_from_union(sources, rand).unwrap();
 
         assert_manifest_equal(&union, &expected_manifest, &sst_ids);
+    }
+
+    #[rstest]
+    #[case(true)]
+    #[case(false)]
+    fn test_watermark_matches_view_not_shared_sst(#[case] watermark_present: bool) {
+        let sst = SsTableHandle::new(
+            SsTableId::from(Ulid::from_parts(1, 0)),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo::default(),
+        );
+        let left = SsTableView::new(Ulid::from_parts(1, 1), sst.clone());
+        let child = SsTableView::identity(SsTableHandle::new(
+            SsTableId::from(Ulid::from_parts(2, 0)),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo::default(),
+        ));
+        let right = SsTableView::new(Ulid::from_parts(1, 2), sst.clone());
+        let mut writer = LsmTreeState {
+            l0: VecDeque::from([left.clone(), child.clone()]),
+            ..Default::default()
+        };
+        if watermark_present {
+            writer.l0.push_back(right.clone());
+        }
+        let compactor = LsmTreeState {
+            last_compacted_l0_sst_view_id: Some(right.id),
+            last_compacted_l0_sst_id: Some(sst.id.value()),
+            ..Default::default()
+        };
+        let expected = VecDeque::from([left, child]);
+        assert_eq!(writer.merge_from_compactor(&compactor).l0, expected);
+        assert_eq!(compactor.merge_from_writer(&writer).l0, expected);
     }
 
     #[test]
@@ -2879,6 +2965,94 @@ mod tests {
         .unwrap();
 
         assert_eq!(union.core.last_l0_seq, 200);
+    }
+
+    #[rstest]
+    #[case(100, 250, 250)]
+    #[case(250, 100, 250)]
+    #[case(i64::MIN, 250, 250)]
+    #[case(i64::MIN, i64::MIN, i64::MIN)]
+    fn test_union_propagates_last_l0_clock_tick(
+        #[case] tick1: i64,
+        #[case] tick2: i64,
+        #[case] expected: i64,
+    ) {
+        let mut manifest1 = build_manifest(
+            &SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![vec![SstEntry::projected("sr1", "a", "a".."m")]],
+            },
+            |_| SsTableId::from(Ulid::new()),
+        );
+        manifest1.core.last_l0_clock_tick = tick1;
+
+        let mut manifest2 = build_manifest(
+            &SimpleManifest {
+                l0: vec![],
+                sorted_runs: vec![vec![SstEntry::projected("sr2", "m", "m"..)]],
+            },
+            |_| SsTableId::from(Ulid::new()),
+        );
+        manifest2.core.last_l0_clock_tick = tick2;
+
+        let union = Manifest::cloned_from_union(
+            vec![
+                CloneSource {
+                    manifest: manifest1,
+                    path: Path::from("/tmp/db1"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+                CloneSource {
+                    manifest: manifest2,
+                    path: Path::from("/tmp/db2"),
+                    checkpoint: new_checkpoint(Uuid::new_v4()),
+                },
+            ],
+            Arc::new(DbRand::default()),
+        )
+        .unwrap();
+
+        assert_eq!(union.core.last_l0_clock_tick, expected);
+    }
+
+    #[test]
+    fn test_union_drops_emptied_ancestor() {
+        // As test_cloned_drops_emptied_ancestor, for a union: a source's inherited entry
+        // with no SSTs is not carried into the union.
+        let rand = Arc::new(DbRand::default());
+        let own_sst = SsTableId::from(Ulid::new());
+        let mut manifest = build_manifest(
+            &SimpleManifest {
+                l0: vec![SstEntry::projected("own", "a", "a"..)],
+                sorted_runs: vec![],
+            },
+            |_| own_sst,
+        );
+        manifest.external_dbs.push(ExternalDb {
+            path: "/tmp/grandparent".to_string(),
+            source_checkpoint_id: Uuid::new_v4(),
+            final_checkpoint_id: Some(Uuid::new_v4()),
+            sst_ids: vec![],
+        });
+
+        let union = Manifest::cloned_from_union(
+            vec![CloneSource {
+                manifest,
+                path: Path::from("/tmp/db1"),
+                checkpoint: new_checkpoint(Uuid::new_v4()),
+            }],
+            rand,
+        )
+        .unwrap();
+
+        assert!(
+            union
+                .external_dbs
+                .iter()
+                .all(|e| e.path != "/tmp/grandparent"),
+            "an ancestor entry with no SSTs must not be carried into a union"
+        );
+        assert!(union.external_dbs.iter().any(|e| e.path == "tmp/db1"));
     }
 
     #[test]

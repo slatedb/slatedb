@@ -28,7 +28,7 @@ use crate::utils::SafeSender;
 use log::warn;
 use std::sync::Arc;
 use tokio::runtime::Handle;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 const TRACKER_TASK_NAME: &str = "l0_flush_tracker";
 
@@ -79,6 +79,7 @@ impl MemtableFlusher {
             tokio_handle,
         )?;
 
+        let (l0_stall_tx, l0_stall_rx) = watch::channel(0);
         let manifest_writer = ManifestWriter::start(
             Arc::clone(&inner),
             manifest,
@@ -87,9 +88,10 @@ impl MemtableFlusher {
             executor,
             tokio_handle,
             self.messages_tx.clone(),
+            l0_stall_rx,
         )?;
 
-        let tracker = FlushTracker::new(inner, uploader, manifest_writer);
+        let tracker = FlushTracker::new(inner, uploader, manifest_writer, l0_stall_tx);
         executor.add_handler(
             TRACKER_TASK_NAME.to_string(),
             Box::new(tracker),

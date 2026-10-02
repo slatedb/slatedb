@@ -2,7 +2,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use log::error;
-use tokio::task::{JoinError, JoinHandle};
+use tokio::task::JoinError;
+use tokio_util::task::AbortOnDropHandle;
 
 use super::resource_limiter::{ResourceGuard, ResourceLimiter};
 use super::store::{WalFileHandle, WalTableStore};
@@ -17,7 +18,7 @@ use crate::utils::panic_string;
 
 enum FetchTask {
     InFlight {
-        join_handle: JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>,
+        join_handle: AbortOnDropHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>,
         _fetch_guard: ResourceGuard,
         _buffer_guard: ResourceGuard,
     },
@@ -166,7 +167,7 @@ impl WalSstIterator {
                     .await
             });
             self.fetch_tasks.push_back(FetchTask::InFlight {
-                join_handle,
+                join_handle: AbortOnDropHandle::new(join_handle),
                 _fetch_guard: fetch_guard,
                 _buffer_guard: buffer_guard,
             });

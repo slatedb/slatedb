@@ -13,7 +13,7 @@ use crate::{utils::build_scan_options, Actor, ActorCtx};
 
 use super::PROGRESS_LOG_INTERVAL;
 
-const WORKLOAD_VALUE_VERSION_SIZE: usize = std::mem::size_of::<u64>();
+const WORKLOAD_VALUE_VERSION_SIZE: usize = size_of::<u64>();
 
 /// Configuration for the mixed DST workload actor.
 #[derive(Clone, Debug)]
