@@ -768,7 +768,7 @@ impl Db {
     ///
     ///     // Write some data and create a snapshot
     ///     db.put(b"key1", b"value1").await?;
-    ///     let snapshot = db.snapshot().await?;
+    ///     let snapshot = db.snapshot()?;
     ///
     ///     // Snapshot provides read-only access to database state
     ///     let value = snapshot.get(b"key1").await?;
@@ -784,7 +784,7 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
+    pub fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
         self.inner.check_closed()?;
         let snapshot = DbSnapshot::new(self.inner.clone(), None);
         Ok(snapshot)
@@ -1860,14 +1860,11 @@ impl Db {
     /// async fn main() -> Result<(), slatedb::Error> {
     ///     let object_store = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
-    ///     let txn = db.begin(IsolationLevel::SerializableSnapshot).await?;
+    ///     let txn = db.begin(IsolationLevel::SerializableSnapshot)?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn begin(
-        &self,
-        isolation_level: IsolationLevel,
-    ) -> Result<DbTransaction, crate::Error> {
+    pub fn begin(&self, isolation_level: IsolationLevel) -> Result<DbTransaction, crate::Error> {
         self.inner.check_closed()?;
         let txn = DbTransaction::new(
             self.inner.clone(),
@@ -2019,8 +2016,8 @@ impl DbWriteOps for Db {
         Db::flush_with_options(self, options).await
     }
 
-    async fn begin(&self, isolation_level: IsolationLevel) -> Result<DbTransaction, crate::Error> {
-        Db::begin(self, isolation_level).await
+    fn begin(&self, isolation_level: IsolationLevel) -> Result<DbTransaction, crate::Error> {
+        Db::begin(self, isolation_level)
     }
 }
 
@@ -6141,7 +6138,7 @@ mod tests {
         let db = Arc::new(db);
 
         db.merge(b"foo", b"0").await.unwrap();
-        let snapshot = db.snapshot().await.unwrap();
+        let snapshot = db.snapshot().unwrap();
         db.flush_with_options(FlushOptions {
             flush_type: FlushType::MemTable,
         })
@@ -7854,7 +7851,7 @@ mod tests {
         db.put(b"key2", b"value2").await.unwrap();
 
         // Create a snapshot
-        let snapshot = db.snapshot().await.unwrap();
+        let snapshot = db.snapshot().unwrap();
 
         // Verify snapshot can read the data
         assert_eq!(
@@ -7920,7 +7917,7 @@ mod tests {
         }
 
         // Test 2: With active snapshots
-        let _snapshot = db.snapshot().await.unwrap();
+        let _snapshot = db.snapshot().unwrap();
         let snapshot_seq = db.inner.oracle.last_committed_seq();
 
         // Write more data and force flush
@@ -8009,7 +8006,7 @@ mod tests {
             .unwrap();
 
         db.merge(b"k", b"1").await.unwrap();
-        let snapshot = db.snapshot().await.unwrap();
+        let snapshot = db.snapshot().unwrap();
         let snapshot_seq = db.inner.oracle.last_committed_seq();
         db.flush().await.unwrap();
 
@@ -8154,7 +8151,7 @@ mod tests {
         db.put(b"key1", b"value1").await.unwrap();
         db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         let txn_seq = txn.seqnum();
 
         db.put(b"key2", b"value2").await.unwrap();
@@ -8198,13 +8195,13 @@ mod tests {
         db.put(b"key1", b"value1").await.unwrap();
         db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
-        let snapshot = db.snapshot().await.unwrap();
+        let snapshot = db.snapshot().unwrap();
         let snapshot_seq = snapshot.seq();
 
         db.put(b"key2", b"value2").await.unwrap();
         db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         let txn_seq = txn.seqnum();
 
         assert_eq!(
@@ -8256,13 +8253,13 @@ mod tests {
         db.put(b"key1", b"value1").await.unwrap();
         db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         let txn_seq = txn.seqnum();
 
         db.put(b"key2", b"value2").await.unwrap();
         db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
-        let snapshot = db.snapshot().await.unwrap();
+        let snapshot = db.snapshot().unwrap();
         let snapshot_seq = snapshot.seq();
 
         assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
@@ -8881,10 +8878,7 @@ mod tests {
             .unwrap();
 
         // 1-2. Create txn1 and write k1=v1.
-        let txn1 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn1 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
         txn1.put(b"k1", b"v1").unwrap();
 
         // 3. Pause on write-batch-post-commit so txn1 blocks after conflict metadata is tracked.
@@ -8915,19 +8909,13 @@ mod tests {
         }
 
         // 5.1. Add/drop txn to trigger a recycle that removes txn1 from recent commits.
-        let txn_dropped = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn_dropped = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
         drop(txn_dropped);
 
         // 6. Create txn2 after txn1 is committed but before batch_write is complete.
         // The seqnum should advance transactionally with the commit, so txn2 should
         // see txn1's post-write seqnum.
-        let txn2 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn2 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
 
         // 6.1. txn2 should see k1=v1 since it started after txn1's commit, even though the
         // batch write is not fully complete until after txn2 starts.
@@ -8992,7 +8980,7 @@ mod tests {
         let initial_last_seq = db.inner.oracle.last_seq();
 
         // Start txn1 and buffer a write to key "x".
-        let txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn1 = db.begin(IsolationLevel::Snapshot).unwrap();
         let txn1_started_seq = txn1.seqnum();
         txn1.put(b"x", b"txn1_value").unwrap();
 
@@ -9031,7 +9019,7 @@ mod tests {
 
         // Start txn2 while the writer is still paused (committed_seq has not
         // been advanced yet), so txn2 starts at the same snapshot as txn1.
-        let txn2 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn2 = db.begin(IsolationLevel::Snapshot).unwrap();
         assert_eq!(
             txn2.seqnum(),
             txn1_started_seq,
@@ -9079,8 +9067,8 @@ mod tests {
 
         // Start txn_a and txn_b at the same snapshot. Both write the same key,
         // so txn_b will hit a WW conflict once txn_a's commit is tracked.
-        let txn_a = db.begin(IsolationLevel::Snapshot).await.unwrap();
-        let txn_b = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_a = db.begin(IsolationLevel::Snapshot).unwrap();
+        let txn_b = db.begin(IsolationLevel::Snapshot).unwrap();
         txn_a.put(b"y", b"txn_a_value").unwrap();
         txn_b.put(b"y", b"txn_b_value").unwrap();
 
@@ -9185,7 +9173,7 @@ mod tests {
         // assert on active_txns afterwards.
         let txn_manager = db.inner.txn_manager.clone();
 
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         txn.put(b"k", b"v").unwrap();
         assert!(
             txn_manager.min_active_seq().is_some(),
@@ -9253,10 +9241,7 @@ mod tests {
         // Start a serializable transaction at seq=1 and record a read on
         // conflict-key. The next committed write to that key will conflict
         // with this transaction when it tries to commit.
-        let txn = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
         assert_eq!(
             txn.get(b"conflict-key").await.unwrap(),
             Some(Bytes::from_static(b"v1"))
@@ -9737,7 +9722,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let _snapshot = db.snapshot().await.unwrap();
+        let _snapshot = db.snapshot().unwrap();
 
         // Write many merge operands for the same key, each forced into L0.
         for i in 0..16u16 {
@@ -9905,7 +9890,7 @@ mod tests {
         .await
         .unwrap();
         expected.put(b"base".as_slice());
-        let _snapshot = db.snapshot().await.unwrap();
+        let _snapshot = db.snapshot().unwrap();
 
         // Write distinct merge operands so the final value also verifies operand ordering.
         for i in 0..16u8 {
@@ -11812,7 +11797,7 @@ mod tests {
             create_segmented_scan_fixture("/tmp/test_segmented_scans_on_snapshot", object_store)
                 .await;
 
-        let snapshot = db.snapshot().await.unwrap();
+        let snapshot = db.snapshot().unwrap();
         assert_segmented_scan_matrix(snapshot.as_ref(), &table).await;
         drop(snapshot);
         db.close().await.unwrap();

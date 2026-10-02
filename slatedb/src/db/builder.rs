@@ -943,6 +943,7 @@ pub struct AdminBuilder<P: Into<Path>> {
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
     merge_operator: Option<MergeOperatorType>,
+    block_transformer: Option<Arc<dyn BlockTransformer>>,
 }
 
 impl<P: Into<Path>> AdminBuilder<P> {
@@ -959,6 +960,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
             merge_operator: None,
+            block_transformer: None,
         }
     }
 
@@ -1010,6 +1012,13 @@ impl<P: Into<Path>> AdminBuilder<P> {
         self
     }
 
+    /// Sets the block transformer the database's SSTs are written with, so the
+    /// compactor and compaction worker this admin runs can read and rewrite them.
+    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
+        self.block_transformer = Some(block_transformer);
+        self
+    }
+
     /// Builds and returns an Admin instance.
     pub fn build(self) -> Admin {
         // Store the raw object stores here. Admin wraps them in a
@@ -1045,6 +1054,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: self.compaction_filter_supplier,
             merge_operator: self.merge_operator,
+            block_transformer: self.block_transformer,
         }
     }
 }
@@ -2881,5 +2891,26 @@ mod tests {
             Some(b"v1".as_ref())
         );
         db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn admin_hands_its_hooks_to_the_compactor_and_worker_it_runs() {
+        use super::AdminBuilder;
+        use crate::config::CompactionWorkerOptions;
+        use crate::test_utils::{IdentityBlockTransformer, StringConcatMergeOperator};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let admin = AdminBuilder::new("/tmp/admin_hooks", object_store)
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .with_block_transformer(Arc::new(IdentityBlockTransformer))
+            .build();
+
+        let compactor = admin.compactor_builder(CompactorOptions::default());
+        assert!(compactor.merge_operator.is_some());
+        assert!(compactor.block_transformer.is_some());
+
+        let worker = admin.compaction_worker_builder(CompactionWorkerOptions::default());
+        assert!(worker.merge_operator.is_some());
+        assert!(worker.block_transformer.is_some());
     }
 }
