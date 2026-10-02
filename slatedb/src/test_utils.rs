@@ -1236,7 +1236,7 @@ impl Gate {
 /// Each ObjectStore method has its own [`Gate`] that can be independently closed,
 /// released, and configured to inject errors. Gates default to **open** (pass-through).
 ///
-/// # Usage pattern (mirrors `single_flight.rs` tests)
+/// # Usage pattern (mirrors `slatedb_common::single_flight` tests)
 /// ```ignore
 /// let inner = Arc::new(InMemory::new());
 /// let gated = Arc::new(GatedObjectStore::new(inner));

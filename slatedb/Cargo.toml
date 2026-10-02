@@ -43,6 +43,7 @@ serde_json = { workspace = true }
 siphasher = { workspace = true }
 smallvec = { workspace = true }
 slatedb-common = { workspace = true, features = ["serde"] }
+slatedb-mirror = { workspace = true }
 slatedb-txn-obj = { workspace = true }
 snap = { workspace = true, optional = true }
 thiserror = { workspace = true }

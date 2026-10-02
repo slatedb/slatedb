@@ -1950,7 +1950,7 @@ mod tests {
         while let Some(kv) = iter
             .next()
             .await
-            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .map_err(|e| SlateDBError::from(std::io::Error::other(e)))?
         {
             actual.push((kv.key.to_vec(), kv.value.to_vec()));
         }
@@ -2416,7 +2416,7 @@ mod tests {
         let first = iter
             .next()
             .await
-            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .map_err(|e| SlateDBError::from(std::io::Error::other(e)))?
             .expect("should have key1");
         assert_eq!(first.key.as_ref(), b"key1");
         assert_eq!(first.value.as_ref(), b"ab");
@@ -2424,7 +2424,7 @@ mod tests {
         let second = iter
             .next()
             .await
-            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .map_err(|e| SlateDBError::from(std::io::Error::other(e)))?
             .expect("should have key2");
         assert_eq!(second.key.as_ref(), b"key2");
         assert_eq!(second.value.as_ref(), b"value2");
@@ -2432,7 +2432,7 @@ mod tests {
         assert!(iter
             .next()
             .await
-            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .map_err(|e| SlateDBError::from(std::io::Error::other(e)))?
             .is_none());
 
         assert_eq!(
@@ -2589,7 +2589,7 @@ mod tests {
         let kv1 = iter
             .next()
             .await
-            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .map_err(|e| SlateDBError::from(std::io::Error::other(e)))?
             .expect("should have key1");
         assert_eq!(kv1.key.as_ref(), b"key1");
         assert_eq!(kv1.expire_ts, Some(100));
@@ -2597,7 +2597,7 @@ mod tests {
         let kv2 = iter
             .next()
             .await
-            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .map_err(|e| SlateDBError::from(std::io::Error::other(e)))?
             .expect("should have key2");
         assert_eq!(kv2.key.as_ref(), b"key2");
         assert_eq!(kv2.expire_ts, None);
@@ -2605,7 +2605,7 @@ mod tests {
         let kv3 = iter
             .next()
             .await
-            .map_err(|e| SlateDBError::IoError(Arc::new(std::io::Error::other(e))))?
+            .map_err(|e| SlateDBError::from(std::io::Error::other(e)))?
             .expect("should have key3");
         assert_eq!(kv3.key.as_ref(), b"key3");
         assert_eq!(kv3.expire_ts, Some(300));

@@ -42,7 +42,7 @@ where
 /// SingleFlight deduplicates concurrent calls for the same key, ensuring only one
 /// execution is in-flight at a time while sharing the result with all waiters.
 #[derive(Debug, Clone)]
-pub(crate) struct SingleFlight<K, T> {
+pub struct SingleFlight<K, T> {
     in_flight: InFlightMap<K, T>,
 }
 
@@ -60,14 +60,14 @@ where
 {
     /// Create a new SingleFlight group.
     #[inline]
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
     /// Execute and return the value for a given function, making sure that only one
     /// operation is in-flight at a given moment. If a duplicate call comes in, that caller will
     /// wait until the original call completes and return the same value.
-    pub(crate) async fn call<F, Fut, E>(&self, key: K, func: F) -> Result<T, E>
+    pub async fn call<F, Fut, E>(&self, key: K, func: F) -> Result<T, E>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T, E>>,
