@@ -131,10 +131,9 @@ use crate::compactor::CompactorEventHandler;
 use crate::compactor::CompactorMessage;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
-use crate::compactor::{CompactionSchedulerSupplier, Compactor};
+use crate::compactor::{CompactionScheduler, CompactionSchedulerSupplier, Compactor};
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
-use crate::config::SizeTieredCompactionSchedulerOptions;
 use crate::config::{CompactionWorkerOptions, CompactorOptions};
 use crate::config::{Settings, SstBlockSize};
 use crate::db::Db;
@@ -493,18 +492,28 @@ impl<P: Into<Path>> DbBuilder<P> {
             )
             .into());
         }
-        let compactor_options = match &self.compactor_builder {
-            Some(builder) if builder.scheduler_supplier.is_none() => Some(&builder.options),
-            Some(_) => None,
-            None => self.settings.compactor_options.as_ref(),
-        };
-        if let Some(compactor_options) = compactor_options {
-            let scheduler_options =
-                SizeTieredCompactionSchedulerOptions::from(&compactor_options.scheduler_options);
-            scheduler_options.validate_l0_limit(self.settings.l0_max_ssts)?;
+        let path = self.path.into();
+        let mut compactor_builder = self.compactor_builder.or_else(|| {
+            self.settings.compactor_options.as_ref().map(|options| {
+                CompactorBuilder::new(path.clone(), self.main_object_store.clone())
+                    .with_options(options.clone())
+            })
+        });
+        if let Some(builder) = &mut compactor_builder {
+            builder.options.metric_level = builder
+                .options
+                .metric_level
+                .or(Some(self.settings.metric_level));
+            let scheduler_supplier = builder
+                .scheduler_supplier
+                .clone()
+                .unwrap_or_else(|| Arc::new(SizeTieredCompactionSchedulerSupplier));
+            let scheduler: Arc<dyn CompactionScheduler + Send + Sync> =
+                Arc::from(scheduler_supplier.compaction_scheduler(&builder.options));
+            scheduler.validate_l0_limits(&self.settings)?;
+            builder.scheduler = Some(scheduler);
         }
 
-        let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
 
@@ -782,18 +791,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // The compactor reads/writes through the object store held by its
         // builder: the DB's own store on the auto from settings path, or the
         // store the caller passed to their own `CompactorBuilder`.
-        let compactor_builder = self.compactor_builder.or_else(|| {
-            self.settings.compactor_options.as_ref().map(|opts| {
-                CompactorBuilder::new(path.clone(), self.main_object_store.clone())
-                    .with_options(opts.clone())
-            })
-        });
-
-        if let Some(mut compactor_builder) = compactor_builder {
-            compactor_builder.options.metric_level = compactor_builder
-                .options
-                .metric_level
-                .or(Some(self.settings.metric_level));
+        if let Some(compactor_builder) = compactor_builder {
             let mut builder = compactor_builder
                 .with_system_clock(system_clock.clone())
                 .with_metrics_recorder(metrics_recorder.clone())
@@ -1264,6 +1262,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     compaction_runtime: Handle,
     options: CompactorOptions,
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
+    scheduler: Option<Arc<dyn CompactionScheduler + Send + Sync>>,
     rand: Arc<DbRand>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
     system_clock: Arc<dyn SystemClock>,
@@ -1287,6 +1286,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             compaction_runtime: Handle::current(),
             options: CompactorOptions::default(),
             scheduler_supplier: None,
+            scheduler: None,
             rand: Arc::new(DbRand::default()),
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
@@ -1309,6 +1309,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             compaction_runtime: self.compaction_runtime,
             options: self.options,
             scheduler_supplier: self.scheduler_supplier,
+            scheduler: self.scheduler,
             rand: self.rand,
             metrics_recorder: self.metrics_recorder,
             system_clock: self.system_clock,
@@ -1518,11 +1519,13 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.options.metric_level.unwrap_or_default(),
         );
         let options = Arc::new(self.options);
-        let scheduler_supplier = self
-            .scheduler_supplier
-            .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
         let (_tx, rx) = async_channel::unbounded();
-        let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&options));
+        let scheduler = self.scheduler.unwrap_or_else(|| {
+            let scheduler_supplier = self
+                .scheduler_supplier
+                .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
+            Arc::from(scheduler_supplier.compaction_scheduler(&options))
+        });
         let stats = Arc::new(CompactionStats::new(&recorder));
         let handler = CompactorEventHandler::new(
             manifest_store.clone(),
@@ -2636,6 +2639,106 @@ mod tests {
                 .contains("l0_max_ssts (2) must be at least min_compaction_sources (4)"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_db_builder_rejects_l0_max_ssts_per_key_below_min_compaction_sources() {
+        let result = crate::Db::builder(
+            "test_db_builder_rejects_l0_max_ssts_per_key_below_min_compaction_sources",
+            Arc::new(InMemory::new()),
+        )
+        .with_settings(Settings {
+            l0_max_ssts: 8,
+            l0_max_ssts_per_key: 2,
+            ..Settings::default()
+        })
+        .build()
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("expected invalid l0_max_ssts_per_key to fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err.kind(), ErrorKind::Invalid));
+        println!("returned error: {err}");
+        assert!(err
+            .to_string()
+            .contains("l0_max_ssts_per_key (2) must be at least min_compaction_sources (4)"));
+    }
+
+    #[tokio::test]
+    async fn test_db_builder_rejects_size_tiered_supplier_with_low_l0_max_ssts() {
+        let object_store = Arc::new(InMemory::new());
+        let compactor_builder = crate::CompactorBuilder::new(
+            "test_db_builder_rejects_size_tiered_supplier_with_low_l0_max_ssts",
+            object_store.clone(),
+        )
+        .with_scheduler_supplier(Arc::new(
+            crate::compactor::SizeTieredCompactionSchedulerSupplier::new(),
+        ));
+        let result = crate::Db::builder(
+            "test_db_builder_rejects_size_tiered_supplier_with_low_l0_max_ssts",
+            object_store,
+        )
+        .with_settings(Settings {
+            l0_max_ssts: 2,
+            compactor_options: None,
+            ..Settings::default()
+        })
+        .with_compactor_builder(compactor_builder)
+        .build()
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("expected invalid size-tiered scheduler configuration to fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err.kind(), ErrorKind::Invalid));
+        println!("returned error: {err}");
+        assert!(err
+            .to_string()
+            .contains("l0_max_ssts (2) must be at least min_compaction_sources (4)"));
+    }
+
+    #[tokio::test]
+    async fn test_db_builder_validates_effective_compactor_builder_options() {
+        let object_store = Arc::new(InMemory::new());
+        let compactor_builder = crate::CompactorBuilder::new(
+            "test_db_builder_validates_effective_compactor_builder_options",
+            object_store.clone(),
+        )
+        .with_options(CompactorOptions {
+            scheduler_options: crate::config::SizeTieredCompactionSchedulerOptions {
+                min_compaction_sources: 3,
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        });
+        let result = crate::Db::builder(
+            "test_db_builder_validates_effective_compactor_builder_options",
+            object_store,
+        )
+        .with_settings(Settings {
+            l0_max_ssts: 3,
+            compactor_options: Some(CompactorOptions {
+                scheduler_options: crate::config::SizeTieredCompactionSchedulerOptions {
+                    min_compaction_sources: 8,
+                    ..Default::default()
+                }
+                .into(),
+                ..Default::default()
+            }),
+            ..Settings::default()
+        })
+        .with_compactor_builder(compactor_builder)
+        .build()
+        .await;
+
+        let db = result.expect("the explicit compactor builder options should take precedence");
+        drop(db);
     }
 
     #[tokio::test]
