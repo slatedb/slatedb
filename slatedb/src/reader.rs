@@ -2696,4 +2696,60 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn point_reads_progress_without_block_task_executor() {
+        use crate::config::{FlushOptions, FlushType};
+        use crate::db_cache::test_utils::TestCache;
+        let db = crate::Db::builder("point-inline-get", Arc::new(InMemory::new()))
+            .with_db_cache(Arc::new(TestCache::new()), 1)
+            .build()
+            .await
+            .unwrap();
+        db.put(b"k", b"value").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            db.get(b"k").await.unwrap(),
+            Some(Bytes::from_static(b"value"))
+        );
+        let dead = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let handle = dead.handle().clone();
+        dead.shutdown_background();
+        let result = {
+            let _entered = handle.enter();
+            db.get(b"k").await
+        };
+        assert_eq!(result.unwrap(), Some(Bytes::from_static(b"value")));
+        // An exact-key scan with one fetch task is the same single-block read,
+        // so it is polled inline as well.
+        let result = {
+            let _entered = handle.enter();
+            async {
+                let mut scan = db
+                    .scan_with_options(
+                        b"k".as_slice()..=b"k".as_slice(),
+                        &ScanOptions {
+                            max_fetch_tasks: 1,
+                            read_ahead_bytes: 1,
+                            ..ScanOptions::default()
+                        },
+                    )
+                    .await?;
+                scan.next().await
+            }
+            .await
+        };
+        assert_eq!(
+            result.unwrap().map(|kv| kv.value),
+            Some(Bytes::from_static(b"value"))
+        );
+        db.close().await.unwrap();
+    }
 }
