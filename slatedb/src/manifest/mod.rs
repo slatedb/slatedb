@@ -711,6 +711,9 @@ impl ManifestCore {
         let mut clone = self.clone();
         clone.initialized = false;
         clone.checkpoints.clear();
+        // Source snapshots do not carry into the clone. Its first snapshot starts
+        // at or above the latest persisted sequence, even before a new flush.
+        clone.recent_snapshot_min_seq = clone.last_l0_seq;
         clone
     }
 
@@ -1491,6 +1494,9 @@ impl Manifest {
                 source.manifest.core.last_l0_clock_tick,
             );
         }
+        // The union starts without source snapshots. Reclaim older versions
+        // without waiting for the clone to flush new writes.
+        core.recent_snapshot_min_seq = core.last_l0_seq;
 
         // Coalesce borrows of the same physical ancestor, keyed on (path, sst_ids) rather than
         // source_checkpoint_id: the carried-forward checkpoint id is regenerated on every clone,
@@ -2927,8 +2933,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_union_propagates_last_l0_seq() {
+    #[rstest]
+    #[case(100, 200)]
+    #[case(200, 100)]
+    #[case(0, 200)]
+    #[case(0, 0)]
+    fn test_union_initializes_retention_boundary(#[case] seq1: u64, #[case] seq2: u64) {
         let mut manifest1 = build_manifest(
             &SimpleManifest {
                 l0: vec![],
@@ -2936,7 +2946,8 @@ mod tests {
             },
             |_| SsTableId::from(Ulid::new()),
         );
-        manifest1.core.last_l0_seq = 100;
+        manifest1.core.last_l0_seq = seq1;
+        manifest1.core.recent_snapshot_min_seq = seq1 / 2;
 
         let mut manifest2 = build_manifest(
             &SimpleManifest {
@@ -2945,7 +2956,8 @@ mod tests {
             },
             |_| SsTableId::from(Ulid::new()),
         );
-        manifest2.core.last_l0_seq = 200;
+        manifest2.core.last_l0_seq = seq2;
+        manifest2.core.recent_snapshot_min_seq = seq2 / 2;
 
         let union = Manifest::cloned_from_union(
             vec![
@@ -2964,7 +2976,37 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(union.core.last_l0_seq, 200);
+        let expected = seq1.max(seq2);
+        assert_eq!(union.core.last_l0_seq, expected);
+        assert_eq!(union.core.recent_snapshot_min_seq, expected);
+        assert!(union.core.tree.l0.is_empty());
+
+        let child = Manifest::cloned(
+            &union,
+            "/tmp/union".to_string(),
+            Uuid::new_v4(),
+            Arc::new(DbRand::default()),
+        );
+        assert_eq!(child.core.recent_snapshot_min_seq, expected);
+    }
+
+    #[rstest]
+    #[case(0)]
+    #[case(42)]
+    fn test_clone_resets_source_retention_boundary(#[case] source_boundary: u64) {
+        let mut parent = Manifest::initial(ManifestCore::new());
+        parent.core.last_l0_seq = 890_866;
+        parent.core.recent_snapshot_min_seq = source_boundary;
+
+        let child = Manifest::cloned(
+            &parent,
+            "/tmp/parent".to_string(),
+            Uuid::new_v4(),
+            Arc::new(DbRand::default()),
+        );
+
+        assert_eq!(child.core.recent_snapshot_min_seq, 890_866);
+        assert_eq!(parent.core.recent_snapshot_min_seq, source_boundary);
     }
 
     #[rstest]
