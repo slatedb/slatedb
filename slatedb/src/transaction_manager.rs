@@ -263,8 +263,8 @@ impl TransactionManager {
     /// retained for active transactions, so that the compactor can avoid deleting the
     /// data that is still needed.
     ///
-    /// min_active_seq will be persisted to the `recent_snapshot_min_seq` in the manifest
-    /// when a new L0 is flushed.
+    /// The manifest writer samples this value for `recent_snapshot_min_seq`
+    /// before each manifest write.
     pub(crate) fn min_active_seq(&self) -> Option<u64> {
         let inner = self.inner.read();
         inner
