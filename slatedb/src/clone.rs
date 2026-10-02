@@ -588,8 +588,8 @@ async fn copy_wal(
 mod tests {
     use super::{SegmentFilterFn, SegmentProjectionFn};
     use crate::config::{
-        CheckpointOptions, CheckpointScope, FlushOptions, FlushType, PutOptions, Settings,
-        WriteOptions,
+        CheckpointOptions, CheckpointScope, CloseOptions, FlushOptions, FlushType, PutOptions,
+        Settings, WriteOptions,
     };
     use crate::db::builder::CloneSourceSpec;
     use crate::db::Db;
@@ -1606,7 +1606,16 @@ mod tests {
                 .unwrap();
         }
         parent_db.flush().await.unwrap();
-        let manifest = parent_db.manifest();
+        parent_db
+            .close_with_options(CloseOptions {
+                flush_type: Some(FlushType::Wal),
+            })
+            .await
+            .unwrap();
+        let manifest = ManifestStore::new(&Path::from(parent_path), object_store.clone())
+            .read_latest_manifest()
+            .await
+            .unwrap();
         assert!(
             !manifest.manifest.core.tree.l0.is_empty(),
             "expected cloned state to include L0 data"
@@ -1615,7 +1624,6 @@ mod tests {
             manifest.manifest.core.replay_after_wal_id + 1 < manifest.manifest.core.next_wal_sst_id,
             "expected cloned state to retain WAL-only SSTs"
         );
-        parent_db.close().await.unwrap();
 
         create_clone(
             clone_path,
@@ -1696,7 +1704,22 @@ mod tests {
                 .unwrap();
         }
         parent_db.flush().await.unwrap();
-        let manifest = parent_db.manifest();
+
+        // Block L0 uploads so the WAL-only data stays in the WAL.
+        fail_parallel::cfg(
+            fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            "return",
+        )
+        .unwrap();
+        // expect to fail since l0 upload is blocked
+        assert!(parent_db.close().await.is_err());
+        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
+
+        let manifest = ManifestStore::new(&Path::from(parent_path), object_store.clone())
+            .read_latest_manifest()
+            .await
+            .unwrap();
         assert!(
             !manifest.manifest.core.tree.l0.is_empty(),
             "expected cloned state to include L0 data"
@@ -1710,16 +1733,6 @@ mod tests {
                 manifest.manifest.core.replay_after_wal_id + 1,
             ))
             .to_string();
-        // Block L0 uploads so the WAL-only data stays in the WAL.
-        fail_parallel::cfg(
-            fp_registry.clone(),
-            "write-compacted-sst-io-error",
-            "return",
-        )
-        .unwrap();
-        // expect to fail since l0 upload is blocked
-        assert!(parent_db.close().await.is_err());
-        fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
 
         // Pass main store as WAL store — WAL SSTs won't be found there
         let err = create_clone(
@@ -1794,16 +1807,6 @@ mod tests {
             .unwrap();
         parent_db.flush().await.unwrap();
 
-        let manifest = parent_db.manifest();
-        assert!(
-            !manifest.manifest.core.tree.l0.is_empty(),
-            "expected parent state to include L0 data"
-        );
-        assert!(
-            manifest.manifest.core.replay_after_wal_id + 1 < manifest.manifest.core.next_wal_sst_id,
-            "expected parent state to retain WAL-only SSTs"
-        );
-
         // Block L0 uploads so the WAL-only data stays in the WAL.
         fail_parallel::cfg(
             fp_registry.clone(),
@@ -1814,6 +1817,19 @@ mod tests {
         // expect to fail since l0 upload is blocked
         assert!(parent_db.close().await.is_err());
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "off").unwrap();
+
+        let manifest = ManifestStore::new(&parent_path, object_store.clone())
+            .read_latest_manifest()
+            .await
+            .unwrap();
+        assert!(
+            !manifest.manifest.core.tree.l0.is_empty(),
+            "expected parent state to include L0 data"
+        );
+        assert!(
+            manifest.manifest.core.replay_after_wal_id + 1 < manifest.manifest.core.next_wal_sst_id,
+            "expected parent state to retain WAL-only SSTs"
+        );
 
         // Cloning with a projection that keeps only keys in [aaa, bbb) must
         // be rejected while the WAL-only data is still in the WAL.

@@ -174,12 +174,7 @@ impl DbInner {
 
         let txn_manager = Arc::new(TransactionManager::new(oracle.clone(), rand.clone()));
         let snapshot_manager = Arc::new(SnapshotManager::new(oracle.clone(), rand.clone()));
-        let wal_observer = DbWalObserver::new(
-            wal_observer,
-            oracle.clone(),
-            state.clone(),
-            status_manager.clone(),
-        );
+        let wal_observer = DbWalObserver::new(wal_observer, oracle.clone(), status_manager.clone());
 
         let db_inner = Self {
             state,
@@ -2152,7 +2147,7 @@ impl WriteHandle {
 }
 
 /// Wraps [`WalObserver`] and injects a [`crate::wal::WalStatusListener`]
-/// that updates the oracle and manifest, and drives cross-task notifications about wal events
+/// that updates the oracle and sends WAL event notifications between tasks
 /// via a [`tokio::sync::watch`] channel.
 #[derive(Clone)]
 pub(crate) struct DbWalObserver {
@@ -2165,7 +2160,6 @@ impl DbWalObserver {
     fn new(
         wrapped: Box<dyn WalObserver>,
         oracle: Arc<DbOracle>,
-        db_state: Arc<RwLock<DbState>>,
         closed_writer: Arc<dyn ClosedResultWriter>,
     ) -> Self {
         let (status_tx, status_rx) = tokio::sync::watch::channel(wrapped.status());
@@ -2177,9 +2171,6 @@ impl DbWalObserver {
                         if let Some(seq) = status.last_flushed_seq {
                             oracle.advance_durable_seq(seq);
                         }
-                        let mut guard = db_state.write();
-                        guard.set_next_wal_id(status.last_flushed_wal_id + 1);
-                        drop(guard);
                         Ok(status)
                     }
                     WalEvent::WalClosed(status) => {
@@ -2236,9 +2227,10 @@ mod tests {
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::MetricLevel;
     use crate::config::{
-        CheckpointOptions, CloseOptions, CompactionWorkerOptions, CompactorOptions,
-        GarbageCollectorDirectoryOptions, GarbageCollectorOptions, ObjectStoreCacheOptions,
-        PutOptions, ScanOptions, Settings, SstBlockSize, Ttl, WriteOptions,
+        CheckpointOptions, CheckpointScope, CloseOptions, CompactionWorkerOptions,
+        CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+        ObjectStoreCacheOptions, PutOptions, ScanOptions, Settings, SstBlockSize, Ttl,
+        WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
@@ -6531,7 +6523,16 @@ mod tests {
                 .recent_flushed_wal_id(),
             2
         );
-        assert_eq!(db_state.state.core().next_wal_sst_id, next_wal_id);
+        assert_eq!(
+            reader
+                .inner
+                .wal_observer
+                .status()
+                .unwrap()
+                .last_flushed_wal_id
+                + 1,
+            next_wal_id
+        );
         assert_eq!(
             reader.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -6627,7 +6628,10 @@ mod tests {
         );
         assert!(db_state.state.imm_memtable.get(1).is_none());
 
-        assert_eq!(db_state.state.core().next_wal_sst_id, 4);
+        assert_eq!(
+            db.inner.wal_observer.status().unwrap().last_flushed_wal_id,
+            3
+        );
         assert_eq!(
             db.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -6657,6 +6661,108 @@ mod tests {
             .await
             .unwrap_err();
         assert!(result.to_string().contains("background task panicked"));
+    }
+
+    #[tokio::test]
+    async fn test_manifest_writes_sample_flushed_wal_id() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_manifest_writes_sample_flushed_wal_id");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings {
+                flush_interval: None,
+                compactor_options: None,
+                garbage_collector_options: None,
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let manifest_store = ManifestStore::new(&path, object_store);
+        let initial_next_wal_id = db.inner.state.read().state().core().next_wal_sst_id;
+        let write = db.put(b"first", b"value").await.unwrap();
+        db.flush().await.unwrap();
+        write.await_durable().await.unwrap();
+        let next_wal_id = db.inner.wal_observer.status().unwrap().last_flushed_wal_id + 1;
+        assert!(next_wal_id > initial_next_wal_id);
+        assert_eq!(
+            db.inner.state.read().state().core().next_wal_sst_id,
+            initial_next_wal_id
+        );
+
+        let checkpoint = db
+            .create_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            manifest_store
+                .read_manifest(checkpoint.manifest_id)
+                .await
+                .unwrap()
+                .core
+                .next_wal_sst_id,
+            next_wal_id
+        );
+        assert_eq!(
+            db.inner.state.read().state().core().next_wal_sst_id,
+            next_wal_id
+        );
+
+        db.put(b"second", b"value").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        let next_wal_id = db.inner.wal_observer.status().unwrap().last_flushed_wal_id + 1;
+        assert_eq!(
+            manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .next_wal_sst_id,
+            next_wal_id
+        );
+        assert_eq!(
+            db.inner.state.read().state().core().next_wal_sst_id,
+            next_wal_id
+        );
+
+        db.put(b"third", b"value").await.unwrap();
+        let checkpoint = db
+            .create_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            manifest_store
+                .read_manifest(checkpoint.manifest_id)
+                .await
+                .unwrap()
+                .core
+                .next_wal_sst_id,
+            next_wal_id
+        );
+        db.flush().await.unwrap();
+        assert_eq!(
+            db.inner.state.read().state().core().next_wal_sst_id,
+            next_wal_id
+        );
+        db.close_with_options(CloseOptions {
+            flush_type: Some(FlushType::Wal),
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .next_wal_sst_id,
+            next_wal_id + 1
+        );
     }
 
     #[tokio::test]
@@ -7020,7 +7126,10 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 2);
+        assert_eq!(
+            db.inner.wal_observer.status().unwrap().last_flushed_wal_id,
+            1
+        );
         let wal_store = WalTableStore::new(
             object_store.clone(),
             SsTableFormat::default(),
@@ -7037,7 +7146,10 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 4);
+        assert_eq!(
+            db.inner.wal_observer.status().unwrap().last_flushed_wal_id,
+            3
+        );
     }
 
     #[tokio::test]
@@ -7073,7 +7185,10 @@ mod tests {
         assert_eq!(err.to_string(), "Closed error: detected newer DB client");
 
         do_put(&db2, b"2", b"2").await.unwrap();
-        assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
+        assert_eq!(
+            db2.inner.wal_observer.status().unwrap().last_flushed_wal_id,
+            4
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
