@@ -11,7 +11,7 @@ use crate::types::RowEntry;
 use crate::utils::SafeSender;
 use crate::utils::{format_bytes_si, WatchableOnceCellReader};
 use crate::wal;
-use crate::wal::{FlushResultFuture, WalError, WalEvent, WalStatus, WalWriter};
+use crate::wal::{WalError, WalEvent, WalFlush, WalStatus, WalWriter};
 use async_trait::async_trait;
 use futures::{stream::BoxStream, FutureExt, StreamExt};
 use log::{error, trace, warn};
@@ -230,15 +230,27 @@ impl WalWriter for SlateDbWalWriter {
         })
     }
 
-    async fn flush(&mut self) -> Result<FlushResultFuture, WalError> {
+    async fn flush(&mut self) -> Result<WalFlush, WalError> {
         let (result_tx, result_rx) = oneshot::channel();
-        self.send_flush_request(Some(result_tx))?;
-        Ok(async {
-            result_rx
-                .await
-                .unwrap_or_else(|e| Err(WalError::InternalError(Arc::new(e))))
-        }
-        .boxed())
+        let wal_id = {
+            let mut inner = self.inner.write();
+            inner.check_exited()?;
+            inner.freeze_current_wal();
+            inner.send_flush_msg(WalFlushWork::Flush {
+                result_tx: Some(result_tx),
+            })?;
+            inner.next_wal_id - 1
+        };
+        self.stats.flush_requests.increment(1);
+        Ok(WalFlush {
+            wal_id,
+            completion: async {
+                result_rx
+                    .await
+                    .unwrap_or_else(|e| Err(WalError::InternalError(Arc::new(e))))
+            }
+            .boxed(),
+        })
     }
 
     async fn close(&mut self) -> Result<(), WalError> {
@@ -883,6 +895,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_flush_returns_frozen_wal_id_before_upload() {
+        let (mut writer, table_store, _, _) =
+            setup_wal_buffer_with_flush_interval(Duration::from_secs(3600)).await;
+        let empty = writer.flush().await.unwrap();
+        assert_eq!(empty.wal_id, 0);
+        empty.completion.await.unwrap();
+
+        writer
+            .append(&[make_entry("before", "v1", 1, None)])
+            .await
+            .unwrap();
+        let first = writer.flush().await.unwrap();
+        assert_eq!(first.wal_id, 1);
+        assert_eq!(writer.status().unwrap().last_flushed_wal_id, 0);
+        let repeated = writer.flush().await.unwrap();
+        assert_eq!(repeated.wal_id, first.wal_id);
+
+        writer
+            .append(&[make_entry("after", "v2", 2, None)])
+            .await
+            .unwrap();
+        let second = writer.flush().await.unwrap();
+        assert_eq!(second.wal_id, 2);
+        first.completion.await.unwrap();
+        repeated.completion.await.unwrap();
+        second.completion.await.unwrap();
+
+        for (wal_id, key) in [(1, "before"), (2, "after")] {
+            let table = table_store.open_sst(wal_id.into()).await.unwrap();
+            let mut iter =
+                WalSstIterator::new(table, table_store.clone(), WalSstIteratorOptions::default())
+                    .await
+                    .unwrap();
+            assert_eq!(iter.next().await.unwrap().unwrap().key, Bytes::from(key));
+            assert!(iter.next().await.unwrap().is_none());
+        }
+        let empty = writer.flush().await.unwrap();
+        assert_eq!(empty.wal_id, 2);
+        empty.completion.await.unwrap();
+        writer.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_basic_append_and_flush_operations() {
         let (mut wal_buffer, table_store, _, _) = setup_wal_buffer().await;
 
@@ -900,7 +955,7 @@ mod tests {
             .unwrap();
 
         // Flush the buffer
-        wal_buffer.flush().await.unwrap().await.unwrap();
+        wal_buffer.flush().await.unwrap().completion.await.unwrap();
 
         // Verify entries were written to storage
         let table = table_store.open_sst(1.into()).await.unwrap();
@@ -951,7 +1006,7 @@ mod tests {
             let seq = i + 1;
             let entry = make_entry(&format!("key{}", i), &format!("value{}", i), seq, None);
             wal_buffer.append(&[entry]).await.unwrap();
-            wal_buffer.flush().await.unwrap().await.unwrap();
+            wal_buffer.flush().await.unwrap().completion.await.unwrap();
         }
         assert_eq!(wal_buffer.status().unwrap().last_flushed_wal_id, 100);
         assert_eq!(wal_buffer.inner.read().immutable_wals.len(), 0);
@@ -977,7 +1032,7 @@ mod tests {
             lookup_metric(&recorder, stats::WAL_BUFFER_FLUSH_REQUESTS).unwrap();
 
         // Explicitly flush to drain everything, including any partial current WAL.
-        wal_buffer.flush().await.unwrap().await.unwrap();
+        wal_buffer.flush().await.unwrap().completion.await.unwrap();
 
         let actual_flushes = lookup_metric(&recorder, stats::WAL_BUFFER_FLUSHES).unwrap();
 
@@ -1017,7 +1072,7 @@ mod tests {
             .append(&[make_entry("key1", "value1", 1, None)])
             .await
             .unwrap();
-        wal_buffer.flush().await.unwrap().await.unwrap();
+        wal_buffer.flush().await.unwrap().completion.await.unwrap();
 
         // then: the listener should have been notified that wal 1 was flushed.
         let recorded = events.lock().unwrap().clone();

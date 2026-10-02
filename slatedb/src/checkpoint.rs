@@ -153,24 +153,13 @@ impl Db {
                     Some(wal_flush),
                 )
             }
-            CheckpointScope::Durable => {
-                let guard = self.inner.state.read();
-                let state = guard.state();
-                let core = state.core();
-                let boundary = CheckpointBoundary {
+            CheckpointScope::Durable => (
+                CheckpointBoundary {
                     through_seq: None,
-                    wal_id_last_seen: if self.inner.wal_enabled {
-                        Some(
-                            core.next_wal_sst_id
-                                .checked_sub(1)
-                                .ok_or(SlateDBError::InvalidDBState)?,
-                        )
-                    } else {
-                        None
-                    },
-                };
-                (boundary, None)
-            }
+                    wal_id_last_seen: None,
+                },
+                None,
+            ),
         };
         let id = self.inner.rand.rng().gen_uuid();
 
@@ -632,6 +621,7 @@ mod tests {
             .unwrap();
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
         db.put(b"before", b"v1").await.unwrap();
+        let frozen_wal_id = db.inner.wal_observer.status().unwrap().last_flushed_wal_id + 1;
         let started = tokio::time::timeout(
             Duration::from_secs(5),
             db.begin_checkpoint(CheckpointScope::All, &CheckpointOptions::default()),
@@ -660,6 +650,11 @@ mod tests {
         .await
         .unwrap();
         let checkpoint = completion.await.unwrap();
+        let manifest = ManifestStore::new(&path, object_store.clone())
+            .read_manifest(checkpoint.manifest_id)
+            .await
+            .unwrap();
+        assert_eq!(manifest.core.next_wal_sst_id, frozen_wal_id + 1);
         let reader = DbReader::builder(path, object_store)
             .with_reader_mode(DbReaderMode::Checkpoint(checkpoint.id))
             .build()

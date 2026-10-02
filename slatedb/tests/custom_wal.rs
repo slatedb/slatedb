@@ -14,7 +14,7 @@ use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::path::Path;
 use slatedb::object_store::ObjectStore;
 use slatedb::wal::{
-    FlushResultFuture, WalAdmin, WalError, WalEvent, WalFileRange, WalGc, WalIterator, WalObserver,
+    WalAdmin, WalError, WalEvent, WalFileRange, WalFlush, WalGc, WalIterator, WalObserver,
     WalReader, WalRows, WalStatus, WalStatusListener, WalWriter, WriterInit, WriterInitResult,
     WriterManifest,
 };
@@ -178,8 +178,11 @@ impl WalWriter for BTreeMapWalWriter {
         Ok(())
     }
 
-    async fn flush(&mut self) -> Result<FlushResultFuture, WalError> {
-        Ok(Box::pin(async { Ok(()) }))
+    async fn flush(&mut self) -> Result<WalFlush, WalError> {
+        Ok(WalFlush {
+            wal_id: self.observer.status()?.last_flushed_wal_id,
+            completion: Box::pin(async { Ok(()) }),
+        })
     }
 
     fn observer(&self) -> Box<dyn WalObserver> {

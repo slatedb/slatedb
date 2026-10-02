@@ -206,6 +206,15 @@ pub trait WalObserver: Send + Sync + 'static {
 
 pub type FlushResultFuture = BoxFuture<'static, Result<(), WalError>>;
 
+/// The frozen WAL boundary and its durable completion result.
+pub struct WalFlush {
+    /// The last WAL file covered by this flush, including files still awaiting upload.
+    /// If no new file is frozen, this is the last previously assigned file ID.
+    pub wal_id: u64,
+    /// Completes when all writes through `wal_id` are durable, or reports a flush error.
+    pub completion: FlushResultFuture,
+}
+
 /// The WAL's write API. Used by SlateDB to append new WAL writes. Is returned by
 /// [`WalWriterInit::fence_and_init_writer`].
 ///
@@ -224,9 +233,10 @@ pub trait WalWriter: Send {
     /// Append a write batch to the WAL.
     async fn append(&mut self, write_batch: &[RowEntry]) -> Result<(), WalError>;
 
-    /// Triggers a flush of all appended write batches to durable storage. Returns a
-    /// future that receives the result of the flush once it completes.
-    async fn flush(&mut self) -> Result<FlushResultFuture, WalError>;
+    /// Freezes all appended writes and returns their final WAL file ID without waiting for storage.
+    /// Later appends must use a greater file ID. An empty flush returns the previous file ID.
+    /// The returned completion future reports durability or a flush error.
+    async fn flush(&mut self) -> Result<WalFlush, WalError>;
 
     /// Returns true if the WAL implementation wants to request that the current in-memory
     /// writes be flushed to a new l0. WAL implementations can use this to (1) bound the range

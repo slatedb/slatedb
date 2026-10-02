@@ -1,6 +1,4 @@
-use crate::wal::{
-    FlushResultFuture, WalError, WalObserver, WalStatus, WalStatusListener, WalWriter,
-};
+use crate::wal::{WalError, WalFlush, WalObserver, WalStatus, WalStatusListener, WalWriter};
 use crate::RowEntry;
 use futures::FutureExt;
 
@@ -34,8 +32,11 @@ impl WalWriter for FakeWalWriter {
         Ok(())
     }
 
-    async fn flush(&mut self) -> Result<FlushResultFuture, WalError> {
-        Ok(async { Ok(()) }.boxed())
+    async fn flush(&mut self) -> Result<WalFlush, WalError> {
+        Ok(WalFlush {
+            wal_id: self.status.last_flushed_wal_id,
+            completion: async { Ok(()) }.boxed(),
+        })
     }
 
     fn observer(&self) -> Box<dyn WalObserver> {

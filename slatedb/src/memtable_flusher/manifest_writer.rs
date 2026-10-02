@@ -61,7 +61,6 @@ enum ManifestWriterCommand {
     },
     /// Create a checkpoint against the current durable manifest state.
     CreateCheckpoint {
-        through_seq: Option<u64>,
         options: CheckpointOptions,
         request: CheckpointRequest,
     },
@@ -86,8 +85,8 @@ impl std::fmt::Debug for ManifestWriterCommand {
             Self::AwaitFlush { through_seq, .. } => {
                 write!(f, "AwaitFlush({through_seq:?})")
             }
-            Self::CreateCheckpoint { through_seq, .. } => {
-                write!(f, "CreateCheckpoint({through_seq:?})")
+            Self::CreateCheckpoint { request, .. } => {
+                write!(f, "CreateCheckpoint({:?})", request.boundary.through_seq)
             }
             Self::PollManifest { .. } => write!(f, "PollManifest"),
             Self::DurableSeqAdvanced => write!(f, "DurableSeqAdvanced"),
@@ -155,21 +154,15 @@ impl ManifestWriter {
         )
     }
 
-    /// Sends a checkpoint request to the manifest_writer. The manifest_writer will write
-    /// the checkpoint once all sequences up to and including `through_seq` are
-    /// durable (or immediately if `None`) and respond via `sender`.
+    /// Sends a checkpoint request with its boundary and completion channels.
+    /// The manifest writer waits until the request's sequence boundary is durable.
     pub(crate) fn begin_checkpoint(
         &self,
-        through_seq: Option<u64>,
         options: CheckpointOptions,
         request: CheckpointRequest,
     ) -> Result<(), SlateDBError> {
         self.commands_tx.send_or_handle_closed(
-            ManifestWriterCommand::CreateCheckpoint {
-                through_seq,
-                options,
-                request,
-            },
+            ManifestWriterCommand::CreateCheckpoint { options, request },
             |message, err| {
                 if let ManifestWriterCommand::CreateCheckpoint { request, .. } = message {
                     request.lifecycle.fail(err.clone());
@@ -196,7 +189,7 @@ impl ManifestWriter {
             lifecycle,
             wal_flush: None,
         };
-        let result = self.begin_checkpoint(through_seq, options, request);
+        let result = self.begin_checkpoint(options, request);
         tokio::spawn(async move {
             if ready_rx.await.is_err() {
                 return;
@@ -273,13 +266,8 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
             } => {
                 self.handle_flush(through_seq, sender);
             }
-            ManifestWriterCommand::CreateCheckpoint {
-                through_seq,
-                options,
-                request,
-            } => {
-                self.handle_create_checkpoint(through_seq, options, request)
-                    .await?;
+            ManifestWriterCommand::CreateCheckpoint { options, request } => {
+                self.handle_create_checkpoint(options, request).await?;
             }
             ManifestWriterCommand::PollManifest { done } => {
                 self.refresh_manifest_progress(done).await?;
@@ -380,7 +368,6 @@ impl ManifestWriterHandler {
 
     async fn handle_create_checkpoint(
         &mut self,
-        through_seq: Option<u64>,
         options: CheckpointOptions,
         request: CheckpointRequest,
     ) -> Result<(), SlateDBError> {
@@ -403,7 +390,7 @@ impl ManifestWriterHandler {
         self.pending_checkpoints.push(PendingCheckpoint {
             id,
             wal_id_last_seen: boundary.wal_id_last_seen,
-            through_seq,
+            through_seq: boundary.through_seq,
             options,
             lifecycle,
         });
@@ -681,9 +668,6 @@ impl ManifestWriterHandler {
             .iter()
             .filter(|checkpoint| checkpoint.options.source.is_none())
         {
-            if self.db.wal_enabled && checkpoint.wal_id_last_seen.is_none() {
-                return Err(SlateDBError::InvalidDBState);
-            }
             match boundary {
                 Some(current) => {
                     if checkpoint.wal_id_last_seen != current {
@@ -946,14 +930,10 @@ impl ManifestWriterHandler {
                     sender,
                 });
             }
-            ManifestWriterCommand::CreateCheckpoint {
-                through_seq,
-                options,
-                request,
-            } => {
+            ManifestWriterCommand::CreateCheckpoint { options, request } => {
                 self.pending_checkpoints.push(PendingCheckpoint {
                     id: request.id,
-                    through_seq,
+                    through_seq: request.boundary.through_seq,
                     wal_id_last_seen: request.boundary.wal_id_last_seen,
                     options,
                     lifecycle: request.lifecycle,
@@ -1136,7 +1116,6 @@ mod tests {
         let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
         writer
             .begin_checkpoint(
-                through_seq,
                 CheckpointOptions::default(),
                 CheckpointRequest {
                     id,
@@ -1669,6 +1648,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn durable_checkpoint_uses_current_wal_end() {
+        let harness = setup_harness(
+            "/tmp/test_durable_checkpoint_current_wal_end",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let store = ManifestStore::new(
+            &Path::from(harness.path.clone()),
+            harness.object_store.clone(),
+        );
+        let inner = harness.inner.clone();
+        let mut handler = new_handler_from_harness(harness);
+        inner.state.write().set_next_wal_id(2);
+        let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
+        handler
+            .handle_create_checkpoint(
+                CheckpointOptions::default(),
+                CheckpointRequest {
+                    id: Uuid::new_v4(),
+                    boundary: CheckpointBoundary {
+                        through_seq: None,
+                        wal_id_last_seen: None,
+                    },
+                    lifecycle,
+                    wal_flush: None,
+                },
+            )
+            .await
+            .unwrap();
+        ready_rx.await.unwrap().unwrap();
+
+        inner.state.write().set_next_wal_id(3);
+        handler.process_ready_work().await.unwrap();
+        let result = result_rx.await.unwrap().unwrap();
+        let manifest = store.read_manifest(result.manifest_id).await.unwrap();
+        assert_eq!(manifest.core.next_wal_sst_id, 3);
+    }
+
+    #[tokio::test]
     async fn checkpoint_stops_wal_at_its_begin_boundary() {
         let harness = setup_harness(
             "/tmp/test_checkpoint_manifest_wal_boundary",
@@ -2121,7 +2139,6 @@ mod tests {
         let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
         handler
             .handle_create_checkpoint(
-                through_seq,
                 CheckpointOptions::default(),
                 CheckpointRequest {
                     id,

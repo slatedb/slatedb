@@ -355,21 +355,16 @@ impl DbInner {
         freeze_memtable: bool,
         wal_writer: Option<&mut Box<dyn WalWriter>>,
     ) -> Result<BatchWriterFlushResult, SlateDBError> {
-        let flush_rx = if let Some(wal_writer) = wal_writer {
-            wal_writer.flush().await?
+        let (flush_rx, wal_id_last_seen) = if let Some(wal_writer) = wal_writer {
+            let flush = wal_writer.flush().await?;
+            (flush.completion, Some(flush.wal_id))
         } else {
-            async { Ok(()) }.boxed()
+            (async { Ok(()) }.boxed(), None)
         };
         let checkpoint_boundary = if freeze_memtable {
+            // The replay starting point can precede the frozen WAL endpoint.
+            let replay_after_wal_id = self.wal_observer.status()?.last_flushed_wal_id;
             let mut guard = self.state.write();
-            // The requested flush can still be in progress. Table files will cover
-            // the frozen writes, so the checkpoint can stop WAL replay at this earlier file.
-            let replay_after_wal_id = guard
-                .state()
-                .core()
-                .next_wal_sst_id
-                .checked_sub(1)
-                .ok_or(SlateDBError::InvalidDBState)?;
             self.freeze_current_memtable_with_state_guard(&mut guard, replay_after_wal_id);
             let through_seq = guard
                 .state()
@@ -378,7 +373,7 @@ impl DbInner {
                 .and_then(|imm| imm.table().last_seq());
             Some(CheckpointBoundary {
                 through_seq,
-                wal_id_last_seen: self.wal_enabled.then_some(replay_after_wal_id),
+                wal_id_last_seen,
             })
         } else {
             None
@@ -571,7 +566,7 @@ mod tests {
             self.inner.append(write_batch).await
         }
 
-        async fn flush(&mut self) -> Result<FlushResultFuture, WalError> {
+        async fn flush(&mut self) -> Result<crate::wal::WalFlush, WalError> {
             if matches!(self.operation, FailingWalOperation::Flush) {
                 return Err(WalError::Fenced);
             }

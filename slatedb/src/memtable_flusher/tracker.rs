@@ -223,8 +223,7 @@ impl FlushTracker {
             "checkpoint-after-reconcile",
             |_| { Ok(()) }
         );
-        self.manifest_writer
-            .begin_checkpoint(request.boundary.through_seq, options, request)?;
+        self.manifest_writer.begin_checkpoint(options, request)?;
         self.dispatch_ready_memtables()
     }
 
