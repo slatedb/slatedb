@@ -356,6 +356,10 @@ pub(crate) struct InternalSstIterator<'a> {
     fetch_tasks: VecDeque<FetchTask>,
     table_store: Arc<TableStore>,
     options: SstIteratorOptions,
+    /// A point range read by one fetch task: its one block, when the range
+    /// is one block, is polled inline rather than spawned. Fixed for the
+    /// iterator's life, so decided once here.
+    inline_point_read: bool,
     tracing_context: Option<SstTracingContext>,
     /// Buffer for descending iteration to maintain correct sequence order within keys.
     descending_buffer: Option<VecDeque<RowEntry>>,
@@ -378,6 +382,7 @@ impl<'a> InternalSstIterator<'a> {
             IterationOrder::Descending => Some(VecDeque::new()),
             IterationOrder::Ascending => None,
         };
+        let inline_point_read = view.point_key().is_some() && options.max_fetch_tasks == 1;
 
         Ok(Self {
             view,
@@ -388,6 +393,7 @@ impl<'a> InternalSstIterator<'a> {
             fetch_tasks: VecDeque::new(),
             table_store,
             options,
+            inline_point_read,
             tracing_context,
             descending_buffer,
             pending_entry: None,
@@ -465,7 +471,7 @@ impl<'a> InternalSstIterator<'a> {
     /// decrementing `next_block_idx_to_fetch` as blocks are scheduled. Stops when reaching
     /// `block_idx_range.start`.
     fn spawn_fetches(&mut self) {
-        let Some(index) = self.index.as_ref() else {
+        let Some(index) = self.index.clone() else {
             return;
         };
 
@@ -475,36 +481,17 @@ impl<'a> InternalSstIterator<'a> {
                 while self.fetch_tasks.len() < self.options.max_fetch_tasks
                     && self.block_idx_range.contains(&self.next_block_idx_to_fetch)
                 {
-                    let table = self.view.table_as_ref().sst.clone();
                     let mut blocks = self.table_store.block_range_for_target_bytes(
-                        &table,
-                        index,
+                        &self.view.table_as_ref().sst,
+                        &index,
                         self.next_block_idx_to_fetch,
                         self.options.target_bytes_to_fetch,
                         IterationOrder::Ascending,
                     );
                     blocks.end = blocks.end.min(self.block_idx_range.end);
-                    let table_store = self.table_store.clone();
-                    let index = index.clone();
-                    let cache_blocks = self.options.cache_blocks;
-                    let segment = self.options.segment.clone();
-                    let blocks_end = blocks.end;
-                    let single_block = blocks.len() == 1;
-                    let read = async move {
-                        table_store
-                            .read_blocks_using_index(&table, index, blocks, cache_blocks, segment)
-                            .await
-                    };
-                    let fetch = if self.view.point_key().is_some()
-                        && self.options.max_fetch_tasks == 1
-                        && single_block
-                    {
-                        FetchTask::Inline(parking_lot::Mutex::new(Box::pin(read)))
-                    } else {
-                        FetchTask::InFlight(AbortOnDropHandle::new(tokio::spawn(read)))
-                    };
+                    self.next_block_idx_to_fetch = blocks.end;
+                    let fetch = self.start_fetch(index.clone(), blocks);
                     self.fetch_tasks.push_back(fetch);
-                    self.next_block_idx_to_fetch = blocks_end;
                 }
             }
             IterationOrder::Descending => {
@@ -512,30 +499,39 @@ impl<'a> InternalSstIterator<'a> {
                 while self.fetch_tasks.len() < self.options.max_fetch_tasks
                     && self.next_block_idx_to_fetch > self.block_idx_range.start
                 {
-                    let table = self.view.table_as_ref().sst.clone();
                     let mut blocks = self.table_store.block_range_for_target_bytes(
-                        &table,
-                        index,
+                        &self.view.table_as_ref().sst,
+                        &index,
                         self.next_block_idx_to_fetch - 1,
                         self.options.target_bytes_to_fetch,
                         IterationOrder::Descending,
                     );
                     blocks.start = blocks.start.max(self.block_idx_range.start);
-                    let table_store = self.table_store.clone();
-                    let index = index.clone();
-                    let cache_blocks = self.options.cache_blocks;
-                    let segment = self.options.segment.clone();
-                    let blocks_start = blocks.start;
-                    let fetch = tokio::spawn(async move {
-                        table_store
-                            .read_blocks_using_index(&table, index, blocks, cache_blocks, segment)
-                            .await
-                    });
-                    self.fetch_tasks
-                        .push_back(FetchTask::InFlight(AbortOnDropHandle::new(fetch)));
-                    self.next_block_idx_to_fetch = blocks_start;
+                    self.next_block_idx_to_fetch = blocks.start;
+                    let fetch = self.start_fetch(index.clone(), blocks);
+                    self.fetch_tasks.push_back(fetch);
                 }
             }
+        }
+    }
+
+    /// Starts the read of `blocks`: inline for a one-task point read's single
+    /// block, as a task on the runtime for everything else.
+    fn start_fetch(&self, index: Arc<SsTableIndexOwned>, blocks: Range<usize>) -> FetchTask {
+        let table = self.view.table_as_ref().sst.clone();
+        let table_store = self.table_store.clone();
+        let cache_blocks = self.options.cache_blocks;
+        let segment = self.options.segment.clone();
+        let single_block = blocks.len() == 1;
+        let read = async move {
+            table_store
+                .read_blocks_using_index(&table, index, blocks, cache_blocks, segment)
+                .await
+        };
+        if self.inline_point_read && single_block {
+            FetchTask::Inline(parking_lot::Mutex::new(Box::pin(read)))
+        } else {
+            FetchTask::InFlight(AbortOnDropHandle::new(tokio::spawn(read)))
         }
     }
 
@@ -3954,9 +3950,9 @@ mod tests {
     }
 
     /// Inline is decided by the shape of the read alone: a point range, one
-    /// fetch task, one block. Read-ahead over a one-block SST is still one
-    /// block. Descending reads and read-ahead across tasks keep their spawned
-    /// fetch, so on a dead runtime only they fail.
+    /// fetch task, one block, in either order. Read-ahead over a one-block SST
+    /// is still one block. Read-ahead across tasks keeps its spawned fetch, so
+    /// on a dead runtime only it fails.
     #[tokio::test]
     async fn point_read_inline_is_detected_from_the_read_shape() {
         let (store, sst, _, _) = point_read_fixture().await;
@@ -3970,8 +3966,9 @@ mod tests {
         let cases = [
             (IterationOrder::Ascending, 1, 1, true),
             (IterationOrder::Ascending, 1, 2, true),
-            (IterationOrder::Descending, 1, 1, false),
+            (IterationOrder::Descending, 1, 1, true),
             (IterationOrder::Ascending, 2, 1, false),
+            (IterationOrder::Descending, 2, 1, false),
         ];
         for (order, max_fetch_tasks, target_bytes_to_fetch, inline) in cases {
             let options = SstIteratorOptions {
