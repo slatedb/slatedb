@@ -6,9 +6,7 @@ use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
 use std::sync::Arc;
-use tokio::task::JoinHandle;
 use tokio_util::task::AbortOnDropHandle;
-use tracing::instrument::WithSubscriber;
 
 use crate::block_iterator::DataBlockIterator;
 use crate::bytes_range::BytesRange;
@@ -525,7 +523,7 @@ impl<'a> InternalSstIterator<'a> {
                     let read_trace = self.read_trace();
                     let sst_level = self.sst_level().cloned();
                     let blocks_start = blocks.start;
-                    let fetch = tokio::spawn(async move {
+                    let fetch = spawn_with_optional_subscriber(async move {
                         table_store
                             .read_blocks_using_index(
                                 &table,
@@ -537,7 +535,7 @@ impl<'a> InternalSstIterator<'a> {
                                 sst_level.as_ref(),
                             )
                             .await
-                    }).with_current_subscriber();
+                    });
                     self.fetch_tasks
                         .push_back(FetchTask::InFlight(AbortOnDropHandle::new(fetch)));
                     self.next_block_idx_to_fetch = blocks_start;
