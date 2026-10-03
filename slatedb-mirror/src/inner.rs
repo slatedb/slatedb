@@ -8,10 +8,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
+use futures::future;
 use futures::stream::{self, StreamExt};
 use log::warn;
 use object_store::path::Path;
-use object_store::{GetOptions, GetResult, GetResultPayload, ObjectStore, PutPayload};
+use object_store::{
+    GetOptions, GetResult, GetResultPayload, ObjectStore, ObjectStoreExt, PutPayload,
+};
 use parking_lot::Mutex;
 use slatedb_common::clock::SystemClock;
 use tokio::runtime::Handle;
@@ -227,21 +230,28 @@ impl Inner {
         Ok(())
     }
 
-    /// Queues a removal of `path`'s local copy and waits for it.
-    pub(crate) async fn delete_local(&self, path: &Path) -> Result<(), MirrorError> {
+    /// Deletes `path` remotely and removes its local copy. Both run in
+    /// parallel under one turn in the ordering, so the remote delete can't
+    /// overtake an earlier write to the same path. Neither side's failure
+    /// stops the other.
+    pub(crate) async fn delete(&self, path: &Path) -> object_store::Result<()> {
         if LocalName::new(path).is_err() {
-            // Never mirrored.
-            return Ok(());
+            // Never mirrored, so there's nothing to order against.
+            return self.remote.delete(path).await;
         }
         let ticket = self
             .ordering
             .register(path, OpKind::Delete)
             .expect("deletes are always queued");
         ticket.ready().await;
-        self.remove_local(path).await
+        let (remote, local) = future::join(self.remote.delete(path), self.remove_local(path)).await;
+        drop(ticket);
+        remote?;
+        local?;
+        Ok(())
     }
 
-    /// Like [`Self::delete_local`], but removes the files even if the
+    /// Like [`Self::delete`]'s local half, but removes the files even if the
     /// in-memory map doesn't have `path`. Used by the remote scan, which finds
     /// paths on disk.
     pub(crate) async fn purge_local(&self, path: &Path) -> Result<(), MirrorError> {

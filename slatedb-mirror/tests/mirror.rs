@@ -39,6 +39,10 @@ struct TestStore {
     fail_gets: AtomicUsize,
     /// When set, each GET takes a permit first.
     gate: Mutex<Option<Arc<Semaphore>>>,
+    /// PUTs started.
+    puts: AtomicUsize,
+    /// When set, each PUT takes a permit first.
+    put_gate: Mutex<Option<Arc<Semaphore>>>,
 }
 
 impl fmt::Display for TestStore {
@@ -55,6 +59,11 @@ impl ObjectStore for TestStore {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
+        self.puts.fetch_add(1, Ordering::SeqCst);
+        let gate = self.put_gate.lock().clone();
+        if let Some(gate) = gate {
+            gate.acquire().await.unwrap().forget();
+        }
         self.inner.put_opts(location, payload, opts).await
     }
 
@@ -722,6 +731,33 @@ async fn should_delete_local_and_remote_copies() {
     fixture.mirror.delete(&path).await.unwrap();
     assert!(!fixture.handle().contains(&path));
     assert!(fixture.store.head(&path).await.is_err());
+    assert_eq!(fixture.files(), fixture.expected_files(&[]));
+}
+
+#[tokio::test]
+async fn should_not_delete_remotely_before_earlier_mirrored_put() {
+    let fixture = Fixture::new().await;
+    let path = Path::from(SST);
+    let gate = Arc::new(Semaphore::new(0));
+    *fixture.store.put_gate.lock() = Some(Arc::clone(&gate));
+
+    let mirror = Arc::clone(&fixture.mirror);
+    let put_path = path.clone();
+    let put =
+        tokio::spawn(async move { mirror.put(&put_path, PutPayload::from_static(b"x")).await });
+    eventually(|| fixture.store.puts.load(Ordering::SeqCst) == 1).await;
+
+    let mirror = Arc::clone(&fixture.mirror);
+    let delete_path = path.clone();
+    let delete = tokio::spawn(async move { mirror.delete(&delete_path).await });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!delete.is_finished());
+
+    gate.add_permits(1);
+    put.await.unwrap().unwrap();
+    delete.await.unwrap().unwrap();
+    assert!(fixture.store.head(&path).await.is_err());
+    assert!(!fixture.handle().contains(&path));
     assert_eq!(fixture.files(), fixture.expected_files(&[]));
 }
 

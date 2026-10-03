@@ -12,8 +12,7 @@ use futures::stream::{self, BoxStream, StreamExt};
 use object_store::path::Path;
 use object_store::{
     CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta,
-    ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
-    RenameOptions,
+    ObjectStore, PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
 };
 use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
@@ -313,14 +312,7 @@ impl ObjectStore for ObjectStoreMirror {
                 let inner = Arc::clone(&inner);
                 async move {
                     let location = location?;
-                    // Neither side's failure stops the other.
-                    let (remote, local) = future::join(
-                        inner.remote.delete(&location),
-                        inner.delete_local(&location),
-                    )
-                    .await;
-                    remote?;
-                    local?;
+                    inner.delete(&location).await?;
                     Ok(location)
                 }
             })

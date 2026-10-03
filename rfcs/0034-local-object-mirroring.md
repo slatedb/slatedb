@@ -532,9 +532,11 @@ no manifest or active checkpoint references (see
 ### Deletes, Copies, Renames, and Lists
 
 Delete operations pass through to the wrapped store. Local files that match the
-deleted path are removed if they exist. Local and remote deletions are done in
-parallel, and a failure in one does not affect the other. Deletions also remove
-any in-memory state for the deleted object.
+deleted path are removed if they exist. A delete waits for its turn in the
+path's [ordering](#ordering), then runs the local and remote deletions in
+parallel. Waiting first keeps the remote delete from overtaking an earlier
+`Mirror` write to the same path. A failure in one deletion does not affect the
+other. Deletions also remove any in-memory state for the deleted object.
 
 This means a client running a local garbage collector inherits the GC's delete
 calls locally. Garbage collectors that run remotely do not directly remove
