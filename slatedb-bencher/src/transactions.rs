@@ -258,7 +258,7 @@ impl TransactionTask {
         random: &mut XorShiftRng,
         should_abort: bool,
     ) -> TransactionResult {
-        let txn = match self.db.begin(self.isolation_level).await {
+        let txn = match self.db.begin(self.isolation_level) {
             Ok(t) => t,
             Err(e) => {
                 warn!("begin transaction failed [error={}]", e);

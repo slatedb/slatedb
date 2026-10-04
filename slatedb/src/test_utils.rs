@@ -137,6 +137,11 @@ impl tracing::field::Visit for SpanFieldRecorder<'_> {
             .insert(field.name().to_string(), value.to_string());
     }
 
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         self.fields
             .insert(field.name().to_string(), value.to_string());
@@ -1379,6 +1384,19 @@ impl ObjectStore for GatedObjectStore {
     ) -> object_store::Result<()> {
         self.rename_gate.wait().await?;
         self.inner.rename_opts(from, to, options).await
+    }
+}
+
+pub(crate) struct IdentityBlockTransformer;
+
+#[async_trait]
+impl crate::format::sst::BlockTransformer for IdentityBlockTransformer {
+    async fn encode(&self, data: Bytes) -> Result<Bytes, crate::Error> {
+        Ok(data)
+    }
+
+    async fn decode(&self, data: Bytes) -> Result<Bytes, crate::Error> {
+        Ok(data)
     }
 }
 
