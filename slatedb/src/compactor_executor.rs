@@ -28,6 +28,7 @@ use crate::merge_operator::{
     MergeOperatorType,
 };
 use crate::peeking_iterator::PeekingIterator;
+use crate::reader::ReadTrace;
 use crate::retention_iterator::RetentionIterator;
 use crate::seq_tracker::SequenceTracker;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -401,6 +402,7 @@ impl TokioCompactionExecutorInner {
                     merge_iter,
                     false,
                     retention_min_seq,
+                    ReadTrace::none(),
                 ))
             } else {
                 Box::new(MergeOperatorRequiredIterator::new(merge_iter))
@@ -2890,6 +2892,13 @@ mod tests {
                     retention_min_seq,
                 )),
             };
+            self.run_job(compaction).await
+        }
+
+        async fn run_job(
+            self,
+            compaction: StartCompactionJobArgs,
+        ) -> Result<SortedRun, SlateDBError> {
             self.executor.start_compaction_job(compaction);
 
             tokio::time::timeout(Duration::from_secs(5), async move {
@@ -2903,6 +2912,100 @@ mod tests {
             .await
             .unwrap()
         }
+    }
+
+    #[rstest]
+    #[case::union(false, false)]
+    #[case::single_source_clone(true, false)]
+    #[case::legacy_union_clone(true, true)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_clone_compaction_removes_deleted_merge_without_flush(
+        #[case] clone_again: bool,
+        #[case] legacy_boundary: bool,
+    ) {
+        use crate::clone::CloneSource;
+        use crate::manifest::Manifest;
+        use crate::Checkpoint;
+        use uuid::Uuid;
+
+        let ctx = TestContextBuilder::new("testdb-clone-retention")
+            .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
+            .build()
+            .await;
+        let table_store = ctx.table_store.clone();
+        let live = RowEntry::new_merge(b"z-live", b"live", 890_866);
+        let entries = [
+            vec![
+                RowEntry::new_tombstone(b"a-deleted", 886_642),
+                RowEntry::new_merge(b"a-deleted", b"old", 884_364),
+            ],
+            vec![live.clone()],
+        ];
+        let mut sources = Vec::new();
+        for (index, rows) in entries.iter().enumerate() {
+            let ssts = write_sst(&table_store, rows, usize::MAX).await;
+            let mut core = ManifestCore::new();
+            core.last_l0_seq = rows.iter().map(|row| row.seq).max().unwrap();
+            Arc::make_mut(&mut core.tree).compacted.push(SortedRun::new(
+                0,
+                ssts.into_iter().map(SsTableView::identity),
+            ));
+            sources.push(CloneSource {
+                manifest: Manifest::initial(core),
+                path: Path::from(format!("source-{index}")),
+                checkpoint: Checkpoint {
+                    id: Uuid::new_v4(),
+                    manifest_id: 1,
+                    expire_time: None,
+                    create_time: DefaultSystemClock::new().now(),
+                    name: None,
+                },
+            });
+        }
+        let rand = Arc::new(DbRand::new(42));
+        let mut manifest = Manifest::cloned_from_union(sources, rand.clone()).unwrap();
+        if legacy_boundary {
+            manifest.core.recent_snapshot_min_seq = 0;
+        }
+        if clone_again {
+            manifest = Manifest::cloned(&manifest, "union".into(), Uuid::new_v4(), rand);
+        }
+        assert!(manifest.core.tree.l0.is_empty());
+
+        let retention_min_seq = Some(manifest.core.recent_snapshot_min_seq);
+        let result = ctx
+            .run_job(StartCompactionJobArgs {
+                id: Ulid::new(),
+                compaction_id: Ulid::new(),
+                segment: Bytes::new(),
+                destination: 0,
+                l0_sst_views: vec![],
+                sorted_runs: manifest.core.tree.compacted.clone(),
+                compaction_clock_tick: manifest.core.last_l0_clock_tick,
+                is_dest_last_run: true,
+                retention_min_seq,
+                ctx: Some(CompactionContext::new(
+                    vec![Subcompaction::new(BytesRange::unbounded())],
+                    retention_min_seq,
+                )),
+            })
+            .await
+            .unwrap();
+
+        let mut rows = Vec::new();
+        for sst in result.sst_views() {
+            let mut iter = SstIterator::new(
+                SstView::Borrowed(sst, BytesRange::unbounded()),
+                table_store.clone(),
+                SstIteratorOptions::default(),
+            )
+            .unwrap();
+            iter.init().await.unwrap();
+            while let Some(row) = iter.next().await.unwrap() {
+                rows.push(row);
+            }
+        }
+        assert_eq!(rows, vec![live]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -137,6 +137,11 @@ impl tracing::field::Visit for SpanFieldRecorder<'_> {
             .insert(field.name().to_string(), value.to_string());
     }
 
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         self.fields
             .insert(field.name().to_string(), value.to_string());

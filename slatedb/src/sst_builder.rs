@@ -1113,6 +1113,8 @@ mod tests {
                 0..num_blocks,
                 false,
                 Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
             )
             .await
             .unwrap();
@@ -1125,6 +1127,8 @@ mod tests {
                     range.clone(),
                     false,
                     Some(Bytes::new()),
+                    &ReadTrace::none(),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -1325,7 +1329,7 @@ mod tests {
                 &sst_handle_from_store,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1398,7 +1402,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1408,7 +1412,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1502,7 +1506,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1512,7 +1516,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1664,7 +1668,7 @@ mod tests {
                 &sst_handle_from_store,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1914,7 +1918,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1924,7 +1928,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1991,7 +1995,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -2534,13 +2538,7 @@ mod tests {
 
         // --- Both sub-filters decoded correctly ---
         let filters = table_store
-            .read_filters(
-                &handle,
-                false,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_filters(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
         assert_eq!(
@@ -2591,7 +2589,7 @@ mod tests {
                 &handle_partial,
                 false,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await

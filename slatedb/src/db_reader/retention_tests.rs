@@ -17,7 +17,7 @@ use crate::{
         ManifestCore,
     },
     tablestore::{TableStore, TableStoreKind},
-    test_utils::{OnDemandCompactionSchedulerSupplier, RecordingObjectStore},
+    test_utils::{GatedObjectStore, OnDemandCompactionSchedulerSupplier, RecordingObjectStore},
     types::RowEntry,
     wal::slatedb::store::WalTableStore,
     Db,
@@ -57,8 +57,11 @@ async fn write_rows(table_store: &Arc<TableStore>, id: SsTableId, value: &[u8]) 
         .unwrap()
 }
 
+#[rstest::rstest]
+#[case::retained(false)]
+#[case::expired(true)]
 #[tokio::test]
-async fn managed_scan_retains_ssts_across_refresh_and_gc() {
+async fn managed_scan_retains_ssts_across_refresh_and_gc(#[case] renewal_stops: bool) {
     let raw_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let reader_recording = Arc::new(RecordingObjectStore::new(Arc::clone(&raw_store)));
     let reader_store: Arc<dyn ObjectStore> = reader_recording.clone();
@@ -94,7 +97,8 @@ async fn managed_scan_retains_ssts_across_refresh_and_gc() {
         BlockCachePolicy::default(),
     ));
     let manifest_store = Arc::new(ManifestStore::new(&root, Arc::clone(&raw_store)));
-    let reader_manifest_store = Arc::new(ManifestStore::new(&root, Arc::clone(&reader_store)));
+    let renewal_gate = Arc::new(GatedObjectStore::new(Arc::clone(&reader_store)));
+    let reader_manifest_store = Arc::new(ManifestStore::new(&root, renewal_gate.clone()));
     let compactions_store = Arc::new(CompactionsStore::new(&root, Arc::clone(&raw_store)));
     let wal_store = Arc::new(WalTableStore::new(
         Arc::clone(&raw_store),
@@ -146,6 +150,14 @@ async fn managed_scan_retains_ssts_across_refresh_and_gc() {
     .await
     .unwrap();
 
+    let checkpoint = reader
+        .inner
+        .state
+        .read()
+        .snapshot_lease
+        .as_ref()
+        .unwrap()
+        .checkpoint();
     let mut scan = reader
         .scan_with_options(
             ..,
@@ -215,10 +227,30 @@ async fn managed_scan_retains_ssts_across_refresh_and_gc() {
             object_store_max_retries: Some(0),
         },
         &MetricsRecorderHelper::noop(),
-        clock,
+        clock.clone(),
         None,
         None,
     );
+    if renewal_stops {
+        let arrivals = renewal_gate.put_opts_gate.arrivals();
+        renewal_gate.put_opts_gate.close();
+        clock.set(41_000);
+        let maintenance = reader.inner.retention.as_ref().unwrap().maintain();
+        tokio::pin!(maintenance);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                result = &mut maintenance => panic!("renewal completed before the gate: {result:?}"),
+                _ = renewal_gate.put_opts_gate.wait_for_arrivals(arrivals + 1) => {},
+            }
+        })
+        .await
+        .unwrap();
+        renewal_gate.get_opts_gate.close();
+        clock.advance(Duration::from_millis(21_500)).await;
+        maintenance.await.unwrap();
+        clock.set(70_001);
+        assert!(clock.now() > checkpoint.expire_time.unwrap());
+    }
     gc.run_gc_once().await;
 
     let remaining_ids = writer_tables
@@ -233,6 +265,34 @@ async fn managed_scan_retains_ssts_across_refresh_and_gc() {
         !remaining_ids.contains(&control_id),
         "GC did not delete the eligible control SST"
     );
+
+    if renewal_stops {
+        assert!(!old_sst_present, "GC did not delete the expired scan SST");
+        reader_recording.clear();
+        let error = scan.next_entry().await.unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::SlateDBError::SnapshotLeaseLost { checkpoint_id, manifest_id }
+                if checkpoint_id == checkpoint.id && manifest_id == checkpoint.manifest_id
+        ));
+        assert_eq!(
+            scan.seek(b"key-060").await.unwrap_err().to_string(),
+            error.to_string()
+        );
+        assert_eq!(
+            scan.next_entry().await.unwrap_err().to_string(),
+            error.to_string()
+        );
+        assert!(reader_recording
+            .get_kinds(false)
+            .into_iter()
+            .all(|kind| kind != Some(TableStoreKind::Reader)));
+        renewal_gate.put_opts_gate.release();
+        renewal_gate.get_opts_gate.release();
+        drop(scan);
+        reader.close().await.unwrap();
+        return;
+    }
 
     reader_recording.clear();
     let seek_result = scan.seek(b"key-060").await;

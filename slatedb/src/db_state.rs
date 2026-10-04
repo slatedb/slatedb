@@ -5,7 +5,9 @@ use crate::manifest::{Manifest, ManifestCore};
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use bytes::Bytes;
+use rand::Rng;
 use serde::Serialize;
+use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
@@ -161,10 +163,24 @@ impl SsTableView {
     /// SST owns the range logically but holds no physical keys in it: it
     /// contributes nothing to the projection and is dropped rather than
     /// constructing a view whose physical/visible intersection is empty.
-    pub(crate) fn try_with_visible_range(&self, visible_range: BytesRange) -> Option<Self> {
+    pub(crate) fn try_with_visible_range(
+        &self,
+        visible_range: BytesRange,
+        rand: &DbRand,
+    ) -> Option<Self> {
         self.physical_range().intersect(&visible_range)?;
+        if self.visible_range.as_ref() == Some(&visible_range) {
+            return Some(self.clone());
+        }
+        // A changed range is a new view. Preserve the timestamp for GC watermarks.
+        let id = loop {
+            let id = Ulid::from_parts(self.id.timestamp_ms(), rand.rng().random::<u128>());
+            if id != self.id {
+                break id;
+            }
+        };
         Some(Self::new_projected(
-            self.id,
+            id,
             self.sst.clone(),
             Some(visible_range),
         ))
@@ -937,6 +953,7 @@ mod tests {
     use proptest::collection::vec;
     use proptest::proptest;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::DbRand;
     use std::collections::BTreeSet;
     use std::collections::VecDeque;
     use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -1360,6 +1377,33 @@ mod tests {
         let sst_id = SsTableId::new(ulid::Ulid::new());
         let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
         SsTableView::identity(handle)
+    }
+
+    #[test]
+    fn test_projection_assigns_new_view_ids_only_when_range_changes() {
+        let base = create_compacted_sst_view_with_size(b"a", b"z", 100);
+        let rand = DbRand::new(42);
+        let left_range = BytesRange::from_ref("a".."m");
+        let left = base
+            .try_with_visible_range(left_range.clone(), &rand)
+            .unwrap();
+        let right = base
+            .try_with_visible_range(BytesRange::from_ref("m"..="z"), &rand)
+            .unwrap();
+
+        assert_ne!(left.id, base.id);
+        assert_ne!(right.id, base.id);
+        assert_ne!(left.id, right.id);
+        for view in [&left, &right] {
+            assert_eq!(view.id.timestamp_ms(), base.id.timestamp_ms());
+            assert_eq!(view.sst, base.sst);
+        }
+        assert_eq!(left.visible_range, Some(left_range.clone()));
+        assert_eq!(left.try_with_visible_range(left_range, &rand), Some(left));
+        assert!(base
+            .try_with_visible_range(BytesRange::from_ref("zz"..), &rand)
+            .is_none());
+        assert_eq!(base.visible_range, None);
     }
 
     #[test]
