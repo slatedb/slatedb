@@ -1013,15 +1013,14 @@ impl TableStore {
     /// read bypasses the cache. Compactor reads use the cache only for
     /// components selected by `BlockCachePolicy::with_compaction_read_targets`.
     fn cache_for_reads(&self, target: &CacheTarget) -> Option<&Arc<dyn DbCache>> {
-        if self.kind == TableStoreKind::Compactor {
-            if matches!(target, CacheTarget::Data(_))
+        if self.kind == TableStoreKind::Compactor
+            && (matches!(target, CacheTarget::Data(_))
                 || !self
                     .block_cache_policy
                     .compaction_read_targets()
-                    .contains(target)
-            {
-                return None;
-            }
+                    .contains(target))
+        {
+            return None;
         }
         self.cache.as_ref()
     }
@@ -2057,7 +2056,15 @@ mod tests {
 
         let block_offset = index.borrow().block_meta().get(0).offset();
         reader
-            .read_blocks_using_index(&handle, index, 0..1, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index,
+                0..1,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
             .await
             .unwrap();
         assert!(block_cache
