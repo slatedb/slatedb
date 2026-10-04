@@ -423,7 +423,7 @@ impl TableStore {
         span: tracing::Span,
     ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
         let cache_key: CachedKey = (handle.id, handle.info.filter_offset).into();
-        if let Some(cache) = self.cache_for_reads() {
+        if let Some(cache) = self.cache_for_reads(&CacheTarget::Filters) {
             // cache_blocks=true: dedup-aware fetch; concurrent callers collapse onto
             // one loader. cache_blocks=false: read-only lookup that won't pollute the
             // cache on miss. Cache errors fall through to a best-effort direct load;
@@ -488,7 +488,7 @@ impl TableStore {
             return Ok(None);
         }
         let cache_key = (handle.id, handle.info.stats_offset).into();
-        if let Some(cache) = self.cache_for_reads() {
+        if let Some(cache) = self.cache_for_reads(&CacheTarget::Stats) {
             // See `read_filters` for the rationale on the fall-through path.
             let entry = if cache_blocks {
                 cache
@@ -545,7 +545,7 @@ impl TableStore {
         span: tracing::Span,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         let cache_key = (handle.id, handle.info.index_offset).into();
-        if let Some(cache) = self.cache_for_reads() {
+        if let Some(cache) = self.cache_for_reads(&CacheTarget::Index) {
             // See `read_filters` for the rationale on the fall-through path.
             let fetch = if cache_blocks {
                 cache
@@ -790,7 +790,7 @@ impl TableStore {
         // run of uncached blocks. Cache errors fall through to the direct load,
         // which produces the authoritative error if any.
         if cache_blocks && blocks.len() == 1 {
-            if let Some(cache) = self.cache_for_reads() {
+            if let Some(cache) = self.cache_for_reads(&CacheTarget::data::<&[u8], _>(..)) {
                 let block_num = blocks.start;
                 let offset = index.borrow().block_meta().get(block_num).offset();
                 let cache_key: CachedKey = (handle.id, offset).into();
@@ -812,7 +812,7 @@ impl TableStore {
         let mut uncached_ranges = Vec::new();
 
         // If block cache is available, try to retrieve cached blocks
-        if let Some(cache) = self.cache_for_reads() {
+        if let Some(cache) = self.cache_for_reads(&CacheTarget::data::<&[u8], _>(..)) {
             let index_borrow = index.borrow();
             // Attempt to get all requested blocks from cache concurrently
             let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
@@ -900,7 +900,7 @@ impl TableStore {
         }
 
         // Cache the newly read blocks if caching is enabled
-        if let Some(cache) = self.cache_for_reads() {
+        if let Some(cache) = self.cache_for_reads(&CacheTarget::data::<&[u8], _>(..)) {
             if !blocks_to_cache.is_empty() {
                 join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
                     cache.insert((id, offset).into(), CachedEntry::with_block(block))
@@ -960,18 +960,21 @@ impl TableStore {
         self.cache.as_ref()
     }
 
-    /// The block cache to probe for read operations, gated based on the table
-    /// store kind.
-    ///
-    /// compactor reads bypass it so compaction input does not pollute the
-    /// cache.
-    // TODO: revisit this when the read side of BlockCachePolicy is implemented.
-    fn cache_for_reads(&self) -> Option<&Arc<dyn DbCache>> {
+    /// Returns the block cache for a read of `target`, or `None` when the
+    /// read bypasses the cache. Compactor reads use the cache only for
+    /// components selected by `BlockCachePolicy::with_compaction_read_targets`.
+    fn cache_for_reads(&self, target: &CacheTarget) -> Option<&Arc<dyn DbCache>> {
         if self.kind == TableStoreKind::Compactor {
-            None
-        } else {
-            self.cache.as_ref()
+            if matches!(target, CacheTarget::Data(_))
+                || !self
+                    .block_cache_policy
+                    .compaction_read_targets()
+                    .contains(target)
+            {
+                return None;
+            }
         }
+        self.cache.as_ref()
     }
 
     /// Best-effort removal of the cache entries of an SST named by `targets`.
@@ -1855,6 +1858,142 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_compactor_read_cache_policy() {
+        let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            ..SsTableFormat::default()
+        };
+        let writer = TableStore::new(
+            main_store.clone(),
+            format.clone(),
+            Path::from(ROOT),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        );
+        let mut builder = writer.table_builder();
+        builder
+            .add(RowEntry::new_value(b"key1", b"value1", 0))
+            .await
+            .unwrap();
+        builder
+            .add(RowEntry::new_value(b"key2", b"value2", 0))
+            .await
+            .unwrap();
+        let id = SsTableId::from(ulid::Ulid::new());
+        let handle = writer
+            .write_sst(&id, &builder.build().await.unwrap(), Some(Bytes::new()))
+            .await
+            .unwrap();
+
+        let meta_cache = Arc::new(TestCache::new());
+        let block_cache = Arc::new(TestCache::new());
+        let cache = Arc::new(
+            SplitCache::new()
+                .with_block_cache(Some(block_cache.clone()))
+                .with_meta_cache(Some(meta_cache.clone()))
+                .build(),
+        );
+        let reader = TableStore::new(
+            main_store.clone(),
+            format.clone(),
+            Path::from(ROOT),
+            Some(cache.clone()),
+            TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
+        );
+
+        reader
+            .read_index(
+                &handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(meta_cache
+            .get_index(&(handle.id, handle.info.index_offset).into())
+            .await
+            .unwrap()
+            .is_none());
+
+        let filters = reader
+            .read_filters(
+                &handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!filters.is_empty());
+        assert!(meta_cache
+            .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .await
+            .unwrap()
+            .is_none());
+
+        let reader = TableStore::new(
+            main_store,
+            format,
+            Path::from(ROOT),
+            Some(cache),
+            TableStoreKind::Compactor,
+            BlockCachePolicy::default().with_compaction_read_targets(&[
+                CacheTarget::Index,
+                CacheTarget::data::<&[u8], _>(..),
+            ]),
+        );
+        let index = reader
+            .read_index(
+                &handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(meta_cache
+            .get_index(&(handle.id, handle.info.index_offset).into())
+            .await
+            .unwrap()
+            .is_some());
+
+        let filters = reader
+            .read_filters(
+                &handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::new(None),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!filters.is_empty());
+        assert!(meta_cache
+            .get_filter(&(handle.id, handle.info.filter_offset).into())
+            .await
+            .unwrap()
+            .is_none());
+
+        let block_offset = index.borrow().block_meta().get(0).offset();
+        reader
+            .read_blocks_using_index(&handle, index, 0..1, true, Some(Bytes::new()))
+            .await
+            .unwrap();
+        assert!(block_cache
+            .get_block(&(handle.id, block_offset).into())
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[derive(Clone, Copy, Debug)]
