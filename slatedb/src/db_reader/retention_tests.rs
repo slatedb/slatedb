@@ -277,7 +277,7 @@ async fn managed_scan_retains_ssts_across_refresh_and_gc(#[case] renewal_stops: 
         ));
         assert_eq!(
             scan.seek(b"key-060").await.unwrap_err().to_string(),
-            error.to_string()
+            crate::Error::from(error.clone()).to_string()
         );
         assert_eq!(
             scan.next_entry().await.unwrap_err().to_string(),
