@@ -504,13 +504,6 @@ impl ManifestWriterHandler {
     }
 
     fn apply_uploaded_state(&self, staged_batch: &[UploadedMemtable]) -> Result<(), SlateDBError> {
-        let min_active_snapshot_seq = [
-            self.db.snapshot_manager.min_active_seq(),
-            self.db.txn_manager.min_active_seq(),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
         let segmented = self.db.segment_extractor.is_some();
         let mut guard = self.db.state.write();
         let manifest = guard.modify(|modifier| {
@@ -564,7 +557,6 @@ impl ManifestWriterHandler {
                 // can do that. So assert `>` rather than `>=`.
                 assert!(uploaded.last_seq > core.last_l0_seq);
                 core.last_l0_seq = uploaded.last_seq;
-                core.recent_snapshot_min_seq = min_active_snapshot_seq.unwrap_or(uploaded.last_seq);
                 core.sequence_tracker.extend_from(uploaded_tracker);
             }
             Ok(modifier.state.manifest.clone())
@@ -616,7 +608,7 @@ impl ManifestWriterHandler {
         &mut self,
         checkpoint_options: &[&CheckpointOptions],
     ) -> Result<Vec<CheckpointCreateResult>, SlateDBError> {
-        let mut dirty = self.clone_local_manifest_for_write();
+        let mut dirty = self.prepare_local_manifest_for_write();
         let mut checkpoint_results = Vec::new();
         for options in checkpoint_options {
             let id = self.db.rand.rng().gen_uuid();
@@ -641,18 +633,33 @@ impl ManifestWriterHandler {
     }
 
     async fn write_current_manifest(&mut self) -> Result<(), SlateDBError> {
-        let dirty = self.clone_local_manifest_for_write();
+        let dirty = self.prepare_local_manifest_for_write();
         self.manifest.update(dirty.clone()).await?;
         self.db.status_manager.report_manifest(dirty.into());
         Ok(())
     }
 
-    fn clone_local_manifest_for_write(&self) -> DirtyObject<Manifest> {
-        let dirty = {
-            let rguard_state = self.db.state.read();
-            rguard_state.state().manifest.clone()
-        };
-        dirty
+    fn prepare_local_manifest_for_write(&self) -> DirtyObject<Manifest> {
+        let min_active_snapshot_seq = [
+            self.db.snapshot_manager.min_active_seq(),
+            self.db.txn_manager.min_active_seq(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        // A closed WAL still reports the last durable file for the final manifest write.
+        let wal_status = self
+            .db
+            .wal_observer
+            .status()
+            .unwrap_or_else(|status| status);
+        let mut guard = self.db.state.write();
+        guard.set_next_wal_id(wal_status.last_flushed_wal_id + 1);
+        guard.modify(|modifier| {
+            let core = &mut modifier.state.manifest.value.core;
+            core.recent_snapshot_min_seq = min_active_snapshot_seq.unwrap_or(core.last_l0_seq);
+            modifier.state.manifest.clone()
+        })
     }
 
     async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
@@ -1001,7 +1008,7 @@ mod tests {
 
     use crate::dispatcher::Notifier;
     use crate::wal::test_utils::FakeWalWriter;
-    use crate::wal::WalWriter;
+    use crate::wal::{WalError, WalObserver, WalStatus, WalStatusListener, WalWriter};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
@@ -1010,6 +1017,7 @@ mod tests {
     use slatedb_common::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
     use slatedb_common::metrics::MetricsRecorderHelper;
     use slatedb_common::DbRand;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;
@@ -1272,6 +1280,21 @@ mod tests {
         fp_registry: Arc<FailPointRegistry>,
         segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     ) -> TestHarness {
+        setup_harness_with_wal_observer(
+            path,
+            fp_registry,
+            segment_extractor,
+            FakeWalWriter::new(0).observer(),
+        )
+        .await
+    }
+
+    async fn setup_harness_with_wal_observer(
+        path: &str,
+        fp_registry: Arc<FailPointRegistry>,
+        segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+        wal_observer: Box<dyn WalObserver>,
+    ) -> TestHarness {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = path.to_string();
         let settings = Settings::default();
@@ -1302,7 +1325,6 @@ mod tests {
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =
             crate::utils::SafeSender::unbounded_channel(status_manager.result_reader());
-        let wal_writer = Box::new(FakeWalWriter::new(0));
         let inner = Arc::new(
             DbInner::new(
                 settings.clone(),
@@ -1314,7 +1336,7 @@ mod tests {
                     &WatchableOnceCell::new(),
                 )),
                 write_tx,
-                wal_writer.observer(),
+                wal_observer,
                 db_metrics,
                 fp_registry,
                 None,
@@ -1446,6 +1468,212 @@ mod tests {
         let uploaded = next_uploaded_memtable_no_wal(inner, key, value).await;
         inner.oracle.advance_durable_seq(uploaded.last_seq);
         uploaded
+    }
+
+    #[rstest::rstest]
+    #[case(None, None, 30)]
+    #[case(Some(10), None, 10)]
+    #[case(None, Some(20), 20)]
+    #[case(Some(10), Some(20), 10)]
+    #[case(Some(20), Some(10), 10)]
+    #[tokio::test]
+    async fn manifest_writes_refresh_snapshot_min_seq_without_uploaded_tables(
+        #[case] snapshot_seq: Option<u64>,
+        #[case] txn_seq: Option<u64>,
+        #[case] expected_min_seq: u64,
+    ) {
+        let harness = setup_harness(
+            "/tmp/test_manifest_writes_refresh_snapshot_min_seq",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let manifest_store = ManifestStore::new(
+            &Path::from(harness.path.clone()),
+            Arc::clone(&harness.object_store),
+        );
+        let mut handler = new_handler_from_harness(harness);
+        handler.load_manifest().await.unwrap();
+        let snapshot =
+            snapshot_seq.map(|seq| handler.db.snapshot_manager.new_snapshot(Some(seq)).0);
+        let txn = txn_seq.map(|seq| {
+            handler.db.oracle.advance_committed_seq(seq);
+            handler.db.txn_manager.new_transaction().0
+        });
+        handler.db.oracle.advance_committed_seq(30);
+        handler.db.state.write().modify(|modifier| {
+            modifier.state.manifest.value.core.last_l0_seq = 30;
+        });
+
+        handler.write_current_manifest_safely().await.unwrap();
+        assert_eq!(
+            handler
+                .db
+                .state
+                .read()
+                .state()
+                .core()
+                .recent_snapshot_min_seq,
+            expected_min_seq
+        );
+        assert_eq!(
+            manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .recent_snapshot_min_seq,
+            expected_min_seq
+        );
+
+        if let Some(snapshot) = snapshot {
+            handler.db.snapshot_manager.drop_snapshot(&snapshot);
+        }
+        if let Some(txn) = txn {
+            handler.db.txn_manager.drop_txn(&txn);
+        }
+        handler
+            .write_manifest_update_safely(&[&CheckpointOptions::default()])
+            .await
+            .unwrap();
+        assert_eq!(
+            handler
+                .db
+                .state
+                .read()
+                .state()
+                .core()
+                .recent_snapshot_min_seq,
+            30
+        );
+        assert_eq!(
+            manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .recent_snapshot_min_seq,
+            30
+        );
+    }
+
+    struct AdvancingWalObserver {
+        next_flushed_wal_id: Arc<AtomicU64>,
+    }
+
+    impl WalObserver for AdvancingWalObserver {
+        fn status(&self) -> Result<WalStatus, WalStatus> {
+            Ok(WalStatus {
+                last_flushed_wal_id: self.next_flushed_wal_id.fetch_add(1, Ordering::SeqCst),
+                last_flushed_seq: None,
+                estimated_bytes: 0,
+                buffered_wal_entries_count: 0,
+                closed_reason: None,
+            })
+        }
+
+        fn subscribe(&self, _listener: WalStatusListener) -> Result<(), WalError> {
+            Ok(())
+        }
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn manifest_write_retry_samples_new_wal_end(#[case] checkpoint: bool) {
+        let next_flushed_wal_id = Arc::new(AtomicU64::new(0));
+        let harness = setup_harness_with_wal_observer(
+            "/tmp/test_manifest_write_retry_samples_new_wal_end",
+            Arc::new(FailPointRegistry::new()),
+            None,
+            Box::new(AdvancingWalObserver {
+                next_flushed_wal_id: Arc::clone(&next_flushed_wal_id),
+            }),
+        )
+        .await;
+        let manifest_store = ManifestStore::new(
+            &Path::from(harness.path.clone()),
+            Arc::clone(&harness.object_store),
+        );
+        let mut handler = new_handler_from_harness(harness);
+        handler.load_manifest().await.unwrap();
+        handler
+            .manifest
+            .update(handler.manifest.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        next_flushed_wal_id.store(10, Ordering::SeqCst);
+
+        if checkpoint {
+            handler
+                .write_manifest_update_safely(&[&CheckpointOptions::default()])
+                .await
+                .unwrap();
+        } else {
+            handler.write_current_manifest_safely().await.unwrap();
+        }
+
+        assert_eq!(next_flushed_wal_id.load(Ordering::SeqCst), 12);
+        assert_eq!(handler.db.state.read().state().core().next_wal_sst_id, 12);
+        assert_eq!(
+            manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .next_wal_sst_id,
+            12
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn replay_leaves_wal_end_to_manifest_writer(#[case] sample_before_replay: bool) {
+        let harness = setup_harness_with_wal_observer(
+            "/tmp/test_replay_leaves_wal_end_to_manifest_writer",
+            Arc::new(FailPointRegistry::new()),
+            None,
+            FakeWalWriter::new(10).observer(),
+        )
+        .await;
+        let handler = new_handler_from_harness(harness);
+        if sample_before_replay {
+            handler.prepare_local_manifest_for_write();
+        }
+        let next_wal_id_before_replay = handler.db.state.read().state().core().next_wal_sst_id;
+        let table = crate::mem_table::WritableKVTable::new();
+        table.put(RowEntry::new_value(b"key", b"value", 1));
+        handler
+            .db
+            .replay_memtable(
+                0,
+                crate::wal_replay::ReplayedMemtable {
+                    table,
+                    last_tick: 0,
+                    last_seq: 1,
+                    last_wal_id: 3,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            handler.db.state.read().state().core().next_wal_sst_id,
+            next_wal_id_before_replay
+        );
+        assert_eq!(
+            handler
+                .prepare_local_manifest_for_write()
+                .value
+                .core
+                .next_wal_sst_id,
+            11
+        );
+        assert_eq!(handler.db.state.read().state().core().next_wal_sst_id, 11);
     }
 
     #[tokio::test]
