@@ -123,12 +123,6 @@ path = "src/write_runtime.rs"
 test = false
 bench = false
 
-[[bin]]
-name = "memtable-seek"
-path = "src/memtable_seek.rs"
-test = false
-bench = false
-
 [dependencies]
 anyhow.workspace = true
 object_store = { workspace = true, features = ["azure", "gcp"] }
