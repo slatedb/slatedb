@@ -285,8 +285,7 @@ let db = Db::builder(db_path, mirror).build().await?;
 
 The mirror guarantees the following on its own, whatever the policy does:
 
-- A local copy is byte-for-byte identical to the remote object at the time it
-  was downloaded or written through the mirror.
+- The mirror copies whole objects without changing their bytes.
 - A DELETE through the mirror removes the local copy.
 - When the remote scan is enabled, local copies of objects that other clients
   deleted are removed within one scan interval (plus scan time).
@@ -297,14 +296,25 @@ The mirror only supports write-once paths. Policies must only
 route paths that are never overwritten to `Local`, `Refetch`, or `Mirror`.
 SlateDB SSTs meet this: their names are ULIDs and they are never rewritten.
 
+Local copies are disposable. The default `StdVfs` flushes writes without
+syncing them to disk. Local reads can return corrupted bytes without an error,
+including after a machine crash. Startup checks metadata, filenames, and file
+sizes, but does not check object contents. Corruption that preserves the file
+size can pass these checks.
+
+Callers must detect corruption and signal their policy to route a retry through
+`ReadRoute::Refetch`. Repeating a `ReadRoute::Local` read does not repair the
+local copy. Callers must also check the refetched data for corruption and limit
+the number of retries.
+
 ### Filesystem layout
 
 Four types of files exist under the cache root:
 
 - `LOCK`: A persistent lock file held exclusively for the lifetime of the
   mirror.
-- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst`: The complete object, which is byte-for
-  byte identical to the remote object.
+- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst`: The complete object, copied without
+  changing its bytes. The mirror does not check its contents for corruption.
 - `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.1234567890`: A temporary file that is being
   written to either for uploading or downloading purposes. The suffix is an
   atomic counter owned by the mirror. Only one mirror can hold a directory's
@@ -798,6 +808,11 @@ reads, streamed temporary-file writes, directory creation, rename, remove, and
 listing and file locking. `ObjectStoreMirrorBuilder::with_vfs` replaces the
 default implementation.
 
+`VfsWriter::finish` flushes buffered writes and waits for pending writes to
+complete before the mirror renames the file into place. It does not guarantee
+that the contents survive a machine crash. `StdVfs` uses `flush().await`
+without `sync_all()` for both data and metadata files.
+
 The design supports three implementations:
 
 1. `StdVfs`, the default implementation based on standard filesystem I/O.
@@ -839,10 +854,13 @@ On startup, `ObjectStoreMirrorBuilder::build`:
    pointing the mirror at the wrong directory doesn't delete anything
 5. Scans object and `.meta` pairs, deleting entries with a missing partner,
    malformed metadata, a canonical path that does not match the local filename,
-   a file size that does not match the metadata (a torn write), or a
+   a file size that does not match the metadata, or a
    conflicting MD5-to-parent-path mapping
 6. Reconstructs the in-memory path and object metadata maps from valid pairs
 7. Starts the remote scan and spawns `MirrorPolicy::run`
+
+These checks do not detect corruption that preserves the file size. Callers
+must detect and repair such corruption as described in [Guarantees](#guarantees).
 
 ## Impact Analysis
 

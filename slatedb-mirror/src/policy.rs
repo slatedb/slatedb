@@ -19,6 +19,8 @@ pub enum ReadRoute {
     /// skip `observe`.
     Observe,
     /// Local copy only. A miss is a `MirrorError::NotLocal`.
+    /// Contents can be corrupt. Callers must detect corruption and arrange
+    /// a retry through [`ReadRoute::Refetch`].
     Local,
     /// Download the whole object again, replace the local copy, and serve the
     /// request from it.

@@ -68,8 +68,9 @@ pub trait VfsWriter: Debug + Send {
     /// Appends `bytes` to the file.
     async fn write(&mut self, bytes: Bytes) -> io::Result<()>;
 
-    /// Flushes buffered writes and syncs the file's contents to disk. The
-    /// mirror calls this once, before renaming the file into place.
+    /// Flushes buffered writes and waits for pending writes to complete.
+    /// The mirror calls this once, before renaming the file into place.
+    /// This does not guarantee that the contents survive a machine crash.
     async fn finish(&mut self) -> io::Result<()>;
 }
 
@@ -77,6 +78,8 @@ pub trait VfsWriter: Debug + Send {
 pub trait VfsLock: Debug + Send + Sync {}
 
 /// A [`Vfs`] backed by the standard filesystem through `tokio::fs`.
+///
+/// Writes are flushed before publication, without syncing them to disk.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct StdVfs;
 
@@ -187,8 +190,7 @@ impl VfsWriter for StdVfsWriter {
     }
 
     async fn finish(&mut self) -> io::Result<()> {
-        self.file.flush().await?;
-        self.file.sync_all().await
+        self.file.flush().await
     }
 }
 

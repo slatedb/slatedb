@@ -136,7 +136,7 @@ impl Inner {
         });
     }
 
-    /// Writes `payload` to a new file at `path` and syncs it.
+    /// Writes `payload` to a new file at `path` and flushes it.
     pub(crate) async fn write_payload(
         &self,
         path: &StdPath,

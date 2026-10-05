@@ -59,9 +59,18 @@ fn bytes_payload(bytes: Bytes) -> GetResultPayload {
 /// A whole-object local mirror of an object store.
 ///
 /// A [`MirrorPolicy`] picks a route for every GET, HEAD, PUT, and multipart
-/// upload. The mirror keeps local copies byte-for-byte identical to the remote
-/// objects, and applies operations on the same path in the order they were
-/// issued.
+/// upload. The mirror copies whole objects without changing their bytes and
+/// applies operations on the same path in the order they were issued.
+///
+/// Local copies are disposable. The default [`StdVfs`] flushes writes without
+/// syncing them to disk. Local reads can return corrupted bytes without an
+/// error, including after a machine crash. Startup checks metadata, filenames,
+/// and file sizes, but does not check object contents.
+///
+/// Callers must detect corruption and signal their policy to route a retry
+/// through [`ReadRoute::Refetch`]. Repeating a [`ReadRoute::Local`] read does
+/// not repair the local copy. Callers must also check the refetched data for
+/// corruption and limit the number of retries.
 ///
 /// Dropping the mirror stops the remote scan and `MirrorPolicy::run`.
 pub struct ObjectStoreMirror {

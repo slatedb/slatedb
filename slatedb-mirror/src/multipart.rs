@@ -97,7 +97,7 @@ struct MirrorUpload {
     attributes: Attributes,
     writer: SharedWriter,
     local: LocalWrites,
-    /// The local file is synced and closed.
+    /// The local file is flushed and closed.
     local_done: bool,
     size: u64,
     /// `None` once the upload is finished.
@@ -124,7 +124,7 @@ impl MirrorUpload {
         self.ticket.take();
     }
 
-    /// Waits for all local writes, then syncs and closes the file.
+    /// Waits for all local writes, then flushes and closes the file.
     async fn finish_local(&mut self) -> io::Result<()> {
         if self.local_done {
             return Ok(());

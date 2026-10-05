@@ -819,6 +819,62 @@ async fn should_restore_local_copies_after_restart() {
 }
 
 #[tokio::test]
+async fn should_refetch_corrupt_local_copy_after_restart() {
+    let fixture = Fixture::new().await;
+    let path = Path::from(SST);
+    fixture
+        .mirror
+        .put(&path, PutPayload::from_static(b"good bytes"))
+        .await
+        .unwrap();
+
+    let Fixture {
+        _dir,
+        root,
+        store,
+        policy,
+        mirror,
+    } = fixture;
+    drop(mirror);
+    eventually(|| policy.run_stopped.load(Ordering::SeqCst)).await;
+
+    // Model corruption that startup's file-size check cannot detect.
+    std::fs::write(root.join(data_file(SST)), b"bad bytes!").unwrap();
+    let mut reopened = None;
+    for _ in 0..100 {
+        if let Ok(mirror) = build(&root, &store, &policy, 8).await {
+            reopened = Some(mirror);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let mirror = reopened.expect("mirror reopened");
+
+    // Local reads succeed with corrupt bytes, even when repeated.
+    assert!(mirror.handle().contains(&path));
+    for _ in 0..2 {
+        assert_eq!(
+            mirror.get(&path).await.unwrap().bytes().await.unwrap(),
+            "bad bytes!"
+        );
+    }
+    assert_eq!(store.gets.load(Ordering::SeqCst), 0);
+
+    // The caller signals its policy to refetch, then checks the result.
+    *policy.sst_read.lock() = ReadRoute::Refetch;
+    assert_eq!(
+        mirror.get(&path).await.unwrap().bytes().await.unwrap(),
+        "good bytes"
+    );
+    *policy.sst_read.lock() = ReadRoute::Local;
+    assert_eq!(
+        mirror.get(&path).await.unwrap().bytes().await.unwrap(),
+        "good bytes"
+    );
+    assert_eq!(store.gets.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn should_dedupe_concurrent_fetches() {
     let fixture = Fixture::new().await;
     fixture.put_remote(SST, b"x").await;
