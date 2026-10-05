@@ -83,12 +83,6 @@ impl RetryingObjectStore {
         }
     }
 
-    /// Exponential backoff from [`MIN_RETRY_DELAY`] to [`MAX_RETRY_DELAY`], with
-    /// each delay stretched by a random 0–100% (`backon`'s jitter). Without
-    /// jitter, every caller that fails at the same moment retries on the same
-    /// schedule, so a store that fails many requests at once is re-hit by all
-    /// of them in lockstep. The jitter is seeded from the store's [`DbRand`]
-    /// so it stays deterministic under a seeded `DbRand`.
     #[inline]
     fn retry_builder(&self) -> ExponentialBuilder {
         let builder = ExponentialBuilder::default()
