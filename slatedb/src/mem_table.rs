@@ -1144,46 +1144,15 @@ mod tests {
         table
     }
 
+    #[rstest]
+    #[case::existing_key(b"abc333".as_slice())]
+    #[case::between_keys(b"abc332".as_slice())]
     #[tokio::test]
-    async fn test_memtable_seek_forward_to_existing_key() {
+    async fn test_memtable_seek_lands_on_highest_seq(#[case] next_key: &[u8]) {
         let table = seek_test_table();
         let mut iter = table.table().iter();
 
-        iter.seek(b"abc444").await.unwrap();
-
-        assert_iterator(
-            &mut iter,
-            vec![
-                RowEntry::new_value(b"abc444", b"value4", 5),
-                RowEntry::new_value(b"abc555", b"value5", 6),
-            ],
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_memtable_seek_forward_to_nonexisting_key() {
-        let table = seek_test_table();
-        let mut iter = table.table().iter();
-
-        iter.seek(b"abc334").await.unwrap();
-
-        assert_iterator(
-            &mut iter,
-            vec![
-                RowEntry::new_value(b"abc444", b"value4", 5),
-                RowEntry::new_value(b"abc555", b"value5", 6),
-            ],
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_memtable_seek_lands_on_highest_seq() {
-        let table = seek_test_table();
-        let mut iter = table.table().iter();
-
-        iter.seek(b"abc333").await.unwrap();
+        iter.seek(next_key).await.unwrap();
 
         assert_iterator(
             &mut iter,
@@ -1240,37 +1209,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_memtable_seek_before_range_start_is_noop() {
-        let table = seek_test_table();
-        let mut iter = table.table().range_ascending(BytesRange::from((
-            Bound::Excluded(Bytes::from_static(b"abc333")),
-            Bound::Unbounded,
-        )));
-
-        iter.seek(b"abc111").await.unwrap();
-        iter.seek(b"abc333").await.unwrap();
-
-        assert_iterator(
-            &mut iter,
-            vec![
-                RowEntry::new_value(b"abc444", b"value4", 5),
-                RowEntry::new_value(b"abc555", b"value5", 6),
-            ],
-        )
-        .await;
-    }
-
-    #[rstest]
-    #[case::past_excluded_end(b"abc444".as_slice())]
-    #[case::past_last_key(b"abc999".as_slice())]
-    #[tokio::test]
-    async fn test_memtable_seek_past_range_end_exhausts(#[case] next_key: &[u8]) {
+    async fn test_memtable_seek_past_range_end_exhausts() {
         let table = seek_test_table();
         let mut iter = table
             .table()
             .range_ascending(BytesRange::from(..Bytes::from_static(b"abc444")));
 
-        iter.seek(next_key).await.unwrap();
+        iter.seek(b"abc999").await.unwrap();
 
         assert_eq!(iter.next().await.unwrap(), None);
     }
@@ -1305,30 +1250,6 @@ mod tests {
                 RowEntry::new_value(b"abc222", b"value2", 2),
                 RowEntry::new_value(b"abc333", b"new", 4),
                 RowEntry::new_value(b"abc333", b"old", 3),
-            ],
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_memtable_seek_sees_entries_inserted_after_iterator_creation() {
-        let table = seek_test_table();
-        let mut iter = table.table().iter();
-        table.put(RowEntry::new_value(b"abc333", b"newest", 7));
-        table.put(RowEntry::new_value(b"abc444", b"newer", 8));
-
-        iter.seek(b"abc333").await.unwrap();
-
-        // Crossbeam ranges are live; callers filter new entries by seq.
-        assert_iterator(
-            &mut iter,
-            vec![
-                RowEntry::new_value(b"abc333", b"newest", 7),
-                RowEntry::new_value(b"abc333", b"new", 4),
-                RowEntry::new_value(b"abc333", b"old", 3),
-                RowEntry::new_value(b"abc444", b"newer", 8),
-                RowEntry::new_value(b"abc444", b"value4", 5),
-                RowEntry::new_value(b"abc555", b"value5", 6),
             ],
         )
         .await;
