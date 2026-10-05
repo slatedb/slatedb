@@ -3308,11 +3308,13 @@ version = "0.17.0"
 dependencies = [
  "chrono",
  "log",
+ "lru",
  "object_store",
  "parking_lot",
  "rand 0.9.4",
  "rand_xoshiro",
  "serde",
+ "tempfile",
  "thread_local",
  "tokio",
 ]

@@ -23,6 +23,7 @@
 )]
 
 pub mod clock;
+pub mod file_handle_cache;
 pub mod metrics;
 pub mod object_metadata;
 pub mod rand;

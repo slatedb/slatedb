@@ -10,6 +10,7 @@ homepage.workspace = true
 [dependencies]
 chrono = { workspace = true }
 log = { workspace = true }
+lru = { workspace = true }
 object_store = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
@@ -23,6 +24,7 @@ serde = ["dep:serde"]
 test-util = ["tokio/test-util"]
 
 [dev-dependencies]
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "test-util"] }
 
 [lints]
