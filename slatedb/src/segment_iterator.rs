@@ -12,7 +12,7 @@ use crate::error::SlateDBError;
 use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
 use crate::manifest::{LsmTreeState, Segment};
 use crate::merge_iterator::MergeIterator;
-use crate::reader::{ReadTrace, SstTraceLevel};
+use crate::read_trace::{ReadTrace, SstTraceLevel};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstTracingContext};
 use crate::tablestore::TableStore;

@@ -3845,7 +3845,7 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_find_with_multiple_repeated_keys() {
-        use crate::reader::ReadTrace;
+        use crate::read_trace::ReadTrace;
 
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut options = test_db_options(0, 1024 * 1024, None);
@@ -5582,7 +5582,7 @@ mod tests {
                 handle,
                 true,
                 Some(Bytes::new()),
-                &crate::reader::ReadTrace::new(None),
+                &crate::read_trace::ReadTrace::new(None),
                 None,
             )
             .await

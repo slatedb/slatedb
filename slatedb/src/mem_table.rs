@@ -18,7 +18,7 @@ use crate::db_common::extract_segment_prefix;
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::prefix_extractor::PrefixExtractor;
-use crate::reader::ReadTrace;
+use crate::read_trace::ReadTrace;
 use crate::seq_tracker::{SequenceTracker, TrackedSeq};
 use crate::types::RowEntry;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};

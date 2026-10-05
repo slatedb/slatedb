@@ -16,7 +16,7 @@ use crate::error::SlateDBError;
 use crate::filter_policy::{FilterContext, FilterQuery, FilterTarget, NamedFilter};
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
-use crate::reader::{ReadTrace, SstTraceLevel};
+use crate::read_trace::{ReadTrace, SstTraceLevel};
 use crate::utils::spawn_with_optional_subscriber;
 use crate::{
     iter::{IterationOrder, RowEntryIterator},
