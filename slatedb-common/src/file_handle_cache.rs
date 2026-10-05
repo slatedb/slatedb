@@ -59,25 +59,34 @@ impl FileHandleCache {
         &self,
         path: &std::path::Path,
     ) -> Result<Option<Arc<std::fs::File>>, std::io::Error> {
+        match self.try_get_or_open(path) {
+            Ok(handle) => Ok(Some(handle)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Look up a cached file handle, or open the file and cache it.
+    /// Unlike [`Self::get_or_open`], returns the error from opening the file
+    /// as-is, including `NotFound`.
+    /// The returned `Arc` keeps the file open after its cache entry is evicted.
+    pub fn try_get_or_open(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Arc<std::fs::File>, std::io::Error> {
         let mut cache = self.inner.lock().expect("lock should not be poisoned");
         if let Some(handle) = cache.get(path) {
             if Self::is_valid(handle, path) {
-                return Ok(Some(handle.clone()));
+                return Ok(handle.clone());
             }
             // Stale entry — remove it so we reopen below.
             cache.pop(path);
         }
 
-        let file = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err),
-        };
-
-        let handle = Arc::new(file);
+        let handle = Arc::new(std::fs::File::open(path)?);
 
         cache.push(path.to_path_buf(), handle.clone());
-        Ok(Some(handle))
+        Ok(handle)
     }
 
     /// Check whether a cached file descriptor still refers to a live file.
@@ -159,6 +168,16 @@ mod tests {
         let second = cache.clone().get_or_open(&path).unwrap().unwrap();
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn should_return_not_found_error_from_try_get_or_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        let cache = FileHandleCache::new(1);
+        let err = cache.try_get_or_open(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(cache.is_empty());
     }
 
     #[test]

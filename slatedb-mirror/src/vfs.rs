@@ -169,12 +169,7 @@ impl Vfs for StdVfs {
         let file_handle_cache = self.file_handle_cache.clone();
         #[allow(clippy::disallowed_methods)]
         tokio::task::spawn_blocking(move || {
-            let handle = file_handle_cache.get_or_open(&path)?.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("`{}` does not exist", path.display()),
-                )
-            })?;
+            let handle = file_handle_cache.try_get_or_open(&path)?;
             let mut buf = vec![0; len];
             read_exact_at_offset(&handle, &mut buf, range.start)?;
             Ok(Bytes::from(buf))
