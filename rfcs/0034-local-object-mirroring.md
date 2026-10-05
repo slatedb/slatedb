@@ -456,7 +456,7 @@ conditional-write, fencing, and publication ordering.
 ### Errors and Retries
 
 The mirror returns its own errors wrapped in `object_store::Error::Generic`,
-with a `MirrorError` as the source:
+with a `slatedb_common::retry::NonRetryable` wrapper around the `MirrorError`.
 
 ```rust
 pub enum MirrorError {
@@ -478,11 +478,9 @@ pub enum MirrorError {
 }
 ```
 
-`RetryingObjectStore::should_retry` is updated to never retry a `MirrorError`.
-Today it retries every `Generic` error. For `WriteCommitted`, that would be
-wrong: a retried manifest PUT hits `AlreadyExists`, `verify_put_succeeded`
-finds our ULID, and the retry reports success even though warming never
-finished. The caller must see the failure.
+Both retry loops use `slatedb_common::retry::should_retry`, which rejects errors
+that contain a `NonRetryable` wrapper. Any store can use this wrapper to stop
+retries. The retry code does not need to know about `MirrorError`.
 
 Because the mirror sits beneath `RetryingObjectStore`, that wrapper doesn't
 cover the mirror's own remote calls (`fetch`, `prefetch`, and `Refetch`). The

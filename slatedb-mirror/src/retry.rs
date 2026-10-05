@@ -13,8 +13,6 @@ use backon::{ExponentialBuilder, Retryable, Sleeper};
 use log::{debug, info};
 use slatedb_common::clock::SystemClock;
 
-use crate::MirrorError;
-
 const MIN_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -74,17 +72,8 @@ impl Retry {
     }
 }
 
-/// Matches `RetryingObjectStore::should_retry` in `slatedb`.
 pub(crate) fn should_retry(err: &object_store::Error) -> bool {
-    let retry = !matches!(
-        err,
-        object_store::Error::AlreadyExists { .. }
-            | object_store::Error::Precondition { .. }
-            | object_store::Error::NotModified { .. }
-            | object_store::Error::NotFound { .. }
-            | object_store::Error::NotImplemented { .. }
-            | object_store::Error::NotSupported { .. }
-    ) && MirrorError::find(err).is_none();
+    let retry = slatedb_common::retry::should_retry(err);
     if !retry {
         debug!("not retrying mirror remote operation [error={:?}]", err);
     }
@@ -96,6 +85,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::retry::NonRetryable;
+
+    use crate::MirrorError;
 
     use super::*;
 
@@ -149,5 +141,24 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn should_stop_on_non_retryable_error() {
+        let retry = Retry::new(Arc::new(DefaultSystemClock::new()), Some(2));
+        let attempts = AtomicUsize::new(0);
+        let result: object_store::Result<()> = retry
+            .run(|| async {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                Err(object_store::Error::Generic {
+                    store: "test",
+                    source: Box::new(NonRetryable(Box::new(std::io::Error::other(
+                        "write already committed",
+                    )))),
+                })
+            })
+            .await;
+        assert!(NonRetryable::find(&result.unwrap_err()).is_some());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 }

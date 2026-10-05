@@ -1,6 +1,7 @@
 use std::error::Error;
 
 use object_store::path::Path;
+use slatedb_common::retry::NonRetryable;
 
 /// The `store` name on the [`object_store::Error::Generic`] that carries a
 /// [`MirrorError`].
@@ -9,8 +10,9 @@ pub const MIRROR_STORE_NAME: &str = "ObjectStoreMirror";
 /// Errors raised by the mirror itself, as opposed to errors from the wrapped
 /// store.
 ///
-/// The mirror returns these wrapped in [`object_store::Error::Generic`] with the
-/// `MirrorError` as the source. Use [`MirrorError::find`] to get it back out.
+/// The mirror returns these wrapped in [`object_store::Error::Generic`] with
+/// a [`NonRetryable`] wrapper around the `MirrorError` as the source.
+/// Use [`MirrorError::find`] to get the original error.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum MirrorError {
@@ -77,7 +79,7 @@ impl From<MirrorError> for object_store::Error {
     fn from(err: MirrorError) -> Self {
         object_store::Error::Generic {
             store: MIRROR_STORE_NAME,
-            source: Box::new(err),
+            source: Box::new(NonRetryable(Box::new(err))),
         }
     }
 }

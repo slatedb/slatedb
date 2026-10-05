@@ -26,6 +26,7 @@ pub mod clock;
 pub mod metrics;
 pub mod object_metadata;
 pub mod rand;
+pub mod retry;
 pub mod single_flight;
 pub mod utils;
 
