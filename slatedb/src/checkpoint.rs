@@ -2,6 +2,7 @@ use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
 use crate::utils::IdGenerator;
+#[cfg(test)]
 use crate::wal::FlushResultFuture;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -37,9 +38,17 @@ pub(crate) struct CheckpointBoundary {
 
 pub(crate) struct CheckpointRequest {
     pub(crate) id: Uuid,
-    pub(crate) boundary: CheckpointBoundary,
+    pub(crate) target: CheckpointTarget,
     pub(crate) lifecycle: CheckpointLifecycle,
-    pub(crate) wal_flush: Option<FlushResultFuture>,
+}
+
+pub(crate) enum CheckpointTarget {
+    Scope(CheckpointScope),
+    #[cfg(test)]
+    Captured {
+        boundary: CheckpointBoundary,
+        wal_flush: Option<FlushResultFuture>,
+    },
 }
 
 pub(crate) struct CheckpointLifecycle {
@@ -145,27 +154,11 @@ impl Db {
         scope: CheckpointScope,
         options: &CheckpointOptions,
     ) -> Result<CheckpointHandle, crate::Error> {
-        let (boundary, wal_flush) = match scope {
-            CheckpointScope::All => {
-                let (wal_flush, boundary) = self.inner.begin_batch_writer_flush(true).await?;
-                (
-                    boundary.expect("a memtable freeze must return a checkpoint boundary"),
-                    Some(wal_flush),
-                )
-            }
-            CheckpointScope::Durable => (
-                CheckpointBoundary {
-                    through_seq: None,
-                    wal_id_last_seen: None,
-                },
-                None,
-            ),
-        };
         let id = self.inner.rand.rng().gen_uuid();
 
         self.inner
             .memtable_flusher()
-            .begin_checkpoint(id, boundary, options.clone(), wal_flush)
+            .begin_checkpoint(id, CheckpointTarget::Scope(scope), options.clone())
             .await
             .map_err(Into::into)
     }
@@ -686,9 +679,25 @@ mod tests {
         let mut checkpoint = Box::pin(db.begin_checkpoint(CheckpointScope::All, &options));
         assert!(futures::poll!(&mut checkpoint).is_pending());
 
-        // Finish the requested freeze before advancing the table state again.
+        // The database completes the accepted request while its caller stays unpolled.
         db.flush_with_options(FlushOptions {
             flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        let store = ManifestStore::new(&path, object_store.clone());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .checkpoints
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
         })
         .await
         .unwrap();
@@ -716,10 +725,7 @@ mod tests {
             reader.get(b"before").await.unwrap(),
             Some(Bytes::from_static(b"v1"))
         );
-        assert_eq!(
-            reader.get(b"during").await.unwrap(),
-            Some(Bytes::from_static(b"v2"))
-        );
+        assert_eq!(reader.get(b"during").await.unwrap(), None);
         assert_eq!(reader.get(b"after").await.unwrap(), None);
         assert_eq!(
             db.get(b"after").await.unwrap(),
@@ -786,7 +792,7 @@ mod tests {
         let callback_release = Arc::clone(&release_checkpoint);
         fail_parallel::cfg_callback(
             Arc::clone(&fp_registry),
-            "checkpoint-after-reconcile",
+            "checkpoint-after-freeze",
             move || {
                 callback_reached.store(true, Ordering::Release);
                 while !callback_release.load(Ordering::Acquire) {
@@ -825,7 +831,7 @@ mod tests {
         assert!(later_wal_id > wal_id_before_later_write);
 
         release_checkpoint.store(true, Ordering::Release);
-        fail_parallel::remove(Arc::clone(&fp_registry), "checkpoint-after-reconcile");
+        fail_parallel::remove(Arc::clone(&fp_registry), "checkpoint-after-freeze");
         let checkpoint = tokio::time::timeout(Duration::from_secs(5), checkpoint_task)
             .await
             .unwrap()

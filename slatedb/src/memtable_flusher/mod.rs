@@ -14,9 +14,11 @@ pub(crate) use manifest_writer::FlushResult;
 #[cfg(test)]
 pub(crate) use tracker::MANIFEST_REFRESH_COUNT;
 
+#[cfg(test)]
+use crate::checkpoint::CheckpointBoundary;
 use crate::checkpoint::{
-    checkpoint_outcome_unknown, CheckpointBoundary, CheckpointHandle, CheckpointLifecycle,
-    CheckpointRequest,
+    checkpoint_outcome_unknown, CheckpointHandle, CheckpointLifecycle, CheckpointRequest,
+    CheckpointTarget,
 };
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
@@ -31,7 +33,7 @@ use crate::utils::SafeSender;
 use log::warn;
 use std::sync::Arc;
 use tokio::runtime::Handle;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
 
 const TRACKER_TASK_NAME: &str = "l0_flush_tracker";
@@ -81,6 +83,7 @@ impl MemtableFlusher {
             tokio_handle,
         )?;
 
+        let (l0_stall_tx, l0_stall_rx) = watch::channel(0);
         let manifest_writer = ManifestWriter::start(
             Arc::clone(&inner),
             manifest,
@@ -89,9 +92,10 @@ impl MemtableFlusher {
             executor,
             tokio_handle,
             self.messages_tx.clone(),
+            l0_stall_rx,
         )?;
 
-        let tracker = FlushTracker::new(inner, uploader, manifest_writer);
+        let tracker = FlushTracker::new(inner, uploader, manifest_writer, l0_stall_tx);
         executor.add_handler(
             TRACKER_TASK_NAME.to_string(),
             Box::new(tracker),
@@ -128,16 +132,14 @@ impl MemtableFlusher {
     pub(crate) async fn begin_checkpoint(
         &self,
         id: Uuid,
-        boundary: CheckpointBoundary,
+        target: CheckpointTarget,
         options: CheckpointOptions,
-        wal_flush: Option<crate::wal::FlushResultFuture>,
     ) -> Result<CheckpointHandle, SlateDBError> {
         let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
         let request = CheckpointRequest {
             id,
-            boundary,
+            target,
             lifecycle,
-            wal_flush,
         };
         self.messages_tx
             .send(TrackerMessage::CheckpointRequest { options, request })?;
@@ -153,10 +155,17 @@ impl MemtableFlusher {
         boundary: CheckpointBoundary,
         options: CheckpointOptions,
     ) -> Result<crate::checkpoint::CheckpointCreateResult, SlateDBError> {
-        self.begin_checkpoint(Uuid::new_v4(), boundary, options, None)
-            .await?
-            .wait_inner()
-            .await
+        self.begin_checkpoint(
+            Uuid::new_v4(),
+            CheckpointTarget::Captured {
+                boundary,
+                wal_flush: None,
+            },
+            options,
+        )
+        .await?
+        .wait_inner()
+        .await
     }
 
     /// Closes the flusher and its subsystems via the executor.

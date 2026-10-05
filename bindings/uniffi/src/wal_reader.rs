@@ -44,7 +44,7 @@ impl TryFrom<SlateDbWalReaderOptions> for slatedb::wal::SlateDbWalReaderOptions 
     }
 }
 
-fn positive_usize(value: u64, field: &'static str) -> Result<usize, Error> {
+pub(crate) fn positive_usize(value: u64, field: &'static str) -> Result<usize, Error> {
     if value == 0 {
         return Err(Error::Invalid {
             message: format!("{field} must be greater than zero"),

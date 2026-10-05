@@ -501,21 +501,60 @@ impl Compaction {
     /// Returns all L0 SSTable sources for this compaction. Sources are looked
     /// up from the spec's target segment tree (root tree for an empty
     /// segment).
+    /// Returns an error if a source is missing, ambiguous, or repeated.
     ///
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
-    pub(crate) fn get_l0_sst_views(&self, db_state: &ManifestCore) -> Vec<SsTableView> {
+    pub(crate) fn get_l0_sst_views(
+        &self,
+        db_state: &ManifestCore,
+    ) -> Result<Vec<SsTableView>, SlateDBError> {
         let Some(tree) = db_state.tree_for_segment(self.spec.segment()) else {
-            return Vec::new();
+            debug!(
+                "compaction target segment missing [compaction_id={}, segment={:?}]",
+                self.id,
+                self.spec.segment()
+            );
+            return Err(SlateDBError::InvalidCompaction);
         };
-        let sst_views_by_id: HashMap<Ulid, &SsTableView> =
-            tree.l0.iter().map(|view| (view.id, view)).collect();
+        let mut sst_views_by_id = HashMap::new();
+        for view in &tree.l0 {
+            // None marks an ID shared by multiple views.
+            sst_views_by_id
+                .entry(view.id)
+                .and_modify(|entry| *entry = None)
+                .or_insert(Some(view));
+        }
 
+        let mut sources_seen = HashSet::new();
         self.spec
             .sources()
             .iter()
             .filter_map(|s| s.maybe_unwrap_sst_view())
-            .filter_map(|ulid| sst_views_by_id.get(&ulid).map(|t| (*t).clone()))
+            .map(|id| {
+                if !sources_seen.insert(id) {
+                    debug!(
+                        "compaction L0 source repeated [compaction_id={}, view_id={}]",
+                        self.id, id
+                    );
+                    return Err(SlateDBError::InvalidCompaction);
+                }
+                match sst_views_by_id.get(&id) {
+                    Some(Some(view)) => Ok((*view).clone()),
+                    invalid => {
+                        let reason = if invalid.is_some() {
+                            "ambiguous"
+                        } else {
+                            "missing"
+                        };
+                        debug!(
+                            "compaction L0 source {} [compaction_id={}, view_id={}]",
+                            reason, self.id, id
+                        );
+                        Err(SlateDBError::InvalidCompaction)
+                    }
+                }
+            })
             .collect()
     }
 
@@ -523,7 +562,7 @@ impl Compaction {
     /// key ranges. Reusing the views avoids reading or rewriting SST data.
     pub(crate) fn trivial_move_output(&self, db_state: &ManifestCore) -> Option<SortedRun> {
         let destination = self.spec.destination()?;
-        let mut sst_views = self.get_l0_sst_views(db_state);
+        let mut sst_views = self.get_l0_sst_views(db_state).ok()?;
         sst_views.extend(
             self.get_sorted_runs(db_state)
                 .iter()
@@ -571,6 +610,16 @@ impl Compaction {
     /// Returns the current status of this compaction.
     pub fn status(&self) -> CompactionStatus {
         self.status
+    }
+
+    /// Returns whether a worker can claim this compaction but has not yet.
+    pub(crate) fn scheduled(&self) -> bool {
+        matches!(self.status, CompactionStatus::Scheduled)
+    }
+
+    /// Returns whether a worker has claimed this compaction and is executing it.
+    pub(crate) fn running(&self) -> bool {
+        matches!(self.status, CompactionStatus::Running)
     }
 
     /// Returns all output SSTs produced by this compaction.
@@ -2569,7 +2618,10 @@ mod tests {
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
         let opts = Settings {
-            l0_sst_size_bytes: 256,
+            // The two seeded puts must land in one L0 SST, so this sits
+            // between the estimated size of a one entry and a two entry
+            // memtable.
+            l0_sst_size_bytes: 300,
             // make sure to run with the compactor disabled. The tests will explicitly
             // manage compaction execution and assert the associated state mutations.
             compactor_options: None,

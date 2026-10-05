@@ -59,6 +59,11 @@ fn record_read_cached(span: &tracing::Span, lookup: CacheLookup) {
     };
 }
 
+fn record_read_block_cache_counts(span: &tracing::Span, cache_hits: usize, cache_misses: usize) {
+    span.record("cache_hits", cache_hits as u64);
+    span.record("cache_misses", cache_misses as u64);
+}
+
 impl TableStore {
     pub(crate) fn new<P: Into<Path>>(
         object_store: Arc<dyn ObjectStore>,
@@ -718,6 +723,7 @@ impl TableStore {
     /// Returns the smallest contiguous block range, starting at `first_block` in
     /// `order`, whose encoded size is at least `target_bytes`. If the SST boundary
     /// is reached first, all remaining blocks in that direction are returned.
+    /// The size counts block padding, since the read fetches it.
     pub(crate) fn block_range_for_target_bytes(
         &self,
         handle: &SsTableHandle,
@@ -774,6 +780,8 @@ impl TableStore {
     /// It can optionally cache newly read blocks.
     /// `segment` is a hint attached to the [`ObjectStoreCallTag`] for
     /// object-store routing.
+    /// `trace` owns the span for the block read.
+    /// `sst_level` identifies the level that contains the SST.
     pub(crate) async fn read_blocks_using_index(
         &self,
         handle: &SsTableHandle,
@@ -781,6 +789,29 @@ impl TableStore {
         blocks: Range<usize>,
         cache_blocks: bool,
         segment: Option<Bytes>,
+        trace: &ReadTrace,
+        sst_level: Option<&SstTraceLevel>,
+    ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
+        let span = trace.new_read_block_span(handle.id, sst_level);
+        let read = self.read_blocks_using_index_inner(
+            handle,
+            index,
+            blocks,
+            cache_blocks,
+            segment,
+            span.clone(),
+        );
+        read.instrument(span).await
+    }
+
+    async fn read_blocks_using_index_inner(
+        &self,
+        handle: &SsTableHandle,
+        index: Arc<SsTableIndexOwned>,
+        blocks: Range<usize>,
+        cache_blocks: bool,
+        segment: Option<Bytes>,
+        span: tracing::Span,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
         // Single-block reads (point-gets via SstIterator::for_key, SstFile::read_block,
         // etc.) take a dedup-aware fast-path: concurrent callers for the same block
@@ -796,6 +827,11 @@ impl TableStore {
                 let loader = self.block_loader(handle, index.clone(), block_num, segment.clone());
                 if let Ok(fetch) = cache.fetch_block(cache_key, loader).await {
                     if let Some(block) = fetch.entry.block() {
+                        let (cache_hits, cache_misses) = match fetch.lookup {
+                            CacheLookup::Hit => (1, 0),
+                            CacheLookup::Miss => (0, 1),
+                        };
+                        record_read_block_cache_counts(&span, cache_hits, cache_misses);
                         let mut result = VecDeque::with_capacity(1);
                         result.push_back(block);
                         return Ok(result);
@@ -809,6 +845,8 @@ impl TableStore {
         // Initialize the result vector and a vector to track uncached ranges
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
+        let mut cache_hits = 0;
+        let mut cache_misses = 0;
 
         // If block cache is available, try to retrieve cached blocks
         if let Some(cache) = self.cache_for_reads() {
@@ -831,6 +869,7 @@ impl TableStore {
             for (index, block_result) in cached_blocks.into_iter().enumerate() {
                 match block_result {
                     Some(cached_block) => {
+                        cache_hits += 1;
                         // If a cached block is found, add it to blocks_read
                         if let Some(start) = last_uncached_start.take() {
                             uncached_ranges.push((blocks.start + start)..(blocks.start + index));
@@ -838,6 +877,7 @@ impl TableStore {
                         blocks_read.push_back(cached_block);
                     }
                     None => {
+                        cache_misses += 1;
                         // If a block is not in cache, mark the start of an uncached range
                         last_uncached_start.get_or_insert(index);
                     }
@@ -849,8 +889,10 @@ impl TableStore {
             }
         } else {
             // If no cache is available, treat all blocks as uncached
+            cache_misses = blocks.len();
             uncached_ranges.push(blocks.clone());
         }
+        record_read_block_cache_counts(&span, cache_hits, cache_misses);
         // Read uncached blocks concurrently
         let uncached_blocks = join_all(uncached_ranges.iter().map(|range| {
             let object_store = &object_store;
@@ -955,6 +997,14 @@ impl TableStore {
             .any(|policy| policy.supports_range_queries())
     }
 
+    /// Whether any registered filter policy can answer a prefix query.
+    pub(crate) fn any_filter_policy_supports_prefix_queries(&self) -> bool {
+        self.sst_format
+            .filter_policies
+            .iter()
+            .any(|policy| policy.supports_prefix_queries())
+    }
+
     pub(crate) fn cache(&self) -> Option<&Arc<dyn DbCache>> {
         self.cache.as_ref()
     }
@@ -1032,7 +1082,7 @@ impl TableStore {
         // Best effort: if we can't read the index we can't enumerate blocks,
         // so log and skip. Remaining entries will age out under normal pressure.
         let index = match self
-            .read_index(handle, false, segment, &ReadTrace::new(None), None)
+            .read_index(handle, false, segment, &ReadTrace::none(), None)
             .await
         {
             Ok(index) => index,
@@ -1082,7 +1132,7 @@ async fn write_sst_streaming_in_object_store(
 ) -> Result<(), SlateDBError> {
     let mut writer = tagged_buf_writer(object_store, path.clone(), tag);
     for block in &encoded_sst.unconsumed_blocks {
-        writer.put(block.encoded_bytes.clone()).await?;
+        writer.put(block.padded_bytes.clone()).await?;
     }
     writer.put(encoded_sst.footer.clone()).await?;
     writer.shutdown().await?;
@@ -1129,8 +1179,8 @@ impl EncodedSsTableWriter {
             let builder = std::mem::replace(&mut self.builder, self.table_store.table_builder());
             let encoded_sst = builder.build().await?;
             for block in &encoded_sst.unconsumed_blocks {
-                self.writer.write_all(block.encoded_bytes.as_ref()).await?;
-                self.bytes_written += block.encoded_bytes.len();
+                self.writer.write_all(block.padded_bytes.as_ref()).await?;
+                self.bytes_written += block.padded_bytes.len();
             }
             self.writer.write_all(encoded_sst.footer.as_ref()).await?;
             self.bytes_written += encoded_sst.footer.len();
@@ -1201,8 +1251,8 @@ impl EncodedSsTableWriter {
             "write-compacted-sst-io-error",
             |_| Err(slatedb_io_error())
         );
-        self.writer.write_all(block.encoded_bytes.as_ref()).await?;
-        self.bytes_written += block.encoded_bytes.len();
+        self.writer.write_all(block.padded_bytes.as_ref()).await?;
+        self.bytes_written += block.padded_bytes.len();
         if let (Some(cache), Some(key_span)) = (&self.table_store.cache, &block.key_span) {
             let targets = self.table_store.targets_to_cache(&self.id);
             if should_cache_data_block(targets, key_span) {
@@ -1245,7 +1295,7 @@ mod tests {
     use futures::future;
     use futures::StreamExt;
     use object_store::{memory::InMemory, path::Path, ObjectStore, ObjectStoreExt};
-    use rstest::rstest;
+    use rstest::{fixture, rstest};
     use std::collections::{HashMap, VecDeque};
     use std::ops::Range;
     use std::sync::Arc;
@@ -1380,6 +1430,7 @@ mod tests {
                     &BlockMetaArgs {
                         offset: *offset,
                         first_key: Some(first_key),
+                        encoded_len: 0,
                     },
                 )
             })
@@ -1673,19 +1724,21 @@ mod tests {
 
         // Read the index
         let index = ts
-            .read_index(
-                &handle,
-                true,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
 
         // Test 1: SST hit
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                0..20,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1717,7 +1770,15 @@ mod tests {
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                0..20,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data).await;
@@ -1742,7 +1803,15 @@ mod tests {
 
         // Test 3: All blocks should be in cache after SST file is emptied
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                0..20,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data).await;
@@ -1763,13 +1832,29 @@ mod tests {
 
         // Test 4: Verify that reading specific ranges still works after SST file is emptied
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 5..10, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                5..10,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data[5..10]).await;
 
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 15..20, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                15..20,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data[15..20]).await;
@@ -1823,13 +1908,7 @@ mod tests {
         assert_eq!(meta_cache.entry_count(), 0);
 
         let _ = reader
-            .read_index(
-                &handle,
-                false,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
         assert!(meta_cache
@@ -1839,13 +1918,7 @@ mod tests {
             .is_none());
 
         let _ = reader
-            .read_index(
-                &handle,
-                true,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
         assert!(meta_cache
@@ -1939,7 +2012,7 @@ mod tests {
                                     &handle,
                                     true,
                                     Some(Bytes::new()),
-                                    &ReadTrace::new(None),
+                                    &ReadTrace::none(),
                                     None,
                                 )
                                 .await
@@ -1951,7 +2024,7 @@ mod tests {
                                     &handle,
                                     true,
                                     Some(Bytes::new()),
-                                    &ReadTrace::new(None),
+                                    &ReadTrace::none(),
                                     None,
                                 )
                                 .await
@@ -2011,6 +2084,275 @@ mod tests {
         );
     }
 
+    struct ReadBlocksSpanTest {
+        writer: TableStore,
+        reader: TableStore,
+        block_cache: Arc<TestCache>,
+        handle: SsTableHandle,
+        index: Arc<SsTableIndexOwned>,
+        num_blocks: usize,
+    }
+
+    impl ReadBlocksSpanTest {
+        fn all_blocks(&self) -> Range<usize> {
+            0..self.num_blocks
+        }
+
+        fn fill_cache(&self, blocks: Range<usize>) {
+            tokio_test::block_on(async {
+                self.reader
+                    .read_blocks_using_index(
+                        &self.handle,
+                        self.index.clone(),
+                        blocks,
+                        true,
+                        Some(Bytes::new()),
+                        &ReadTrace::none(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            });
+        }
+
+        fn evict_block(&self, block: usize) {
+            tokio_test::block_on(async {
+                let offset = self.index.borrow().block_meta().get(block).offset();
+                self.block_cache
+                    .remove(&(self.handle.id, offset).into())
+                    .await;
+            });
+        }
+    }
+
+    #[fixture]
+    fn read_blocks_span_test() -> ReadBlocksSpanTest {
+        tokio_test::block_on(async {
+            let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let format = SsTableFormat {
+                block_size: 32,
+                min_filter_keys: u32::MAX,
+                ..SsTableFormat::default()
+            };
+            let writer = TableStore::new(
+                main_store.clone(),
+                format.clone(),
+                Path::from(ROOT),
+                None,
+                TableStoreKind::Main,
+                BlockCachePolicy::default(),
+            );
+
+            let mut builder = writer.table_builder();
+            for i in 0..8 {
+                builder
+                    .add(RowEntry::new_value(&[i; 16], &[i + 1; 16], 0))
+                    .await
+                    .unwrap();
+            }
+            let id = SsTableId::from(ulid::Ulid::new());
+            let handle = writer
+                .write_sst(&id, &builder.build().await.unwrap(), Some(Bytes::new()))
+                .await
+                .unwrap();
+
+            let block_cache = Arc::new(TestCache::new());
+            let cache = Arc::new(
+                SplitCache::new()
+                    .with_block_cache(Some(block_cache.clone()))
+                    .build(),
+            );
+            let reader = TableStore::new(
+                main_store,
+                format,
+                Path::from(ROOT),
+                Some(cache),
+                TableStoreKind::Main,
+                BlockCachePolicy::default(),
+            );
+            let index = reader
+                .read_index(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None)
+                .await
+                .unwrap();
+            let num_blocks = index.borrow().block_meta().len();
+            assert!(num_blocks > 1);
+
+            ReadBlocksSpanTest {
+                writer,
+                reader,
+                block_cache,
+                handle,
+                index,
+                num_blocks,
+            }
+        })
+    }
+
+    fn verify_read_blocks_span(
+        store: &TableStore,
+        handle: &SsTableHandle,
+        index: Arc<SsTableIndexOwned>,
+        trace_id: &str,
+        blocks: Range<usize>,
+        cache_blocks: bool,
+        cache_hits: usize,
+        cache_misses: usize,
+    ) {
+        let span_recorder = SpanRecorder::for_name("slatedb.read.read_blocks");
+        let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            tokio_test::block_on(async {
+                let trace = ReadTrace::new(Some(TracingOptions::new(trace_id)));
+                let sst_level = SstTraceLevel::SortedRun(7);
+                let expected_blocks = blocks.len();
+                let blocks = store
+                    .read_blocks_using_index(
+                        handle,
+                        index,
+                        blocks,
+                        cache_blocks,
+                        Some(Bytes::new()),
+                        &trace,
+                        Some(&sst_level),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(blocks.len(), expected_blocks);
+
+                let span = span_recorder.only_span();
+                assert_eq!(span.level, "INFO");
+                assert_eq!(span.parent_name.as_deref(), Some("slatedb.read"));
+                assert_eq!(
+                    span.fields.get("trace_id").map(String::as_str),
+                    Some(trace_id)
+                );
+                assert_eq!(
+                    span.fields.get("sst_id").map(String::as_str),
+                    Some(handle.id.value().to_string().as_str())
+                );
+                assert_eq!(
+                    span.fields.get("sst_level").map(String::as_str),
+                    Some("sorted_run:7")
+                );
+                assert_eq!(
+                    span.fields.get("cache_hits").map(String::as_str),
+                    Some(cache_hits.to_string().as_str())
+                );
+                assert_eq!(
+                    span.fields.get("cache_misses").map(String::as_str),
+                    Some(cache_misses.to_string().as_str())
+                );
+            })
+        });
+    }
+
+    #[rstest]
+    fn test_read_blocks_span_all_miss(read_blocks_span_test: ReadBlocksSpanTest) {
+        let blocks = read_blocks_span_test.all_blocks();
+        verify_read_blocks_span(
+            &read_blocks_span_test.reader,
+            &read_blocks_span_test.handle,
+            read_blocks_span_test.index.clone(),
+            "all-miss",
+            blocks.clone(),
+            true,
+            0,
+            blocks.len(),
+        );
+    }
+
+    #[rstest]
+    fn test_read_blocks_span_all_hit(read_blocks_span_test: ReadBlocksSpanTest) {
+        let blocks = read_blocks_span_test.all_blocks();
+        read_blocks_span_test.fill_cache(blocks.clone());
+        verify_read_blocks_span(
+            &read_blocks_span_test.reader,
+            &read_blocks_span_test.handle,
+            read_blocks_span_test.index.clone(),
+            "all-hit",
+            blocks.clone(),
+            true,
+            blocks.len(),
+            0,
+        );
+    }
+
+    #[rstest]
+    fn test_read_blocks_span_partial_hit(read_blocks_span_test: ReadBlocksSpanTest) {
+        let blocks = read_blocks_span_test.all_blocks();
+        read_blocks_span_test.fill_cache(blocks.clone());
+        read_blocks_span_test.evict_block(1);
+        verify_read_blocks_span(
+            &read_blocks_span_test.reader,
+            &read_blocks_span_test.handle,
+            read_blocks_span_test.index.clone(),
+            "partial-hit",
+            blocks.clone(),
+            true,
+            blocks.len() - 1,
+            1,
+        );
+    }
+
+    #[rstest]
+    fn test_read_blocks_span_single_hit(read_blocks_span_test: ReadBlocksSpanTest) {
+        read_blocks_span_test.fill_cache(0..1);
+        verify_read_blocks_span(
+            &read_blocks_span_test.reader,
+            &read_blocks_span_test.handle,
+            read_blocks_span_test.index.clone(),
+            "single-hit",
+            0..1,
+            true,
+            1,
+            0,
+        );
+    }
+
+    #[rstest]
+    fn test_read_blocks_span_single_miss(read_blocks_span_test: ReadBlocksSpanTest) {
+        verify_read_blocks_span(
+            &read_blocks_span_test.reader,
+            &read_blocks_span_test.handle,
+            read_blocks_span_test.index.clone(),
+            "single-miss",
+            0..1,
+            true,
+            0,
+            1,
+        );
+    }
+
+    #[rstest]
+    fn test_read_blocks_span_when_cache_is_disabled(read_blocks_span_test: ReadBlocksSpanTest) {
+        verify_read_blocks_span(
+            &read_blocks_span_test.reader,
+            &read_blocks_span_test.handle,
+            read_blocks_span_test.index.clone(),
+            "cache-disabled",
+            0..1,
+            false,
+            0,
+            1,
+        );
+        assert_eq!(read_blocks_span_test.block_cache.entry_count(), 0);
+    }
+
+    #[rstest]
+    fn test_read_blocks_span_without_cache(read_blocks_span_test: ReadBlocksSpanTest) {
+        let blocks = read_blocks_span_test.all_blocks();
+        verify_read_blocks_span(
+            &read_blocks_span_test.writer,
+            &read_blocks_span_test.handle,
+            read_blocks_span_test.index.clone(),
+            "no-cache",
+            blocks.clone(),
+            true,
+            0,
+            blocks.len(),
+        );
+    }
+
     #[tokio::test]
     async fn test_read_filter_honors_cache_blocks() {
         let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -2059,13 +2401,7 @@ mod tests {
         assert_eq!(meta_cache.entry_count(), 0);
 
         let filters = reader
-            .read_filters(
-                &handle,
-                false,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_filters(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
         assert!(!filters.is_empty());
@@ -2076,13 +2412,7 @@ mod tests {
             .is_none());
 
         let _ = reader
-            .read_filters(
-                &handle,
-                true,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_filters(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
         assert!(meta_cache
@@ -2499,13 +2829,7 @@ mod tests {
         // be used and reading the index will just return an error.
         os.delete(&ts.path(&id)).await.unwrap();
         assert!(ts
-            .read_index(
-                &handle,
-                false,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None,)
             .await
             .is_err());
     }
@@ -2983,13 +3307,7 @@ mod tests {
             let handle = handle.clone();
             async move {
                 reader
-                    .read_index(
-                        &handle,
-                        true,
-                        Some(Bytes::new()),
-                        &ReadTrace::new(None),
-                        None,
-                    )
+                    .read_index(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
                     .await
             }
         });
@@ -3009,13 +3327,7 @@ mod tests {
             let handle = handle.clone();
             async move {
                 reader
-                    .read_index(
-                        &handle,
-                        true,
-                        Some(Bytes::new()),
-                        &ReadTrace::new(None),
-                        None,
-                    )
+                    .read_index(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
                     .await
             }
         };
@@ -3082,13 +3394,7 @@ mod tests {
         // sees only block reads (the fast-path takes `index` as an argument, so no
         // extra index read happens inside the race).
         let index = writer
-            .read_index(
-                &handle,
-                false,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
 
@@ -3122,7 +3428,15 @@ mod tests {
             let index = index.clone();
             async move {
                 reader
-                    .read_blocks_using_index(&handle, index, 0..1, true, Some(Bytes::new()))
+                    .read_blocks_using_index(
+                        &handle,
+                        index,
+                        0..1,
+                        true,
+                        Some(Bytes::new()),
+                        &ReadTrace::none(),
+                        None,
+                    )
                     .await
             }
         });
@@ -3143,7 +3457,15 @@ mod tests {
             let index = index.clone();
             async move {
                 reader
-                    .read_blocks_using_index(&handle, index, 0..1, true, Some(Bytes::new()))
+                    .read_blocks_using_index(
+                        &handle,
+                        index,
+                        0..1,
+                        true,
+                        Some(Bytes::new()),
+                        &ReadTrace::none(),
+                        None,
+                    )
                     .await
             }
         };
@@ -3224,7 +3546,7 @@ mod tests {
                 &handle,
                 false,
                 Some(segment.clone()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await

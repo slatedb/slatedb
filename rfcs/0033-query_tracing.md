@@ -179,7 +179,10 @@ Span `slatedb.read.read_blocks` traces the reading of data blocks of an SST. The
 the level of the SST, and how many cache hits and misses were encountered while reading the blocks.
 
 Processing of the merge operator is traced by span `slatedb.read.merge`. Merging is performed in batches. For each
-batch a separate span is produced. Each span contains the number of merged operands as a field.
+batch a separate span is produced. One additional span is produced for the final merge that merges the merge results of
+the batches and a base value if present. Each span contains the number of merged operands as a field. The
+number of operands for each batch merge is the size of the batch. For the final merge the number of operands is the
+number of batches plus one if the base value is present.
 
 ## Impact Analysis
 

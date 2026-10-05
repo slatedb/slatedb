@@ -315,6 +315,7 @@ impl DbIterator {
                 // The entries in the write batch iterator have seq num u64::MAX and any merges
                 // there need to be merged with the entries from the other iterators.
                 None,
+                read_trace,
             ));
         } else {
             // When no merge operator is configured, wrap with iterator that errors on merge operands
@@ -764,7 +765,7 @@ mod tests {
             Some(5),
             merge.then(|| Arc::new(StringConcatMergeOperator) as MergeOperatorType),
             order,
-            ReadTrace::new(None),
+            ReadTrace::none(),
         )
         .await
         .unwrap();
@@ -792,7 +793,7 @@ mod tests {
             None,
             None,
             IterationOrder::Ascending,
-            ReadTrace::new(None),
+            ReadTrace::none(),
         )
         .await
         .unwrap();
@@ -833,7 +834,7 @@ mod tests {
             Some(100),
             None,
             IterationOrder::Ascending,
-            ReadTrace::new(None),
+            ReadTrace::none(),
         )
         .await
         .unwrap();
@@ -864,7 +865,7 @@ mod tests {
             None,
             None,
             IterationOrder::Ascending,
-            ReadTrace::new(None),
+            ReadTrace::none(),
         )
         .await
         .unwrap();
@@ -914,7 +915,7 @@ mod tests {
             None,
             None,
             IterationOrder::Ascending,
-            ReadTrace::new(None),
+            ReadTrace::none(),
         )
         .await
         .unwrap();

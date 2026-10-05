@@ -17,9 +17,12 @@ use log::debug;
 use super::tracker::TrackerMessage;
 use super::uploader::UploadedMemtable;
 #[cfg(test)]
-use crate::checkpoint::{CheckpointBoundary, CheckpointResult};
-use crate::checkpoint::{CheckpointCreateResult, CheckpointLifecycle, CheckpointRequest};
-use crate::config::CheckpointOptions;
+use crate::checkpoint::CheckpointResult;
+use crate::checkpoint::{
+    CheckpointBoundary, CheckpointCreateResult, CheckpointLifecycle, CheckpointRequest,
+    CheckpointTarget,
+};
+use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::DbInner;
 use crate::db_state::{collect_touched_segments, DbState, SsTableId, SsTableView};
 use crate::dispatcher::MessageHandler;
@@ -34,6 +37,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use parking_lot::RwLockWriteGuard;
+use slatedb_common::clock::SystemClock;
 use slatedb_txn_obj::DirtyObject;
 use std::cmp;
 use std::collections::{BTreeMap, HashSet};
@@ -86,7 +90,7 @@ impl std::fmt::Debug for ManifestWriterCommand {
                 write!(f, "AwaitFlush({through_seq:?})")
             }
             Self::CreateCheckpoint { request, .. } => {
-                write!(f, "CreateCheckpoint({:?})", request.boundary.through_seq)
+                write!(f, "CreateCheckpoint({})", request.id)
             }
             Self::PollManifest { .. } => write!(f, "PollManifest"),
             Self::DurableSeqAdvanced => write!(f, "DurableSeqAdvanced"),
@@ -95,6 +99,11 @@ impl std::fmt::Debug for ManifestWriterCommand {
 }
 
 pub(super) const MANIFEST_WRITER_TASK_NAME: &str = "l0_manifest_writer";
+
+/// First delay between manifest polls while the flush tracker is stalled on L0.
+const MIN_L0_STALL_POLL_BACKOFF: Duration = Duration::from_millis(50);
+/// Longest delay between manifest polls while the flush tracker is stalled on L0.
+const MAX_L0_STALL_POLL_BACKOFF: Duration = Duration::from_secs(1);
 
 /// Ordered L0 retirement and manifest update subsystem.
 pub(crate) struct ManifestWriter {
@@ -111,10 +120,17 @@ impl ManifestWriter {
         executor: &crate::dispatcher::MessageHandlerExecutor,
         tokio_handle: &Handle,
         tracker_tx: SafeSender<TrackerMessage>,
+        l0_stall_rx: watch::Receiver<u64>,
     ) -> Result<Self, SlateDBError> {
         let (commands_tx, commands_rx) =
             SafeSender::unbounded_channel(closed_result.result_reader());
-        let handler = ManifestWriterHandler::new(db, manifest, manifest_poll_interval, tracker_tx);
+        let handler = ManifestWriterHandler::new(
+            db,
+            manifest,
+            manifest_poll_interval,
+            tracker_tx,
+            l0_stall_rx,
+        );
         executor.add_handler(
             MANIFEST_WRITER_TASK_NAME.to_string(),
             Box::new(handler),
@@ -154,7 +170,7 @@ impl ManifestWriter {
         )
     }
 
-    /// Sends a checkpoint request with its boundary and completion channels.
+    /// Sends a checkpoint request with its scope and completion channels.
     /// The manifest writer waits until the request's sequence boundary is durable.
     pub(crate) fn begin_checkpoint(
         &self,
@@ -182,12 +198,14 @@ impl ManifestWriter {
         let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
         let request = CheckpointRequest {
             id,
-            boundary: CheckpointBoundary {
-                through_seq,
-                wal_id_last_seen: Some(0),
+            target: CheckpointTarget::Captured {
+                boundary: CheckpointBoundary {
+                    through_seq,
+                    wal_id_last_seen: Some(0),
+                },
+                wal_flush: None,
             },
             lifecycle,
-            wal_flush: None,
         };
         let result = self.begin_checkpoint(options, request);
         tokio::spawn(async move {
@@ -235,6 +253,9 @@ struct ManifestWriterHandler {
     /// Watches the database status so the manifest write can wait for
     /// WAL durability without blocking uploads.
     db_status_rx: watch::Receiver<crate::db_status::DbStatus>,
+    /// Watches the flush tracker's L0 stall state so the manifest is polled
+    /// while a writer is stalled. See [`L0StallPollNotifier`].
+    l0_stall_rx: watch::Receiver<u64>,
     pending_flushes: Vec<PendingFlush>,
     pending_checkpoints: Vec<PendingCheckpoint>,
     pending_manifest_refreshes: Vec<oneshot::Sender<Result<(), SlateDBError>>>,
@@ -250,9 +271,16 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
     }
 
     fn notifiers(&mut self) -> Vec<Box<dyn crate::dispatcher::Notifier<ManifestWriterCommand>>> {
-        vec![Box::new(DurableSeqNotifier {
-            rx: self.db_status_rx.clone(),
-        })]
+        vec![
+            Box::new(DurableSeqNotifier {
+                rx: self.db_status_rx.clone(),
+            }),
+            Box::new(L0StallPollNotifier::new(
+                self.l0_stall_rx.clone(),
+                Arc::clone(&self.db.system_clock),
+                self.manifest_poll_interval,
+            )),
+        ]
     }
 
     async fn handle(&mut self, command: ManifestWriterCommand) -> Result<(), SlateDBError> {
@@ -284,16 +312,14 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
     ) -> Result<(), SlateDBError> {
         let mut commands = commands.fuse();
         let close_result = self.try_graceful_cleanup(&mut commands, &result).await;
-        // Drain any commands not consumed by graceful cleanup, collecting
-        // waiters so they receive a proper error.
-        while let Some(command) = commands.next().await {
-            self.collect_pending_waiter(command);
-        }
-        // Any remaining pending waiters must fail with a concrete error.
         let error = result
             .and(close_result.clone())
             .err()
             .unwrap_or(SlateDBError::Closed);
+        // Fail requests that remain after cleanup with the database error.
+        while let Some(command) = commands.next().await {
+            self.collect_pending_waiter(command, &error);
+        }
         self.fail_pending_flushes(&error);
         self.fail_pending_checkpoints(&error);
         self.fail_pending_manifest_refreshes(&error);
@@ -307,6 +333,7 @@ impl ManifestWriterHandler {
         manifest: FenceableManifest,
         manifest_poll_interval: Duration,
         tracker_tx: SafeSender<TrackerMessage>,
+        l0_stall_rx: watch::Receiver<u64>,
     ) -> Self {
         let durable_seq = db.oracle.last_remote_persisted_seq();
         let db_status_rx = db.status_manager.subscribe();
@@ -319,6 +346,7 @@ impl ManifestWriterHandler {
             ready: BTreeMap::new(),
             durable_seq,
             db_status_rx,
+            l0_stall_rx,
             pending_checkpoints: Vec::new(),
             pending_manifest_refreshes: Vec::new(),
         }
@@ -373,10 +401,41 @@ impl ManifestWriterHandler {
     ) -> Result<(), SlateDBError> {
         let CheckpointRequest {
             id,
-            boundary,
+            target,
             mut lifecycle,
-            wal_flush,
         } = request;
+        // Capture the boundary here so no manifest write can pass it before registration.
+        let (boundary, wal_flush) = match target {
+            CheckpointTarget::Scope(CheckpointScope::All) => {
+                match self.db.begin_batch_writer_flush(true).await {
+                    Ok((flush, boundary)) => (
+                        boundary.expect("checkpoint freeze needs a boundary"),
+                        Some(flush),
+                    ),
+                    Err(error) => {
+                        lifecycle.fail(error.clone());
+                        return Err(error);
+                    }
+                }
+            }
+            CheckpointTarget::Scope(CheckpointScope::Durable) => (
+                CheckpointBoundary {
+                    through_seq: None,
+                    wal_id_last_seen: None,
+                },
+                None,
+            ),
+            #[cfg(test)]
+            CheckpointTarget::Captured {
+                boundary,
+                wal_flush,
+            } => (boundary, wal_flush),
+        };
+        fail_parallel::fail_point!(
+            Arc::clone(&self.db.fp_registry),
+            "checkpoint-after-freeze",
+            |_| { Ok(()) }
+        );
         lifecycle.accept();
         // This handler holds the boundary while the WAL upload finishes.
         // Later commands cannot publish table files before this request is queued.
@@ -524,13 +583,6 @@ impl ManifestWriterHandler {
     }
 
     fn apply_uploaded_state(&self, staged_batch: &[UploadedMemtable]) -> Result<(), SlateDBError> {
-        let min_active_snapshot_seq = [
-            self.db.snapshot_manager.min_active_seq(),
-            self.db.txn_manager.min_active_seq(),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
         let segmented = self.db.segment_extractor.is_some();
         let mut guard = self.db.state.write();
         let manifest = guard.modify(|modifier| {
@@ -584,7 +636,6 @@ impl ManifestWriterHandler {
                 // can do that. So assert `>` rather than `>=`.
                 assert!(uploaded.last_seq > core.last_l0_seq);
                 core.last_l0_seq = uploaded.last_seq;
-                core.recent_snapshot_min_seq = min_active_snapshot_seq.unwrap_or(uploaded.last_seq);
                 core.sequence_tracker.extend_from(uploaded_tracker);
             }
             Ok(modifier.state.manifest.clone())
@@ -636,15 +687,8 @@ impl ManifestWriterHandler {
         &mut self,
         checkpoints: &[&PendingCheckpoint],
     ) -> Result<Vec<CheckpointCreateResult>, SlateDBError> {
-        let mut dirty = self.clone_local_manifest_for_write();
-        if let Some(wal_id_last_seen) = self.checkpoint_wal_id_last_seen(checkpoints)? {
-            // Table flushes can advance the replay point past the captured WAL boundary.
-            // In that case, the checkpoint needs no WAL replay.
-            dirty.value.core.next_wal_sst_id = wal_id_last_seen
-                .max(dirty.value.core.replay_after_wal_id)
-                .checked_add(1)
-                .ok_or(SlateDBError::InvalidDBState)?;
-        }
+        let wal_boundary = self.checkpoint_wal_id_last_seen(checkpoints)?;
+        let mut dirty = self.prepare_local_manifest_for_write(wal_boundary)?;
         let mut checkpoint_results = Vec::new();
         for pending in checkpoints {
             let checkpoint = self.manifest.new_checkpoint(pending.id, &pending.options)?;
@@ -694,18 +738,53 @@ impl ManifestWriterHandler {
     }
 
     async fn write_current_manifest(&mut self) -> Result<(), SlateDBError> {
-        let dirty = self.clone_local_manifest_for_write();
+        let dirty = self.prepare_local_manifest_for_write(None)?;
         self.manifest.update(dirty.clone()).await?;
         self.db.status_manager.report_manifest(dirty.into());
         Ok(())
     }
 
-    fn clone_local_manifest_for_write(&self) -> DirtyObject<Manifest> {
-        let dirty = {
-            let rguard_state = self.db.state.read();
-            rguard_state.state().manifest.clone()
-        };
-        dirty
+    fn prepare_local_manifest_for_write(
+        &self,
+        attached_wal_boundary: Option<u64>,
+    ) -> Result<DirtyObject<Manifest>, SlateDBError> {
+        let min_active_snapshot_seq = [
+            self.db.snapshot_manager.min_active_seq(),
+            self.db.txn_manager.min_active_seq(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        // A closed WAL still reports the last durable file for the final manifest write.
+        let wal_status = self
+            .db
+            .wal_observer
+            .status()
+            .unwrap_or_else(|status| status);
+        let mut guard = self.db.state.write();
+        // Pending checkpoints limit every manifest write until their boundaries are published.
+        let wal_boundary = self
+            .pending_checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.options.source.is_none())
+            .filter_map(|checkpoint| checkpoint.wal_id_last_seen)
+            .chain(attached_wal_boundary)
+            .min();
+        let last_wal_id = wal_boundary.map_or(wal_status.last_flushed_wal_id, |boundary| {
+            boundary.min(wal_status.last_flushed_wal_id)
+        });
+        let next_wal_id = last_wal_id
+            .checked_add(1)
+            .ok_or(SlateDBError::InvalidDBState)?;
+        if next_wal_id < guard.state().core().next_wal_sst_id {
+            return Err(SlateDBError::InvalidDBState);
+        }
+        guard.set_next_wal_id(next_wal_id);
+        Ok(guard.modify(|modifier| {
+            let core = &mut modifier.state.manifest.value.core;
+            core.recent_snapshot_min_seq = min_active_snapshot_seq.unwrap_or(core.last_l0_seq);
+            modifier.state.manifest.clone()
+        }))
     }
 
     async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
@@ -919,7 +998,7 @@ impl ManifestWriterHandler {
 
     /// Extract waiters from a command without processing uploads. Used during
     /// error shutdown to ensure waiters get a proper error.
-    fn collect_pending_waiter(&mut self, command: ManifestWriterCommand) {
+    fn collect_pending_waiter(&mut self, command: ManifestWriterCommand, error: &SlateDBError) {
         match command {
             ManifestWriterCommand::AwaitFlush {
                 through_seq,
@@ -930,14 +1009,8 @@ impl ManifestWriterHandler {
                     sender,
                 });
             }
-            ManifestWriterCommand::CreateCheckpoint { options, request } => {
-                self.pending_checkpoints.push(PendingCheckpoint {
-                    id: request.id,
-                    through_seq: request.boundary.through_seq,
-                    wal_id_last_seen: request.boundary.wal_id_last_seen,
-                    options,
-                    lifecycle: request.lifecycle,
-                });
+            ManifestWriterCommand::CreateCheckpoint { request, .. } => {
+                request.lifecycle.fail(error.clone());
             }
             ManifestWriterCommand::PollManifest { done: Some(sender) } => {
                 self.pending_manifest_refreshes.push(sender);
@@ -957,14 +1030,23 @@ impl ManifestWriterHandler {
             }
         }
 
-        // Persist the local manifest on shutdown to advance next_wal_sst_id
-        // and any other locally updated fields. Skip if fenced since another
-        // writer owns the manifest.
-        if !matches!(result, Err(SlateDBError::Fenced)) {
-            self.write_current_manifest_safely().await?;
+        // Unfinished checkpoints no longer limit the final WAL endpoint.
+        let unfinished_checkpoints = std::mem::take(&mut self.pending_checkpoints);
+        let write_result = if matches!(result, Err(SlateDBError::Fenced)) {
+            Ok(())
+        } else {
+            self.write_current_manifest_safely().await
+        };
+        let error = result
+            .as_ref()
+            .err()
+            .or_else(|| write_result.as_ref().err())
+            .cloned()
+            .unwrap_or(SlateDBError::Closed);
+        for checkpoint in unfinished_checkpoints {
+            checkpoint.send_error(error.clone());
         }
-
-        Ok(())
+        write_result
     }
 }
 
@@ -1020,13 +1102,84 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqNotifier {
     }
 }
 
+/// Polls the manifest while the flush tracker is stalled on L0, so a slot
+/// freed by compaction is seen before the next `manifest_poll_interval` tick.
+///
+/// `rx` carries 0 while dispatch is not stalled and an id that is distinct
+/// for every stall otherwise. A new id polls at once and restarts the
+/// backoff; while the same id persists, each poll waits twice as long as
+/// the one before, up to `max_backoff`. Nothing runs while `rx` is 0.
+struct L0StallPollNotifier {
+    rx: watch::Receiver<u64>,
+    clock: Arc<dyn SystemClock>,
+    max_backoff: Duration,
+    /// The stall being polled and the delay before its next poll.
+    /// `None` while not stalled.
+    stall: Option<(u64, Duration)>,
+}
+
+impl L0StallPollNotifier {
+    fn new(
+        rx: watch::Receiver<u64>,
+        clock: Arc<dyn SystemClock>,
+        manifest_poll_interval: Duration,
+    ) -> Self {
+        Self {
+            rx,
+            clock,
+            max_backoff: MAX_L0_STALL_POLL_BACKOFF.min(manifest_poll_interval),
+            stall: None,
+        }
+    }
+}
+
+#[async_trait]
+impl crate::dispatcher::Notifier<ManifestWriterCommand> for L0StallPollNotifier {
+    async fn notify(&mut self) -> ManifestWriterCommand {
+        loop {
+            let stall_id = *self.rx.borrow_and_update();
+            if stall_id == 0 {
+                self.stall = None;
+                // As in DurableSeqNotifier, Err means the sender is gone and
+                // the database is closing.
+                if self.rx.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+                continue;
+            }
+            let delay = match self.stall {
+                Some((id, delay)) if id == stall_id => delay,
+                _ => {
+                    let first = MIN_L0_STALL_POLL_BACKOFF.min(self.max_backoff);
+                    self.stall = Some((stall_id, first));
+                    return ManifestWriterCommand::PollManifest { done: None };
+                }
+            };
+            tokio::select! {
+                _ = self.clock.sleep(delay) => {
+                    self.stall = Some((stall_id, (delay * 2).min(self.max_backoff)));
+                    return ManifestWriterCommand::PollManifest { done: None };
+                }
+                changed = self.rx.changed() => {
+                    if changed.is_err() {
+                        std::future::pending::<()>().await;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ManifestWriter, ManifestWriterCommand, ManifestWriterHandler, TrackerMessage};
+    use super::{
+        L0StallPollNotifier, ManifestWriter, ManifestWriterCommand, ManifestWriterHandler,
+        TrackerMessage,
+    };
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::checkpoint::{
         CheckpointBoundary, CheckpointHandle, CheckpointLifecycle, CheckpointRequest,
-        CheckpointResult,
+        CheckpointResult, CheckpointTarget,
     };
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
@@ -1042,21 +1195,22 @@ mod tests {
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
 
+    use crate::dispatcher::Notifier;
     use crate::wal::test_utils::FakeWalWriter;
-    use crate::wal::WalWriter;
+    use crate::wal::{WalError, WalObserver, WalStatus, WalStatusListener, WalWriter};
     use bytes::Bytes;
     use fail_parallel::FailPointRegistry;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
-    use slatedb_common::clock::DefaultSystemClock;
-    use slatedb_common::clock::SystemClock;
+    use slatedb_common::clock::{DefaultSystemClock, MockSystemClock, SystemClock};
     use slatedb_common::metrics::MetricsRecorderHelper;
     use slatedb_common::DbRand;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;
-    use tokio::sync::oneshot;
+    use tokio::sync::{oneshot, watch};
     use tokio::time::timeout;
     use uuid::Uuid;
 
@@ -1065,6 +1219,7 @@ mod tests {
         executor: crate::dispatcher::MessageHandlerExecutor,
         tracker_rx: async_channel::Receiver<TrackerMessage>,
         closed_result: WatchableOnceCell<Result<(), SlateDBError>>,
+        _l0_stall_tx: watch::Sender<u64>,
     }
 
     impl StartedManifestWriter {
@@ -1119,12 +1274,14 @@ mod tests {
                 CheckpointOptions::default(),
                 CheckpointRequest {
                     id,
-                    boundary: CheckpointBoundary {
-                        through_seq,
-                        wal_id_last_seen,
+                    target: CheckpointTarget::Captured {
+                        boundary: CheckpointBoundary {
+                            through_seq,
+                            wal_id_last_seen,
+                        },
+                        wal_flush,
                     },
                     lifecycle,
-                    wal_flush,
                 },
             )
             .unwrap();
@@ -1148,6 +1305,7 @@ mod tests {
         );
         let (tracker_tx, tracker_rx) =
             crate::utils::SafeSender::unbounded_channel(closed_result.result_reader());
+        let (l0_stall_tx, l0_stall_rx) = watch::channel(0);
         let writer = ManifestWriter::start(
             inner,
             manifest,
@@ -1156,6 +1314,7 @@ mod tests {
             &executor,
             &Handle::current(),
             tracker_tx,
+            l0_stall_rx,
         )
         .unwrap();
         executor.monitor_on(&Handle::current()).unwrap();
@@ -1164,7 +1323,143 @@ mod tests {
             executor,
             tracker_rx,
             closed_result,
+            _l0_stall_tx: l0_stall_tx,
         }
+    }
+
+    fn stall_notifier(
+        clock: Arc<MockSystemClock>,
+        manifest_poll_interval: Duration,
+    ) -> (watch::Sender<u64>, L0StallPollNotifier) {
+        let (tx, rx) = watch::channel(0);
+        (
+            tx,
+            L0StallPollNotifier::new(rx, clock, manifest_poll_interval),
+        )
+    }
+
+    /// Drives one `notify` call on the mock clock: it must stay pending until
+    /// the clock has advanced by `expected`, then produce a `PollManifest`
+    /// with no reply channel. A zero `expected` demands a poll at once.
+    async fn assert_poll_after(
+        notifier: &mut L0StallPollNotifier,
+        clock: &MockSystemClock,
+        expected: Duration,
+    ) {
+        let notify = notifier.notify();
+        tokio::pin!(notify);
+        if !expected.is_zero() {
+            assert!(timeout(Duration::from_millis(20), &mut notify)
+                .await
+                .is_err());
+            clock.advance(expected - Duration::from_millis(1)).await;
+            assert!(
+                timeout(Duration::from_millis(20), &mut notify)
+                    .await
+                    .is_err(),
+                "polled before {expected:?} elapsed"
+            );
+            clock.advance(Duration::from_millis(1)).await;
+        }
+        let command = timeout(Duration::from_secs(5), &mut notify)
+            .await
+            .unwrap_or_else(|_| panic!("no poll after {expected:?}"));
+        assert!(matches!(
+            command,
+            ManifestWriterCommand::PollManifest { done: None }
+        ));
+    }
+
+    #[tokio::test]
+    async fn l0_stall_notifier_is_idle_while_not_stalled() {
+        let clock = Arc::new(MockSystemClock::new());
+        let (_tx, mut notifier) = stall_notifier(Arc::clone(&clock), Duration::from_secs(60));
+        let notify = notifier.notify();
+        tokio::pin!(notify);
+        assert!(timeout(Duration::from_millis(50), &mut notify)
+            .await
+            .is_err());
+        clock.advance(Duration::from_secs(120)).await;
+        assert!(timeout(Duration::from_millis(50), &mut notify)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn l0_stall_notifier_polls_at_once_then_backs_off_to_the_cap() {
+        let clock = Arc::new(MockSystemClock::new());
+        let (tx, mut notifier) = stall_notifier(Arc::clone(&clock), Duration::from_secs(60));
+        tx.send(1).unwrap();
+        assert_poll_after(&mut notifier, &clock, Duration::ZERO).await;
+        for millis in [50, 100, 200, 400, 800, 1000, 1000] {
+            assert_poll_after(&mut notifier, &clock, Duration::from_millis(millis)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn l0_stall_notifier_backoff_is_capped_at_manifest_poll_interval() {
+        let clock = Arc::new(MockSystemClock::new());
+        let (tx, mut notifier) = stall_notifier(Arc::clone(&clock), Duration::from_millis(20));
+        tx.send(1).unwrap();
+        assert_poll_after(&mut notifier, &clock, Duration::ZERO).await;
+        for _ in 0..3 {
+            assert_poll_after(&mut notifier, &clock, Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn l0_stall_notifier_goes_idle_when_the_stall_clears_and_restarts_backoff() {
+        let clock = Arc::new(MockSystemClock::new());
+        let (tx, mut notifier) = stall_notifier(Arc::clone(&clock), Duration::from_secs(60));
+        tx.send(1).unwrap();
+        assert_poll_after(&mut notifier, &clock, Duration::ZERO).await;
+        assert_poll_after(&mut notifier, &clock, Duration::from_millis(50)).await;
+        assert_poll_after(&mut notifier, &clock, Duration::from_millis(100)).await;
+
+        {
+            // The stall clears while the 200 ms sleep is in flight: the sleep
+            // is abandoned and no poll follows, however far the clock moves.
+            let notify = notifier.notify();
+            tokio::pin!(notify);
+            assert!(timeout(Duration::from_millis(20), &mut notify)
+                .await
+                .is_err());
+            tx.send(0).unwrap();
+            assert!(timeout(Duration::from_millis(20), &mut notify)
+                .await
+                .is_err());
+            clock.advance(Duration::from_secs(10)).await;
+            assert!(timeout(Duration::from_millis(50), &mut notify)
+                .await
+                .is_err());
+
+            // A new stall polls at once.
+            tx.send(2).unwrap();
+            let command = timeout(Duration::from_secs(5), &mut notify).await.unwrap();
+            assert!(matches!(
+                command,
+                ManifestWriterCommand::PollManifest { done: None }
+            ));
+        }
+        // And the backoff starts over.
+        assert_poll_after(&mut notifier, &clock, Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn l0_stall_notifier_restarts_backoff_for_a_stall_it_never_saw_clear() {
+        let clock = Arc::new(MockSystemClock::new());
+        let (tx, mut notifier) = stall_notifier(Arc::clone(&clock), Duration::from_secs(60));
+        tx.send(1).unwrap();
+        assert_poll_after(&mut notifier, &clock, Duration::ZERO).await;
+        assert_poll_after(&mut notifier, &clock, Duration::from_millis(50)).await;
+        assert_poll_after(&mut notifier, &clock, Duration::from_millis(100)).await;
+
+        // Between two notify calls the stall clears and a new one starts; the
+        // notifier only ever reads the new id.
+        tx.send(0).unwrap();
+        tx.send(2).unwrap();
+        assert_poll_after(&mut notifier, &clock, Duration::ZERO).await;
+        assert_poll_after(&mut notifier, &clock, Duration::from_millis(50)).await;
     }
 
     async fn assert_no_flush_event(
@@ -1218,6 +1513,7 @@ mod tests {
             harness.manifest,
             Duration::from_secs(3600),
             tracker_tx,
+            watch::channel(0).1,
         )
     }
 
@@ -1226,15 +1522,38 @@ mod tests {
         fp_registry: Arc<FailPointRegistry>,
         segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     ) -> TestHarness {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        setup_harness_with_object_store(path, fp_registry, segment_extractor, object_store).await
+        setup_harness_with_wal_observer(
+            path,
+            fp_registry,
+            segment_extractor,
+            FakeWalWriter::new(0).observer(),
+        )
+        .await
     }
 
-    async fn setup_harness_with_object_store(
+    async fn setup_harness_with_wal_observer(
+        path: &str,
+        fp_registry: Arc<FailPointRegistry>,
+        segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+        wal_observer: Box<dyn WalObserver>,
+    ) -> TestHarness {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        setup_harness_with_dependencies(
+            path,
+            fp_registry,
+            segment_extractor,
+            object_store,
+            wal_observer,
+        )
+        .await
+    }
+
+    async fn setup_harness_with_dependencies(
         path: &str,
         fp_registry: Arc<FailPointRegistry>,
         segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
         object_store: Arc<dyn ObjectStore>,
+        wal_observer: Box<dyn WalObserver>,
     ) -> TestHarness {
         let path = path.to_string();
         let settings = Settings::default();
@@ -1265,7 +1584,6 @@ mod tests {
         let status_manager = DbStatusManager::new(0);
         let (write_tx, _) =
             crate::utils::SafeSender::unbounded_channel(status_manager.result_reader());
-        let wal_writer = Box::new(FakeWalWriter::new(0));
         let inner = Arc::new(
             DbInner::new(
                 settings.clone(),
@@ -1277,7 +1595,7 @@ mod tests {
                     &WatchableOnceCell::new(),
                 )),
                 write_tx,
-                wal_writer.observer(),
+                wal_observer,
                 db_metrics,
                 fp_registry,
                 None,
@@ -1409,6 +1727,237 @@ mod tests {
         let uploaded = next_uploaded_memtable_no_wal(inner, key, value).await;
         inner.oracle.advance_durable_seq(uploaded.last_seq);
         uploaded
+    }
+
+    #[rstest::rstest]
+    #[case(None, None, 30)]
+    #[case(Some(10), None, 10)]
+    #[case(None, Some(20), 20)]
+    #[case(Some(10), Some(20), 10)]
+    #[case(Some(20), Some(10), 10)]
+    #[tokio::test]
+    async fn manifest_writes_refresh_snapshot_min_seq_without_uploaded_tables(
+        #[case] snapshot_seq: Option<u64>,
+        #[case] txn_seq: Option<u64>,
+        #[case] expected_min_seq: u64,
+    ) {
+        let harness = setup_harness(
+            "/tmp/test_manifest_writes_refresh_snapshot_min_seq",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let manifest_store = ManifestStore::new(
+            &Path::from(harness.path.clone()),
+            Arc::clone(&harness.object_store),
+        );
+        let mut handler = new_handler_from_harness(harness);
+        handler.load_manifest().await.unwrap();
+        let snapshot =
+            snapshot_seq.map(|seq| handler.db.snapshot_manager.new_snapshot(Some(seq)).0);
+        let txn = txn_seq.map(|seq| {
+            handler.db.oracle.advance_committed_seq(seq);
+            handler.db.txn_manager.new_transaction().0
+        });
+        handler.db.oracle.advance_committed_seq(30);
+        handler.db.state.write().modify(|modifier| {
+            modifier.state.manifest.value.core.last_l0_seq = 30;
+        });
+
+        handler.write_current_manifest_safely().await.unwrap();
+        assert_eq!(
+            handler
+                .db
+                .state
+                .read()
+                .state()
+                .core()
+                .recent_snapshot_min_seq,
+            expected_min_seq
+        );
+        assert_eq!(
+            manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .recent_snapshot_min_seq,
+            expected_min_seq
+        );
+
+        if let Some(snapshot) = snapshot {
+            handler.db.snapshot_manager.drop_snapshot(&snapshot);
+        }
+        if let Some(txn) = txn {
+            handler.db.txn_manager.drop_txn(&txn);
+        }
+        handler
+            .write_manifest_update_safely(&[&durable_pending_checkpoint()])
+            .await
+            .unwrap();
+        assert_eq!(
+            handler
+                .db
+                .state
+                .read()
+                .state()
+                .core()
+                .recent_snapshot_min_seq,
+            30
+        );
+        assert_eq!(
+            manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .recent_snapshot_min_seq,
+            30
+        );
+    }
+
+    fn durable_pending_checkpoint() -> super::PendingCheckpoint {
+        super::PendingCheckpoint {
+            id: Uuid::new_v4(),
+            through_seq: None,
+            wal_id_last_seen: None,
+            options: CheckpointOptions::default(),
+            lifecycle: CheckpointLifecycle::new().0,
+        }
+    }
+
+    struct AdvancingWalObserver {
+        next_flushed_wal_id: Arc<AtomicU64>,
+    }
+
+    impl WalObserver for AdvancingWalObserver {
+        fn status(&self) -> Result<WalStatus, WalStatus> {
+            Ok(WalStatus {
+                last_flushed_wal_id: self.next_flushed_wal_id.fetch_add(1, Ordering::SeqCst),
+                last_flushed_seq: None,
+                estimated_bytes: 0,
+                buffered_wal_entries_count: 0,
+                closed_reason: None,
+            })
+        }
+
+        fn subscribe(&self, _listener: WalStatusListener) -> Result<(), WalError> {
+            Ok(())
+        }
+    }
+
+    struct MutableWalObserver {
+        last_flushed_wal_id: Arc<AtomicU64>,
+    }
+
+    impl WalObserver for MutableWalObserver {
+        fn status(&self) -> Result<WalStatus, WalStatus> {
+            FakeWalWriter::new(self.last_flushed_wal_id.load(Ordering::SeqCst)).status()
+        }
+
+        fn subscribe(&self, _listener: WalStatusListener) -> Result<(), WalError> {
+            Ok(())
+        }
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn manifest_write_retry_samples_new_wal_end(#[case] checkpoint: bool) {
+        let next_flushed_wal_id = Arc::new(AtomicU64::new(0));
+        let harness = setup_harness_with_wal_observer(
+            "/tmp/test_manifest_write_retry_samples_new_wal_end",
+            Arc::new(FailPointRegistry::new()),
+            None,
+            Box::new(AdvancingWalObserver {
+                next_flushed_wal_id: Arc::clone(&next_flushed_wal_id),
+            }),
+        )
+        .await;
+        let manifest_store = ManifestStore::new(
+            &Path::from(harness.path.clone()),
+            Arc::clone(&harness.object_store),
+        );
+        let mut handler = new_handler_from_harness(harness);
+        handler.load_manifest().await.unwrap();
+        handler
+            .manifest
+            .update(handler.manifest.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        next_flushed_wal_id.store(10, Ordering::SeqCst);
+
+        if checkpoint {
+            handler
+                .write_manifest_update_safely(&[&durable_pending_checkpoint()])
+                .await
+                .unwrap();
+        } else {
+            handler.write_current_manifest_safely().await.unwrap();
+        }
+
+        assert_eq!(next_flushed_wal_id.load(Ordering::SeqCst), 12);
+        assert_eq!(handler.db.state.read().state().core().next_wal_sst_id, 12);
+        assert_eq!(
+            manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .next_wal_sst_id,
+            12
+        );
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn replay_leaves_wal_end_to_manifest_writer(#[case] sample_before_replay: bool) {
+        let harness = setup_harness_with_wal_observer(
+            "/tmp/test_replay_leaves_wal_end_to_manifest_writer",
+            Arc::new(FailPointRegistry::new()),
+            None,
+            FakeWalWriter::new(10).observer(),
+        )
+        .await;
+        let handler = new_handler_from_harness(harness);
+        if sample_before_replay {
+            handler.prepare_local_manifest_for_write(None).unwrap();
+        }
+        let next_wal_id_before_replay = handler.db.state.read().state().core().next_wal_sst_id;
+        let table = crate::mem_table::WritableKVTable::new();
+        table.put(RowEntry::new_value(b"key", b"value", 1));
+        handler
+            .db
+            .replay_memtable(
+                0,
+                crate::wal_replay::ReplayedMemtable {
+                    table,
+                    last_tick: 0,
+                    last_seq: 1,
+                    last_wal_id: 3,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            handler.db.state.read().state().core().next_wal_sst_id,
+            next_wal_id_before_replay
+        );
+        assert_eq!(
+            handler
+                .prepare_local_manifest_for_write(None)
+                .unwrap()
+                .value
+                .core
+                .next_wal_sst_id,
+            11
+        );
+        assert_eq!(handler.db.state.read().state().core().next_wal_sst_id, 11);
     }
 
     #[tokio::test]
@@ -1586,9 +2135,14 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_includes_replay_points_only_through_its_sequence_boundary() {
-        let harness = setup_harness(
+        let wal_end = Arc::new(AtomicU64::new(2));
+        let harness = setup_harness_with_wal_observer(
             "/tmp/test_checkpoint_pending_replay_points",
             Arc::new(FailPointRegistry::new()),
+            None,
+            Box::new(MutableWalObserver {
+                last_flushed_wal_id: wal_end.clone(),
+            }),
         )
         .await;
         let manifest_store = ManifestStore::new(
@@ -1621,10 +2175,10 @@ mod tests {
             uploads.push(UploadedMemtable::new(imm, sst, seq, seq));
         }
         inner.oracle.advance_durable_seq(2);
-        inner.state.write().set_next_wal_id(3);
+        wal_end.store(2, Ordering::SeqCst);
 
-        // The WAL listener can update the database state after boundary capture.
-        let request = begin_test_checkpoint_with_wal_boundary(&started, Some(1), Some(0));
+        // The WAL can advance while this checkpoint waits for table uploads.
+        let request = begin_test_checkpoint_with_wal_boundary(&started, Some(1), Some(1));
         request.ready_rx.await.unwrap().unwrap();
         started
             .notify_uploaded(uploads.pop().unwrap())
@@ -1649,37 +2203,36 @@ mod tests {
 
     #[tokio::test]
     async fn durable_checkpoint_uses_current_wal_end() {
-        let harness = setup_harness(
+        let wal_end = Arc::new(AtomicU64::new(1));
+        let harness = setup_harness_with_wal_observer(
             "/tmp/test_durable_checkpoint_current_wal_end",
             Arc::new(FailPointRegistry::new()),
+            None,
+            Box::new(MutableWalObserver {
+                last_flushed_wal_id: wal_end.clone(),
+            }),
         )
         .await;
         let store = ManifestStore::new(
             &Path::from(harness.path.clone()),
             harness.object_store.clone(),
         );
-        let inner = harness.inner.clone();
         let mut handler = new_handler_from_harness(harness);
-        inner.state.write().set_next_wal_id(2);
         let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
         handler
             .handle_create_checkpoint(
                 CheckpointOptions::default(),
                 CheckpointRequest {
                     id: Uuid::new_v4(),
-                    boundary: CheckpointBoundary {
-                        through_seq: None,
-                        wal_id_last_seen: None,
-                    },
+                    target: CheckpointTarget::Scope(crate::config::CheckpointScope::Durable),
                     lifecycle,
-                    wal_flush: None,
                 },
             )
             .await
             .unwrap();
         ready_rx.await.unwrap().unwrap();
 
-        inner.state.write().set_next_wal_id(3);
+        wal_end.store(2, Ordering::SeqCst);
         handler.process_ready_work().await.unwrap();
         let result = result_rx.await.unwrap().unwrap();
         let manifest = store.read_manifest(result.manifest_id).await.unwrap();
@@ -1688,9 +2241,14 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_stops_wal_at_its_begin_boundary() {
-        let harness = setup_harness(
+        let wal_end = Arc::new(AtomicU64::new(1));
+        let harness = setup_harness_with_wal_observer(
             "/tmp/test_checkpoint_manifest_wal_boundary",
             Arc::new(FailPointRegistry::new()),
+            None,
+            Box::new(MutableWalObserver {
+                last_flushed_wal_id: wal_end.clone(),
+            }),
         )
         .await;
         let path = harness.path.clone();
@@ -1706,7 +2264,7 @@ mod tests {
             begin_test_checkpoint_with_wal_boundary(&started, Some(uploaded.last_seq), Some(1));
         request.ready_rx.await.unwrap().unwrap();
 
-        inner.state.write().set_next_wal_id(3);
+        wal_end.store(2, Ordering::SeqCst);
         started.notify_uploaded(uploaded).await.unwrap();
         assert_eq!(expect_flushed(&started.tracker_rx).await, 1);
 
@@ -1721,10 +2279,185 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_releases_failed_checkpoint_wal_boundary() {
+        let harness = setup_harness_with_wal_observer(
+            "/tmp/test_shutdown_releases_checkpoint_wal_boundary",
+            Arc::new(FailPointRegistry::new()),
+            None,
+            FakeWalWriter::new(2).observer(),
+        )
+        .await;
+        let store = ManifestStore::new(
+            &Path::from(harness.path.clone()),
+            harness.object_store.clone(),
+        );
+        let mut handler = new_handler_from_harness(harness);
+        let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
+        handler
+            .handle_create_checkpoint(
+                CheckpointOptions::default(),
+                CheckpointRequest {
+                    id: Uuid::new_v4(),
+                    target: CheckpointTarget::Captured {
+                        boundary: CheckpointBoundary {
+                            through_seq: Some(1),
+                            wal_id_last_seen: Some(1),
+                        },
+                        wal_flush: None,
+                    },
+                    lifecycle,
+                },
+            )
+            .await
+            .unwrap();
+        ready_rx.await.unwrap().unwrap();
+        handler.write_current_manifest_safely().await.unwrap();
+        assert_eq!(
+            store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .next_wal_sst_id,
+            2
+        );
+        crate::dispatcher::MessageHandler::cleanup(
+            &mut handler,
+            Box::pin(futures::stream::empty()),
+            Ok(()),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result_rx.await.unwrap(),
+            Err(SlateDBError::Closed)
+        ));
+        let latest = store.read_latest_manifest().await.unwrap();
+        assert_eq!(latest.manifest.core.next_wal_sst_id, 3);
+        assert!(latest.manifest.core.checkpoints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pending_checkpoint_caps_all_manifest_writes_and_retries() {
+        let wal_end = Arc::new(AtomicU64::new(1));
+        let harness = setup_harness_with_wal_observer(
+            "/tmp/test_pending_checkpoint_monotonic_wal_end",
+            Arc::new(FailPointRegistry::new()),
+            None,
+            Box::new(MutableWalObserver {
+                last_flushed_wal_id: wal_end.clone(),
+            }),
+        )
+        .await;
+        let store = Arc::new(ManifestStore::new(
+            &Path::from(harness.path.clone()),
+            harness.object_store.clone(),
+        ));
+        let inner = harness.inner.clone();
+        let mut handler = new_handler_from_harness(harness);
+        let (tracker_tx, _tracker_rx) =
+            crate::utils::SafeSender::unbounded_channel(inner.status_manager.result_reader());
+        handler.tracker_tx = tracker_tx;
+        handler.load_manifest().await.unwrap();
+        handler.write_current_manifest_safely().await.unwrap();
+        let first_upload = next_uploaded_memtable(&inner, b"first", b"v1").await;
+        let second_upload = next_uploaded_memtable(&inner, b"second", b"v2").await;
+        let (lifecycle, result_rx, ready_rx) = CheckpointLifecycle::new();
+        handler
+            .handle_create_checkpoint(
+                CheckpointOptions::default(),
+                CheckpointRequest {
+                    id: Uuid::new_v4(),
+                    target: CheckpointTarget::Captured {
+                        boundary: CheckpointBoundary {
+                            through_seq: Some(second_upload.last_seq),
+                            wal_id_last_seen: Some(1),
+                        },
+                        wal_flush: None,
+                    },
+                    lifecycle,
+                },
+            )
+            .await
+            .unwrap();
+        ready_rx.await.unwrap().unwrap();
+        wal_end.store(2, Ordering::SeqCst);
+
+        // An earlier table upload must preserve the pending checkpoint's WAL endpoint.
+        handler.handle_uploaded(first_upload).await.unwrap();
+        handler.process_ready_work().await.unwrap();
+        assert_eq!(
+            store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .next_wal_sst_id,
+            2
+        );
+
+        // A durable checkpoint and a retry must preserve that endpoint too.
+        handler
+            .write_manifest_update_safely(&[&durable_pending_checkpoint()])
+            .await
+            .unwrap();
+        let mut external = StoredManifest::load(store.clone(), Arc::new(DefaultSystemClock::new()))
+            .await
+            .unwrap();
+        external
+            .update(external.prepare_dirty().unwrap())
+            .await
+            .unwrap();
+        handler.write_current_manifest_safely().await.unwrap();
+        assert_eq!(
+            store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .next_wal_sst_id,
+            2
+        );
+
+        handler.handle_uploaded(second_upload).await.unwrap();
+        handler.process_ready_work().await.unwrap();
+        let checkpoint = result_rx.await.unwrap().unwrap();
+        let manifest = store.read_manifest(checkpoint.manifest_id).await.unwrap();
+        assert_eq!(manifest.core.next_wal_sst_id, 2);
+        assert_eq!(manifest.core.last_l0_seq, 2);
+        handler.write_current_manifest_safely().await.unwrap();
+        assert_eq!(
+            store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .next_wal_sst_id,
+            3
+        );
+
+        let mut previous_end = 0;
+        for metadata in store.list_manifests(..).await.unwrap() {
+            let manifest = store.read_manifest(metadata.id).await.unwrap();
+            assert!(manifest.core.next_wal_sst_id >= previous_end);
+            previous_end = manifest.core.next_wal_sst_id;
+        }
+    }
+
+    #[tokio::test]
     async fn checkpoints_with_different_wal_boundaries_use_different_manifests() {
-        let harness = setup_harness(
+        let wal_end = Arc::new(AtomicU64::new(1));
+        let harness = setup_harness_with_wal_observer(
             "/tmp/test_concurrent_checkpoint_wal_boundaries",
             Arc::new(FailPointRegistry::new()),
+            None,
+            Box::new(MutableWalObserver {
+                last_flushed_wal_id: wal_end.clone(),
+            }),
         )
         .await;
         let path = harness.path.clone();
@@ -1746,7 +2479,7 @@ mod tests {
             begin_test_checkpoint_with_wal_boundary(&started, Some(uploaded.last_seq), Some(3));
         third.ready_rx.await.unwrap().unwrap();
 
-        inner.state.write().set_next_wal_id(4);
+        wal_end.store(3, Ordering::SeqCst);
         started.notify_uploaded(uploaded).await.unwrap();
         assert_eq!(expect_flushed(&started.tracker_rx).await, 1);
 
@@ -2045,7 +2778,7 @@ mod tests {
             .unwrap();
         let mut wait = Box::pin(CheckpointHandle::new(request.id, request.result_rx).wait_inner());
         assert!(futures::poll!(&mut wait).is_pending());
-        flush_tx.send(Err(crate::wal::WalError::Fenced)).unwrap();
+        flush_tx.send(Err(WalError::Fenced)).unwrap();
         assert!(matches!(
             timeout(Duration::from_secs(5), wait).await.unwrap(),
             Err(SlateDBError::Fenced)
@@ -2142,12 +2875,14 @@ mod tests {
                 CheckpointOptions::default(),
                 CheckpointRequest {
                     id,
-                    boundary: CheckpointBoundary {
-                        through_seq,
-                        wal_id_last_seen: Some(0),
+                    target: CheckpointTarget::Captured {
+                        boundary: CheckpointBoundary {
+                            through_seq,
+                            wal_id_last_seen: Some(0),
+                        },
+                        wal_flush: None,
                     },
                     lifecycle,
-                    wal_flush: None,
                 },
             )
             .await

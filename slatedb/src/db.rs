@@ -174,12 +174,7 @@ impl DbInner {
 
         let txn_manager = Arc::new(TransactionManager::new(oracle.clone(), rand.clone()));
         let snapshot_manager = Arc::new(SnapshotManager::new(oracle.clone(), rand.clone()));
-        let wal_observer = DbWalObserver::new(
-            wal_observer,
-            oracle.clone(),
-            state.clone(),
-            status_manager.clone(),
-        );
+        let wal_observer = DbWalObserver::new(wal_observer, oracle.clone(), status_manager.clone());
 
         let db_inner = Self {
             state,
@@ -768,7 +763,7 @@ impl Db {
     ///
     ///     // Write some data and create a snapshot
     ///     db.put(b"key1", b"value1").await?;
-    ///     let snapshot = db.snapshot().await?;
+    ///     let snapshot = db.snapshot()?;
     ///
     ///     // Snapshot provides read-only access to database state
     ///     let value = snapshot.get(b"key1").await?;
@@ -784,7 +779,7 @@ impl Db {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
+    pub fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
         self.inner.check_closed()?;
         let snapshot = DbSnapshot::new(self.inner.clone(), None);
         Ok(snapshot)
@@ -1860,14 +1855,11 @@ impl Db {
     /// async fn main() -> Result<(), slatedb::Error> {
     ///     let object_store = Arc::new(InMemory::new());
     ///     let db = Db::open("test_db", object_store).await?;
-    ///     let txn = db.begin(IsolationLevel::SerializableSnapshot).await?;
+    ///     let txn = db.begin(IsolationLevel::SerializableSnapshot)?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn begin(
-        &self,
-        isolation_level: IsolationLevel,
-    ) -> Result<DbTransaction, crate::Error> {
+    pub fn begin(&self, isolation_level: IsolationLevel) -> Result<DbTransaction, crate::Error> {
         self.inner.check_closed()?;
         let txn = DbTransaction::new(
             self.inner.clone(),
@@ -2019,8 +2011,8 @@ impl DbWriteOps for Db {
         Db::flush_with_options(self, options).await
     }
 
-    async fn begin(&self, isolation_level: IsolationLevel) -> Result<DbTransaction, crate::Error> {
-        Db::begin(self, isolation_level).await
+    fn begin(&self, isolation_level: IsolationLevel) -> Result<DbTransaction, crate::Error> {
+        Db::begin(self, isolation_level)
     }
 }
 
@@ -2155,7 +2147,7 @@ impl WriteHandle {
 }
 
 /// Wraps [`WalObserver`] and injects a [`crate::wal::WalStatusListener`]
-/// that updates the oracle and manifest, and drives cross-task notifications about wal events
+/// that updates the oracle and sends WAL event notifications between tasks
 /// via a [`tokio::sync::watch`] channel.
 #[derive(Clone)]
 pub(crate) struct DbWalObserver {
@@ -2168,7 +2160,6 @@ impl DbWalObserver {
     fn new(
         wrapped: Box<dyn WalObserver>,
         oracle: Arc<DbOracle>,
-        db_state: Arc<RwLock<DbState>>,
         closed_writer: Arc<dyn ClosedResultWriter>,
     ) -> Self {
         let (status_tx, status_rx) = tokio::sync::watch::channel(wrapped.status());
@@ -2180,9 +2171,6 @@ impl DbWalObserver {
                         if let Some(seq) = status.last_flushed_seq {
                             oracle.advance_durable_seq(seq);
                         }
-                        let mut guard = db_state.write();
-                        guard.set_next_wal_id(status.last_flushed_wal_id + 1);
-                        drop(guard);
                         Ok(status)
                     }
                     WalEvent::WalClosed(status) => {
@@ -2239,9 +2227,10 @@ mod tests {
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::MetricLevel;
     use crate::config::{
-        CheckpointOptions, CloseOptions, CompactionWorkerOptions, CompactorOptions,
-        GarbageCollectorDirectoryOptions, GarbageCollectorOptions, ObjectStoreCacheOptions,
-        PutOptions, ScanOptions, Settings, SstBlockSize, Ttl, WriteOptions,
+        CheckpointOptions, CheckpointScope, CloseOptions, CompactionWorkerOptions,
+        CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+        ObjectStoreCacheOptions, PutOptions, ScanOptions, Settings, SstBlockSize, Ttl,
+        WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
@@ -3856,6 +3845,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_find_with_multiple_repeated_keys() {
+        use crate::reader::ReadTrace;
+
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let mut options = test_db_options(0, 1024 * 1024, None);
         options.wal_enabled = false;
@@ -3912,7 +3903,7 @@ mod tests {
                 &view.sst,
                 true,
                 Some(Bytes::new()),
-                &crate::reader::ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -5582,6 +5573,311 @@ mod tests {
         assert_eq!(db_state.state.imm_memtable.len(), 1);
     }
 
+    /// Offsets and unpadded lengths of every block in `handle`.
+    async fn block_layout(db: &Db, handle: &SsTableHandle) -> Vec<(u64, u64)> {
+        let index = db
+            .inner
+            .table_store
+            .read_index(
+                handle,
+                true,
+                Some(Bytes::new()),
+                &crate::reader::ReadTrace::new(None),
+                None,
+            )
+            .await
+            .unwrap();
+        let borrowed = index.borrow();
+        borrowed
+            .block_meta()
+            .iter()
+            .map(|meta| (meta.offset(), u64::from(meta.encoded_len())))
+            .collect()
+    }
+
+    /// Asserts every block of `handle` starts on an `alignment` boundary and
+    /// is followed by padding up to the next one. Returns the number of
+    /// blocks it checked.
+    ///
+    /// The last block ends where the filter starts, so every block is
+    /// checked, and the data section as a whole must end on a boundary.
+    async fn assert_sst_is_padded(db: &Db, handle: &SsTableHandle, alignment: u64) -> usize {
+        let layout = block_layout(db, handle).await;
+        let data_end = if handle.info.filter_len > 0 {
+            handle.info.filter_offset
+        } else {
+            handle.info.index_offset
+        };
+        for (i, (offset, encoded_len)) in layout.iter().enumerate() {
+            assert_eq!(offset % alignment, 0, "block {i} starts off boundary");
+            let unit = layout.get(i + 1).map_or(data_end, |(next, _)| *next) - offset;
+            assert_eq!(unit % alignment, 0, "block {i} is not a whole unit");
+            // A block that filled its unit exactly records no length.
+            if *encoded_len > 0 {
+                assert_eq!(
+                    unit,
+                    encoded_len.next_multiple_of(alignment),
+                    "block {i} is not padded to its unit"
+                );
+            }
+        }
+        assert_eq!(
+            data_end % alignment,
+            0,
+            "the data section ends off boundary"
+        );
+        layout.len()
+    }
+
+    /// Asserts no block of `handle` records a length, which only padded
+    /// blocks do. Returns the number of blocks it checked, as
+    /// `assert_sst_is_padded` does.
+    async fn assert_sst_is_unpadded(db: &Db, handle: &SsTableHandle) -> usize {
+        let layout = block_layout(db, handle).await;
+        for (i, (_, encoded_len)) in layout.iter().enumerate() {
+            assert_eq!(*encoded_len, 0, "block {i} is padded");
+        }
+        layout.len()
+    }
+
+    /// A padded database serves every key after a flush, after a compaction,
+    /// and after a reopen, and the SSTs behind those reads really are padded.
+    #[tokio::test]
+    async fn test_db_round_trip_with_padded_ssts() {
+        const ALIGNMENT: u64 = 1024;
+        const NUM_KEYS: u32 = 400;
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_db_round_trip_with_padded_ssts";
+        let key = |i: u32| format!("key{i:05}").into_bytes();
+        let value = |i: u32| format!("value{i:059}").into_bytes();
+
+        let should_compact = Arc::new(AtomicBool::new(false));
+        let this_should_compact = should_compact.clone();
+        let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            move |_state| this_should_compact.swap(false, Ordering::SeqCst),
+        )));
+        let settings = Settings {
+            // The seed writes more L0 SSTs than the default cap allows, and
+            // compaction only runs once this test asks for it.
+            l0_max_ssts: 64,
+            l0_max_ssts_per_key: 64,
+            ..test_db_options(0, 4096, None)
+        };
+        let db = Arc::new(
+            Db::builder(path, object_store.clone())
+                .with_settings(settings.clone())
+                .with_sst_block_size(SstBlockSize::Block1Kib)
+                .with_sst_block_alignment(true)
+                .with_compactor_builder(
+                    CompactorBuilder::new(path, object_store.clone())
+                        .with_scheduler_supplier(scheduler)
+                        .with_options(fast_compactor_options()),
+                )
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        for i in 0..NUM_KEYS {
+            db.put(&key(i), &value(i)).await.unwrap();
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let l0 = db.inner.state.read().state().core().tree.l0.clone();
+        assert!(l0.len() > 1, "test needs several L0 SSTs");
+        let mut blocks = 0;
+        for view in &l0 {
+            blocks += assert_sst_is_padded(&db, &view.sst, ALIGNMENT).await;
+        }
+        assert!(blocks > l0.len(), "test needs a multi-block SST");
+
+        should_compact.store(true, Ordering::SeqCst);
+        let db_poll = db.clone();
+        tokio::time::timeout(Duration::from_secs(10), async move {
+            loop {
+                if !db_poll
+                    .inner
+                    .state
+                    .read()
+                    .state()
+                    .core()
+                    .tree
+                    .compacted
+                    .is_empty()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // Compaction runs through the same table store, so its output is
+        // padded too.
+        let compacted = db.inner.state.read().state().core().tree.compacted.clone();
+        let compacted_ssts: Vec<_> = compacted
+            .iter()
+            .flat_map(|run| run.sst_views().to_vec())
+            .collect();
+        assert!(!compacted_ssts.is_empty());
+        let mut blocks = 0;
+        for view in &compacted_ssts {
+            blocks += assert_sst_is_padded(&db, &view.sst, ALIGNMENT).await;
+        }
+        assert!(
+            blocks > compacted_ssts.len(),
+            "test needs a multi-block SST"
+        );
+
+        for i in 0..NUM_KEYS {
+            assert_eq!(db.get(&key(i)).await.unwrap(), Some(Bytes::from(value(i))));
+        }
+        // Scans iterate the padded blocks rather than loading them one by one.
+        let mut scan = db.scan(..).await.unwrap();
+        for i in 0..NUM_KEYS {
+            let entry = scan.next().await.unwrap().expect("scan ended early");
+            assert_eq!(entry.key, Bytes::from(key(i)));
+            assert_eq!(entry.value, Bytes::from(value(i)));
+        }
+        assert!(scan.next().await.unwrap().is_none());
+        db.close().await.unwrap();
+
+        let db = Db::builder(path, object_store)
+            .with_settings(settings)
+            .with_sst_block_size(SstBlockSize::Block1Kib)
+            .with_sst_block_alignment(true)
+            .build()
+            .await
+            .unwrap();
+        for i in 0..NUM_KEYS {
+            assert_eq!(db.get(&key(i)).await.unwrap(), Some(Bytes::from(value(i))));
+        }
+        db.close().await.unwrap();
+    }
+
+    /// One database holds SSTs written before and after the alignment was
+    /// turned on, and reads both.
+    ///
+    /// The SSTs written before the flag was on carry no `encoded_len`, so
+    /// they look exactly like the output of a writer that predates the field.
+    #[tokio::test]
+    async fn test_db_reads_mixed_padded_and_unpadded_ssts() {
+        const ALIGNMENT: u64 = 1024;
+        const NUM_KEYS: u32 = 400;
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_db_reads_mixed_padded_and_unpadded_ssts";
+        let key = |i: u32| format!("key{i:05}").into_bytes();
+        let value = |i: u32| format!("value{i:059}").into_bytes();
+        let settings = Settings {
+            // No compactor runs here, so nothing drains L0.
+            l0_max_ssts: 64,
+            l0_max_ssts_per_key: 64,
+            ..test_db_options(0, 4096, None)
+        };
+
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(settings.clone())
+            .with_sst_block_size(SstBlockSize::Block1Kib)
+            .build()
+            .await
+            .unwrap();
+        for i in 0..NUM_KEYS / 2 {
+            db.put(&key(i), &value(i)).await.unwrap();
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        let unpadded_ids: Vec<_> = db
+            .inner
+            .state
+            .read()
+            .state()
+            .core()
+            .tree
+            .l0
+            .iter()
+            .map(|view| view.id)
+            .collect();
+        assert!(!unpadded_ids.is_empty());
+        db.close().await.unwrap();
+
+        let db = Db::builder(path, object_store)
+            .with_settings(settings)
+            .with_sst_block_size(SstBlockSize::Block1Kib)
+            .with_sst_block_alignment(true)
+            .build()
+            .await
+            .unwrap();
+        for i in NUM_KEYS / 2..NUM_KEYS {
+            db.put(&key(i), &value(i)).await.unwrap();
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        let l0 = db.inner.state.read().state().core().tree.l0.clone();
+        let (old, new): (Vec<_>, Vec<_>) =
+            l0.iter().partition(|view| unpadded_ids.contains(&view.id));
+        assert!(!old.is_empty() && !new.is_empty(), "test needs both kinds");
+        let mut old_blocks = 0;
+        for view in &old {
+            old_blocks += assert_sst_is_unpadded(&db, &view.sst).await;
+        }
+        let mut new_blocks = 0;
+        for view in &new {
+            new_blocks += assert_sst_is_padded(&db, &view.sst, ALIGNMENT).await;
+        }
+        assert!(
+            old_blocks > old.len() && new_blocks > new.len(),
+            "test needs a multi-block SST of each kind"
+        );
+
+        for i in 0..NUM_KEYS {
+            assert_eq!(db.get(&key(i)).await.unwrap(), Some(Bytes::from(value(i))));
+        }
+        db.close().await.unwrap();
+    }
+
+    /// `DbBuilder::with_sst_block_alignment` must reach the table store that
+    /// writes SSTs, so the blocks it builds land on block-size boundaries.
+    #[tokio::test]
+    async fn test_sst_block_alignment_reaches_the_table_store() {
+        const ALIGNMENT: usize = 1024;
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder("/tmp/test_sst_block_alignment", object_store)
+            .with_settings(test_db_options(0, 1024, None))
+            .with_sst_block_size(SstBlockSize::Block1Kib)
+            .with_sst_block_alignment(true)
+            .build()
+            .await
+            .unwrap();
+
+        let mut builder = db.inner.table_store.table_builder();
+        for i in 0..64u8 {
+            builder
+                .add_value(&[b'a', i], &[i; 64], None, None)
+                .await
+                .unwrap();
+        }
+        let sst = builder.build().await.unwrap();
+
+        assert!(!sst.unconsumed_blocks.is_empty());
+        for block in &sst.unconsumed_blocks {
+            assert_eq!(block.offset % ALIGNMENT as u64, 0);
+            assert_eq!(block.padded_len() % ALIGNMENT, 0);
+        }
+        db.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_put_empty_value() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -5836,7 +6132,7 @@ mod tests {
         let db = Arc::new(db);
 
         db.merge(b"foo", b"0").await.unwrap();
-        let snapshot = db.snapshot().await.unwrap();
+        let snapshot = db.snapshot().unwrap();
         db.flush_with_options(FlushOptions {
             flush_type: FlushType::MemTable,
         })
@@ -6229,7 +6525,16 @@ mod tests {
                 .recent_flushed_wal_id(),
             2
         );
-        assert_eq!(db_state.state.core().next_wal_sst_id, next_wal_id);
+        assert_eq!(
+            reader
+                .inner
+                .wal_observer
+                .status()
+                .unwrap()
+                .last_flushed_wal_id
+                + 1,
+            next_wal_id
+        );
         assert_eq!(
             reader.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -6325,7 +6630,10 @@ mod tests {
         );
         assert!(db_state.state.imm_memtable.get(1).is_none());
 
-        assert_eq!(db_state.state.core().next_wal_sst_id, 4);
+        assert_eq!(
+            db.inner.wal_observer.status().unwrap().last_flushed_wal_id,
+            3
+        );
         assert_eq!(
             db.get(key1).await.unwrap(),
             Some(Bytes::copy_from_slice(&value1))
@@ -6355,6 +6663,108 @@ mod tests {
             .await
             .unwrap_err();
         assert!(result.to_string().contains("background task panicked"));
+    }
+
+    #[tokio::test]
+    async fn test_manifest_writes_sample_flushed_wal_id() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_manifest_writes_sample_flushed_wal_id");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings {
+                flush_interval: None,
+                compactor_options: None,
+                garbage_collector_options: None,
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let manifest_store = ManifestStore::new(&path, object_store);
+        let initial_next_wal_id = db.inner.state.read().state().core().next_wal_sst_id;
+        let write = db.put(b"first", b"value").await.unwrap();
+        db.flush().await.unwrap();
+        write.await_durable().await.unwrap();
+        let next_wal_id = db.inner.wal_observer.status().unwrap().last_flushed_wal_id + 1;
+        assert!(next_wal_id > initial_next_wal_id);
+        assert_eq!(
+            db.inner.state.read().state().core().next_wal_sst_id,
+            initial_next_wal_id
+        );
+
+        let checkpoint = db
+            .create_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            manifest_store
+                .read_manifest(checkpoint.manifest_id)
+                .await
+                .unwrap()
+                .core
+                .next_wal_sst_id,
+            next_wal_id
+        );
+        assert_eq!(
+            db.inner.state.read().state().core().next_wal_sst_id,
+            next_wal_id
+        );
+
+        db.put(b"second", b"value").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        let next_wal_id = db.inner.wal_observer.status().unwrap().last_flushed_wal_id + 1;
+        assert_eq!(
+            manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .next_wal_sst_id,
+            next_wal_id
+        );
+        assert_eq!(
+            db.inner.state.read().state().core().next_wal_sst_id,
+            next_wal_id
+        );
+
+        db.put(b"third", b"value").await.unwrap();
+        let checkpoint = db
+            .create_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            manifest_store
+                .read_manifest(checkpoint.manifest_id)
+                .await
+                .unwrap()
+                .core
+                .next_wal_sst_id,
+            next_wal_id
+        );
+        db.flush().await.unwrap();
+        assert_eq!(
+            db.inner.state.read().state().core().next_wal_sst_id,
+            next_wal_id
+        );
+        db.close_with_options(CloseOptions {
+            flush_type: Some(FlushType::Wal),
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .next_wal_sst_id,
+            next_wal_id + 1
+        );
     }
 
     #[tokio::test]
@@ -6718,7 +7128,10 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 2);
+        assert_eq!(
+            db.inner.wal_observer.status().unwrap().last_flushed_wal_id,
+            1
+        );
         let wal_store = WalTableStore::new(
             object_store.clone(),
             SsTableFormat::default(),
@@ -6735,7 +7148,10 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(db.inner.state.read().state().core().next_wal_sst_id, 4);
+        assert_eq!(
+            db.inner.wal_observer.status().unwrap().last_flushed_wal_id,
+            3
+        );
     }
 
     #[tokio::test]
@@ -6771,7 +7187,10 @@ mod tests {
         assert_eq!(err.to_string(), "Closed error: detected newer DB client");
 
         do_put(&db2, b"2", b"2").await.unwrap();
-        assert_eq!(db2.inner.state.read().state().core().next_wal_sst_id, 5);
+        assert_eq!(
+            db2.inner.wal_observer.status().unwrap().last_flushed_wal_id,
+            4
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7549,7 +7968,7 @@ mod tests {
         db.put(b"key2", b"value2").await.unwrap();
 
         // Create a snapshot
-        let snapshot = db.snapshot().await.unwrap();
+        let snapshot = db.snapshot().unwrap();
 
         // Verify snapshot can read the data
         assert_eq!(
@@ -7615,7 +8034,7 @@ mod tests {
         }
 
         // Test 2: With active snapshots
-        let _snapshot = db.snapshot().await.unwrap();
+        let _snapshot = db.snapshot().unwrap();
         let snapshot_seq = db.inner.oracle.last_committed_seq();
 
         // Write more data and force flush
@@ -7704,7 +8123,7 @@ mod tests {
             .unwrap();
 
         db.merge(b"k", b"1").await.unwrap();
-        let snapshot = db.snapshot().await.unwrap();
+        let snapshot = db.snapshot().unwrap();
         let snapshot_seq = db.inner.oracle.last_committed_seq();
         db.flush().await.unwrap();
 
@@ -7849,7 +8268,7 @@ mod tests {
         db.put(b"key1", b"value1").await.unwrap();
         db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         let txn_seq = txn.seqnum();
 
         db.put(b"key2", b"value2").await.unwrap();
@@ -7893,13 +8312,13 @@ mod tests {
         db.put(b"key1", b"value1").await.unwrap();
         db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
-        let snapshot = db.snapshot().await.unwrap();
+        let snapshot = db.snapshot().unwrap();
         let snapshot_seq = snapshot.seq();
 
         db.put(b"key2", b"value2").await.unwrap();
         db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         let txn_seq = txn.seqnum();
 
         assert_eq!(
@@ -7951,13 +8370,13 @@ mod tests {
         db.put(b"key1", b"value1").await.unwrap();
         db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         let txn_seq = txn.seqnum();
 
         db.put(b"key2", b"value2").await.unwrap();
         db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
-        let snapshot = db.snapshot().await.unwrap();
+        let snapshot = db.snapshot().unwrap();
         let snapshot_seq = snapshot.seq();
 
         assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
@@ -8576,10 +8995,7 @@ mod tests {
             .unwrap();
 
         // 1-2. Create txn1 and write k1=v1.
-        let txn1 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn1 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
         txn1.put(b"k1", b"v1").unwrap();
 
         // 3. Pause on write-batch-post-commit so txn1 blocks after conflict metadata is tracked.
@@ -8610,19 +9026,13 @@ mod tests {
         }
 
         // 5.1. Add/drop txn to trigger a recycle that removes txn1 from recent commits.
-        let txn_dropped = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn_dropped = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
         drop(txn_dropped);
 
         // 6. Create txn2 after txn1 is committed but before batch_write is complete.
         // The seqnum should advance transactionally with the commit, so txn2 should
         // see txn1's post-write seqnum.
-        let txn2 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn2 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
 
         // 6.1. txn2 should see k1=v1 since it started after txn1's commit, even though the
         // batch write is not fully complete until after txn2 starts.
@@ -8687,7 +9097,7 @@ mod tests {
         let initial_last_seq = db.inner.oracle.last_seq();
 
         // Start txn1 and buffer a write to key "x".
-        let txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn1 = db.begin(IsolationLevel::Snapshot).unwrap();
         let txn1_started_seq = txn1.seqnum();
         txn1.put(b"x", b"txn1_value").unwrap();
 
@@ -8726,7 +9136,7 @@ mod tests {
 
         // Start txn2 while the writer is still paused (committed_seq has not
         // been advanced yet), so txn2 starts at the same snapshot as txn1.
-        let txn2 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn2 = db.begin(IsolationLevel::Snapshot).unwrap();
         assert_eq!(
             txn2.seqnum(),
             txn1_started_seq,
@@ -8774,8 +9184,8 @@ mod tests {
 
         // Start txn_a and txn_b at the same snapshot. Both write the same key,
         // so txn_b will hit a WW conflict once txn_a's commit is tracked.
-        let txn_a = db.begin(IsolationLevel::Snapshot).await.unwrap();
-        let txn_b = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn_a = db.begin(IsolationLevel::Snapshot).unwrap();
+        let txn_b = db.begin(IsolationLevel::Snapshot).unwrap();
         txn_a.put(b"y", b"txn_a_value").unwrap();
         txn_b.put(b"y", b"txn_b_value").unwrap();
 
@@ -8880,7 +9290,7 @@ mod tests {
         // assert on active_txns afterwards.
         let txn_manager = db.inner.txn_manager.clone();
 
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         txn.put(b"k", b"v").unwrap();
         assert!(
             txn_manager.min_active_seq().is_some(),
@@ -8948,10 +9358,7 @@ mod tests {
         // Start a serializable transaction at seq=1 and record a read on
         // conflict-key. The next committed write to that key will conflict
         // with this transaction when it tries to commit.
-        let txn = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
         assert_eq!(
             txn.get(b"conflict-key").await.unwrap(),
             Some(Bytes::from_static(b"v1"))
@@ -9432,7 +9839,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let _snapshot = db.snapshot().await.unwrap();
+        let _snapshot = db.snapshot().unwrap();
 
         // Write many merge operands for the same key, each forced into L0.
         for i in 0..16u16 {
@@ -9600,7 +10007,7 @@ mod tests {
         .await
         .unwrap();
         expected.put(b"base".as_slice());
-        let _snapshot = db.snapshot().await.unwrap();
+        let _snapshot = db.snapshot().unwrap();
 
         // Write distinct merge operands so the final value also verifies operand ordering.
         for i in 0..16u8 {
@@ -11507,7 +11914,7 @@ mod tests {
             create_segmented_scan_fixture("/tmp/test_segmented_scans_on_snapshot", object_store)
                 .await;
 
-        let snapshot = db.snapshot().await.unwrap();
+        let snapshot = db.snapshot().unwrap();
         assert_segmented_scan_matrix(snapshot.as_ref(), &table).await;
         drop(snapshot);
         db.close().await.unwrap();
