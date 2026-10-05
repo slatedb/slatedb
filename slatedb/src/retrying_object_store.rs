@@ -15,7 +15,7 @@ use object_store::{
     ListResult, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions,
     PutOptions, PutPayload, PutResult, RenameOptions,
 };
-use rand::RngCore;
+use rand::Rng;
 
 use crate::utils::IdGenerator;
 use slatedb_common::clock::SystemClock;
@@ -95,7 +95,7 @@ impl RetryingObjectStore {
             .with_min_delay(MIN_RETRY_DELAY)
             .with_max_delay(MAX_RETRY_DELAY)
             .with_jitter()
-            .with_jitter_seed(self.rand.rng().next_u64());
+            .with_jitter_seed(self.rand.rng().random());
         match self.max_retries {
             Some(max_retries) => builder.with_max_times(max_retries as usize),
             None => builder.without_max_times(),
@@ -246,8 +246,21 @@ impl RetryingObjectStorePolicy {
             return false;
         }
 
-        // Double the delay for each retry, up to one second.
-        // Stop at one second so a large attempt count does not require a long loop.
+        let delay = self.retry_delay(attempt);
+        info!(
+            "retrying multipart part upload [failure={:?}, attempt={}, duration={:?}]",
+            failure, attempt, delay
+        );
+        self.clock.sleep(delay).await;
+        true
+    }
+
+    /// The sleep before retry `attempt`: the exponential base (doubling from
+    /// [`MIN_RETRY_DELAY`], capped at [`MAX_RETRY_DELAY`]) plus up to 100%
+    /// jitter, the same shape as `RetryingObjectStore::retry_builder`, so parts
+    /// that fail together don't retry together.
+    fn retry_delay(&self, attempt: usize) -> Duration {
+        // Stop doubling at the cap so a large attempt count does not loop long.
         let mut base = MIN_RETRY_DELAY;
         for _ in 1..attempt {
             if base >= MAX_RETRY_DELAY {
@@ -255,16 +268,7 @@ impl RetryingObjectStorePolicy {
             }
             base = (base * 2).min(MAX_RETRY_DELAY);
         }
-        // Same jitter as `RetryingObjectStore::retry_builder`: up to +100%, so
-        // parts that fail together don't retry together.
-        let jitter = (self.rand.rng().next_u64() >> 11) as f64 / (1u64 << 53) as f64;
-        let delay = base + base.mul_f64(jitter);
-        info!(
-            "retrying multipart part upload [failure={:?}, attempt={}, duration={:?}]",
-            failure, attempt, delay
-        );
-        self.clock.sleep(delay).await;
-        true
+        self.rand.rng().random_range(base..=base * 2)
     }
 }
 
@@ -886,6 +890,36 @@ mod tests {
         assert_ne!(a, unjittered.to_vec(), "delays must be jittered");
         assert_ne!(a, schedule(&store(2)), "different seeds spread retries");
         assert_eq!(a, schedule(&store(1)), "a seed reproduces its schedule");
+    }
+
+    /// Multipart part retries are jittered the same way: within `[d, 2d]` of
+    /// the exponential schedule, different across seeds, reproducible for one.
+    #[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+    #[test]
+    fn test_multipart_retry_delay_is_jittered_and_seeded() {
+        use super::RetryingObjectStorePolicy;
+
+        let policy = |seed| RetryingObjectStorePolicy {
+            clock: test_clock(),
+            rand: Arc::new(DbRand::new(seed)),
+            max_retries: None,
+        };
+        let schedule = |p: &RetryingObjectStorePolicy| -> Vec<Duration> {
+            (1..=8).map(|attempt| p.retry_delay(attempt)).collect()
+        };
+
+        let a = schedule(&policy(1));
+        let unjittered = [100, 200, 400, 800, 1000, 1000, 1000, 1000].map(Duration::from_millis);
+        for (delay, base) in a.iter().zip(unjittered) {
+            assert!(
+                *delay >= base && *delay <= base * 2,
+                "{delay:?} not in [{base:?}, {:?}]",
+                base * 2
+            );
+        }
+        assert_ne!(a, unjittered.to_vec(), "delays must be jittered");
+        assert_ne!(a, schedule(&policy(2)), "different seeds spread retries");
+        assert_eq!(a, schedule(&policy(1)), "a seed reproduces its schedule");
     }
 
     #[tokio::test]
