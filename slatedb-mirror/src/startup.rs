@@ -167,7 +167,7 @@ mod tests {
         write(
             root,
             &name.meta(),
-            &object(path, contents.len() as u64).to_meta_bytes(),
+            &object(path, contents.len() as u64).to_meta_bytes().unwrap(),
         );
         name
     }
@@ -200,7 +200,7 @@ mod tests {
         write(
             root,
             &meta_only.meta(),
-            &object("db/compacted/d.sst", 1).to_meta_bytes(),
+            &object("db/compacted/d.sst", 1).to_meta_bytes().unwrap(),
         );
 
         // Malformed metadata.
@@ -214,7 +214,7 @@ mod tests {
         write(
             root,
             &mismatched.meta(),
-            &object("db/compacted/g.sst", 1).to_meta_bytes(),
+            &object("db/compacted/g.sst", 1).to_meta_bytes().unwrap(),
         );
 
         // Torn data file.
@@ -223,7 +223,7 @@ mod tests {
         write(
             root,
             &torn.meta(),
-            &object("db/compacted/h.sst", 10).to_meta_bytes(),
+            &object("db/compacted/h.sst", 10).to_meta_bytes().unwrap(),
         );
 
         let recovered = recover(&StdVfs::new(), root).await.unwrap();

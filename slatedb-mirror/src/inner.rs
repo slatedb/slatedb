@@ -181,9 +181,9 @@ impl Inner {
     ) -> Result<(), MirrorError> {
         self.prefixes.lock().check_or_insert(name)?;
 
+        let meta = PutPayload::from(Bytes::from(object.to_meta_bytes()?));
         let meta_temp =
             self.temp(name.meta_temp(self.temp_counter.fetch_add(1, Ordering::Relaxed)));
-        let meta = PutPayload::from(Bytes::from(object.to_meta_bytes()));
         let written = match self.write_payload(&meta_temp.path, &meta).await {
             Ok(()) => {
                 self.vfs

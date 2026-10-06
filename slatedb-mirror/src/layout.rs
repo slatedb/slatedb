@@ -189,7 +189,7 @@ fn attribute_from_name(name: &str) -> Option<Attribute> {
 
 impl LocalObject {
     /// Serializes this object's `.meta` file.
-    pub(crate) fn to_meta_bytes(&self) -> Vec<u8> {
+    pub(crate) fn to_meta_bytes(&self) -> Result<Vec<u8>, MirrorError> {
         let mut attributes = BTreeMap::new();
         let mut metadata = BTreeMap::new();
         for (key, value) in self.attributes.iter() {
@@ -214,7 +214,9 @@ impl LocalObject {
             attributes,
             metadata,
         };
-        serde_json::to_vec(&file).expect("MetaFile always serializes")
+        serde_json::to_vec(&file).map_err(|err| MirrorError::Local {
+            source: std::io::Error::other(err),
+        })
     }
 
     /// Parses a `.meta` file. Unknown standard attributes are dropped.
@@ -357,7 +359,7 @@ mod tests {
             attributes,
         };
 
-        let parsed = LocalObject::from_meta_bytes(&object.to_meta_bytes()).unwrap();
+        let parsed = LocalObject::from_meta_bytes(&object.to_meta_bytes().unwrap()).unwrap();
         assert_eq!(parsed.meta, object.meta);
         assert_eq!(parsed.attributes, object.attributes);
     }
