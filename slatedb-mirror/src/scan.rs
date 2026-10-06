@@ -163,7 +163,7 @@ async fn local_path(inner: &Inner, name: &str) -> Option<Path> {
         }
     };
     match LocalName::new(&path) {
-        Ok(local) if local.data == name => Some(path),
+        Ok(local) if local.object_file_name == name => Some(path),
         _ => {
             warn!(
                 "mirror remote scan skipping file whose metadata doesn't match its name [name={}, path={}]",
@@ -202,7 +202,7 @@ mod tests {
         for path in paths {
             let name = LocalName::new(&Path::from(*path)).unwrap();
             expected.insert(name.meta());
-            expected.insert(name.data);
+            expected.insert(name.object_file_name);
         }
         expected
     }

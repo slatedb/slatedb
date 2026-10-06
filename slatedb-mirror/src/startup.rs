@@ -124,7 +124,7 @@ fn validate(
     let object = LocalObject::from_meta_bytes(&bytes)?;
     let location = &object.meta.location;
     let name = LocalName::new(location).map_err(|err| err.to_string())?;
-    if name.data != data {
+    if name.object_file_name != data {
         return Err(format!("path `{location}` doesn't match the file name"));
     }
     if object.meta.size != size {
@@ -163,7 +163,7 @@ mod tests {
 
     fn write_pair(root: &StdPath, path: &str, contents: &[u8]) -> LocalName {
         let name = LocalName::new(&Path::from(path)).unwrap();
-        write(root, &name.data, contents);
+        write(root, &name.object_file_name, contents);
         write(
             root,
             &name.meta(),
@@ -195,7 +195,7 @@ mod tests {
 
         // Data without metadata, and metadata without data.
         let data_only = LocalName::new(&Path::from("db/compacted/c.sst")).unwrap();
-        write(root, &data_only.data, b"c");
+        write(root, &data_only.object_file_name, b"c");
         let meta_only = LocalName::new(&Path::from("db/compacted/d.sst")).unwrap();
         write(
             root,
@@ -205,12 +205,12 @@ mod tests {
 
         // Malformed metadata.
         let malformed = LocalName::new(&Path::from("db/compacted/e.sst")).unwrap();
-        write(root, &malformed.data, b"e");
+        write(root, &malformed.object_file_name, b"e");
         write(root, &malformed.meta(), b"{not json");
 
         // Metadata for a different path than the file name.
         let mismatched = LocalName::new(&Path::from("db/compacted/f.sst")).unwrap();
-        write(root, &mismatched.data, b"f");
+        write(root, &mismatched.object_file_name, b"f");
         write(
             root,
             &mismatched.meta(),
@@ -219,7 +219,7 @@ mod tests {
 
         // Torn data file.
         let torn = LocalName::new(&Path::from("db/compacted/h.sst")).unwrap();
-        write(root, &torn.data, b"");
+        write(root, &torn.object_file_name, b"");
         write(
             root,
             &torn.meta(),
@@ -239,9 +239,9 @@ mod tests {
             BTreeSet::from([
                 "LOCK".to_string(),
                 "notes.txt".to_string(),
-                valid.data.clone(),
+                valid.object_file_name.clone(),
                 valid.meta(),
-                root_level.data.clone(),
+                root_level.object_file_name.clone(),
                 root_level.meta(),
             ])
         );

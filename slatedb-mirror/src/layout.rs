@@ -61,7 +61,7 @@ pub(crate) struct LocalName {
     /// The object's parent path.
     pub(crate) parent: String,
     /// `<prefix>.<file name>`, the complete object.
-    pub(crate) data: String,
+    pub(crate) object_file_name: String,
 }
 
 impl LocalName {
@@ -70,9 +70,9 @@ impl LocalName {
     pub(crate) fn new(path: &Path) -> Result<Self, MirrorError> {
         let (parent, name) = split_path(path);
         let prefix = md5_hex(parent);
-        let data = format!("{prefix}.{name}");
+        let object_file_name = format!("{prefix}.{name}");
         // Check the full name so that names like `7` and `meta` are caught too.
-        if name.is_empty() || classify(&data) != FileKind::Data {
+        if name.is_empty() || classify(&object_file_name) != FileKind::Data {
             return Err(MirrorError::Unsupported {
                 operation: "local copy of a file name that is empty, ends in `.meta` or \
                      `.<digits>`, or is `meta` or all digits",
@@ -81,23 +81,23 @@ impl LocalName {
         Ok(Self {
             prefix,
             parent: parent.to_string(),
-            data,
+            object_file_name,
         })
     }
 
     /// `<prefix>.<file name>.meta`
     pub(crate) fn meta(&self) -> String {
-        format!("{}{META_SUFFIX}", self.data)
+        format!("{}{META_SUFFIX}", self.object_file_name)
     }
 
     /// `<prefix>.<file name>.<counter>`
     pub(crate) fn temp(&self, counter: u64) -> String {
-        format!("{}.{counter}", self.data)
+        format!("{}.{counter}", self.object_file_name)
     }
 
     /// `<prefix>.<file name>.meta.<counter>`
     pub(crate) fn meta_temp(&self, counter: u64) -> String {
-        format!("{}{META_SUFFIX}.{counter}", self.data)
+        format!("{}{META_SUFFIX}.{counter}", self.object_file_name)
     }
 }
 
@@ -293,7 +293,7 @@ mod tests {
         let name = LocalName::new(&Path::from("path/to/db/compacted/01K.sst")).unwrap();
         assert_eq!(name.prefix, md5_hex("path/to/db/compacted"));
         assert_eq!(name.parent, "path/to/db/compacted");
-        assert_eq!(name.data, format!("{}.01K.sst", name.prefix));
+        assert_eq!(name.object_file_name, format!("{}.01K.sst", name.prefix));
         assert_eq!(name.meta(), format!("{}.01K.sst.meta", name.prefix));
         assert_eq!(name.temp(7), format!("{}.01K.sst.7", name.prefix));
         assert_eq!(name.meta_temp(7), format!("{}.01K.sst.meta.7", name.prefix));
@@ -323,8 +323,13 @@ mod tests {
     fn should_classify_files() {
         let name = LocalName::new(&Path::from("a/b.sst")).unwrap();
         assert_eq!(classify("LOCK"), FileKind::Lock);
-        assert_eq!(classify(&name.data), FileKind::Data);
-        assert_eq!(classify(&name.meta()), FileKind::Meta { data: &name.data });
+        assert_eq!(classify(&name.object_file_name), FileKind::Data);
+        assert_eq!(
+            classify(&name.meta()),
+            FileKind::Meta {
+                data: &name.object_file_name
+            }
+        );
         assert_eq!(classify(&name.temp(3)), FileKind::Temp);
         assert_eq!(classify(&name.meta_temp(3)), FileKind::Temp);
         assert_eq!(classify("notes.txt"), FileKind::Unknown);

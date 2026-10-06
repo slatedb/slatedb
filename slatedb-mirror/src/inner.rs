@@ -199,7 +199,7 @@ impl Inner {
         meta_temp.disarm();
 
         self.vfs
-            .rename(&temp.path, &self.file(&name.data))
+            .rename(&temp.path, &self.file(&name.object_file_name))
             .await
             .map_err(local_error)
     }
@@ -220,7 +220,7 @@ impl Inner {
         let name = LocalName::new(path)?;
         // Data first, so a crash never leaves a data file without its
         // metadata.
-        for file in [&name.data, &name.meta()] {
+        for file in [&name.object_file_name, &name.meta()] {
             match self.vfs.remove(&self.file(file)).await {
                 Ok(()) => {}
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
@@ -300,7 +300,7 @@ impl Inner {
             } else {
                 let name = LocalName::new(path)?;
                 self.vfs
-                    .read_range(&self.file(&name.data), range.clone())
+                    .read_range(&self.file(&name.object_file_name), range.clone())
                     .await
                     .map_err(|err| match err.kind() {
                         // Evicted since we looked it up.
