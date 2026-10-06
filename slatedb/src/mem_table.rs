@@ -1254,4 +1254,19 @@ mod tests {
         )
         .await;
     }
+
+    #[tokio::test]
+    async fn test_memtable_descending_seek_is_not_supported() {
+        let table = seek_test_table();
+        let mut iter = table
+            .table()
+            .range(.., IterationOrder::Descending, ReadTrace::new(None));
+
+        let result = iter.seek(b"abc333").await;
+
+        assert!(matches!(
+            result,
+            Err(SlateDBError::SeekNotSupportedForDescendingScan)
+        ));
+    }
 }
