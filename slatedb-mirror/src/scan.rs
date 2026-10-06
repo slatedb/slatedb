@@ -27,10 +27,9 @@ pub(crate) async fn run(inner: Arc<Inner>, interval: Duration) {
 /// how many were removed.
 ///
 /// The snapshot comes from the cache directory, not the entry map, so a local
-/// copy the map is missing still gets cleaned up. It's taken before any
-/// LIST. Files are only installed after they exist remotely, so anything
-/// installed after the snapshot is skipped and anything in the snapshot but
-/// missing from a later LIST was deleted.
+/// copy the map is missing still gets cleaned up. We collect local file names
+/// before listing remote objects so concurrent additions cannot be mistaken for
+/// remote deletions.
 pub(crate) async fn scan(inner: &Inner) -> usize {
     let files = match inner.vfs.list(&inner.root).await {
         Ok(files) => files,
