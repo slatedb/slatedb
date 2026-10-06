@@ -220,12 +220,21 @@ impl LocalObject {
     }
 
     /// Parses a `.meta` file. Unknown standard attributes are dropped.
-    pub(crate) fn from_meta_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let file: MetaFile = serde_json::from_slice(bytes).map_err(|err| err.to_string())?;
+    pub(crate) fn from_meta_bytes(bytes: &[u8]) -> Result<Self, MirrorError> {
+        let file: MetaFile = serde_json::from_slice(bytes).map_err(|err| MirrorError::Local {
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, err),
+        })?;
         if file.format != META_FORMAT {
-            return Err(format!("unknown format {}", file.format));
+            return Err(MirrorError::Local {
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown format {}", file.format),
+                ),
+            });
         }
-        let location = Path::parse(&file.location).map_err(|err| err.to_string())?;
+        let location = Path::parse(&file.location).map_err(|err| MirrorError::Local {
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, err),
+        })?;
         let mut attributes = Attributes::new();
         for (name, value) in file.attributes {
             if let Some(attribute) = attribute_from_name(&name) {
@@ -366,12 +375,18 @@ mod tests {
 
     #[test]
     fn should_reject_malformed_meta_files() {
-        assert!(LocalObject::from_meta_bytes(b"").is_err());
-        assert!(LocalObject::from_meta_bytes(b"{}").is_err());
         let wrong_format = br#"{"format":2,"location":"a","last_modified":"2024-01-01T00:00:00Z","size":1,"e_tag":null,"version":null}"#;
-        assert!(LocalObject::from_meta_bytes(wrong_format).is_err());
         let bad_path = br#"{"format":1,"location":"a//b","last_modified":"2024-01-01T00:00:00Z","size":1,"e_tag":null,"version":null}"#;
-        assert!(LocalObject::from_meta_bytes(bad_path).is_err());
+        for bytes in [b"".as_slice(), b"{}".as_slice(), wrong_format, bad_path] {
+            let err = LocalObject::from_meta_bytes(bytes).unwrap_err();
+            let MirrorError::Local { source } = err else {
+                panic!("expected a local mirror error, got {err:?}");
+            };
+            assert_eq!(source.kind(), std::io::ErrorKind::InvalidData);
+            if bytes == bad_path {
+                assert!(source.get_ref().unwrap().is::<object_store::path::Error>());
+            }
+        }
     }
 
     #[test]

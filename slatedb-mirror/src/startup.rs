@@ -121,7 +121,7 @@ fn validate(
     bytes: io::Result<Bytes>,
 ) -> Result<(LocalName, LocalObject), String> {
     let bytes = bytes.map_err(|err| format!("unreadable metadata: {err}"))?;
-    let object = LocalObject::from_meta_bytes(&bytes)?;
+    let object = LocalObject::from_meta_bytes(&bytes).map_err(|err| format!("{err:?}"))?;
     let location = &object.meta.location;
     let name = LocalName::new(location).map_err(|err| err.to_string())?;
     if name.object_file_name != data {

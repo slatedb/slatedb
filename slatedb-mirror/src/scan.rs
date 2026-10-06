@@ -156,7 +156,7 @@ async fn local_path(inner: &Inner, name: &str) -> Option<Path> {
         Ok(object) => object.meta.location,
         Err(err) => {
             warn!(
-                "mirror remote scan skipping file with malformed metadata [name={}, error={}]",
+                "mirror remote scan skipping file with malformed metadata [name={}, error={:?}]",
                 name, err
             );
             return None;
