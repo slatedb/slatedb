@@ -10,8 +10,8 @@
 //! - `LOCK` is held for the mirror's lifetime.
 //!
 //! File names that end in `.meta` or `.<digits>` can't be told apart from
-//! metadata or temporary files, so the mirror refuses to keep local copies of
-//! them.
+//! metadata or temporary files, so the mirror refuses to keep local copies that
+//! collide with the local naming scheme.
 
 use std::collections::{BTreeMap, HashMap};
 
