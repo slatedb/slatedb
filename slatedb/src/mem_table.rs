@@ -226,7 +226,7 @@ impl RowEntryIterator for MemTableIterator {
 impl MemTableIterator {
     /// Moves to the first entry with a key at or after `next_key` in O(log n).
     ///
-    /// A crossbeam `Range` only searches the skiplist when it is created, so this
+    /// A crossbeam `Range` searches the skiplist only on its first `next()`, so this
     /// replaces `inner` with a new range starting at `next_key`.
     fn seek_ascending(&mut self, next_key: &[u8]) {
         // Don't move backwards or revive an exhausted iterator.
