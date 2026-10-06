@@ -9,6 +9,7 @@ use crate::merge_operator::{MergeOperatorIterator, MergeOperatorRequiredIterator
 use crate::oracle::Oracle;
 use crate::reader::{DbStateReader, ReadTrace};
 use crate::retention_iterator::RetentionIterator;
+use crate::retrying_object_store::RetryingObjectStore;
 use crate::tablestore::EncodedSsTableWriter;
 use bytes::Bytes;
 use log::warn;
@@ -37,6 +38,32 @@ pub(crate) struct SegmentedSstHandle {
     pub(crate) prefix: Bytes,
     pub(crate) sst_handle: SsTableHandle,
     pub(crate) encoded_bytes: u64,
+}
+
+// `BufWriter` wraps an `object_store::Error` inside `std::io::Error` through
+// `AsyncWrite`. Find the original error before applying the shared retry rule.
+// Without this step, `NotSupported` can retry forever.
+pub(crate) fn should_retry_upload_error(error: &SlateDBError) -> bool {
+    match error {
+        SlateDBError::ObjectStoreError(error) => RetryingObjectStore::should_retry(error),
+        SlateDBError::IoError(error) => {
+            let Some(source) = error.get_ref() else {
+                return true;
+            };
+            let mut source: Option<&(dyn std::error::Error + 'static)> = Some(source);
+            while let Some(error) = source {
+                if let Some(error) = error.downcast_ref::<object_store::Error>() {
+                    return RetryingObjectStore::should_retry(error);
+                }
+                if let Some(error) = error.downcast_ref::<Arc<object_store::Error>>() {
+                    return RetryingObjectStore::should_retry(error);
+                }
+                source = error.source();
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Owns the close tasks for one flush attempt. Dropping it cancels those tasks.
@@ -106,10 +133,23 @@ impl PendingSstUploads {
         mut self,
         mut result: Result<(), SlateDBError>,
     ) -> Result<Vec<SegmentedSstHandle>, SlateDBError> {
-        // Settle every upload before retrying with the same SST ids.
-        while let Some(upload) = self.tasks.join_next().await {
+        loop {
+            if result
+                .as_ref()
+                .is_err_and(|error| !should_retry_upload_error(error))
+            {
+                // A fatal error forbids retries. Cancel siblings that can otherwise
+                // retry forever, and await cancellation to release their upload slots.
+                self.tasks.shutdown().await;
+                break;
+            }
+            // Settle every upload before retrying with the same SST ids.
+            let Some(upload) = self.tasks.join_next().await else {
+                break;
+            };
             if let Err(error) = self.collect(upload) {
-                if result.is_ok() {
+                // A fatal error takes precedence over an earlier retryable error.
+                if result.is_ok() || !should_retry_upload_error(&error) {
                     result = Err(error);
                 }
             }
@@ -129,7 +169,8 @@ impl DbInner {
     /// segment starts if a slot is available. Blocks stream as they are built.
     /// Small SSTs stay buffered until close, and large SSTs use multipart uploads.
     ///
-    /// On error, abort the active writer and settle all close tasks before returning.
+    /// On error, abort the active writer. Before retrying, settle all close tasks.
+    /// On fatal errors, cancel and await the close tasks instead.
     /// Completed SSTs stay uploaded. Results are sorted by segment prefix.
     pub(crate) async fn stream_imm_ssts(
         &self,

@@ -18,9 +18,9 @@ use crate::db_state::SsTableHandle;
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageHandler, MessageHandlerExecutor};
 use crate::error::SlateDBError;
-use crate::flush::SegmentedSstHandle;
+use crate::flush::{should_retry_upload_error, SegmentedSstHandle};
 use crate::mem_table::ImmutableMemtable;
-use crate::retrying_object_store::{RetryingObjectStore, MAX_RETRY_DELAY};
+use crate::retrying_object_store::MAX_RETRY_DELAY;
 use crate::utils::SafeSender;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -35,32 +35,6 @@ use tokio::sync::Semaphore;
 use ulid::Ulid;
 
 const UPLOADER_TASK_NAME: &str = "l0_sst_uploader";
-
-// `BufWriter` wraps an `object_store::Error` inside `std::io::Error` through
-// `AsyncWrite`. Find the original error before applying the shared retry rule.
-// Without this step, `NotSupported` can retry forever.
-fn should_retry_upload_error(error: &SlateDBError) -> bool {
-    match error {
-        SlateDBError::ObjectStoreError(error) => RetryingObjectStore::should_retry(error),
-        SlateDBError::IoError(error) => {
-            let Some(source) = error.get_ref() else {
-                return true;
-            };
-            let mut source: Option<&(dyn std::error::Error + 'static)> = Some(source);
-            while let Some(error) = source {
-                if let Some(error) = error.downcast_ref::<object_store::Error>() {
-                    return RetryingObjectStore::should_retry(error);
-                }
-                if let Some(error) = error.downcast_ref::<Arc<object_store::Error>>() {
-                    return RetryingObjectStore::should_retry(error);
-                }
-                source = error.source();
-            }
-            true
-        }
-        _ => false,
-    }
-}
 
 /// One immutable-memtable upload request submitted to the uploader. Physical
 /// SST ids are allocated at dispatch (in sequence order) and carried here, so
@@ -664,11 +638,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_settle_uploads_before_returning_a_build_error() {
+    async fn should_cancel_uploads_after_a_build_error() {
         let (db, store) = setup_gated_db(2).await;
-        let baseline = store.put_opts_gate.arrivals();
         let mut job = segmented_job(&db, 1, 3);
         job.segment_sst_ids.remove(&Bytes::from_static(b"001"));
+        let slots = Arc::new(Semaphore::new(2));
+        let result = timeout(
+            Duration::from_secs(1),
+            db.stream_imm_ssts(job.imm_memtable.table(), None, &job.segment_sst_ids, &slots),
+        )
+        .await
+        .expect("a build error must cancel pending uploads");
+        assert!(matches!(result, Err(SlateDBError::InvalidDBState)));
+        assert_eq!(slots.available_permits(), 2);
+        store.put_opts_gate.release();
+    }
+
+    #[rstest::rstest]
+    #[case(2)]
+    #[case(4)]
+    #[tokio::test]
+    async fn should_cancel_sibling_uploads_after_a_fatal_close_error(#[case] segments: usize) {
+        let (db, store) = setup_gated_db(2).await;
+        let baseline = store.put_opts_gate.arrivals();
+        let job = segmented_job(&db, 1, segments);
         let slots = Arc::new(Semaphore::new(2));
         let task = tokio::spawn({
             let db = Arc::clone(&db);
@@ -680,23 +673,34 @@ mod tests {
         });
         timeout(
             Duration::from_secs(5),
-            store.put_opts_gate.wait_for_arrivals(baseline + 1),
+            store.put_opts_gate.wait_for_arrivals(baseline + 2),
         )
         .await
         .unwrap();
-        assert!(!task.is_finished(), "a failed flush left an upload running");
-        assert_eq!(slots.available_permits(), 1);
-        store.put_opts_gate.release();
-        let result = timeout(Duration::from_secs(5), task)
+        store.put_opts_gate.set_error(not_supported_error);
+        store.put_opts_gate.admit(1);
+        // Keep the sibling blocked until the flush reports the permanent error.
+        let result = timeout(Duration::from_secs(1), task)
             .await
-            .unwrap()
+            .expect("a fatal close error must cancel sibling uploads")
             .unwrap();
-        assert!(matches!(result, Err(SlateDBError::InvalidDBState)));
+        assert!(matches!(result, Err(SlateDBError::IoError(ref error))
+            if error.to_string().contains("not supported")));
         assert_eq!(slots.available_permits(), 2);
+        assert_eq!(store.put_opts_gate.arrivals(), baseline + 2);
+        store.put_opts_gate.clear_error();
+        store.put_opts_gate.release();
+
+        let job = segmented_job(&db, 5, 3);
+        let uploaded = db
+            .stream_imm_ssts(job.imm_memtable.table(), None, &job.segment_sst_ids, &slots)
+            .await
+            .unwrap();
+        assert_eq!(uploaded.len(), 3);
     }
 
     #[tokio::test]
-    async fn should_settle_sibling_uploads_after_a_close_error() {
+    async fn should_settle_sibling_uploads_after_a_retryable_close_error() {
         let (db, store) = setup_gated_db(2).await;
         let baseline = store.put_opts_gate.arrivals();
         let job = segmented_job(&db, 1, 4);
@@ -715,7 +719,12 @@ mod tests {
         )
         .await
         .unwrap();
-        store.put_opts_gate.set_error(not_supported_error);
+        store
+            .put_opts_gate
+            .set_error(|| object_store::Error::Generic {
+                store: "test",
+                source: Box::new(std::io::Error::other("temporary failure")),
+            });
         store.put_opts_gate.admit(1);
         timeout(Duration::from_secs(5), async {
             while slots.available_permits() != 1 {
@@ -740,7 +749,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(result, Err(error) if !should_retry_upload_error(&error)));
+        assert!(matches!(result, Err(error) if should_retry_upload_error(&error)));
         assert_eq!(slots.available_permits(), 2);
 
         let job = segmented_job(&db, 5, 3);
@@ -1033,6 +1042,39 @@ mod tests {
         assert_eq!(event.first_seq, 1);
         assert_eq!(event.last_seq, 1);
 
+        test.shutdown().await;
+    }
+
+    #[rstest::rstest]
+    #[case(2)]
+    #[case(6)]
+    #[tokio::test]
+    async fn should_not_retry_a_panic_after_an_upload_error(#[case] segments: usize) {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        fail_parallel::cfg(
+            Arc::clone(&fp_registry),
+            "write-compacted-sst-io-error",
+            "1*return->1*panic->off",
+        )
+        .unwrap();
+        let db = setup_db_with_extractor(
+            "/tmp/test_l0_upload_error_then_panic",
+            fp_registry,
+            Some(Arc::new(FixedThreeBytePrefixExtractor)),
+        )
+        .await;
+        let test = start_test_uploader(&db);
+        test.submit(segmented_job(&db, 1, segments)).unwrap();
+        let result = timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                result = test.await_closed() => result,
+                Ok(_) = test.tracker_rx.recv() => panic!("a fatal flush reported upload completion"),
+            }
+        })
+        .await
+        .expect("the panic must stop the uploader");
+        assert!(matches!(result, Err(SlateDBError::BackgroundTaskPanic(_))));
+        assert!(test.tracker_rx.is_empty());
         test.shutdown().await;
     }
 
