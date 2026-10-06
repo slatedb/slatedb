@@ -44,10 +44,7 @@ pub(crate) fn split_path(path: &Path) -> (&str, &str) {
 
 /// Returns the hex MD5 digest of `parent`.
 fn md5_hex(parent: &str) -> String {
-    Md5::digest(parent.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex::encode(Md5::digest(parent.as_bytes()))
 }
 
 /// Returns true if `name` ends in `.` followed by one or more ASCII digits.

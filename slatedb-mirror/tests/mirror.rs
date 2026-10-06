@@ -312,10 +312,7 @@ async fn build(
 /// its file name. See `src/layout.rs`.
 fn data_file(path: &str) -> String {
     let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
-    let prefix: String = Md5::digest(parent.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let prefix = hex::encode(Md5::digest(parent.as_bytes()));
     format!("{prefix}.{name}")
 }
 
