@@ -42,12 +42,8 @@ pub(crate) fn split_path(path: &Path) -> (&str, &str) {
         .unwrap_or(("", path.as_ref()))
 }
 
-/// Returns the hex MD5 digest of `parent`.
-fn md5_hex(parent: &str) -> String {
-    hex::encode(Md5::digest(parent.as_bytes()))
-}
-
 /// Returns true if `name` ends in `.` followed by one or more ASCII digits.
+#[inline]
 fn has_temp_suffix(name: &str) -> bool {
     name.rsplit_once('.')
         .is_some_and(|(_, suffix)| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
@@ -69,7 +65,7 @@ impl LocalName {
     /// reserved by the layout.
     pub(crate) fn new(path: &Path) -> Result<Self, MirrorError> {
         let (parent, name) = split_path(path);
-        let prefix = md5_hex(parent);
+        let prefix = hex::encode(Md5::digest(parent.as_bytes()));
         let object_file_name = format!("{prefix}.{name}");
         // Check the full name so that names like `7` and `meta` are caught too.
         if name.is_empty() || classify(&object_file_name) != FileKind::Object {
@@ -291,7 +287,10 @@ mod tests {
     #[test]
     fn should_name_files_by_parent_md5() {
         let name = LocalName::new(&Path::from("path/to/db/compacted/01K.sst")).unwrap();
-        assert_eq!(name.prefix, md5_hex("path/to/db/compacted"));
+        assert_eq!(
+            name.prefix,
+            hex::encode(Md5::digest(b"path/to/db/compacted"))
+        );
         assert_eq!(name.parent, "path/to/db/compacted");
         assert_eq!(name.object_file_name, format!("{}.01K.sst", name.prefix));
         assert_eq!(name.meta(), format!("{}.01K.sst.meta", name.prefix));
