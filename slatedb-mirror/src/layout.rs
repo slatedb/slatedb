@@ -107,9 +107,9 @@ pub(crate) enum FileKind<'a> {
     Lock,
     /// A leftover temporary file.
     Temp,
-    /// A `.meta` file for the data file named `data`.
+    /// A `.meta` file for the local object file named `object_file_name`.
     Meta {
-        data: &'a str,
+        object_file_name: &'a str,
     },
     Data,
     /// Not part of the layout. Left alone.
@@ -130,8 +130,8 @@ pub(crate) fn classify(name: &str) -> FileKind<'_> {
     }
     if has_temp_suffix(name) {
         FileKind::Temp
-    } else if let Some(data) = name.strip_suffix(META_SUFFIX) {
-        FileKind::Meta { data }
+    } else if let Some(object_file_name) = name.strip_suffix(META_SUFFIX) {
+        FileKind::Meta { object_file_name }
     } else {
         FileKind::Data
     }
@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(
             classify(&name.meta()),
             FileKind::Meta {
-                data: &name.object_file_name
+                object_file_name: &name.object_file_name
             }
         );
         assert_eq!(classify(&name.temp(3)), FileKind::Temp);
