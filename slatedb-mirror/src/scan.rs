@@ -10,7 +10,7 @@ use log::{debug, warn};
 use object_store::path::Path;
 
 use crate::inner::Inner;
-use crate::layout::{classify, split_data_name, split_path, FileKind, LocalName, LocalObject};
+use crate::layout::{classify, split_object_name, split_path, FileKind, LocalName, LocalObject};
 use crate::startup::IO_CONCURRENCY;
 
 /// Scans every `interval`, starting immediately. Runs until cancelled.
@@ -51,10 +51,10 @@ pub(crate) async fn scan(inner: &Inner) -> usize {
     {
         let prefixes = inner.prefixes.lock();
         for file in files {
-            if classify(&file.name) != FileKind::Data {
+            if classify(&file.name) != FileKind::Object {
                 continue;
             }
-            let (prefix, name) = split_data_name(&file.name);
+            let (prefix, name) = split_object_name(&file.name);
             let path = prefixes.parent(prefix).and_then(|parent| {
                 let path = if parent.is_empty() {
                     name.to_string()

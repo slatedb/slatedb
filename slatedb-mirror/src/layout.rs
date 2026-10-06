@@ -72,7 +72,7 @@ impl LocalName {
         let prefix = md5_hex(parent);
         let object_file_name = format!("{prefix}.{name}");
         // Check the full name so that names like `7` and `meta` are caught too.
-        if name.is_empty() || classify(&object_file_name) != FileKind::Data {
+        if name.is_empty() || classify(&object_file_name) != FileKind::Object {
             return Err(MirrorError::Unsupported {
                 operation: "local copy of a file name that is empty, ends in `.meta` or \
                      `.<digits>`, or is `meta` or all digits",
@@ -111,7 +111,7 @@ pub(crate) enum FileKind<'a> {
     Meta {
         object_file_name: &'a str,
     },
-    Data,
+    Object,
     /// Not part of the layout. Left alone.
     Unknown,
 }
@@ -133,13 +133,13 @@ pub(crate) fn classify(name: &str) -> FileKind<'_> {
     } else if let Some(object_file_name) = name.strip_suffix(META_SUFFIX) {
         FileKind::Meta { object_file_name }
     } else {
-        FileKind::Data
+        FileKind::Object
     }
 }
 
-/// Splits a [`FileKind::Data`] file name into its MD5 prefix and the object's
+/// Splits a [`FileKind::Object`] file name into its MD5 prefix and the object's
 /// file name.
-pub(crate) fn split_data_name(name: &str) -> (&str, &str) {
+pub(crate) fn split_object_name(name: &str) -> (&str, &str) {
     (&name[..PREFIX_LEN], &name[PREFIX_LEN + 1..])
 }
 
@@ -323,7 +323,7 @@ mod tests {
     fn should_classify_files() {
         let name = LocalName::new(&Path::from("a/b.sst")).unwrap();
         assert_eq!(classify("LOCK"), FileKind::Lock);
-        assert_eq!(classify(&name.object_file_name), FileKind::Data);
+        assert_eq!(classify(&name.object_file_name), FileKind::Object);
         assert_eq!(
             classify(&name.meta()),
             FileKind::Meta {

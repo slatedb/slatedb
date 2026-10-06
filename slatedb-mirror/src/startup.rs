@@ -49,7 +49,7 @@ pub(crate) async fn recover(vfs: &dyn Vfs, root: &StdPath) -> Result<Recovered, 
             FileKind::Meta { .. } => {
                 metas.insert(file.name);
             }
-            FileKind::Data => {
+            FileKind::Object => {
                 data.insert(file.name, file.size);
             }
         }
