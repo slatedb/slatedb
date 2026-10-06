@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
+use tokio::sync::Semaphore;
 use ulid::Ulid;
 
 const UPLOADER_TASK_NAME: &str = "l0_sst_uploader";
@@ -164,6 +165,7 @@ impl Uploader {
         tracker_tx: SafeSender<TrackerMessage>,
     ) -> Vec<Box<dyn MessageHandler<UploadJob>>> {
         let parallelism = db.settings.l0_flush_parallelism;
+        let upload_slots = Arc::new(Semaphore::new(parallelism));
         // A failed upload retries after `manifest_poll_interval`, capped so a
         // long poll interval does not stretch upload retries with it.
         let retry_backoff = db.settings.manifest_poll_interval.min(MAX_RETRY_DELAY);
@@ -173,6 +175,7 @@ impl Uploader {
                     Arc::clone(&db),
                     tracker_tx.clone(),
                     retry_backoff,
+                    Arc::clone(&upload_slots),
                 )) as Box<dyn MessageHandler<UploadJob>>
             })
             .collect()
@@ -190,11 +193,12 @@ impl Uploader {
     }
 }
 
-/// MessageHandler that builds and uploads one SST per job.
+/// Streams each job's SSTs under the shared upload limit.
 pub(crate) struct UploadHandler {
     db: Arc<DbInner>,
     tracker_tx: SafeSender<TrackerMessage>,
     retry_backoff: Duration,
+    upload_slots: Arc<Semaphore>,
 }
 
 impl UploadHandler {
@@ -202,11 +206,13 @@ impl UploadHandler {
         db: Arc<DbInner>,
         tracker_tx: SafeSender<TrackerMessage>,
         retry_backoff: Duration,
+        upload_slots: Arc<Semaphore>,
     ) -> Self {
         Self {
             db,
             tracker_tx,
             retry_backoff,
+            upload_slots,
         }
     }
 
@@ -233,6 +239,7 @@ impl UploadHandler {
                     job.imm_memtable.table(),
                     min_retention_seq,
                     &job.segment_sst_ids,
+                    &self.upload_slots,
                 )
                 .await
             {
@@ -309,7 +316,7 @@ mod tests {
     use crate::retrying_object_store::MAX_RETRY_DELAY;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
-    use crate::test_utils::FixedThreeBytePrefixExtractor;
+    use crate::test_utils::{FixedThreeBytePrefixExtractor, GatedObjectStore};
     use crate::types::{RowEntry, ValueDeletable};
     use crate::utils::WatchableOnceCell;
 
@@ -327,6 +334,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::runtime::Handle;
+    use tokio::sync::Semaphore;
     use tokio::time::timeout;
     use ulid::Ulid;
 
@@ -407,7 +415,27 @@ mod tests {
         cache: Option<Arc<dyn DbCache>>,
         block_cache_policy: BlockCachePolicy,
     ) -> Arc<DbInner> {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        setup_db_with_object_store(
+            path,
+            fp_registry,
+            settings,
+            segment_extractor,
+            cache,
+            block_cache_policy,
+            Arc::new(InMemory::new()),
+        )
+        .await
+    }
+
+    async fn setup_db_with_object_store(
+        path: &str,
+        fp_registry: Arc<FailPointRegistry>,
+        settings: Settings,
+        segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
+        cache: Option<Arc<dyn DbCache>>,
+        block_cache_policy: BlockCachePolicy,
+        object_store: Arc<dyn ObjectStore>,
+    ) -> Arc<DbInner> {
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
         let rand = Arc::new(DbRand::new(42));
         let db_metrics = MetricsRecorderHelper::noop();
@@ -469,6 +497,295 @@ mod tests {
         let imm_memtable = freeze_imm(db, key, value, seq);
         let segment_sst_ids = preallocate_ids(&imm_memtable);
         UploadJob::new(imm_memtable, segment_sst_ids)
+    }
+
+    fn segmented_job(db: &DbInner, first_seq: u64, segment_count: usize) -> UploadJob {
+        let mut guard = db.state.write();
+        let prefixes = (0..segment_count)
+            .map(|i| {
+                let prefix = format!("{i:03}");
+                let key = format!("{prefix}-key");
+                guard.memtable().put(RowEntry::new_value(
+                    key.as_bytes(),
+                    b"value",
+                    first_seq + i as u64,
+                ));
+                Bytes::from(prefix)
+            })
+            .collect();
+        guard.memtable().table().record_touched_segments(prefixes);
+        guard.freeze_memtable(0);
+        let imm = guard.state().imm_memtable.front().cloned().unwrap();
+        UploadJob::new(Arc::clone(&imm), preallocate_ids(&imm))
+    }
+
+    async fn setup_gated_db(parallelism: usize) -> (Arc<DbInner>, Arc<GatedObjectStore>) {
+        setup_gated_db_with_extractor(parallelism, true).await
+    }
+
+    async fn setup_gated_db_with_extractor(
+        parallelism: usize,
+        segmented: bool,
+    ) -> (Arc<DbInner>, Arc<GatedObjectStore>) {
+        let store = Arc::new(GatedObjectStore::new(Arc::new(InMemory::new())));
+        let db = setup_db_with_object_store(
+            "/tmp/test_shared_l0_upload_slots",
+            Arc::new(FailPointRegistry::new()),
+            Settings {
+                l0_flush_parallelism: parallelism,
+                ..Settings::default()
+            },
+            segmented.then(|| {
+                Arc::new(FixedThreeBytePrefixExtractor)
+                    as Arc<dyn crate::prefix_extractor::PrefixExtractor>
+            }),
+            None,
+            BlockCachePolicy::default(),
+            store.clone(),
+        )
+        .await;
+        store.put_opts_gate.close();
+        (db, store)
+    }
+
+    #[rstest::rstest]
+    #[case(1, 1, true)]
+    #[case(3, 1, true)]
+    #[case(3, 3, true)]
+    #[case(3, 6, false)]
+    #[tokio::test]
+    async fn should_share_upload_limit_across_segments_and_memtables(
+        #[case] parallelism: usize,
+        #[case] memtables: usize,
+        #[case] segmented: bool,
+    ) {
+        let (db, store) = setup_gated_db_with_extractor(parallelism, segmented).await;
+        let segment_count = if segmented { 4 } else { 1 };
+        let baseline = store.put_opts_gate.arrivals();
+        let test = start_test_uploader(&db);
+        let mut expected_ids = BTreeMap::new();
+        for i in 0..memtables {
+            let first_seq = (i * segment_count + 1) as u64;
+            let job = if segmented {
+                segmented_job(&db, first_seq, segment_count)
+            } else {
+                next_upload_job(&db, b"000-key", b"value", first_seq)
+            };
+            expected_ids.insert(
+                job.imm_memtable.table().first_seq().unwrap(),
+                job.segment_sst_ids.clone(),
+            );
+            test.submit(job).unwrap();
+        }
+        timeout(
+            Duration::from_secs(5),
+            store
+                .put_opts_gate
+                .wait_for_arrivals(baseline + parallelism),
+        )
+        .await
+        .unwrap();
+        assert!(test.tracker_rx.is_empty());
+        assert!(
+            timeout(
+                Duration::from_millis(50),
+                store
+                    .put_opts_gate
+                    .wait_for_arrivals(baseline + parallelism + 1)
+            )
+            .await
+            .is_err(),
+            "uploads exceeded the shared limit"
+        );
+
+        store.put_opts_gate.admit(1);
+        timeout(
+            Duration::from_secs(5),
+            store
+                .put_opts_gate
+                .wait_for_arrivals(baseline + parallelism + 1),
+        )
+        .await
+        .unwrap();
+        assert!(
+            timeout(
+                Duration::from_millis(50),
+                store
+                    .put_opts_gate
+                    .wait_for_arrivals(baseline + parallelism + 2)
+            )
+            .await
+            .is_err(),
+            "one free slot admitted more than one upload"
+        );
+        store.put_opts_gate.release();
+
+        for _ in 0..memtables {
+            let TrackerMessage::UploadComplete(uploaded) =
+                timeout(Duration::from_secs(5), test.tracker_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+            else {
+                panic!("expected upload completion");
+            };
+            assert_eq!(uploaded.segments.len(), segment_count);
+            let ids = expected_ids.remove(&uploaded.first_seq).unwrap();
+            for (i, segment) in uploaded.segments.iter().enumerate() {
+                let prefix = if segmented {
+                    Bytes::from(format!("{i:03}"))
+                } else {
+                    Bytes::new()
+                };
+                assert_eq!(segment.prefix, prefix);
+                assert_eq!(segment.sst_handle.id, SsTableId::from(ids[&segment.prefix]));
+                let view = SsTableView::identity(segment.sst_handle.clone());
+                let mut iter = SstIterator::new_owned_initialized(
+                    ..,
+                    view,
+                    Arc::clone(&db.table_store),
+                    SstIteratorOptions::default(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let entry = iter.next().await.unwrap().unwrap();
+                assert_eq!(entry.key, Bytes::from(format!("{i:03}-key")));
+                assert_eq!(entry.seq, uploaded.first_seq + i as u64);
+                assert_eq!(
+                    entry.value,
+                    ValueDeletable::Value(Bytes::from_static(b"value"))
+                );
+                assert!(iter.next().await.unwrap().is_none());
+            }
+        }
+        assert!(expected_ids.is_empty());
+        test.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_settle_uploads_before_returning_a_build_error() {
+        let (db, store) = setup_gated_db(2).await;
+        let baseline = store.put_opts_gate.arrivals();
+        let mut job = segmented_job(&db, 1, 3);
+        job.segment_sst_ids.remove(&Bytes::from_static(b"001"));
+        let slots = Arc::new(Semaphore::new(2));
+        let task = tokio::spawn({
+            let db = Arc::clone(&db);
+            let slots = Arc::clone(&slots);
+            async move {
+                db.stream_imm_ssts(job.imm_memtable.table(), None, &job.segment_sst_ids, &slots)
+                    .await
+            }
+        });
+        timeout(
+            Duration::from_secs(5),
+            store.put_opts_gate.wait_for_arrivals(baseline + 1),
+        )
+        .await
+        .unwrap();
+        assert!(!task.is_finished(), "a failed flush left an upload running");
+        assert_eq!(slots.available_permits(), 1);
+        store.put_opts_gate.release();
+        let result = timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(SlateDBError::InvalidDBState)));
+        assert_eq!(slots.available_permits(), 2);
+    }
+
+    #[tokio::test]
+    async fn should_settle_sibling_uploads_after_a_close_error() {
+        let (db, store) = setup_gated_db(2).await;
+        let baseline = store.put_opts_gate.arrivals();
+        let job = segmented_job(&db, 1, 4);
+        let slots = Arc::new(Semaphore::new(2));
+        let task = tokio::spawn({
+            let db = Arc::clone(&db);
+            let slots = Arc::clone(&slots);
+            async move {
+                db.stream_imm_ssts(job.imm_memtable.table(), None, &job.segment_sst_ids, &slots)
+                    .await
+            }
+        });
+        timeout(
+            Duration::from_secs(5),
+            store.put_opts_gate.wait_for_arrivals(baseline + 2),
+        )
+        .await
+        .unwrap();
+        store.put_opts_gate.set_error(not_supported_error);
+        store.put_opts_gate.admit(1);
+        timeout(Duration::from_secs(5), async {
+            while slots.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            timeout(
+                Duration::from_millis(50),
+                store.put_opts_gate.wait_for_arrivals(baseline + 3)
+            )
+            .await
+            .is_err(),
+            "a failed flush started another upload"
+        );
+        assert!(!task.is_finished(), "a sibling upload is still running");
+        store.put_opts_gate.clear_error();
+        store.put_opts_gate.release();
+        let result = timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(error) if !should_retry_upload_error(&error)));
+        assert_eq!(slots.available_permits(), 2);
+
+        let job = segmented_job(&db, 5, 3);
+        let uploaded = db
+            .stream_imm_ssts(job.imm_memtable.table(), None, &job.segment_sst_ids, &slots)
+            .await
+            .unwrap();
+        assert_eq!(uploaded.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn should_release_upload_slots_when_flush_is_cancelled() {
+        let (db, store) = setup_gated_db(2).await;
+        let baseline = store.put_opts_gate.arrivals();
+        let job = segmented_job(&db, 1, 4);
+        let slots = Arc::new(Semaphore::new(2));
+        let task = tokio::spawn({
+            let db = Arc::clone(&db);
+            let slots = Arc::clone(&slots);
+            async move {
+                db.stream_imm_ssts(job.imm_memtable.table(), None, &job.segment_sst_ids, &slots)
+                    .await
+            }
+        });
+        timeout(
+            Duration::from_secs(5),
+            store.put_opts_gate.wait_for_arrivals(baseline + 2),
+        )
+        .await
+        .unwrap();
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        let permits = timeout(Duration::from_secs(5), slots.acquire_many(2))
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permits);
+        store.put_opts_gate.release();
+        let job = segmented_job(&db, 5, 3);
+        let uploaded = db
+            .stream_imm_ssts(job.imm_memtable.table(), None, &job.segment_sst_ids, &slots)
+            .await
+            .unwrap();
+        assert_eq!(uploaded.len(), 3);
+        assert_eq!(slots.available_permits(), 2);
     }
 
     struct TestUploader {
@@ -720,11 +1037,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_retry_the_whole_job_when_a_later_segment_fails() {
+    async fn should_retry_the_whole_job_when_a_segment_fails() {
         let fp_registry = Arc::new(FailPointRegistry::new());
-        // First segment's write succeeds; second segment's write fails once;
-        // every write after that succeeds, including the retried first
-        // segment.
+        // One segment succeeds before another fails. The retry uses the same
+        // ids for every segment.
         fail_parallel::cfg(
             Arc::clone(&fp_registry),
             "write-compacted-sst-io-error",
