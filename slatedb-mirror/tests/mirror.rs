@@ -780,6 +780,7 @@ async fn should_reject_copy_and_rename() {
 #[tokio::test]
 async fn should_restore_local_copies_after_restart() {
     let fixture = Fixture::new().await;
+    eventually(|| fixture.policy.run_started.load(Ordering::SeqCst)).await;
     let path = Path::from(SST);
     let put = fixture
         .mirror
@@ -818,6 +819,8 @@ async fn should_restore_local_copies_after_restart() {
 #[tokio::test]
 async fn should_refetch_corrupt_local_copy_after_restart() {
     let fixture = Fixture::new().await;
+    // The policy task must create its shutdown guard before the mirror is dropped.
+    eventually(|| fixture.policy.run_started.load(Ordering::SeqCst)).await;
     let path = Path::from(SST);
     fixture
         .mirror
