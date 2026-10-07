@@ -9,11 +9,17 @@ use crate::merge_operator::{MergeOperatorIterator, MergeOperatorRequiredIterator
 use crate::oracle::Oracle;
 use crate::reader::{DbStateReader, ReadTrace};
 use crate::retention_iterator::RetentionIterator;
+use crate::retrying_object_store::RetryingObjectStore;
 use crate::tablestore::EncodedSsTableWriter;
 use bytes::Bytes;
 use log::warn;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::task::{JoinError, JoinSet};
+use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
+use tracing::subscriber::NoSubscriber;
 use ulid::Ulid;
 
 /// Best-effort cleanup after a writer fails partway through.
@@ -37,180 +43,211 @@ pub(crate) struct SegmentedSstHandle {
     pub(crate) encoded_bytes: u64,
 }
 
+// `BufWriter` wraps an `object_store::Error` inside `std::io::Error` through
+// `AsyncWrite`. Find the original error before applying the shared retry rule.
+// Without this step, `NotSupported` can retry forever.
+pub(crate) fn should_retry_upload_error(error: &SlateDBError) -> bool {
+    match error {
+        SlateDBError::ObjectStoreError(error) => RetryingObjectStore::should_retry(error),
+        SlateDBError::IoError(error) => {
+            let Some(source) = error.get_ref() else {
+                return true;
+            };
+            let mut source: Option<&(dyn std::error::Error + 'static)> = Some(source);
+            while let Some(error) = source {
+                if let Some(error) = error.downcast_ref::<object_store::Error>() {
+                    return RetryingObjectStore::should_retry(error);
+                }
+                if let Some(error) = error.downcast_ref::<Arc<object_store::Error>>() {
+                    return RetryingObjectStore::should_retry(error);
+                }
+                source = error.source();
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Owns the close tasks for one flush attempt. Dropping it cancels those tasks.
+struct PendingSstUploads {
+    slots: Arc<Semaphore>,
+    tasks: JoinSet<Result<SegmentedSstHandle, SlateDBError>>,
+    cancel: CancellationToken,
+    uploaded: Vec<SegmentedSstHandle>,
+}
+
+impl PendingSstUploads {
+    fn new(slots: &Arc<Semaphore>) -> Self {
+        Self {
+            slots: Arc::clone(slots),
+            tasks: JoinSet::new(),
+            cancel: CancellationToken::new(),
+            uploaded: Vec::new(),
+        }
+    }
+
+    fn collect(
+        &mut self,
+        result: Result<Result<SegmentedSstHandle, SlateDBError>, JoinError>,
+    ) -> Result<(), SlateDBError> {
+        let sst = result.map_err(|error| {
+            if error.is_cancelled() {
+                SlateDBError::BackgroundTaskCancelled(format!("l0_sst_close: {error}"))
+            } else {
+                SlateDBError::BackgroundTaskPanic(format!("l0_sst_close: {error}"))
+            }
+        })??;
+        self.uploaded.push(sst);
+        Ok(())
+    }
+
+    fn collect_ready(&mut self) -> Result<(), SlateDBError> {
+        while let Some(result) = self.tasks.try_join_next() {
+            self.collect(result)?;
+        }
+        Ok(())
+    }
+
+    async fn acquire(&mut self) -> Result<OwnedSemaphorePermit, SlateDBError> {
+        let acquire = Arc::clone(&self.slots).acquire_owned();
+        tokio::pin!(acquire);
+        loop {
+            tokio::select! {
+                biased;
+                Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
+                    self.collect(result)?;
+                }
+                permit = &mut acquire => {
+                    return permit.map_err(|_| SlateDBError::InvalidDBState);
+                }
+            }
+        }
+    }
+
+    fn close(&mut self, prefix: Bytes, writer: EncodedSsTableWriter, permit: OwnedSemaphorePermit) {
+        let cancel = self.cancel.clone();
+        let close = async move {
+            // Keep the slot until the writer finishes, including its cache writes.
+            let _permit = permit;
+            let (sst_handle, encoded_bytes) = writer.close_unless_cancelled(&cancel).await?;
+            Ok(SegmentedSstHandle {
+                prefix,
+                sst_handle,
+                encoded_bytes,
+            })
+        };
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
+        if dispatch.is::<NoSubscriber>() {
+            self.tasks.spawn(close);
+        } else {
+            self.tasks.spawn(close.with_subscriber(dispatch));
+        }
+    }
+
+    async fn finish(
+        mut self,
+        mut result: Result<(), SlateDBError>,
+    ) -> Result<Vec<SegmentedSstHandle>, SlateDBError> {
+        let is_fatal = |result: &Result<(), SlateDBError>| {
+            result
+                .as_ref()
+                .is_err_and(|error| !should_retry_upload_error(error))
+        };
+        loop {
+            if is_fatal(&result) {
+                // A fatal error forbids retries. Cancel siblings that can otherwise
+                // retry forever, and await cancellation to release their upload slots.
+                self.cancel.cancel();
+            }
+            // Settle every upload before retrying with the same SST ids.
+            let Some(upload) = self.tasks.join_next().await else {
+                break;
+            };
+            if let Err(error) = self.collect(upload) {
+                // A fatal error takes precedence over an earlier retryable error.
+                if result.is_ok() || (!is_fatal(&result) && !should_retry_upload_error(&error)) {
+                    result = Err(error);
+                }
+            }
+        }
+        result?;
+        self.uploaded.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+        Ok(self.uploaded)
+    }
+}
+
 impl DbInner {
-    /// Write this memtable's post-retention entries to object storage.
+    /// Stream one SST per segment that retains entries from this memtable.
+    /// Without a segment extractor, all entries belong to the empty prefix.
     ///
-    /// Hands the SST to the writer one block at a time, so peak memory
-    /// is bounded by the writer's buffer (10 MiB) rather than the whole
-    /// encoded SST. An SST that fits in that buffer still stays fully
-    /// buffered until close; the saving is for SSTs larger than it.
+    /// Each writer holds a shared upload slot from creation through completion.
+    /// At a segment boundary, its close runs in the background while the next
+    /// segment starts if a slot is available. Blocks stream as they are built.
+    /// Small SSTs stay buffered until close, and large SSTs use multipart uploads.
     ///
-    /// With no segment extractor configured, writes one SST. With one
-    /// configured, writes one SST per segment prefix that received at
-    /// least one entry.
+    /// On error, abort the active writer. Before retrying, settle all close tasks.
+    /// On fatal errors, cancel and await the close tasks instead.
+    /// Completed SSTs stay uploaded. Results are sorted by segment prefix.
     pub(crate) async fn stream_imm_ssts(
         &self,
         imm_table: Arc<KVTable>,
         min_retention_seq: Option<u64>,
         segment_sst_ids: &BTreeMap<Bytes, Ulid>,
+        upload_slots: &Arc<Semaphore>,
     ) -> Result<Vec<SegmentedSstHandle>, SlateDBError> {
-        if self.segment_extractor.is_none() {
-            let sst_id = segment_sst_ids
-                .get(&Bytes::new())
-                .copied()
-                .map(SsTableId::from)
-                .ok_or(SlateDBError::InvalidDBState)?;
-            return Ok(self
-                .stream_imm_sst(imm_table, min_retention_seq, sst_id)
-                .await?
-                .into_iter()
-                .map(|(sst_handle, encoded_bytes)| SegmentedSstHandle {
-                    prefix: Bytes::new(),
-                    sst_handle,
-                    encoded_bytes,
-                })
-                .collect());
-        }
-        let touched = imm_table.touched_segments();
-        if touched.is_empty() {
-            if imm_table.is_empty() {
-                return Ok(Vec::new());
+        let touched = if self.segment_extractor.is_none() {
+            std::collections::BTreeSet::from([Bytes::new()])
+        } else {
+            let touched = imm_table.touched_segments();
+            if touched.is_empty() && !imm_table.is_empty() {
+                return Err(SlateDBError::InvalidDBState);
             }
-            return Err(SlateDBError::InvalidDBState);
-        }
-        self.stream_imm_segment_ssts(imm_table, touched, min_retention_seq, segment_sst_ids)
-            .await
-    }
-
-    /// Write one SST for the whole memtable, with no segment extractor.
-    ///
-    /// Each finished block is handed to the writer as it is produced.
-    /// The writer buffers blocks and only starts uploading once its
-    /// buffer fills, so a small SST is held in memory until close.
-    ///
-    /// On any error, aborts this SST's upload before returning the
-    /// error. This discards any blocks already sent to object storage
-    /// for this attempt.
-    async fn stream_imm_sst(
-        &self,
-        imm_table: Arc<KVTable>,
-        min_retention_seq: Option<u64>,
-        sst_id: SsTableId,
-    ) -> Result<Option<(SsTableHandle, u64)>, SlateDBError> {
-        let mut writer = self.table_store.table_writer(sst_id, Some(Bytes::new()));
-        let mut iter = match self.iter_imm_table(imm_table, min_retention_seq).await {
-            Ok(iter) => iter,
-            Err(e) => {
-                abort_writer(&mut writer).await;
-                return Err(e);
-            }
+            touched
         };
-        let mut any = false;
-        loop {
-            match iter.next().await {
-                Ok(Some(entry)) => {
-                    if let Err(e) = writer.add(entry).await {
-                        abort_writer(&mut writer).await;
-                        return Err(e);
-                    }
-                    any = true;
-                    tokio::task::coop::consume_budget().await;
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    abort_writer(&mut writer).await;
-                    return Err(e);
-                }
-            }
-        }
-        if !any {
-            return Ok(None);
-        }
-        Ok(Some(writer.close().await?))
-    }
-
-    /// Write one SST per touched segment, block by block.
-    ///
-    /// Walks the memtable's entries and the segment prefixes together.
-    /// Both are sorted, so every entry for one prefix arrives before
-    /// the next prefix starts. Closes the current segment's SST and
-    /// opens the next one each time an entry's key no longer matches
-    /// the current prefix.
-    ///
-    /// On error, aborts only the segment being written when the error
-    /// happened. Segments already closed and uploaded earlier in this
-    /// call stay uploaded.
-    async fn stream_imm_segment_ssts(
-        &self,
-        imm_table: Arc<KVTable>,
-        touched_segments: std::collections::BTreeSet<Bytes>,
-        min_retention_seq: Option<u64>,
-        segment_sst_ids: &BTreeMap<Bytes, Ulid>,
-    ) -> Result<Vec<SegmentedSstHandle>, SlateDBError> {
+        let mut prefixes = touched.into_iter();
+        let Some(mut prefix) = prefixes.next() else {
+            return Ok(Vec::new());
+        };
         let mut entries = self.iter_imm_table(imm_table, min_retention_seq).await?;
-        let mut seg_iter = touched_segments.into_iter();
-        let mut current_prefix = seg_iter
-            .next()
-            .expect("touched_segments non-empty in this branch");
-        let mut current_id = segment_sst_ids
-            .get(&current_prefix)
-            .copied()
-            .ok_or(SlateDBError::InvalidDBState)?;
-        let mut current_writer = self
-            .table_store
-            .table_writer(SsTableId::from(current_id), Some(current_prefix.clone()));
-        let mut current_has_entry = false;
-        let mut out: Vec<SegmentedSstHandle> = Vec::new();
-        loop {
-            let entry = match entries.next().await {
-                Ok(Some(entry)) => entry,
-                Ok(None) => break,
-                Err(e) => {
-                    abort_writer(&mut current_writer).await;
-                    return Err(e);
+        let mut uploads = PendingSstUploads::new(upload_slots);
+        let mut active: Option<(EncodedSsTableWriter, OwnedSemaphorePermit)> = None;
+        let result = async {
+            while let Some(entry) = entries.next().await? {
+                while !entry.key.starts_with(prefix.as_ref()) {
+                    if let Some((writer, permit)) = active.take() {
+                        uploads.close(prefix.clone(), writer, permit);
+                    }
+                    prefix = prefixes.next().ok_or(SlateDBError::InvalidDBState)?;
                 }
-            };
-            // entry's key no longer matches current_prefix: close this
-            // segment's SST (if it received any entries) and move on
-            // to the next prefix.
-            while !entry.key.starts_with(current_prefix.as_ref()) {
-                if current_has_entry {
-                    let (sst_handle, encoded_bytes) = current_writer.close().await?;
-                    out.push(SegmentedSstHandle {
-                        prefix: current_prefix,
-                        sst_handle,
-                        encoded_bytes,
-                    });
+                if active.is_none() {
+                    let id = segment_sst_ids
+                        .get(&prefix)
+                        .copied()
+                        .ok_or(SlateDBError::InvalidDBState)?;
+                    let permit = uploads.acquire().await?;
+                    active = Some((
+                        self.table_store
+                            .table_writer(SsTableId::from(id), Some(prefix.clone())),
+                        permit,
+                    ));
                 }
-                current_prefix = seg_iter.next().expect(
-                    "entry key has no matching prefix in touched_segments — \
-                         extractor output inconsistent with recorded set",
-                );
-                current_id = segment_sst_ids
-                    .get(&current_prefix)
-                    .copied()
-                    .ok_or(SlateDBError::InvalidDBState)?;
-                current_writer = self
-                    .table_store
-                    .table_writer(SsTableId::from(current_id), Some(current_prefix.clone()));
-                current_has_entry = false;
+                let finished_block = active.as_mut().expect("active writer").0.add(entry).await?;
+                if finished_block.is_some() {
+                    uploads.collect_ready()?;
+                }
+                tokio::task::coop::consume_budget().await;
             }
-            if let Err(e) = current_writer.add(entry).await {
-                abort_writer(&mut current_writer).await;
-                return Err(e);
+            if let Some((writer, permit)) = active.take() {
+                uploads.close(prefix, writer, permit);
             }
-            current_has_entry = true;
-            tokio::task::coop::consume_budget().await;
+            Ok(())
         }
-        if current_has_entry {
-            let (sst_handle, encoded_bytes) = current_writer.close().await?;
-            out.push(SegmentedSstHandle {
-                prefix: current_prefix,
-                sst_handle,
-                encoded_bytes,
-            });
+        .await;
+        if let Some((mut writer, _permit)) = active {
+            abort_writer(&mut writer).await;
         }
-        Ok(out)
+        uploads.finish(result).await
     }
 
     /// Write `encoded_sst` to object storage at `id` and advance the
@@ -254,7 +291,12 @@ impl DbInner {
             .collect();
         let min_retention_seq = self.compute_min_retention_seq();
         let segments = self
-            .stream_imm_ssts(imm_table, min_retention_seq, &segment_sst_ids)
+            .stream_imm_ssts(
+                imm_table,
+                min_retention_seq,
+                &segment_sst_ids,
+                &Arc::new(Semaphore::new(self.settings.l0_flush_parallelism)),
+            )
             .await?;
         Ok(segments.into_iter().map(|s| s.sst_handle).collect())
     }
@@ -348,7 +390,23 @@ mod tests {
     use slatedb_common::metrics::test_recorder_helper;
     use std::collections::BTreeMap;
     use std::sync::Arc;
+    use tokio::sync::Semaphore;
     use ulid::Ulid;
+
+    #[tokio::test]
+    async fn should_report_a_cancelled_close_task_as_cancelled_not_panicked() {
+        let slots = Arc::new(Semaphore::new(1));
+        let mut uploads = super::PendingSstUploads::new(&slots);
+        uploads.tasks.spawn(std::future::pending());
+        uploads.tasks.abort_all();
+
+        let joined = uploads.tasks.join_next().await.unwrap();
+
+        assert!(matches!(
+            uploads.collect(joined),
+            Err(SlateDBError::BackgroundTaskCancelled(_))
+        ));
+    }
 
     fn preallocate_ids(prefixes: impl IntoIterator<Item = Bytes>) -> BTreeMap<Bytes, Ulid> {
         prefixes.into_iter().map(|p| (p, Ulid::new())).collect()
@@ -824,7 +882,12 @@ mod tests {
             let ids = preallocate_ids([Bytes::new()]);
             let segments = db
                 .inner
-                .stream_imm_ssts(table.table().clone(), pinned, &ids)
+                .stream_imm_ssts(
+                    table.table().clone(),
+                    pinned,
+                    &ids,
+                    &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+                )
                 .await
                 .unwrap();
             let handle = segments.into_iter().next().unwrap().sst_handle;
@@ -845,7 +908,12 @@ mod tests {
         let ids = preallocate_ids([Bytes::new()]);
         let segments = db
             .inner
-            .stream_imm_ssts(table.table().clone(), live, &ids)
+            .stream_imm_ssts(
+                table.table().clone(),
+                live,
+                &ids,
+                &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+            )
             .await
             .unwrap();
         let handle = segments.into_iter().next().unwrap().sst_handle;
@@ -903,7 +971,12 @@ mod tests {
 
         let ssts = db
             .inner
-            .stream_imm_ssts(table.table().clone(), None, &segment_sst_ids)
+            .stream_imm_ssts(
+                table.table().clone(),
+                None,
+                &segment_sst_ids,
+                &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+            )
             .await
             .unwrap();
 
@@ -928,7 +1001,12 @@ mod tests {
 
         let ssts = db
             .inner
-            .stream_imm_ssts(table.table().clone(), None, &segment_sst_ids)
+            .stream_imm_ssts(
+                table.table().clone(),
+                None,
+                &segment_sst_ids,
+                &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+            )
             .await
             .unwrap();
 
@@ -948,7 +1026,12 @@ mod tests {
 
         let ssts = db
             .inner
-            .stream_imm_ssts(table.table().clone(), None, &segment_sst_ids)
+            .stream_imm_ssts(
+                table.table().clone(),
+                None,
+                &segment_sst_ids,
+                &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+            )
             .await
             .unwrap();
 
@@ -987,7 +1070,12 @@ mod tests {
 
         let ssts = db
             .inner
-            .stream_imm_ssts(table.table().clone(), None, &segment_sst_ids)
+            .stream_imm_ssts(
+                table.table().clone(),
+                None,
+                &segment_sst_ids,
+                &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+            )
             .await
             .unwrap();
 
@@ -1050,7 +1138,12 @@ mod tests {
 
         let ssts = db
             .inner
-            .stream_imm_ssts(table.table().clone(), None, &segment_sst_ids)
+            .stream_imm_ssts(
+                table.table().clone(),
+                None,
+                &segment_sst_ids,
+                &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+            )
             .await
             .unwrap();
 
@@ -1078,7 +1171,12 @@ mod tests {
 
         let err = match db
             .inner
-            .stream_imm_ssts(table.table().clone(), None, &segment_sst_ids)
+            .stream_imm_ssts(
+                table.table().clone(),
+                None,
+                &segment_sst_ids,
+                &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+            )
             .await
         {
             Ok(_) => panic!("expected InvalidDBState for missing touched_segments"),
