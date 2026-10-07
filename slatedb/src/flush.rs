@@ -17,6 +17,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinError, JoinSet};
+use tokio_util::sync::CancellationToken;
+use tracing::instrument::WithSubscriber;
+use tracing::subscriber::NoSubscriber;
 use ulid::Ulid;
 
 /// Best-effort cleanup after a writer fails partway through.
@@ -70,6 +73,7 @@ pub(crate) fn should_retry_upload_error(error: &SlateDBError) -> bool {
 struct PendingSstUploads {
     slots: Arc<Semaphore>,
     tasks: JoinSet<Result<SegmentedSstHandle, SlateDBError>>,
+    cancel: CancellationToken,
     uploaded: Vec<SegmentedSstHandle>,
 }
 
@@ -78,6 +82,7 @@ impl PendingSstUploads {
         Self {
             slots: Arc::clone(slots),
             tasks: JoinSet::new(),
+            cancel: CancellationToken::new(),
             uploaded: Vec::new(),
         }
     }
@@ -87,7 +92,11 @@ impl PendingSstUploads {
         result: Result<Result<SegmentedSstHandle, SlateDBError>, JoinError>,
     ) -> Result<(), SlateDBError> {
         let sst = result.map_err(|error| {
-            SlateDBError::BackgroundTaskPanic(format!("l0_sst_close: {error}"))
+            if error.is_cancelled() {
+                SlateDBError::BackgroundTaskCancelled(format!("l0_sst_close: {error}"))
+            } else {
+                SlateDBError::BackgroundTaskPanic(format!("l0_sst_close: {error}"))
+            }
         })??;
         self.uploaded.push(sst);
         Ok(())
@@ -117,31 +126,39 @@ impl PendingSstUploads {
     }
 
     fn close(&mut self, prefix: Bytes, writer: EncodedSsTableWriter, permit: OwnedSemaphorePermit) {
-        self.tasks.spawn(async move {
+        let cancel = self.cancel.clone();
+        let close = async move {
             // Keep the slot until the writer finishes, including its cache writes.
             let _permit = permit;
-            let (sst_handle, encoded_bytes) = writer.close().await?;
+            let (sst_handle, encoded_bytes) = writer.close_unless_cancelled(&cancel).await?;
             Ok(SegmentedSstHandle {
                 prefix,
                 sst_handle,
                 encoded_bytes,
             })
-        });
+        };
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
+        if dispatch.is::<NoSubscriber>() {
+            self.tasks.spawn(close);
+        } else {
+            self.tasks.spawn(close.with_subscriber(dispatch));
+        }
     }
 
     async fn finish(
         mut self,
         mut result: Result<(), SlateDBError>,
     ) -> Result<Vec<SegmentedSstHandle>, SlateDBError> {
-        loop {
-            if result
+        let is_fatal = |result: &Result<(), SlateDBError>| {
+            result
                 .as_ref()
                 .is_err_and(|error| !should_retry_upload_error(error))
-            {
+        };
+        loop {
+            if is_fatal(&result) {
                 // A fatal error forbids retries. Cancel siblings that can otherwise
                 // retry forever, and await cancellation to release their upload slots.
-                self.tasks.shutdown().await;
-                break;
+                self.cancel.cancel();
             }
             // Settle every upload before retrying with the same SST ids.
             let Some(upload) = self.tasks.join_next().await else {
@@ -149,7 +166,7 @@ impl PendingSstUploads {
             };
             if let Err(error) = self.collect(upload) {
                 // A fatal error takes precedence over an earlier retryable error.
-                if result.is_ok() || !should_retry_upload_error(&error) {
+                if result.is_ok() || (!is_fatal(&result) && !should_retry_upload_error(&error)) {
                     result = Err(error);
                 }
             }
@@ -197,7 +214,6 @@ impl DbInner {
         let mut active: Option<(EncodedSsTableWriter, OwnedSemaphorePermit)> = None;
         let result = async {
             while let Some(entry) = entries.next().await? {
-                uploads.collect_ready()?;
                 while !entry.key.starts_with(prefix.as_ref()) {
                     if let Some((writer, permit)) = active.take() {
                         uploads.close(prefix.clone(), writer, permit);
@@ -216,7 +232,10 @@ impl DbInner {
                         permit,
                     ));
                 }
-                active.as_mut().expect("active writer").0.add(entry).await?;
+                let finished_block = active.as_mut().expect("active writer").0.add(entry).await?;
+                if finished_block.is_some() {
+                    uploads.collect_ready()?;
+                }
                 tokio::task::coop::consume_budget().await;
             }
             if let Some((writer, permit)) = active.take() {
@@ -373,6 +392,21 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Semaphore;
     use ulid::Ulid;
+
+    #[tokio::test]
+    async fn should_report_a_cancelled_close_task_as_cancelled_not_panicked() {
+        let slots = Arc::new(Semaphore::new(1));
+        let mut uploads = super::PendingSstUploads::new(&slots);
+        uploads.tasks.spawn(std::future::pending());
+        uploads.tasks.abort_all();
+
+        let joined = uploads.tasks.join_next().await.unwrap();
+
+        assert!(matches!(
+            uploads.collect(joined),
+            Err(SlateDBError::BackgroundTaskCancelled(_))
+        ));
+    }
 
     fn preallocate_ids(prefixes: impl IntoIterator<Item = Bytes>) -> BTreeMap<Bytes, Ulid> {
         prefixes.into_iter().map(|p| (p, Ulid::new())).collect()

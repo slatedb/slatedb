@@ -1275,6 +1275,7 @@ pub(crate) struct GatedObjectStore {
     /// the pre-0.13 single-call `delete` semantics now that callers go through
     /// `ObjectStoreExt::delete`, which fans out into `delete_stream`.
     pub(crate) delete_stream_gate: Arc<Gate>,
+    pub(crate) multipart_aborts: Arc<AtomicUsize>,
 }
 
 impl GatedObjectStore {
@@ -1288,7 +1289,30 @@ impl GatedObjectStore {
             copy_gate: Gate::default(),
             rename_gate: Gate::default(),
             delete_stream_gate: Arc::new(Gate::default()),
+            multipart_aborts: Arc::new(AtomicUsize::new(0)),
         }
+    }
+}
+
+#[derive(Debug)]
+struct AbortCountingUpload {
+    inner: Box<dyn MultipartUpload>,
+    aborts: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl MultipartUpload for AbortCountingUpload {
+    fn put_part(&mut self, data: PutPayload) -> object_store::UploadPart {
+        self.inner.put_part(data)
+    }
+
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        self.inner.complete().await
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        self.aborts.fetch_add(1, Ordering::SeqCst);
+        self.inner.abort().await
     }
 }
 
@@ -1329,7 +1353,11 @@ impl ObjectStore for GatedObjectStore {
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         self.put_multipart_opts_gate.wait().await?;
-        self.inner.put_multipart_opts(location, opts).await
+        let inner = self.inner.put_multipart_opts(location, opts).await?;
+        Ok(Box::new(AbortCountingUpload {
+            inner,
+            aborts: Arc::clone(&self.multipart_aborts),
+        }))
     }
 
     fn delete_stream(
