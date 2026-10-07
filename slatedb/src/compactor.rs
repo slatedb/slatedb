@@ -1909,7 +1909,6 @@ mod tests {
         assert_eq!(cached_ids, expected_ids);
         db.close().await.unwrap();
     }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_compactor_compacts_only_target_segment() {
         let os = Arc::new(InMemory::new());
