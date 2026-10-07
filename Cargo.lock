@@ -1452,6 +1452,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3245,6 +3251,7 @@ dependencies = [
  "serde_json",
  "siphasher",
  "slatedb-common",
+ "slatedb-mirror",
  "slatedb-txn-obj",
  "smallvec",
  "snap",
@@ -3307,10 +3314,13 @@ version = "0.17.0"
 dependencies = [
  "chrono",
  "log",
+ "lru",
  "object_store",
+ "parking_lot",
  "rand 0.9.4",
  "rand_xoshiro",
  "serde",
+ "tempfile",
  "thread_local",
  "tokio",
 ]
@@ -3338,6 +3348,29 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
+]
+
+[[package]]
+name = "slatedb-mirror"
+version = "0.17.0"
+dependencies = [
+ "async-trait",
+ "backon",
+ "bytes",
+ "chrono",
+ "futures",
+ "hex",
+ "log",
+ "md-5",
+ "object_store",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "slatedb-common",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
