@@ -122,6 +122,13 @@ pub trait CompactionSchedulerSupplier: Send + Sync {
 /// Implementations return one or more candidate compaction specs, which the compactor then
 /// validates and submits to the executor.
 pub trait CompactionScheduler: Send + Sync {
+    /// Validates scheduler requirements against the database's L0 limits.
+    ///
+    /// Schedulers without a fixed L0 source minimum can keep the default implementation.
+    fn validate_l0_limits(&self, _settings: &crate::config::Settings) -> Result<(), Error> {
+        Ok(())
+    }
+
     /// Proposes compaction specs for the current state.
     ///
     /// ## Arguments

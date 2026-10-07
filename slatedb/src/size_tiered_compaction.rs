@@ -197,6 +197,11 @@ impl Default for SizeTieredCompactionScheduler {
 }
 
 impl CompactionScheduler for SizeTieredCompactionScheduler {
+    fn validate_l0_limits(&self, settings: &crate::config::Settings) -> Result<(), Error> {
+        self.options
+            .validate_l0_limits(settings.l0_max_ssts, settings.l0_max_ssts_per_key)
+    }
+
     fn propose(&self, state: &CompactorStateView) -> Vec<CompactionSpec> {
         let mut compactions = Vec::new();
         let db_state = state.manifest().core();
