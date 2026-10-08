@@ -569,7 +569,6 @@ enum TrackedImmState {
 mod tests {
     use crate::batch_write::BatchWriterMessage;
     use crate::block_cache_policy::BlockCachePolicy;
-    use crate::checkpoint::CheckpointBoundary;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_state::{
@@ -585,6 +584,7 @@ mod tests {
     use crate::manifest::ManifestCore;
     use crate::mem_table::{ImmutableMemtable, WritableKVTable};
     use crate::memtable_flusher::uploader::Uploader;
+    use crate::memtable_flusher::CheckpointCursor;
     use crate::memtable_flusher::{FlushTarget, MemtableFlusher};
     use crate::paths::PathResolver;
     use crate::prefix_extractor::PrefixExtractor;
@@ -1005,10 +1005,11 @@ mod tests {
         let checkpoint = timeout(
             Duration::from_secs(5),
             flusher.create_checkpoint(
-                CheckpointBoundary {
-                    through_seq: Some(1),
-                    wal_id_last_seen: Some(0),
-                },
+                Some(CheckpointCursor {
+                    seq: 1,
+                    wal_file: Some(0),
+                }),
+                true,
                 CheckpointOptions::default(),
             ),
         )
@@ -1049,13 +1050,7 @@ mod tests {
         // current durable state without waiting for the flush pipeline.
         let checkpoint = timeout(
             Duration::from_secs(5),
-            flusher.create_checkpoint(
-                CheckpointBoundary {
-                    through_seq: None,
-                    wal_id_last_seen: Some(0),
-                },
-                CheckpointOptions::default(),
-            ),
+            flusher.create_checkpoint(None, false, CheckpointOptions::default()),
         )
         .await
         .unwrap()
@@ -1183,10 +1178,11 @@ mod tests {
         let checkpoint_result = timeout(
             Duration::from_secs(5),
             flusher.create_checkpoint(
-                CheckpointBoundary {
-                    through_seq: Some(1),
-                    wal_id_last_seen: Some(0),
-                },
+                Some(CheckpointCursor {
+                    seq: 1,
+                    wal_file: Some(0),
+                }),
+                true,
                 CheckpointOptions::default(),
             ),
         )

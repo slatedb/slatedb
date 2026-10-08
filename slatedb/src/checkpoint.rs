@@ -1,9 +1,8 @@
 use crate::config::{CheckpointOptions, CheckpointScope};
 use crate::db::Db;
 use crate::error::SlateDBError;
+use crate::memtable_flusher::CheckpointCursor;
 use crate::utils::IdGenerator;
-#[cfg(test)]
-use crate::wal::FlushResultFuture;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::oneshot;
@@ -30,25 +29,14 @@ pub struct CheckpointCreateResult {
 
 pub(crate) type CheckpointResult = Result<CheckpointCreateResult, SlateDBError>;
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct CheckpointBoundary {
-    pub(crate) through_seq: Option<u64>,
-    pub(crate) wal_id_last_seen: Option<u64>,
-}
-
 pub(crate) struct CheckpointRequest {
     pub(crate) id: Uuid,
-    pub(crate) target: CheckpointTarget,
+    /// The earliest write position that the checkpoint must include.
+    /// If `None`, the manifest writer uses the last durable write.
+    pub(crate) floor: Option<CheckpointCursor>,
+    /// If true, the checkpoint waits until L0 holds every write through `floor`.
+    pub(crate) wait_for_l0: bool,
     pub(crate) lifecycle: CheckpointLifecycle,
-}
-
-pub(crate) enum CheckpointTarget {
-    Scope(CheckpointScope),
-    #[cfg(test)]
-    Captured {
-        boundary: CheckpointBoundary,
-        wal_flush: Option<FlushResultFuture>,
-    },
 }
 
 pub(crate) struct CheckpointLifecycle {
@@ -155,10 +143,19 @@ impl Db {
         options: &CheckpointOptions,
     ) -> Result<CheckpointHandle, crate::Error> {
         let id = self.inner.rand.rng().gen_uuid();
+        let (floor, wait_for_l0) = match scope {
+            CheckpointScope::All => {
+                // Freeze the WAL and the memtable. The manifest writer waits until the frozen
+                // WAL file is durable, so this call does not wait for the WAL upload.
+                let (_, floor) = self.inner.begin_batch_writer_flush(true).await?;
+                (Some(floor), true)
+            }
+            CheckpointScope::Durable => (None, false),
+        };
 
         self.inner
             .memtable_flusher()
-            .begin_checkpoint(id, CheckpointTarget::Scope(scope), options.clone())
+            .begin_checkpoint(id, floor, wait_for_l0, options.clone())
             .await
             .map_err(Into::into)
     }
@@ -663,9 +660,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delayed_checkpoint_survives_concurrent_table_flushes() {
+    async fn test_wal_upload_failure_fails_pending_checkpoint() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_delayed_checkpoint_survives_concurrent_table_flushes");
+        let path = Path::from("/tmp/test_wal_upload_failure_fails_pending_checkpoint");
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let db = Db::builder(path, object_store)
+            .with_settings(Settings {
+                flush_interval: None,
+                ..Settings::default()
+            })
+            .with_fp_registry(fp_registry.clone())
+            .build()
+            .await
+            .unwrap();
+        db.put(b"key", b"value").await.unwrap();
+        fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "return").unwrap();
+
+        // The failed WAL task stops the manifest writer, which fails the pending checkpoint.
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            db.begin_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+                .await?
+                .wait()
+                .await
+        })
+        .await
+        .expect("checkpoint did not finish after the WAL upload failed");
+        fail_parallel::remove(fp_registry, "write-wal-sst-io-error");
+        assert!(result.is_err());
+        let _ = db.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_survives_concurrent_table_flushes() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_checkpoint_survives_concurrent_table_flushes");
         let db = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings {
                 flush_interval: Some(Duration::from_secs(3600)),
@@ -675,40 +703,18 @@ mod tests {
             .await
             .unwrap();
         db.put(b"before", b"v1").await.unwrap();
-        let options = CheckpointOptions::default();
-        let mut checkpoint = Box::pin(db.begin_checkpoint(CheckpointScope::All, &options));
-        assert!(futures::poll!(&mut checkpoint).is_pending());
+        let handle = db
+            .begin_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+            .await
+            .unwrap();
 
-        // The database completes the accepted request while its caller stays unpolled.
-        db.flush_with_options(FlushOptions {
-            flush_type: FlushType::MemTable,
-        })
-        .await
-        .unwrap();
-        let store = ManifestStore::new(&path, object_store.clone());
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while store
-                .read_latest_manifest()
-                .await
-                .unwrap()
-                .manifest
-                .core
-                .checkpoints
-                .is_empty()
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        // Later writes reach L0 while the checkpoint waits, but the checkpoint excludes them.
         db.put(b"during", b"v2").await.unwrap();
         db.flush_with_options(FlushOptions {
             flush_type: FlushType::MemTable,
         })
         .await
         .unwrap();
-
-        let handle = checkpoint.await.unwrap();
         db.put(b"after", b"v3").await.unwrap();
         db.flush_with_options(FlushOptions {
             flush_type: FlushType::MemTable,
@@ -771,9 +777,9 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_begin_checkpoint_keeps_the_wal_boundary_from_its_freeze() {
+    async fn test_begin_checkpoint_keeps_its_wal_bound() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_begin_checkpoint_keeps_wal_boundary");
+        let path = Path::from("/tmp/test_begin_checkpoint_keeps_wal_bound");
         let fp_registry = Arc::new(FailPointRegistry::new());
         let db = Db::builder(path.clone(), object_store.clone())
             .with_settings(Settings {
@@ -792,7 +798,7 @@ mod tests {
         let callback_release = Arc::clone(&release_checkpoint);
         fail_parallel::cfg_callback(
             Arc::clone(&fp_registry),
-            "checkpoint-after-freeze",
+            "checkpoint-after-bound",
             move || {
                 callback_reached.store(true, Ordering::Release);
                 while !callback_release.load(Ordering::Acquire) {
@@ -831,7 +837,7 @@ mod tests {
         assert!(later_wal_id > wal_id_before_later_write);
 
         release_checkpoint.store(true, Ordering::Release);
-        fail_parallel::remove(Arc::clone(&fp_registry), "checkpoint-after-freeze");
+        fail_parallel::remove(Arc::clone(&fp_registry), "checkpoint-after-bound");
         let checkpoint = tokio::time::timeout(Duration::from_secs(5), checkpoint_task)
             .await
             .unwrap()
@@ -840,7 +846,8 @@ mod tests {
             .read_manifest(checkpoint.manifest_id)
             .await
             .unwrap();
-        assert!(manifest.core.next_wal_sst_id <= later_wal_id);
+        // The bound ends at the WAL file before the later write.
+        assert_eq!(manifest.core.next_wal_sst_id, later_wal_id);
 
         db.close().await.unwrap();
     }

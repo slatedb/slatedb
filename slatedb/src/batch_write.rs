@@ -32,12 +32,13 @@ use futures::{FutureExt, StreamExt};
 use std::sync::Arc;
 use tracing::instrument;
 
-use crate::checkpoint::CheckpointBoundary;
 use crate::config::WriteOptions;
 use crate::db_state::DbState;
 use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandler;
 use crate::mem_table::KVTable;
+use crate::memtable_flusher::CheckpointCursor;
+use crate::oracle::Oracle;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
 use crate::wal::{FlushResultFuture, WalWriter};
@@ -50,7 +51,7 @@ use tokio::sync::oneshot;
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 
 pub(crate) type WriteBatchResult = Result<WriteHandle, SlateDBError>;
-pub(crate) type BatchWriterFlushResult = (FlushResultFuture, Option<CheckpointBoundary>);
+pub(crate) type BatchWriterFlushResult = (FlushResultFuture, CheckpointCursor);
 
 /// A message processed by the batch writer event loop.
 #[allow(clippy::large_enum_variant)]
@@ -355,30 +356,27 @@ impl DbInner {
         freeze_memtable: bool,
         wal_writer: Option<&mut Box<dyn WalWriter>>,
     ) -> Result<BatchWriterFlushResult, SlateDBError> {
-        let (flush_rx, wal_id_last_seen) = if let Some(wal_writer) = wal_writer {
+        let (flush_rx, wal_file) = if let Some(wal_writer) = wal_writer {
             let flush = wal_writer.flush().await?;
             (flush.completion, Some(flush.wal_id))
         } else {
             (async { Ok(()) }.boxed(), None)
         };
-        let checkpoint_boundary = if freeze_memtable {
-            // The replay starting point can precede the frozen WAL endpoint.
+        // The writer task applies writes one at a time, so no write is in progress here.
+        // The last committed write is the last write in the frozen WAL file.
+        let cursor = CheckpointCursor {
+            seq: self.oracle.last_committed_seq(),
+            wal_file,
+        };
+        if freeze_memtable {
+            // Note that this likely won't reflect the result of the above flush call as we don't
+            // block until the flush completes. That's fine, as any earlier wal is still a safe
+            // replay point.
             let replay_after_wal_id = self.wal_observer.status()?.last_flushed_wal_id;
             let mut guard = self.state.write();
             self.freeze_current_memtable_with_state_guard(&mut guard, replay_after_wal_id);
-            let through_seq = guard
-                .state()
-                .imm_memtable
-                .front()
-                .and_then(|imm| imm.table().last_seq());
-            Some(CheckpointBoundary {
-                through_seq,
-                wal_id_last_seen,
-            })
-        } else {
-            None
-        };
-        Ok((flush_rx, checkpoint_boundary))
+        }
+        Ok((flush_rx, cursor))
     }
 
     // TODO: this is only pub(crate) because currently the replay logic resides in db_common. We
@@ -402,14 +400,13 @@ impl DbInner {
     pub(crate) async fn request_batch_writer_flush(
         &self,
         freeze_memtable: bool,
-    ) -> Result<Option<CheckpointBoundary>, SlateDBError> {
-        let (flush_result, checkpoint_boundary) =
-            self.begin_batch_writer_flush(freeze_memtable).await?;
-        flush_result.await?;
-        Ok(checkpoint_boundary)
+    ) -> Result<(), SlateDBError> {
+        let (flush_result, _) = self.begin_batch_writer_flush(freeze_memtable).await?;
+        Ok(flush_result.await?)
     }
 
-    /// Waits for the writer to start the flush and capture the optional boundary.
+    /// Waits for the writer to start the flush. Returns the WAL flush future and the cursor of
+    /// the last write that the flush covers.
     pub(crate) async fn begin_batch_writer_flush(
         &self,
         freeze_memtable: bool,

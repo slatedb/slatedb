@@ -407,7 +407,7 @@ impl DbInner {
     ) -> Result<FlushResult, SlateDBError> {
         // flush the batch writer to freeze the active memtable and flush all WALs to unblock
         // memtable flush
-        let _ = self.request_batch_writer_flush(true).await?;
+        self.request_batch_writer_flush(true).await?;
         self.flush_imm_memtables(target).await
     }
 
@@ -443,7 +443,7 @@ impl DbInner {
                 if !self.wal_enabled {
                     return Err(SlateDBError::WalDisabled);
                 }
-                self.request_batch_writer_flush(false).await.map(|_| ())
+                self.request_batch_writer_flush(false).await
             }
             FlushType::MemTable => self.flush_memtables(FlushTarget::All).await.map(|_| ()),
         }
