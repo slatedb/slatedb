@@ -90,21 +90,28 @@ impl FenceableManifest {
         Ok(self.inner.update(dirty).await?)
     }
 
-    pub(crate) fn new_checkpoint(
+    pub(crate) fn new_checkpoint_in(
         &self,
+        db_state: &ManifestCore,
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        Self::make_new_checkpoint(self.clock.clone(), &self.inner, checkpoint_id, options)
+        Self::make_new_checkpoint(
+            self.clock.clone(),
+            &self.inner,
+            db_state,
+            checkpoint_id,
+            options,
+        )
     }
 
     fn make_new_checkpoint(
         clock: Arc<dyn SystemClock>,
         inner: &FenceableTransactionalObject<Manifest>,
+        db_state: &ManifestCore,
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let db_state = &inner.object().core;
         let manifest_id = match options.source {
             Some(source_checkpoint_id) => {
                 let Some(source_checkpoint) = db_state.find_checkpoint(source_checkpoint_id) else {
@@ -135,7 +142,13 @@ impl FenceableManifest {
     ) -> Result<Checkpoint, SlateDBError> {
         let clock = self.clock.clone();
         self.maybe_apply_update(|fm| {
-            let checkpoint = Self::make_new_checkpoint(clock.clone(), fm, checkpoint_id, options)?;
+            let checkpoint = Self::make_new_checkpoint(
+                clock.clone(),
+                fm,
+                &fm.object().core,
+                checkpoint_id,
+                options,
+            )?;
             let mut dirty = fm.prepare_dirty()?;
             dirty.value.core.checkpoints.push(checkpoint);
             Ok(Some(dirty))

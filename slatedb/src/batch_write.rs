@@ -37,6 +37,8 @@ use crate::db_state::DbState;
 use crate::db_transaction::DbTransaction;
 use crate::dispatcher::MessageHandler;
 use crate::mem_table::KVTable;
+use crate::memtable_flusher::CheckpointCursor;
+use crate::oracle::Oracle;
 use crate::types::RowEntry;
 use crate::utils::WatchableOnceCellReader;
 use crate::wal::{FlushResultFuture, WalWriter};
@@ -49,6 +51,7 @@ use tokio::sync::oneshot;
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 
 pub(crate) type WriteBatchResult = Result<WriteHandle, SlateDBError>;
+pub(crate) type BatchWriterFlushResult = (FlushResultFuture, CheckpointCursor);
 
 /// A message processed by the batch writer event loop.
 #[allow(clippy::large_enum_variant)]
@@ -65,7 +68,7 @@ pub(crate) struct BatchWriterFlush {
     /// Sends a message when the writer has processed the flush message. On successful receipt
     /// of a message, the caller should wait on the received Receiver to get the result of the
     /// wal flush.
-    done: oneshot::Sender<Result<FlushResultFuture, SlateDBError>>,
+    done: oneshot::Sender<Result<BatchWriterFlushResult, SlateDBError>>,
 }
 
 pub(crate) struct WriteBatchRequest {
@@ -352,11 +355,18 @@ impl DbInner {
         &self,
         freeze_memtable: bool,
         wal_writer: Option<&mut Box<dyn WalWriter>>,
-    ) -> Result<FlushResultFuture, SlateDBError> {
-        let flush_rx = if let Some(wal_writer) = wal_writer {
-            wal_writer.flush().await?
+    ) -> Result<BatchWriterFlushResult, SlateDBError> {
+        let (flush_rx, wal_file) = if let Some(wal_writer) = wal_writer {
+            let flush = wal_writer.flush().await?;
+            (flush.completion, Some(flush.wal_id))
         } else {
-            async { Ok(()) }.boxed()
+            (async { Ok(()) }.boxed(), None)
+        };
+        // The writer task applies writes one at a time, so no write is in progress here.
+        // The last committed write is the last write in the frozen WAL file.
+        let cursor = CheckpointCursor {
+            seq: self.oracle.last_committed_seq(),
+            wal_file,
         };
         if freeze_memtable {
             // Note that this likely won't reflect the result of the above flush call as we don't
@@ -366,7 +376,7 @@ impl DbInner {
             let mut guard = self.state.write();
             self.freeze_current_memtable_with_state_guard(&mut guard, replay_after_wal_id);
         }
-        Ok(flush_rx)
+        Ok((flush_rx, cursor))
     }
 
     // TODO: this is only pub(crate) because currently the replay logic resides in db_common. We
@@ -391,13 +401,23 @@ impl DbInner {
         &self,
         freeze_memtable: bool,
     ) -> Result<(), SlateDBError> {
+        let (flush_result, _) = self.begin_batch_writer_flush(freeze_memtable).await?;
+        Ok(flush_result.await?)
+    }
+
+    /// Waits for the writer to start the flush. Returns the WAL flush future and the cursor of
+    /// the last write that the flush covers.
+    pub(crate) async fn begin_batch_writer_flush(
+        &self,
+        freeze_memtable: bool,
+    ) -> Result<BatchWriterFlushResult, SlateDBError> {
         let (done, rx) = oneshot::channel();
         self.write_notifier
             .send(BatchWriterMessage::Flush(BatchWriterFlush {
                 freeze_memtable,
                 done,
             }))?;
-        Ok(rx.await??.await?)
+        rx.await?
     }
 
     /// RFC-0024 route-consistency check. Verifies that `batch_prefixes`,
@@ -543,7 +563,7 @@ mod tests {
             self.inner.append(write_batch).await
         }
 
-        async fn flush(&mut self) -> Result<FlushResultFuture, WalError> {
+        async fn flush(&mut self) -> Result<crate::wal::WalFlush, WalError> {
             if matches!(self.operation, FailingWalOperation::Flush) {
                 return Err(WalError::Fenced);
             }
