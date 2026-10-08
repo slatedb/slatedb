@@ -29,7 +29,7 @@ use crate::object_store_tag::ObjectStoreCallTag;
 pub(crate) use crate::object_store_tag::TableStoreKind;
 use crate::partitioned_keyspace::partitions_covering_range;
 use crate::paths::PathResolver;
-use crate::reader::{ReadTrace, SstTraceLevel};
+use crate::read_trace::{ReadTrace, SstTraceLevel};
 use crate::sst_builder::EncodedSsTableBuilder;
 #[cfg(test)]
 use crate::sst_io::MAX_VALIDATION_RETRIES;
@@ -1289,7 +1289,7 @@ fn slatedb_io_error() -> SlateDBError {
 #[cfg(test)]
 mod tests {
     use crate::config::TracingOptions;
-    use crate::reader::{ReadTrace, SstTraceLevel};
+    use crate::read_trace::{ReadTrace, SstTraceLevel};
     use crate::types::KeyValue;
     use bytes::Bytes;
     use futures::future;
@@ -3500,7 +3500,7 @@ mod tests {
         use crate::db_state::{SsTableId, SstType};
         use crate::error::{RetryReason, SlateDBError};
         use crate::format::sst::SsTableFormat;
-        use crate::reader::ReadTrace;
+        use crate::read_trace::ReadTrace;
         use crate::tablestore::TableStore;
         use crate::test_utils::{build_test_sst, RecordingObjectStore};
         use bytes::Bytes;

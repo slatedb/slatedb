@@ -3,13 +3,13 @@ use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions, TracingOptions};
 use crate::db_iter::{apply_filters, DbRecencyIterator};
-use crate::db_state::SsTableId;
 use crate::db_stats::DbStats;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::manifest::{ManifestCore, Segment};
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
+use crate::read_trace::{ReadTrace, SstTraceLevel};
 use crate::segment_iterator::{build_segment_iter, SegmentScanContext};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstTracingContext};
@@ -36,168 +36,6 @@ struct IteratorSources {
     /// `SegmentRangeIterator`); the top-level scan path treats the
     /// chain as one merge arm alongside `mem_iters` and `write_batch_iter`.
     segment_iter: Box<dyn RowEntryIterator + 'static>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct ReadTrace {
-    tracing_options: Option<TracingOptions>,
-    read_span: tracing::Span,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum SstTraceLevel {
-    L0,
-    SortedRun(u32),
-}
-
-impl SstTraceLevel {
-    fn span_value(&self) -> String {
-        match self {
-            Self::L0 => "l0".to_string(),
-            Self::SortedRun(id) => format!("sorted_run:{id}"),
-        }
-    }
-}
-
-impl ReadTrace {
-    pub(crate) fn new(tracing_options: Option<TracingOptions>) -> Self {
-        let read_span = tracing_options
-            .as_ref()
-            .map(|tracing_options| {
-                tracing::info_span!("slatedb.read", trace_id = tracing_options.trace_id.as_str(),)
-            })
-            .unwrap_or_else(tracing::Span::none);
-        Self {
-            tracing_options,
-            read_span,
-        }
-    }
-
-    pub(crate) fn none() -> Self {
-        Self::new(None)
-    }
-
-    pub(crate) fn read_span(&self) -> tracing::Span {
-        self.read_span.clone()
-    }
-
-    pub(crate) fn new_memtable_span(&self) -> tracing::Span {
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
-            tracing::debug_span!(
-                parent: &self.read_span,
-                "slatedb.read.memtable",
-                trace_id = tracing_options.trace_id.as_str(),
-            )
-        } else {
-            tracing::Span::none()
-        }
-    }
-
-    fn format_sst_level(sst_level: Option<&SstTraceLevel>) -> String {
-        sst_level
-            .map(SstTraceLevel::span_value)
-            .unwrap_or_else(|| "unknown".to_string())
-    }
-
-    pub(crate) fn new_read_filter_span(
-        &self,
-        sst_id: SsTableId,
-        sst_level: Option<&SstTraceLevel>,
-    ) -> tracing::Span {
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
-            let sst_id = sst_id.value().to_string();
-            let sst_level = Self::format_sst_level(sst_level);
-            tracing::info_span!(
-                parent: &self.read_span,
-                "slatedb.read.read_filters",
-                trace_id = tracing_options.trace_id.as_str(),
-                sst_id = sst_id.as_str(),
-                sst_level = sst_level.as_str(),
-                cached = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::none()
-        }
-    }
-
-    pub(crate) fn new_evaluate_filter_span(
-        &self,
-        sst_id: SsTableId,
-        sst_level: Option<&SstTraceLevel>,
-        filter_name: impl AsRef<str>,
-    ) -> tracing::Span {
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
-            let sst_id = sst_id.value().to_string();
-            let sst_level = Self::format_sst_level(sst_level);
-            tracing::info_span!(
-                parent: &self.read_span,
-                "slatedb.read.evaluate_filter",
-                trace_id = tracing_options.trace_id.as_str(),
-                sst_id = sst_id.as_str(),
-                sst_level = sst_level.as_str(),
-                filter_name = filter_name.as_ref(),
-                result = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::none()
-        }
-    }
-
-    pub(crate) fn new_read_index_span(
-        &self,
-        sst_id: SsTableId,
-        sst_level: Option<&SstTraceLevel>,
-    ) -> tracing::Span {
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
-            let sst_id = sst_id.value().to_string();
-            let sst_level = Self::format_sst_level(sst_level);
-            tracing::info_span!(
-                parent: &self.read_span,
-                "slatedb.read.read_index",
-                trace_id = tracing_options.trace_id.as_str(),
-                sst_id = sst_id.as_str(),
-                sst_level = sst_level.as_str(),
-                cached = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::none()
-        }
-    }
-
-    pub(crate) fn new_read_block_span(
-        &self,
-        sst_id: SsTableId,
-        sst_level: Option<&SstTraceLevel>,
-    ) -> tracing::Span {
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
-            let sst_id = sst_id.value().to_string();
-            let sst_level = Self::format_sst_level(sst_level);
-            tracing::info_span!(
-                parent: &self.read_span,
-                "slatedb.read.read_blocks",
-                trace_id = tracing_options.trace_id.as_str(),
-                sst_id = sst_id.as_str(),
-                sst_level = sst_level.as_str(),
-                cache_hits = tracing::field::Empty,
-                cache_misses = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::none()
-        }
-    }
-
-    pub(crate) fn new_read_merge_span(&self, num_operands: usize) -> tracing::Span {
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
-            tracing::info_span!(
-                parent: &self.read_span,
-                "slatedb.read.merge",
-                trace_id = tracing_options.trace_id.as_str(),
-                num_operands,
-            )
-        } else {
-            tracing::Span::none()
-        }
-    }
 }
 
 /// Context for [`Reader::scan_with_options`].

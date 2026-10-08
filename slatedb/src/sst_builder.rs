@@ -484,7 +484,7 @@ mod tests {
     use crate::flatbuffer_types::{SsTableIndex, SsTableIndexArgs, SsTableIndexOwned};
     use crate::format::block::Block;
     use crate::prefix_extractor::PrefixExtractor;
-    use crate::reader::ReadTrace;
+    use crate::read_trace::ReadTrace;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::{assert_iterator, build_test_sst};

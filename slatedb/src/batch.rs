@@ -10,7 +10,7 @@ use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorType};
 use crate::prefix_extractor::PrefixExtractor;
-use crate::reader::ReadTrace;
+use crate::read_trace::ReadTrace;
 use crate::types::{RowEntry, ValueDeletable};
 use async_trait::async_trait;
 use bytes::Bytes;
