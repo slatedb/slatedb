@@ -1360,6 +1360,7 @@ mod tests {
             stored_manifest,
             Duration::from_secs(300),
             Arc::new(DefaultSystemClock::new()),
+            &mut crate::DefaultAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -1385,6 +1386,7 @@ mod tests {
             stored_manifest,
             Duration::from_secs(300),
             Arc::new(DefaultSystemClock::new()),
+            &mut crate::DefaultAcquisitionPolicy,
         )
         .await
         .unwrap()

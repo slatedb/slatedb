@@ -251,6 +251,62 @@ pub trait TransactionalObject<T: Clone, Id = MonotonicId> {
     }
 }
 
+/// A decision point before an epoch claim succeeds.
+#[derive(Debug)]
+pub enum AcquisitionEvent<'a, T> {
+    /// The current object before the first claim attempt.
+    InitialObject { id: MonotonicId, object: &'a T },
+    /// A write conflict before the latest object is loaded.
+    WriteConflict {
+        /// The failed candidate. Its ID is the base version, as in [`DirtyObject`].
+        attempted: &'a DirtyObject<T>,
+    },
+    /// A refresh found an object with a higher version ID.
+    NewerObjectFound { id: MonotonicId, object: &'a T },
+}
+
+/// Chooses whether epoch acquisition continues at each decision point.
+///
+/// Policies let callers choose which concurrent changes invalidate an acquisition attempt.
+/// For example, a writer policy can abort when the writer epoch advances but tolerate compactor epoch changes.
+/// A compactor policy can do the reverse, while another policy can abort on any version change.
+/// These choices share the same acquisition loop.
+///
+/// The acquisition loop owns I/O, retries, epoch selection, and timeouts.
+/// It returns non-conflict errors directly without consulting the policy.
+/// A policy can keep its baseline snapshot and other state between events.
+/// Policy callbacks end when the epoch claim succeeds.
+/// Later refreshes use the existing ownership checks.
+pub trait AcquisitionPolicy<T>: Send {
+    /// Returns `true` to continue, or `false` to stop with [`TransactionalObjectError::Fenced`].
+    fn should_continue(&mut self, event: AcquisitionEvent<'_, T>) -> bool;
+}
+
+impl<T, F> AcquisitionPolicy<T> for F
+where
+    F: for<'a> FnMut(AcquisitionEvent<'a, T>) -> bool + Send,
+{
+    fn should_continue(&mut self, event: AcquisitionEvent<'_, T>) -> bool {
+        self(event)
+    }
+}
+
+/// Preserves the existing retry behavior by permitting acquisition at every event.
+/// The acquisition loop retries conflicts until it claims the epoch.
+/// Timeouts and non-conflict errors still stop acquisition.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DefaultAcquisitionPolicy;
+
+impl<T> AcquisitionPolicy<T> for DefaultAcquisitionPolicy {
+    fn should_continue(&mut self, event: AcquisitionEvent<'_, T>) -> bool {
+        match event {
+            AcquisitionEvent::InitialObject { .. }
+            | AcquisitionEvent::WriteConflict { .. }
+            | AcquisitionEvent::NewerObjectFound { .. } => true,
+        }
+    }
+}
+
 /// Wraps `SimpleTransactionalObject` with epoch-based fencing to provide mutually-exclusive
 /// access to the object. When creating a `FenceableTransactionalObject` the caller supplied
 /// `get_epoch` and `set_epoch` fns for getting and setting the epoch in the contained object.
@@ -288,11 +344,36 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
     /// - Propagates any other [`TransactionalObjectError`] from refresh/update
     ///   operations.
     pub async fn init(
+        delegate: SimpleTransactionalObject<T, MonotonicId>,
+        object_update_timeout: Duration,
+        system_clock: Arc<dyn SystemClock>,
+        get_epoch: fn(&T) -> u64,
+        set_epoch: fn(&mut T, u64),
+    ) -> Result<Self, TransactionalObjectError> {
+        Self::init_with_policy(
+            delegate,
+            object_update_timeout,
+            system_clock,
+            get_epoch,
+            set_epoch,
+            &mut DefaultAcquisitionPolicy,
+        )
+        .await
+    }
+
+    /// Claims an epoch with a caller-supplied acquisition policy.
+    ///
+    /// The callback runs before the first claim, after write conflicts, and after refreshes that find a higher version ID.
+    /// A `true` result follows the existing retry behavior.
+    /// A `false` result stops acquisition with [`TransactionalObjectError::Fenced`].
+    /// Callbacks end when the claim succeeds. Storage errors and the acquisition timeout propagate directly.
+    pub async fn init_with_policy(
         mut delegate: SimpleTransactionalObject<T, MonotonicId>,
         object_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
         get_epoch: fn(&T) -> u64,
         set_epoch: fn(&mut T, u64),
+        policy: &mut dyn AcquisitionPolicy<T>,
     ) -> Result<Self, TransactionalObjectError> {
         utils::timeout(
             system_clock.clone(),
@@ -301,15 +382,33 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
                 timeout: object_update_timeout,
             },
             async {
+                if !policy.should_continue(AcquisitionEvent::InitialObject {
+                    id: delegate.id(),
+                    object: delegate.object(),
+                }) {
+                    return Err(TransactionalObjectError::Fenced);
+                }
                 loop {
                     let local_epoch = get_epoch(delegate.object()) + 1;
-                    let mut new_val = delegate.object().clone();
-                    set_epoch(&mut new_val, local_epoch);
                     let mut dirty = delegate.prepare_dirty()?;
-                    dirty.value = new_val;
-                    match delegate.update(dirty).await {
+                    set_epoch(&mut dirty.value, local_epoch);
+                    match delegate.update(dirty.clone()).await {
                         Err(err) if err.is_sequenced_write_conflict() => {
+                            if !policy.should_continue(AcquisitionEvent::WriteConflict {
+                                attempted: &dirty,
+                            }) {
+                                return Err(TransactionalObjectError::Fenced);
+                            }
+                            let previous_id = delegate.id();
                             delegate.refresh().await?;
+                            if delegate.id() > previous_id
+                                && !policy.should_continue(AcquisitionEvent::NewerObjectFound {
+                                    id: delegate.id(),
+                                    object: delegate.object(),
+                                })
+                            {
+                                return Err(TransactionalObjectError::Fenced);
+                            }
                             continue;
                         }
                         Err(err) => return Err(err),

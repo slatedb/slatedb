@@ -151,7 +151,7 @@ use crate::garbage_collector::GC_TASK_NAME;
 use crate::garbage_collector::{GarbageCollector, GcFilter};
 use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
 use crate::manifest::store::{ManifestStore, StoredManifest};
-use crate::manifest::ManifestCore;
+use crate::manifest::{Manifest, ManifestCore};
 use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
 use crate::paths::PathResolver;
@@ -165,6 +165,7 @@ use crate::wal::slatedb::admin::SlateDbWalAdmin;
 use crate::wal::slatedb::store::WalTableStore;
 use crate::wal::wal_disabled::DisabledWalObserver;
 use crate::wal::{WalAdmin, WalGc, WalObserver};
+use crate::{AcquisitionPolicy, DefaultAcquisitionPolicy};
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorder;
@@ -485,6 +486,19 @@ impl<P: Into<Path>> DbBuilder<P> {
 
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
+        self.build_with_acquisition_policy(&mut DefaultAcquisitionPolicy)
+            .await
+    }
+
+    /// Builds and opens the database with a policy for manifest acquisition.
+    ///
+    /// The policy controls whether to attempt or retry the manifest claim.
+    /// An abort returns [`crate::ErrorKind::Closed`] with [`crate::CloseReason::Fenced`].
+    /// Callbacks end when the manifest claim succeeds. The opened database does not retain the policy.
+    pub async fn build_with_acquisition_policy(
+        self,
+        policy: &mut dyn AcquisitionPolicy<Manifest>,
+    ) -> Result<Db, crate::Error> {
         self.settings.validate()?;
         if self.sst_block_alignment && self.settings.compression_codec.is_some() {
             return Err(SlateDBError::InvalidConfiguration(
@@ -695,7 +709,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             manifest,
             replay_iterator,
             mut wal_writer,
-        } = fencer.fence(stored_manifest).await?;
+        } = fencer.fence(stored_manifest, policy).await?;
         let (wal_writer, wal_observer) = if DbInner::wal_enabled_in_options(&self.settings) {
             let wal_observer = wal_writer.observer();
             (Some(wal_writer), wal_observer)

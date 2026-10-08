@@ -14,8 +14,9 @@ use slatedb_common::clock::SystemClock;
 use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
 use slatedb_txn_obj::{
-    DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
-    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
+    AcquisitionPolicy, DirtyObject, FenceableTransactionalObject, MonotonicId,
+    SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
+    TransactionalStorageProtocol,
 };
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
@@ -36,15 +37,17 @@ impl FenceableManifest {
         stored_manifest: StoredManifest,
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
+        policy: &mut dyn AcquisitionPolicy<Manifest>,
     ) -> Result<Self, SlateDBError> {
         let clock = system_clock.clone();
         // Initialize generic fenceable record using writer epoch
-        let fr = FenceableTransactionalObject::init(
+        let fr = FenceableTransactionalObject::init_with_policy(
             stored_manifest.inner,
             manifest_update_timeout,
             system_clock,
             |m: &Manifest| m.writer_epoch,
             |m: &mut Manifest, e: u64| m.writer_epoch = e,
+            policy,
         )
         .await?;
         Ok(Self { inner: fr, clock })
@@ -595,6 +598,7 @@ mod tests {
     use crate::manifest::ManifestCore;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::{bounded_sst_view, FlakyObjectStore};
+    use crate::DefaultAcquisitionPolicy;
     use chrono::Timelike;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -760,9 +764,14 @@ mod tests {
             let sm = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
-            FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+            FenceableManifest::init_writer(
+                sm,
+                timeout,
+                Arc::new(DefaultSystemClock::new()),
+                &mut DefaultAcquisitionPolicy,
+            )
+            .await
+            .unwrap();
             let manifest = ms.read_latest_manifest().await.unwrap();
             assert_eq!(manifest.manifest.writer_epoch, i);
         }
@@ -780,17 +789,26 @@ mod tests {
         .await
         .unwrap();
         let timeout = Duration::from_secs(300);
-        let mut writer1 =
-            FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+        let mut writer1 = FenceableManifest::init_writer(
+            sm,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            &mut DefaultAcquisitionPolicy,
+        )
+        .await
+        .unwrap();
         let sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
             .await
             .unwrap();
 
-        FenceableManifest::init_writer(sm2, timeout, Arc::new(DefaultSystemClock::new()))
-            .await
-            .unwrap();
+        FenceableManifest::init_writer(
+            sm2,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            &mut DefaultAcquisitionPolicy,
+        )
+        .await
+        .unwrap();
 
         let result = writer1.refresh().await;
         assert!(matches!(result, Err(SlateDBError::Fenced)));
@@ -912,17 +930,25 @@ mod tests {
         .await
         .unwrap();
         let timeout = Duration::from_secs(300);
-        let mut fm1 =
-            FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+        let mut fm1 = FenceableManifest::init_writer(
+            sm,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            &mut DefaultAcquisitionPolicy,
+        )
+        .await
+        .unwrap();
         let sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
             .await
             .unwrap();
-        let mut fm2 =
-            FenceableManifest::init_writer(sm2, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+        let mut fm2 = FenceableManifest::init_writer(
+            sm2,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            &mut DefaultAcquisitionPolicy,
+        )
+        .await
+        .unwrap();
 
         let result = fm1
             .maybe_apply_update(|fm| {
@@ -1507,17 +1533,25 @@ mod tests {
             .unwrap();
         let timeout = Duration::from_secs(300);
 
-        let mut fm_b =
-            FenceableManifest::init_writer(sm_b, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+        let mut fm_b = FenceableManifest::init_writer(
+            sm_b,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            &mut DefaultAcquisitionPolicy,
+        )
+        .await
+        .unwrap();
         assert_eq!(1, fm_b.inner.local_epoch());
 
         // The last writer always wins
-        let mut fm_a =
-            FenceableManifest::init_writer(sm_a, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+        let mut fm_a = FenceableManifest::init_writer(
+            sm_a,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            &mut DefaultAcquisitionPolicy,
+        )
+        .await
+        .unwrap();
         assert_eq!(2, fm_a.inner.local_epoch());
 
         assert!(matches!(

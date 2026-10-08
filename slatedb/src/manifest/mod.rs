@@ -819,8 +819,9 @@ impl ManifestCore {
     }
 }
 
+/// Database metadata stored in a manifest.
 #[derive(Clone, Serialize, PartialEq, Debug)]
-pub(crate) struct Manifest {
+pub struct Manifest {
     // todo: try to make this writable only from module
     pub(crate) external_dbs: Vec<ExternalDb>,
     #[serde(flatten)]
@@ -981,6 +982,16 @@ impl From<DirtyObject<Manifest>> for VersionedManifest {
 }
 
 impl Manifest {
+    /// Returns the writer epoch recorded in this manifest.
+    pub fn writer_epoch(&self) -> u64 {
+        self.writer_epoch
+    }
+
+    /// Returns the compactor epoch recorded in this manifest.
+    pub fn compactor_epoch(&self) -> u64 {
+        self.compactor_epoch
+    }
+
     pub(crate) fn initial(core: ManifestCore) -> Self {
         Self {
             external_dbs: vec![],
