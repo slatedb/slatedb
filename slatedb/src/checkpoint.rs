@@ -201,7 +201,7 @@ mod tests {
     use object_store::ObjectStore;
     use slatedb_common::clock::SystemClock;
     use slatedb_common::clock::{DefaultSystemClock, MockSystemClock};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -970,6 +970,259 @@ mod tests {
             path,
             &last_flushed_table_id.sst.id,
             last_written_kv,
+        )
+        .await;
+    }
+
+    fn checkpoint_test_key(index: usize) -> String {
+        format!("key{index:06}")
+    }
+
+    async fn checkpoint_visible_prefix(
+        object_store: &Arc<dyn ObjectStore>,
+        path: &Path,
+        id: uuid::Uuid,
+        total: usize,
+    ) -> usize {
+        let reader = DbReader::builder(path.clone(), Arc::clone(object_store))
+            .with_reader_mode(DbReaderMode::Checkpoint(id))
+            .build()
+            .await
+            .unwrap();
+        let mut visible = 0;
+        while visible < total
+            && reader
+                .get(checkpoint_test_key(visible))
+                .await
+                .unwrap()
+                .is_some()
+        {
+            visible += 1;
+        }
+        for index in visible..total {
+            assert!(
+                reader
+                    .get(checkpoint_test_key(index))
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "checkpoint {id} has a gap: prefix={visible}, found key {index}"
+            );
+        }
+        reader.close().await.unwrap();
+        visible
+    }
+
+    async fn run_mixed_scope_checkpoints(settings: Settings, name: &str) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from(format!("/tmp/{name}"));
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+        let options = CheckpointOptions::default();
+        let mut handles = Vec::new();
+
+        db.put(checkpoint_test_key(0), b"v").await.unwrap();
+        db.flush().await.unwrap();
+        handles.push(
+            db.begin_checkpoint(CheckpointScope::All, &options)
+                .await
+                .unwrap(),
+        );
+        db.put(checkpoint_test_key(1), b"v").await.unwrap();
+        db.flush().await.unwrap();
+        handles.push(
+            db.begin_checkpoint(CheckpointScope::All, &options)
+                .await
+                .unwrap(),
+        );
+        handles.push(
+            db.begin_checkpoint(CheckpointScope::All, &options)
+                .await
+                .unwrap(),
+        );
+        db.put(checkpoint_test_key(2), b"v").await.unwrap();
+        db.flush().await.unwrap();
+        handles.push(
+            db.begin_checkpoint(CheckpointScope::Durable, &options)
+                .await
+                .unwrap(),
+        );
+        db.put(checkpoint_test_key(3), b"v").await.unwrap();
+        handles.push(
+            db.begin_checkpoint(CheckpointScope::All, &options)
+                .await
+                .unwrap(),
+        );
+
+        let results = tokio::time::timeout(
+            Duration::from_secs(30),
+            futures::future::join_all(handles.into_iter().map(|handle| handle.wait())),
+        )
+        .await
+        .unwrap();
+        let mut visible = Vec::new();
+        for result in results {
+            let result = result.unwrap();
+            visible.push(checkpoint_visible_prefix(&object_store, &path, result.id, 4).await);
+        }
+        assert_eq!(visible, vec![1, 2, 2, 3, 4]);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_concurrent_checkpoints_keep_their_own_bounds() {
+        run_mixed_scope_checkpoints(
+            Settings {
+                flush_interval: Some(Duration::from_millis(5)),
+                ..Settings::default()
+            },
+            "test_concurrent_checkpoints_keep_their_own_bounds",
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(feature = "wal_disable")]
+    async fn test_concurrent_checkpoints_keep_their_own_bounds_wal_disabled() {
+        run_mixed_scope_checkpoints(
+            Settings {
+                wal_enabled: false,
+                flush_interval: Some(Duration::from_millis(5)),
+                ..Settings::default()
+            },
+            "test_concurrent_checkpoints_keep_their_own_bounds_wal_disabled",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_durable_checkpoint_wal_disabled() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_durable_checkpoint_wal_disabled");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings {
+                wal_enabled: false,
+                flush_interval: Some(Duration::from_secs(3600)),
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        db.put(checkpoint_test_key(0), b"v").await.unwrap();
+        db.flush().await.unwrap();
+        db.put(checkpoint_test_key(1), b"v").await.unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            db.create_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            checkpoint_visible_prefix(&object_store, &path, result.id, 2).await,
+            1
+        );
+        db.close().await.unwrap();
+    }
+
+    async fn run_checkpoint_prefix_stress(settings: Settings, name: &str) {
+        const TOTAL: usize = 100;
+        const CHECKPOINTS: usize = 9;
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from(format!("/tmp/{name}"));
+        let db = Arc::new(
+            Db::builder(path.clone(), object_store.clone())
+                .with_settings(settings)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let started = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let writer = {
+            let db = Arc::clone(&db);
+            let started = Arc::clone(&started);
+            let completed = Arc::clone(&completed);
+            tokio::spawn(async move {
+                for index in 0..TOTAL {
+                    started.store(index + 1, Ordering::SeqCst);
+                    db.put(checkpoint_test_key(index), b"v").await.unwrap();
+                    completed.store(index + 1, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+
+        let options = CheckpointOptions::default();
+        let mut taken = Vec::new();
+        for round in 0..CHECKPOINTS {
+            let is_all = round % 3 != 2;
+            let scope = if is_all {
+                CheckpointScope::All
+            } else {
+                CheckpointScope::Durable
+            };
+            let before = completed.load(Ordering::SeqCst);
+            let handle = db.begin_checkpoint(scope, &options).await.unwrap();
+            let after = started.load(Ordering::SeqCst);
+            taken.push((handle, is_all, before, after));
+            tokio::task::yield_now().await;
+        }
+        writer.await.unwrap();
+
+        for (handle, is_all, before, after) in taken {
+            let result = tokio::time::timeout(Duration::from_secs(30), handle.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            let visible = checkpoint_visible_prefix(&object_store, &path, result.id, TOTAL).await;
+            if is_all {
+                assert!(
+                    visible >= before,
+                    "checkpoint {} lost writes that finished before begin: visible={visible}, before={before}",
+                    result.id
+                );
+            }
+            assert!(
+                visible <= after,
+                "checkpoint {} includes writes issued after begin returned: visible={visible}, after={after}",
+                result.id
+            );
+        }
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_checkpoints_under_concurrent_writes_are_prefixes() {
+        run_checkpoint_prefix_stress(
+            Settings {
+                flush_interval: Some(Duration::from_millis(5)),
+                l0_sst_size_bytes: 1024,
+                ..Settings::default()
+            },
+            "test_checkpoints_under_concurrent_writes_are_prefixes",
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[cfg(feature = "wal_disable")]
+    async fn test_checkpoints_under_concurrent_writes_are_prefixes_wal_disabled() {
+        run_checkpoint_prefix_stress(
+            Settings {
+                wal_enabled: false,
+                flush_interval: Some(Duration::from_millis(5)),
+                l0_sst_size_bytes: 1024,
+                ..Settings::default()
+            },
+            "test_checkpoints_under_concurrent_writes_are_prefixes_wal_disabled",
         )
         .await;
     }
