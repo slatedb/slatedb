@@ -81,10 +81,11 @@ use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::{Error, SlateDBError};
 use crate::manifest::store::ManifestStore;
-use crate::manifest::{LsmTreeState, ManifestCore};
+use crate::manifest::{LsmTreeState, Manifest, ManifestCore};
 use crate::merge_operator::MergeOperatorType;
 use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator};
+use crate::{AcquisitionPolicy, DefaultAcquisitionPolicy};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::{GaugeFn, MetricsRecorderHelper};
 use slatedb_common::DbRand;
@@ -374,11 +375,28 @@ impl Compactor {
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
     pub async fn run(&self) -> Result<(), Error> {
-        self.start().await?;
+        self.run_with_acquisition_policy(&mut DefaultAcquisitionPolicy)
+            .await
+    }
+
+    /// Runs the compactor with a policy for manifest acquisition.
+    ///
+    /// The policy can reject competing compactor epochs while permitting writer epoch changes.
+    /// An abort returns [`crate::ErrorKind::Closed`] with [`crate::CloseReason::Fenced`].
+    /// Callbacks end when the manifest claim succeeds.
+    /// The policy remains borrowed for the duration of this call.
+    pub async fn run_with_acquisition_policy(
+        &self,
+        policy: &mut dyn AcquisitionPolicy<Manifest>,
+    ) -> Result<(), Error> {
+        self.start(policy).await?;
         self.join().await
     }
 
-    pub(crate) async fn start(&self) -> Result<(), Error> {
+    pub(crate) async fn start(
+        &self,
+        policy: &mut dyn AcquisitionPolicy<Manifest>,
+    ) -> Result<(), Error> {
         // The coordinator delegates compaction execution to [`crate::compaction_worker::CompactionWorker`]
         // either spawned in this process (set `worker: Some`) or running standalone (set `worker: None`).
         let (_tx, rx) = async_channel::unbounded::<CompactorMessage>();
@@ -392,6 +410,7 @@ impl Compactor {
             self.stats.clone(),
             self.system_clock.clone(),
             self.recorder.clone(),
+            policy,
         )
         .await?;
         self.task_executor
@@ -583,6 +602,7 @@ impl CompactorEventHandler {
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
         recorder: MetricsRecorderHelper,
+        policy: &mut dyn AcquisitionPolicy<Manifest>,
     ) -> Result<Self, SlateDBError> {
         let state_writer = CompactorStateWriter::new(
             manifest_store,
@@ -590,6 +610,7 @@ impl CompactorEventHandler {
             system_clock.clone(),
             options.as_ref(),
             rand.clone(),
+            policy,
         )
         .await?;
         let compactor_epoch = state_writer.state.manifest().value.compactor_epoch;
@@ -4822,6 +4843,7 @@ mod tests {
                 compactor_stats.clone(),
                 Arc::new(DefaultSystemClock::new()),
                 MetricsRecorderHelper::noop(),
+                &mut DefaultAcquisitionPolicy,
             )
             .await
             .unwrap();
@@ -4894,6 +4916,7 @@ mod tests {
                 compactor_stats.clone(),
                 system_clock.clone(),
                 recorder.clone(),
+                &mut DefaultAcquisitionPolicy,
             )
             .await
             .unwrap();
@@ -5755,6 +5778,7 @@ mod tests {
             compactor_stats,
             system_clock,
             recorder,
+            &mut DefaultAcquisitionPolicy,
         )
         .await
         .unwrap();

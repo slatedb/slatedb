@@ -1536,6 +1536,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             stats.clone(),
             self.system_clock.clone(),
             recorder.clone(),
+            &mut DefaultAcquisitionPolicy,
         )
         .await?;
         let worker = options.worker.clone().map(|worker_options| {

@@ -19,8 +19,9 @@ use crate::compactor_state::{CompactionStatus, CompactorState, VersionedCompacti
 use crate::config::{CheckpointOptions, CompactorOptions};
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
-use crate::manifest::VersionedManifest;
+use crate::manifest::{Manifest, VersionedManifest};
 use crate::utils::IdGenerator;
+use crate::AcquisitionPolicy;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
 
@@ -125,6 +126,7 @@ impl CompactorStateWriter {
     /// - `system_clock`: Clock for fencing/timeouts.
     /// - `options`: Compactor options containing timeouts.
     /// - `rand`: RNG for checkpoint ids.
+    /// - `policy`: Decisions during manifest acquisition.
     ///
     /// ## Returns
     /// - A new writer seeded with dirty manifest/compactions and finished compactions trimmed.
@@ -134,6 +136,7 @@ impl CompactorStateWriter {
         system_clock: Arc<dyn SystemClock>,
         options: &CompactorOptions,
         rand: Arc<DbRand>,
+        policy: &mut dyn AcquisitionPolicy<Manifest>,
     ) -> Result<Self, SlateDBError> {
         let stored_manifest =
             StoredManifest::load(manifest_store.clone(), system_clock.clone()).await?;
@@ -142,6 +145,7 @@ impl CompactorStateWriter {
             compactions_store,
             system_clock.clone(),
             options,
+            policy,
         )
         .await?;
         let dirty_manifest = manifest.prepare_dirty()?;
@@ -182,11 +186,13 @@ impl CompactorStateWriter {
         compactions_store: Arc<CompactionsStore>,
         system_clock: Arc<dyn SystemClock>,
         options: &CompactorOptions,
+        policy: &mut dyn AcquisitionPolicy<Manifest>,
     ) -> Result<(FenceableManifest, FenceableCompactions), SlateDBError> {
         let fenceable_manifest = FenceableManifest::init_compactor(
             stored_manifest,
             options.manifest_update_timeout,
             system_clock.clone(),
+            policy,
         )
         .await?;
         let stored_compactions =
@@ -392,6 +398,7 @@ mod tests {
             system_clock.clone(),
             &options,
             Arc::clone(&rand),
+            &mut crate::DefaultAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -402,6 +409,7 @@ mod tests {
             system_clock,
             &options,
             rand,
+            &mut crate::DefaultAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -501,6 +509,7 @@ mod tests {
             system_clock,
             &options,
             rand,
+            &mut crate::DefaultAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -572,6 +581,7 @@ mod tests {
             system_clock,
             &options,
             rand,
+            &mut crate::DefaultAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -661,6 +671,7 @@ mod tests {
             system_clock,
             &options,
             rand,
+            &mut crate::DefaultAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -743,6 +754,7 @@ mod tests {
             system_clock,
             &options,
             rand,
+            &mut crate::DefaultAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -800,6 +812,7 @@ mod tests {
             system_clock,
             &options,
             rand,
+            &mut crate::DefaultAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -855,6 +868,7 @@ mod tests {
             system_clock,
             &options,
             rand,
+            &mut crate::DefaultAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -920,6 +934,7 @@ mod tests {
             system_clock,
             &CompactorOptions::default(),
             Arc::new(DbRand::new(7)),
+            &mut crate::DefaultAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -999,6 +1014,7 @@ mod tests {
             system_clock,
             &options,
             rand,
+            &mut crate::DefaultAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -1086,6 +1102,7 @@ mod tests {
             system_clock.clone(),
             &options,
             Arc::new(DbRand::new(7)),
+            &mut crate::DefaultAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -1148,6 +1165,7 @@ mod tests {
             system_clock,
             &options,
             rand,
+            &mut crate::DefaultAcquisitionPolicy,
         )
         .await
         .unwrap();

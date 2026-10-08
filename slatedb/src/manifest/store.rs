@@ -57,14 +57,16 @@ impl FenceableManifest {
         stored_manifest: StoredManifest,
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
+        policy: &mut dyn AcquisitionPolicy<Manifest>,
     ) -> Result<Self, SlateDBError> {
         let clock = system_clock.clone();
-        let fr = FenceableTransactionalObject::init(
+        let fr = FenceableTransactionalObject::init_with_policy(
             stored_manifest.inner,
             manifest_update_timeout,
             system_clock,
             |m: &Manifest| m.compactor_epoch,
             |m: &mut Manifest, e: u64| m.compactor_epoch = e,
+            policy,
         )
         .await?;
         Ok(Self { inner: fr, clock })
@@ -830,9 +832,14 @@ mod tests {
             let sm = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
-            FenceableManifest::init_compactor(sm, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+            FenceableManifest::init_compactor(
+                sm,
+                timeout,
+                Arc::new(DefaultSystemClock::new()),
+                &mut DefaultAcquisitionPolicy,
+            )
+            .await
+            .unwrap();
             let manifest = ms.read_latest_manifest().await.unwrap();
             assert_eq!(manifest.manifest.compactor_epoch, i);
         }
@@ -850,17 +857,26 @@ mod tests {
         .await
         .unwrap();
         let timeout = Duration::from_secs(300);
-        let mut compactor1 =
-            FenceableManifest::init_compactor(sm, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+        let mut compactor1 = FenceableManifest::init_compactor(
+            sm,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            &mut DefaultAcquisitionPolicy,
+        )
+        .await
+        .unwrap();
         let sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
             .await
             .unwrap();
 
-        FenceableManifest::init_compactor(sm2, timeout, Arc::new(DefaultSystemClock::new()))
-            .await
-            .unwrap();
+        FenceableManifest::init_compactor(
+            sm2,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            &mut DefaultAcquisitionPolicy,
+        )
+        .await
+        .unwrap();
 
         let result = compactor1.refresh().await;
         assert!(matches!(result, Err(SlateDBError::Fenced)));
@@ -899,17 +915,25 @@ mod tests {
         .await
         .unwrap();
         let timeout = Duration::from_secs(300);
-        let mut compactor1 =
-            FenceableManifest::init_compactor(sm, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+        let mut compactor1 = FenceableManifest::init_compactor(
+            sm,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            &mut DefaultAcquisitionPolicy,
+        )
+        .await
+        .unwrap();
         let sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
             .await
             .unwrap();
-        let mut compactor2 =
-            FenceableManifest::init_compactor(sm2, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+        let mut compactor2 = FenceableManifest::init_compactor(
+            sm2,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            &mut DefaultAcquisitionPolicy,
+        )
+        .await
+        .unwrap();
 
         let result = compactor1
             .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
