@@ -1010,10 +1010,7 @@ impl ManifestWriterHandler {
         }
     }
 
-    fn complete_checkpoints(
-        checkpoints: Vec<PendingCheckpoint>,
-        results: Vec<CheckpointResult>,
-    ) {
+    fn complete_checkpoints(checkpoints: Vec<PendingCheckpoint>, results: Vec<CheckpointResult>) {
         for (checkpoint, result) in checkpoints.into_iter().zip(results) {
             match result {
                 Ok(result) => {
