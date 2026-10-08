@@ -858,11 +858,13 @@ impl ManifestWriterHandler {
             return Err(SlateDBError::InvalidDBState);
         }
         guard.set_next_wal_id(next_wal_id);
-        Ok(guard.modify(|modifier| {
+        let manifest = guard.modify(|modifier| {
             let core = &mut modifier.state.manifest.value.core;
             core.recent_snapshot_min_seq = min_active_snapshot_seq.unwrap_or(core.last_l0_seq);
             modifier.state.manifest.clone()
-        }))
+        });
+        self.report_to_status_manager(&guard, manifest.clone().into());
+        Ok(manifest)
     }
 
     async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
@@ -1269,7 +1271,7 @@ mod tests {
     use crate::flush::SegmentedSstHandle;
     use crate::format::sst::SsTableFormat;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
-    use crate::manifest::ManifestCore;
+    use crate::manifest::{ManifestCore, VersionedManifest};
     use crate::memtable_flusher::uploader::UploadedMemtable;
     use crate::memtable_flusher::CheckpointCursor;
     use crate::paths::PathResolver;
@@ -2053,6 +2055,27 @@ mod tests {
             11
         );
         assert_eq!(handler.db.state.read().state().core().next_wal_sst_id, 11);
+    }
+
+    #[tokio::test]
+    async fn prepare_local_manifest_for_write_reports_to_status_manager() {
+        let harness = setup_harness_with_wal_observer(
+            "/tmp/test_prepare_local_manifest_for_write_reports_to_status_manager",
+            Arc::new(FailPointRegistry::new()),
+            None,
+            FakeWalWriter::new(10).observer(),
+        )
+        .await;
+        let handler = new_handler_from_harness(harness);
+        let mut status_rx = handler.db.status_manager.subscribe();
+
+        let prepared = handler.prepare_local_manifest_for_write(None).unwrap();
+
+        // Subscribers see the prepared manifest before the manifest writer writes it.
+        assert!(status_rx.has_changed().unwrap());
+        let current_manifest = status_rx.borrow_and_update().current_manifest.clone();
+        assert_eq!(current_manifest.core().next_wal_sst_id, 11);
+        assert_eq!(current_manifest, VersionedManifest::from(prepared));
     }
 
     #[tokio::test]
