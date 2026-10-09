@@ -256,37 +256,34 @@ pub trait TransactionalObject<T: Clone, Id = MonotonicId> {
 pub enum AcquisitionEvent<'a, T> {
     /// The current object before the first claim attempt.
     InitialObject { id: MonotonicId, object: &'a T },
-    /// A write conflict before the latest object is loaded.
-    WriteConflict {
-        /// The failed candidate. Its ID is the base version, as in [`DirtyObject`].
-        attempted: &'a DirtyObject<T>,
-    },
     /// A refresh found an object with a higher version ID.
     NewerObjectFound { id: MonotonicId, object: &'a T },
 }
 
 /// Chooses whether epoch acquisition continues at each decision point.
 ///
-/// Policies let callers choose which concurrent changes invalidate an acquisition attempt.
-/// For example, a writer policy can abort when the writer epoch advances but tolerate compactor epoch changes.
-/// A compactor policy can do the reverse, while another policy can abort on any version change.
-/// These choices share the same acquisition loop.
+/// Policies let callers choose which concurrent changes invalidate an acquisition
+/// attempt. For example, a writer policy can abort when the writer epoch advances
+/// but tolerate compactor epoch changes. A compactor policy can do the reverse,
+/// while another policy can abort on any version change. These choices share the
+/// same acquisition loop.
 ///
 /// The acquisition loop owns I/O, retries, epoch selection, and timeouts.
 /// It returns non-conflict errors directly without consulting the policy.
-/// A policy can keep its baseline snapshot and other state between events.
+/// Policies that retain state between callbacks use interior mutability.
 /// Policy callbacks end when the epoch claim succeeds.
 /// Later refreshes use the existing ownership checks.
-pub trait AcquisitionPolicy<T>: Send {
-    /// Returns `true` to continue, or `false` to stop with [`TransactionalObjectError::Fenced`].
-    fn should_continue(&mut self, event: AcquisitionEvent<'_, T>) -> bool;
+pub trait EpochAcquisitionPolicy<T>: Send + Sync {
+    /// Returns `true` to continue, or `false` to stop with
+    /// [`TransactionalObjectError::Fenced`].
+    fn should_continue(&self, event: AcquisitionEvent<'_, T>) -> bool;
 }
 
-impl<T, F> AcquisitionPolicy<T> for F
+impl<T, F> EpochAcquisitionPolicy<T> for F
 where
-    F: for<'a> FnMut(AcquisitionEvent<'a, T>) -> bool + Send,
+    F: for<'a> Fn(AcquisitionEvent<'a, T>) -> bool + Send + Sync,
 {
-    fn should_continue(&mut self, event: AcquisitionEvent<'_, T>) -> bool {
+    fn should_continue(&self, event: AcquisitionEvent<'_, T>) -> bool {
         self(event)
     }
 }
@@ -295,14 +292,53 @@ where
 /// The acquisition loop retries conflicts until it claims the epoch.
 /// Timeouts and non-conflict errors still stop acquisition.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct DefaultAcquisitionPolicy;
+pub struct DefaultEpochAcquisitionPolicy;
 
-impl<T> AcquisitionPolicy<T> for DefaultAcquisitionPolicy {
-    fn should_continue(&mut self, event: AcquisitionEvent<'_, T>) -> bool {
+impl<T> EpochAcquisitionPolicy<T> for DefaultEpochAcquisitionPolicy {
+    fn should_continue(&self, event: AcquisitionEvent<'_, T>) -> bool {
         match event {
-            AcquisitionEvent::InitialObject { .. }
-            | AcquisitionEvent::WriteConflict { .. }
-            | AcquisitionEvent::NewerObjectFound { .. } => true,
+            AcquisitionEvent::InitialObject { .. } | AcquisitionEvent::NewerObjectFound { .. } => {
+                true
+            }
+        }
+    }
+}
+
+/// Stops acquisition when a selected version exceeds the expected value.
+///
+/// The selector chooses which value to compare from each observed object.
+/// For example, selecting an owner epoch permits unrelated object updates.
+/// The selected value can differ from the storage version ID in the event.
+/// The bound applies only to observed snapshots. A successful claim can advance
+/// the selected version beyond the bound.
+#[derive(Clone, Copy, Debug)]
+pub struct ExpectedVersionPolicy<Id, F> {
+    expected_version: Id,
+    get_version: F,
+}
+
+impl<Id, F> ExpectedVersionPolicy<Id, F> {
+    /// Creates a policy bounded by `expected_version`, with values selected by
+    /// `get_version`.
+    pub fn new(expected_version: Id, get_version: F) -> Self {
+        Self {
+            expected_version,
+            get_version,
+        }
+    }
+}
+
+impl<T, Id, F> EpochAcquisitionPolicy<T> for ExpectedVersionPolicy<Id, F>
+where
+    Id: Ord + Send + Sync,
+    F: Fn(&T) -> Id + Send + Sync,
+{
+    fn should_continue(&self, event: AcquisitionEvent<'_, T>) -> bool {
+        match event {
+            AcquisitionEvent::InitialObject { object, .. }
+            | AcquisitionEvent::NewerObjectFound { object, .. } => {
+                (self.get_version)(object) <= self.expected_version
+            }
         }
     }
 }
@@ -356,24 +392,26 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
             system_clock,
             get_epoch,
             set_epoch,
-            &mut DefaultAcquisitionPolicy,
+            &DefaultEpochAcquisitionPolicy,
         )
         .await
     }
 
     /// Claims an epoch with a caller-supplied acquisition policy.
     ///
-    /// The callback runs before the first claim, after write conflicts, and after refreshes that find a higher version ID.
+    /// The callback runs before the first claim and after conflict refreshes that
+    /// find a higher version ID.
     /// A `true` result follows the existing retry behavior.
     /// A `false` result stops acquisition with [`TransactionalObjectError::Fenced`].
-    /// Callbacks end when the claim succeeds. Storage errors and the acquisition timeout propagate directly.
+    /// Callbacks end when the claim succeeds. Storage errors and the acquisition
+    /// timeout propagate directly.
     pub async fn init_with_policy(
         mut delegate: SimpleTransactionalObject<T, MonotonicId>,
         object_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
         get_epoch: fn(&T) -> u64,
         set_epoch: fn(&mut T, u64),
-        policy: &mut dyn AcquisitionPolicy<T>,
+        policy: &dyn EpochAcquisitionPolicy<T>,
     ) -> Result<Self, TransactionalObjectError> {
         utils::timeout(
             system_clock.clone(),
@@ -392,13 +430,8 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
                     let local_epoch = get_epoch(delegate.object()) + 1;
                     let mut dirty = delegate.prepare_dirty()?;
                     set_epoch(&mut dirty.value, local_epoch);
-                    match delegate.update(dirty.clone()).await {
+                    match delegate.update(dirty).await {
                         Err(err) if err.is_sequenced_write_conflict() => {
-                            if !policy.should_continue(AcquisitionEvent::WriteConflict {
-                                attempted: &dirty,
-                            }) {
-                                return Err(TransactionalObjectError::Fenced);
-                            }
                             let previous_id = delegate.id();
                             delegate.refresh().await?;
                             if delegate.id() > previous_id

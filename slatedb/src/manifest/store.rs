@@ -14,8 +14,8 @@ use slatedb_common::clock::SystemClock;
 use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
 use slatedb_txn_obj::{
-    AcquisitionPolicy, DirtyObject, FenceableTransactionalObject, MonotonicId,
-    SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
+    AcquisitionEvent, DirtyObject, EpochAcquisitionPolicy, FenceableTransactionalObject,
+    MonotonicId, SequencedStorageProtocol, SimpleTransactionalObject, TransactionalObject,
     TransactionalStorageProtocol,
 };
 use std::collections::BTreeMap;
@@ -23,6 +23,30 @@ use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
+
+/// Presents private manifest snapshots to public acquisition policies.
+pub(crate) struct ManifestAcquisitionPolicy<P>(pub(crate) P);
+
+impl<P: EpochAcquisitionPolicy<VersionedManifest>> EpochAcquisitionPolicy<Manifest>
+    for ManifestAcquisitionPolicy<P>
+{
+    fn should_continue(&self, event: AcquisitionEvent<'_, Manifest>) -> bool {
+        match event {
+            AcquisitionEvent::InitialObject { id, object } => {
+                self.0.should_continue(AcquisitionEvent::InitialObject {
+                    id,
+                    object: &VersionedManifest::from_manifest(id.id(), object.clone()),
+                })
+            }
+            AcquisitionEvent::NewerObjectFound { id, object } => {
+                self.0.should_continue(AcquisitionEvent::NewerObjectFound {
+                    id,
+                    object: &VersionedManifest::from_manifest(id.id(), object.clone()),
+                })
+            }
+        }
+    }
+}
 
 pub(crate) struct FenceableManifest {
     clock: Arc<dyn SystemClock>,
@@ -37,7 +61,7 @@ impl FenceableManifest {
         stored_manifest: StoredManifest,
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
-        policy: &mut dyn AcquisitionPolicy<Manifest>,
+        policy: &dyn EpochAcquisitionPolicy<Manifest>,
     ) -> Result<Self, SlateDBError> {
         let clock = system_clock.clone();
         // Initialize generic fenceable record using writer epoch
@@ -57,7 +81,7 @@ impl FenceableManifest {
         stored_manifest: StoredManifest,
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
-        policy: &mut dyn AcquisitionPolicy<Manifest>,
+        policy: &dyn EpochAcquisitionPolicy<Manifest>,
     ) -> Result<Self, SlateDBError> {
         let clock = system_clock.clone();
         let fr = FenceableTransactionalObject::init_with_policy(
@@ -596,14 +620,20 @@ mod tests {
     use crate::checkpoint::Checkpoint;
     use crate::config::CheckpointOptions;
     use crate::error::SlateDBError;
-    use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
-    use crate::manifest::ManifestCore;
+    use crate::manifest::store::{
+        FenceableManifest, ManifestAcquisitionPolicy, ManifestStore, StoredManifest,
+    };
+    use crate::manifest::{ManifestCore, VersionedManifest};
     use crate::retrying_object_store::RetryingObjectStore;
-    use crate::test_utils::{bounded_sst_view, FlakyObjectStore};
-    use crate::DefaultAcquisitionPolicy;
+    use crate::test_utils::{bounded_sst_view, FlakyObjectStore, RecordingObjectStore};
+    use crate::{
+        AcquisitionEvent, DefaultEpochAcquisitionPolicy, EpochAcquisitionPolicy,
+        ExpectedVersionPolicy,
+    };
     use chrono::Timelike;
     use object_store::memory::InMemory;
     use object_store::path::Path;
+    use parking_lot::Mutex;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use slatedb_common::DbRand;
     use slatedb_txn_obj::object_store::ObjectStoreBoundaryObject;
@@ -612,6 +642,142 @@ mod tests {
     use std::time::Duration;
 
     const ROOT: &str = "/root/path";
+
+    fn new_recording_manifest_store() -> (Arc<ManifestStore>, Arc<RecordingObjectStore>) {
+        let object_store = Arc::new(RecordingObjectStore::new(Arc::new(InMemory::new())));
+        let store = Arc::new(ManifestStore::new(&Path::from(ROOT), object_store.clone()));
+        (store, object_store)
+    }
+
+    fn record_acquisition_event(
+        events: &Mutex<Vec<&'static str>>,
+        event: &AcquisitionEvent<'_, VersionedManifest>,
+    ) {
+        events.lock().push(match event {
+            AcquisitionEvent::InitialObject { .. } => "initial",
+            AcquisitionEvent::NewerObjectFound { .. } => "newer",
+        });
+    }
+
+    #[tokio::test]
+    async fn test_acquisition_policy_rejects_initial_epoch_without_write() {
+        let (store, object_store) = new_recording_manifest_store();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let initial =
+            StoredManifest::create_new_db(store.clone(), ManifestCore::new(), clock.clone())
+                .await
+                .unwrap();
+        let _writer = FenceableManifest::init_writer(
+            initial,
+            Duration::from_secs(5),
+            clock.clone(),
+            &DefaultEpochAcquisitionPolicy,
+        )
+        .await
+        .unwrap();
+        let before = store.read_latest_manifest().await.unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded_events = events.clone();
+        let limit = ExpectedVersionPolicy::new(0, VersionedManifest::writer_epoch);
+        let policy = move |event: AcquisitionEvent<'_, VersionedManifest>| {
+            record_acquisition_event(&recorded_events, &event);
+            limit.should_continue(event)
+        };
+        object_store.clear();
+
+        let result = crate::Db::builder(ROOT, object_store.clone())
+            .with_acquisition_policy(policy)
+            .build()
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == crate::ErrorKind::Closed(crate::CloseReason::Fenced)
+        ));
+        assert_eq!(*events.lock(), ["initial"]);
+        assert!(object_store.write_kinds().is_empty());
+        assert_eq!(store.read_latest_manifest().await.unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn test_acquisition_policy_rejects_competing_writer_epoch() {
+        let (store, object_store) = new_recording_manifest_store();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let stale =
+            StoredManifest::create_new_db(store.clone(), ManifestCore::new(), clock.clone())
+                .await
+                .unwrap();
+        let current = StoredManifest::load(store.clone(), clock.clone())
+            .await
+            .unwrap();
+        let mut winner = FenceableManifest::init_writer(
+            current,
+            Duration::from_secs(5),
+            clock.clone(),
+            &DefaultEpochAcquisitionPolicy,
+        )
+        .await
+        .unwrap();
+        let before = store.read_latest_manifest().await.unwrap();
+        let events = Mutex::new(Vec::new());
+        let limit = ExpectedVersionPolicy::new(0, VersionedManifest::writer_epoch);
+        let policy = ManifestAcquisitionPolicy(|event: AcquisitionEvent<'_, VersionedManifest>| {
+            record_acquisition_event(&events, &event);
+            limit.should_continue(event)
+        });
+        object_store.clear();
+
+        let result =
+            FenceableManifest::init_writer(stale, Duration::from_secs(5), clock, &policy).await;
+
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
+        assert_eq!(*events.lock(), ["initial", "newer"]);
+        assert_eq!(object_store.write_kinds().len(), 1);
+        assert_eq!(store.read_latest_manifest().await.unwrap(), before);
+        winner.refresh().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_acquisition_policy_tolerates_compactor_epoch_change() {
+        let (store, object_store) = new_recording_manifest_store();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let stale =
+            StoredManifest::create_new_db(store.clone(), ManifestCore::new(), clock.clone())
+                .await
+                .unwrap();
+        let current = StoredManifest::load(store.clone(), clock.clone())
+            .await
+            .unwrap();
+        let mut compactor = FenceableManifest::init_compactor(
+            current,
+            Duration::from_secs(5),
+            clock.clone(),
+            &DefaultEpochAcquisitionPolicy,
+        )
+        .await
+        .unwrap();
+        let before = store.read_latest_manifest().await.unwrap();
+        let events = Mutex::new(Vec::new());
+        let limit = ExpectedVersionPolicy::new(0, VersionedManifest::writer_epoch);
+        let policy = ManifestAcquisitionPolicy(|event: AcquisitionEvent<'_, VersionedManifest>| {
+            record_acquisition_event(&events, &event);
+            limit.should_continue(event)
+        });
+        object_store.clear();
+
+        let writer = FenceableManifest::init_writer(stale, Duration::from_secs(5), clock, &policy)
+            .await
+            .unwrap();
+
+        assert_eq!(*events.lock(), ["initial", "newer"]);
+        assert_eq!(object_store.write_kinds().len(), 2);
+        let after = store.read_latest_manifest().await.unwrap();
+        assert_eq!(after.id(), before.id() + 1);
+        assert_eq!(after.writer_epoch(), before.writer_epoch() + 1);
+        assert_eq!(after.compactor_epoch(), before.compactor_epoch());
+        assert_eq!(writer.local_epoch(), after.writer_epoch());
+        compactor.refresh().await.unwrap();
+    }
 
     #[tokio::test]
     async fn test_should_fail_write_on_version_conflict() {
@@ -770,7 +936,7 @@ mod tests {
                 sm,
                 timeout,
                 Arc::new(DefaultSystemClock::new()),
-                &mut DefaultAcquisitionPolicy,
+                &DefaultEpochAcquisitionPolicy,
             )
             .await
             .unwrap();
@@ -795,7 +961,7 @@ mod tests {
             sm,
             timeout,
             Arc::new(DefaultSystemClock::new()),
-            &mut DefaultAcquisitionPolicy,
+            &DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -807,7 +973,7 @@ mod tests {
             sm2,
             timeout,
             Arc::new(DefaultSystemClock::new()),
-            &mut DefaultAcquisitionPolicy,
+            &DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -836,7 +1002,7 @@ mod tests {
                 sm,
                 timeout,
                 Arc::new(DefaultSystemClock::new()),
-                &mut DefaultAcquisitionPolicy,
+                &DefaultEpochAcquisitionPolicy,
             )
             .await
             .unwrap();
@@ -861,7 +1027,7 @@ mod tests {
             sm,
             timeout,
             Arc::new(DefaultSystemClock::new()),
-            &mut DefaultAcquisitionPolicy,
+            &DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -873,7 +1039,7 @@ mod tests {
             sm2,
             timeout,
             Arc::new(DefaultSystemClock::new()),
-            &mut DefaultAcquisitionPolicy,
+            &DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -919,7 +1085,7 @@ mod tests {
             sm,
             timeout,
             Arc::new(DefaultSystemClock::new()),
-            &mut DefaultAcquisitionPolicy,
+            &DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -930,7 +1096,7 @@ mod tests {
             sm2,
             timeout,
             Arc::new(DefaultSystemClock::new()),
-            &mut DefaultAcquisitionPolicy,
+            &DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -958,7 +1124,7 @@ mod tests {
             sm,
             timeout,
             Arc::new(DefaultSystemClock::new()),
-            &mut DefaultAcquisitionPolicy,
+            &DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -969,7 +1135,7 @@ mod tests {
             sm2,
             timeout,
             Arc::new(DefaultSystemClock::new()),
-            &mut DefaultAcquisitionPolicy,
+            &DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -1561,7 +1727,7 @@ mod tests {
             sm_b,
             timeout,
             Arc::new(DefaultSystemClock::new()),
-            &mut DefaultAcquisitionPolicy,
+            &DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -1572,7 +1738,7 @@ mod tests {
             sm_a,
             timeout,
             Arc::new(DefaultSystemClock::new()),
-            &mut DefaultAcquisitionPolicy,
+            &DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();

@@ -150,8 +150,8 @@ use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::garbage_collector::{GarbageCollector, GcFilter};
 use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
-use crate::manifest::store::{ManifestStore, StoredManifest};
-use crate::manifest::{Manifest, ManifestCore};
+use crate::manifest::store::{ManifestAcquisitionPolicy, ManifestStore, StoredManifest};
+use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
 use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
 use crate::paths::PathResolver;
@@ -165,7 +165,7 @@ use crate::wal::slatedb::admin::SlateDbWalAdmin;
 use crate::wal::slatedb::store::WalTableStore;
 use crate::wal::wal_disabled::DisabledWalObserver;
 use crate::wal::{WalAdmin, WalGc, WalObserver};
-use crate::{AcquisitionPolicy, DefaultAcquisitionPolicy};
+use crate::{DefaultEpochAcquisitionPolicy, EpochAcquisitionPolicy};
 use slatedb_common::clock::DefaultSystemClock;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::MetricsRecorder;
@@ -200,6 +200,7 @@ pub struct DbBuilder<P: Into<Path>> {
     metrics_recorder: Arc<dyn MetricsRecorder>,
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     wal_writer_init: Option<Box<dyn wal::WriterInit>>,
+    acquisition_policy: Box<dyn EpochAcquisitionPolicy<Manifest>>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -232,7 +233,22 @@ impl<P: Into<Path>> DbBuilder<P> {
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             segment_extractor: None,
             wal_writer_init: None,
+            acquisition_policy: Box::new(DefaultEpochAcquisitionPolicy),
         }
+    }
+
+    /// Sets the policy for acquiring the writer epoch in the manifest.
+    ///
+    /// The policy controls whether to attempt or retry the manifest claim.
+    /// Returning `false` stops acquisition with [`crate::CloseReason::Fenced`].
+    /// Callbacks end when the claim succeeds. The opened database does not
+    /// retain the policy. Embedded compactors use their own builder's policy.
+    pub fn with_acquisition_policy(
+        mut self,
+        policy: impl EpochAcquisitionPolicy<VersionedManifest> + 'static,
+    ) -> Self {
+        self.acquisition_policy = Box::new(ManifestAcquisitionPolicy(policy));
+        self
     }
 
     /// Set the segment extractor (RFC-0024). When configured, every
@@ -486,19 +502,6 @@ impl<P: Into<Path>> DbBuilder<P> {
 
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
-        self.build_with_acquisition_policy(&mut DefaultAcquisitionPolicy)
-            .await
-    }
-
-    /// Builds and opens the database with a policy for manifest acquisition.
-    ///
-    /// The policy controls whether to attempt or retry the manifest claim.
-    /// An abort returns [`crate::ErrorKind::Closed`] with [`crate::CloseReason::Fenced`].
-    /// Callbacks end when the manifest claim succeeds. The opened database does not retain the policy.
-    pub async fn build_with_acquisition_policy(
-        self,
-        policy: &mut dyn AcquisitionPolicy<Manifest>,
-    ) -> Result<Db, crate::Error> {
         self.settings.validate()?;
         if self.sst_block_alignment && self.settings.compression_codec.is_some() {
             return Err(SlateDBError::InvalidConfiguration(
@@ -709,7 +712,9 @@ impl<P: Into<Path>> DbBuilder<P> {
             manifest,
             replay_iterator,
             mut wal_writer,
-        } = fencer.fence(stored_manifest, policy).await?;
+        } = fencer
+            .fence(stored_manifest, self.acquisition_policy.as_ref())
+            .await?;
         let (wal_writer, wal_observer) = if DbInner::wal_enabled_in_options(&self.settings) {
             let wal_observer = wal_writer.observer();
             (Some(wal_writer), wal_observer)
@@ -1267,6 +1272,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     compaction_runtime: Handle,
     options: CompactorOptions,
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
+    acquisition_policy: Arc<dyn EpochAcquisitionPolicy<Manifest>>,
     rand: Arc<DbRand>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
     system_clock: Arc<dyn SystemClock>,
@@ -1290,6 +1296,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             compaction_runtime: Handle::current(),
             options: CompactorOptions::default(),
             scheduler_supplier: None,
+            acquisition_policy: Arc::new(DefaultEpochAcquisitionPolicy),
             rand: Arc::new(DbRand::default()),
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
@@ -1312,6 +1319,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             compaction_runtime: self.compaction_runtime,
             options: self.options,
             scheduler_supplier: self.scheduler_supplier,
+            acquisition_policy: self.acquisition_policy,
             rand: self.rand,
             metrics_recorder: self.metrics_recorder,
             system_clock: self.system_clock,
@@ -1337,6 +1345,20 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Sets the options to use for the compactor.
     pub fn with_options(mut self, options: CompactorOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    /// Sets the policy for acquiring the compactor epoch in the manifest.
+    ///
+    /// Returning `false` stops acquisition with [`crate::CloseReason::Fenced`].
+    /// Callbacks end when the manifest claim succeeds. The compactions file
+    /// then claims that same epoch without consulting the policy.
+    /// Cloned compactor handles share the policy.
+    pub fn with_acquisition_policy(
+        mut self,
+        policy: impl EpochAcquisitionPolicy<VersionedManifest> + 'static,
+    ) -> Self {
+        self.acquisition_policy = Arc::new(ManifestAcquisitionPolicy(policy));
         self
     }
 
@@ -1492,6 +1514,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             table_store,
             self.options,
             scheduler_supplier,
+            self.acquisition_policy,
             self.compaction_runtime,
             self.rand,
             &recorder,
@@ -1536,7 +1559,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             stats.clone(),
             self.system_clock.clone(),
             recorder.clone(),
-            &mut DefaultAcquisitionPolicy,
+            self.acquisition_policy.as_ref(),
         )
         .await?;
         let worker = options.worker.clone().map(|worker_options| {

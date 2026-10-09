@@ -382,9 +382,7 @@ impl Admin {
     ) -> Result<(), crate::Error> {
         let compactor = self.compactor_builder(options).build();
 
-        compactor
-            .start(&mut crate::DefaultAcquisitionPolicy)
-            .await?;
+        compactor.start().await?;
 
         tokio::select! {
             result = compactor.join() => result,

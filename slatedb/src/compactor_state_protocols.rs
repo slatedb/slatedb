@@ -21,7 +21,7 @@ use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::manifest::{Manifest, VersionedManifest};
 use crate::utils::IdGenerator;
-use crate::AcquisitionPolicy;
+use crate::EpochAcquisitionPolicy;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
 
@@ -136,7 +136,7 @@ impl CompactorStateWriter {
         system_clock: Arc<dyn SystemClock>,
         options: &CompactorOptions,
         rand: Arc<DbRand>,
-        policy: &mut dyn AcquisitionPolicy<Manifest>,
+        policy: &dyn EpochAcquisitionPolicy<Manifest>,
     ) -> Result<Self, SlateDBError> {
         let stored_manifest =
             StoredManifest::load(manifest_store.clone(), system_clock.clone()).await?;
@@ -186,7 +186,7 @@ impl CompactorStateWriter {
         compactions_store: Arc<CompactionsStore>,
         system_clock: Arc<dyn SystemClock>,
         options: &CompactorOptions,
-        policy: &mut dyn AcquisitionPolicy<Manifest>,
+        policy: &dyn EpochAcquisitionPolicy<Manifest>,
     ) -> Result<(FenceableManifest, FenceableCompactions), SlateDBError> {
         let fenceable_manifest = FenceableManifest::init_compactor(
             stored_manifest,
@@ -398,7 +398,7 @@ mod tests {
             system_clock.clone(),
             &options,
             Arc::clone(&rand),
-            &mut crate::DefaultAcquisitionPolicy,
+            &crate::DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -409,7 +409,7 @@ mod tests {
             system_clock,
             &options,
             rand,
-            &mut crate::DefaultAcquisitionPolicy,
+            &crate::DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -509,7 +509,7 @@ mod tests {
             system_clock,
             &options,
             rand,
-            &mut crate::DefaultAcquisitionPolicy,
+            &crate::DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -581,7 +581,7 @@ mod tests {
             system_clock,
             &options,
             rand,
-            &mut crate::DefaultAcquisitionPolicy,
+            &crate::DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -671,7 +671,7 @@ mod tests {
             system_clock,
             &options,
             rand,
-            &mut crate::DefaultAcquisitionPolicy,
+            &crate::DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -754,7 +754,7 @@ mod tests {
             system_clock,
             &options,
             rand,
-            &mut crate::DefaultAcquisitionPolicy,
+            &crate::DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -812,7 +812,7 @@ mod tests {
             system_clock,
             &options,
             rand,
-            &mut crate::DefaultAcquisitionPolicy,
+            &crate::DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -868,7 +868,7 @@ mod tests {
             system_clock,
             &options,
             rand,
-            &mut crate::DefaultAcquisitionPolicy,
+            &crate::DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -934,7 +934,7 @@ mod tests {
             system_clock,
             &CompactorOptions::default(),
             Arc::new(DbRand::new(7)),
-            &mut crate::DefaultAcquisitionPolicy,
+            &crate::DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -1014,7 +1014,7 @@ mod tests {
             system_clock,
             &options,
             rand,
-            &mut crate::DefaultAcquisitionPolicy,
+            &crate::DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -1102,7 +1102,7 @@ mod tests {
             system_clock.clone(),
             &options,
             Arc::new(DbRand::new(7)),
-            &mut crate::DefaultAcquisitionPolicy,
+            &crate::DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
@@ -1165,7 +1165,7 @@ mod tests {
             system_clock,
             &options,
             rand,
-            &mut crate::DefaultAcquisitionPolicy,
+            &crate::DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();

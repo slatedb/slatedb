@@ -6,7 +6,7 @@ use crate::utils::WatchableOnceCellReader;
 use crate::wal::slatedb::store::WalTableStore;
 use crate::wal::slatedb::writer_init::{SlateDbWalWriterInit, SlateDbWalWriterInitOptions};
 use crate::wal::{WalIterator, WalWriter, WriterInit};
-use crate::{AcquisitionPolicy, Settings};
+use crate::{EpochAcquisitionPolicy, Settings};
 use fail_parallel::{fail_point_send, FailPointTx};
 use slatedb_common::metrics::MetricsRecorderHelper;
 use slatedb_common::SystemClock;
@@ -88,7 +88,7 @@ impl WriterFencer {
     pub(crate) async fn fence(
         mut self,
         stored_manifest: StoredManifest,
-        policy: &mut dyn AcquisitionPolicy<Manifest>,
+        policy: &dyn EpochAcquisitionPolicy<Manifest>,
     ) -> Result<WriterFenceResult, SlateDBError> {
         let wal_writer_init = match self.wal_writer_init.take() {
             Some(wal_writer_init) => wal_writer_init,
@@ -422,7 +422,7 @@ mod tests {
         let result = fencer
             .fence(
                 h.stored_manifest.take().unwrap(),
-                &mut crate::DefaultAcquisitionPolicy,
+                &crate::DefaultEpochAcquisitionPolicy,
             )
             .await;
 
@@ -473,7 +473,7 @@ mod tests {
         let stored_manifest = h.stored_manifest.take().unwrap();
         let jh = tokio::task::spawn(async move {
             fencer
-                .fence(stored_manifest, &mut crate::DefaultAcquisitionPolicy)
+                .fence(stored_manifest, &crate::DefaultEpochAcquisitionPolicy)
                 .await
         });
         // wait for LoadEmptyWalId pause
@@ -576,7 +576,7 @@ mod tests {
         let stored_manifest = h.stored_manifest.take().unwrap();
         let jh = tokio::task::spawn(async move {
             fencer
-                .fence(stored_manifest, &mut crate::DefaultAcquisitionPolicy)
+                .fence(stored_manifest, &crate::DefaultEpochAcquisitionPolicy)
                 .await
         });
         // wait for fencer to load empty wal id and pause

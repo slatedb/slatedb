@@ -65,13 +65,15 @@ pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::{GarbageCollectorBuilder, GcFilter};
 pub use instrumented_object_store::stats as instrumented_object_store_stats;
 pub use iter::IterationOrder;
-pub use manifest::{Manifest, VersionedManifest};
+pub use manifest::VersionedManifest;
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use ops::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbTransactionOps, DbWriteOps};
 pub use paths::PathResolver;
 pub use prefix_extractor::{PrefixExtractor, PrefixTarget};
 pub use slatedb_common::{DbRand, IdentifiedObjectMetadata, ObjectMetadata};
-pub use slatedb_txn_obj::{AcquisitionEvent, AcquisitionPolicy, DefaultAcquisitionPolicy};
+pub use slatedb_txn_obj::{
+    AcquisitionEvent, DefaultEpochAcquisitionPolicy, EpochAcquisitionPolicy, ExpectedVersionPolicy,
+};
 #[cfg(test)]
 pub use sst_builder::BlockFormat;
 pub use sst_reader::{SstFile, SstIndex, SstReader};

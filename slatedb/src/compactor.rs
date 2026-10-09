@@ -85,7 +85,7 @@ use crate::manifest::{LsmTreeState, Manifest, ManifestCore};
 use crate::merge_operator::MergeOperatorType;
 use crate::tablestore::TableStore;
 use crate::utils::{format_bytes_si, IdGenerator};
-use crate::{AcquisitionPolicy, DefaultAcquisitionPolicy};
+use crate::EpochAcquisitionPolicy;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::{GaugeFn, MetricsRecorderHelper};
 use slatedb_common::DbRand;
@@ -311,6 +311,7 @@ pub struct Compactor {
     table_store: Arc<TableStore>,
     options: Arc<CompactorOptions>,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    acquisition_policy: Arc<dyn EpochAcquisitionPolicy<Manifest>>,
     task_executor: Arc<MessageHandlerExecutor>,
     compactor_runtime: Handle,
     rand: Arc<DbRand>,
@@ -331,6 +332,7 @@ impl Compactor {
         table_store: Arc<TableStore>,
         options: CompactorOptions,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+        acquisition_policy: Arc<dyn EpochAcquisitionPolicy<Manifest>>,
         compactor_runtime: Handle,
         rand: Arc<DbRand>,
         recorder: &MetricsRecorderHelper,
@@ -353,6 +355,7 @@ impl Compactor {
             table_store,
             options: Arc::new(options),
             scheduler_supplier,
+            acquisition_policy,
             task_executor,
             compactor_runtime,
             rand,
@@ -375,28 +378,11 @@ impl Compactor {
     /// ## Returns
     /// - `Ok(())` when the compactor task exits cleanly, or [`SlateDBError`] on failure.
     pub async fn run(&self) -> Result<(), Error> {
-        self.run_with_acquisition_policy(&mut DefaultAcquisitionPolicy)
-            .await
-    }
-
-    /// Runs the compactor with a policy for manifest acquisition.
-    ///
-    /// The policy can reject competing compactor epochs while permitting writer epoch changes.
-    /// An abort returns [`crate::ErrorKind::Closed`] with [`crate::CloseReason::Fenced`].
-    /// Callbacks end when the manifest claim succeeds.
-    /// The policy remains borrowed for the duration of this call.
-    pub async fn run_with_acquisition_policy(
-        &self,
-        policy: &mut dyn AcquisitionPolicy<Manifest>,
-    ) -> Result<(), Error> {
-        self.start(policy).await?;
+        self.start().await?;
         self.join().await
     }
 
-    pub(crate) async fn start(
-        &self,
-        policy: &mut dyn AcquisitionPolicy<Manifest>,
-    ) -> Result<(), Error> {
+    pub(crate) async fn start(&self) -> Result<(), Error> {
         // The coordinator delegates compaction execution to [`crate::compaction_worker::CompactionWorker`]
         // either spawned in this process (set `worker: Some`) or running standalone (set `worker: None`).
         let (_tx, rx) = async_channel::unbounded::<CompactorMessage>();
@@ -410,7 +396,7 @@ impl Compactor {
             self.stats.clone(),
             self.system_clock.clone(),
             self.recorder.clone(),
-            policy,
+            self.acquisition_policy.as_ref(),
         )
         .await?;
         self.task_executor
@@ -602,7 +588,7 @@ impl CompactorEventHandler {
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
         recorder: MetricsRecorderHelper,
-        policy: &mut dyn AcquisitionPolicy<Manifest>,
+        policy: &dyn EpochAcquisitionPolicy<Manifest>,
     ) -> Result<Self, SlateDBError> {
         let state_writer = CompactorStateWriter::new(
             manifest_store,
@@ -1495,6 +1481,7 @@ pub mod stats {
 
 #[cfg(test)]
 mod tests {
+    use crate::DefaultEpochAcquisitionPolicy;
     use std::collections::{HashMap, VecDeque};
     use std::future::Future;
     use std::ops::Bound::{Excluded, Included};
@@ -1688,6 +1675,32 @@ mod tests {
             result.extend_from_slice(&value);
             Ok(Bytes::from(result))
         }
+    }
+
+    #[tokio::test]
+    async fn test_compactor_run_honors_acquisition_policy() {
+        let os = Arc::new(InMemory::new());
+        let (manifest_store, _, _) = build_test_stores(os.clone());
+        StoredManifest::create_new_db(
+            manifest_store,
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        let compactor = CompactorBuilder::new(PATH, os)
+            .with_acquisition_policy(|_: crate::AcquisitionEvent<'_, VersionedManifest>| false)
+            .build();
+
+        let error = tokio::time::timeout(Duration::from_secs(5), compactor.run())
+            .await
+            .unwrap()
+            .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            crate::ErrorKind::Closed(crate::CloseReason::Fenced)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4843,7 +4856,7 @@ mod tests {
                 compactor_stats.clone(),
                 Arc::new(DefaultSystemClock::new()),
                 MetricsRecorderHelper::noop(),
-                &mut DefaultAcquisitionPolicy,
+                &DefaultEpochAcquisitionPolicy,
             )
             .await
             .unwrap();
@@ -4916,7 +4929,7 @@ mod tests {
                 compactor_stats.clone(),
                 system_clock.clone(),
                 recorder.clone(),
-                &mut DefaultAcquisitionPolicy,
+                &DefaultEpochAcquisitionPolicy,
             )
             .await
             .unwrap();
@@ -5778,7 +5791,7 @@ mod tests {
             compactor_stats,
             system_clock,
             recorder,
-            &mut DefaultAcquisitionPolicy,
+            &DefaultEpochAcquisitionPolicy,
         )
         .await
         .unwrap();
