@@ -310,6 +310,7 @@ pub struct Compactor {
     table_store: Arc<TableStore>,
     options: Arc<CompactorOptions>,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    expected_compactor_epoch: Option<u64>,
     task_executor: Arc<MessageHandlerExecutor>,
     compactor_runtime: Handle,
     rand: Arc<DbRand>,
@@ -330,6 +331,7 @@ impl Compactor {
         table_store: Arc<TableStore>,
         options: CompactorOptions,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+        expected_compactor_epoch: Option<u64>,
         compactor_runtime: Handle,
         rand: Arc<DbRand>,
         recorder: &MetricsRecorderHelper,
@@ -352,6 +354,7 @@ impl Compactor {
             table_store,
             options: Arc::new(options),
             scheduler_supplier,
+            expected_compactor_epoch,
             task_executor,
             compactor_runtime,
             rand,
@@ -392,6 +395,7 @@ impl Compactor {
             self.stats.clone(),
             self.system_clock.clone(),
             self.recorder.clone(),
+            self.expected_compactor_epoch,
         )
         .await?;
         self.task_executor
@@ -583,6 +587,7 @@ impl CompactorEventHandler {
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
         recorder: MetricsRecorderHelper,
+        expected_compactor_epoch: Option<u64>,
     ) -> Result<Self, SlateDBError> {
         let state_writer = CompactorStateWriter::new(
             manifest_store,
@@ -590,6 +595,7 @@ impl CompactorEventHandler {
             system_clock.clone(),
             options.as_ref(),
             rand.clone(),
+            expected_compactor_epoch,
         )
         .await?;
         let compactor_epoch = state_writer.state.manifest().value.compactor_epoch;
@@ -1516,7 +1522,7 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::iter::RowEntryIterator;
-    use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::{LsmTreeState, Manifest, ManifestCore, Segment, VersionedManifest};
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::proptest_util::rng;
@@ -1667,6 +1673,39 @@ mod tests {
             result.extend_from_slice(&value);
             Ok(Bytes::from(result))
         }
+    }
+
+    #[tokio::test]
+    async fn test_compactor_run_honors_expected_epoch() {
+        let os = Arc::new(InMemory::new());
+        let (manifest_store, _, _) = build_test_stores(os.clone());
+        let clock = Arc::new(DefaultSystemClock::new());
+        let initial = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
+        let _owner =
+            FenceableManifest::init_compactor(initial, Duration::from_secs(5), clock, None)
+                .await
+                .unwrap();
+        let before = manifest_store.read_latest_manifest().await.unwrap();
+        let compactor = CompactorBuilder::new(PATH, os)
+            .with_expected_compactor_epoch(0)
+            .build();
+
+        let error = tokio::time::timeout(Duration::from_secs(5), compactor.run())
+            .await
+            .unwrap()
+            .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            crate::ErrorKind::Closed(crate::CloseReason::Fenced)
+        );
+        assert_eq!(manifest_store.read_latest_manifest().await.unwrap(), before);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4822,6 +4861,7 @@ mod tests {
                 compactor_stats.clone(),
                 Arc::new(DefaultSystemClock::new()),
                 MetricsRecorderHelper::noop(),
+                None,
             )
             .await
             .unwrap();
@@ -4894,6 +4934,7 @@ mod tests {
                 compactor_stats.clone(),
                 system_clock.clone(),
                 recorder.clone(),
+                None,
             )
             .await
             .unwrap();
@@ -5755,6 +5796,7 @@ mod tests {
             compactor_stats,
             system_clock,
             recorder,
+            None,
         )
         .await
         .unwrap();
