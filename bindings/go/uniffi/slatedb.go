@@ -10856,12 +10856,6 @@ type CompactorOptions struct {
 	PollIntervalMs uint64
 	// How long a manifest update is retried before giving up.
 	ManifestUpdateTimeoutMs uint64
-	// Attempts to claim compactor epoch `expected_epoch + 1`.
-	//
-	// A newer compactor epoch rejects startup. Writer epoch changes are
-	// tolerated. `None` retries acquisition against newer compactors.
-	// The epoch must be below `u64::MAX`.
-	ExpectedEpoch *uint64
 	// The maximum number of compactions in flight at once.
 	MaxConcurrentCompactions uint64
 	// Whether non-overlapping input SSTs may be moved into the destination
@@ -10893,7 +10887,6 @@ type CompactorOptions struct {
 func (r *CompactorOptions) Destroy() {
 	FfiDestroyerUint64{}.Destroy(r.PollIntervalMs)
 	FfiDestroyerUint64{}.Destroy(r.ManifestUpdateTimeoutMs)
-	FfiDestroyerOptionalUint64{}.Destroy(r.ExpectedEpoch)
 	FfiDestroyerUint64{}.Destroy(r.MaxConcurrentCompactions)
 	FfiDestroyerBool{}.Destroy(r.EnableTrivialMove)
 	FfiDestroyerMapStringString{}.Destroy(r.SchedulerOptions)
@@ -10916,7 +10909,6 @@ func (c FfiConverterCompactorOptions) Read(reader io.Reader) CompactorOptions {
 	return CompactorOptions{
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterOptionalUint64INSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterMapStringStringINSTANCE.Read(reader),
@@ -10939,7 +10931,6 @@ func (c FfiConverterCompactorOptions) LowerExternal(value CompactorOptions) Exte
 func (c FfiConverterCompactorOptions) Write(writer io.Writer, value CompactorOptions) {
 	FfiConverterUint64INSTANCE.Write(writer, value.PollIntervalMs)
 	FfiConverterUint64INSTANCE.Write(writer, value.ManifestUpdateTimeoutMs)
-	FfiConverterOptionalUint64INSTANCE.Write(writer, value.ExpectedEpoch)
 	FfiConverterUint64INSTANCE.Write(writer, value.MaxConcurrentCompactions)
 	FfiConverterBoolINSTANCE.Write(writer, value.EnableTrivialMove)
 	FfiConverterMapStringStringINSTANCE.Write(writer, value.SchedulerOptions)

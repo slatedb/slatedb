@@ -705,13 +705,6 @@ pub struct CompactorOptions {
     /// How long a manifest update is retried before giving up.
     #[uniffi(default = 300000)]
     pub manifest_update_timeout_ms: u64,
-    /// Attempts to claim compactor epoch `expected_epoch + 1`.
-    ///
-    /// A newer compactor epoch rejects startup. Writer epoch changes are
-    /// tolerated. `None` retries acquisition against newer compactors.
-    /// The epoch must be below `u64::MAX`.
-    #[uniffi(default = None)]
-    pub expected_epoch: Option<u64>,
     /// The maximum number of compactions in flight at once.
     #[uniffi(default = 4)]
     pub max_concurrent_compactions: u64,
@@ -753,7 +746,6 @@ impl Default for CompactorOptions {
         Self {
             poll_interval_ms: millis(core.poll_interval),
             manifest_update_timeout_ms: millis(core.manifest_update_timeout),
-            expected_epoch: core.expected_epoch,
             max_concurrent_compactions: core.max_concurrent_compactions as u64,
             enable_trivial_move: core.enable_trivial_move,
             scheduler_options: core.scheduler_options,
@@ -773,7 +765,6 @@ impl TryFrom<CompactorOptions> for slatedb::config::CompactorOptions {
         Ok(Self {
             poll_interval: Duration::from_millis(value.poll_interval_ms),
             manifest_update_timeout: Duration::from_millis(value.manifest_update_timeout_ms),
-            expected_epoch: value.expected_epoch,
             max_concurrent_compactions: usize_field(
                 value.max_concurrent_compactions,
                 "max_concurrent_compactions",
@@ -971,7 +962,6 @@ mod tests {
         let engine = slatedb::config::CompactorOptions::default();
         assert_eq!(core.poll_interval, engine.poll_interval);
         assert_eq!(core.manifest_update_timeout, engine.manifest_update_timeout);
-        assert_eq!(core.expected_epoch, engine.expected_epoch);
         assert_eq!(
             core.max_concurrent_compactions,
             engine.max_concurrent_compactions
@@ -1020,7 +1010,6 @@ mod tests {
     fn compactor_options_carry_every_field_into_the_engine() {
         let options = CompactorOptions {
             poll_interval_ms: 250,
-            expected_epoch: Some(7),
             max_concurrent_compactions: 2,
             enable_trivial_move: true,
             scheduler_options: HashMap::from([(
@@ -1037,7 +1026,6 @@ mod tests {
         };
         let core = slatedb::config::CompactorOptions::try_from(options).unwrap();
         assert_eq!(core.poll_interval, Duration::from_millis(250));
-        assert_eq!(core.expected_epoch, Some(7));
         assert_eq!(core.max_concurrent_compactions, 2);
         assert!(core.enable_trivial_move);
         assert_eq!(core.scheduler_options["min_compaction_sources"], "2");

@@ -310,6 +310,7 @@ pub struct Compactor {
     table_store: Arc<TableStore>,
     options: Arc<CompactorOptions>,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    expected_epoch: Option<u64>,
     task_executor: Arc<MessageHandlerExecutor>,
     compactor_runtime: Handle,
     rand: Arc<DbRand>,
@@ -330,6 +331,7 @@ impl Compactor {
         table_store: Arc<TableStore>,
         options: CompactorOptions,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+        expected_epoch: Option<u64>,
         compactor_runtime: Handle,
         rand: Arc<DbRand>,
         recorder: &MetricsRecorderHelper,
@@ -352,6 +354,7 @@ impl Compactor {
             table_store,
             options: Arc::new(options),
             scheduler_supplier,
+            expected_epoch,
             task_executor,
             compactor_runtime,
             rand,
@@ -392,6 +395,7 @@ impl Compactor {
             self.stats.clone(),
             self.system_clock.clone(),
             self.recorder.clone(),
+            self.expected_epoch,
         )
         .await?;
         self.task_executor
@@ -583,6 +587,7 @@ impl CompactorEventHandler {
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
         recorder: MetricsRecorderHelper,
+        expected_epoch: Option<u64>,
     ) -> Result<Self, SlateDBError> {
         let state_writer = CompactorStateWriter::new(
             manifest_store,
@@ -590,6 +595,7 @@ impl CompactorEventHandler {
             system_clock.clone(),
             options.as_ref(),
             rand.clone(),
+            expected_epoch,
         )
         .await?;
         let compactor_epoch = state_writer.state.manifest().value.compactor_epoch;
@@ -1687,10 +1693,7 @@ mod tests {
                 .unwrap();
         let before = manifest_store.read_latest_manifest().await.unwrap();
         let compactor = CompactorBuilder::new(PATH, os)
-            .with_options(CompactorOptions {
-                expected_epoch: Some(0),
-                ..CompactorOptions::default()
-            })
+            .with_expected_epoch(0)
             .build();
 
         let error = tokio::time::timeout(Duration::from_secs(5), compactor.run())
@@ -4858,6 +4861,7 @@ mod tests {
                 compactor_stats.clone(),
                 Arc::new(DefaultSystemClock::new()),
                 MetricsRecorderHelper::noop(),
+                None,
             )
             .await
             .unwrap();
@@ -4930,6 +4934,7 @@ mod tests {
                 compactor_stats.clone(),
                 system_clock.clone(),
                 recorder.clone(),
+                None,
             )
             .await
             .unwrap();
@@ -5791,6 +5796,7 @@ mod tests {
             compactor_stats,
             system_clock,
             recorder,
+            None,
         )
         .await
         .unwrap();
