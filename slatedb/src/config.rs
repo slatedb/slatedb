@@ -1239,6 +1239,14 @@ pub struct CompactorOptions {
     #[serde(serialize_with = "serialize_duration")]
     pub manifest_update_timeout: Duration,
 
+    /// Attempts to claim compactor epoch `expected_epoch + 1`.
+    ///
+    /// A newer compactor epoch causes startup to fail with
+    /// [`crate::CloseReason::Fenced`]. Writer epoch changes are tolerated.
+    /// `None` retries claims against newer compactors. The supplied epoch must
+    /// be below `u64::MAX` and applies each time this configuration is used.
+    pub expected_epoch: Option<u64>,
+
     /// The maximum number of concurrent compactions to execute at once
     pub max_concurrent_compactions: usize,
 
@@ -1321,6 +1329,7 @@ impl Default for CompactorOptions {
         Self {
             poll_interval: Duration::from_secs(5),
             manifest_update_timeout: Duration::from_secs(300),
+            expected_epoch: None,
             max_concurrent_compactions: 4,
             enable_trivial_move: false,
             scheduler_options: HashMap::new(),
@@ -1340,6 +1349,7 @@ impl std::fmt::Debug for CompactorOptions {
         f.debug_struct("CompactorOptions")
             .field("poll_interval", &self.poll_interval)
             .field("manifest_update_timeout", &self.manifest_update_timeout)
+            .field("expected_epoch", &self.expected_epoch)
             .field(
                 "max_concurrent_compactions",
                 &self.max_concurrent_compactions,

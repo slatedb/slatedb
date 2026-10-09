@@ -36,13 +36,13 @@ impl FenceableManifest {
         stored_manifest: StoredManifest,
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
-        expected_writer_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> Result<Self, SlateDBError> {
         Self::init(
             stored_manifest,
             manifest_update_timeout,
             system_clock,
-            expected_writer_epoch,
+            expected_epoch,
             |m: &Manifest| m.writer_epoch,
             |m: &mut Manifest, e: u64| m.writer_epoch = e,
         )
@@ -53,13 +53,13 @@ impl FenceableManifest {
         stored_manifest: StoredManifest,
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
-        expected_compactor_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> Result<Self, SlateDBError> {
         Self::init(
             stored_manifest,
             manifest_update_timeout,
             system_clock,
-            expected_compactor_epoch,
+            expected_epoch,
             |m: &Manifest| m.compactor_epoch,
             |m: &mut Manifest, e: u64| m.compactor_epoch = e,
         )
@@ -668,7 +668,7 @@ mod tests {
         object_store.clear();
 
         let result = crate::Db::builder(ROOT, object_store.clone())
-            .with_expected_writer_epoch(0)
+            .with_expected_epoch(0)
             .build()
             .await;
 

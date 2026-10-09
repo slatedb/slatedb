@@ -199,7 +199,7 @@ pub struct DbBuilder<P: Into<Path>> {
     metrics_recorder: Arc<dyn MetricsRecorder>,
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     wal_writer_init: Option<Box<dyn wal::WriterInit>>,
-    expected_writer_epoch: Option<u64>,
+    expected_epoch: Option<u64>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -232,7 +232,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             segment_extractor: None,
             wal_writer_init: None,
-            expected_writer_epoch: None,
+            expected_epoch: None,
         }
     }
 
@@ -242,8 +242,8 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// [`crate::CloseReason::Fenced`]. Compactor epoch changes are tolerated.
     /// Without this option, opening retries claims against newer writers.
     /// `expected_epoch` must be less than `u64::MAX`.
-    pub fn with_expected_writer_epoch(mut self, expected_epoch: u64) -> Self {
-        self.expected_writer_epoch = Some(expected_epoch);
+    pub fn with_expected_epoch(mut self, expected_epoch: u64) -> Self {
+        self.expected_epoch = Some(expected_epoch);
         self
     }
 
@@ -708,9 +708,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             manifest,
             replay_iterator,
             mut wal_writer,
-        } = fencer
-            .fence(stored_manifest, self.expected_writer_epoch)
-            .await?;
+        } = fencer.fence(stored_manifest, self.expected_epoch).await?;
         let (wal_writer, wal_observer) = if DbInner::wal_enabled_in_options(&self.settings) {
             let wal_observer = wal_writer.observer();
             (Some(wal_writer), wal_observer)
@@ -1268,7 +1266,6 @@ pub struct CompactorBuilder<P: Into<Path>> {
     compaction_runtime: Handle,
     options: CompactorOptions,
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
-    expected_compactor_epoch: Option<u64>,
     rand: Arc<DbRand>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
     system_clock: Arc<dyn SystemClock>,
@@ -1292,7 +1289,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             compaction_runtime: Handle::current(),
             options: CompactorOptions::default(),
             scheduler_supplier: None,
-            expected_compactor_epoch: None,
             rand: Arc::new(DbRand::default()),
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
@@ -1315,7 +1311,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             compaction_runtime: self.compaction_runtime,
             options: self.options,
             scheduler_supplier: self.scheduler_supplier,
-            expected_compactor_epoch: self.expected_compactor_epoch,
             rand: self.rand,
             metrics_recorder: self.metrics_recorder,
             system_clock: self.system_clock,
@@ -1341,17 +1336,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Sets the options to use for the compactor.
     pub fn with_options(mut self, options: CompactorOptions) -> Self {
         self.options = options;
-        self
-    }
-
-    /// Attempts to claim compactor epoch `expected_epoch + 1`.
-    ///
-    /// If a newer compactor epoch is observed, startup fails with
-    /// [`crate::CloseReason::Fenced`]. Writer epoch changes are tolerated.
-    /// Without this option, startup retries claims against newer compactors.
-    /// `expected_epoch` must be less than `u64::MAX`.
-    pub fn with_expected_compactor_epoch(mut self, expected_epoch: u64) -> Self {
-        self.expected_compactor_epoch = Some(expected_epoch);
         self
     }
 
@@ -1507,7 +1491,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             table_store,
             self.options,
             scheduler_supplier,
-            self.expected_compactor_epoch,
             self.compaction_runtime,
             self.rand,
             &recorder,
@@ -1552,7 +1535,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             stats.clone(),
             self.system_clock.clone(),
             recorder.clone(),
-            self.expected_compactor_epoch,
         )
         .await?;
         let worker = options.worker.clone().map(|worker_options| {

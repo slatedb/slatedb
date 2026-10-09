@@ -125,7 +125,6 @@ impl CompactorStateWriter {
     /// - `system_clock`: Clock for fencing/timeouts.
     /// - `options`: Compactor options containing timeouts.
     /// - `rand`: RNG for checkpoint ids.
-    /// - `expected_compactor_epoch`: Previously observed compactor epoch.
     ///
     /// ## Returns
     /// - A new writer seeded with dirty manifest/compactions and finished compactions trimmed.
@@ -135,7 +134,6 @@ impl CompactorStateWriter {
         system_clock: Arc<dyn SystemClock>,
         options: &CompactorOptions,
         rand: Arc<DbRand>,
-        expected_compactor_epoch: Option<u64>,
     ) -> Result<Self, SlateDBError> {
         let stored_manifest =
             StoredManifest::load(manifest_store.clone(), system_clock.clone()).await?;
@@ -144,7 +142,6 @@ impl CompactorStateWriter {
             compactions_store,
             system_clock.clone(),
             options,
-            expected_compactor_epoch,
         )
         .await?;
         let dirty_manifest = manifest.prepare_dirty()?;
@@ -185,13 +182,12 @@ impl CompactorStateWriter {
         compactions_store: Arc<CompactionsStore>,
         system_clock: Arc<dyn SystemClock>,
         options: &CompactorOptions,
-        expected_compactor_epoch: Option<u64>,
     ) -> Result<(FenceableManifest, FenceableCompactions), SlateDBError> {
         let fenceable_manifest = FenceableManifest::init_compactor(
             stored_manifest,
             options.manifest_update_timeout,
             system_clock.clone(),
-            expected_compactor_epoch,
+            options.expected_epoch,
         )
         .await?;
         let stored_compactions =
@@ -397,7 +393,6 @@ mod tests {
             system_clock.clone(),
             &options,
             Arc::clone(&rand),
-            None,
         )
         .await
         .unwrap();
@@ -408,7 +403,6 @@ mod tests {
             system_clock,
             &options,
             rand,
-            None,
         )
         .await
         .unwrap();
@@ -508,7 +502,6 @@ mod tests {
             system_clock,
             &options,
             rand,
-            None,
         )
         .await
         .unwrap();
@@ -580,7 +573,6 @@ mod tests {
             system_clock,
             &options,
             rand,
-            None,
         )
         .await
         .unwrap();
@@ -670,7 +662,6 @@ mod tests {
             system_clock,
             &options,
             rand,
-            None,
         )
         .await
         .unwrap();
@@ -753,7 +744,6 @@ mod tests {
             system_clock,
             &options,
             rand,
-            None,
         )
         .await
         .unwrap();
@@ -811,7 +801,6 @@ mod tests {
             system_clock,
             &options,
             rand,
-            None,
         )
         .await
         .unwrap();
@@ -867,7 +856,6 @@ mod tests {
             system_clock,
             &options,
             rand,
-            None,
         )
         .await
         .unwrap();
@@ -933,7 +921,6 @@ mod tests {
             system_clock,
             &CompactorOptions::default(),
             Arc::new(DbRand::new(7)),
-            None,
         )
         .await
         .unwrap();
@@ -1013,7 +1000,6 @@ mod tests {
             system_clock,
             &options,
             rand,
-            None,
         )
         .await
         .unwrap();
@@ -1101,7 +1087,6 @@ mod tests {
             system_clock.clone(),
             &options,
             Arc::new(DbRand::new(7)),
-            None,
         )
         .await
         .unwrap();
@@ -1164,7 +1149,6 @@ mod tests {
             system_clock,
             &options,
             rand,
-            None,
         )
         .await
         .unwrap();

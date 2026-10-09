@@ -87,7 +87,7 @@ impl WriterFencer {
     pub(crate) async fn fence(
         mut self,
         stored_manifest: StoredManifest,
-        expected_writer_epoch: Option<u64>,
+        expected_epoch: Option<u64>,
     ) -> Result<WriterFenceResult, SlateDBError> {
         let wal_writer_init = match self.wal_writer_init.take() {
             Some(wal_writer_init) => wal_writer_init,
@@ -109,7 +109,7 @@ impl WriterFencer {
             stored_manifest,
             self.manifest_update_timeout,
             self.system_clock.clone(),
-            expected_writer_epoch,
+            expected_epoch,
         )
         .await?;
         self.fail_point_send("FenceManifest");

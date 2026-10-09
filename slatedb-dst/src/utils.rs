@@ -148,6 +148,7 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
             .random_range(Duration::from_millis(1)..Duration::from_secs(5)),
         checkpoint_lifetime: CompactorOptions::default().checkpoint_lifetime,
         worker_heartbeat_timeout,
+        expected_epoch: None,
         object_store_max_retries: None,
     }
 }
