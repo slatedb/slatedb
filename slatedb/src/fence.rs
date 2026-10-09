@@ -245,13 +245,22 @@ mod tests {
         async fn fenced_db(&self) -> Db {
             // initialize a db with manifest poll interval set to 1hr — long enough
             // that the db won't independently observe the fencer's epoch bump
-            // through its background poller while the fencer is paused.
+            // through its background poller while the fencer is paused — and
+            // with its poll after durable progress off, for the same reason.
             let recorder = Arc::new(DefaultMetricsRecorder::new());
             let mut settings = test_db_options();
             settings.manifest_poll_interval = Duration::from_secs(3600);
+            let fp_registry = Arc::new(FailPointRegistry::new());
+            fail_parallel::cfg(
+                fp_registry.clone(),
+                "manifest-writer-durable-seq-poll",
+                "return",
+            )
+            .unwrap();
             let db = Db::builder(self.path.clone(), self.object_store.clone())
                 .with_settings(settings)
                 .with_metrics_recorder(recorder.clone())
+                .with_fp_registry(fp_registry)
                 .build()
                 .await
                 .unwrap();

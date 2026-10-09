@@ -30,6 +30,7 @@ use crate::utils::SafeSender;
 use crate::VersionedManifest;
 use async_trait::async_trait;
 use bytes::Bytes;
+use fail_parallel::{fail_point, FailPointRegistry};
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use parking_lot::RwLockWriteGuard;
@@ -101,6 +102,8 @@ pub(super) const MANIFEST_WRITER_TASK_NAME: &str = "l0_manifest_writer";
 const MIN_L0_STALL_POLL_BACKOFF: Duration = Duration::from_millis(50);
 /// Longest delay between manifest polls while the flush tracker is stalled on L0.
 const MAX_L0_STALL_POLL_BACKOFF: Duration = Duration::from_secs(1);
+/// Delay between the durable seq advancing and the manifest poll it causes.
+const DURABLE_SEQ_POLL_DELAY: Duration = Duration::from_millis(100);
 
 /// Ordered L0 retirement and manifest update subsystem.
 pub(crate) struct ManifestWriter {
@@ -249,6 +252,12 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
             Box::new(L0StallPollNotifier::new(
                 self.l0_stall_rx.clone(),
                 Arc::clone(&self.db.system_clock),
+                self.manifest_poll_interval,
+            )),
+            Box::new(DurableSeqPollNotifier::new(
+                self.db_status_rx.clone(),
+                Arc::clone(&self.db.system_clock),
+                Arc::clone(&self.db.fp_registry),
                 self.manifest_poll_interval,
             )),
         ]
@@ -950,6 +959,37 @@ impl L0StallPollNotifier {
     }
 }
 
+/// Polls the manifest once the durable seq has advanced past the seq of its
+/// last poll, so a writer that keeps writing sees a newer writer's epoch
+/// before the next `manifest_poll_interval` tick. Each poll waits `delay`
+/// first; nothing runs while the durable seq stands still.
+struct DurableSeqPollNotifier {
+    rx: watch::Receiver<crate::db_status::DbStatus>,
+    clock: Arc<dyn SystemClock>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    fp_registry: Arc<FailPointRegistry>,
+    delay: Duration,
+    polled_seq: u64,
+}
+
+impl DurableSeqPollNotifier {
+    fn new(
+        rx: watch::Receiver<crate::db_status::DbStatus>,
+        clock: Arc<dyn SystemClock>,
+        fp_registry: Arc<FailPointRegistry>,
+        manifest_poll_interval: Duration,
+    ) -> Self {
+        let polled_seq = rx.borrow().durable_seq;
+        Self {
+            rx,
+            clock,
+            fp_registry,
+            delay: DURABLE_SEQ_POLL_DELAY.min(manifest_poll_interval),
+            polled_seq,
+        }
+    }
+}
+
 #[async_trait]
 impl crate::dispatcher::Notifier<ManifestWriterCommand> for L0StallPollNotifier {
     async fn notify(&mut self) -> ManifestWriterCommand {
@@ -987,16 +1027,42 @@ impl crate::dispatcher::Notifier<ManifestWriterCommand> for L0StallPollNotifier 
     }
 }
 
+#[async_trait]
+impl crate::dispatcher::Notifier<ManifestWriterCommand> for DurableSeqPollNotifier {
+    async fn notify(&mut self) -> ManifestWriterCommand {
+        loop {
+            let durable_seq = self.rx.borrow_and_update().durable_seq;
+            if durable_seq > self.polled_seq {
+                break;
+            }
+            // As in DurableSeqNotifier, Err means the sender is gone and the
+            // database is closing.
+            if self.rx.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+        self.clock.sleep(self.delay).await;
+        self.polled_seq = self.rx.borrow_and_update().durable_seq;
+        fail_point!(
+            Arc::clone(&self.fp_registry),
+            "manifest-writer-durable-seq-poll",
+            |_| { ManifestWriterCommand::DurableSeqAdvanced }
+        );
+        ManifestWriterCommand::PollManifest { done: None }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        L0StallPollNotifier, ManifestWriter, ManifestWriterCommand, ManifestWriterHandler,
-        TrackerMessage,
+        DurableSeqPollNotifier, L0StallPollNotifier, ManifestWriter, ManifestWriterCommand,
+        ManifestWriterHandler, TrackerMessage,
     };
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::config::{CheckpointOptions, Settings};
     use crate::db::DbInner;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
+    use crate::dispatcher::Notifier;
     use crate::error::SlateDBError;
     use crate::flush::SegmentedSstHandle;
     use crate::format::sst::SsTableFormat;
@@ -1008,7 +1074,6 @@ mod tests {
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
 
-    use crate::dispatcher::Notifier;
     use crate::wal::test_utils::FakeWalWriter;
     use crate::wal::{WalError, WalObserver, WalStatus, WalStatusListener, WalWriter};
     use bytes::Bytes;
@@ -2240,6 +2305,88 @@ mod tests {
         assert_eq!(through_seq, last_seq);
 
         started.shutdown().await;
+    }
+
+    async fn count_manifest_refreshes(
+        tracker_rx: &async_channel::Receiver<TrackerMessage>,
+        duration: Duration,
+    ) -> usize {
+        let deadline = tokio::time::Instant::now() + duration;
+        let mut refreshes = 0;
+        while let Ok(message) =
+            timeout(deadline - tokio::time::Instant::now(), tracker_rx.recv()).await
+        {
+            if matches!(message, Ok(TrackerMessage::ManifestRefreshed)) {
+                refreshes += 1;
+            }
+        }
+        refreshes
+    }
+
+    #[tokio::test]
+    async fn should_poll_manifest_once_after_durable_progress_and_never_while_idle() {
+        let harness = setup_harness(
+            "/tmp/test_manifest_writer_durable_progress_poll",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let inner = Arc::clone(&harness.inner);
+        let started = start_manifest_writer(
+            Arc::clone(&inner),
+            harness.manifest,
+            Duration::from_secs(3600),
+        );
+        count_manifest_refreshes(&started.tracker_rx, Duration::from_millis(200)).await;
+
+        assert_eq!(
+            count_manifest_refreshes(&started.tracker_rx, Duration::from_millis(500)).await,
+            0,
+            "an idle writer must not poll"
+        );
+
+        inner.oracle.advance_durable_seq(1);
+        assert_eq!(
+            count_manifest_refreshes(&started.tracker_rx, Duration::from_millis(500)).await,
+            1,
+            "durable progress must cause one poll within the poll delay"
+        );
+
+        started.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_not_notify_again_without_durable_progress_when_poll_failpoint_returns() {
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        fail_parallel::cfg(
+            Arc::clone(&fp_registry),
+            "manifest-writer-durable-seq-poll",
+            "return",
+        )
+        .unwrap();
+        let harness = setup_harness(
+            "/tmp/test_manifest_writer_durable_seq_poll_failpoint",
+            fp_registry,
+        )
+        .await;
+        let inner = harness.inner;
+        let mut notifier = DurableSeqPollNotifier::new(
+            inner.status_manager.subscribe(),
+            Arc::clone(&inner.system_clock),
+            Arc::clone(&inner.fp_registry),
+            Duration::from_secs(3600),
+        );
+
+        inner.oracle.advance_durable_seq(1);
+        assert!(matches!(
+            notifier.notify().await,
+            ManifestWriterCommand::DurableSeqAdvanced
+        ));
+        assert!(
+            timeout(Duration::from_millis(500), notifier.notify())
+                .await
+                .is_err(),
+            "the failpoint's return must still consume the durable progress"
+        );
     }
 
     #[tokio::test]

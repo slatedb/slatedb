@@ -7194,6 +7194,69 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_committing_writer_should_be_fenced_by_concurrent_open_before_manifest_poll() {
+        use object_store::throttle::{ThrottleConfig, ThrottledStore};
+        // A fence step costs a PUT and two GETs and a WAL flush one PUT, so a
+        // writer flushing back to back takes WAL ids faster than an opening
+        // writer can step through them.
+        let object_store: Arc<dyn ObjectStore> = Arc::new(ThrottledStore::new(
+            InMemory::new(),
+            ThrottleConfig {
+                wait_get_per_call: Duration::from_millis(2),
+                wait_put_per_call: Duration::from_millis(2),
+                ..ThrottleConfig::default()
+            },
+        ));
+        let path = "/tmp/test_committing_writer_fenced_by_concurrent_open";
+        let settings = Settings {
+            manifest_poll_interval: Duration::from_secs(10),
+            ..test_db_options(0, 1024 * 1024, None)
+        };
+        let db1 = Db::builder(path, object_store.clone())
+            .with_settings(settings.clone())
+            .build()
+            .await
+            .unwrap();
+        let committer = {
+            let db1 = db1.clone();
+            tokio::spawn(async move {
+                for i in 0u64.. {
+                    if let Err(err) = db1.put(i.to_be_bytes(), b"v").await {
+                        return err;
+                    }
+                    if let Err(err) = db1.flush().await {
+                        return err;
+                    }
+                }
+                unreachable!()
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let db2 = tokio::time::timeout(
+            Duration::from_secs(1),
+            Db::builder(path, object_store.clone())
+                .with_settings(settings)
+                .build(),
+        )
+        .await
+        .expect("an open must fence a committing writer before its manifest_poll_interval")
+        .unwrap();
+
+        let err = tokio::time::timeout(Duration::from_secs(1), committer)
+            .await
+            .expect("the old writer must stop once fenced")
+            .unwrap();
+        assert!(
+            matches!(err.kind(), crate::ErrorKind::Closed(CloseReason::Fenced)),
+            "{err}"
+        );
+        let handle = db2.put(b"k", b"v").await.unwrap();
+        handle.await_durable().await.unwrap();
+        db2.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_writer_paused_in_replay_wal_should_be_fenced_by_concurrent_open() {
         // Race we're trying to reproduce:
         // - W1 starts opening: claims writer_epoch=1, writes its fence WAL, then
