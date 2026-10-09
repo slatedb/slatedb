@@ -238,7 +238,7 @@ impl<P: Into<Path>> DbBuilder<P> {
 
     /// Attempts to claim writer epoch `expected_epoch + 1`.
     ///
-    /// If a newer writer epoch is observed, opening fails with
+    /// If a different writer epoch is observed, opening fails with
     /// [`crate::CloseReason::Fenced`]. Compactor epoch changes are tolerated.
     /// Without this option, opening retries claims against newer writers.
     /// `expected_epoch` must be less than `u64::MAX`.
@@ -1344,7 +1344,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
 
     /// Attempts to claim compactor epoch `expected_epoch + 1`.
     ///
-    /// If a newer compactor epoch is observed, startup fails with
+    /// If a different compactor epoch is observed, startup fails with
     /// [`crate::CloseReason::Fenced`]. Writer epoch changes are tolerated.
     /// Without this option, startup retries claims against newer compactors.
     /// `expected_epoch` must be less than `u64::MAX`.

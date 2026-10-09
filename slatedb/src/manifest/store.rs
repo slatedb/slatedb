@@ -78,16 +78,11 @@ impl FenceableManifest {
         let clock = system_clock.clone();
         let inner = match expected_epoch {
             Some(expected_epoch) => {
-                let epoch = expected_epoch.checked_add(1).ok_or_else(|| {
-                    SlateDBError::InvalidConfiguration(
-                        "expected epoch must be less than u64::MAX".into(),
-                    )
-                })?;
-                FenceableTransactionalObject::init_with_epoch(
+                FenceableTransactionalObject::init_with_expected_epoch(
                     stored_manifest.inner,
                     manifest_update_timeout,
                     system_clock,
-                    epoch,
+                    expected_epoch,
                     get_epoch,
                     set_epoch,
                 )
