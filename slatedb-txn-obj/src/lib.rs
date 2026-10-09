@@ -105,6 +105,17 @@ pub enum TransactionalObjectError {
     #[error("detected newer client")]
     Fenced,
 
+    /// Fencing lost `conflicts` consecutive CAS rounds to a still-live
+    /// writer. Distinct from [`Self::ObjectUpdateTimeout`]: the store is
+    /// healthy and every round completed — the opener's
+    /// refresh->CAS window is simply longer than the incumbent's write
+    /// cadence, so each CAS targets an id that already exists. Losing
+    /// this many consecutive rounds is deterministic starvation, not
+    /// bad luck; failing fast lets the caller apply its own holdoff
+    /// instead of burning the whole update timeout (slatedb#1970).
+    #[error("fencing lost {conflicts} consecutive CAS rounds to a live writer")]
+    FencingConflictLimitExceeded { conflicts: usize },
+
     #[error("object in store is in an unexpected state")]
     InvalidObjectState,
 
@@ -251,6 +262,14 @@ pub trait TransactionalObject<T: Clone, Id = MonotonicId> {
     }
 }
 
+/// Maximum consecutive CAS conflicts a fencing `init` tolerates before
+/// failing with [`TransactionalObjectError::FencingConflictLimitExceeded`].
+/// Each round costs a full refresh + write against the store, so by this
+/// many consecutive losses the race is cadence-deterministic (an
+/// incumbent writing faster than the opener's round trip) and more
+/// retries cannot win it.
+pub const MAX_FENCING_CAS_CONFLICTS: usize = 8;
+
 /// Wraps `SimpleTransactionalObject` with epoch-based fencing to provide mutually-exclusive
 /// access to the object. When creating a `FenceableTransactionalObject` the caller supplied
 /// `get_epoch` and `set_epoch` fns for getting and setting the epoch in the contained object.
@@ -301,6 +320,7 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
                 timeout: object_update_timeout,
             },
             async {
+                let mut conflicts = 0usize;
                 loop {
                     let local_epoch = get_epoch(delegate.object()) + 1;
                     let mut new_val = delegate.object().clone();
@@ -309,6 +329,14 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
                     dirty.value = new_val;
                     match delegate.update(dirty).await {
                         Err(err) if err.is_sequenced_write_conflict() => {
+                            conflicts += 1;
+                            if conflicts >= MAX_FENCING_CAS_CONFLICTS {
+                                return Err(
+                                    TransactionalObjectError::FencingConflictLimitExceeded {
+                                        conflicts,
+                                    },
+                                );
+                            }
                             delegate.refresh().await?;
                             continue;
                         }
@@ -367,6 +395,7 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
                 timeout: object_update_timeout,
             },
             async {
+                let mut conflicts = 0usize;
                 loop {
                     let stored_epoch = get_epoch(delegate.object());
                     if epoch <= stored_epoch {
@@ -376,6 +405,14 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
                     set_epoch(&mut dirty.value, epoch);
                     match delegate.update(dirty).await {
                         Err(err) if err.is_sequenced_write_conflict() => {
+                            conflicts += 1;
+                            if conflicts >= MAX_FENCING_CAS_CONFLICTS {
+                                return Err(
+                                    TransactionalObjectError::FencingConflictLimitExceeded {
+                                        conflicts,
+                                    },
+                                );
+                            }
                             delegate.refresh().await?;
                             continue;
                         }
@@ -1517,5 +1554,145 @@ mod tests {
         // write was aborted: id unchanged and stored value still the original.
         assert_eq!(1, sr.id());
         assert_eq!(1, store.try_read_latest().await.unwrap().unwrap().1.payload);
+    }
+
+    /// slatedb#1970: an opener whose refresh->CAS window is longer than a
+    /// live incumbent's write cadence loses EVERY fencing round — that is
+    /// deterministic starvation, and it must surface as a typed failure
+    /// after a bounded number of rounds, not burn the whole update
+    /// timeout. The adapter forces the schedule: before each checked
+    /// write it commits an incumbent version, so the opener's CAS always
+    /// targets a stale id.
+    struct IncumbentAlwaysWins {
+        inner: Arc<ObjectStoreSequencedStorageProtocol<TestVal>>,
+        incumbent_writes: AtomicU64,
+    }
+
+    #[async_trait::async_trait]
+    impl BoundaryObject for IncumbentAlwaysWins {
+        async fn check(&self, id: MonotonicId) -> Result<(), TransactionalObjectError> {
+            self.inner.check(id).await
+        }
+        async fn advance(&self, boundary: MonotonicId) -> Result<(), TransactionalObjectError> {
+            self.inner.advance(boundary).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SequencedStorageProtocol<TestVal> for IncumbentAlwaysWins {
+        async fn write_unchecked(
+            &self,
+            current_id: Option<MonotonicId>,
+            new_value: &TestVal,
+        ) -> Result<MonotonicId, TransactionalObjectError> {
+            // The incumbent lands a version first (straight to the inner
+            // store — never back through this adapter), so the opener's
+            // write against `current_id` conflicts every round.
+            let (latest_id, latest) = self
+                .inner
+                .try_read_latest_unchecked()
+                .await?
+                .expect("object exists");
+            let mut bump = latest.clone();
+            bump.payload += 1;
+            self.inner
+                .write_unchecked(Some(latest_id), &bump)
+                .await
+                .expect("incumbent write");
+            self.incumbent_writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.write_unchecked(current_id, new_value).await
+        }
+        async fn try_read_latest_unchecked(
+            &self,
+        ) -> Result<Option<(MonotonicId, TestVal)>, TransactionalObjectError> {
+            self.inner.try_read_latest_unchecked().await
+        }
+        async fn try_read_unchecked(
+            &self,
+            id: MonotonicId,
+        ) -> Result<Option<TestVal>, TransactionalObjectError> {
+            self.inner.try_read_unchecked(id).await
+        }
+        async fn list(
+            &self,
+            from: std::ops::Bound<MonotonicId>,
+            to: std::ops::Bound<MonotonicId>,
+        ) -> Result<Vec<IdentifiedObjectMetadata<MonotonicId>>, TransactionalObjectError> {
+            self.inner.list(from, to).await
+        }
+        async fn delete_unchecked(
+            &self,
+            id: MonotonicId,
+        ) -> Result<(), TransactionalObjectError> {
+            self.inner.delete_unchecked(id).await
+        }
+    }
+
+    #[tokio::test]
+    async fn fencing_fails_typed_after_bounded_cas_conflicts() {
+        let inner = new_store();
+        SimpleTransactionalObject::init(
+            inner.clone(),
+            TestVal {
+                epoch: 0,
+                payload: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let adapter = Arc::new(IncumbentAlwaysWins {
+            inner,
+            incumbent_writes: AtomicU64::new(0),
+        });
+        let opener = SimpleTransactionalObject::load(adapter.clone())
+            .await
+            .unwrap();
+        let res = FenceableTransactionalObject::init(
+            opener,
+            TokioDuration::from_secs(3600),
+            Arc::new(DefaultSystemClock::new()),
+            |v: &TestVal| v.epoch,
+            |v: &mut TestVal, e: u64| v.epoch = e,
+        )
+        .await;
+        match res {
+            Err(TransactionalObjectError::FencingConflictLimitExceeded { conflicts }) => {
+                assert_eq!(conflicts, crate::MAX_FENCING_CAS_CONFLICTS);
+            }
+            Err(other) => panic!("expected FencingConflictLimitExceeded, got {other:?}"),
+            Ok(_) => panic!("fencing succeeded against a live incumbent that wins every round"),
+        }
+        assert_eq!(
+            adapter.incumbent_writes.load(Ordering::SeqCst) as usize,
+            crate::MAX_FENCING_CAS_CONFLICTS,
+            "one incumbent win per fencing round"
+        );
+    }
+
+    /// Control: with no incumbent, fencing succeeds on the first round —
+    /// the cap must never fire on a quiet store.
+    #[tokio::test]
+    async fn fencing_succeeds_without_contention() {
+        let store = new_store();
+        SimpleTransactionalObject::init(
+            store.clone(),
+            TestVal {
+                epoch: 0,
+                payload: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let opener = SimpleTransactionalObject::load(store).await.unwrap();
+        let fenced = FenceableTransactionalObject::init(
+            opener,
+            TokioDuration::from_secs(60),
+            Arc::new(DefaultSystemClock::new()),
+            |v: &TestVal| v.epoch,
+            |v: &mut TestVal, e: u64| v.epoch = e,
+        )
+        .await
+        .expect("uncontended fencing succeeds");
+        assert_eq!(fenced.local_epoch(), 1);
     }
 }
