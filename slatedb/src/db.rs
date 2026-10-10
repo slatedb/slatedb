@@ -2233,6 +2233,7 @@ mod tests {
         WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
+    use crate::db_state::SstType;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
     use crate::format::sst::SsTableFormat;
     use crate::instrumented_object_store::stats::{
@@ -3732,6 +3733,41 @@ mod tests {
             expected,
         );
 
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_wal_flush_uploads_the_encoded_blocks_without_a_copy() {
+        let recording = Arc::new(test_utils::RecordingObjectStore::new(Arc::new(
+            InMemory::new(),
+        )));
+        let object_store: Arc<dyn ObjectStore> = recording.clone();
+        let db_options = {
+            let mut db_options = test_db_options(0, 1024 * 1024, None);
+            db_options.flush_interval = None;
+            db_options
+        };
+        let db = Db::builder(
+            "/tmp/test_wal_flush_uploads_the_encoded_blocks_without_a_copy",
+            object_store,
+        )
+        .with_settings(db_options)
+        .build()
+        .await
+        .unwrap();
+
+        let mut batch = WriteBatch::new();
+        for key in [b"k1", b"k2", b"k3"] {
+            batch.put(key, vec![7u8; 64 * 1024]);
+        }
+        db.write(batch).await.unwrap();
+        db.flush().await.unwrap();
+
+        let wal_puts = recording.put_chunks(SstType::Wal);
+        assert!(
+            wal_puts.contains(&4),
+            "a WAL SST of three blocks and a footer was put as {wal_puts:?} chunks",
+        );
         db.close().await.unwrap();
     }
 

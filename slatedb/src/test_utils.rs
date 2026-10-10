@@ -1760,6 +1760,7 @@ pub(crate) enum RecordedCall {
         kind: Option<TableStoreKind>,
         sst_type: Option<SstType>,
         segment: Option<Bytes>,
+        chunks: usize,
     },
     PutMultipart {
         kind: Option<TableStoreKind>,
@@ -1786,6 +1787,23 @@ impl RecordingObjectStore {
 
     pub(crate) fn clear(&self) {
         self.calls.lock().clear();
+    }
+
+    /// The number of buffers in the payload of each put of `sst_type`, in
+    /// call order.
+    pub(crate) fn put_chunks(&self, sst_type: SstType) -> Vec<usize> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::Put {
+                    sst_type: Some(t),
+                    chunks,
+                    ..
+                } if *t == sst_type => Some(*chunks),
+                _ => None,
+            })
+            .collect()
     }
 
     pub(crate) fn get_kinds(&self, head: bool) -> Vec<Option<TableStoreKind>> {
@@ -1926,6 +1944,7 @@ impl ObjectStore for RecordingObjectStore {
             kind: tag.as_ref().map(|t| t.kind),
             sst_type: tag.as_ref().map(|t| t.sst_type),
             segment: tag.as_ref().and_then(|t| t.segment.clone()),
+            chunks: payload.iter().count(),
         });
         self.inner.put_opts(location, payload, opts).await
     }
