@@ -2480,6 +2480,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_expected_writer_epoch_returns_closed_fenced() {
+        let result = crate::Db::builder("epoch-mismatch", Arc::new(InMemory::new()))
+            .with_expected_epoch(1)
+            .build()
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == ErrorKind::Closed(crate::CloseReason::Fenced)
+        ));
+    }
+
+    #[tokio::test]
     async fn test_db_builder_uses_custom_wal_writer_init() {
         let called = Arc::new(AtomicBool::new(false));
         let db = crate::Db::builder(

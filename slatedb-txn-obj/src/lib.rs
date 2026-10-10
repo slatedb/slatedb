@@ -1478,31 +1478,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fenceable_record_init_with_expected_epoch_rejects_lower_epoch() {
-        let store = new_store();
-        let sr = SimpleTransactionalObject::<TestVal>::init(
-            Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
-            TestVal {
-                epoch: 2,
+    async fn test_fenceable_record_init_with_expected_epoch_mismatch_performs_no_io() {
+        struct NoIoStorage;
+
+        #[async_trait::async_trait]
+        impl TransactionalStorageProtocol<TestVal, MonotonicId> for NoIoStorage {
+            async fn write(
+                &self,
+                _current_id: Option<MonotonicId>,
+                _new_value: &TestVal,
+            ) -> Result<MonotonicId, TransactionalObjectError> {
+                panic!("unexpected storage write");
+            }
+
+            async fn try_read_latest(
+                &self,
+            ) -> Result<Option<(MonotonicId, TestVal)>, TransactionalObjectError> {
+                panic!("unexpected storage read");
+            }
+        }
+
+        let loaded = SimpleTransactionalObject {
+            id: MonotonicId::initial(),
+            object: TestVal {
+                epoch: 0,
                 payload: 0,
             },
-        )
-        .await
-        .unwrap();
-        let before = store.try_read_latest().await.unwrap().unwrap();
+            ops: Arc::new(NoIoStorage),
+            invariants: vec![],
+        };
 
         let result = FenceableTransactionalObject::init_with_expected_epoch(
-            sr,
+            loaded,
             TokioDuration::from_secs(5),
             Arc::new(DefaultSystemClock::new()),
-            41,
+            1,
             |v: &TestVal| v.epoch,
             |v: &mut TestVal, e: u64| v.epoch = e,
         )
         .await;
 
         assert!(matches!(result, Err(TransactionalObjectError::Fenced)));
-        assert_eq!(store.try_read_latest().await.unwrap().unwrap(), before);
     }
 
     /// Test invariant: fails when the dirty value's `payload` exceeds `ceiling`, and records every

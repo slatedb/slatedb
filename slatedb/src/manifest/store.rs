@@ -649,33 +649,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_expected_writer_epoch_rejects_before_write() {
-        let (store, object_store) = new_recording_manifest_store();
-        let clock = Arc::new(DefaultSystemClock::new());
-        let initial =
-            StoredManifest::create_new_db(store.clone(), ManifestCore::new(), clock.clone())
-                .await
-                .unwrap();
-        let _writer = FenceableManifest::init_writer(initial, Duration::from_secs(5), clock, None)
-            .await
-            .unwrap();
-        let before = store.read_latest_manifest().await.unwrap();
-        object_store.clear();
-
-        let result = crate::Db::builder(ROOT, object_store.clone())
-            .with_expected_epoch(0)
-            .build()
-            .await;
-
-        assert!(matches!(
-            result,
-            Err(error) if error.kind() == crate::ErrorKind::Closed(crate::CloseReason::Fenced)
-        ));
-        assert!(object_store.write_kinds().is_empty());
-        assert_eq!(store.read_latest_manifest().await.unwrap(), before);
-    }
-
-    #[tokio::test]
     async fn test_expected_writer_epoch_rejects_competing_writer() {
         let (store, object_store) = new_recording_manifest_store();
         let clock = Arc::new(DefaultSystemClock::new());
