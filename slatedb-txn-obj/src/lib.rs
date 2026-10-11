@@ -333,11 +333,16 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
     /// cannot be claimed because the stored epoch is already greater than or
     /// equal to it, this returns `Fenced`.
     ///
+    /// If `exact_epoch` is true, the stored epoch must be one less than `epoch`.
+    /// The loop checks this condition before every update. Changes to other
+    /// fields do not prevent acquisition.
+    ///
     /// ## Arguments
     /// - `delegate`: The underlying transactional object to wrap.
     /// - `object_update_timeout`: Upper bound for a single update attempt.
     /// - `system_clock`: Clock used by the timeout mechanism.
     /// - `epoch`: The exact epoch to claim.
+    /// - `exact_epoch`: Requires the stored epoch to be one less than `epoch`.
     /// - `get_epoch`: Extracts the epoch from the object value.
     /// - `set_epoch`: Updates the epoch on the object value.
     ///
@@ -347,7 +352,8 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
     ///
     /// ## Errors
     /// - [`TransactionalObjectError::Fenced`] if the stored epoch is already
-    ///   greater than or equal to `epoch`.
+    ///   greater than or equal to `epoch`, or `exact_epoch` is true and the
+    ///   stored epoch is not one less than `epoch`.
     /// - `ObjectUpdateTimeout` if an update attempt cannot complete within
     ///   `object_update_timeout`.
     /// - Propagates any other [`TransactionalObjectError`] from refresh/update
@@ -357,6 +363,7 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
         object_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
         epoch: u64,
+        exact_epoch: bool,
         get_epoch: fn(&T) -> u64,
         set_epoch: fn(&mut T, u64),
     ) -> Result<Self, TransactionalObjectError> {
@@ -369,7 +376,9 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
             async {
                 loop {
                     let stored_epoch = get_epoch(delegate.object());
-                    if epoch <= stored_epoch {
+                    if epoch <= stored_epoch
+                        || (exact_epoch && stored_epoch.checked_add(1) != Some(epoch))
+                    {
                         return Err(TransactionalObjectError::Fenced);
                     }
                     let mut dirty = delegate.prepare_dirty()?;
@@ -390,49 +399,6 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
                     }
                 }
             },
-        )
-        .await
-    }
-
-    /// Claims `expected_epoch + 1` if the loaded epoch matches `expected_epoch`.
-    ///
-    /// If the loaded epoch differs, this returns
-    /// [`TransactionalObjectError::Fenced`] without an update.
-    /// On a write conflict, this refreshes and retries while the epoch stays
-    /// unchanged. Changes to other fields do not prevent acquisition.
-    ///
-    /// Use [`Self::init_with_epoch`] to claim a specific epoch even when the
-    /// stored epoch is more than one step behind it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransactionalObjectError::Fenced`] if the loaded epoch differs
-    /// from `expected_epoch`, or a refresh finds a higher epoch.
-    /// Returns [`TransactionalObjectError::InvalidObjectState`] if
-    /// `expected_epoch` is `u64::MAX` and cannot advance.
-    /// Returns [`TransactionalObjectError::ObjectUpdateTimeout`] if acquisition
-    /// exceeds `object_update_timeout`. Other storage errors propagate.
-    pub async fn init_with_expected_epoch(
-        delegate: SimpleTransactionalObject<T, MonotonicId>,
-        object_update_timeout: Duration,
-        system_clock: Arc<dyn SystemClock>,
-        expected_epoch: u64,
-        get_epoch: fn(&T) -> u64,
-        set_epoch: fn(&mut T, u64),
-    ) -> Result<Self, TransactionalObjectError> {
-        if get_epoch(delegate.object()) != expected_epoch {
-            return Err(TransactionalObjectError::Fenced);
-        }
-        let epoch = expected_epoch
-            .checked_add(1)
-            .ok_or(TransactionalObjectError::InvalidObjectState)?;
-        Self::init_with_epoch(
-            delegate,
-            object_update_timeout,
-            system_clock,
-            epoch,
-            get_epoch,
-            set_epoch,
         )
         .await
     }
@@ -1440,6 +1406,7 @@ mod tests {
             TokioDuration::from_secs(5),
             Arc::new(DefaultSystemClock::new()),
             7,
+            false,
             |v: &TestVal| v.epoch,
             |v: &mut TestVal, e: u64| v.epoch = e,
         )
@@ -1469,6 +1436,7 @@ mod tests {
             TokioDuration::from_secs(5),
             Arc::new(DefaultSystemClock::new()),
             3,
+            false,
             |v: &TestVal| v.epoch,
             |v: &mut TestVal, e: u64| v.epoch = e,
         )
@@ -1478,7 +1446,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fenceable_record_init_with_expected_epoch_mismatch_performs_no_io() {
+    async fn test_fenceable_record_init_with_epoch_mismatch_performs_no_io() {
         struct NoIoStorage;
 
         #[async_trait::async_trait]
@@ -1508,11 +1476,12 @@ mod tests {
             invariants: vec![],
         };
 
-        let result = FenceableTransactionalObject::init_with_expected_epoch(
+        let result = FenceableTransactionalObject::init_with_epoch(
             loaded,
             TokioDuration::from_secs(5),
             Arc::new(DefaultSystemClock::new()),
-            1,
+            2,
+            true,
             |v: &TestVal| v.epoch,
             |v: &mut TestVal, e: u64| v.epoch = e,
         )

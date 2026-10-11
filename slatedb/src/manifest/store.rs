@@ -78,11 +78,15 @@ impl FenceableManifest {
         let clock = system_clock.clone();
         let inner = match expected_epoch {
             Some(expected_epoch) => {
-                FenceableTransactionalObject::init_with_expected_epoch(
+                let epoch = expected_epoch
+                    .checked_add(1)
+                    .ok_or(SlateDBError::InvalidTransactionalObjectState)?;
+                FenceableTransactionalObject::init_with_epoch(
                     stored_manifest.inner,
                     manifest_update_timeout,
                     system_clock,
-                    expected_epoch,
+                    epoch,
+                    true,
                     get_epoch,
                     set_epoch,
                 )
