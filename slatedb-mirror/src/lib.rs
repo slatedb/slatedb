@@ -1,5 +1,10 @@
 //! A local whole-object mirror for an [`object_store::ObjectStore`].
 //!
+//! The mirror stores user-defined metadata and object attributes in unencrypted
+//! JSON `.meta` files in the local mirror directory. If these values contain
+//! sensitive data, protect the directory with access controls and filesystem or
+//! disk encryption.
+//!
 //! See [RFC 0034](https://github.com/slatedb/slatedb/blob/main/rfcs/0034-local-object-mirroring.md).
 //!
 //! `slatedb-mirror` must not depend on `slatedb`. SlateDB-specific rules live in

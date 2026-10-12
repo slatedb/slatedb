@@ -325,6 +325,11 @@ Four types of files exist under the cache root:
   canonical object path, ETag, version, and attributes. The path is used to
   recover the remote location after restart and verify the filename hash.
 
+The mirror stores user-defined metadata and object attributes in unencrypted JSON
+`.meta` files in the local mirror directory. If these values contain sensitive
+data, protect the directory with access controls and filesystem or disk
+encryption.
+
 The examples use SlateDB SST names, but the mirror stores whatever file name the
 object path ends with. Each object-related file is prefixed with an MD5-encoding
 of its object path with the filename stripped. This protects against filename
