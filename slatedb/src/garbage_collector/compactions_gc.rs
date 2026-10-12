@@ -15,8 +15,7 @@
 //! - This task does not inspect compaction contents; it is purely time-based and
 //!   version-aware (keeps the latest).
 //!
-//! Errors are logged and the task continues; stats are updated only on successful
-//! deletes.
+//! The pass logs deletion errors and continues. Delete counts include only successful deletes.
 
 use crate::{
     compactions_store::CompactionsStore, config::GarbageCollectorDirectoryOptions,
@@ -476,7 +475,7 @@ mod tests {
         let recorder = MetricsRecorderHelper::new(metrics.clone(), Default::default());
         let stats = Arc::new(GcStats::new(&recorder));
         stats.gc_compactions_versions.set(-1);
-        let task = CompactionsGcTask::new(
+        let mut task = CompactionsGcTask::new(
             compactions_store.clone(),
             stats,
             GarbageCollectorDirectoryOptions {
@@ -488,15 +487,17 @@ mod tests {
             true,
         );
 
-        let error = task
-            .collect(Utc::now() + TimeDelta::hours(1))
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            SlateDBError::ObjectStoreError(error)
-                if matches!(error.as_ref(), object_store::Error::NotImplemented { .. })
-        ));
+        for _ in 0..2 {
+            let error = task
+                .collect(Utc::now() + TimeDelta::hours(1))
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                SlateDBError::ObjectStoreError(error)
+                    if matches!(error.as_ref(), object_store::Error::NotImplemented { .. })
+            ));
+        }
 
         let raw_boundary = object_store
             .get(&Path::from("/root/gc/compactions.boundary"))
@@ -523,6 +524,15 @@ mod tests {
                 &[("resource", "compactions")]
             ),
             Some(3)
+        );
+
+        task.boundary_files_enabled = false;
+        task.collect(Utc::now() + TimeDelta::hours(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            compactions_store.list_compactions(..).await.unwrap().len(),
+            1
         );
     }
 
