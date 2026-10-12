@@ -20,7 +20,7 @@ use crate::MirrorError;
 /// Resolves once every part passed to `put_part` so far is written locally.
 type LocalWrites = Shared<BoxFuture<'static, Result<(), Arc<io::Error>>>>;
 
-type SharedWriter = Arc<tokio::sync::Mutex<Option<Box<dyn crate::vfs::VfsWriter>>>>;
+type SharedWriter = Arc<tokio::sync::Mutex<Option<Box<dyn slatedb_common::vfs::VfsWriter>>>>;
 
 fn unshare(err: Arc<io::Error>) -> io::Error {
     io::Error::new(err.kind(), err)

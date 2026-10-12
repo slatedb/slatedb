@@ -23,8 +23,8 @@ use crate::multipart::{self, committed};
 use crate::ordering::OpKind;
 use crate::retry::Retry;
 use crate::startup::recover;
-use crate::vfs::{StdVfs, Vfs};
 use crate::{scan, MirrorError, MirrorHandle, MirrorPolicy, ReadRoute, WriteRoute};
+use slatedb_common::vfs::{StdVfs, Vfs};
 
 /// The default for [`ObjectStoreMirrorBuilder::with_download_concurrency`].
 pub const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 8;

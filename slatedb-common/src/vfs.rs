@@ -1,8 +1,8 @@
-//! Local filesystem access for the mirror.
+//! A small asynchronous local filesystem abstraction.
 //!
-//! The mirror does all of its local I/O through [`Vfs`]. [`StdVfs`] is the
-//! default. Other implementations (io_uring, simulation) can be passed to
-//! `ObjectStoreMirrorBuilder::with_vfs`.
+//! Components that do their local I/O through [`Vfs`] can swap in other
+//! implementations (io_uring, simulation). [`StdVfs`] is backed by the
+//! standard filesystem.
 
 use std::fmt::Debug;
 use std::fs::TryLockError;
@@ -10,9 +10,9 @@ use std::io;
 use std::ops::Range;
 use std::path::Path;
 
+use crate::file_handle_cache::{read_exact_at_offset, FileHandleCache};
 use async_trait::async_trait;
 use bytes::Bytes;
-use slatedb_common::file_handle_cache::{read_exact_at_offset, FileHandleCache};
 use tokio::io::AsyncWriteExt;
 
 /// A regular file in a [`Vfs::list`] result.
@@ -24,7 +24,7 @@ pub struct VfsEntry {
     pub size: u64,
 }
 
-/// The local filesystem operations the mirror needs.
+/// Asynchronous local filesystem operations.
 ///
 /// A `Vfs` doesn't cache, evict, or know about object stores. It only moves
 /// bytes to and from local files.
@@ -70,7 +70,7 @@ pub trait VfsWriter: Debug + Send {
     async fn write(&mut self, bytes: Bytes) -> io::Result<()>;
 
     /// Flushes buffered writes and waits for pending writes to complete.
-    /// The mirror calls this once, before renaming the file into place.
+    /// Call this once, after the last write.
     /// This does not guarantee that the contents survive a machine crash.
     async fn finish(&mut self) -> io::Result<()>;
 }

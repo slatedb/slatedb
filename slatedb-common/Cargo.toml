@@ -8,6 +8,8 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 log = { workspace = true }
 lru = { workspace = true }
@@ -17,7 +19,7 @@ rand = { workspace = true }
 rand_xoshiro = { workspace = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 thread_local = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
 
 [features]
 serde = ["dep:serde"]
@@ -25,7 +27,7 @@ test-util = ["tokio/test-util"]
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "test-util"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "sync", "time", "test-util"] }
 
 [lints]
 workspace = true

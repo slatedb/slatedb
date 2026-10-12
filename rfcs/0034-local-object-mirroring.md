@@ -101,11 +101,13 @@ the SlateDB logic in one small place and lets other projects reuse the mirror.
 ### Crates
 
 - `slatedb-mirror` is a new workspace crate containing `ObjectStoreMirror`,
-  `MirrorPolicy`, `MirrorHandle`, `MirrorError`, and `Vfs`. It doesn't depend
+  `MirrorPolicy`, `MirrorHandle`, and `MirrorError`. It doesn't depend
   on `slatedb`. A crate boundary is the only thing that keeps the mirror truly
   generic, because it can't reach `ManifestCore` even by accident.
 - `single_flight.rs` moves out of `slatedb`, into either `slatedb-mirror` or
   `slatedb-common`.
+- `Vfs` lives in `slatedb-common`, since nothing in it is mirror-specific.
+  `slatedb-mirror` re-exports it.
 - `SlateDbMirrorPolicy` lives in `slatedb`.
 
 ### Public API

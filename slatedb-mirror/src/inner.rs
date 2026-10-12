@@ -25,8 +25,8 @@ use crate::error::MIRROR_STORE_NAME;
 use crate::layout::{LocalName, LocalObject, PrefixMap};
 use crate::ordering::{OpKind, PathOrdering};
 use crate::retry::Retry;
-use crate::vfs::{Vfs, VfsLock};
 use crate::{MirrorError, MirrorPolicy};
+use slatedb_common::vfs::{Vfs, VfsLock};
 
 pub(crate) fn local_error(source: io::Error) -> MirrorError {
     MirrorError::Local { source }

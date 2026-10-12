@@ -36,7 +36,6 @@ mod policy;
 mod retry;
 mod scan;
 mod startup;
-pub mod vfs;
 
 pub use error::MirrorError;
 pub use handle::MirrorHandle;
@@ -45,4 +44,4 @@ pub use mirror::{
     DEFAULT_REMOTE_SCAN_INTERVAL,
 };
 pub use policy::{MirrorPolicy, ReadRoute, WriteRoute};
-pub use vfs::{StdVfs, Vfs, VfsEntry, VfsLock, VfsWriter};
+pub use slatedb_common::vfs::{StdVfs, Vfs, VfsEntry, VfsLock, VfsWriter};

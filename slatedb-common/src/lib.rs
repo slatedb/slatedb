@@ -30,6 +30,7 @@ pub mod rand;
 pub mod retry;
 pub mod single_flight;
 pub mod utils;
+pub mod vfs;
 
 #[cfg(feature = "test-util")]
 pub use clock::MockSystemClock;

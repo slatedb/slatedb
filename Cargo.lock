@@ -3312,6 +3312,8 @@ dependencies = [
 name = "slatedb-common"
 version = "0.17.0"
 dependencies = [
+ "async-trait",
+ "bytes",
  "chrono",
  "log",
  "lru",

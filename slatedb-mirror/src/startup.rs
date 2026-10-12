@@ -12,8 +12,8 @@ use object_store::path::Path;
 
 use crate::inner::{local_error, remove_quietly};
 use crate::layout::{classify, FileKind, LocalName, LocalObject, PrefixMap};
-use crate::vfs::Vfs;
 use crate::MirrorError;
+use slatedb_common::vfs::Vfs;
 
 /// How many `.meta` files to read or files to remove at once.
 pub(crate) const IO_CONCURRENCY: usize = 64;
@@ -142,7 +142,7 @@ mod tests {
     use object_store::{Attributes, ObjectMeta};
 
     use super::*;
-    use crate::vfs::StdVfs;
+    use slatedb_common::vfs::StdVfs;
 
     fn object(path: &str, size: u64) -> LocalObject {
         LocalObject {
