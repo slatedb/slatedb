@@ -28,7 +28,7 @@ use crate::merge_operator::{
     MergeOperatorType,
 };
 use crate::peeking_iterator::PeekingIterator;
-use crate::reader::ReadTrace;
+use crate::read_trace::ReadTrace;
 use crate::retention_iterator::RetentionIterator;
 use crate::seq_tracker::SequenceTracker;
 use crate::sorted_run_iterator::SortedRunIterator;

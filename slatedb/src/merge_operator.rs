@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::{
     error::SlateDBError,
     iter::{RowEntryIterator, TrackedRowEntryIterator},
-    reader::ReadTrace,
+    read_trace::ReadTrace,
     types::{RowEntry, ValueDeletable},
     utils::merge_options,
 };

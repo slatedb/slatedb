@@ -154,6 +154,7 @@ mod paths;
 mod peeking_iterator;
 #[cfg(test)]
 mod proptest_util;
+mod read_trace;
 mod reader;
 mod retention_iterator;
 mod retrying_object_store;

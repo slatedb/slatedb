@@ -12,7 +12,7 @@ use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::manifest::ManifestCore;
 use crate::partitioned_keyspace::partitions_covering_range;
-use crate::reader::ReadTrace;
+use crate::read_trace::ReadTrace;
 use crate::tablestore::TableStore;
 
 fn find_sst<'a>(

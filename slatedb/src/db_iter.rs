@@ -8,7 +8,7 @@ use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
     MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
 };
-use crate::reader::ReadTrace;
+use crate::read_trace::ReadTrace;
 use crate::segment_iterator::{build_l0_point_iters, build_sr_point_iters, SegmentScanContext};
 use crate::types::{KeyValue, RowEntry, ValueDeletable};
 
@@ -548,7 +548,7 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
     use crate::merge_operator::MergeOperatorType;
-    use crate::reader::ReadTrace;
+    use crate::read_trace::ReadTrace;
     use crate::test_utils::{StringConcatMergeOperator, TestIterator};
     use crate::types::RowEntry;
     use async_trait::async_trait;

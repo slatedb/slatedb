@@ -21,7 +21,7 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableView};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
-use crate::reader::ReadTrace;
+use crate::read_trace::ReadTrace;
 use crate::tablestore::TableStore;
 
 /// A compaction over a sub-range of the parent compaction's key space

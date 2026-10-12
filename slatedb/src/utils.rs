@@ -9,7 +9,7 @@ use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::manifest::ManifestCore;
 use crate::paths::PathResolver;
-use crate::reader::ReadTrace;
+use crate::read_trace::ReadTrace;
 use crate::tablestore::TableStore;
 use bytes::{Buf, BufMut, Bytes};
 use futures::FutureExt;
