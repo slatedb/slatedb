@@ -1,4 +1,18 @@
-//! `ObjectStoreMirror`, its builder, and its `ObjectStore` implementation.
+//! A policy-driven local mirror of whole objects from an [`ObjectStore`].
+//!
+//! [`ObjectStoreMirror`] implements the object-store API and keeps local copies
+//! with the same bytes as their remote objects. A [`MirrorPolicy`] selects the
+//! read and write routes. The mirror handles local files, downloads, and cleanup.
+//! The policy decides which objects to keep and when callers can read them locally.
+//!
+//! Use [`ObjectStoreMirror::builder`] to choose a local directory, a remote store,
+//! and a policy. [`ObjectStoreMirrorBuilder::build`] recovers local copies and
+//! starts the background tasks. Policies use a [`MirrorHandle`] to fetch,
+//! prefetch, and evict objects.
+//!
+//! Mirrored paths must never be overwritten. Local copies are disposable and
+//! require callers to detect corruption. See [`ObjectStoreMirror`] for routing,
+//! error handling, lifecycle details, and a complete example.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -56,11 +70,53 @@ fn bytes_payload(bytes: Bytes) -> GetResultPayload {
     GetResultPayload::Stream(stream::once(async move { Ok(bytes) }).boxed())
 }
 
-/// A whole-object local mirror of an object store.
+/// An [`ObjectStore`] wrapper that keeps whole objects in a local directory.
 ///
-/// A [`MirrorPolicy`] picks a route for every GET, HEAD, PUT, and multipart
-/// upload. The mirror copies whole objects without changing their bytes and
-/// applies operations on the same path in the order they were issued.
+/// The remote store holds the authoritative objects. Local copies contain the
+/// same bytes, without splitting objects into blocks or changing their format.
+/// A [`MirrorPolicy`] chooses which objects to mirror. The mirror does not impose
+/// a size limit or automatically evict objects to reclaim disk space.
+///
+/// # Read and write routes
+///
+/// The policy selects a [`ReadRoute`] for each GET and HEAD:
+///
+/// - [`Remote`](ReadRoute::Remote) forwards the request to the remote store.
+/// - [`Observe`](ReadRoute::Observe) fetches the whole remote object and calls
+///   [`MirrorPolicy::observe`] before returning the requested bytes. HEAD requests
+///   and requests that return no body skip the hook. This route does not install
+///   a local copy.
+/// - [`Local`](ReadRoute::Local) serves only the local copy. A missing copy returns
+///   [`MirrorError::NotLocal`], with no remote fallback.
+/// - [`Refetch`](ReadRoute::Refetch) downloads the whole object, replaces its local
+///   copy, and serves the request from that copy. Even a range request or HEAD
+///   downloads the whole object.
+///
+/// The policy selects a [`WriteRoute`] for each PUT and multipart upload:
+///
+/// - [`Remote`](WriteRoute::Remote) writes only to the remote store.
+/// - [`Observe`](WriteRoute::Observe) writes remotely, then calls
+///   [`MirrorPolicy::observe`] with the whole payload before returning success.
+///   Multipart uploads do not support this route.
+/// - [`Mirror`](WriteRoute::Mirror) writes to both stores. Success means that the
+///   remote upload completed and the local copy is in place.
+///
+/// Policies can use [`MirrorHandle::fetch`] to wait for missing local copies,
+/// [`MirrorHandle::prefetch`] to download them in the background, and
+/// [`MirrorHandle::evict`] to remove local copies without deleting remote objects.
+/// Fetching an existing local copy does not refresh it. Use `Refetch` to replace it.
+///
+/// Downloads, mirrored writes, deletes, and evictions coordinate per path.
+/// A later download or mirrored write can cancel an eviction that has not started.
+///
+/// Listings always use the remote store. Deletes remove the remote object and
+/// its local copy. Copy and rename operations return [`MirrorError::Unsupported`].
+///
+/// # Object lifetime and local integrity
+///
+/// Policies must only mirror paths that are never overwritten. The mirror does
+/// not track remote updates to existing objects. Route mutable objects through
+/// `Remote` or `Observe`.
 ///
 /// Local copies are disposable. The default [`StdVfs`] flushes writes without
 /// syncing them to disk. Local reads can return corrupted bytes without an
@@ -72,7 +128,97 @@ fn bytes_payload(bytes: Bytes) -> GetResultPayload {
 /// not repair the local copy. Callers must also check the refetched data for
 /// corruption and limit the number of retries.
 ///
-/// Dropping the mirror stops the remote scan and `MirrorPolicy::run`.
+/// # Startup and background tasks
+///
+/// Call [`ObjectStoreMirrorBuilder::build`] inside a Tokio runtime. It creates
+/// the local directory, acquires its exclusive lock, and recovers complete local
+/// copies. Use a dedicated directory for each mirror and remote store.
+///
+/// The builder starts [`MirrorPolicy::run`] and a periodic remote scan. The scan
+/// removes local copies of objects deleted remotely. It does not download new
+/// objects or refresh existing copies. The scan requires strongly consistent
+/// remote reads, writes, deletes, and listings. If the remote store lacks these
+/// guarantees, disable the scan with
+/// [`with_remote_scan_interval(None)`](ObjectStoreMirrorBuilder::with_remote_scan_interval).
+///
+/// The defaults allow [eight concurrent downloads](DEFAULT_DOWNLOAD_CONCURRENCY)
+/// and [a remote scan every ten minutes](DEFAULT_REMOTE_SCAN_INTERVAL). Downloads
+/// and remote scan listings retry transient errors without a limit by default.
+/// Use [`ObjectStoreMirrorBuilder::with_max_retries`] to bound these retries.
+///
+/// Dropping the last `Arc<ObjectStoreMirror>` cancels the background tasks.
+/// Cloned [`MirrorHandle`] values keep the local state and directory lock alive
+/// until those handles are also dropped.
+///
+/// # Errors
+///
+/// Mirror errors travel inside [`object_store::Error`]. Use [`MirrorError::find`]
+/// to recover the specific error from its source chain.
+/// [`MirrorError::WriteCommitted`] means that the remote write succeeded, but
+/// local installation or the observation hook failed. Account for that remote
+/// write before deciding whether to retry it.
+///
+/// Some object names conflict with local metadata or temporary files. See
+/// [`MirrorError::Unsupported`] for the filename restrictions.
+///
+/// # Example
+///
+/// This policy mirrors every write and serves every read locally. It assumes
+/// that callers write each path once. Existing remote objects need an explicit
+/// [`MirrorHandle::fetch`] before a local read.
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use async_trait::async_trait;
+/// use object_store::memory::InMemory;
+/// use object_store::path::Path;
+/// use object_store::{
+///     GetOptions, ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions,
+/// };
+/// use slatedb_mirror::{MirrorPolicy, ObjectStoreMirror, ReadRoute, WriteRoute};
+///
+/// struct ImmutableObjects;
+///
+/// #[async_trait]
+/// impl MirrorPolicy for ImmutableObjects {
+///     fn read_route(&self, _: &Path, _: &GetOptions) -> object_store::Result<ReadRoute> {
+///         Ok(ReadRoute::Local)
+///     }
+///
+///     fn put_route(&self, _: &Path, _: &PutOptions) -> object_store::Result<WriteRoute> {
+///         Ok(WriteRoute::Mirror)
+///     }
+///
+///     fn put_multipart_route(
+///         &self,
+///         _: &Path,
+///         _: &PutMultipartOptions,
+///     ) -> object_store::Result<WriteRoute> {
+///         Ok(WriteRoute::Mirror)
+///     }
+/// }
+///
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let local_dir = tempfile::tempdir()?;
+/// let remote: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+/// let mirror = ObjectStoreMirror::builder(
+///     local_dir.path(),
+///     remote,
+///     Arc::new(ImmutableObjects),
+/// )
+/// .build()
+/// .await?;
+///
+/// let path = Path::from("objects/first.bin");
+/// mirror.put(&path, "hello".into()).await?;
+/// assert!(mirror.handle().contains(&path));
+/// let bytes = mirror.get(&path).await?.bytes().await?;
+/// assert_eq!(bytes.as_ref(), b"hello");
+/// # Ok(())
+/// # }
+/// ```
 pub struct ObjectStoreMirror {
     handle: MirrorHandle,
 }

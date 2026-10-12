@@ -115,6 +115,14 @@ pub(crate) async fn recover(vfs: &dyn Vfs, root: &StdPath) -> Result<Recovered, 
     Ok(Recovered { entries, prefixes })
 }
 
+/// Checks one data/`.meta` pair found by [`recover`].
+///
+/// `data` is the data file's name, `size` is its length on disk, and `bytes`
+/// is the result of reading its `.meta` file. Returns the parsed name and
+/// object if the metadata parses, its path maps to `data`, and its size
+/// matches `size`. Otherwise returns a reason to log before removing the pair.
+///
+/// Doesn't check for MD5 prefix conflicts; [`recover`] does that afterwards.
 fn validate(
     data: &str,
     size: u64,
