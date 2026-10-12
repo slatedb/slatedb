@@ -1650,6 +1650,9 @@ pub struct GarbageCollectorOptions {
     /// Whether manifest and compactions boundary files are advanced before deletion.
     ///
     /// Disable this only for object stores that do not support conditional overwrites (`If-Match`).
+    /// For these stores, including `LocalFileSystem`, set this to `false`.
+    /// If a boundary update returns `NotImplemented`, GC logs a warning and skips deletion
+    /// for that resource.
     /// Without boundary advancement, a SlateDB client or compactor can begin updating a manifest or
     /// compactions file, stop making progress (for example, because its process or host is
     /// suspended), then resume after the garbage collector's `min_age`. It can then recreate a

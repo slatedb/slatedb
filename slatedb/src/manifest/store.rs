@@ -15,7 +15,8 @@ use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
 use slatedb_txn_obj::{
     DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
-    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
+    SimpleTransactionalObject, TransactionalObject, TransactionalObjectError,
+    TransactionalStorageProtocol,
 };
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
@@ -466,7 +467,19 @@ impl ManifestStore {
     }
 
     pub(crate) async fn advance_boundary(&self, id: u64) -> Result<(), SlateDBError> {
-        Ok(self.inner.advance(MonotonicId::new(id)).await?)
+        match self.inner.advance(MonotonicId::new(id)).await {
+            Err(TransactionalObjectError::ObjectStoreError(error))
+                if matches!(&error, object_store::Error::NotImplemented { .. }) =>
+            {
+                log::warn!(
+                    "The object store does not support manifest GC boundary updates. \
+                     Set GarbageCollectorOptions::boundary_files_enabled = false to allow manifest garbage collection. \
+                     [error={error}]"
+                );
+                Err(error.into())
+            }
+            result => result.map_err(SlateDBError::from),
+        }
     }
 
     /// Delete a manifest from the object store.
