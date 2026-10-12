@@ -147,6 +147,7 @@ impl FenceableCompactions {
             compactions_update_timeout,
             system_clock,
             compactor_epoch,
+            false,
             |c: &Compactions| c.compactor_epoch,
             |c: &mut Compactions, e: u64| c.compactor_epoch = e,
         )
