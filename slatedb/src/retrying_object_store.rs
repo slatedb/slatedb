@@ -113,15 +113,7 @@ impl RetryingObjectStore {
 
     #[inline]
     pub(crate) fn should_retry(err: &object_store::Error) -> bool {
-        let retry = !matches!(
-            err,
-            object_store::Error::AlreadyExists { .. }
-                | object_store::Error::Precondition { .. }
-                | object_store::Error::NotModified { .. }
-                | object_store::Error::NotFound { .. }
-                | object_store::Error::NotImplemented { .. }
-                | object_store::Error::NotSupported { .. }
-        );
+        let retry = slatedb_common::retry::should_retry(err);
         if !retry {
             debug!("not retrying object store operation [error={:?}]", err);
         }
@@ -660,8 +652,10 @@ mod tests {
     use object_store::path::Path;
     use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload};
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::retry::NonRetryable;
     use slatedb_common::DbRand;
     use slatedb_common::MockSystemClock;
+    use slatedb_mirror::MirrorError;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -990,6 +984,112 @@ mod tests {
             e => panic!("unexpected error: {e:?}"),
         }
         assert_eq!(failing.put_attempts(), 1);
+    }
+
+    #[test]
+    fn test_should_not_retry_mirror_errors() {
+        let generic = object_store::Error::Generic {
+            store: "S3",
+            source: Box::new(std::io::Error::other("timeout")),
+        };
+        assert!(RetryingObjectStore::should_retry(&generic));
+
+        let write_committed = object_store::Error::from(MirrorError::WriteCommitted {
+            path: Path::from("manifest/00000000000000000001.manifest"),
+            source: Box::new(std::io::Error::other("disk full")),
+        });
+        assert!(!RetryingObjectStore::should_retry(&write_committed));
+
+        let not_local = object_store::Error::from(MirrorError::NotLocal {
+            path: Path::from("compacted/01K.sst"),
+        });
+        assert!(!RetryingObjectStore::should_retry(&not_local));
+    }
+
+    #[test]
+    fn test_should_not_retry_tagged_store_errors() {
+        let err = object_store::Error::Generic {
+            store: "test",
+            source: Box::new(std::io::Error::other(NonRetryable(Box::new(
+                std::io::Error::other("write already committed"),
+            )))),
+        };
+        assert!(!RetryingObjectStore::should_retry(&err));
+    }
+
+    #[tokio::test]
+    async fn test_put_opts_preserves_committed_mirror_failure() {
+        use object_store::PutMultipartOptions;
+        use slatedb_mirror::{
+            MirrorHandle, MirrorPolicy, ObjectStoreMirror, ReadRoute, WriteRoute,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct FailingObserver {
+            attempts: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl MirrorPolicy for FailingObserver {
+            fn read_route(&self, _: &Path, _: &GetOptions) -> object_store::Result<ReadRoute> {
+                Ok(ReadRoute::Remote)
+            }
+
+            fn put_route(&self, _: &Path, _: &PutOptions) -> object_store::Result<WriteRoute> {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                Ok(WriteRoute::Observe)
+            }
+
+            fn put_multipart_route(
+                &self,
+                _: &Path,
+                _: &PutMultipartOptions,
+            ) -> object_store::Result<WriteRoute> {
+                Ok(WriteRoute::Remote)
+            }
+
+            async fn observe(
+                &self,
+                _: &Path,
+                _: &Bytes,
+                _: &MirrorHandle,
+            ) -> object_store::Result<()> {
+                Err(object_store::Error::Generic {
+                    store: "test",
+                    source: "observer failed".into(),
+                })
+            }
+        }
+
+        let remote = Arc::new(InMemory::new());
+        let policy = Arc::new(FailingObserver::default());
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = ObjectStoreMirror::builder(dir.path(), remote.clone(), policy.clone())
+            .with_remote_scan_interval(None)
+            .build()
+            .await
+            .unwrap();
+        let retrying = RetryingObjectStore::new(mirror, test_rand(), test_clock(), Some(2));
+        let path = Path::from("manifest/00000000000000000001.manifest");
+        let err = retrying
+            .put_opts(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"manifest")),
+                PutOptions::from(PutMode::Create),
+            )
+            .await
+            .expect_err("the committed write must preserve the observer failure");
+
+        assert!(matches!(
+            MirrorError::find(&err),
+            Some(MirrorError::WriteCommitted { .. })
+        ));
+        assert_eq!(policy.attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            remote.get(&path).await.unwrap().bytes().await.unwrap(),
+            Bytes::from_static(b"manifest")
+        );
     }
 
     #[tokio::test]

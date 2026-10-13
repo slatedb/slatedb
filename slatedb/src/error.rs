@@ -11,13 +11,15 @@ use crate::error::SlateDBError::{
     LatestTransactionalObjectVersionMissing, TransactionalObjectVersionExists,
 };
 use crate::merge_operator::MergeOperatorError;
+use slatedb_mirror::error::MIRROR_STORE_NAME;
+use slatedb_mirror::MirrorError;
 use slatedb_txn_obj::TransactionalObjectError;
 
 #[non_exhaustive]
 #[derive(Clone, Debug, ThisError)]
 pub(crate) enum SlateDBError {
     #[error("io error")]
-    IoError(#[from] Arc<std::io::Error>),
+    IoError(#[source] Arc<std::io::Error>),
 
     #[error("checksum mismatch{}", .path.as_ref().map(|p| format!(" in {p}")).unwrap_or_default())]
     ChecksumMismatch { path: Option<Path> },
@@ -44,7 +46,13 @@ pub(crate) enum SlateDBError {
     EmptyManifest,
 
     #[error("object store error")]
-    ObjectStoreError(#[from] Arc<object_store::Error>),
+    ObjectStoreError(#[source] Arc<object_store::Error>),
+
+    /// An error raised by an `ObjectStoreMirror`. `From` picks this over
+    /// `IoError` and `ObjectStoreError` when the source chain holds a
+    /// `MirrorError`.
+    #[error("object store mirror error")]
+    MirrorError(#[source] Arc<object_store::Error>),
 
     #[error("failed to find manifest with id. id=`{0}`")]
     ManifestMissing(u64),
@@ -401,13 +409,53 @@ impl From<TransactionalObjectError> for SlateDBError {
 
 impl From<std::io::Error> for SlateDBError {
     fn from(value: std::io::Error) -> Self {
-        Self::IoError(Arc::new(value))
+        Self::from(Arc::new(value))
+    }
+}
+
+impl From<Arc<std::io::Error>> for SlateDBError {
+    fn from(value: Arc<std::io::Error>) -> Self {
+        if MirrorError::find(value.as_ref()).is_none() {
+            return Self::IoError(value);
+        }
+        // `BufWriter` wraps object-store errors from multipart uploads in
+        // `io::Error`. Take the original error out when we can. Otherwise keep
+        // the `io::Error` as the source so the mirror error is still found.
+        let source: Box<dyn std::error::Error + Send + Sync> = match Arc::try_unwrap(value) {
+            Ok(err)
+                if err
+                    .get_ref()
+                    .is_some_and(|inner| inner.is::<object_store::Error>()) =>
+            {
+                let inner = err
+                    .into_inner()
+                    .and_then(|inner| inner.downcast::<object_store::Error>().ok())
+                    .expect("checked that io::Error wraps an object_store::Error");
+                return Self::MirrorError(Arc::new(*inner));
+            }
+            Ok(err) => Box::new(err),
+            Err(value) => Box::new(value),
+        };
+        Self::MirrorError(Arc::new(object_store::Error::Generic {
+            store: MIRROR_STORE_NAME,
+            source,
+        }))
     }
 }
 
 impl From<object_store::Error> for SlateDBError {
     fn from(value: object_store::Error) -> Self {
-        Self::ObjectStoreError(Arc::new(value))
+        Self::from(Arc::new(value))
+    }
+}
+
+impl From<Arc<object_store::Error>> for SlateDBError {
+    fn from(value: Arc<object_store::Error>) -> Self {
+        if MirrorError::find(value.as_ref()).is_some() {
+            Self::MirrorError(value)
+        } else {
+            Self::ObjectStoreError(value)
+        }
     }
 }
 
@@ -649,6 +697,26 @@ impl From<SlateDBError> for Error {
                 };
                 error.with_source(Box::new(err))
             }
+            SlateDBError::MirrorError(err) => {
+                let error = match MirrorError::find(err.as_ref()) {
+                    // The policy routed the read to the local copy and it
+                    // wasn't there. Like a remote `NotFound`, retrying the
+                    // read won't help.
+                    Some(MirrorError::NotLocal { .. }) => Error::data(msg),
+                    // The object is durable remotely but the mirror's
+                    // follow-up work didn't finish. `Db` and the compactor
+                    // close with this error, and reopening runs `observe`
+                    // again (RFC 0034).
+                    Some(MirrorError::WriteCommitted { .. }) => Error::data(msg),
+                    Some(
+                        MirrorError::Policy { .. }
+                        | MirrorError::Unsupported { .. }
+                        | MirrorError::InvalidConfig { .. },
+                    ) => Error::invalid(msg),
+                    _ => Error::unavailable(msg),
+                };
+                error.with_source(Box::new(err))
+            }
             #[cfg(feature = "foyer")]
             SlateDBError::FoyerError(err) => Error::unavailable(msg).with_source(Box::new(err)),
             SlateDBError::TransactionalObjectTimeout { .. } => Error::unavailable(msg),
@@ -782,5 +850,97 @@ mod tests {
         let public_err = Error::from(err);
 
         assert_eq!(public_err.kind(), ErrorKind::Unavailable);
+    }
+
+    fn mirror_error_kind(err: MirrorError) -> ErrorKind {
+        let err = SlateDBError::from(object_store::Error::from(err));
+        assert!(matches!(err, SlateDBError::MirrorError(_)));
+        Error::from(err).kind()
+    }
+
+    #[test]
+    fn mirror_errors_map_to_public_kinds() {
+        let path = Path::from("compacted/01K.sst");
+        assert_eq!(
+            mirror_error_kind(MirrorError::NotLocal { path: path.clone() }),
+            ErrorKind::Data
+        );
+        assert_eq!(
+            mirror_error_kind(MirrorError::WriteCommitted {
+                path,
+                source: Box::new(std::io::Error::other("disk full")),
+            }),
+            ErrorKind::Data
+        );
+        assert_eq!(
+            mirror_error_kind(MirrorError::Local {
+                source: std::io::Error::other("disk full"),
+            }),
+            ErrorKind::Unavailable
+        );
+        assert_eq!(
+            mirror_error_kind(MirrorError::Policy {
+                source: Box::new(std::io::Error::other("wrong root")),
+            }),
+            ErrorKind::Invalid
+        );
+        assert_eq!(
+            mirror_error_kind(MirrorError::Unsupported { operation: "copy" }),
+            ErrorKind::Invalid
+        );
+        assert_eq!(
+            mirror_error_kind(MirrorError::InvalidConfig {
+                message: "download_concurrency must be greater than zero".to_string(),
+            }),
+            ErrorKind::Invalid
+        );
+    }
+
+    #[test]
+    fn mirror_write_committed_through_io_error_maps_to_data() {
+        // `BufWriter` wraps object-store errors from multipart uploads in
+        // `io::Error`.
+        let err = SlateDBError::from(std::io::Error::other(object_store::Error::from(
+            MirrorError::WriteCommitted {
+                path: Path::from("compacted/01K.sst"),
+                source: Box::new(std::io::Error::other("rename failed")),
+            },
+        )));
+
+        let SlateDBError::MirrorError(inner) = &err else {
+            panic!("expected SlateDBError::MirrorError, got {err:?}");
+        };
+        assert!(matches!(
+            MirrorError::find(inner.as_ref()),
+            Some(MirrorError::WriteCommitted { .. })
+        ));
+        assert_eq!(Error::from(err).kind(), ErrorKind::Data);
+    }
+
+    #[test]
+    fn mirror_error_behind_shared_io_error_maps_to_mirror_variant() {
+        // A shared `Arc` can't be unwrapped, so the `io::Error` stays in the
+        // source chain.
+        let io_err = Arc::new(std::io::Error::other(object_store::Error::from(
+            MirrorError::NotLocal {
+                path: Path::from("compacted/01K.sst"),
+            },
+        )));
+        let err = SlateDBError::from(Arc::clone(&io_err));
+
+        assert!(matches!(err, SlateDBError::MirrorError(_)));
+        assert_eq!(Error::from(err).kind(), ErrorKind::Data);
+    }
+
+    #[test]
+    fn non_mirror_errors_keep_their_variants() {
+        let err = SlateDBError::from(std::io::Error::other("disk full"));
+        assert!(matches!(err, SlateDBError::IoError(_)));
+
+        let err = SlateDBError::from(object_store::Error::NotFound {
+            path: "a".to_string(),
+            source: Box::new(std::io::Error::other("missing")),
+        });
+        assert!(matches!(err, SlateDBError::ObjectStoreError(_)));
     }
 }

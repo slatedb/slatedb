@@ -2,16 +2,15 @@ use crate::cached_object_store::stats::CachedObjectStoreStats;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use log::{debug, error, warn};
-use lru::LruCache;
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
 use rand::{distr::Alphanumeric, Rng};
 use slatedb_common::clock::SystemClock;
+use slatedb_common::file_handle_cache::{read_exact_at_offset, FileHandleCache};
 use slatedb_common::DbRand;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::io::Write;
-use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -21,131 +20,6 @@ use walkdir::WalkDir;
 
 use crate::cached_object_store::storage::{LocalCacheEntry, LocalCacheHead, LocalCacheStorage};
 use crate::utils::format_bytes_si;
-
-/// A cached file handle node. Callers that obtain an `Arc<CachedFileHandle>`
-/// keep the underlying fd alive even after the entry is evicted from the cache.
-#[derive(Debug)]
-pub(crate) struct CachedFileHandle {
-    file: std::fs::File,
-}
-
-impl CachedFileHandle {
-    pub(crate) fn file(&self) -> &std::fs::File {
-        &self.file
-    }
-}
-
-/// A cache of open file descriptors, keyed by filesystem path.
-///
-/// Uses a `Mutex` protecting an `LruCache` for O(1) lookup, promotion, and
-/// eviction. Individual file reads use positional I/O (`pread` /
-/// `read_exact_at`) which does not touch the file cursor, so multiple threads
-/// can read from the same `Arc<CachedFileHandle>` concurrently without any
-/// per-file locking.
-#[derive(Clone)]
-pub(crate) struct FileHandleCache {
-    inner: Arc<std::sync::Mutex<LruCache<std::path::PathBuf, Arc<CachedFileHandle>>>>,
-}
-
-impl std::fmt::Debug for FileHandleCache {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let inner = self.inner.lock().expect("lock should not be poisoned");
-        f.debug_struct("FileHandleCache")
-            .field("len", &inner.len())
-            .field("cap", &inner.cap())
-            .finish()
-    }
-}
-
-impl FileHandleCache {
-    fn new(max_handles: usize) -> Self {
-        Self {
-            inner: Arc::new(std::sync::Mutex::new(LruCache::new(
-                NonZeroUsize::new(max_handles).expect("max_handles must be > 0"),
-            ))),
-        }
-    }
-
-    /// Look up a cached file handle, or open the file and cache it.
-    /// Returns `Ok(None)` if the file does not exist on disk.
-    fn get_or_open(
-        &self,
-        path: &std::path::Path,
-    ) -> Result<Option<Arc<CachedFileHandle>>, std::io::Error> {
-        let mut cache = self.inner.lock().expect("lock should not be poisoned");
-        if let Some(handle) = cache.get(path) {
-            if Self::is_valid(handle, path) {
-                return Ok(Some(handle.clone()));
-            }
-            // Stale entry — remove it so we reopen below.
-            cache.pop(path);
-        }
-
-        let file = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err),
-        };
-
-        let handle = Arc::new(CachedFileHandle { file });
-
-        cache.push(path.to_path_buf(), handle.clone());
-        Ok(Some(handle))
-    }
-
-    /// Check whether a cached file descriptor still refers to a live file.
-    ///
-    /// On Unix an unlinked file keeps its data accessible through open fds,
-    /// but `fstat` will report `nlink == 0`. This single in-kernel syscall is
-    /// much cheaper than a full `open` and lets us detect deleted or replaced
-    /// files without a TOCTOU-prone path `stat`.
-    ///
-    /// On non-Unix platforms (e.g. Windows), we fall back to checking whether
-    /// the path still exists on disk.
-    #[cfg(unix)]
-    fn is_valid(handle: &CachedFileHandle, _path: &std::path::Path) -> bool {
-        use std::os::unix::fs::MetadataExt;
-        handle.file().metadata().is_ok_and(|m| m.nlink() > 0)
-    }
-
-    #[cfg(not(unix))]
-    fn is_valid(_handle: &CachedFileHandle, path: &std::path::Path) -> bool {
-        path.exists()
-    }
-
-    /// Remove a cached handle, e.g. after eviction or after a write replaces
-    /// the file (since the cached fd would still reference the old inode).
-    fn invalidate(&self, path: &std::path::Path) {
-        let mut cache = self.inner.lock().expect("lock should not be poisoned");
-        cache.pop(path);
-    }
-}
-
-/// Cross-platform positional read. Reads exactly `buf.len()` bytes at `offset`
-/// without altering the file cursor, allowing concurrent readers on the same fd.
-fn read_exact_at_offset(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileExt;
-        file.read_exact_at(buf, offset)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::FileExt;
-        let mut bytes_read = 0;
-        while bytes_read < buf.len() {
-            let n = file.seek_read(&mut buf[bytes_read..], offset + bytes_read as u64)?;
-            if n == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "failed to fill whole buffer",
-                ));
-            }
-            bytes_read += n;
-        }
-        Ok(())
-    }
-}
 
 #[derive(Debug)]
 pub struct FsCacheStorage {
@@ -188,7 +62,7 @@ impl FsCacheStorage {
 
     #[cfg(test)]
     pub(crate) fn file_handle_cache_population(&self) -> usize {
-        self.file_handle_cache.inner.lock().unwrap().len()
+        self.file_handle_cache.len()
     }
 }
 
@@ -365,7 +239,7 @@ impl LocalCacheEntry for FsCacheEntry {
             // Use positional I/O (pread) — no seek required, and safe for
             // concurrent readers sharing the same Arc<File>.
             let mut buffer = vec![0; range_in_part.len()];
-            read_exact_at_offset(file.file(), &mut buffer, range_in_part.start as u64)
+            read_exact_at_offset(&file, &mut buffer, range_in_part.start as u64)
                 .map_err(wrap_io_err)?;
             Ok(Some(Bytes::from(buffer)))
         })
@@ -480,12 +354,12 @@ impl LocalCacheEntry for FsCacheEntry {
                 Err(err) => return Err(wrap_io_err(err)),
             };
 
-            let metadata = file.file().metadata().map_err(wrap_io_err)?;
+            let metadata = file.metadata().map_err(wrap_io_err)?;
             let head_size_bytes = metadata.len() as usize;
 
             // Use positional read from offset 0 to read the entire file.
             let mut buffer = vec![0u8; head_size_bytes];
-            read_exact_at_offset(file.file(), &mut buffer, 0).map_err(wrap_io_err)?;
+            read_exact_at_offset(&file, &mut buffer, 0).map_err(wrap_io_err)?;
 
             let content = String::from_utf8(buffer).map_err(|e| {
                 wrap_io_err(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
