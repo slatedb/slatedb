@@ -206,12 +206,11 @@ pub trait WalObserver: Send + Sync + 'static {
 
 pub type FlushResultFuture = BoxFuture<'static, Result<(), WalError>>;
 
-/// The frozen WAL boundary and its durable completion result.
-pub struct WalFlush {
-    /// The last WAL file covered by this flush, including files still awaiting upload.
-    /// If no new file is frozen, this is the last previously assigned file ID.
+/// The result of [`WalWriter::flush`].
+pub struct WalFlushResult {
+    /// The ID of the last WAL file that the flush covers.
     pub wal_id: u64,
-    /// Completes when all writes through `wal_id` are durable, or reports a flush error.
+    /// Completes when the flush is durable, or returns the flush error.
     pub completion: FlushResultFuture,
 }
 
@@ -233,10 +232,10 @@ pub trait WalWriter: Send {
     /// Append a write batch to the WAL.
     async fn append(&mut self, write_batch: &[RowEntry]) -> Result<(), WalError>;
 
-    /// Freezes all appended writes and returns their final WAL file ID without waiting for storage.
-    /// Later appends must use a greater file ID. An empty flush returns the previous file ID.
-    /// The returned completion future reports durability or a flush error.
-    async fn flush(&mut self) -> Result<WalFlush, WalError>;
+    /// Triggers a flush of all appended write batches to durable storage. Returns the ID of
+    /// the last WAL file that the flush covers, without waiting for the upload. If there is
+    /// nothing to flush, the ID is the ID of the previous WAL file.
+    async fn flush(&mut self) -> Result<WalFlushResult, WalError>;
 
     /// Returns true if the WAL implementation wants to request that the current in-memory
     /// writes be flushed to a new l0. WAL implementations can use this to (1) bound the range

@@ -48,10 +48,7 @@ pub(crate) enum FlushTarget {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CheckpointCursor {
-    /// The sequence number associated with the checkpoint.
     pub(crate) seq: u64,
-    /// If the wal is enabled, then this field must be specified. It must be the wal file whose
-    /// last write is `seq`, and `seq` must be the last write of the wal file.
     pub(crate) wal_file: Option<u64>,
 }
 
@@ -134,11 +131,6 @@ impl MemtableFlusher {
         self.messages_tx.send(TrackerMessage::MemtableFrozen)
     }
 
-    /// Starts a checkpoint and returns after the manifest writer records its bound.
-    ///
-    /// `floor` is the earliest write position that the checkpoint must include.
-    /// If `floor` is `None`, the manifest writer uses the last durable write as the floor.
-    /// If `wait_for_l0` is true, the checkpoint waits until L0 holds every write through `floor`.
     pub(crate) async fn begin_checkpoint(
         &self,
         id: Uuid,

@@ -168,9 +168,6 @@ impl ManifestWriter {
         )
     }
 
-    /// Sends a checkpoint request to the manifest writer.
-    /// The manifest writer computes the bound of the checkpoint and accepts the request.
-    /// It writes the checkpoint when every write through the bound is durable.
     pub(crate) fn begin_checkpoint(
         &self,
         options: CheckpointOptions,
@@ -313,7 +310,6 @@ impl MessageHandler<ManifestWriterCommand> for ManifestWriterHandler {
             .and(close_result.clone())
             .err()
             .unwrap_or(SlateDBError::Closed);
-        // Fail requests that remain after cleanup with the database error.
         while let Some(command) = commands.next().await {
             self.collect_pending_waiter(command, &error);
         }
@@ -410,16 +406,10 @@ impl ManifestWriterHandler {
             }
         };
         let floor = floor.unwrap_or(durable);
-        // If the durable cursor is past the floor, the bound is the durable cursor. The caller
-        // does not have its handle yet, so the checkpoint can include every durable write.
-        // This also keeps next_wal_sst_id from moving back, because earlier manifests never
-        // pass the durable WAL file. Otherwise, the bound is the floor.
         let bound = if durable.seq > floor.seq {
             if let (Some(durable_wal_file), Some(floor_wal_file)) =
                 (durable.wal_file, floor.wal_file)
             {
-                // The last write of the floor WAL file is floor.seq, so a later write is in a
-                // later WAL file.
                 assert!(
                     durable_wal_file > floor_wal_file,
                     "durable cursor is past the checkpoint floor, but its WAL file is not \
@@ -435,7 +425,6 @@ impl ManifestWriterHandler {
         let l0_through_seq = if self.db.wal_enabled {
             wait_for_l0.then_some(floor.seq)
         } else {
-            // Without a WAL, a write is durable only after it is in L0.
             Some(bound.seq)
         };
         fail_parallel::fail_point!(
@@ -443,15 +432,10 @@ impl ManifestWriterHandler {
             "checkpoint-after-bound",
             |_| { Ok(()) }
         );
-        // Register the bound before the next command, so that no later manifest write passes it.
         lifecycle.accept();
-        // Requests can arrive out of bound order, so keep the queue sorted by bound. A request
-        // goes after the requests with the same bound.
         let index = self.pending_checkpoints.partition_point(|pending| {
             (pending.bound.seq, pending.bound.wal_file) <= (bound.seq, bound.wal_file)
         });
-        // The WAL file of a cursor ends with the write at its sequence number, so bounds with the
-        // same sequence number name the same WAL file.
         let conflict = self.pending_checkpoints.iter().find(|pending| {
             pending.bound.seq == bound.seq && pending.bound.wal_file != bound.wal_file
         });
@@ -475,10 +459,6 @@ impl ManifestWriterHandler {
         Ok(())
     }
 
-    /// Returns the cursor of the last durable write.
-    ///
-    /// If the WAL is enabled, the WAL status gives the cursor. Otherwise, the durable sequence
-    /// number of the oracle gives the cursor, because L0 holds the only durable copy of a write.
     fn durable_checkpoint_cursor(&self) -> Result<CheckpointCursor, SlateDBError> {
         if !self.db.wal_enabled {
             return Ok(CheckpointCursor {
@@ -488,8 +468,6 @@ impl ManifestWriterHandler {
         }
         let status = self.db.wal_observer.status()?;
         Ok(CheckpointCursor {
-            // The WAL reports no sequence number until its first flush. The durable sequence
-            // number of the oracle then covers the writes that recovery replayed.
             seq: status
                 .last_flushed_seq
                 .unwrap_or_else(|| self.db.oracle.last_remote_persisted_seq()),
@@ -513,10 +491,8 @@ impl ManifestWriterHandler {
         }
     }
 
-    /// Returns the next batch of uploaded tables to apply, oldest first.
     fn take_next_ready_batch(&mut self) -> Option<Vec<UploadedMemtable>> {
         let durable_seq = self.db_status_rx.borrow().durable_seq;
-        // L0 must not pass the bound of a pending checkpoint.
         let checkpoint_boundary = self
             .pending_checkpoints
             .iter()
@@ -565,13 +541,6 @@ impl ManifestWriterHandler {
         }
     }
 
-    /// Removes the checkpoints that the next manifest write can include.
-    ///
-    /// `l0_last_seq` is the last sequence number in L0 after that write. A checkpoint with a
-    /// bound cannot leave before a pending checkpoint with a lower bound, because the write
-    /// limits its WAL range to the lowest pending bound. A checkpoint with the same bound as a
-    /// pending one can leave. A source checkpoint has no bound. It leaves when its source is
-    /// not pending. The removed checkpoints with a bound share one WAL bound.
     fn take_ready_checkpoints(
         &mut self,
         l0_last_seq: u64,
@@ -627,8 +596,6 @@ impl ManifestWriterHandler {
             .filter(|checkpoint| checkpoint.options.source.is_none())
             .map(|checkpoint| checkpoint.bound);
         if let Some(bound) = bounds.next() {
-            // The ready checkpoints share a WAL file, and a WAL file ends with one write.
-            // Without a WAL, L0 cannot pass the lowest bound, so only that bound can be ready.
             assert!(
                 bounds.all(|other| other == bound),
                 "ready checkpoints have different bounds [bounds={:?}]",
@@ -637,15 +604,12 @@ impl ManifestWriterHandler {
                     .map(|checkpoint| checkpoint.bound)
                     .collect::<Vec<_>>()
             );
-            // L0 never passes the bound of a pending checkpoint.
             assert!(
                 l0_last_seq <= bound.seq,
                 "L0 passed the checkpoint bound [l0_last_seq={}, bound={:?}]",
                 l0_last_seq,
                 bound
             );
-            // Without a WAL, L0 holds the only durable copy of a write, so the checkpoint waits
-            // until L0 reaches its bound.
             assert!(
                 self.db.wal_enabled || l0_last_seq == bound.seq,
                 "L0 did not reach the checkpoint bound [l0_last_seq={}, bound={:?}]",
@@ -881,7 +845,6 @@ impl ManifestWriterHandler {
             .status()
             .unwrap_or_else(|status| status);
         let mut guard = self.db.state.write();
-        // Pending checkpoints limit every manifest write until their boundaries are published.
         let wal_boundary = self
             .pending_checkpoints
             .iter()
@@ -988,7 +951,6 @@ impl ManifestWriterHandler {
         self.write_manifest_update_safely(checkpoints).await
     }
 
-    /// Writes the checkpoints that are ready with the current L0 state.
     async fn write_ready_checkpoints(&mut self) -> Result<(), SlateDBError> {
         loop {
             let l0_last_seq = self.db.state.read().state().core().last_l0_seq;
@@ -1139,7 +1101,6 @@ impl ManifestWriterHandler {
             }
         }
 
-        // Unfinished checkpoints no longer limit the final WAL endpoint.
         let unfinished_checkpoints = std::mem::take(&mut self.pending_checkpoints);
         let write_result = if matches!(result, Err(SlateDBError::Fenced)) {
             Ok(())
@@ -1166,20 +1127,14 @@ struct PendingFlush {
 
 struct PendingCheckpoint {
     id: Uuid,
-    /// The last write that the checkpoint includes.
     bound: CheckpointCursor,
-    /// If set, the checkpoint waits until L0 holds every write through this sequence number.
     l0_through_seq: Option<u64>,
     options: CheckpointOptions,
     lifecycle: CheckpointLifecycle,
 }
 
 impl PendingCheckpoint {
-    /// Returns true if the manifest writer can write this checkpoint.
-    ///
-    /// `l0_last_seq` is the last sequence number in L0. L0 holds every write through it.
     fn is_ready(&self, last_flushed_wal_id: u64, l0_last_seq: u64) -> bool {
-        // A checkpoint from a source refers to the manifest of that source.
         if self.options.source.is_some() {
             return true;
         }
@@ -1413,7 +1368,6 @@ mod tests {
         receivers
     }
 
-    /// Waits until the manifest writer handles every command sent before this call.
     async fn sync_manifest_writer(writer: &ManifestWriter) {
         let (tx, rx) = oneshot::channel();
         writer.send_poll(tx).unwrap();
@@ -1982,8 +1936,6 @@ mod tests {
         }
     }
 
-    /// Reports a WAL status that a test can advance. WAL file `n` holds the write with
-    /// sequence number `n`.
     struct MutableWalObserver {
         last_flushed_wal_id: Arc<AtomicU64>,
     }
@@ -2279,7 +2231,6 @@ mod tests {
         let uploaded1 = next_uploaded_memtable(&inner, b"k1", b"v1").await;
         let uploaded2 = next_uploaded_memtable(&inner, b"k2", b"v2").await;
 
-        // The WAL file of the floor is not durable yet, so the bound is the floor.
         let request = begin_test_checkpoint(&started, cursor(1, 1), true);
         request.ready_rx.await.unwrap().unwrap();
         started.notify_uploaded(uploaded2).await.unwrap();
@@ -2345,7 +2296,6 @@ mod tests {
 
         let request = begin_test_checkpoint(&started, cursor(1, 1), true);
         request.ready_rx.await.unwrap().unwrap();
-        // The WAL can advance while this checkpoint waits for table uploads.
         wal_end.store(2, Ordering::SeqCst);
         started
             .notify_uploaded(uploads.pop().unwrap())
@@ -2391,7 +2341,6 @@ mod tests {
             .unwrap();
         receivers.ready_rx.await.unwrap().unwrap();
 
-        // A WAL file that becomes durable after the request is not in the checkpoint.
         wal_end.store(2, Ordering::SeqCst);
         handler.process_ready_work().await.unwrap();
         let result = receivers.result_rx.await.unwrap().unwrap();
@@ -2519,7 +2468,6 @@ mod tests {
         receivers.ready_rx.await.unwrap().unwrap();
         wal_end.store(2, Ordering::SeqCst);
 
-        // An earlier table upload must preserve the pending checkpoint's WAL endpoint.
         handler.handle_uploaded(first_upload).await.unwrap();
         handler.process_ready_work().await.unwrap();
         assert_eq!(
@@ -2533,7 +2481,6 @@ mod tests {
             2
         );
 
-        // A durable checkpoint and a retry must preserve that endpoint too.
         handler
             .write_manifest_update_safely(&[&durable_pending_checkpoint()])
             .await
@@ -2606,10 +2553,8 @@ mod tests {
         let uploaded1 = next_uploaded_memtable(&inner, b"k1", b"v1").await;
         let uploaded2 = next_uploaded_memtable(&inner, b"k2", b"v2").await;
 
-        // WAL file 2 is durable before the request, so the bound moves to it.
         let request = begin_test_checkpoint(&started, cursor(1, 1), true);
         request.ready_rx.await.unwrap().unwrap();
-        // A WAL file that becomes durable after the request does not move the bound.
         wal_end.store(3, Ordering::SeqCst);
         started.notify_uploaded(uploaded1).await.unwrap();
         started.notify_uploaded(uploaded2).await.unwrap();
@@ -2645,7 +2590,6 @@ mod tests {
             harness.manifest,
             Duration::from_secs(3600),
         );
-        // Each WAL file ends with the write of one uploaded memtable.
         let mut uploads = Vec::new();
         for key in [b"k1", b"k2", b"k3"] {
             uploads.push(next_uploaded_memtable(&inner, key, b"v").await);
@@ -2904,7 +2848,6 @@ mod tests {
         let first_upload = next_uploaded_memtable(&inner, b"first", b"v1").await;
         let second_upload = next_uploaded_memtable(&inner, b"second", b"v2").await;
 
-        // The request with the higher bound arrives first.
         let (later_request, mut later) =
             new_test_checkpoint(cursor(second_upload.last_seq, 2), true);
         handler
@@ -2921,7 +2864,6 @@ mod tests {
         handler.handle_uploaded(second_upload).await.unwrap();
         handler.process_ready_work().await.unwrap();
 
-        // Each checkpoint stops at its own bound.
         let earlier_result = earlier.result_rx.try_recv().unwrap().unwrap();
         let earlier_manifest = store
             .read_manifest(earlier_result.manifest_id)
@@ -2957,7 +2899,6 @@ mod tests {
             crate::utils::SafeSender::unbounded_channel(inner.status_manager.result_reader());
         handler.tracker_tx = tracker_tx;
 
-        // The floor write is in the active memtable, and no immutable memtable exists.
         let seq = inner.oracle.next_seq();
         inner
             .state
@@ -2974,7 +2915,6 @@ mod tests {
             Err(oneshot::error::TryRecvError::Empty)
         ));
 
-        // The manifest writer writes the checkpoint after L0 holds the floor write.
         let imm = {
             let mut guard = inner.state.write();
             guard.freeze_memtable(1);
@@ -3039,7 +2979,6 @@ mod tests {
 
             started.notify_uploaded(uploaded2).await.unwrap();
             assert_no_flush_event(&started.tracker_rx, Duration::from_millis(100)).await;
-            // Make sure that the manifest writer computed the bound before the WAL advances.
             sync_manifest_writer(&started).await;
             wal_end.store(1, Ordering::SeqCst);
             started.notify_uploaded(uploaded1).await.unwrap();
@@ -3297,7 +3236,6 @@ mod tests {
         }
 
         wal_end.store(1, Ordering::SeqCst);
-        // The first poll writes the checkpoint. The second poll waits for the first one.
         sync_manifest_writer(&started).await;
         sync_manifest_writer(&started).await;
         if let Some(wait) = wait {

@@ -31,10 +31,7 @@ pub(crate) type CheckpointResult = Result<CheckpointCreateResult, SlateDBError>;
 
 pub(crate) struct CheckpointRequest {
     pub(crate) id: Uuid,
-    /// The earliest write position that the checkpoint must include.
-    /// If `None`, the manifest writer uses the last durable write.
     pub(crate) floor: Option<CheckpointCursor>,
-    /// If true, the checkpoint waits until L0 holds every write through `floor`.
     pub(crate) wait_for_l0: bool,
     pub(crate) lifecycle: CheckpointLifecycle,
 }
@@ -80,10 +77,8 @@ impl CheckpointLifecycle {
     }
 }
 
-/// Observes a checkpoint that the database owns.
-///
-/// Dropping this handle does not cancel or delete the checkpoint.
-/// Use [`CheckpointOptions::lifetime`] to limit retention of abandoned checkpoints.
+/// A handle to a checkpoint that [`Db::begin_checkpoint`] started. If you drop the handle,
+/// SlateDB does not cancel or delete the checkpoint.
 pub struct CheckpointHandle {
     id: Uuid,
     result_rx: oneshot::Receiver<CheckpointResult>,
@@ -94,15 +89,12 @@ impl CheckpointHandle {
         Self { id, result_rx }
     }
 
-    /// Returns the identifier reserved for this checkpoint.
+    /// Returns the ID of the checkpoint.
     pub fn id(&self) -> Uuid {
         self.id
     }
 
-    /// Waits until the checkpoint manifest is durable.
-    ///
-    /// This method consumes the handle without changing the checkpoint lifetime.
-    /// Dropping the returned future does not cancel or delete the checkpoint.
+    /// Waits until the checkpoint is stored, and returns the result.
     pub async fn wait(self) -> Result<CheckpointCreateResult, crate::Error> {
         self.wait_inner().await.map_err(Into::into)
     }
@@ -119,24 +111,9 @@ pub(crate) fn checkpoint_outcome_unknown(id: Uuid) -> SlateDBError {
 }
 
 impl Db {
-    /// Captures the checkpoint boundary and starts the durable storage work.
-    ///
-    /// [`CheckpointScope::All`] freezes the active memtable, the in-memory write buffer, before this method returns.
-    /// Concurrent writes before this method returns can be included.
-    /// Writes issued after this method returns are excluded from that checkpoint.
-    /// Call [`CheckpointHandle::wait`] to wait for the checkpoint manifest.
-    /// WAL upload completion and its errors are reported through that handle.
-    ///
-    /// The database owns the request once it enters the flush pipeline.
-    /// Dropping this future or the handle does not cancel an accepted request.
-    /// Use a finite [`CheckpointOptions::lifetime`] to limit retention after a timeout or crash.
-    /// With `lifetime: None`, abandoned checkpoints remain until explicit deletion.
-    ///
-    /// Save [`CheckpointHandle::id`] before waiting if recovery needs the checkpoint identifier.
-    /// After the application durably records ownership, call
-    /// [`Admin::refresh_checkpoint`](crate::admin::Admin::refresh_checkpoint) with `None` to remove expiration.
-    /// Recovery must retry that update before expiration if the application stops between those steps.
-    /// Waiting for completion does not remove expiration.
+    /// Starts a checkpoint and returns a handle to it. With [`CheckpointScope::All`], the
+    /// checkpoint includes the writes that finished before this method returned. Call
+    /// [`CheckpointHandle::wait`] to wait until the checkpoint is stored.
     pub async fn begin_checkpoint(
         &self,
         scope: CheckpointScope,
@@ -145,8 +122,6 @@ impl Db {
         let id = self.inner.rand.rng().gen_uuid();
         let (floor, wait_for_l0) = match scope {
             CheckpointScope::All => {
-                // Freeze the WAL and the memtable. The manifest writer waits until the frozen
-                // WAL file is durable, so this call does not wait for the WAL upload.
                 let (_, floor) = self.inner.begin_batch_writer_flush(true).await?;
                 (Some(floor), true)
             }
@@ -676,7 +651,6 @@ mod tests {
         db.put(b"key", b"value").await.unwrap();
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "return").unwrap();
 
-        // The failed WAL task stops the manifest writer, which fails the pending checkpoint.
         let result = tokio::time::timeout(Duration::from_secs(5), async {
             db.begin_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
                 .await?
@@ -708,7 +682,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Later writes reach L0 while the checkpoint waits, but the checkpoint excludes them.
         db.put(b"during", b"v2").await.unwrap();
         db.flush_with_options(FlushOptions {
             flush_type: FlushType::MemTable,
@@ -846,7 +819,6 @@ mod tests {
             .read_manifest(checkpoint.manifest_id)
             .await
             .unwrap();
-        // The bound ends at the WAL file before the later write.
         assert_eq!(manifest.core.next_wal_sst_id, later_wal_id);
 
         db.close().await.unwrap();

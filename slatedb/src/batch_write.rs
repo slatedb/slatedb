@@ -362,8 +362,6 @@ impl DbInner {
         } else {
             (async { Ok(()) }.boxed(), None)
         };
-        // The writer task applies writes one at a time, so no write is in progress here.
-        // The last committed write is the last write in the frozen WAL file.
         let cursor = CheckpointCursor {
             seq: self.oracle.last_committed_seq(),
             wal_file,
@@ -405,8 +403,6 @@ impl DbInner {
         Ok(flush_result.await?)
     }
 
-    /// Waits for the writer to start the flush. Returns the WAL flush future and the cursor of
-    /// the last write that the flush covers.
     pub(crate) async fn begin_batch_writer_flush(
         &self,
         freeze_memtable: bool,
@@ -563,7 +559,7 @@ mod tests {
             self.inner.append(write_batch).await
         }
 
-        async fn flush(&mut self) -> Result<crate::wal::WalFlush, WalError> {
+        async fn flush(&mut self) -> Result<crate::wal::WalFlushResult, WalError> {
             if matches!(self.operation, FailingWalOperation::Flush) {
                 return Err(WalError::Fenced);
             }

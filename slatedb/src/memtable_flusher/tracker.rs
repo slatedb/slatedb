@@ -1046,8 +1046,8 @@ mod tests {
         let flusher = start_flusher(harness);
         freeze_value_imm(&flusher.inner, b"k1", b"v1", 61);
 
-        // A durable checkpoint can finish when L0 is full. It records the
-        // current durable state without waiting for the flush pipeline.
+        // A Durable checkpoint completes even when L0 is full. It does not wait for
+        // pending flushes.
         let checkpoint = timeout(
             Duration::from_secs(5),
             flusher.create_checkpoint(None, false, CheckpointOptions::default()),

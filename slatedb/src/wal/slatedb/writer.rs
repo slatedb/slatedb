@@ -11,7 +11,7 @@ use crate::types::RowEntry;
 use crate::utils::SafeSender;
 use crate::utils::{format_bytes_si, WatchableOnceCellReader};
 use crate::wal;
-use crate::wal::{WalError, WalEvent, WalFlush, WalStatus, WalWriter};
+use crate::wal::{WalError, WalEvent, WalFlushResult, WalStatus, WalWriter};
 use async_trait::async_trait;
 use futures::{stream::BoxStream, FutureExt, StreamExt};
 use log::{error, trace, warn};
@@ -230,19 +230,19 @@ impl WalWriter for SlateDbWalWriter {
         })
     }
 
-    async fn flush(&mut self) -> Result<WalFlush, WalError> {
+    async fn flush(&mut self) -> Result<WalFlushResult, WalError> {
         let (result_tx, result_rx) = oneshot::channel();
         let wal_id = {
             let mut inner = self.inner.write();
             inner.check_exited()?;
-            inner.freeze_current_wal();
+            let wal_id = inner.freeze_current_wal();
             inner.send_flush_msg(WalFlushWork::Flush {
                 result_tx: Some(result_tx),
             })?;
-            inner.next_wal_id - 1
+            wal_id
         };
         self.stats.flush_requests.increment(1);
-        Ok(WalFlush {
+        Ok(WalFlushResult {
             wal_id,
             completion: async {
                 result_rx
@@ -361,9 +361,9 @@ impl SlateDbWalWriterInner {
         self.compute_status(table_store)
     }
 
-    fn freeze_current_wal(&mut self) {
+    fn freeze_current_wal(&mut self) -> u64 {
         if self.current_wal.is_empty() {
-            return;
+            return self.next_wal_id - 1;
         }
         let next_wal_id = self.next_wal_id;
         self.next_wal_id += 1;
@@ -371,6 +371,7 @@ impl SlateDbWalWriterInner {
         self.flush_epoch += 1;
         self.immutable_wals
             .push_back((next_wal_id, Arc::new(current_wal)));
+        next_wal_id
     }
 
     fn record_flushed_wal(&mut self, flushed_wal_id: u64, flushed_wal: &Arc<WalBuffer>) {
