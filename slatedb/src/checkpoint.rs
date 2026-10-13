@@ -112,8 +112,9 @@ pub(crate) fn checkpoint_outcome_unknown(id: Uuid) -> SlateDBError {
 
 impl Db {
     /// Starts a checkpoint and returns a handle to it. With [`CheckpointScope::All`], the
-    /// checkpoint includes the writes that finished before this method returned. Call
-    /// [`CheckpointHandle::wait`] to wait until the checkpoint is stored.
+    /// checkpoint includes writes that finish before the call starts. It excludes writes that
+    /// start after the call returns. Call [`CheckpointHandle::wait`] to wait until the
+    /// checkpoint is stored.
     pub async fn begin_checkpoint(
         &self,
         scope: CheckpointScope,
