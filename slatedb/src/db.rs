@@ -9494,6 +9494,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn should_report_committed_seq_without_waiting_for_durability() {
+        // Given: a DB
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_status_committed_seq";
+        let db = Db::builder(path, object_store.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // When: a put returns, without awaiting its durability
+        let put = db.put(b"key1", b"value1").await.unwrap();
+
+        // Then: the status carries its seq as committed
+        let status = db.status();
+        assert_eq!(status.committed_seq, put.seqnum());
+        assert!(status.durable_seq <= status.committed_seq);
+
+        // When: a transaction commits
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
+        txn.put(b"key2", b"value2").unwrap();
+        let commit = txn
+            .commit()
+            .await
+            .unwrap()
+            .expect("a transaction with a write commits a seq");
+
+        // Then: the status carries the transaction's seq as committed
+        let status = db.status();
+        assert_eq!(status.committed_seq, commit.seqnum());
+        assert!(commit.seqnum() > put.seqnum());
+        assert!(status.durable_seq <= status.committed_seq);
+        db.close().await.unwrap();
+
+        // When: the DB reopens and replays its WAL
+        let db = Db::builder(path, object_store).build().await.unwrap();
+
+        // Then: the replayed writes are committed and durable
+        let status = db.status();
+        assert_eq!(status.committed_seq, commit.seqnum());
+        assert_eq!(status.durable_seq, commit.seqnum());
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn should_report_every_visible_row_within_committed_seq() {
+        // Given: a DB that one task writes while others read
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Arc::new(
+            Db::builder("/tmp/test_status_committed_seq_bound", object_store)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let writer = {
+            let db = Arc::clone(&db);
+            tokio::spawn(async move {
+                for i in 0u64..5000 {
+                    db.put(b"key", i.to_be_bytes()).await.unwrap();
+                }
+            })
+        };
+
+        // Then: a status taken after a read carries a committed seq at or
+        // above the seq of the row the read returned
+        let readers: Vec<_> = (0..3)
+            .map(|_| {
+                let db = Arc::clone(&db);
+                tokio::spawn(async move {
+                    let mut reads = 0;
+                    while reads < 5000 {
+                        if let Some(row) = db.get_key_value(b"key").await.unwrap() {
+                            let committed_seq = db.status().committed_seq;
+                            assert!(
+                                row.seq <= committed_seq,
+                                "a read returned seq {} above committed_seq {}",
+                                row.seq,
+                                committed_seq
+                            );
+                            reads += 1;
+                        }
+                    }
+                })
+            })
+            .collect();
+        for reader in readers {
+            reader.await.unwrap();
+        }
+        writer.await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn should_subscribe_to_current_manifest_updates_after_flush() {
         // Given: a DB with a watcher and manifest access
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
