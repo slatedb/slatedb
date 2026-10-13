@@ -18,7 +18,8 @@ use crate::error::SlateDBError;
 use crate::filter_policy::{FilterContext, FilterQuery, FilterTarget, NamedFilter};
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
-use crate::reader::{ReadTrace, SstTraceLevel};
+use crate::read_trace::{ReadTrace, SstTraceLevel};
+use crate::utils::spawn_with_optional_subscriber;
 use crate::{
     iter::{IterationOrder, RowEntryIterator},
     partitioned_keyspace,
@@ -418,7 +419,7 @@ impl<'a> InternalSstIterator<'a> {
         self.tracing_context
             .as_ref()
             .map(|context| context.read_trace.clone())
-            .unwrap_or_else(|| ReadTrace::new(None))
+            .unwrap_or_else(ReadTrace::none)
     }
 
     fn new_owned<T: RangeBounds<Bytes>>(
@@ -522,16 +523,26 @@ impl<'a> InternalSstIterator<'a> {
         let table_store = self.table_store.clone();
         let cache_blocks = self.options.cache_blocks;
         let segment = self.options.segment.clone();
+        let read_trace = self.read_trace();
+        let sst_level = self.sst_level().cloned();
         let single_block = blocks.len() == 1;
         let read = async move {
             table_store
-                .read_blocks_using_index(&table, index, blocks, cache_blocks, segment)
+                .read_blocks_using_index(
+                    &table,
+                    index,
+                    blocks,
+                    cache_blocks,
+                    segment,
+                    &read_trace,
+                    sst_level.as_ref(),
+                )
                 .await
         };
         if self.inline_point_read && single_block {
             FetchTask::Inline(parking_lot::Mutex::new(Box::pin(read)))
         } else {
-            FetchTask::InFlight(AbortOnDropHandle::new(tokio::spawn(read)))
+            FetchTask::InFlight(AbortOnDropHandle::new(spawn_with_optional_subscriber(read)))
         }
     }
 
@@ -1331,7 +1342,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -1487,7 +1498,7 @@ mod tests {
         let existing_keys = [b"k1".as_slice(), b"k3".as_slice()];
         let sst_handle = build_single_block_sst(&table_store, &existing_keys).await;
 
-        let read_trace = ReadTrace::new(None);
+        let read_trace = ReadTrace::none();
         let filters = table_store
             .read_filters(&sst_handle.sst, true, Some(Bytes::new()), &read_trace, None)
             .await
@@ -1812,7 +1823,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -2735,7 +2746,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -2940,7 +2951,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -3092,7 +3103,7 @@ mod tests {
                 &sst_handle,
                 true,
                 Some(Bytes::new()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -3507,7 +3518,7 @@ mod tests {
             &[abstaining_filter(), context_parity_filter(0)],
             SsTableId::new(Ulid::new()),
             None,
-            &ReadTrace::new(None),
+            &ReadTrace::none(),
         );
 
         assert!(evaluator.is_filtered_out());
@@ -3526,7 +3537,7 @@ mod tests {
             &[abstaining_filter(), context_parity_filter(0)],
             SsTableId::new(Ulid::new()),
             None,
-            &ReadTrace::new(None),
+            &ReadTrace::none(),
         );
         assert!(!evaluator.is_filtered_out());
 
@@ -3550,7 +3561,7 @@ mod tests {
             &[context_parity_filter(0)],
             SsTableId::new(Ulid::new()),
             None,
-            &ReadTrace::new(None),
+            &ReadTrace::none(),
         );
         evaluator.notify_finished_iteration();
 
@@ -3593,7 +3604,7 @@ mod tests {
             ))],
             SsTableId::new(Ulid::new()),
             None,
-            &ReadTrace::new(None),
+            &ReadTrace::none(),
         );
 
         assert!(!evaluator.is_filtered_out());

@@ -310,6 +310,7 @@ pub struct Compactor {
     table_store: Arc<TableStore>,
     options: Arc<CompactorOptions>,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    expected_epoch: Option<u64>,
     task_executor: Arc<MessageHandlerExecutor>,
     compactor_runtime: Handle,
     rand: Arc<DbRand>,
@@ -330,6 +331,7 @@ impl Compactor {
         table_store: Arc<TableStore>,
         options: CompactorOptions,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+        expected_epoch: Option<u64>,
         compactor_runtime: Handle,
         rand: Arc<DbRand>,
         recorder: &MetricsRecorderHelper,
@@ -352,6 +354,7 @@ impl Compactor {
             table_store,
             options: Arc::new(options),
             scheduler_supplier,
+            expected_epoch,
             task_executor,
             compactor_runtime,
             rand,
@@ -392,6 +395,7 @@ impl Compactor {
             self.stats.clone(),
             self.system_clock.clone(),
             self.recorder.clone(),
+            self.expected_epoch,
         )
         .await?;
         self.task_executor
@@ -583,6 +587,7 @@ impl CompactorEventHandler {
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
         recorder: MetricsRecorderHelper,
+        expected_epoch: Option<u64>,
     ) -> Result<Self, SlateDBError> {
         let state_writer = CompactorStateWriter::new(
             manifest_store,
@@ -590,6 +595,7 @@ impl CompactorEventHandler {
             system_clock.clone(),
             options.as_ref(),
             rand.clone(),
+            expected_epoch,
         )
         .await?;
         let compactor_epoch = state_writer.state.manifest().value.compactor_epoch;
@@ -706,8 +712,12 @@ impl CompactorEventHandler {
     ) -> Option<u64> {
         let tree = db_state.tree_for_segment(compaction.spec().segment())?;
 
-        let views_by_id: HashMap<Ulid, &SsTableView> =
-            tree.l0.iter().map(|view| (view.id, view)).collect();
+        let l0_bytes: u64 = compaction
+            .get_l0_sst_views(db_state)
+            .ok()?
+            .iter()
+            .map(SsTableView::estimate_visible_size)
+            .sum();
         let srs_by_id: HashMap<u32, &SortedRun> =
             tree.compacted.iter().map(|sr| (sr.id, sr)).collect();
 
@@ -715,12 +725,9 @@ impl CompactorEventHandler {
             .spec()
             .sources()
             .iter()
-            .try_fold(0, |total, source| {
-                let source_bytes = match source {
-                    SourceId::SstView(id) => views_by_id.get(id)?.estimate_visible_size(),
-                    SourceId::SortedRun(id) => srs_by_id.get(id)?.estimate_visible_size(),
-                };
-                Some(total + source_bytes)
+            .filter_map(SourceId::maybe_unwrap_sorted_run)
+            .try_fold(l0_bytes, |total, id| {
+                Some(total + srs_by_id.get(&id)?.estimate_visible_size())
             })
     }
 
@@ -972,7 +979,8 @@ impl CompactorEventHandler {
             );
             return Err(SlateDBError::InvalidCompaction);
         };
-        let l0_view_ids = tree.l0.iter().map(|view| view.id).collect::<HashSet<_>>();
+        // Reject missing or ambiguous L0 sources before execution and before commit.
+        compaction.get_l0_sst_views(db_state)?;
         let sr_ids = tree
             .compacted
             .iter()
@@ -980,7 +988,7 @@ impl CompactorEventHandler {
             .collect::<HashSet<_>>();
 
         if let Some(missing) = spec.sources().iter().find(|source| match source {
-            SourceId::SstView(id) => !l0_view_ids.contains(id),
+            SourceId::SstView(_) => false,
             SourceId::SortedRun(id) => !sr_ids.contains(id),
         }) {
             debug!("compaction source missing from db state: {:?}", missing);
@@ -1514,10 +1522,11 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::iter::RowEntryIterator;
-    use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::{LsmTreeState, Manifest, ManifestCore, Segment, VersionedManifest};
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
     use crate::proptest_util::rng;
+    use crate::read_trace::ReadTrace;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::{
@@ -1664,6 +1673,39 @@ mod tests {
             result.extend_from_slice(&value);
             Ok(Bytes::from(result))
         }
+    }
+
+    #[tokio::test]
+    async fn test_compactor_run_honors_expected_epoch() {
+        let os = Arc::new(InMemory::new());
+        let (manifest_store, _, _) = build_test_stores(os.clone());
+        let clock = Arc::new(DefaultSystemClock::new());
+        let initial = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
+        let _owner =
+            FenceableManifest::init_compactor(initial, Duration::from_secs(5), clock, None)
+                .await
+                .unwrap();
+        let before = manifest_store.read_latest_manifest().await.unwrap();
+        let compactor = CompactorBuilder::new(PATH, os)
+            .with_expected_epoch(0)
+            .build();
+
+        let error = tokio::time::timeout(Duration::from_secs(5), compactor.run())
+            .await
+            .unwrap()
+            .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            crate::ErrorKind::Closed(crate::CloseReason::Fenced)
+        );
+        assert_eq!(manifest_store.read_latest_manifest().await.unwrap(), before);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1874,7 +1916,7 @@ mod tests {
                 &view.sst,
                 false,
                 Some(Bytes::new()),
-                &crate::reader::ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
@@ -3979,6 +4021,37 @@ mod tests {
         assert_eq!(actual, None);
     }
 
+    #[rstest::rstest]
+    #[case::ambiguous_view(true)]
+    #[case::repeated_source(false)]
+    fn test_calculate_estimated_source_bytes_rejects_duplicate_l0_ids(
+        #[case] duplicate_view: bool,
+    ) {
+        let view = SsTableView::identity(SsTableHandle::new(
+            SsTableId::new(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo {
+                index_offset: 100,
+                ..SsTableInfo::default()
+            },
+        ));
+        let mut core = ManifestCore::new();
+        let tree = Arc::make_mut(&mut core.tree);
+        tree.l0.push_back(view.clone());
+        let mut sources = vec![SourceId::SstView(view.id)];
+        if duplicate_view {
+            tree.l0.push_back(view);
+        } else {
+            sources.push(SourceId::SstView(view.id));
+        }
+        let compaction = Compaction::new(Ulid::new(), CompactionSpec::new(sources, 1));
+
+        assert_eq!(
+            CompactorEventHandler::calculate_estimated_source_bytes(&compaction, &core),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn test_should_track_per_job_throughput() {
         let start_time_ms = 1000u64;
@@ -4788,6 +4861,7 @@ mod tests {
                 compactor_stats.clone(),
                 Arc::new(DefaultSystemClock::new()),
                 MetricsRecorderHelper::noop(),
+                None,
             )
             .await
             .unwrap();
@@ -4860,6 +4934,7 @@ mod tests {
                 compactor_stats.clone(),
                 system_clock.clone(),
                 recorder.clone(),
+                None,
             )
             .await
             .unwrap();
@@ -4938,7 +5013,7 @@ mod tests {
             let scheduled = self.get_scheduled_compactions().await;
             for compaction in scheduled {
                 let destination = compaction.spec().destination().expect("tiered spec");
-                let l0_sst_views = compaction.get_l0_sst_views(db_state);
+                let l0_sst_views = compaction.get_l0_sst_views(db_state).unwrap();
                 let sorted_runs = compaction.get_sorted_runs(db_state);
                 let is_dest_last_run = match db_state.tree_for_segment(compaction.spec().segment())
                 {
@@ -5721,6 +5796,7 @@ mod tests {
             compactor_stats,
             system_clock,
             recorder,
+            None,
         )
         .await
         .unwrap();
@@ -5916,6 +5992,33 @@ mod tests {
             .validate_compaction(&Compaction::new(Ulid::new(), c))
             .unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    #[tokio::test]
+    async fn test_union_duplicate_l0_source_rejected_before_execution_and_commit() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.write_l0().await;
+        fixture.handler.handle_ticker().await.unwrap();
+        let spec = fixture.build_l0_compaction().await;
+        let manifest = fixture.handler.state_mut().manifest_mut_for_test();
+        let tree = Arc::make_mut(&mut manifest.value.core.tree);
+        tree.l0.push_back(tree.l0[0].clone());
+
+        // The spec names the ID only once, but two views carry that ID.
+        for status in [CompactionStatus::Submitted, CompactionStatus::Compacted] {
+            let compaction = Compaction::new(Ulid::new(), spec.clone()).with_status(status);
+            assert!(matches!(
+                fixture.handler.validate_compaction(&compaction),
+                Err(SlateDBError::InvalidCompaction)
+            ));
+            assert!(compaction
+                .get_l0_sst_views(fixture.handler.state().db_state())
+                .is_err());
+            assert!(compaction
+                .trivial_move_output(fixture.handler.state().db_state())
+                .is_none());
+        }
+        fixture.db.close().await.unwrap();
     }
 
     #[tokio::test]

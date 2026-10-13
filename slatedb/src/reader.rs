@@ -3,13 +3,13 @@ use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions, TracingOptions};
 use crate::db_iter::{apply_filters, DbRecencyIterator};
-use crate::db_state::SsTableId;
 use crate::db_stats::DbStats;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::manifest::{ManifestCore, Segment};
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
+use crate::read_trace::{ReadTrace, SstTraceLevel};
 use crate::segment_iterator::{build_segment_iter, SegmentScanContext};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstTracingContext};
@@ -36,129 +36,6 @@ struct IteratorSources {
     /// `SegmentRangeIterator`); the top-level scan path treats the
     /// chain as one merge arm alongside `mem_iters` and `write_batch_iter`.
     segment_iter: Box<dyn RowEntryIterator + 'static>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct ReadTrace {
-    tracing_options: Option<TracingOptions>,
-    read_span: tracing::Span,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum SstTraceLevel {
-    L0,
-    SortedRun(u32),
-}
-
-impl SstTraceLevel {
-    fn span_value(&self) -> String {
-        match self {
-            Self::L0 => "l0".to_string(),
-            Self::SortedRun(id) => format!("sorted_run:{id}"),
-        }
-    }
-}
-
-impl ReadTrace {
-    pub(crate) fn new(tracing_options: Option<TracingOptions>) -> Self {
-        let read_span = tracing_options
-            .as_ref()
-            .map(|tracing_options| {
-                tracing::info_span!("slatedb.read", trace_id = tracing_options.trace_id.as_str(),)
-            })
-            .unwrap_or_else(tracing::Span::none);
-        Self {
-            tracing_options,
-            read_span,
-        }
-    }
-
-    pub(crate) fn read_span(&self) -> tracing::Span {
-        self.read_span.clone()
-    }
-
-    pub(crate) fn new_memtable_span(&self) -> tracing::Span {
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
-            tracing::debug_span!(
-                parent: &self.read_span,
-                "slatedb.read.memtable",
-                trace_id = tracing_options.trace_id.as_str(),
-            )
-        } else {
-            tracing::Span::none()
-        }
-    }
-
-    fn format_sst_level(sst_level: Option<&SstTraceLevel>) -> String {
-        sst_level
-            .map(SstTraceLevel::span_value)
-            .unwrap_or_else(|| "unknown".to_string())
-    }
-
-    pub(crate) fn new_read_filter_span(
-        &self,
-        sst_id: SsTableId,
-        sst_level: Option<&SstTraceLevel>,
-    ) -> tracing::Span {
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
-            let sst_id = sst_id.value().to_string();
-            let sst_level = Self::format_sst_level(sst_level);
-            tracing::info_span!(
-                parent: &self.read_span,
-                "slatedb.read.read_filters",
-                trace_id = tracing_options.trace_id.as_str(),
-                sst_id = sst_id.as_str(),
-                sst_level = sst_level.as_str(),
-                cached = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::none()
-        }
-    }
-
-    pub(crate) fn new_evaluate_filter_span(
-        &self,
-        sst_id: SsTableId,
-        sst_level: Option<&SstTraceLevel>,
-        filter_name: impl AsRef<str>,
-    ) -> tracing::Span {
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
-            let sst_id = sst_id.value().to_string();
-            let sst_level = Self::format_sst_level(sst_level);
-            tracing::info_span!(
-                parent: &self.read_span,
-                "slatedb.read.evaluate_filter",
-                trace_id = tracing_options.trace_id.as_str(),
-                sst_id = sst_id.as_str(),
-                sst_level = sst_level.as_str(),
-                filter_name = filter_name.as_ref(),
-                result = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::none()
-        }
-    }
-
-    pub(crate) fn new_read_index_span(
-        &self,
-        sst_id: SsTableId,
-        sst_level: Option<&SstTraceLevel>,
-    ) -> tracing::Span {
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
-            let sst_id = sst_id.value().to_string();
-            let sst_level = Self::format_sst_level(sst_level);
-            tracing::info_span!(
-                parent: &self.read_span,
-                "slatedb.read.read_index",
-                trace_id = tracing_options.trace_id.as_str(),
-                sst_id = sst_id.as_str(),
-                sst_level = sst_level.as_str(),
-                cached = tracing::field::Empty,
-            )
-        } else {
-            tracing::Span::none()
-        }
-    }
 }
 
 /// Context for [`Reader::scan_with_options`].
@@ -2011,20 +1888,30 @@ mod tests {
         )
     }
 
-    fn build_span_test_reader() -> (TestDbState, Reader) {
+    fn build_span_test_reader(include_merge_operands: bool) -> (TestDbState, Reader) {
         let mut test_db_state = tokio_test::block_on(TestDbState::new());
-        test_db_state.add_to_memtable(vec![
-            TestEntry::value(b"memtable-key", b"other-value", 1).to_row_entry()
-        ]);
+        let mut memtable_entries =
+            vec![TestEntry::value(b"memtable-key", b"memtable-value1", 1).to_row_entry()];
+        if include_merge_operands {
+            memtable_entries.extend([
+                TestEntry::merge(b"sst-key", b"memtable-value2", 52).to_row_entry(),
+                TestEntry::merge(b"sst-key", b"memtable-value3", 51).to_row_entry(),
+            ]);
+        }
+        test_db_state.add_to_memtable(memtable_entries);
         tokio_test::block_on(test_db_state.add_to_sorted_run(
             0,
-            vec![TestEntry::value(b"sst-key", b"value1", 50).to_row_entry()],
+            vec![TestEntry::value(b"sst-key", b"sst-value1", 50).to_row_entry()],
         ))
         .unwrap();
 
         let recorder = MetricsRecorderHelper::noop();
         let db_stats = DbStats::new(&recorder);
-        let reader = tokio_test::block_on(build_reader(&test_db_state, db_stats, false));
+        let reader = tokio_test::block_on(build_reader(
+            &test_db_state,
+            db_stats,
+            include_merge_operands,
+        ));
 
         (test_db_state, reader)
     }
@@ -2042,28 +1929,31 @@ mod tests {
         );
     }
 
-    fn assert_recorded_read_child_span(
+    fn assert_recorded_read_child_spans(
         recorder: &SpanRecorder,
         name: &str,
         trace_id: &str,
-    ) -> RecordedSpan {
-        let spans = recorder.spans();
-        let span = spans
-            .iter()
-            .find(|span| span.name == name)
-            .unwrap_or_else(|| panic!("missing {name} span"));
+    ) -> Vec<RecordedSpan> {
+        let spans = recorder
+            .spans()
+            .into_iter()
+            .filter(|span| span.name == name)
+            .collect::<Vec<_>>();
+        assert!(!spans.is_empty(), "missing {name} span");
         let expected_level = if name == "slatedb.read.memtable" {
             "DEBUG"
         } else {
             "INFO"
         };
-        assert_eq!(span.level, expected_level);
-        assert_eq!(span.parent_name.as_deref(), Some("slatedb.read"));
-        assert_eq!(
-            span.fields.get("trace_id").map(String::as_str),
-            Some(trace_id)
-        );
-        span.clone()
+        for span in &spans {
+            assert_eq!(span.level, expected_level);
+            assert_eq!(span.parent_name.as_deref(), Some("slatedb.read"));
+            assert_eq!(
+                span.fields.get("trace_id").map(String::as_str),
+                Some(trace_id)
+            );
+        }
+        spans
     }
 
     fn sorted_run_sst_id(test_db_state: &TestDbState, sorted_run_id: u32) -> String {
@@ -2079,11 +1969,18 @@ mod tests {
         sst_id.value().to_string()
     }
 
-    fn assert_recorded_read_spans(recorder: &SpanRecorder, trace_id: &str, expected_sst_id: &str) {
+    fn assert_recorded_read_spans(
+        recorder: &SpanRecorder,
+        trace_id: &str,
+        expected_sst_id: &str,
+        expected_merge_operands: Option<&[usize]>,
+    ) {
         assert_recorded_read_span(recorder, trace_id);
-        assert_recorded_read_child_span(recorder, "slatedb.read.memtable", trace_id);
-        let read_filter =
-            assert_recorded_read_child_span(recorder, "slatedb.read.read_filters", trace_id);
+        assert_recorded_read_child_spans(recorder, "slatedb.read.memtable", trace_id);
+        let read_filters =
+            assert_recorded_read_child_spans(recorder, "slatedb.read.read_filters", trace_id);
+        assert_eq!(read_filters.len(), 1);
+        let read_filter = &read_filters[0];
         assert_eq!(
             read_filter.fields.get("sst_id").map(String::as_str),
             Some(expected_sst_id)
@@ -2097,8 +1994,10 @@ mod tests {
             Some("false")
         );
 
-        let evaluate_filter =
-            assert_recorded_read_child_span(recorder, "slatedb.read.evaluate_filter", trace_id);
+        let evaluate_filters =
+            assert_recorded_read_child_spans(recorder, "slatedb.read.evaluate_filter", trace_id);
+        assert_eq!(evaluate_filters.len(), 1);
+        let evaluate_filter = &evaluate_filters[0];
         assert_eq!(
             evaluate_filter.fields.get("sst_id").map(String::as_str),
             Some(expected_sst_id)
@@ -2119,8 +2018,10 @@ mod tests {
             Some("true")
         );
 
-        let read_index =
-            assert_recorded_read_child_span(recorder, "slatedb.read.read_index", trace_id);
+        let read_indexes =
+            assert_recorded_read_child_spans(recorder, "slatedb.read.read_index", trace_id);
+        assert_eq!(read_indexes.len(), 1);
+        let read_index = &read_indexes[0];
         assert_eq!(
             read_index.fields.get("sst_id").map(String::as_str),
             Some(expected_sst_id)
@@ -2133,15 +2034,62 @@ mod tests {
             read_index.fields.get("cached").map(String::as_str),
             Some("false")
         );
+
+        let read_blocks =
+            assert_recorded_read_child_spans(recorder, "slatedb.read.read_blocks", trace_id);
+        assert_eq!(read_blocks.len(), 1);
+        let read_blocks = &read_blocks[0];
+        assert_eq!(
+            read_blocks.fields.get("sst_id").map(String::as_str),
+            Some(expected_sst_id)
+        );
+        assert_eq!(
+            read_blocks.fields.get("sst_level").map(String::as_str),
+            Some("sorted_run:0")
+        );
+        assert_eq!(
+            read_blocks.fields.get("cache_hits").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            read_blocks.fields.get("cache_misses").map(String::as_str),
+            Some("1")
+        );
+
+        if let Some(expected_merge_operands) = expected_merge_operands {
+            let merge_spans =
+                assert_recorded_read_child_spans(recorder, "slatedb.read.merge", trace_id);
+            assert_eq!(
+                merge_spans
+                    .iter()
+                    .map(|span| {
+                        span.fields
+                            .get("num_operands")
+                            .expect("merge span must contain num_operands")
+                            .parse::<usize>()
+                            .expect("num_operands must be a number")
+                    })
+                    .collect::<Vec<_>>(),
+                expected_merge_operands
+            );
+        } else {
+            let spans = recorder.spans();
+            assert!(
+                spans.iter().all(|span| span.name != "slatedb.read.merge"),
+                "slatedb.read.merge span should not be recorded: {spans:?}"
+            );
+        }
     }
 
     fn assert_no_read_spans(recorder: &SpanRecorder) {
-        const READ_SPAN_NAMES: [&str; 5] = [
+        const READ_SPAN_NAMES: [&str; 7] = [
             "slatedb.read",
             "slatedb.read.memtable",
             "slatedb.read.read_filters",
             "slatedb.read.evaluate_filter",
             "slatedb.read.read_index",
+            "slatedb.read.read_blocks",
+            "slatedb.read.merge",
         ];
         let spans = recorder.spans();
         assert!(
@@ -2154,7 +2102,7 @@ mod tests {
 
     #[test]
     fn should_record_read_spans_for_get_with_tracing_options() -> Result<(), SlateDBError> {
-        let (test_db_state, reader) = build_span_test_reader();
+        let (test_db_state, reader) = build_span_test_reader(true);
         let span_recorder = SpanRecorder::default();
         let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
         let trace_id = "get-trace";
@@ -2162,65 +2110,84 @@ mod tests {
             ReadOptions::default().with_tracing_options(Some(TracingOptions::new(trace_id)));
 
         let result = tracing::subscriber::with_default(subscriber, || {
-            tokio_test::block_on(reader.get_key_value_with_options(
-                b"sst-key",
-                &read_options,
-                &test_db_state,
-                None,
-                None,
-            ))
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(reader.get_key_value_with_options(
+                    b"sst-key",
+                    &read_options,
+                    &test_db_state,
+                    None,
+                    None,
+                ))
         })?;
 
         assert_eq!(
             result.map(|kv| kv.value),
-            Some(Bytes::from_static(b"value1"))
+            Some(Bytes::from_static(
+                b"sst-value1memtable-value3memtable-value2"
+            ))
         );
         let expected_sst_id = sorted_run_sst_id(&test_db_state, 0);
-        assert_recorded_read_spans(&span_recorder, trace_id, &expected_sst_id);
+        assert_recorded_read_spans(&span_recorder, trace_id, &expected_sst_id, Some(&[2, 2]));
         Ok(())
     }
 
-    #[test]
-    fn should_record_read_spans_for_scan_with_tracing_options() -> Result<(), SlateDBError> {
-        let (test_db_state, reader) = build_span_test_reader();
+    #[rstest]
+    #[case::ascending(IterationOrder::Ascending)]
+    #[case::descending(IterationOrder::Descending)]
+    fn should_record_read_spans_for_scan_with_tracing_options(
+        #[case] order: IterationOrder,
+    ) -> Result<(), SlateDBError> {
+        let (test_db_state, reader) = build_span_test_reader(true);
         let span_recorder = SpanRecorder::default();
         let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
         let trace_id = "scan-trace";
-        let scan_options =
-            ScanOptions::default().with_tracing_options(Some(TracingOptions::new(trace_id)));
+        let scan_options = ScanOptions::default()
+            .with_order(order)
+            .with_tracing_options(Some(TracingOptions::new(trace_id)));
         let range = BytesRange::from_slice(b"sst-key".as_slice()..=b"sst-key".as_slice());
 
         tracing::subscriber::with_default(subscriber, || {
-            tokio_test::block_on(async {
-                let mut iter = reader
-                    .scan_with_options(
-                        range.clone(),
-                        &scan_options,
-                        ScanContext {
-                            db_state: &test_db_state,
-                            write_batch_iter: None,
-                            max_seq: None,
-                            prefix: None,
-                        },
-                    )
-                    .await?;
-                assert_eq!(
-                    iter.next_entry().await?.map(|entry| entry.value),
-                    Some(ValueDeletable::Value(Bytes::from_static(b"value1")))
-                );
-                Ok::<_, SlateDBError>(())
-            })
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let mut iter = reader
+                        .scan_with_options(
+                            range.clone(),
+                            &scan_options,
+                            ScanContext {
+                                db_state: &test_db_state,
+                                write_batch_iter: None,
+                                max_seq: None,
+                                prefix: None,
+                            },
+                        )
+                        .await?;
+                    assert_eq!(
+                        iter.next_entry().await?.map(|entry| entry.value),
+                        Some(ValueDeletable::Value(Bytes::from_static(
+                            b"sst-value1memtable-value3memtable-value2"
+                        )))
+                    );
+                    Ok::<_, SlateDBError>(())
+                })
         })?;
 
         let expected_sst_id = sorted_run_sst_id(&test_db_state, 0);
-        assert_recorded_read_spans(&span_recorder, trace_id, &expected_sst_id);
+        assert_recorded_read_spans(&span_recorder, trace_id, &expected_sst_id, Some(&[2, 2]));
         Ok(())
     }
 
     #[test]
     fn should_record_read_spans_for_recency_scan_with_tracing_options() -> Result<(), SlateDBError>
     {
-        let (test_db_state, reader) = build_span_test_reader();
+        let (test_db_state, reader) = build_span_test_reader(false);
         let span_recorder = SpanRecorder::default();
         let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
         let trace_id = "recency-scan-trace";
@@ -2241,14 +2208,14 @@ mod tests {
                         .await
                         .expect("recency scan next should succeed")
                         .map(|entry| entry.value),
-                    Some(ValueDeletable::Value(Bytes::from_static(b"value1")))
+                    Some(ValueDeletable::Value(Bytes::from_static(b"sst-value1")))
                 );
                 Ok::<_, SlateDBError>(())
             })
         })?;
 
         let expected_sst_id = sorted_run_sst_id(&test_db_state, 0);
-        assert_recorded_read_spans(&span_recorder, trace_id, &expected_sst_id);
+        assert_recorded_read_spans(&span_recorder, trace_id, &expected_sst_id, None);
         Ok(())
     }
 
@@ -2286,7 +2253,7 @@ mod tests {
 
     #[test]
     fn should_not_record_read_spans_for_scan_without_tracing_options() -> Result<(), SlateDBError> {
-        let (test_db_state, reader) = build_span_test_reader();
+        let (test_db_state, reader) = build_span_test_reader(true);
         let span_recorder = SpanRecorder::default();
         let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
         let scan_options = ScanOptions::default();
@@ -2308,7 +2275,9 @@ mod tests {
                     .await?;
                 assert_eq!(
                     iter.next_entry().await?.map(|entry| entry.value),
-                    Some(ValueDeletable::Value(Bytes::from_static(b"value1")))
+                    Some(ValueDeletable::Value(Bytes::from_static(
+                        b"sst-value1memtable-value3memtable-value2"
+                    )))
                 );
                 Ok::<_, SlateDBError>(())
             })
@@ -2321,7 +2290,7 @@ mod tests {
     #[test]
     fn should_not_record_read_spans_for_recency_scan_without_tracing_options(
     ) -> Result<(), SlateDBError> {
-        let (test_db_state, reader) = build_span_test_reader();
+        let (test_db_state, reader) = build_span_test_reader(false);
         let span_recorder = SpanRecorder::default();
         let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
         let scan_options = ScanOptions::default();
@@ -2340,7 +2309,7 @@ mod tests {
                         .await
                         .expect("recency scan next should succeed")
                         .map(|entry| entry.value),
-                    Some(ValueDeletable::Value(Bytes::from_static(b"value1")))
+                    Some(ValueDeletable::Value(Bytes::from_static(b"sst-value1")))
                 );
                 Ok::<_, SlateDBError>(())
             })

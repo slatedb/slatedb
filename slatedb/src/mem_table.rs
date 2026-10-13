@@ -18,7 +18,7 @@ use crate::db_common::extract_segment_prefix;
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::prefix_extractor::PrefixExtractor;
-use crate::reader::ReadTrace;
+use crate::read_trace::ReadTrace;
 use crate::seq_tracker::{SequenceTracker, TrackedSeq};
 use crate::types::RowEntry;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
@@ -504,7 +504,7 @@ impl KVTable {
     }
 
     pub(crate) fn range_ascending<T: RangeBounds<Bytes>>(&self, range: T) -> MemTableIterator {
-        self.range(range, IterationOrder::Ascending, ReadTrace::new(None))
+        self.range(range, IterationOrder::Ascending, ReadTrace::none())
     }
 
     pub(crate) fn range<T: RangeBounds<Bytes>>(
@@ -869,7 +869,7 @@ mod tests {
                     let mut kv_iter =
                         kv_table
                             .table
-                            .range(range.clone(), ordering, ReadTrace::new(None));
+                            .range(range.clone(), ordering, ReadTrace::none());
 
                     runtime.block_on(test_utils::assert_ranged_kv_scan(
                         &sample_table,
@@ -1087,7 +1087,7 @@ mod tests {
 
         let mut iter = table
             .table()
-            .range(.., IterationOrder::Descending, ReadTrace::new(None));
+            .range(.., IterationOrder::Descending, ReadTrace::none());
 
         // In descending order, for key "bbbb" the newest version (seq 2) must
         // come before the older version (seq 1) so that dedup works correctly.

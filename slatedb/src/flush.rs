@@ -7,6 +7,7 @@ use crate::iter::RowEntryIterator;
 use crate::mem_table::KVTable;
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorRequiredIterator};
 use crate::oracle::Oracle;
+use crate::read_trace::ReadTrace;
 use crate::reader::DbStateReader;
 use crate::retention_iterator::RetentionIterator;
 use crate::tablestore::EncodedSsTableWriter;
@@ -305,6 +306,7 @@ impl DbInner {
                 imm_table.iter(),
                 false,
                 min_retention_seq,
+                ReadTrace::none(),
             ))
         } else {
             Box::new(MergeOperatorRequiredIterator::new(imm_table.iter()))
@@ -337,6 +339,7 @@ mod tests {
     use crate::mem_table::WritableKVTable;
     use crate::merge_operator::{MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH};
     use crate::object_store::memory::InMemory;
+    use crate::read_trace::ReadTrace;
     use crate::test_utils::{
         lookup_merge_operator_operands, FixedThreeBytePrefixExtractor, StringConcatMergeOperator,
     };
@@ -383,7 +386,7 @@ mod tests {
                 sst_handle,
                 true,
                 Some(Bytes::new()),
-                &crate::reader::ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await
