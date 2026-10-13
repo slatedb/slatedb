@@ -688,10 +688,14 @@ mod tests {
             .await
             .unwrap(),
         );
-        let manifest =
-            FenceableManifest::init_writer(stored_manifest, Duration::from_secs(300), system_clock)
-                .await
-                .unwrap();
+        let manifest = FenceableManifest::init_writer(
+            stored_manifest,
+            Duration::from_secs(300),
+            system_clock,
+            None,
+        )
+        .await
+        .unwrap();
         TestHarness {
             inner,
             manifest,
@@ -1114,6 +1118,7 @@ mod tests {
                 stored_manifest,
                 Duration::from_secs(300),
                 Arc::new(DefaultSystemClock::new()),
+                None,
             )
             .await
             .unwrap()

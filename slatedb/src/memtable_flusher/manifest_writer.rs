@@ -1703,6 +1703,7 @@ mod tests {
             stored_manifest,
             Duration::from_secs(300),
             Arc::new(DefaultSystemClock::new()),
+            None,
         )
         .await
         .unwrap();
@@ -1728,6 +1729,7 @@ mod tests {
             stored_manifest,
             Duration::from_secs(300),
             Arc::new(DefaultSystemClock::new()),
+            None,
         )
         .await
         .unwrap()

@@ -60,7 +60,7 @@ use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::iter::IterationOrder;
 use crate::partitioned_keyspace::{partition_point, RangePartitionedKeySpace};
-use crate::reader::ReadTrace;
+use crate::read_trace::ReadTrace;
 use crate::sst_stats::SstStats;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::types::RowEntry;
