@@ -462,7 +462,7 @@ impl ManifestWriterHandler {
     fn durable_checkpoint_cursor(&self) -> Result<CheckpointCursor, SlateDBError> {
         if !self.db.wal_enabled {
             return Ok(CheckpointCursor {
-                seq: self.db.oracle.last_remote_persisted_seq(),
+                seq: self.db.state.read().state().core().last_l0_seq,
                 wal_file: None,
             });
         }

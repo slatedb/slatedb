@@ -749,6 +749,66 @@ mod tests {
         db.close().await.unwrap();
     }
 
+    #[tokio::test]
+    #[cfg(feature = "wal_disable")]
+    async fn test_durable_checkpoint_after_wal_replay_with_wal_disabled() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_durable_checkpoint_after_wal_replay_with_wal_disabled");
+        let db = Db::builder(path.clone(), object_store.clone())
+            .build()
+            .await
+            .unwrap();
+        db.put(b"replayed", b"v1").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+        db.close_with_options(crate::config::CloseOptions { flush_type: None })
+            .await
+            .unwrap();
+
+        let db = Db::builder(path.clone(), object_store.clone())
+            .with_settings(Settings {
+                wal_enabled: false,
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        db.put(b"later", b"v2").await.unwrap();
+        let handle = db
+            .begin_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            }),
+        )
+        .await
+        .expect("memtable flush did not finish")
+        .unwrap();
+        let checkpoint = tokio::time::timeout(Duration::from_secs(5), handle.wait())
+            .await
+            .expect("checkpoint did not finish")
+            .unwrap();
+
+        let reader = DbReader::builder(path, object_store)
+            .with_reader_mode(DbReaderMode::Checkpoint(checkpoint.id))
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(
+            reader.get(b"replayed").await.unwrap(),
+            Some(Bytes::from_static(b"v1"))
+        );
+        assert_eq!(reader.get(b"later").await.unwrap(), None);
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_begin_checkpoint_keeps_its_wal_bound() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
