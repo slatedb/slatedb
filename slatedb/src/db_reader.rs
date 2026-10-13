@@ -860,7 +860,101 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
     }
 }
 
+/// A read view of a [`DbReader`]: the manifest and the replayed WAL that the
+/// reader held when the view was taken.
+///
+/// Later polls and refreshes of the reader do not change the view. The view
+/// creates no checkpoint, so it does not protect the objects it reads from
+/// garbage collection beyond what the reader's mode does: in
+/// [`DbReaderMode::ManagedCheckpoint`], until the reader replaces its
+/// checkpoint; in [`DbReaderMode::FollowLatest`], not at all. After the reader
+/// closes, reads through the view return an error.
+pub struct DbReaderSnapshot {
+    inner: Arc<DbReaderInner>,
+    state: Arc<ReaderState>,
+}
+
+impl DbReaderSnapshot {
+    pub async fn get<K: AsRef<[u8]> + Send>(&self, key: K) -> Result<Option<Bytes>, crate::Error> {
+        self.inner.check_closed()?;
+        self.inner
+            .reader
+            .get_key_value_with_options(
+                key,
+                &ReadOptions::default(),
+                self.state.as_ref(),
+                None,
+                None,
+            )
+            .await
+            .map(|row| row.map(|row| row.value))
+            .map_err(Into::into)
+    }
+
+    pub async fn scan_with_options<T>(
+        &self,
+        range: T,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        T: ByteRangeBounds + Send,
+    {
+        let start = range.start_bound().map(Bytes::copy_from_slice);
+        let end = range.end_bound().map(Bytes::copy_from_slice);
+        self.scan_inner(BytesRange::from((start, end)), options, None)
+            .await
+    }
+
+    pub async fn scan_prefix_with_options<P, T>(
+        &self,
+        prefix: P,
+        subrange: T,
+        options: &ScanOptions,
+    ) -> Result<DbIterator, crate::Error>
+    where
+        P: AsRef<[u8]> + Send,
+        T: ByteRangeBounds + Send,
+    {
+        let prefix = Bytes::copy_from_slice(prefix.as_ref());
+        let range = BytesRange::from_prefix_and_subrange(prefix.as_ref(), subrange);
+        self.scan_inner(range, options, Some(prefix)).await
+    }
+
+    async fn scan_inner(
+        &self,
+        range: BytesRange,
+        options: &ScanOptions,
+        prefix: Option<Bytes>,
+    ) -> Result<DbIterator, crate::Error> {
+        self.inner.check_closed()?;
+        self.inner
+            .reader
+            .scan_with_options(
+                range,
+                options,
+                ScanContext {
+                    db_state: self.state.as_ref(),
+                    write_batch_iter: None,
+                    max_seq: None,
+                    prefix,
+                },
+            )
+            .await
+            .map_err(Into::into)
+    }
+}
+
 impl DbReader {
+    /// Returns a read view of the reader's current state. See
+    /// [`DbReaderSnapshot`].
+    pub fn snapshot(&self) -> Result<Arc<DbReaderSnapshot>, crate::Error> {
+        self.inner.check_closed()?;
+        Ok(Arc::new(DbReaderSnapshot {
+            inner: Arc::clone(&self.inner),
+            state: Arc::clone(&self.inner.state.read()),
+        }))
+    }
+
     fn validate_options(mode: DbReaderMode, options: &DbReaderOptions) -> Result<(), SlateDBError> {
         if mode != DbReaderMode::ManagedCheckpoint {
             return Ok(());
@@ -3943,6 +4037,206 @@ mod tests {
         rx.changed().await.unwrap();
         assert!(rx.borrow().close_reason.is_some());
 
+        db.close().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reader_snapshot_tests {
+    use super::{DbReader, DbReaderMode, DbReaderOptions};
+    use crate::{
+        config::{FlushOptions, FlushType, ScanOptions},
+        test_utils, Db, WriteBatch,
+    };
+    use bytes::Bytes;
+    use futures::TryStreamExt;
+    use object_store::{memory::InMemory, ObjectStore, ObjectStoreExt};
+    use std::{sync::Arc, time::Duration};
+
+    const POLL: Duration = Duration::from_millis(50);
+
+    async fn wait_for(reader: &DbReader, key: &[u8], value: &[u8]) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while reader.get(key).await.unwrap().as_deref() != Some(value) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the reader did not poll the write");
+    }
+
+    async fn pair(db: &Db, value: &[u8], manifest: bool) {
+        let mut batch = WriteBatch::new();
+        batch.put(b"pair/a", value);
+        batch.put(b"pair/z", value);
+        db.write(batch).await.unwrap();
+        if manifest {
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        } else {
+            db.flush().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn reader_snapshot_holds_wal_and_manifest_state_across_polls() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::open("snapshot-pair", Arc::clone(&object_store))
+            .await
+            .unwrap();
+        pair(&db, b"before", false).await;
+        let recording = Arc::new(test_utils::RecordingObjectStore::new(object_store));
+        let reader = DbReader::builder("snapshot-pair", recording.clone())
+            .with_reader_mode(DbReaderMode::FollowLatest)
+            .with_options(DbReaderOptions {
+                manifest_poll_interval: POLL,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let old = reader.snapshot().unwrap();
+        let held = Arc::downgrade(&reader.inner.state.read());
+        assert_eq!(
+            old.get(b"pair/a").await.unwrap(),
+            Some(Bytes::from_static(b"before"))
+        );
+        pair(&db, b"wal", false).await;
+        wait_for(&reader, b"pair/z", b"wal").await;
+        assert_eq!(
+            old.get(b"pair/z").await.unwrap(),
+            Some(Bytes::from_static(b"before"))
+        );
+        pair(&db, b"manifest", true).await;
+        wait_for(&reader, b"pair/a", b"manifest").await;
+        let mut scan = old
+            .scan_with_options(.., &ScanOptions::default())
+            .await
+            .unwrap();
+        let mut count = 0;
+        while let Some(row) = scan.next().await.unwrap() {
+            assert_eq!(row.value, Bytes::from_static(b"before"));
+            count += 1;
+        }
+        assert_eq!(count, 2);
+        assert!(recording.write_kinds().is_empty());
+        drop(scan);
+        assert!(held.upgrade().is_some());
+        drop(old);
+        assert!(held.upgrade().is_none());
+        reader.close().await.unwrap();
+        assert!(recording.write_kinds().is_empty());
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reader_snapshot_concurrent_gets_and_scans_do_not_mix_polls() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::open("snapshot-concurrent", Arc::clone(&object_store))
+            .await
+            .unwrap();
+        pair(&db, b"zero", true).await;
+        let reader = DbReader::builder("snapshot-concurrent", object_store)
+            .with_reader_mode(DbReaderMode::FollowLatest)
+            .with_options(DbReaderOptions {
+                manifest_poll_interval: POLL,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let old = reader.snapshot().unwrap();
+        let reads = (0..16)
+            .map(|n| {
+                let old = Arc::clone(&old);
+                tokio::spawn(async move {
+                    for _ in 0..8 {
+                        let keys: [&[u8]; 2] = if n % 2 == 0 {
+                            [b"pair/z", b"pair/a"]
+                        } else {
+                            [b"pair/a", b"pair/z"]
+                        };
+                        for key in keys {
+                            assert_eq!(
+                                old.get(key).await.unwrap(),
+                                Some(Bytes::from_static(b"zero"))
+                            );
+                        }
+                        let mut scan = old
+                            .scan_prefix_with_options(b"pair/", .., &ScanOptions::default())
+                            .await
+                            .unwrap();
+                        let mut count = 0;
+                        while let Some(row) = scan.next().await.unwrap() {
+                            assert_eq!(row.value, Bytes::from_static(b"zero"));
+                            count += 1;
+                        }
+                        assert_eq!(count, 2);
+                        tokio::task::yield_now().await;
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for i in 0..4 {
+            let value = format!("next-{i}");
+            pair(&db, value.as_bytes(), i % 2 == 0).await;
+            wait_for(&reader, b"pair/z", value.as_bytes()).await;
+        }
+        for task in reads {
+            task.await.unwrap();
+        }
+        assert_eq!(
+            old.get(b"pair/z").await.unwrap(),
+            Some(Bytes::from_static(b"zero"))
+        );
+        reader.close().await.unwrap();
+        assert!(old.get(b"pair/a").await.is_err());
+        assert!(old
+            .scan_with_options(.., &ScanOptions::default())
+            .await
+            .is_err());
+        drop(old);
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reader_snapshot_missing_object_fails_closed_without_checkpoint() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::open("snapshot-missing", Arc::clone(&object_store))
+            .await
+            .unwrap();
+        pair(&db, b"kept", true).await;
+        let reader = DbReader::builder("snapshot-missing", Arc::clone(&object_store))
+            .with_reader_mode(DbReaderMode::FollowLatest)
+            .with_db_cache_disabled()
+            .with_options(DbReaderOptions {
+                manifest_poll_interval: Duration::from_secs(3600),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let view = reader.snapshot().unwrap();
+        let objects = object_store
+            .list(None)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let mut removed = 0;
+        for object in objects {
+            if object.location.as_ref().ends_with(".sst") {
+                object_store.delete(&object.location).await.unwrap();
+                removed += 1;
+            }
+        }
+        assert!(removed > 0);
+        assert!(view.get(b"pair/a").await.is_err());
+        assert!(reader.manifest().core().checkpoints.is_empty());
+        drop(view);
+        reader.close().await.unwrap();
         db.close().await.unwrap();
     }
 }
