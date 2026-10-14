@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use log::info;
-use rand::RngCore;
+use rand::Rng;
 use slatedb::config::WriteOptions;
 use slatedb::{Error, ErrorKind, IsolationLevel};
 

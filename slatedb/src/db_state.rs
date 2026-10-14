@@ -5,7 +5,7 @@ use crate::manifest::{Manifest, ManifestCore};
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use bytes::Bytes;
-use rand::Rng;
+use rand::RngExt;
 use serde::Serialize;
 use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;

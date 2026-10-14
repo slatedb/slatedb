@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rand::RngCore;
+use rand::Rng;
 use slatedb::config::DbReaderOptions;
 use slatedb::{DbReadOps, DbReader, Error};
 use tracing::{info, instrument};

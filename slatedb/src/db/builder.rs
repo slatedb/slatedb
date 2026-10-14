@@ -111,7 +111,7 @@ use log::info;
 use log::warn;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use rand::RngCore;
+use rand::Rng;
 use tokio::runtime::Handle;
 
 use crate::admin::Admin;

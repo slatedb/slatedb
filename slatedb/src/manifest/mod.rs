@@ -12,7 +12,7 @@ use crate::seq_tracker::SequenceTracker;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
 use log::{debug, warn};
-use rand::Rng;
+use rand::RngExt;
 use serde::Serialize;
 use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;

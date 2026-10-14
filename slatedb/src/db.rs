@@ -12011,7 +12011,7 @@ mod tests {
         };
 
         fn probe_entry() -> CachedEntry {
-            use rand::RngCore;
+            use rand::Rng;
             let mut rng = rand::rng();
             let mut builder = BlockBuilder::new_latest(1024);
             loop {

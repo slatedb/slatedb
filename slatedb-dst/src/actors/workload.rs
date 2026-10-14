@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use bytes::Bytes;
 use log::info;
-use rand::RngCore;
+use rand::Rng;
 use slatedb::config::{DurabilityLevel, MergeOptions, PutOptions, ReadOptions, WriteOptions};
 use slatedb::{Error, IterationOrder, MergeOperator, MergeOperatorError, WriteBatch};
 use tracing::instrument;
@@ -309,7 +309,7 @@ fn workload_key(prefix: &str, rand_value: u64, key_count: usize) -> Bytes {
 
 fn workload_value(
     version: u64,
-    rng: &mut impl RngCore,
+    rng: &mut impl Rng,
     min_value_size: usize,
     max_value_size: usize,
 ) -> Bytes {

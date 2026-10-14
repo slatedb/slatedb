@@ -13,7 +13,7 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use ::rand::RngCore;
+use ::rand::Rng;
 use ::rand::SeedableRng;
 use rand_xoshiro::Xoroshiro128PlusPlus;
 use thread_local::ThreadLocal;
@@ -58,7 +58,7 @@ impl DbRand {
     }
 
     /// Grab this thread’s RNG. Initializes the RNG if it hasn't been initialized yet.
-    pub fn rng(&self) -> std::cell::RefMut<'_, impl RngCore> {
+    pub fn rng(&self) -> std::cell::RefMut<'_, impl Rng> {
         self.thread_rng
             .get_or(|| {
                 let seed = self.seed_counter.fetch_add(1, Ordering::Relaxed);

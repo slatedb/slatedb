@@ -15,7 +15,7 @@ use object_store::{
     ListResult, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions,
     PutOptions, PutPayload, PutResult, RenameOptions,
 };
-use rand::Rng;
+use rand::RngExt;
 
 use crate::utils::IdGenerator;
 use slatedb_common::clock::SystemClock;

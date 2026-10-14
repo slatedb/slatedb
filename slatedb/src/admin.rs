@@ -23,7 +23,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
-use rand::RngCore;
+use rand::Rng;
 use slatedb_common::DbRand;
 use std::env;
 use std::env::VarError;

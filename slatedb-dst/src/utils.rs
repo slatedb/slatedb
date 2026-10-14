@@ -2,7 +2,7 @@ use std::str::FromStr;
 use std::sync::Once;
 use std::time::Duration;
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 use slatedb::config::{
     CompactionWorkerOptions, CompactorOptions, CompressionCodec, DbReaderOptions, DurabilityLevel,
     GarbageCollectorDirectoryOptions, GarbageCollectorOptions, GarbageCollectorScheduleOptions,

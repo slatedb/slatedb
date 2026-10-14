@@ -1491,7 +1491,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use parking_lot::Mutex;
-    use rand::RngCore;
+    use rand::Rng;
     use rstest::rstest;
     use slatedb_common::MockSystemClock;
     use ulid::Ulid;

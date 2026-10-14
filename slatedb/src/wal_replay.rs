@@ -208,7 +208,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use proptest::test_runner::TestRng;
-    use rand::Rng;
+    use rand::RngExt;
     use std::cmp::min;
     use std::collections::btree_map::Iter;
     use std::collections::{BTreeMap, VecDeque};
