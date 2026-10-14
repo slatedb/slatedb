@@ -156,6 +156,7 @@ mod peeking_iterator;
 mod proptest_util;
 mod read_trace;
 mod reader;
+mod reader_snapshot_manager;
 mod retention_iterator;
 mod retrying_object_store;
 mod segment_iterator;
