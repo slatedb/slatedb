@@ -4,19 +4,20 @@
 //! Measures the cost of `DbIterator::seek` when every key is in the memtable.
 //!
 //! The `memtable_seek_by_size` group changes the number of keys in the
-//! memtable. Each iteration opens a full-range scan and seeks to a key near the
-//! end.
+//! memtable. Each iteration seeks a full-range scan to a key near the end.
 //!
 //! The `memtable_seek_by_distance` group keeps the memtable size fixed and
 //! changes the seek distance. The seek distance is the number of keys between
 //! the start of the scan and the seek target. Each distance is 10 times the
 //! distance before it.
 //!
+//! Only the seek is timed. Criterion opens the scans in an untimed setup step.
+//!
 //! Run with: cargo bench -p slatedb --bench memtable_seek
 
 use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, Bencher, BenchmarkId, Criterion};
 use object_store::memory::InMemory;
 use pprof::criterion::{Output, PProfProfiler};
 use slatedb::config::Settings;
@@ -62,17 +63,32 @@ async fn load(n: usize) -> Db {
     db
 }
 
-/// Opens a scan over `range`, seeks to `target`, and makes sure that the next
-/// key is `target`.
-async fn scan_then_seek<T: ByteRangeBounds + Send>(db: &Db, range: T, target: &[u8]) {
-    let mut iter = db.scan(range).await.expect("scan failed");
-    iter.seek(target).await.expect("seek failed");
-    let kv = iter
-        .next()
-        .await
-        .expect("iterator next failed")
-        .expect("target key exists");
-    assert_eq!(kv.key.as_ref(), target);
+/// Benchmarks `seek` on scans from `case`, which gives the scan range and the
+/// seek target for each round.
+///
+/// Criterion runs the setup step outside the timer, so only the seek is timed.
+/// The routine returns the iterator, so Criterion drops it outside the timer.
+fn bench_seek<R, F>(b: &mut Bencher, runtime: &Runtime, db: &Db, mut case: F)
+where
+    R: ByteRangeBounds + Send,
+    F: FnMut(usize) -> (R, Vec<u8>),
+{
+    let mut round = 0;
+    b.to_async(runtime).iter_batched(
+        || {
+            let (range, target) = case(round);
+            round += 1;
+            // Both sync and async Bencher only support a sync setup closure, hence this convoluted block_in_place.
+            let iter = tokio::task::block_in_place(|| runtime.block_on(db.scan(range)))
+                .expect("scan failed");
+            (iter, target)
+        },
+        |(mut iter, target)| async move {
+            iter.seek(&target).await.expect("seek failed");
+            iter
+        },
+        BatchSize::SmallInput,
+    );
 }
 
 fn bench_seek_by_size(c: &mut Criterion) {
@@ -81,17 +97,12 @@ fn bench_seek_by_size(c: &mut Criterion) {
 
     for n in SIZES {
         let db = runtime.block_on(load(n));
-        // The targets are the last keys, so each seek skips almost all of the
-        // memtable.
-        let target = |round: usize| key(n - 1 - round % TARGETS_PER_CASE);
 
-        group.bench_function(BenchmarkId::new("scan_all_then_seek", n), |b| {
-            let mut round = 0;
-            b.to_async(&runtime).iter(|| {
-                let target = target(round);
-                round += 1;
-                let db = &db;
-                async move { scan_then_seek(db, .., &target).await }
+        group.bench_function(BenchmarkId::new("seek_full_scan", n), |b| {
+            // The targets are the last keys, so each seek skips almost all of
+            // the memtable.
+            bench_seek(b, &runtime, &db, |round| {
+                (.., key(n - 1 - round % TARGETS_PER_CASE))
             });
         });
 
@@ -107,13 +118,10 @@ fn bench_seek_by_distance(c: &mut Criterion) {
     let mut group = c.benchmark_group("memtable_seek_by_distance");
 
     for distance in DISTANCES {
-        group.bench_function(BenchmarkId::new("scan_then_seek", distance), |b| {
-            let mut round = 0;
-            b.to_async(&runtime).iter(|| {
+        group.bench_function(BenchmarkId::new("seek", distance), |b| {
+            bench_seek(b, &runtime, &db, |round| {
                 let start = round % TARGETS_PER_CASE;
-                round += 1;
-                let db = &db;
-                async move { scan_then_seek(db, key(start).., &key(start + distance)).await }
+                (key(start).., key(start + distance))
             });
         });
     }
