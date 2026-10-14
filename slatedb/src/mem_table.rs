@@ -196,7 +196,7 @@ pub(crate) struct MemTableIteratorInner<T: RangeBounds<SequencedKey>> {
     /// seq-descending order, which is what the merge iterator needs for dedup.
     descending_stack: Vec<RowEntry>,
     read_trace: ReadTrace,
-    /// End bound of the original range, kept for `seek` since `Range` doesn't expose it.
+    /// End bound of the original range, kept for `seek` because `Range` does not expose it.
     end_bound: Bound<SequencedKey>,
 }
 pub(crate) type MemTableIterator = MemTableIteratorInner<KVTableInternalKeyRange>;
@@ -231,7 +231,7 @@ impl MemTableIterator {
     /// A crossbeam `Range` searches the skiplist only on its first `next()`, so this
     /// replaces `inner` with a new range starting at `next_key`.
     fn seek_ascending(&mut self, next_key: &[u8]) {
-        // Don't move backwards or revive an exhausted iterator.
+        // Do not move backwards or revive an exhausted iterator.
         if self
             .borrow_item()
             .as_ref()
