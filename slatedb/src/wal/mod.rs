@@ -121,6 +121,24 @@ impl WriterManifest {
         self.manifest.refresh().await?;
         Ok(())
     }
+
+    /// Moves [`WriterManifest::replay_after_wal_id`] forward to `wal_id` and writes the
+    /// manifest. Implementations of `WriterInit::fence_and_init` can call this after the
+    /// fence write when they know that the WAL above the current boundary holds no rows, for
+    /// example when it holds only WAL fences. Later opens then replay a bounded range
+    /// instead of every WAL written since the last L0 flush.
+    pub(crate) async fn advance_replay_after_wal_id(
+        &mut self,
+        wal_id: u64,
+    ) -> Result<(), WalError> {
+        let mut dirty = self.manifest.prepare_dirty()?;
+        if dirty.value.core.replay_after_wal_id >= wal_id {
+            return Ok(());
+        }
+        dirty.value.core.replay_after_wal_id = wal_id;
+        self.manifest.update(dirty).await?;
+        Ok(())
+    }
 }
 
 /// The result returned by [`WriterInit::fence_and_init`]

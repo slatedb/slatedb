@@ -14,7 +14,8 @@ use slatedb_common::metrics::MetricsRecorderHelper;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::store::WalTableStore;
+use super::sst_iterator::{WalSstIterator, WalSstIteratorOptions};
+use super::store::{WalFileId, WalTableStore};
 
 #[derive(Clone, Copy)]
 pub(crate) struct SlateDbWalWriterInitOptions {
@@ -117,8 +118,26 @@ impl wal::WriterInit for SlateDbWalWriterInit {
                 // this writer is the only writer that could have written replay_after_wal_id,
                 // so it should not be possible for it to have advanced past the fencing wal.
                 // older writers would have failed with a stale epoch
-                let replay_after_wal_id = manifest.core().replay_after_wal_id;
+                let mut replay_after_wal_id = manifest.core().replay_after_wal_id;
                 assert!(empty_wal_id > replay_after_wal_id);
+
+                // No earlier writer can append above our fence: the next WAL id of every
+                // earlier writer is the fence id. So when the WALs below our fence hold no
+                // rows, there is nothing to recover from them, and the boundary can move up
+                // to just below our fence. The fence itself stays above the boundary, so the
+                // WAL count the flush thresholds read does not shift on a fresh open. Later
+                // opens then replay one fence instead of every fence written since the last
+                // L0 flush.
+                if self
+                    .wal_above_boundary_holds_no_rows(replay_after_wal_id, empty_wal_id)
+                    .await?
+                {
+                    writer_manifest
+                        .advance_replay_after_wal_id(empty_wal_id - 1)
+                        .await?;
+                    replay_after_wal_id = empty_wal_id - 1;
+                }
+
                 let replay_iterator = SlateDbWalIterator::range(
                     replay_after_wal_id + 1,
                     WalIteratorEndBound::Exclusive(empty_wal_id + 1),
@@ -150,5 +169,54 @@ impl wal::WriterInit for SlateDbWalWriterInit {
                 empty_wal_id += 1;
             }
         }
+    }
+}
+
+impl SlateDbWalWriterInit {
+    /// Returns true when every WAL file between `replay_after_wal_id` (exclusive) and
+    /// `fence_wal_id` (exclusive) holds no rows. Replay of that range then recovers nothing,
+    /// so the writer can move the replay boundary up to just below its own fence.
+    async fn wal_above_boundary_holds_no_rows(
+        &self,
+        replay_after_wal_id: u64,
+        fence_wal_id: u64,
+    ) -> Result<bool, SlateDBError> {
+        // The fence we just wrote is the only WAL above the boundary, so this open replayed
+        // nothing and there is nothing to move past.
+        if fence_wal_id <= replay_after_wal_id + 1 {
+            return Ok(false);
+        }
+        for wal_id in (replay_after_wal_id + 1)..fence_wal_id {
+            match self.wal_holds_rows(WalFileId::from(wal_id)).await {
+                Ok(true) => return Ok(false),
+                Ok(false) => {}
+                // A WAL id that has no object holds no rows either. GC deletes only WALs
+                // below the replay boundary, so this case is a hole in the id space.
+                Err(err) if err.has_object_store_not_found() => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(true)
+    }
+
+    /// Returns true when the WAL file has at least one row.
+    ///
+    /// Fences hold no rows. Versions before 0.16 wrote a fence as an empty WAL SST, and
+    /// later versions write a zero-byte object. Check the rows, and not the object size,
+    /// so that both fence formats count as empty.
+    async fn wal_holds_rows(&self, wal_id: WalFileId) -> Result<bool, SlateDBError> {
+        let sst = match self.table_store.open_sst(wal_id).await {
+            // A zero-byte object is a fence.
+            Err(SlateDBError::EmptySSTable) => return Ok(false),
+            Ok(sst) => sst,
+            Err(err) => return Err(err),
+        };
+        let mut iter = WalSstIterator::new(
+            sst,
+            Arc::clone(&self.table_store),
+            WalSstIteratorOptions::default(),
+        )
+        .await?;
+        Ok(iter.next().await?.is_some())
     }
 }
