@@ -1092,7 +1092,7 @@ mod tests {
     // Property-based tests using proptest for invariant verification
     use proptest::collection::vec;
     use proptest::prelude::*;
-    use rand::Rng;
+    use rand::RngExt;
 
     #[derive(Debug, Clone)]
     enum TxnOperation {

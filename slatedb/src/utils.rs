@@ -14,7 +14,7 @@ use crate::tablestore::TableStore;
 use bytes::{Buf, BufMut, Bytes};
 use futures::FutureExt;
 use log::{error, warn};
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt};
 use slatedb_common::clock::SystemClock;
 use std::any::Any;
 use std::future::Future;
@@ -308,7 +308,7 @@ pub(crate) trait IdGenerator {
     fn gen_ulid(&mut self, clock: &dyn SystemClock) -> Ulid;
 }
 
-impl<R: RngCore> IdGenerator for R {
+impl<R: Rng> IdGenerator for R {
     /// Generates a random UUID using the provided RNG.
     fn gen_uuid(&mut self) -> Uuid {
         let mut bytes = [0u8; 16];

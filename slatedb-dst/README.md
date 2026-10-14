@@ -103,7 +103,7 @@ use std::time::Duration;
 
 use object_store::path::Path;
 use object_store::ObjectStore;
-use rand::RngCore;
+use rand::Rng;
 use slatedb::Db;
 use slatedb_common::clock::MockSystemClock;
 use slatedb_dst::{

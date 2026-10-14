@@ -1165,7 +1165,7 @@ mod tests {
         path::Path, GetOptions, GetRange, MultipartUpload, ObjectStore, ObjectStoreExt,
         PutMultipartOptions, PutPayload,
     };
-    use rand::Rng;
+    use rand::RngExt;
     use rstest::rstest;
     use std::sync::Arc;
     use std::time::Duration;

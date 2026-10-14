@@ -449,7 +449,7 @@ mod tests {
     use object_store::{memory::InMemory, ObjectStore};
     use proptest::test_runner::TestRng;
     use rand::distr::uniform::SampleRange;
-    use rand::Rng;
+    use rand::RngExt;
     use std::collections::BTreeMap;
     use std::sync::Arc;
 

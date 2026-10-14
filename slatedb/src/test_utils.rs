@@ -20,7 +20,7 @@ use object_store::{
     ObjectStore, PutMultipartOptions, PutOptions as OS_PutOptions, PutPayload, PutResult,
     RenameOptions,
 };
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;

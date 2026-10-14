@@ -8,7 +8,7 @@ use futures::StreamExt;
 use log::{error, info};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
-use rand::RngCore;
+use rand::Rng;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use ulid::Ulid;

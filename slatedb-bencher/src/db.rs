@@ -39,7 +39,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use rand::{Rng, RngCore, SeedableRng};
+use rand::{Rng, RngExt};
 use rand_xorshift::XorShiftRng;
 use slatedb::config::{PutOptions, WriteOptions};
 use slatedb::Db;
@@ -87,7 +87,7 @@ impl RandomKeyGenerator {
     pub fn new(key_bytes: usize) -> Self {
         Self {
             key_len_bytes: key_bytes,
-            rng: XorShiftRng::from_os_rng(),
+            rng: rand::make_rng::<XorShiftRng>(),
             used_keys: Vec::new(),
         }
     }
@@ -134,7 +134,7 @@ impl FixedSetKeyGenerator {
         }
         Self {
             keys,
-            rng: XorShiftRng::from_os_rng(),
+            rng: rand::make_rng::<XorShiftRng>(),
             used_keys: Vec::new(),
         }
     }
@@ -275,7 +275,7 @@ impl Task {
     /// This method runs a loop, generating a key (and value if needed), and
     /// then either puts the key/value pair or gets the key.
     async fn run(&mut self) {
-        let mut random = XorShiftRng::from_os_rng();
+        let mut random = rand::make_rng::<XorShiftRng>();
         let mut puts = 0u64;
         let mut puts_bytes = 0u64;
         let mut gets = 0u64;

@@ -5,7 +5,7 @@ use log::{debug, error, warn};
 use lru::LruCache;
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
-use rand::{distr::Alphanumeric, Rng};
+use rand::{distr::Alphanumeric, Rng, RngExt};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
 use std::collections::{HashMap, HashSet};

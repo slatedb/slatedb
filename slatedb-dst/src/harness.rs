@@ -14,7 +14,7 @@ use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use parking_lot::RwLock;
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt};
 use tokio::runtime::RngSeed;
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
