@@ -561,7 +561,7 @@ impl Admin {
     /// Refresh the lifetime of an existing checkpoint. Takes the id of an existing checkpoint
     /// and a lifetime, and sets the lifetime of the checkpoint to the specified lifetime. If
     /// there is no checkpoint with the specified id, then this fn fails with
-    /// SlateDBError::InvalidDbState
+    /// SlateDBError::InvalidDbState. If the lifetime is `None`, the checkpoint never expires.
     pub async fn refresh_checkpoint(
         &self,
         id: Uuid,
