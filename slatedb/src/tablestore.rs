@@ -12,6 +12,7 @@ use object_store::{GetOptions, ObjectStore, ObjectStoreExt};
 use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_common::ObjectMetadata;
 use tokio::io::AsyncWriteExt;
+use tokio_util::sync::CancellationToken;
 use ulid::Ulid;
 
 use crate::block_cache_policy::{should_cache_data_block, BlockCachePolicy};
@@ -35,6 +36,7 @@ use crate::sst_builder::EncodedSsTableBuilder;
 use crate::sst_io::MAX_VALIDATION_RETRIES;
 use crate::sst_io::{read_obj, read_with_validation_retry, ReadOnlyObject};
 use crate::sst_stats::SstStats;
+use crate::sst_upload::SstUploadGuard;
 use crate::types::RowEntry;
 use tracing::Instrument;
 
@@ -120,18 +122,19 @@ impl TableStore {
         segment: Option<Bytes>,
     ) -> EncodedSsTableWriter {
         let object_store = self.object_store.clone();
+        let (object_store, upload_guard) = SstUploadGuard::new(object_store);
         let path = self.path(&id);
         EncodedSsTableWriter {
             id,
             builder: self.sst_format.table_builder(),
-            writer: tagged_buf_writer(
+            writer: Some(tagged_buf_writer(
                 object_store,
                 path,
                 ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&id), segment),
-            ),
+            )),
             table_store: self.clone(),
             bytes_written: 0,
-            shutdown_started: false,
+            upload_guard,
             #[cfg(test)]
             blocks_written: 0,
         }
@@ -1110,17 +1113,16 @@ impl TableStore {
     }
 }
 
+const BUF_WRITER_CAPACITY: usize = 10 * 1024 * 1024;
+
 /// Builds a [`BufWriter`] whose upload carries `tag` in its extensions.
 fn tagged_buf_writer(
     object_store: Arc<dyn ObjectStore>,
     path: Path,
     tag: ObjectStoreCallTag,
 ) -> BufWriter {
-    // The one sanctioned `BufWriter::new`: it attaches the tag right after, so
-    // every SST streaming write carries it. Other sites are steered here by the
-    // clippy `disallowed-methods` rule on `BufWriter::new`.
-    #[allow(clippy::disallowed_methods)]
-    BufWriter::new(object_store, path).with_extensions(tag.into())
+    // Attach the tag here so every SST streaming write carries it.
+    BufWriter::with_capacity(object_store, path, BUF_WRITER_CAPACITY).with_extensions(tag.into())
 }
 
 #[cfg(test)]
@@ -1142,10 +1144,10 @@ async fn write_sst_streaming_in_object_store(
 pub(crate) struct EncodedSsTableWriter {
     id: SsTableId,
     builder: EncodedSsTableBuilder,
-    writer: BufWriter,
+    writer: Option<BufWriter>,
     table_store: Arc<TableStore>,
     bytes_written: usize,
-    shutdown_started: bool,
+    upload_guard: SstUploadGuard,
     #[cfg(test)]
     blocks_written: usize,
 }
@@ -1169,23 +1171,27 @@ impl EncodedSsTableWriter {
     /// On failure, aborts the upload before returning the error. This
     /// discards any blocks already sent to object storage for this
     /// SST.
-    pub(crate) async fn close(mut self) -> Result<(SsTableHandle, u64), SlateDBError> {
+    pub(crate) async fn close(self) -> Result<(SsTableHandle, u64), SlateDBError> {
+        self.close_unless_cancelled(&CancellationToken::new()).await
+    }
+
+    pub(crate) async fn close_unless_cancelled(
+        mut self,
+        cancel: &CancellationToken,
+    ) -> Result<(SsTableHandle, u64), SlateDBError> {
+        let id = self.id;
+        let cancelled = || SlateDBError::BackgroundTaskCancelled(format!("sst_close[{:?}]", id));
         let result = async {
-            fail_point!(
-                self.table_store.fp_registry.clone(),
-                "write-compacted-sst-io-error",
-                |_| Err(slatedb_io_error())
-            );
-            let builder = std::mem::replace(&mut self.builder, self.table_store.table_builder());
-            let encoded_sst = builder.build().await?;
-            for block in &encoded_sst.unconsumed_blocks {
-                self.writer.write_all(block.padded_bytes.as_ref()).await?;
-                self.bytes_written += block.padded_bytes.len();
+            let encoded_sst = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(cancelled()),
+                encoded_sst = self.write_tail() => encoded_sst?,
+            };
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(cancelled()),
+                result = self.writer.as_mut().expect("SST writer is active").shutdown() => result?,
             }
-            self.writer.write_all(encoded_sst.footer.as_ref()).await?;
-            self.bytes_written += encoded_sst.footer.len();
-            self.shutdown_started = true;
-            self.writer.shutdown().await?;
 
             // Cache inserts happen after writer shutdown so an SST whose upload
             // fails contributes no metadata entries.
@@ -1196,6 +1202,7 @@ impl EncodedSsTableWriter {
             self.table_store
                 .cache_on_sst_write(self.id, &encoded_sst)
                 .await;
+            self.upload_guard.disarm();
             Ok((
                 SsTableHandle::new(self.id, encoded_sst.format_version, encoded_sst.info),
                 self.bytes_written as u64,
@@ -1214,6 +1221,31 @@ impl EncodedSsTableWriter {
         result
     }
 
+    async fn write_tail(&mut self) -> Result<EncodedSsTable, SlateDBError> {
+        fail_point!(
+            self.table_store.fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            |_| Err(slatedb_io_error())
+        );
+        let builder = std::mem::replace(&mut self.builder, self.table_store.table_builder());
+        let encoded_sst = builder.build().await?;
+        for block in &encoded_sst.unconsumed_blocks {
+            self.writer
+                .as_mut()
+                .expect("SST writer is active")
+                .write_all(block.padded_bytes.as_ref())
+                .await?;
+            self.bytes_written += block.padded_bytes.len();
+        }
+        self.writer
+            .as_mut()
+            .expect("SST writer is active")
+            .write_all(encoded_sst.footer.as_ref())
+            .await?;
+        self.bytes_written += encoded_sst.footer.len();
+        Ok(encoded_sst)
+    }
+
     /// Tell object storage to discard this SST's upload.
     ///
     /// If the upload never grew past the small in-memory buffer,
@@ -1221,14 +1253,11 @@ impl EncodedSsTableWriter {
     /// Otherwise this cancels the multipart upload and asks object
     /// storage to delete the parts already stored.
     ///
-    /// Once shutdown has started this is a no-op: the underlying
-    /// `BufWriter` panics if aborted after shutdown, and a failed
-    /// shutdown leaves nothing this can usefully cancel.
+    /// Drop pending writes before aborting the retained upload handle.
+    /// If creation is still pending, it aborts when the handle arrives.
     pub(crate) async fn abort(&mut self) -> Result<(), SlateDBError> {
-        if self.shutdown_started {
-            return Ok(());
-        }
-        self.writer
+        self.writer.take();
+        self.upload_guard
             .abort()
             .await
             .map_err(|e| SlateDBError::ObjectStoreError(Arc::new(e)))
@@ -1251,7 +1280,11 @@ impl EncodedSsTableWriter {
             "write-compacted-sst-io-error",
             |_| Err(slatedb_io_error())
         );
-        self.writer.write_all(block.padded_bytes.as_ref()).await?;
+        self.writer
+            .as_mut()
+            .expect("SST writer is active")
+            .write_all(block.padded_bytes.as_ref())
+            .await?;
         self.bytes_written += block.padded_bytes.len();
         if let (Some(cache), Some(key_span)) = (&self.table_store.cache, &block.key_span) {
             let targets = self.table_store.targets_to_cache(&self.id);
@@ -1299,6 +1332,7 @@ mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::ops::Range;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
     use tracing_subscriber::layer::SubscriberExt;
 
     use crate::block_cache_policy::BlockCachePolicy;
@@ -1615,6 +1649,222 @@ mod tests {
             .unwrap();
         writer.close().await.unwrap();
         ts.open_sst(&id, Some(Bytes::new())).await.unwrap();
+    }
+
+    fn gated_table_store() -> (Arc<TableStore>, Arc<crate::test_utils::GatedObjectStore>) {
+        let os = Arc::new(crate::test_utils::GatedObjectStore::new(Arc::new(
+            InMemory::new(),
+        )));
+        let ts = Arc::new(TableStore::new(
+            os.clone(),
+            SsTableFormat::default(),
+            Path::from(ROOT),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        (ts, os)
+    }
+
+    #[tokio::test]
+    async fn should_abort_multipart_upload_when_close_is_cancelled() {
+        let (ts, os) = gated_table_store();
+        let id = SsTableId::from(ulid::Ulid::new());
+        let mut writer = ts.table_writer(id, Some(Bytes::new()));
+        let value = vec![7u8; 1024];
+        let mut i = 0u64;
+        while writer.bytes_written <= super::BUF_WRITER_CAPACITY {
+            writer
+                .add(RowEntry::new_value(&i.to_be_bytes(), &value, i))
+                .await
+                .unwrap();
+            i += 1;
+        }
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = writer.close_unless_cancelled(&cancel).await;
+
+        assert!(matches!(
+            result,
+            Err(error::SlateDBError::BackgroundTaskCancelled(_))
+        ));
+        assert_eq!(
+            os.multipart_aborts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(os.head(&ts.path(&id)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn should_cancel_single_put_close_during_shutdown() {
+        let (ts, os) = gated_table_store();
+        os.put_opts_gate.close();
+        let id = SsTableId::from(ulid::Ulid::new());
+        let mut writer = ts.table_writer(id, Some(Bytes::new()));
+        writer
+            .add(RowEntry::new_value(b"key", b"value", 0))
+            .await
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let close = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { writer.close_unless_cancelled(&cancel).await }
+        });
+        os.put_opts_gate.wait_for_arrivals(1).await;
+
+        cancel.cancel();
+        let result = close.await.unwrap();
+
+        assert!(matches!(
+            result,
+            Err(error::SlateDBError::BackgroundTaskCancelled(_))
+        ));
+        assert_eq!(
+            os.multipart_aborts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        os.put_opts_gate.release();
+    }
+
+    async fn large_tail_writer(ts: &Arc<TableStore>) -> super::EncodedSsTableWriter {
+        let mut writer = ts.table_writer(SsTableId::from(ulid::Ulid::new()), Some(Bytes::new()));
+        writer
+            .add(RowEntry::new_value(
+                b"key",
+                &vec![7; super::BUF_WRITER_CAPACITY + 1],
+                0,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(writer.bytes_written, 0);
+        writer
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn should_cancel_multipart_close_during_shutdown(#[case] during_complete: bool) {
+        let (ts, os) = gated_table_store();
+        let gate = if during_complete {
+            &os.multipart_complete_gate
+        } else {
+            &os.multipart_put_part_gate
+        };
+        gate.close();
+        let writer = large_tail_writer(&ts).await;
+        let id = writer.id;
+        let cancel = CancellationToken::new();
+        let close = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { writer.close_unless_cancelled(&cancel).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_for_arrivals(1))
+            .await
+            .unwrap();
+
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), close)
+            .await
+            .expect("cancellation must stop multipart shutdown")
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            Err(error::SlateDBError::BackgroundTaskCancelled(_))
+        ));
+        assert_eq!(
+            os.multipart_aborts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(os.head(&ts.path(&id)).await.is_err());
+        gate.release();
+    }
+
+    #[tokio::test]
+    async fn should_abort_upload_created_after_tail_write_is_cancelled() {
+        let (ts, os) = gated_table_store();
+        os.multipart_created_gate.close();
+        let writer = large_tail_writer(&ts).await;
+        let id = writer.id;
+        let cancel = CancellationToken::new();
+        let close = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { writer.close_unless_cancelled(&cancel).await }
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            os.multipart_created_gate.wait_for_arrivals(1),
+        )
+        .await
+        .unwrap();
+
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), close)
+            .await
+            .expect("cancellation must return while upload creation is pending")
+            .unwrap();
+        assert!(matches!(
+            result,
+            Err(error::SlateDBError::BackgroundTaskCancelled(_))
+        ));
+        os.multipart_created_gate.release();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while os
+                .multipart_aborts
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the upload must abort after creation returns its handle");
+        assert!(os.head(&ts.path(&id)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn should_preserve_upload_creation_panic() {
+        let (ts, os) = gated_table_store();
+        os.put_multipart_opts_gate
+            .set_error(|| panic!("upload creation panic"));
+        let writer = large_tail_writer(&ts).await;
+        let close = tokio::spawn(async move { writer.close().await });
+
+        assert!(close.await.unwrap_err().is_panic());
+    }
+
+    #[tokio::test]
+    async fn should_abort_multipart_upload_when_close_task_is_dropped() {
+        let (ts, os) = gated_table_store();
+        os.multipart_complete_gate.close();
+        let writer = large_tail_writer(&ts).await;
+        let close = tokio::spawn(async move { writer.close().await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            os.multipart_complete_gate.wait_for_arrivals(1),
+        )
+        .await
+        .unwrap();
+
+        close.abort();
+        assert!(close.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while os
+                .multipart_aborts
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the close task must abort its upload");
+        os.multipart_complete_gate.release();
     }
 
     #[tokio::test]

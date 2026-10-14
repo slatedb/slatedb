@@ -167,6 +167,7 @@ mod sst_io;
 mod sst_iter;
 mod sst_reader;
 mod sst_stats;
+mod sst_upload;
 mod subcompaction;
 mod tablestore;
 #[cfg(test)]
