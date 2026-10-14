@@ -216,6 +216,8 @@ impl RowEntryIterator for MemTableIterator {
         match self.borrow_ordering() {
             IterationOrder::Ascending => {
                 self.seek_ascending(next_key);
+                // Keep in-memory seeking cooperative.
+                tokio::task::coop::consume_budget().await;
                 Ok(())
             }
             IterationOrder::Descending => Err(SlateDBError::SeekNotSupportedForDescendingScan),
