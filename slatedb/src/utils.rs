@@ -179,12 +179,19 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    tokio::spawn(with_optional_subscriber(future))
+}
+
+/// Runs the future with the current tracing subscriber if one is set.
+pub(crate) fn with_optional_subscriber<F: Future>(future: F) -> impl Future<Output = F::Output> {
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
 
-    if dispatch.is::<NoSubscriber>() {
-        tokio::spawn(future)
-    } else {
-        tokio::spawn(future.with_subscriber(dispatch))
+    async move {
+        if dispatch.is::<NoSubscriber>() {
+            future.await
+        } else {
+            future.with_subscriber(dispatch).await
+        }
     }
 }
 
@@ -883,6 +890,25 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use ulid::Ulid;
+
+    #[tokio::test]
+    async fn should_capture_optional_subscriber_before_spawning() {
+        let dispatch = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+        let check_subscriber = || async {
+            tracing::dispatcher::get_default(|current| current.is::<tracing_subscriber::Registry>())
+        };
+        let spawned = tracing::dispatcher::with_default(&dispatch, || {
+            super::spawn_with_optional_subscriber(check_subscriber())
+        });
+        assert!(spawned.await.unwrap());
+
+        let future = tracing::dispatcher::with_default(&dispatch, || {
+            super::with_optional_subscriber(check_subscriber())
+        });
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(future);
+        assert!(tasks.join_next().await.unwrap().unwrap());
+    }
 
     struct ResultCaptor<T: Clone> {
         error: Mutex<Option<Result<T, SlateDBError>>>,

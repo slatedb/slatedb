@@ -654,6 +654,65 @@ mod tests {
         store.put_opts_gate.release();
     }
 
+    #[tokio::test]
+    async fn should_abort_large_sibling_when_another_segment_fails_fatally() {
+        let (db, store) = setup_gated_db(2).await;
+        store.multipart_complete_gate.close();
+        let baseline = store.put_opts_gate.arrivals();
+        let job = {
+            let mut guard = db.state.write();
+            guard.memtable().put(RowEntry::new_value(
+                b"000-key",
+                &vec![7; 11 * 1024 * 1024],
+                1,
+            ));
+            guard
+                .memtable()
+                .put(RowEntry::new_value(b"001-key", b"value", 2));
+            guard.memtable().table().record_touched_segments(
+                [Bytes::from_static(b"000"), Bytes::from_static(b"001")].into(),
+            );
+            guard.freeze_memtable(0);
+            let imm = guard.state().imm_memtable.front().cloned().unwrap();
+            UploadJob::new(Arc::clone(&imm), preallocate_ids(&imm))
+        };
+        let slots = Arc::new(Semaphore::new(2));
+        let task = tokio::spawn({
+            let db = Arc::clone(&db);
+            let slots = Arc::clone(&slots);
+            async move {
+                db.stream_imm_ssts(job.imm_memtable.table(), None, &job.segment_sst_ids, &slots)
+                    .await
+            }
+        });
+        timeout(Duration::from_secs(5), async {
+            store.multipart_complete_gate.wait_for_arrivals(1).await;
+            store.put_opts_gate.wait_for_arrivals(baseline + 1).await;
+        })
+        .await
+        .unwrap();
+
+        store.put_opts_gate.set_error(not_supported_error);
+        store.put_opts_gate.admit(1);
+        let result = timeout(Duration::from_secs(1), task)
+            .await
+            .expect("a fatal error must stop the large sibling upload")
+            .unwrap();
+
+        assert!(matches!(result, Err(SlateDBError::IoError(ref error))
+            if error.to_string().contains("not supported")));
+        assert_eq!(slots.available_permits(), 2);
+        assert_eq!(
+            store
+                .multipart_aborts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        store.multipart_complete_gate.release();
+        store.put_opts_gate.clear_error();
+        store.put_opts_gate.release();
+    }
+
     #[rstest::rstest]
     #[case(2)]
     #[case(4)]

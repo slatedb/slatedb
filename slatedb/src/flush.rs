@@ -18,8 +18,6 @@ use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::instrument::WithSubscriber;
-use tracing::subscriber::NoSubscriber;
 use ulid::Ulid;
 
 /// Best-effort cleanup after a writer fails partway through.
@@ -137,12 +135,8 @@ impl PendingSstUploads {
                 encoded_bytes,
             })
         };
-        let dispatch = tracing::dispatcher::get_default(Clone::clone);
-        if dispatch.is::<NoSubscriber>() {
-            self.tasks.spawn(close);
-        } else {
-            self.tasks.spawn(close.with_subscriber(dispatch));
-        }
+        self.tasks
+            .spawn(crate::utils::with_optional_subscriber(close));
     }
 
     async fn finish(

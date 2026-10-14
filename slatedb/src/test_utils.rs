@@ -1269,6 +1269,9 @@ pub(crate) struct GatedObjectStore {
     pub(crate) head_gate: Gate,
     pub(crate) put_opts_gate: Gate,
     pub(crate) put_multipart_opts_gate: Gate,
+    pub(crate) multipart_created_gate: Arc<Gate>,
+    pub(crate) multipart_put_part_gate: Arc<Gate>,
+    pub(crate) multipart_complete_gate: Arc<Gate>,
     pub(crate) copy_gate: Gate,
     pub(crate) rename_gate: Gate,
     /// Gates each path emitted by `delete_stream`. Per-item gating preserves
@@ -1286,6 +1289,9 @@ impl GatedObjectStore {
             head_gate: Gate::default(),
             put_opts_gate: Gate::default(),
             put_multipart_opts_gate: Gate::default(),
+            multipart_created_gate: Arc::new(Gate::default()),
+            multipart_put_part_gate: Arc::new(Gate::default()),
+            multipart_complete_gate: Arc::new(Gate::default()),
             copy_gate: Gate::default(),
             rename_gate: Gate::default(),
             delete_stream_gate: Arc::new(Gate::default()),
@@ -1298,15 +1304,23 @@ impl GatedObjectStore {
 struct AbortCountingUpload {
     inner: Box<dyn MultipartUpload>,
     aborts: Arc<AtomicUsize>,
+    put_part_gate: Arc<Gate>,
+    complete_gate: Arc<Gate>,
 }
 
 #[async_trait]
 impl MultipartUpload for AbortCountingUpload {
     fn put_part(&mut self, data: PutPayload) -> object_store::UploadPart {
-        self.inner.put_part(data)
+        let put_part = self.inner.put_part(data);
+        let gate = Arc::clone(&self.put_part_gate);
+        Box::pin(async move {
+            gate.wait().await?;
+            put_part.await
+        })
     }
 
     async fn complete(&mut self) -> object_store::Result<PutResult> {
+        self.complete_gate.wait().await?;
         self.inner.complete().await
     }
 
@@ -1354,9 +1368,12 @@ impl ObjectStore for GatedObjectStore {
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         self.put_multipart_opts_gate.wait().await?;
         let inner = self.inner.put_multipart_opts(location, opts).await?;
+        self.multipart_created_gate.wait().await?;
         Ok(Box::new(AbortCountingUpload {
             inner,
             aborts: Arc::clone(&self.multipart_aborts),
+            put_part_gate: Arc::clone(&self.multipart_put_part_gate),
+            complete_gate: Arc::clone(&self.multipart_complete_gate),
         }))
     }
 
