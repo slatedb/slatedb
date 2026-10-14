@@ -1,3 +1,4 @@
+use crate::snapshot_lease::SnapshotLease;
 use async_trait::async_trait;
 use bytes::Bytes;
 use log::error;
@@ -33,6 +34,7 @@ enum FetchTask {
 
 #[derive(Clone, Debug)]
 pub(crate) struct SstIteratorOptions {
+    pub(crate) snapshot_lease: Option<Arc<SnapshotLease>>,
     pub(crate) max_fetch_tasks: usize,
     pub(crate) target_bytes_to_fetch: usize,
     pub(crate) cache_blocks: bool,
@@ -47,6 +49,7 @@ pub(crate) struct SstIteratorOptions {
 impl Default for SstIteratorOptions {
     fn default() -> Self {
         SstIteratorOptions {
+            snapshot_lease: None,
             max_fetch_tasks: 1,
             target_bytes_to_fetch: 1,
             cache_blocks: true,
@@ -484,19 +487,22 @@ impl<'a> InternalSstIterator<'a> {
                     let read_trace = self.read_trace();
                     let sst_level = self.sst_level().cloned();
                     let blocks_end = blocks.end;
-                    let fetch = spawn_with_optional_subscriber(async move {
-                        table_store
-                            .read_blocks_using_index(
-                                &table,
-                                index,
-                                blocks,
-                                cache_blocks,
-                                segment,
-                                &read_trace,
-                                sst_level.as_ref(),
-                            )
-                            .await
-                    });
+                    let fetch = spawn_with_optional_subscriber(SnapshotLease::protect_task(
+                        self.options.snapshot_lease.clone(),
+                        async move {
+                            table_store
+                                .read_blocks_using_index(
+                                    &table,
+                                    index,
+                                    blocks,
+                                    cache_blocks,
+                                    segment,
+                                    &read_trace,
+                                    sst_level.as_ref(),
+                                )
+                                .await
+                        },
+                    ));
                     self.fetch_tasks
                         .push_back(FetchTask::InFlight(AbortOnDropHandle::new(fetch)));
                     self.next_block_idx_to_fetch = blocks_end;
@@ -523,19 +529,22 @@ impl<'a> InternalSstIterator<'a> {
                     let read_trace = self.read_trace();
                     let sst_level = self.sst_level().cloned();
                     let blocks_start = blocks.start;
-                    let fetch = spawn_with_optional_subscriber(async move {
-                        table_store
-                            .read_blocks_using_index(
-                                &table,
-                                index,
-                                blocks,
-                                cache_blocks,
-                                segment,
-                                &read_trace,
-                                sst_level.as_ref(),
-                            )
-                            .await
-                    });
+                    let fetch = spawn_with_optional_subscriber(SnapshotLease::protect_task(
+                        self.options.snapshot_lease.clone(),
+                        async move {
+                            table_store
+                                .read_blocks_using_index(
+                                    &table,
+                                    index,
+                                    blocks,
+                                    cache_blocks,
+                                    segment,
+                                    &read_trace,
+                                    sst_level.as_ref(),
+                                )
+                                .await
+                        },
+                    ));
                     self.fetch_tasks
                         .push_back(FetchTask::InFlight(AbortOnDropHandle::new(fetch)));
                     self.next_block_idx_to_fetch = blocks_start;
@@ -1953,8 +1962,11 @@ mod tests {
     /// fix they kept running detached; against a store that never answers (or
     /// a retrying store whose `object_store_max_retries` is `None`) they never
     /// ended. https://github.com/slatedb/slatedb/issues/2139
+    #[rstest]
+    #[case::ascending(IterationOrder::Ascending)]
+    #[case::descending(IterationOrder::Descending)]
     #[tokio::test]
-    async fn test_dropping_iterator_aborts_in_flight_fetches() {
+    async fn test_dropping_iterator_aborts_in_flight_fetches(#[case] order: IterationOrder) {
         let store = Arc::new(HoldReadsStore {
             inner: Arc::new(InMemory::new()),
             hold_below: std::sync::atomic::AtomicU64::new(0),
@@ -2006,6 +2018,7 @@ mod tests {
         // One block per fetch and three fetches in flight, uncached, so every
         // data-block read reaches the store.
         let options = SstIteratorOptions {
+            order,
             max_fetch_tasks: 3,
             target_bytes_to_fetch: 1,
             cache_blocks: false,
@@ -2301,6 +2314,7 @@ mod tests {
             &sst,
             table_store.clone(),
             SstIteratorOptions {
+                snapshot_lease: None,
                 max_fetch_tasks: 32,
                 target_bytes_to_fetch: 256 * 128,
                 cache_blocks: true,
@@ -2321,6 +2335,7 @@ mod tests {
             &sst,
             table_store.clone(),
             SstIteratorOptions {
+                snapshot_lease: None,
                 max_fetch_tasks: 1,
                 target_bytes_to_fetch: 1,
                 cache_blocks: true,
@@ -2956,6 +2971,7 @@ mod tests {
         let end_key = b"key079";
 
         let sst_iter_options = SstIteratorOptions {
+            snapshot_lease: None,
             max_fetch_tasks: 3,
             target_bytes_to_fetch: 3 * 128,
             cache_blocks: true,
@@ -3262,6 +3278,7 @@ mod tests {
             &sst,
             table_store.clone(),
             SstIteratorOptions {
+                snapshot_lease: None,
                 max_fetch_tasks: 1,
                 target_bytes_to_fetch: 1,
                 cache_blocks: true,
