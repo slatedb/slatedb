@@ -39,7 +39,7 @@ fn key(index: usize) -> Vec<u8> {
 fn memtable_only_settings() -> Settings {
     Settings {
         l0_sst_size_bytes: 1 << 30,
-        max_unflushed_bytes: 4 << 30,
+        max_unflushed_bytes: 2 << 30,
         max_wal_flushes_before_l0_flush: u64::MAX,
         compactor_options: None,
         ..Settings::default()
