@@ -3364,6 +3364,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "figment",
+ "futures",
  "log",
  "object_store",
  "parking_lot",
