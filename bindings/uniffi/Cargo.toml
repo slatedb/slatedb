@@ -17,6 +17,7 @@ bench = false
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
+futures = { workspace = true }
 log = { workspace = true }
 parking_lot = { workspace = true }
 object_store = { workspace = true }

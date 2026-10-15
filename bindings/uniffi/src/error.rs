@@ -186,6 +186,17 @@ impl From<SlateDbError> for Error {
     }
 }
 
+impl From<object_store::Error> for Error {
+    fn from(error: object_store::Error) -> Self {
+        let message = error.to_string();
+        match error {
+            object_store::Error::InvalidPath { .. } => Self::Invalid { message },
+            object_store::Error::NotFound { .. } => Self::Data { message },
+            _ => Self::Unavailable { message },
+        }
+    }
+}
+
 impl From<slatedb::Error> for Error {
     fn from(error: slatedb::Error) -> Self {
         let message = error.to_string();
