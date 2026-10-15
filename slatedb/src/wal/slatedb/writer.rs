@@ -532,8 +532,10 @@ impl WalFlushHandler {
 
         let encoded_sst = sst_builder.build().await?;
         let written_bytes = encoded_sst.remaining_len() as u64;
+        let payload = encoded_sst.remaining_as_payload();
+        drop(encoded_sst);
         self.table_store
-            .write_sst(wal_id.into(), &encoded_sst)
+            .write_encoded(wal_id.into(), payload)
             .await?;
         self.stats.flush_bytes.increment(written_bytes);
         Ok(())
