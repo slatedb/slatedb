@@ -55,6 +55,9 @@ impl DbOracle {
     }
 
     pub(crate) fn advance_committed_seq(&self, seq: u64) {
+        // The status reports a commit before reads can see it, so a status
+        // taken after a read is never below the seq of a row the read returned.
+        self.status_reporter.report_committed_seq(seq);
         self.last_committed_seq.fetch_max(seq, SeqCst);
     }
 
@@ -91,6 +94,9 @@ impl DbReaderOracle {
     }
 
     pub(crate) fn advance_durable_seq(&self, seq: u64) {
+        // As in DbOracle::advance_committed_seq: the committed seq is reported
+        // before reads can see the seq. The durable seq is reported after.
+        self.status_reporter.report_committed_seq(seq);
         self.last_remote_persisted_seq.fetch_max(seq, SeqCst);
         self.status_reporter.report_durable_seq(seq);
     }
