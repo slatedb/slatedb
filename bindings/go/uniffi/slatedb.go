@@ -393,6 +393,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_func_init_logging_with_trace()
+		})
+		if checksum != 57356 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_func_init_logging_with_trace: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_admin_create_clone_builder_from_source()
 		})
 		if checksum != 20657 {
@@ -8269,14 +8278,16 @@ func (c FfiConverterHistogram) register() {
 	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_histogram(&UniffiVTableCallbackInterfaceHistogramINSTANCE)
 }
 
-// Capacity applies across the capture's lifetime, including unfinished calls.
+// Capacity separately bounds calls and read spans, including unfinished reservations.
+// Read spans are exported on final close. Root trace IDs are limited to 128 UTF-8 bytes.
 // Calls include credential requests and can contain client-internal retries or redirects.
 // Byte counts cover response data consumed through the body wrapper.
 type HttpTraceCaptureInterface interface {
 	Snapshot() HttpTraceSnapshot
 }
 
-// Capacity applies across the capture's lifetime, including unfinished calls.
+// Capacity separately bounds calls and read spans, including unfinished reservations.
+// Read spans are exported on final close. Root trace IDs are limited to 128 UTF-8 bytes.
 // Calls include credential requests and can contain client-internal retries or redirects.
 // Byte counts cover response data consumed through the body wrapper.
 type HttpTraceCapture struct {
@@ -11609,6 +11620,8 @@ type HttpCallRecord struct {
 	Outcome       HttpCallOutcome
 	SpanId        *uint64
 	ParentSpanId  *uint64
+	// The nearest retained read ancestor in this capture, not a subscriber ID.
+	ReadSpan *uint64
 }
 
 func (r *HttpCallRecord) Destroy() {
@@ -11622,6 +11635,7 @@ func (r *HttpCallRecord) Destroy() {
 	FfiDestroyerHttpCallOutcome{}.Destroy(r.Outcome)
 	FfiDestroyerOptionalUint64{}.Destroy(r.SpanId)
 	FfiDestroyerOptionalUint64{}.Destroy(r.ParentSpanId)
+	FfiDestroyerOptionalUint64{}.Destroy(r.ReadSpan)
 }
 
 type FfiConverterHttpCallRecord struct{}
@@ -11642,6 +11656,7 @@ func (c FfiConverterHttpCallRecord) Read(reader io.Reader) HttpCallRecord {
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterHttpCallOutcomeINSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
 		FfiConverterOptionalUint64INSTANCE.Read(reader),
 		FfiConverterOptionalUint64INSTANCE.Read(reader),
 	}
@@ -11666,6 +11681,7 @@ func (c FfiConverterHttpCallRecord) Write(writer io.Writer, value HttpCallRecord
 	FfiConverterHttpCallOutcomeINSTANCE.Write(writer, value.Outcome)
 	FfiConverterOptionalUint64INSTANCE.Write(writer, value.SpanId)
 	FfiConverterOptionalUint64INSTANCE.Write(writer, value.ParentSpanId)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.ReadSpan)
 }
 
 type FfiDestroyerHttpCallRecord struct{}
@@ -11680,6 +11696,9 @@ type HttpTraceSnapshot struct {
 	DroppedCalls       uint64
 	OpenCalls          uint64
 	CompletedCallCount *uint64
+	ReadSpans          []ReadSpanRecord
+	OpenReadSpans      uint64
+	DroppedReadSpans   uint64
 }
 
 func (r *HttpTraceSnapshot) Destroy() {
@@ -11687,6 +11706,9 @@ func (r *HttpTraceSnapshot) Destroy() {
 	FfiDestroyerUint64{}.Destroy(r.DroppedCalls)
 	FfiDestroyerUint64{}.Destroy(r.OpenCalls)
 	FfiDestroyerOptionalUint64{}.Destroy(r.CompletedCallCount)
+	FfiDestroyerSequenceReadSpanRecord{}.Destroy(r.ReadSpans)
+	FfiDestroyerUint64{}.Destroy(r.OpenReadSpans)
+	FfiDestroyerUint64{}.Destroy(r.DroppedReadSpans)
 }
 
 type FfiConverterHttpTraceSnapshot struct{}
@@ -11703,6 +11725,9 @@ func (c FfiConverterHttpTraceSnapshot) Read(reader io.Reader) HttpTraceSnapshot 
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterSequenceReadSpanRecordINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
 	}
 }
 
@@ -11719,6 +11744,9 @@ func (c FfiConverterHttpTraceSnapshot) Write(writer io.Writer, value HttpTraceSn
 	FfiConverterUint64INSTANCE.Write(writer, value.DroppedCalls)
 	FfiConverterUint64INSTANCE.Write(writer, value.OpenCalls)
 	FfiConverterOptionalUint64INSTANCE.Write(writer, value.CompletedCallCount)
+	FfiConverterSequenceReadSpanRecordINSTANCE.Write(writer, value.ReadSpans)
+	FfiConverterUint64INSTANCE.Write(writer, value.OpenReadSpans)
+	FfiConverterUint64INSTANCE.Write(writer, value.DroppedReadSpans)
 }
 
 type FfiDestroyerHttpTraceSnapshot struct{}
@@ -12414,6 +12442,67 @@ func (c FfiConverterReadOptions) Write(writer io.Writer, value ReadOptions) {
 type FfiDestroyerReadOptions struct{}
 
 func (_ FfiDestroyerReadOptions) Destroy(value ReadOptions) {
+	value.Destroy()
+}
+
+// Identities and times belong to the HTTP capture. Only read roots carry caller trace IDs.
+type ReadSpanRecord struct {
+	Span       uint64
+	ParentSpan *uint64
+	Kind       ReadSpanKind
+	TraceId    *string
+	StartUs    uint64
+	FinishUs   uint64
+}
+
+func (r *ReadSpanRecord) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.Span)
+	FfiDestroyerOptionalUint64{}.Destroy(r.ParentSpan)
+	FfiDestroyerReadSpanKind{}.Destroy(r.Kind)
+	FfiDestroyerOptionalString{}.Destroy(r.TraceId)
+	FfiDestroyerUint64{}.Destroy(r.StartUs)
+	FfiDestroyerUint64{}.Destroy(r.FinishUs)
+}
+
+type FfiConverterReadSpanRecord struct{}
+
+var FfiConverterReadSpanRecordINSTANCE = FfiConverterReadSpanRecord{}
+
+func (c FfiConverterReadSpanRecord) Lift(rb RustBufferI) ReadSpanRecord {
+	return LiftFromRustBuffer[ReadSpanRecord](c, rb)
+}
+
+func (c FfiConverterReadSpanRecord) Read(reader io.Reader) ReadSpanRecord {
+	return ReadSpanRecord{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterReadSpanKindINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterReadSpanRecord) Lower(value ReadSpanRecord) C.RustBuffer {
+	return LowerIntoRustBuffer[ReadSpanRecord](c, value)
+}
+
+func (c FfiConverterReadSpanRecord) LowerExternal(value ReadSpanRecord) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ReadSpanRecord](c, value))
+}
+
+func (c FfiConverterReadSpanRecord) Write(writer io.Writer, value ReadSpanRecord) {
+	FfiConverterUint64INSTANCE.Write(writer, value.Span)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.ParentSpan)
+	FfiConverterReadSpanKindINSTANCE.Write(writer, value.Kind)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.TraceId)
+	FfiConverterUint64INSTANCE.Write(writer, value.StartUs)
+	FfiConverterUint64INSTANCE.Write(writer, value.FinishUs)
+}
+
+type FfiDestroyerReadSpanRecord struct{}
+
+func (_ FfiDestroyerReadSpanRecord) Destroy(value ReadSpanRecord) {
 	value.Destroy()
 }
 
@@ -14874,6 +14963,47 @@ type FfiDestroyerPreloadLevel struct{}
 func (_ FfiDestroyerPreloadLevel) Destroy(value PreloadLevel) {
 }
 
+type ReadSpanKind uint
+
+const (
+	ReadSpanKindRead           ReadSpanKind = 1
+	ReadSpanKindMemtable       ReadSpanKind = 2
+	ReadSpanKindReadFilters    ReadSpanKind = 3
+	ReadSpanKindEvaluateFilter ReadSpanKind = 4
+	ReadSpanKindReadIndex      ReadSpanKind = 5
+	ReadSpanKindReadBlocks     ReadSpanKind = 6
+	ReadSpanKindMerge          ReadSpanKind = 7
+)
+
+type FfiConverterReadSpanKind struct{}
+
+var FfiConverterReadSpanKindINSTANCE = FfiConverterReadSpanKind{}
+
+func (c FfiConverterReadSpanKind) Lift(rb RustBufferI) ReadSpanKind {
+	return LiftFromRustBuffer[ReadSpanKind](c, rb)
+}
+
+func (c FfiConverterReadSpanKind) Lower(value ReadSpanKind) C.RustBuffer {
+	return LowerIntoRustBuffer[ReadSpanKind](c, value)
+}
+
+func (c FfiConverterReadSpanKind) LowerExternal(value ReadSpanKind) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ReadSpanKind](c, value))
+}
+func (FfiConverterReadSpanKind) Read(reader io.Reader) ReadSpanKind {
+	id := readInt32(reader)
+	return ReadSpanKind(id)
+}
+
+func (FfiConverterReadSpanKind) Write(writer io.Writer, value ReadSpanKind) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerReadSpanKind struct{}
+
+func (_ FfiDestroyerReadSpanKind) Destroy(value ReadSpanKind) {
+}
+
 // Determines how a [`crate::DbReader`] chooses and refreshes database state.
 type ReaderMode interface {
 	Destroy()
@@ -17004,6 +17134,53 @@ func (FfiDestroyerSequenceMetricLabel) Destroy(sequence []MetricLabel) {
 	}
 }
 
+type FfiConverterSequenceReadSpanRecord struct{}
+
+var FfiConverterSequenceReadSpanRecordINSTANCE = FfiConverterSequenceReadSpanRecord{}
+
+func (c FfiConverterSequenceReadSpanRecord) Lift(rb RustBufferI) []ReadSpanRecord {
+	return LiftFromRustBuffer[[]ReadSpanRecord](c, rb)
+}
+
+func (c FfiConverterSequenceReadSpanRecord) Read(reader io.Reader) []ReadSpanRecord {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]ReadSpanRecord, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterReadSpanRecordINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceReadSpanRecord) Lower(value []ReadSpanRecord) C.RustBuffer {
+	return LowerIntoRustBuffer[[]ReadSpanRecord](c, value)
+}
+
+func (c FfiConverterSequenceReadSpanRecord) LowerExternal(value []ReadSpanRecord) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]ReadSpanRecord](c, value))
+}
+
+func (c FfiConverterSequenceReadSpanRecord) Write(writer io.Writer, value []ReadSpanRecord) {
+	if len(value) > math.MaxInt32 {
+		panic("[]ReadSpanRecord is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterReadSpanRecordINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceReadSpanRecord struct{}
+
+func (FfiDestroyerSequenceReadSpanRecord) Destroy(sequence []ReadSpanRecord) {
+	for _, value := range sequence {
+		FfiDestroyerReadSpanRecord{}.Destroy(value)
+	}
+}
+
 type FfiConverterSequenceRowEntry struct{}
 
 var FfiConverterSequenceRowEntryINSTANCE = FfiConverterSequenceRowEntry{}
@@ -17636,6 +17813,15 @@ func slatedb_uniffiFreeGorutine(data C.uint64_t) {
 func InitLogging(level LogLevel, callback *LogCallback) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_func_init_logging(FfiConverterLogLevelINSTANCE.Lower(level), FfiConverterOptionalLogCallbackINSTANCE.Lower(callback), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Read capture shares the one process subscriber and does not change the log level.
+func InitLoggingWithTrace(level LogLevel, callback *LogCallback, capture *HttpTraceCapture) error {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_func_init_logging_with_trace(FfiConverterLogLevelINSTANCE.Lower(level), FfiConverterOptionalLogCallbackINSTANCE.Lower(callback), FfiConverterHttpTraceCaptureINSTANCE.Lower(capture), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()

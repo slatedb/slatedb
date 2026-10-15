@@ -2033,6 +2033,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_writehandle_seqnum(uint64_t ptr, RustCa
 void uniffi_slatedb_uniffi_fn_func_init_logging(RustBuffer level, RustBuffer callback, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FUNC_INIT_LOGGING_WITH_TRACE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FUNC_INIT_LOGGING_WITH_TRACE
+void uniffi_slatedb_uniffi_fn_func_init_logging_with_trace(RustBuffer level, RustBuffer callback, uint64_t capture, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_SLATEDB_UNIFFI_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_SLATEDB_UNIFFI_RUSTBUFFER_ALLOC
 RustBuffer ffi_slatedb_uniffi_rustbuffer_alloc(uint64_t size, RustCallStatus *out_status
@@ -2296,6 +2301,12 @@ void ffi_slatedb_uniffi_rust_future_complete_void(uint64_t handle, RustCallStatu
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_FUNC_INIT_LOGGING
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_FUNC_INIT_LOGGING
 uint16_t uniffi_slatedb_uniffi_checksum_func_init_logging(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_FUNC_INIT_LOGGING_WITH_TRACE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_FUNC_INIT_LOGGING_WITH_TRACE
+uint16_t uniffi_slatedb_uniffi_checksum_func_init_logging_with_trace(void
     
 );
 #endif

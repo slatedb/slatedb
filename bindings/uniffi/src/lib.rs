@@ -18,6 +18,7 @@ mod merge_operator;
 mod metrics;
 mod object_store;
 mod object_store_builder;
+mod read_trace;
 mod runtime;
 mod settings;
 mod types;
@@ -50,7 +51,7 @@ pub use http_trace::{
     HttpCallOutcome, HttpCallRecord, HttpMethod, HttpTraceCapture, HttpTraceSnapshot,
 };
 pub use iterator::DbIterator;
-pub use logging::{init_logging, LogCallback, LogLevel, LogRecord};
+pub use logging::{init_logging, init_logging_with_trace, LogCallback, LogLevel, LogRecord};
 pub use merge_operator::MergeOperator;
 pub use metrics::{
     Counter, DefaultMetricsRecorder, Gauge, Histogram, HistogramMetricValue, Metric, MetricLabel,
@@ -58,6 +59,7 @@ pub use metrics::{
 };
 pub use object_store::ObjectStore;
 pub use object_store_builder::{ObjectStoreBuilder, ObjectStoreType};
+pub use read_trace::{ReadSpanKind, ReadSpanRecord};
 pub use settings::Settings;
 pub use types::{
     CacheTarget, Checkpoint, CloneSourceSpec, Compaction, CompactionSpec, CompactionStatus,

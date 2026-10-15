@@ -14,6 +14,8 @@ use object_store::ClientOptions;
 use parking_lot::Mutex;
 use tracing::{Instrument, Span};
 
+use crate::read_trace::{read_parent, ReadSpanRecord};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum HttpMethod {
     Get,
@@ -64,6 +66,8 @@ pub struct HttpCallRecord {
     pub outcome: HttpCallOutcome,
     pub span_id: Option<u64>,
     pub parent_span_id: Option<u64>,
+    /// The nearest retained read ancestor in this capture, not a subscriber ID.
+    pub read_span: Option<u64>,
 }
 
 /// A count is available only when every started call is retained and terminal.
@@ -73,6 +77,9 @@ pub struct HttpTraceSnapshot {
     pub dropped_calls: u64,
     pub open_calls: u64,
     pub completed_call_count: Option<u64>,
+    pub read_spans: Vec<ReadSpanRecord>,
+    pub open_read_spans: u64,
+    pub dropped_read_spans: u64,
 }
 
 #[derive(Debug, Default)]
@@ -81,9 +88,14 @@ struct CaptureState {
     open: u64,
     dropped: u64,
     records: Vec<HttpCallRecord>,
+    read_started: u64,
+    read_open: u64,
+    read_dropped: u64,
+    read_spans: Vec<ReadSpanRecord>,
 }
 
-/// Capacity applies across the capture's lifetime, including unfinished calls.
+/// Capacity separately bounds calls and read spans, including unfinished reservations.
+/// Read spans are exported on final close. Root trace IDs are limited to 128 UTF-8 bytes.
 /// Calls include credential requests and can contain client-internal retries or redirects.
 /// Byte counts cover response data consumed through the body wrapper.
 #[derive(Debug, uniffi::Object)]
@@ -112,12 +124,15 @@ impl HttpTraceCapture {
             open_calls: state.open,
             completed_call_count: (state.dropped == 0 && state.open == 0)
                 .then_some(state.records.len() as u64),
+            read_spans: state.read_spans.clone(),
+            open_read_spans: state.read_open,
+            dropped_read_spans: state.read_dropped,
         }
     }
 }
 
 impl HttpTraceCapture {
-    fn now_us(&self) -> u64 {
+    pub(crate) fn now_us(&self) -> u64 {
         self.epoch
             .elapsed()
             .as_micros()
@@ -125,7 +140,32 @@ impl HttpTraceCapture {
             .unwrap_or(u64::MAX)
     }
 
+    pub(crate) fn start_read_span(
+        &self,
+        mut record: ReadSpanRecord,
+        rejected: bool,
+    ) -> Option<ReadSpanRecord> {
+        let mut state = self.state.lock();
+        state.read_started = state.read_started.saturating_add(1);
+        state.read_open += 1;
+        if rejected || state.read_started > self.capacity {
+            state.read_dropped = state.read_dropped.saturating_add(1);
+            return None;
+        }
+        record.span = state.read_started;
+        Some(record)
+    }
+
+    pub(crate) fn finish_read_span(&self, record: Option<ReadSpanRecord>) {
+        let mut state = self.state.lock();
+        state.read_open -= 1;
+        if let Some(record) = record {
+            state.read_spans.push(record);
+        }
+    }
+
     fn start(self: &Arc<Self>, method: HttpMethod) -> CallGuard {
+        let read_span = read_parent(self);
         let parent_span_id = Span::current().id().map(|id| id.into_u64());
         let span = tracing::info_span!(
             "slatedb.http",
@@ -149,6 +189,7 @@ impl HttpTraceCapture {
                 outcome: HttpCallOutcome::Cancelled,
                 span_id: span.id().map(|id| id.into_u64()),
                 parent_span_id,
+                read_span,
             })
         } else {
             state.dropped = state.dropped.saturating_add(1);
@@ -375,6 +416,61 @@ mod tests {
             .header("authorization", "private credential")
             .body(HttpRequestBody::empty())
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn http_calls_keep_their_live_query_identity() {
+        use crate::read_trace::{ReadSpanKind, ReadTraceLayer};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let capture = HttpTraceCapture::new(16);
+        let dispatch =
+            tracing::Dispatch::new(tracing_subscriber::registry().with(ReadTraceLayer {
+                capture: capture.clone(),
+            }));
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let run = |trace_id: &'static str| {
+            let capture = capture.clone();
+            let barrier = barrier.clone();
+            async move {
+                let root = tracing::info_span!("slatedb.read", trace_id);
+                async move {
+                    barrier.wait().await;
+                    let response = http::Response::new(Bytes::new().into());
+                    client(Reply::Response(Mutex::new(Some(response))), &capture)
+                        .execute(request())
+                        .await
+                        .unwrap();
+                }
+                .instrument(root)
+                .await;
+            }
+            .with_subscriber(dispatch.clone())
+        };
+        futures::join!(run("query-a"), run("query-b"));
+        let snapshot = capture.snapshot();
+        assert_eq!(snapshot.completed_call_count, Some(2));
+        assert_eq!(snapshot.open_read_spans, 0);
+        assert_eq!(snapshot.dropped_read_spans, 0);
+        let roots: Vec<_> = snapshot
+            .read_spans
+            .iter()
+            .filter(|span| span.kind == ReadSpanKind::Read)
+            .collect();
+        assert_eq!(roots.len(), 2);
+        assert_ne!(snapshot.records[0].read_span, snapshot.records[1].read_span);
+        for call in &snapshot.records {
+            let root = roots
+                .iter()
+                .find(|span| Some(span.span) == call.read_span)
+                .unwrap();
+            assert!(root.start_us <= call.start_us);
+            assert!(call.finish_us <= root.finish_us);
+            assert!(matches!(
+                root.trace_id.as_deref(),
+                Some("query-a" | "query-b")
+            ));
+        }
     }
 
     fn client(reply: Reply, capture: &Arc<HttpTraceCapture>) -> HttpClient {
