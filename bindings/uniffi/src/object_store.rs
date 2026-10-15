@@ -5,7 +5,7 @@ use object_store::{path::Path, ObjectStoreExt};
 use slatedb::{admin, Db};
 use tokio::sync::Mutex;
 
-use crate::error::Error;
+use crate::error::{Error, SlateDbError};
 use crate::types::ObjectMetadata;
 
 /// Object store handle used when opening databases, readers, and WAL readers.
@@ -58,6 +58,23 @@ impl ObjectStore {
             Err(error) => return Err(error.into()),
         };
         Ok(Some(result.bytes().await?.to_vec()))
+    }
+
+    /// The byte range starts at `start` and ends before `end`.
+    pub async fn get_range(
+        &self,
+        location: String,
+        start: u64,
+        end: u64,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        if start >= end {
+            return Err(SlateDbError::EmptyRange.into());
+        }
+        match self.inner.get_range(&path(location)?, start..end).await {
+            Ok(bytes) => Ok(Some(bytes.to_vec())),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Missing objects return `None`.
@@ -114,6 +131,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(raw.bytes().await.unwrap().as_ref(), &[0, 255, 1]);
+        assert_eq!(
+            store.get_range(location.clone(), 1, 3).await.unwrap(),
+            Some(vec![255, 1])
+        );
         let meta = store.head(location.clone()).await.unwrap().unwrap();
         assert_eq!(meta.size, 3);
         assert_eq!(meta.location, location);
@@ -131,6 +152,7 @@ mod tests {
         assert_eq!(store.get(location.clone()).await.unwrap(), Some(vec![]));
         store.delete(location.clone()).await.unwrap();
         assert_eq!(store.get(location.clone()).await.unwrap(), None);
+        assert_eq!(store.get_range(location.clone(), 0, 1).await.unwrap(), None);
         assert_eq!(store.head(location.clone()).await.unwrap(), None);
         store.delete(location).await.unwrap();
     }
@@ -168,6 +190,16 @@ mod tests {
             store.get(location.clone()).await,
             Err(Error::Invalid { .. })
         ));
+        assert!(matches!(
+            store.get_range(location.clone(), 0, 1).await,
+            Err(Error::Invalid { .. })
+        ));
+        for (start, end) in [(2, 1), (1, 1)] {
+            assert!(matches!(
+                store.get_range("segments/a".into(), start, end).await,
+                Err(Error::Invalid { .. })
+            ));
+        }
         assert!(matches!(
             store.head(location.clone()).await,
             Err(Error::Invalid { .. })

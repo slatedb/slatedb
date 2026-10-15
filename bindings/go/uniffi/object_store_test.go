@@ -15,11 +15,13 @@ import (
 func TestObjectStoreRoundTrip(t *testing.T) {
 	for _, backend := range []string{"memory", "local"} {
 		t.Run(backend, func(t *testing.T) {
-			store := newMemoryStore(t)
+			var store *slatedb.ObjectStore
 			prefix := "segments"
 			if backend == "local" {
 				store, prefix = newLocalStore(t)
 				prefix += "/segments"
+			} else {
+				store = newMemoryStore(t)
 			}
 			location := prefix + "/a.parquet"
 			want := []byte{0, 255, 1, 128}
@@ -29,6 +31,10 @@ func TestObjectStoreRoundTrip(t *testing.T) {
 			got, err := store.Get(location)
 			if err != nil || got == nil || !bytes.Equal(*got, want) {
 				t.Fatalf("Get: %v, %v", got, err)
+			}
+			ranged, err := store.GetRange(location, 1, 3)
+			if err != nil || ranged == nil || !bytes.Equal(*ranged, want[1:3]) {
+				t.Fatalf("GetRange: %v, %v", ranged, err)
 			}
 			if backend == "local" {
 				raw, err := os.ReadFile(filepath.Join("/", location))
@@ -71,6 +77,9 @@ func TestObjectStoreRoundTrip(t *testing.T) {
 			}
 			if got, err := store.Get(location); err != nil || got != nil {
 				t.Fatalf("Get missing: %v, %v", got, err)
+			}
+			if got, err := store.GetRange(location, 0, 1); err != nil || got != nil {
+				t.Fatalf("GetRange missing: %v, %v", got, err)
 			}
 			if got, err := store.Head(location); err != nil || got != nil {
 				t.Fatalf("Head missing: %v, %v", got, err)
@@ -126,6 +135,12 @@ func TestObjectStoreRefusesInvalidPaths(t *testing.T) {
 	assertInvalid(store.Put(location, nil))
 	_, err := store.Get(location)
 	assertInvalid(err)
+	_, err = store.GetRange(location, 0, 1)
+	assertInvalid(err)
+	for _, bounds := range [][2]uint64{{2, 1}, {1, 1}} {
+		_, err = store.GetRange("segments/a", bounds[0], bounds[1])
+		assertInvalid(err)
+	}
 	_, err = store.Head(location)
 	assertInvalid(err)
 	assertInvalid(store.Delete(location))
