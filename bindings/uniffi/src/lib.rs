@@ -11,6 +11,7 @@ mod db_snapshot;
 mod db_transaction;
 mod error;
 mod filter_policy;
+mod http_trace;
 mod iterator;
 mod logging;
 mod merge_operator;
@@ -44,6 +45,9 @@ pub use db_transaction::DbTransaction;
 pub use error::{BlockTransformerCallbackError, CloseReason, Error, MergeOperatorCallbackError};
 pub use filter_policy::{
     BloomFilterOptions, FilterContext, FilterPolicy, PrefixExtractor, PrefixTarget,
+};
+pub use http_trace::{
+    HttpCallOutcome, HttpCallRecord, HttpMethod, HttpTraceCapture, HttpTraceSnapshot,
 };
 pub use iterator::DbIterator;
 pub use logging::{init_logging, LogCallback, LogLevel, LogRecord};
