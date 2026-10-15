@@ -190,9 +190,12 @@ impl SlateDbWalWriterInit {
             match self.wal_holds_rows(WalFileId::from(wal_id)).await {
                 Ok(true) => return Ok(false),
                 Ok(false) => {}
-                // A WAL id that has no object holds no rows either. GC deletes only WALs
-                // below the replay boundary, so this case is a hole in the id space.
-                Err(err) if err.has_object_store_not_found() => {}
+                // A missing object can mean a concurrent GC removed the files under us, which
+                // would require reloading the manifest, or a real hole in the id space, which
+                // can be a correctness bug. Neither proves the range holds no rows, so the
+                // boundary stays where it is and the replay below reads the range and surfaces
+                // the hole itself.
+                Err(err) if err.has_object_store_not_found() => return Ok(false),
                 Err(err) => return Err(err),
             }
         }

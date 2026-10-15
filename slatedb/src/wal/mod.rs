@@ -4,6 +4,7 @@ use crate::{CloseReason, ErrorKind, RowEntry, VersionedManifest};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use object_store::path::Path;
+use slatedb_txn_obj::TransactionalObject;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::{Bound, Range, RangeFrom};
@@ -131,12 +132,19 @@ impl WriterManifest {
         &mut self,
         wal_id: u64,
     ) -> Result<(), WalError> {
-        let mut dirty = self.manifest.prepare_dirty()?;
-        if dirty.value.core.replay_after_wal_id >= wal_id {
-            return Ok(());
-        }
-        dirty.value.core.replay_after_wal_id = wal_id;
-        self.manifest.update(dirty).await?;
+        // A manifest version conflict here (a checkpoint, a compaction or a GC writing the
+        // manifest at the same time) is retryable, so go through the retrying update path
+        // rather than failing the open.
+        self.manifest
+            .maybe_apply_update(|manifest| {
+                if manifest.object().core.replay_after_wal_id >= wal_id {
+                    return Ok(None);
+                }
+                let mut dirty = manifest.prepare_dirty()?;
+                dirty.value.core.replay_after_wal_id = wal_id;
+                Ok(Some(dirty))
+            })
+            .await?;
         Ok(())
     }
 }
