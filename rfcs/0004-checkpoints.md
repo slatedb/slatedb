@@ -810,7 +810,7 @@ The union then keeps its `external_dbs` references to the source databases.
 The client sets the order with `CloneBuilder::with_union_run_order`. `UnionRunOrder` has these variants:
 
 - `Concat`: all runs of the first source, then all runs of the second source, and so on. This is the default.
-- `BandInterleave { threshold, max_group_len }`: build groups of similarly sized runs across the sources.
+- `BandInterleave`: make groups of runs of similar size from different sources.
 
 These rules apply to `BandInterleave`.
 For each source, the next available run is its newest run that we still need to add.
@@ -821,28 +821,38 @@ After a run is added, the next run of the same source becomes a candidate, so a 
 run from the same source.
 If two runs tie, take the run from the source that comes first in key order (step 1).
 
-`BandInterleave` has no default values. The client must supply both `threshold` and `max_group_len`.
-The values guide only the run order of the union. The compaction scheduler does not read them, and they do not change
-the merge limits of the scheduler.
+`BandInterleave` uses two values: `threshold` and `max_group_len`. The client does not set them.
+`CloneBuilder` calculates them from the options of the size-tiered scheduler.
+The client gives these options with `CloneBuilder::with_compactor_options`.
+Thus the union and the scheduler use the same size rule.
+The compactor options do not select the order.
+The client must select `BandInterleave` with `with_union_run_order`.
+The union code gets only the two values. It does not read the compactor options.
+The scheduler does not read the two values.
 
-- `threshold` sets the maximum candidate size relative to the smallest run already in the group.
-  A candidate is the next available run from a source.
-  For example, `threshold: 4.0` and a smallest run of 5 MB allow candidates up to 20 MB.
-  If `threshold` equals `include_size_threshold`, the union and scheduler use the same size rule.
-- `max_group_len` is a limit on the number of runs in a group. `None` sets no limit.
-  If a group has more than `max_compaction_sources` runs, one compaction of the scheduler takes at most
-  `max_compaction_sources` runs of the group.
+- `threshold` is equal to `include_size_threshold`. Step 1 of the algorithm uses it.
+- `max_group_len` is the maximum number of runs in a group.
+  It is equal to the larger of `min_compaction_sources` and `max_compaction_sources - 1`.
 
-With the size-tiered scheduler, set `threshold` to `include_size_threshold` and `max_group_len` below
-`max_compaction_sources`.
-`BackpressureChecker` rejects an L0 compaction if the scheduler group that starts at the first sorted run has
-`max_compaction_sources` runs or more.
-Then L0 compactions wait until that group is compacted, and L0 flushes can stall.
-A shorter first group lowers this risk. It does not remove it, because the scheduler can join runs across two
-union groups.
+`max_group_len` is less than `max_compaction_sources` because of a limit in `BackpressureChecker`.
+`BackpressureChecker` does not start an L0 compaction if the scheduler group that starts at the first sorted run
+has `max_compaction_sources` runs or more.
+Then L0 compactions wait until the compaction of that group is completed, and L0 flushes can stop.
+A shorter first group decreases this risk.
+The risk is still there, because one scheduler group can contain runs from two union groups.
+If `min_compaction_sources` is equal to `max_compaction_sources`, `max_group_len` is equal to `min_compaction_sources`.
+Then the scheduler can compact each group, but the risk does not decrease.
 
-`threshold` must be a finite number of at least 1.0, and `max_group_len` must be `None` or at least 2.
-For other values, the union returns `InvalidUnion`.
+The calculation has these rules:
+
+- If the client does not give compactor options, `CloneBuilder` uses the default options of the size-tiered
+  scheduler.
+- If a calculated value is not usable, `CloneBuilder` selects `Concat` and writes a warning to the log.
+  The API documentation gives the limits.
+- `CompactorOptions` does not name the scheduler. The calculation is correct only for the size-tiered scheduler,
+  which is the default scheduler.
+- `CloneBuilder` reads the compactor options one time, when the clone starts.
+  The first stored manifest keeps the order. If the compactor options change later, the order does not change.
 
 `BandInterleave` works as follows:
 
@@ -861,8 +871,8 @@ For other values, the union returns `InvalidUnion`.
    If two runs give the same group length, choose the smaller run.
    Set `m` to the size of the chosen run.
 
-Example: each source has three sorted runs, newest first, with sizes in MB. Both `threshold` and
-`include_size_threshold` are 4.
+Example: each source has three sorted runs, newest first, with sizes in MB. The scheduler uses its default options,
+so `threshold` is 4 and `max_group_len` is 7.
 
 ```
 source A:        20   5   1
