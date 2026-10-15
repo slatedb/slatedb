@@ -3397,8 +3397,13 @@ name = "slatedb-uniffi"
 version = "0.17.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "figment",
+ "futures",
+ "http",
+ "http-body",
+ "http-body-util",
  "log",
  "object_store",
  "parking_lot",
