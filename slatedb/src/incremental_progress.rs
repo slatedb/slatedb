@@ -205,8 +205,18 @@ impl IncrementalProgress {
 /// Returns `view` cut to `range`, with the same view ID. Returns `None` if the SST
 /// has no keys in `range`.
 ///
-/// [`SsTableView::try_with_visible_range`] gives a cut view a new ID. An incremental
-/// commit keeps the ID, so the same progress applied twice gives the same views.
+/// This function does not use [`SsTableView::try_with_visible_range`], because that
+/// method gives each cut view a new random ID. [`IncrementalProgress::from_compaction`]
+/// builds the output views again for each commit. With a new ID each time, the same
+/// progress gives a different manifest, and each commit interval writes the manifest
+/// even when the job made no progress.
+///
+/// Keeping the ID is safe for these views. A new ID protects L0 views, because
+/// compaction specs and the L0 watermark refer to L0 views by view ID. An incremental
+/// commit changes only sorted-run views, and compactions refer to sorted runs by run
+/// ID. The view ID also stays unique in the manifest: the cut view replaces the view
+/// that it comes from, and [`IncrementalProgress::apply_to_manifest_core`] gives the
+/// other pieces of a split view new IDs.
 fn cut_view(view: &SsTableView, range: BytesRange) -> Option<SsTableView> {
     view.sst
         .info
