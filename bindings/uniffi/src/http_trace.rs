@@ -825,4 +825,79 @@ mod tests {
             .all(|r| r.outcome == HttpCallOutcome::Complete));
         assert!(!format!("{snapshot:?}").contains("private"));
     }
+
+    #[tokio::test]
+    async fn trace_discloses_hidden_redirect_attempts() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            loop {
+                let (mut stream, _) = tokio::select! {
+                    result = listener.accept() => result.unwrap(),
+                    _ = &mut stopped => break,
+                };
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).await.unwrap();
+                    header.push(byte[0]);
+                    assert!(header.len() < 16384);
+                }
+                requests.push(String::from_utf8(header).unwrap());
+                let response = if requests.len() == 1 {
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: /redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\nLast-Modified: Thu, 15 Oct 2026 00:00:00 GMT\r\nETag: test\r\n\r\nabc"
+                };
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let capture = HttpTraceCapture::new(8);
+        let builder = crate::ObjectStoreBuilder::new(crate::ObjectStoreType::S3);
+        for (key, value) in [
+            ("bucket", "test-bucket"),
+            ("region", "test-region"),
+            ("access_key_id", "test-key"),
+            ("secret_access_key", "test-secret"),
+            ("allow_http", "true"),
+            ("endpoint", endpoint.as_str()),
+        ] {
+            builder
+                .with_config(key.to_owned(), value.to_owned())
+                .unwrap();
+        }
+        builder.with_http_trace(capture.clone()).unwrap();
+        let store = builder.build().unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            store
+                .inner
+                .get(&object_store::path::Path::from("private-key"))
+                .await?
+                .bytes()
+                .await
+        })
+        .await;
+        let _ = stop.send(());
+        let requests = tokio::time::timeout(std::time::Duration::from_secs(10), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.unwrap().unwrap(), Bytes::from_static(b"abc"));
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET /test-bucket/private-key "));
+        assert!(requests[1].starts_with("GET /redirected "));
+        let snapshot = capture.snapshot();
+        assert_eq!(snapshot.completed_call_count, Some(1));
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].method, HttpMethod::Get);
+        assert_eq!(snapshot.records[0].status, Some(200));
+        assert_eq!(snapshot.records[0].consumed_bytes, 3);
+        assert_eq!(snapshot.records[0].outcome, HttpCallOutcome::Complete);
+        assert!(!format!("{snapshot:?}").contains("private"));
+    }
 }
