@@ -1306,7 +1306,7 @@ mod tests {
     use crate::test_utils::{assert_kv, GatedObjectStore, RecordingObjectStore, SpanRecorder};
     use crate::types::{KeyValue, ValueDeletable};
     use object_store::path::Path;
-    use object_store::{memory::InMemory, GetRange, ObjectStore, ObjectStoreExt};
+    use object_store::{memory::InMemory, ObjectStore, ObjectStoreExt};
     use rstest::rstest;
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
@@ -1434,7 +1434,7 @@ mod tests {
             .unwrap()
         }
 
-        fn requests(&self) -> Vec<Option<GetRange>> {
+        fn requests(&self) -> Vec<Option<object_store::GetRange>> {
             let mut ranges = self.recording.recorded_get_ranges(false);
             ranges.sort_by_key(|range| format!("{range:?}"));
             assert!(self.recording.recorded_get_ranges(true).is_empty());
