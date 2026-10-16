@@ -8278,7 +8278,8 @@ func (c FfiConverterHistogram) register() {
 	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_histogram(&UniffiVTableCallbackInterfaceHistogramINSTANCE)
 }
 
-// Capacity separately bounds calls and read spans, including unfinished reservations.
+// Capacity separately bounds calls, read spans and observed read dependencies.
+// Calls and read spans include unfinished reservations.
 // Read spans are exported on final close. Root trace IDs are limited to 128 UTF-8 bytes.
 // Calls include credential requests and can contain client-internal retries or redirects.
 // Byte counts cover response data consumed through the body wrapper.
@@ -8286,7 +8287,8 @@ type HttpTraceCaptureInterface interface {
 	Snapshot() HttpTraceSnapshot
 }
 
-// Capacity separately bounds calls and read spans, including unfinished reservations.
+// Capacity separately bounds calls, read spans and observed read dependencies.
+// Calls and read spans include unfinished reservations.
 // Read spans are exported on final close. Root trace IDs are limited to 128 UTF-8 bytes.
 // Calls include credential requests and can contain client-internal retries or redirects.
 // Byte counts cover response data consumed through the body wrapper.
@@ -11699,6 +11701,10 @@ type HttpTraceSnapshot struct {
 	ReadSpans          []ReadSpanRecord
 	OpenReadSpans      uint64
 	DroppedReadSpans   uint64
+	// Unselected endpoints do not reach the filtered capture layer.
+	ReadDependencies           []ReadDependencyRecord
+	DroppedReadDependencies    uint64
+	UnresolvedReadDependencies uint64
 }
 
 func (r *HttpTraceSnapshot) Destroy() {
@@ -11709,6 +11715,9 @@ func (r *HttpTraceSnapshot) Destroy() {
 	FfiDestroyerSequenceReadSpanRecord{}.Destroy(r.ReadSpans)
 	FfiDestroyerUint64{}.Destroy(r.OpenReadSpans)
 	FfiDestroyerUint64{}.Destroy(r.DroppedReadSpans)
+	FfiDestroyerSequenceReadDependencyRecord{}.Destroy(r.ReadDependencies)
+	FfiDestroyerUint64{}.Destroy(r.DroppedReadDependencies)
+	FfiDestroyerUint64{}.Destroy(r.UnresolvedReadDependencies)
 }
 
 type FfiConverterHttpTraceSnapshot struct{}
@@ -11726,6 +11735,9 @@ func (c FfiConverterHttpTraceSnapshot) Read(reader io.Reader) HttpTraceSnapshot 
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterOptionalUint64INSTANCE.Read(reader),
 		FfiConverterSequenceReadSpanRecordINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterSequenceReadDependencyRecordINSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
 	}
@@ -11747,6 +11759,9 @@ func (c FfiConverterHttpTraceSnapshot) Write(writer io.Writer, value HttpTraceSn
 	FfiConverterSequenceReadSpanRecordINSTANCE.Write(writer, value.ReadSpans)
 	FfiConverterUint64INSTANCE.Write(writer, value.OpenReadSpans)
 	FfiConverterUint64INSTANCE.Write(writer, value.DroppedReadSpans)
+	FfiConverterSequenceReadDependencyRecordINSTANCE.Write(writer, value.ReadDependencies)
+	FfiConverterUint64INSTANCE.Write(writer, value.DroppedReadDependencies)
+	FfiConverterUint64INSTANCE.Write(writer, value.UnresolvedReadDependencies)
 }
 
 type FfiDestroyerHttpTraceSnapshot struct{}
@@ -12378,6 +12393,51 @@ func (c FfiConverterPutOptions) Write(writer io.Writer, value PutOptions) {
 type FfiDestroyerPutOptions struct{}
 
 func (_ FfiDestroyerPutOptions) Destroy(value PutOptions) {
+	value.Destroy()
+}
+
+// Links contain capture-local identities for selected read spans only.
+type ReadDependencyRecord struct {
+	Predecessor uint64
+	Dependent   uint64
+}
+
+func (r *ReadDependencyRecord) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.Predecessor)
+	FfiDestroyerUint64{}.Destroy(r.Dependent)
+}
+
+type FfiConverterReadDependencyRecord struct{}
+
+var FfiConverterReadDependencyRecordINSTANCE = FfiConverterReadDependencyRecord{}
+
+func (c FfiConverterReadDependencyRecord) Lift(rb RustBufferI) ReadDependencyRecord {
+	return LiftFromRustBuffer[ReadDependencyRecord](c, rb)
+}
+
+func (c FfiConverterReadDependencyRecord) Read(reader io.Reader) ReadDependencyRecord {
+	return ReadDependencyRecord{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterReadDependencyRecord) Lower(value ReadDependencyRecord) C.RustBuffer {
+	return LowerIntoRustBuffer[ReadDependencyRecord](c, value)
+}
+
+func (c FfiConverterReadDependencyRecord) LowerExternal(value ReadDependencyRecord) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ReadDependencyRecord](c, value))
+}
+
+func (c FfiConverterReadDependencyRecord) Write(writer io.Writer, value ReadDependencyRecord) {
+	FfiConverterUint64INSTANCE.Write(writer, value.Predecessor)
+	FfiConverterUint64INSTANCE.Write(writer, value.Dependent)
+}
+
+type FfiDestroyerReadDependencyRecord struct{}
+
+func (_ FfiDestroyerReadDependencyRecord) Destroy(value ReadDependencyRecord) {
 	value.Destroy()
 }
 
@@ -17131,6 +17191,53 @@ type FfiDestroyerSequenceMetricLabel struct{}
 func (FfiDestroyerSequenceMetricLabel) Destroy(sequence []MetricLabel) {
 	for _, value := range sequence {
 		FfiDestroyerMetricLabel{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceReadDependencyRecord struct{}
+
+var FfiConverterSequenceReadDependencyRecordINSTANCE = FfiConverterSequenceReadDependencyRecord{}
+
+func (c FfiConverterSequenceReadDependencyRecord) Lift(rb RustBufferI) []ReadDependencyRecord {
+	return LiftFromRustBuffer[[]ReadDependencyRecord](c, rb)
+}
+
+func (c FfiConverterSequenceReadDependencyRecord) Read(reader io.Reader) []ReadDependencyRecord {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]ReadDependencyRecord, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterReadDependencyRecordINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceReadDependencyRecord) Lower(value []ReadDependencyRecord) C.RustBuffer {
+	return LowerIntoRustBuffer[[]ReadDependencyRecord](c, value)
+}
+
+func (c FfiConverterSequenceReadDependencyRecord) LowerExternal(value []ReadDependencyRecord) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]ReadDependencyRecord](c, value))
+}
+
+func (c FfiConverterSequenceReadDependencyRecord) Write(writer io.Writer, value []ReadDependencyRecord) {
+	if len(value) > math.MaxInt32 {
+		panic("[]ReadDependencyRecord is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterReadDependencyRecordINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceReadDependencyRecord struct{}
+
+func (FfiDestroyerSequenceReadDependencyRecord) Destroy(sequence []ReadDependencyRecord) {
+	for _, value := range sequence {
+		FfiDestroyerReadDependencyRecord{}.Destroy(value)
 	}
 }
 
