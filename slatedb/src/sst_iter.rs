@@ -1455,7 +1455,11 @@ mod tests {
             .iter()
             .filter(|span| span.name == "slatedb.read.read_blocks")
             .collect();
-        assert_eq!(indexes.len(), 1);
+        assert_eq!(
+            indexes.len(),
+            1,
+            "Index reads must remain with the query subscriber."
+        );
         assert_eq!(
             blocks.len(),
             block_count,
@@ -1660,9 +1664,9 @@ mod tests {
                 foreign_trace.read_span().id(),
             );
             rows.extend(dependency_rows(&mut iter).with_subscriber(dispatch_b).await);
-            assert_eq!(iter.index_span.id(), foreign_index.id());
             assert_eq!(rows.len(), 6);
             assert_index_dependencies(&recorder_a, 6);
+            assert_eq!(iter.index_span.id(), foreign_index.id());
             assert!(recorder_b.dependencies().is_empty());
             let foreign_spans = recorder_b.spans();
             assert_eq!(foreign_spans.len(), 2);
