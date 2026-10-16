@@ -393,6 +393,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_func_init_logging_with_trace()
+		})
+		if checksum != 57356 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_func_init_logging_with_trace: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_admin_create_clone_builder_from_source()
 		})
 		if checksum != 20657 {
@@ -1599,6 +1608,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_httptracecapture_snapshot()
+		})
+		if checksum != 61437 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_httptracecapture_snapshot: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbiterator_next()
 		})
 		if checksum != 1225 {
@@ -1793,6 +1811,15 @@ func uniffiCheckChecksums() {
 		if checksum != 61356 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstorebuilder_with_config: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstorebuilder_with_http_trace()
+		})
+		if checksum != 48723 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstorebuilder_with_http_trace: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -2022,6 +2049,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_httptracecapture_new()
+		})
+		if checksum != 44923 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_httptracecapture_new: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_constructor_defaultmetricsrecorder_new()
 		})
 		if checksum != 31165 {
@@ -2174,6 +2210,30 @@ func uniffiCheckChecksums() {
 		}
 	}
 }
+
+type FfiConverterUint16 struct{}
+
+var FfiConverterUint16INSTANCE = FfiConverterUint16{}
+
+func (FfiConverterUint16) Lower(value uint16) C.uint16_t {
+	return C.uint16_t(value)
+}
+
+func (FfiConverterUint16) Write(writer io.Writer, value uint16) {
+	writeUint16(writer, value)
+}
+
+func (FfiConverterUint16) Lift(value C.uint16_t) uint16 {
+	return uint16(value)
+}
+
+func (FfiConverterUint16) Read(reader io.Reader) uint16 {
+	return readUint16(reader)
+}
+
+type FfiDestroyerUint16 struct{}
+
+func (FfiDestroyerUint16) Destroy(_ uint16) {}
 
 type FfiConverterUint32 struct{}
 
@@ -8218,6 +8278,94 @@ func (c FfiConverterHistogram) register() {
 	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_histogram(&UniffiVTableCallbackInterfaceHistogramINSTANCE)
 }
 
+// Capacity separately bounds calls and read spans, including unfinished reservations.
+// Read spans are exported on final close. Root trace IDs are limited to 128 UTF-8 bytes.
+// Calls include credential requests and can contain client-internal retries or redirects.
+// Byte counts cover response data consumed through the body wrapper.
+type HttpTraceCaptureInterface interface {
+	Snapshot() HttpTraceSnapshot
+}
+
+// Capacity separately bounds calls and read spans, including unfinished reservations.
+// Read spans are exported on final close. Root trace IDs are limited to 128 UTF-8 bytes.
+// Calls include credential requests and can contain client-internal retries or redirects.
+// Byte counts cover response data consumed through the body wrapper.
+type HttpTraceCapture struct {
+	ffiObject FfiObject
+}
+
+func NewHttpTraceCapture(capacity uint32) *HttpTraceCapture {
+	return FfiConverterHttpTraceCaptureINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_httptracecapture_new(FfiConverterUint32INSTANCE.Lower(capacity), _uniffiStatus)
+	}))
+}
+
+func (_self *HttpTraceCapture) Snapshot() HttpTraceSnapshot {
+	_pointer := _self.ffiObject.incrementPointer("*HttpTraceCapture")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterHttpTraceSnapshotINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_httptracecapture_snapshot(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+func (object *HttpTraceCapture) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterHttpTraceCapture struct{}
+
+var FfiConverterHttpTraceCaptureINSTANCE = FfiConverterHttpTraceCapture{}
+
+func (c FfiConverterHttpTraceCapture) Lift(handle C.uint64_t) *HttpTraceCapture {
+	result := &HttpTraceCapture{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_httptracecapture(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_httptracecapture(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*HttpTraceCapture).Destroy)
+	return result
+}
+
+func (c FfiConverterHttpTraceCapture) Read(reader io.Reader) *HttpTraceCapture {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterHttpTraceCapture) Lower(value *HttpTraceCapture) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*HttpTraceCapture")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterHttpTraceCapture) Write(writer io.Writer, value *HttpTraceCapture) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalHttpTraceCapture(handle uint64) *HttpTraceCapture {
+	return FfiConverterHttpTraceCaptureINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalHttpTraceCapture(value *HttpTraceCapture) uint64 {
+	return uint64(FfiConverterHttpTraceCaptureINSTANCE.Lower(value))
+}
+
+type FfiDestroyerHttpTraceCapture struct{}
+
+func (_ FfiDestroyerHttpTraceCapture) Destroy(value *HttpTraceCapture) {
+	value.Destroy()
+}
+
 // Callback invoked for each emitted log record.
 type LogCallback interface {
 	// Handles one log record.
@@ -8909,6 +9057,8 @@ type ObjectStoreBuilderInterface interface {
 	Build() (*ObjectStore, error)
 	// Sets a single provider-specific configuration entry.
 	WithConfig(key string, value string) error
+	// Captures connector calls, including credential requests. Local and memory stores emit none.
+	WithHttpTrace(capture *HttpTraceCapture) error
 	// Applies provider-specific configuration parsed out of `url`.
 	WithUrl(url string) error
 }
@@ -8990,6 +9140,18 @@ func (_self *ObjectStoreBuilder) WithConfig(key string, value string) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_objectstorebuilder_with_config(
 			_pointer, FfiConverterStringINSTANCE.Lower(key), FfiConverterStringINSTANCE.Lower(value), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Captures connector calls, including credential requests. Local and memory stores emit none.
+func (_self *ObjectStoreBuilder) WithHttpTrace(capture *HttpTraceCapture) error {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStoreBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_objectstorebuilder_with_http_trace(
+			_pointer, FfiConverterHttpTraceCaptureINSTANCE.Lower(capture), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -11445,6 +11607,154 @@ func (_ FfiDestroyerHistogramMetricValue) Destroy(value HistogramMetricValue) {
 	value.Destroy()
 }
 
+// Records contain no URLs, headers, error messages or body content.
+// Times use the capture's native monotonic epoch. Span IDs belong to its subscriber.
+type HttpCallRecord struct {
+	Call          uint64
+	Method        HttpMethod
+	Status        *uint16
+	StartUs       uint64
+	HeadersUs     *uint64
+	FinishUs      uint64
+	ConsumedBytes uint64
+	Outcome       HttpCallOutcome
+	SpanId        *uint64
+	ParentSpanId  *uint64
+	// The nearest retained read ancestor in this capture, not a subscriber ID.
+	ReadSpan *uint64
+}
+
+func (r *HttpCallRecord) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.Call)
+	FfiDestroyerHttpMethod{}.Destroy(r.Method)
+	FfiDestroyerOptionalUint16{}.Destroy(r.Status)
+	FfiDestroyerUint64{}.Destroy(r.StartUs)
+	FfiDestroyerOptionalUint64{}.Destroy(r.HeadersUs)
+	FfiDestroyerUint64{}.Destroy(r.FinishUs)
+	FfiDestroyerUint64{}.Destroy(r.ConsumedBytes)
+	FfiDestroyerHttpCallOutcome{}.Destroy(r.Outcome)
+	FfiDestroyerOptionalUint64{}.Destroy(r.SpanId)
+	FfiDestroyerOptionalUint64{}.Destroy(r.ParentSpanId)
+	FfiDestroyerOptionalUint64{}.Destroy(r.ReadSpan)
+}
+
+type FfiConverterHttpCallRecord struct{}
+
+var FfiConverterHttpCallRecordINSTANCE = FfiConverterHttpCallRecord{}
+
+func (c FfiConverterHttpCallRecord) Lift(rb RustBufferI) HttpCallRecord {
+	return LiftFromRustBuffer[HttpCallRecord](c, rb)
+}
+
+func (c FfiConverterHttpCallRecord) Read(reader io.Reader) HttpCallRecord {
+	return HttpCallRecord{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterHttpMethodINSTANCE.Read(reader),
+		FfiConverterOptionalUint16INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterHttpCallOutcomeINSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterHttpCallRecord) Lower(value HttpCallRecord) C.RustBuffer {
+	return LowerIntoRustBuffer[HttpCallRecord](c, value)
+}
+
+func (c FfiConverterHttpCallRecord) LowerExternal(value HttpCallRecord) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[HttpCallRecord](c, value))
+}
+
+func (c FfiConverterHttpCallRecord) Write(writer io.Writer, value HttpCallRecord) {
+	FfiConverterUint64INSTANCE.Write(writer, value.Call)
+	FfiConverterHttpMethodINSTANCE.Write(writer, value.Method)
+	FfiConverterOptionalUint16INSTANCE.Write(writer, value.Status)
+	FfiConverterUint64INSTANCE.Write(writer, value.StartUs)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.HeadersUs)
+	FfiConverterUint64INSTANCE.Write(writer, value.FinishUs)
+	FfiConverterUint64INSTANCE.Write(writer, value.ConsumedBytes)
+	FfiConverterHttpCallOutcomeINSTANCE.Write(writer, value.Outcome)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.SpanId)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.ParentSpanId)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.ReadSpan)
+}
+
+type FfiDestroyerHttpCallRecord struct{}
+
+func (_ FfiDestroyerHttpCallRecord) Destroy(value HttpCallRecord) {
+	value.Destroy()
+}
+
+// A count is available only when every started call is retained and terminal.
+type HttpTraceSnapshot struct {
+	Records            []HttpCallRecord
+	DroppedCalls       uint64
+	OpenCalls          uint64
+	CompletedCallCount *uint64
+	ReadSpans          []ReadSpanRecord
+	OpenReadSpans      uint64
+	DroppedReadSpans   uint64
+}
+
+func (r *HttpTraceSnapshot) Destroy() {
+	FfiDestroyerSequenceHttpCallRecord{}.Destroy(r.Records)
+	FfiDestroyerUint64{}.Destroy(r.DroppedCalls)
+	FfiDestroyerUint64{}.Destroy(r.OpenCalls)
+	FfiDestroyerOptionalUint64{}.Destroy(r.CompletedCallCount)
+	FfiDestroyerSequenceReadSpanRecord{}.Destroy(r.ReadSpans)
+	FfiDestroyerUint64{}.Destroy(r.OpenReadSpans)
+	FfiDestroyerUint64{}.Destroy(r.DroppedReadSpans)
+}
+
+type FfiConverterHttpTraceSnapshot struct{}
+
+var FfiConverterHttpTraceSnapshotINSTANCE = FfiConverterHttpTraceSnapshot{}
+
+func (c FfiConverterHttpTraceSnapshot) Lift(rb RustBufferI) HttpTraceSnapshot {
+	return LiftFromRustBuffer[HttpTraceSnapshot](c, rb)
+}
+
+func (c FfiConverterHttpTraceSnapshot) Read(reader io.Reader) HttpTraceSnapshot {
+	return HttpTraceSnapshot{
+		FfiConverterSequenceHttpCallRecordINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterSequenceReadSpanRecordINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterHttpTraceSnapshot) Lower(value HttpTraceSnapshot) C.RustBuffer {
+	return LowerIntoRustBuffer[HttpTraceSnapshot](c, value)
+}
+
+func (c FfiConverterHttpTraceSnapshot) LowerExternal(value HttpTraceSnapshot) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[HttpTraceSnapshot](c, value))
+}
+
+func (c FfiConverterHttpTraceSnapshot) Write(writer io.Writer, value HttpTraceSnapshot) {
+	FfiConverterSequenceHttpCallRecordINSTANCE.Write(writer, value.Records)
+	FfiConverterUint64INSTANCE.Write(writer, value.DroppedCalls)
+	FfiConverterUint64INSTANCE.Write(writer, value.OpenCalls)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.CompletedCallCount)
+	FfiConverterSequenceReadSpanRecordINSTANCE.Write(writer, value.ReadSpans)
+	FfiConverterUint64INSTANCE.Write(writer, value.OpenReadSpans)
+	FfiConverterUint64INSTANCE.Write(writer, value.DroppedReadSpans)
+}
+
+type FfiDestroyerHttpTraceSnapshot struct{}
+
+func (_ FfiDestroyerHttpTraceSnapshot) Destroy(value HttpTraceSnapshot) {
+	value.Destroy()
+}
+
 // Metadata for an object plus the domain identifier parsed from its path.
 type IdentifiedObjectMetadata struct {
 	// Parsed domain identifier for the object.
@@ -12132,6 +12442,67 @@ func (c FfiConverterReadOptions) Write(writer io.Writer, value ReadOptions) {
 type FfiDestroyerReadOptions struct{}
 
 func (_ FfiDestroyerReadOptions) Destroy(value ReadOptions) {
+	value.Destroy()
+}
+
+// Identities and times belong to the HTTP capture. Only read roots carry caller trace IDs.
+type ReadSpanRecord struct {
+	Span       uint64
+	ParentSpan *uint64
+	Kind       ReadSpanKind
+	TraceId    *string
+	StartUs    uint64
+	FinishUs   uint64
+}
+
+func (r *ReadSpanRecord) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.Span)
+	FfiDestroyerOptionalUint64{}.Destroy(r.ParentSpan)
+	FfiDestroyerReadSpanKind{}.Destroy(r.Kind)
+	FfiDestroyerOptionalString{}.Destroy(r.TraceId)
+	FfiDestroyerUint64{}.Destroy(r.StartUs)
+	FfiDestroyerUint64{}.Destroy(r.FinishUs)
+}
+
+type FfiConverterReadSpanRecord struct{}
+
+var FfiConverterReadSpanRecordINSTANCE = FfiConverterReadSpanRecord{}
+
+func (c FfiConverterReadSpanRecord) Lift(rb RustBufferI) ReadSpanRecord {
+	return LiftFromRustBuffer[ReadSpanRecord](c, rb)
+}
+
+func (c FfiConverterReadSpanRecord) Read(reader io.Reader) ReadSpanRecord {
+	return ReadSpanRecord{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterOptionalUint64INSTANCE.Read(reader),
+		FfiConverterReadSpanKindINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterReadSpanRecord) Lower(value ReadSpanRecord) C.RustBuffer {
+	return LowerIntoRustBuffer[ReadSpanRecord](c, value)
+}
+
+func (c FfiConverterReadSpanRecord) LowerExternal(value ReadSpanRecord) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ReadSpanRecord](c, value))
+}
+
+func (c FfiConverterReadSpanRecord) Write(writer io.Writer, value ReadSpanRecord) {
+	FfiConverterUint64INSTANCE.Write(writer, value.Span)
+	FfiConverterOptionalUint64INSTANCE.Write(writer, value.ParentSpan)
+	FfiConverterReadSpanKindINSTANCE.Write(writer, value.Kind)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.TraceId)
+	FfiConverterUint64INSTANCE.Write(writer, value.StartUs)
+	FfiConverterUint64INSTANCE.Write(writer, value.FinishUs)
+}
+
+type FfiDestroyerReadSpanRecord struct{}
+
+func (_ FfiDestroyerReadSpanRecord) Destroy(value ReadSpanRecord) {
 	value.Destroy()
 }
 
@@ -14013,6 +14384,87 @@ type FfiDestroyerFlushType struct{}
 func (_ FfiDestroyerFlushType) Destroy(value FlushType) {
 }
 
+type HttpCallOutcome uint
+
+const (
+	HttpCallOutcomeComplete       HttpCallOutcome = 1
+	HttpCallOutcomeTransportError HttpCallOutcome = 2
+	HttpCallOutcomeBodyError      HttpCallOutcome = 3
+	HttpCallOutcomeCancelled      HttpCallOutcome = 4
+	HttpCallOutcomeBodyDropped    HttpCallOutcome = 5
+)
+
+type FfiConverterHttpCallOutcome struct{}
+
+var FfiConverterHttpCallOutcomeINSTANCE = FfiConverterHttpCallOutcome{}
+
+func (c FfiConverterHttpCallOutcome) Lift(rb RustBufferI) HttpCallOutcome {
+	return LiftFromRustBuffer[HttpCallOutcome](c, rb)
+}
+
+func (c FfiConverterHttpCallOutcome) Lower(value HttpCallOutcome) C.RustBuffer {
+	return LowerIntoRustBuffer[HttpCallOutcome](c, value)
+}
+
+func (c FfiConverterHttpCallOutcome) LowerExternal(value HttpCallOutcome) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[HttpCallOutcome](c, value))
+}
+func (FfiConverterHttpCallOutcome) Read(reader io.Reader) HttpCallOutcome {
+	id := readInt32(reader)
+	return HttpCallOutcome(id)
+}
+
+func (FfiConverterHttpCallOutcome) Write(writer io.Writer, value HttpCallOutcome) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerHttpCallOutcome struct{}
+
+func (_ FfiDestroyerHttpCallOutcome) Destroy(value HttpCallOutcome) {
+}
+
+type HttpMethod uint
+
+const (
+	HttpMethodGet     HttpMethod = 1
+	HttpMethodHead    HttpMethod = 2
+	HttpMethodPut     HttpMethod = 3
+	HttpMethodDelete  HttpMethod = 4
+	HttpMethodPost    HttpMethod = 5
+	HttpMethodPatch   HttpMethod = 6
+	HttpMethodOptions HttpMethod = 7
+	HttpMethodOther   HttpMethod = 8
+)
+
+type FfiConverterHttpMethod struct{}
+
+var FfiConverterHttpMethodINSTANCE = FfiConverterHttpMethod{}
+
+func (c FfiConverterHttpMethod) Lift(rb RustBufferI) HttpMethod {
+	return LiftFromRustBuffer[HttpMethod](c, rb)
+}
+
+func (c FfiConverterHttpMethod) Lower(value HttpMethod) C.RustBuffer {
+	return LowerIntoRustBuffer[HttpMethod](c, value)
+}
+
+func (c FfiConverterHttpMethod) LowerExternal(value HttpMethod) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[HttpMethod](c, value))
+}
+func (FfiConverterHttpMethod) Read(reader io.Reader) HttpMethod {
+	id := readInt32(reader)
+	return HttpMethod(id)
+}
+
+func (FfiConverterHttpMethod) Write(writer io.Writer, value HttpMethod) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerHttpMethod struct{}
+
+func (_ FfiDestroyerHttpMethod) Destroy(value HttpMethod) {
+}
+
 // Isolation level used when starting a transaction.
 type IsolationLevel uint
 
@@ -14511,6 +14963,47 @@ type FfiDestroyerPreloadLevel struct{}
 func (_ FfiDestroyerPreloadLevel) Destroy(value PreloadLevel) {
 }
 
+type ReadSpanKind uint
+
+const (
+	ReadSpanKindRead           ReadSpanKind = 1
+	ReadSpanKindMemtable       ReadSpanKind = 2
+	ReadSpanKindReadFilters    ReadSpanKind = 3
+	ReadSpanKindEvaluateFilter ReadSpanKind = 4
+	ReadSpanKindReadIndex      ReadSpanKind = 5
+	ReadSpanKindReadBlocks     ReadSpanKind = 6
+	ReadSpanKindMerge          ReadSpanKind = 7
+)
+
+type FfiConverterReadSpanKind struct{}
+
+var FfiConverterReadSpanKindINSTANCE = FfiConverterReadSpanKind{}
+
+func (c FfiConverterReadSpanKind) Lift(rb RustBufferI) ReadSpanKind {
+	return LiftFromRustBuffer[ReadSpanKind](c, rb)
+}
+
+func (c FfiConverterReadSpanKind) Lower(value ReadSpanKind) C.RustBuffer {
+	return LowerIntoRustBuffer[ReadSpanKind](c, value)
+}
+
+func (c FfiConverterReadSpanKind) LowerExternal(value ReadSpanKind) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ReadSpanKind](c, value))
+}
+func (FfiConverterReadSpanKind) Read(reader io.Reader) ReadSpanKind {
+	id := readInt32(reader)
+	return ReadSpanKind(id)
+}
+
+func (FfiConverterReadSpanKind) Write(writer io.Writer, value ReadSpanKind) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerReadSpanKind struct{}
+
+func (_ FfiDestroyerReadSpanKind) Destroy(value ReadSpanKind) {
+}
+
 // Determines how a [`crate::DbReader`] chooses and refreshes database state.
 type ReaderMode interface {
 	Destroy()
@@ -14886,6 +15379,47 @@ type FfiDestroyerTtl struct{}
 
 func (_ FfiDestroyerTtl) Destroy(value Ttl) {
 	value.Destroy()
+}
+
+type FfiConverterOptionalUint16 struct{}
+
+var FfiConverterOptionalUint16INSTANCE = FfiConverterOptionalUint16{}
+
+func (c FfiConverterOptionalUint16) Lift(rb RustBufferI) *uint16 {
+	return LiftFromRustBuffer[*uint16](c, rb)
+}
+
+func (_ FfiConverterOptionalUint16) Read(reader io.Reader) *uint16 {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterUint16INSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalUint16) Lower(value *uint16) C.RustBuffer {
+	return LowerIntoRustBuffer[*uint16](c, value)
+}
+
+func (c FfiConverterOptionalUint16) LowerExternal(value *uint16) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*uint16](c, value))
+}
+
+func (_ FfiConverterOptionalUint16) Write(writer io.Writer, value *uint16) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterUint16INSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalUint16 struct{}
+
+func (_ FfiDestroyerOptionalUint16) Destroy(value *uint16) {
+	if value != nil {
+		FfiDestroyerUint16{}.Destroy(*value)
+	}
 }
 
 type FfiConverterOptionalUint32 struct{}
@@ -16412,6 +16946,53 @@ func (FfiDestroyerSequenceExternalDb) Destroy(sequence []ExternalDb) {
 	}
 }
 
+type FfiConverterSequenceHttpCallRecord struct{}
+
+var FfiConverterSequenceHttpCallRecordINSTANCE = FfiConverterSequenceHttpCallRecord{}
+
+func (c FfiConverterSequenceHttpCallRecord) Lift(rb RustBufferI) []HttpCallRecord {
+	return LiftFromRustBuffer[[]HttpCallRecord](c, rb)
+}
+
+func (c FfiConverterSequenceHttpCallRecord) Read(reader io.Reader) []HttpCallRecord {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]HttpCallRecord, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterHttpCallRecordINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceHttpCallRecord) Lower(value []HttpCallRecord) C.RustBuffer {
+	return LowerIntoRustBuffer[[]HttpCallRecord](c, value)
+}
+
+func (c FfiConverterSequenceHttpCallRecord) LowerExternal(value []HttpCallRecord) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]HttpCallRecord](c, value))
+}
+
+func (c FfiConverterSequenceHttpCallRecord) Write(writer io.Writer, value []HttpCallRecord) {
+	if len(value) > math.MaxInt32 {
+		panic("[]HttpCallRecord is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterHttpCallRecordINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceHttpCallRecord struct{}
+
+func (FfiDestroyerSequenceHttpCallRecord) Destroy(sequence []HttpCallRecord) {
+	for _, value := range sequence {
+		FfiDestroyerHttpCallRecord{}.Destroy(value)
+	}
+}
+
 type FfiConverterSequenceKeyValue struct{}
 
 var FfiConverterSequenceKeyValueINSTANCE = FfiConverterSequenceKeyValue{}
@@ -16550,6 +17131,53 @@ type FfiDestroyerSequenceMetricLabel struct{}
 func (FfiDestroyerSequenceMetricLabel) Destroy(sequence []MetricLabel) {
 	for _, value := range sequence {
 		FfiDestroyerMetricLabel{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceReadSpanRecord struct{}
+
+var FfiConverterSequenceReadSpanRecordINSTANCE = FfiConverterSequenceReadSpanRecord{}
+
+func (c FfiConverterSequenceReadSpanRecord) Lift(rb RustBufferI) []ReadSpanRecord {
+	return LiftFromRustBuffer[[]ReadSpanRecord](c, rb)
+}
+
+func (c FfiConverterSequenceReadSpanRecord) Read(reader io.Reader) []ReadSpanRecord {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]ReadSpanRecord, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterReadSpanRecordINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceReadSpanRecord) Lower(value []ReadSpanRecord) C.RustBuffer {
+	return LowerIntoRustBuffer[[]ReadSpanRecord](c, value)
+}
+
+func (c FfiConverterSequenceReadSpanRecord) LowerExternal(value []ReadSpanRecord) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]ReadSpanRecord](c, value))
+}
+
+func (c FfiConverterSequenceReadSpanRecord) Write(writer io.Writer, value []ReadSpanRecord) {
+	if len(value) > math.MaxInt32 {
+		panic("[]ReadSpanRecord is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterReadSpanRecordINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceReadSpanRecord struct{}
+
+func (FfiDestroyerSequenceReadSpanRecord) Destroy(sequence []ReadSpanRecord) {
+	for _, value := range sequence {
+		FfiDestroyerReadSpanRecord{}.Destroy(value)
 	}
 }
 
@@ -17185,6 +17813,15 @@ func slatedb_uniffiFreeGorutine(data C.uint64_t) {
 func InitLogging(level LogLevel, callback *LogCallback) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_func_init_logging(FfiConverterLogLevelINSTANCE.Lower(level), FfiConverterOptionalLogCallbackINSTANCE.Lower(callback), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Read capture shares the one process subscriber and does not change the log level.
+func InitLoggingWithTrace(level LogLevel, callback *LogCallback, capture *HttpTraceCapture) error {
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_func_init_logging_with_trace(FfiConverterLogLevelINSTANCE.Lower(level), FfiConverterOptionalLogCallbackINSTANCE.Lower(callback), FfiConverterHttpTraceCaptureINSTANCE.Lower(capture), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()

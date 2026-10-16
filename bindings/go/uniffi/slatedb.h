@@ -1539,6 +1539,26 @@ RustBuffer uniffi_slatedb_uniffi_fn_method_prefixextractor_name(uint64_t ptr, Ru
 RustBuffer uniffi_slatedb_uniffi_fn_method_prefixextractor_prefix_len(uint64_t ptr, RustBuffer target, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_HTTPTRACECAPTURE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_HTTPTRACECAPTURE
+uint64_t uniffi_slatedb_uniffi_fn_clone_httptracecapture(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_HTTPTRACECAPTURE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_HTTPTRACECAPTURE
+void uniffi_slatedb_uniffi_fn_free_httptracecapture(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_HTTPTRACECAPTURE_NEW
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_HTTPTRACECAPTURE_NEW
+uint64_t uniffi_slatedb_uniffi_fn_constructor_httptracecapture_new(uint32_t capacity, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_HTTPTRACECAPTURE_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_HTTPTRACECAPTURE_SNAPSHOT
+RustBuffer uniffi_slatedb_uniffi_fn_method_httptracecapture_snapshot(uint64_t ptr, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBITERATOR
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBITERATOR
 uint64_t uniffi_slatedb_uniffi_fn_clone_dbiterator(uint64_t handle, RustCallStatus *out_status
@@ -1825,6 +1845,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_objectstorebuilder_build(uint64_t ptr, 
 void uniffi_slatedb_uniffi_fn_method_objectstorebuilder_with_config(uint64_t ptr, RustBuffer key, RustBuffer value, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_OBJECTSTOREBUILDER_WITH_HTTP_TRACE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_OBJECTSTOREBUILDER_WITH_HTTP_TRACE
+void uniffi_slatedb_uniffi_fn_method_objectstorebuilder_with_http_trace(uint64_t ptr, uint64_t capture, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_OBJECTSTOREBUILDER_WITH_URL
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_OBJECTSTOREBUILDER_WITH_URL
 void uniffi_slatedb_uniffi_fn_method_objectstorebuilder_with_url(uint64_t ptr, RustBuffer url, RustCallStatus *out_status
@@ -2006,6 +2031,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_writehandle_seqnum(uint64_t ptr, RustCa
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FUNC_INIT_LOGGING
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FUNC_INIT_LOGGING
 void uniffi_slatedb_uniffi_fn_func_init_logging(RustBuffer level, RustBuffer callback, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FUNC_INIT_LOGGING_WITH_TRACE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FUNC_INIT_LOGGING_WITH_TRACE
+void uniffi_slatedb_uniffi_fn_func_init_logging_with_trace(RustBuffer level, RustBuffer callback, uint64_t capture, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_SLATEDB_UNIFFI_RUSTBUFFER_ALLOC
@@ -2271,6 +2301,12 @@ void ffi_slatedb_uniffi_rust_future_complete_void(uint64_t handle, RustCallStatu
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_FUNC_INIT_LOGGING
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_FUNC_INIT_LOGGING
 uint16_t uniffi_slatedb_uniffi_checksum_func_init_logging(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_FUNC_INIT_LOGGING_WITH_TRACE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_FUNC_INIT_LOGGING_WITH_TRACE
+uint16_t uniffi_slatedb_uniffi_checksum_func_init_logging_with_trace(void
     
 );
 #endif
@@ -3078,6 +3114,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_prefixextractor_prefix_len(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_HTTPTRACECAPTURE_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_HTTPTRACECAPTURE_SNAPSHOT
+uint16_t uniffi_slatedb_uniffi_checksum_method_httptracecapture_snapshot(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_NEXT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBITERATOR_NEXT
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbiterator_next(void
@@ -3207,6 +3249,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_objectstorebuilder_build(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_OBJECTSTOREBUILDER_WITH_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_OBJECTSTOREBUILDER_WITH_CONFIG
 uint16_t uniffi_slatedb_uniffi_checksum_method_objectstorebuilder_with_config(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_OBJECTSTOREBUILDER_WITH_HTTP_TRACE
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_OBJECTSTOREBUILDER_WITH_HTTP_TRACE
+uint16_t uniffi_slatedb_uniffi_checksum_method_objectstorebuilder_with_http_trace(void
     
 );
 #endif
@@ -3357,6 +3405,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_constructor_filterpolicy_bloom(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_FILTERPOLICY_BLOOM_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_FILTERPOLICY_BLOOM_WITH_OPTIONS
 uint16_t uniffi_slatedb_uniffi_checksum_constructor_filterpolicy_bloom_with_options(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_HTTPTRACECAPTURE_NEW
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_HTTPTRACECAPTURE_NEW
+uint16_t uniffi_slatedb_uniffi_checksum_constructor_httptracecapture_new(void
     
 );
 #endif
