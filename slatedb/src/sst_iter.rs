@@ -357,10 +357,10 @@ pub(crate) struct InternalSstIterator<'a> {
     fetch_tasks: VecDeque<FetchTask>,
     table_store: Arc<TableStore>,
     options: SstIteratorOptions,
-    /// A point range read by one fetch task: its one block, when the range
-    /// is one block, is polled inline rather than spawned. Fixed for the
-    /// iterator's life, so decided once here.
-    inline_point_read: bool,
+    /// A read with one fetch task: its fetch is polled inline rather than
+    /// spawned as a background task. Fixed for the iterator's life, so
+    /// decided once here.
+    inline_fetch: bool,
     tracing_context: Option<SstTracingContext>,
     /// Buffer for descending iteration to maintain correct sequence order within keys.
     descending_buffer: Option<VecDeque<RowEntry>>,
@@ -383,7 +383,7 @@ impl<'a> InternalSstIterator<'a> {
             IterationOrder::Descending => Some(VecDeque::new()),
             IterationOrder::Ascending => None,
         };
-        let inline_point_read = view.point_key().is_some() && options.max_fetch_tasks == 1;
+        let inline_fetch = options.max_fetch_tasks == 1;
 
         Ok(Self {
             view,
@@ -394,7 +394,7 @@ impl<'a> InternalSstIterator<'a> {
             fetch_tasks: VecDeque::new(),
             table_store,
             options,
-            inline_point_read,
+            inline_fetch,
             tracing_context,
             descending_buffer,
             pending_entry: None,
@@ -516,8 +516,8 @@ impl<'a> InternalSstIterator<'a> {
         }
     }
 
-    /// Starts the read of `blocks`: inline for a one-task point read's single
-    /// block, as a task on the runtime for everything else.
+    /// Starts the read of `blocks`: inline when `max_fetch_tasks == 1`, as
+    /// a task on the runtime when multiple fetch tasks are enabled.
     fn start_fetch(&self, index: Arc<SsTableIndexOwned>, blocks: Range<usize>) -> FetchTask {
         let table = self.view.table_as_ref().sst.clone();
         let table_store = self.table_store.clone();
@@ -525,7 +525,6 @@ impl<'a> InternalSstIterator<'a> {
         let segment = self.options.segment.clone();
         let read_trace = self.read_trace();
         let sst_level = self.sst_level().cloned();
-        let single_block = blocks.len() == 1;
         let read = async move {
             table_store
                 .read_blocks_using_index(
@@ -539,7 +538,7 @@ impl<'a> InternalSstIterator<'a> {
                 )
                 .await
         };
-        if self.inline_point_read && single_block {
+        if self.inline_fetch {
             FetchTask::Inline(parking_lot::Mutex::new(Box::pin(read)))
         } else {
             FetchTask::InFlight(AbortOnDropHandle::new(spawn_with_optional_subscriber(read)))
@@ -3338,14 +3337,17 @@ mod tests {
 
         // Initialization walks `advance_block` -> `next_iter(true)` ->
         // `spawn_fetches`, so the first fetch is spawned onto - and cancelled
-        // by - the dead runtime while its context is entered.
+        // by - the dead runtime while its context is entered when max_fetch_tasks > 1.
         let result = {
             let _guard = dead_handle.enter();
             SstIterator::new_owned_initialized(
                 ..,
                 sst,
                 table_store.clone(),
-                SstIteratorOptions::default(),
+                SstIteratorOptions {
+                    max_fetch_tasks: 2,
+                    ..SstIteratorOptions::default()
+                },
             )
             .await
         };
@@ -4018,6 +4020,82 @@ mod tests {
             scan.init().await
         };
         assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn scan_inline_is_detected_from_one_fetch_task() {
+        let store = Arc::new(TableStore::new(
+            Arc::new(InMemory::new()),
+            SsTableFormat {
+                block_size: 128,
+                ..SsTableFormat::default()
+            },
+            Path::from("scan-multi-blocks"),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let mut builder = store.table_builder();
+        for i in 0..5 {
+            builder
+                .add(RowEntry::new_value(
+                    format!("k{i:02}").as_bytes(),
+                    &[i as u8; 128],
+                    i as u64,
+                ))
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        let sst = SsTableView::identity(
+            store
+                .write_sst(&test_sst_id(2), &encoded, None)
+                .await
+                .unwrap(),
+        );
+
+        let dead = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let handle = dead.handle().clone();
+        dead.shutdown_background();
+
+        // One fetch task: all fetches (including across multiple blocks) are inline.
+        let options_one = SstIteratorOptions {
+            max_fetch_tasks: 1,
+            ..SstIteratorOptions::default()
+        };
+        let mut scan_one =
+            SstIterator::new_owned(.., sst.clone(), store.clone(), options_one, None)
+                .unwrap()
+                .unwrap();
+        let result_one = {
+            let _entered = handle.enter();
+            scan_one.init().await
+        };
+        assert!(result_one.is_ok(), "{result_one:?}");
+        {
+            let _entered = handle.enter();
+            while let Ok(Some(_)) = scan_one.next().await {}
+        }
+
+        // Two fetch tasks: spawns fetches as background tasks, so fails on dead runtime.
+        let options_two = SstIteratorOptions {
+            max_fetch_tasks: 2,
+            ..SstIteratorOptions::default()
+        };
+        let mut scan_two = SstIterator::new_owned(.., sst, store, options_two, None)
+            .unwrap()
+            .unwrap();
+        let result_two = {
+            let _entered = handle.enter();
+            scan_two.init().await
+        };
+        assert!(matches!(
+            result_two,
+            Err(SlateDBError::BackgroundTaskCancelled(_))
+        ));
     }
 
     #[tokio::test]
