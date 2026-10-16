@@ -530,7 +530,7 @@ impl<'a> InternalSstIterator<'a> {
         let read_trace = self.read_trace();
         let sst_level = self.sst_level().cloned();
         let index_span = self.index_span.clone();
-        let subscriber = index_span.with_subscriber(|(_, subscriber)| subscriber.clone());
+        let subscriber = Span::with_subscriber(&index_span, |(_, subscriber)| subscriber.clone());
         let single_block = blocks.len() == 1;
         let read = async move {
             let span = read_trace.new_read_block_span(table.id, sst_level.as_ref());
@@ -679,9 +679,9 @@ impl<'a> InternalSstIterator<'a> {
     async fn ensure_metadata_loaded(&mut self) -> Result<(), SlateDBError> {
         if self.index.is_none() {
             let read_trace = self.read_trace();
-            let subscriber = read_trace
-                .read_span()
-                .with_subscriber(|(_, subscriber)| subscriber.clone());
+            let subscriber = Span::with_subscriber(&read_trace.read_span(), |(_, subscriber)| {
+                subscriber.clone()
+            });
             let read = async {
                 let span = read_trace
                     .new_read_index_span(self.view.table_as_ref().sst.id, self.sst_level());
