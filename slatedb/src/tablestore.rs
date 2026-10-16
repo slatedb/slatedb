@@ -1338,7 +1338,7 @@ fn slatedb_io_error() -> SlateDBError {
 #[cfg(test)]
 mod tests {
     use crate::config::TracingOptions;
-    use crate::read_trace::{ReadSpan, ReadTrace, SstTraceLevel};
+    use crate::read_trace::{ReadTrace, SstTraceLevel};
     use crate::types::KeyValue;
     use bytes::Bytes;
     use futures::future;
