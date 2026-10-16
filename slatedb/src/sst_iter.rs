@@ -679,17 +679,28 @@ impl<'a> InternalSstIterator<'a> {
     async fn ensure_metadata_loaded(&mut self) -> Result<(), SlateDBError> {
         if self.index.is_none() {
             let read_trace = self.read_trace();
-            let index_span =
-                read_trace.new_read_index_span(self.view.table_as_ref().sst.id, self.sst_level());
-            let index = self
-                .table_store
-                .read_index_with_span(
-                    &self.view.table_as_ref().sst,
-                    self.options.cache_metadata,
-                    self.options.segment.clone(),
-                    index_span.clone(),
-                )
-                .await?;
+            let subscriber = read_trace
+                .read_span()
+                .with_subscriber(|(_, subscriber)| subscriber.clone());
+            let read = async {
+                let span = read_trace
+                    .new_read_index_span(self.view.table_as_ref().sst.id, self.sst_level());
+                let index = self
+                    .table_store
+                    .read_index_with_span(
+                        &self.view.table_as_ref().sst,
+                        self.options.cache_metadata,
+                        self.options.segment.clone(),
+                        span.clone(),
+                    )
+                    .await?;
+                Ok::<_, SlateDBError>((index, span))
+            };
+            let (index, index_span) = if let Some(subscriber) = subscriber {
+                read.with_subscriber(subscriber).await?
+            } else {
+                read.await?
+            };
             let block_idx_range = partitioned_keyspace::partitions_covering_range(
                 &index.borrow(),
                 self.view.start_key(),
@@ -1605,8 +1616,11 @@ mod tests {
         .expect("The parallel reads must finish before the timeout.");
     }
 
+    #[rstest]
+    #[case::before_index(false)]
+    #[case::after_index(true)]
     #[tokio::test]
-    async fn iterator_dependencies_keep_the_index_subscriber() {
+    async fn iterator_dependencies_keep_the_index_subscriber(#[case] initialize_under_a: bool) {
         tokio::time::timeout(Duration::from_secs(5), async {
             let fixture = DependencyFixture::new(false).await;
             let recorder_a = SpanRecorder::default();
@@ -1615,13 +1629,22 @@ mod tests {
             let mut iter = tracing::dispatcher::with_default(&dispatch_a, || {
                 fixture.iterator(false, SstIteratorOptions::default(), true)
             });
-            let first = async {
-                iter.init().await.unwrap();
-                iter.next().await.unwrap().unwrap()
+            let mut rows = Vec::new();
+            if initialize_under_a {
+                rows.push(
+                    async {
+                        iter.init().await.unwrap();
+                        iter.next().await.unwrap().unwrap()
+                    }
+                    .with_subscriber(dispatch_a)
+                    .await,
+                );
+                assert_index_dependencies(&recorder_a, 1);
+            } else {
+                assert!(iter.index.is_none());
+                assert!(recorder_a.dependencies().is_empty());
+                assert_eq!(recorder_a.spans().len(), 1);
             }
-            .with_subscriber(dispatch_a)
-            .await;
-            assert_index_dependencies(&recorder_a, 1);
 
             let recorder_b = SpanRecorder::default();
             let dispatch_b =
@@ -1632,20 +1655,20 @@ mod tests {
                     let index = trace.new_read_index_span(fixture.table.sst.id, None);
                     (trace, index)
                 });
-            assert_eq!(iter.index_span.id(), foreign_index.id());
             assert_eq!(
                 iter.read_trace().read_span().id(),
                 foreign_trace.read_span().id(),
             );
-            let mut rows = vec![first];
             rows.extend(dependency_rows(&mut iter).with_subscriber(dispatch_b).await);
+            assert_eq!(iter.index_span.id(), foreign_index.id());
             assert_eq!(rows.len(), 6);
             assert_index_dependencies(&recorder_a, 6);
             assert!(recorder_b.dependencies().is_empty());
-            assert!(recorder_b
-                .spans()
-                .iter()
-                .all(|span| span.name != "slatedb.read.read_blocks"));
+            let foreign_spans = recorder_b.spans();
+            assert_eq!(foreign_spans.len(), 2);
+            assert!(foreign_spans.iter().all(|span| {
+                span.fields.get("trace_id").map(String::as_str) == Some("foreign-test")
+            }));
             assert_eq!(fixture.requests().len(), 7);
             drop((foreign_trace, foreign_index));
         })
