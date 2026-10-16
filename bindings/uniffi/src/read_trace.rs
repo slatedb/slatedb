@@ -47,6 +47,13 @@ pub struct ReadSpanRecord {
     pub finish_us: u64,
 }
 
+/// Links contain capture-local identities for selected read spans only.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ReadDependencyRecord {
+    pub predecessor: u64,
+    pub dependent: u64,
+}
+
 struct CapturedSpan {
     owner: Weak<HttpTraceCapture>,
     record: ReadSpanRecord,
@@ -130,6 +137,18 @@ where
             });
         self.capture.finish_read_span(record);
     }
+
+    fn on_follows_from(&self, dependent: &Id, predecessor: &Id, ctx: Context<'_, S>) {
+        let owner = Arc::downgrade(&self.capture);
+        let retained = |id| {
+            let span = ctx.span(id)?;
+            let extensions = span.extensions();
+            let captured = extensions.get::<CapturedSpan>()?;
+            Weak::ptr_eq(&captured.owner, &owner).then_some(captured.record.span)
+        };
+        self.capture
+            .record_read_dependency(retained(predecessor), retained(dependent));
+    }
 }
 
 #[derive(Default)]
@@ -159,9 +178,157 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
 
     fn subscriber(capture: &Arc<HttpTraceCapture>) -> tracing::Dispatch {
-        tracing::Dispatch::new(tracing_subscriber::registry().with(ReadTraceLayer {
-            capture: capture.clone(),
-        }))
+        tracing::Dispatch::new(
+            tracing_subscriber::registry().with(
+                ReadTraceLayer {
+                    capture: capture.clone(),
+                }
+                .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                    metadata.is_span() && ReadSpanKind::from_name(metadata.name()).is_some()
+                })),
+            ),
+        )
+    }
+
+    #[test]
+    fn dependencies_keep_selected_capture_local_endpoints() {
+        let capture = HttpTraceCapture::new(8);
+        tracing::dispatcher::with_default(&subscriber(&capture), || {
+            let root = tracing::info_span!("slatedb.read", trace_id = "query");
+            root.in_scope(|| {
+                let index = tracing::info_span!("slatedb.read.read_index");
+                let first = tracing::info_span!("slatedb.read.read_blocks");
+                let second = tracing::info_span!("slatedb.read.read_blocks");
+                first.follows_from(&index);
+                second.follows_from(&index);
+                let snapshot = capture.snapshot();
+                assert!(snapshot.read_spans.is_empty());
+                assert_eq!(snapshot.open_read_spans, 4);
+                assert_eq!(
+                    snapshot.read_dependencies,
+                    vec![
+                        ReadDependencyRecord {
+                            predecessor: 2,
+                            dependent: 3
+                        },
+                        ReadDependencyRecord {
+                            predecessor: 2,
+                            dependent: 4
+                        },
+                    ]
+                );
+            });
+        });
+        let snapshot = capture.snapshot();
+        assert_eq!(snapshot.read_spans.len(), 4);
+        assert_eq!(snapshot.open_read_spans, 0);
+        assert_eq!(snapshot.dropped_read_dependencies, 0);
+        assert_eq!(snapshot.unresolved_read_dependencies, 0);
+        for dependency in &snapshot.read_dependencies {
+            let span = snapshot
+                .read_spans
+                .iter()
+                .find(|span| span.span == dependency.dependent)
+                .unwrap();
+            assert_eq!(span.parent_span, Some(1));
+        }
+    }
+
+    #[test]
+    fn dependency_capacity_is_separate_from_spans_and_calls() {
+        let capture = HttpTraceCapture::new(3);
+        tracing::dispatcher::with_default(&subscriber(&capture), || {
+            let index = tracing::info_span!("slatedb.read.read_index");
+            let blocks = tracing::info_span!("slatedb.read.read_blocks");
+            for _ in 0..4 {
+                blocks.follows_from(&index);
+            }
+        });
+        let snapshot = capture.snapshot();
+        assert_eq!(snapshot.read_dependencies.len(), 3);
+        assert_eq!(snapshot.dropped_read_dependencies, 1);
+        assert_eq!(snapshot.unresolved_read_dependencies, 0);
+        assert_eq!(snapshot.read_spans.len(), 2);
+        assert_eq!(snapshot.dropped_read_spans, 0);
+        assert_eq!(snapshot.completed_call_count, Some(0));
+    }
+
+    #[test]
+    fn dependencies_report_unretained_endpoints() {
+        let capture = HttpTraceCapture::new(2);
+        tracing::dispatcher::with_default(&subscriber(&capture), || {
+            let long_id = "x".repeat(MAX_TRACE_ID_BYTES + 1);
+            let rejected = tracing::info_span!("slatedb.read", trace_id = long_id.as_str());
+            let blocks = tracing::info_span!("slatedb.read.read_blocks");
+            let overflow = tracing::info_span!("slatedb.read.read_index");
+            blocks.follows_from(&rejected);
+            blocks.follows_from(&overflow);
+        });
+        let snapshot = capture.snapshot();
+        assert!(snapshot.read_dependencies.is_empty());
+        assert_eq!(snapshot.unresolved_read_dependencies, 2);
+        assert_eq!(snapshot.dropped_read_dependencies, 0);
+        assert_eq!(snapshot.dropped_read_spans, 2);
+        assert_eq!(snapshot.open_read_spans, 0);
+    }
+
+    #[test]
+    fn filtered_dependency_endpoints_do_not_reach_capture() {
+        let capture = HttpTraceCapture::new(4);
+        let dispatch = tracing::Dispatch::new(
+            tracing_subscriber::registry()
+                .with(
+                    ReadTraceLayer {
+                        capture: capture.clone(),
+                    }
+                    .with_filter(tracing_subscriber::filter::filter_fn(
+                        |metadata| {
+                            metadata.is_span() && ReadSpanKind::from_name(metadata.name()).is_some()
+                        },
+                    )),
+                )
+                .with(tracing_subscriber::fmt::layer().with_writer(std::io::sink)),
+        );
+        tracing::dispatcher::with_default(&dispatch, || {
+            let index = tracing::info_span!("slatedb.read.read_index");
+            let outside = tracing::info_span!("outside");
+            assert!(outside.id().is_some());
+            let blocks = tracing::info_span!("slatedb.read.read_blocks");
+            blocks.follows_from(&outside);
+            outside.follows_from(&index);
+        });
+        let snapshot = capture.snapshot();
+        assert!(snapshot.read_dependencies.is_empty());
+        assert_eq!(snapshot.unresolved_read_dependencies, 0);
+        assert_eq!(snapshot.dropped_read_dependencies, 0);
+        assert_eq!(snapshot.read_spans.len(), 2);
+    }
+
+    #[test]
+    fn dependencies_refuse_extensions_owned_by_another_capture() {
+        let capture = HttpTraceCapture::new(4);
+        let foreign = HttpTraceCapture::new(4);
+        let dispatch = subscriber(&capture);
+        tracing::dispatcher::with_default(&dispatch, || {
+            let index = tracing::info_span!("slatedb.read.read_index");
+            let blocks = tracing::info_span!("slatedb.read.read_blocks");
+            index
+                .with_subscriber(|(id, subscriber)| {
+                    let registry = subscriber.downcast_ref::<Registry>().unwrap();
+                    let span = registry.span(id).unwrap();
+                    span.extensions_mut()
+                        .get_mut::<CapturedSpan>()
+                        .unwrap()
+                        .owner = Arc::downgrade(&foreign);
+                })
+                .unwrap();
+            blocks.follows_from(&index);
+        });
+        let snapshot = capture.snapshot();
+        assert!(snapshot.read_dependencies.is_empty());
+        assert_eq!(snapshot.unresolved_read_dependencies, 1);
+        assert_eq!(snapshot.dropped_read_dependencies, 0);
+        assert!(foreign.snapshot().read_dependencies.is_empty());
     }
 
     #[test]

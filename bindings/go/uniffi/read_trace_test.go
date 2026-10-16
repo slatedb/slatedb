@@ -144,8 +144,13 @@ func TestReadTraceCapture(t *testing.T) {
 	if snapshot.OpenReadSpans != 0 || snapshot.DroppedReadSpans != 0 {
 		t.Fatalf("incomplete: %+v", snapshot)
 	}
+	if snapshot.DroppedReadDependencies != 0 || snapshot.UnresolvedReadDependencies != 0 {
+		t.Fatalf("selected dependencies lost: %+v", snapshot)
+	}
+	spans := map[uint64]slatedb.ReadSpanRecord{}
 	roots := map[string]uint64{}
 	for _, span := range snapshot.ReadSpans {
+		spans[span.Span] = span
 		if span.StartUs > span.FinishUs {
 			t.Fatalf("interval: %+v", span)
 		}
@@ -156,8 +161,26 @@ func TestReadTraceCapture(t *testing.T) {
 	if roots["cold-get"] == 0 || roots["paged-scan"] == 0 {
 		t.Fatalf("roots=%v", roots)
 	}
+	dependencies := map[uint64]uint64{}
+	for _, dependency := range snapshot.ReadDependencies {
+		predecessor, predecessorOK := spans[dependency.Predecessor]
+		dependent, dependentOK := spans[dependency.Dependent]
+		if !predecessorOK || !dependentOK || predecessor.Kind != slatedb.ReadSpanKindReadIndex || dependent.Kind != slatedb.ReadSpanKindReadBlocks {
+			t.Fatalf("selected dependency endpoints: %+v", dependency)
+		}
+		if predecessor.ParentSpan == nil || dependent.ParentSpan == nil || *predecessor.ParentSpan != *dependent.ParentSpan {
+			t.Fatalf("selected dependency ownership: %+v -> %+v", predecessor, dependent)
+		}
+		if _, duplicate := dependencies[dependency.Dependent]; duplicate {
+			t.Fatalf("duplicate block dependency: %+v", dependency)
+		}
+		dependencies[dependency.Dependent] = dependency.Predecessor
+	}
 	laterBlocks := 0
 	for _, span := range snapshot.ReadSpans {
+		if span.Kind == slatedb.ReadSpanKindReadBlocks && dependencies[span.Span] == 0 {
+			t.Fatalf("block without index dependency: %+v", span)
+		}
 		if span.Kind == slatedb.ReadSpanKindReadBlocks && span.ParentSpan != nil && *span.ParentSpan == roots["paged-scan"] && !initialBlocks[span.Span] {
 			laterBlocks++
 		}

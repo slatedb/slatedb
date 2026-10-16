@@ -9,6 +9,8 @@ use std::ops::{Bound, Range, RangeBounds};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tokio_util::task::AbortOnDropHandle;
+use tracing::instrument::WithSubscriber;
+use tracing::Span;
 
 use crate::block_iterator::DataBlockIterator;
 use crate::bytes_range::BytesRange;
@@ -351,6 +353,7 @@ impl FilterEvaluator {
 pub(crate) struct InternalSstIterator<'a> {
     view: SstView<'a>,
     index: Option<Arc<SsTableIndexOwned>>,
+    index_span: Span,
     state: IteratorState,
     next_block_idx_to_fetch: usize,
     block_idx_range: Range<usize>,
@@ -388,6 +391,7 @@ impl<'a> InternalSstIterator<'a> {
         Ok(Self {
             view,
             index: None,
+            index_span: Span::none(),
             state: IteratorState::new(),
             next_block_idx_to_fetch: 0,
             block_idx_range: 0..0,
@@ -525,19 +529,29 @@ impl<'a> InternalSstIterator<'a> {
         let segment = self.options.segment.clone();
         let read_trace = self.read_trace();
         let sst_level = self.sst_level().cloned();
+        let index_span = self.index_span.clone();
+        let subscriber = index_span.with_subscriber(|(_, subscriber)| subscriber.clone());
         let single_block = blocks.len() == 1;
         let read = async move {
+            let span = read_trace.new_read_block_span(table.id, sst_level.as_ref());
+            span.follows_from(&index_span);
             table_store
-                .read_blocks_using_index(
+                .read_blocks_using_index_with_span(
                     &table,
                     index,
                     blocks,
                     cache_blocks,
                     segment,
-                    &read_trace,
-                    sst_level.as_ref(),
+                    span,
                 )
                 .await
+        };
+        let read = async move {
+            if let Some(subscriber) = subscriber {
+                read.with_subscriber(subscriber).await
+            } else {
+                read.await
+            }
         };
         if self.inline_point_read && single_block {
             FetchTask::Inline(parking_lot::Mutex::new(Box::pin(read)))
@@ -665,14 +679,15 @@ impl<'a> InternalSstIterator<'a> {
     async fn ensure_metadata_loaded(&mut self) -> Result<(), SlateDBError> {
         if self.index.is_none() {
             let read_trace = self.read_trace();
+            let index_span =
+                read_trace.new_read_index_span(self.view.table_as_ref().sst.id, self.sst_level());
             let index = self
                 .table_store
-                .read_index(
+                .read_index_with_span(
                     &self.view.table_as_ref().sst,
                     self.options.cache_metadata,
                     self.options.segment.clone(),
-                    &read_trace,
-                    self.sst_level(),
+                    index_span.clone(),
                 )
                 .await?;
             let block_idx_range = partitioned_keyspace::partitions_covering_range(
@@ -687,6 +702,7 @@ impl<'a> InternalSstIterator<'a> {
                 IterationOrder::Descending => block_idx_range.end,
             };
             self.index = Some(index);
+            self.index_span = index_span;
             if self.options.eager_spawn {
                 self.spawn_fetches();
             }
@@ -1273,21 +1289,368 @@ mod tests {
     use crate::format::sst::SsTableFormat;
     use crate::sst_builder::BlockFormat;
     use crate::tablestore::TableStoreKind;
-    use crate::test_utils::{assert_kv, SpanRecorder};
+    use crate::test_utils::{assert_kv, GatedObjectStore, RecordingObjectStore, SpanRecorder};
     use crate::types::{KeyValue, ValueDeletable};
     use object_store::path::Path;
-    use object_store::{memory::InMemory, ObjectStore, ObjectStoreExt};
+    use object_store::{memory::InMemory, GetRange, ObjectStore, ObjectStoreExt};
     use rstest::rstest;
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::Duration;
     use tracing_subscriber::layer::SubscriberExt;
     use ulid::Ulid;
 
     fn test_sst_id(id: u64) -> SsTableId {
         SsTableId::from(Ulid::from_parts(id, 0))
+    }
+
+    struct DependencyFixture {
+        table: SsTableView,
+        store: Arc<TableStore>,
+        recording: Arc<RecordingObjectStore>,
+        gated: Arc<GatedObjectStore>,
+    }
+
+    impl DependencyFixture {
+        async fn new(warm: bool) -> Self {
+            let gated = Arc::new(GatedObjectStore::new(Arc::new(InMemory::new())));
+            let recording = Arc::new(RecordingObjectStore::new(gated.clone()));
+            let format = SsTableFormat {
+                block_size: 32,
+                ..SsTableFormat::default()
+            };
+            let writer = TableStore::new(
+                recording.clone(),
+                format.clone(),
+                Path::from("dependencies"),
+                None,
+                TableStoreKind::Main,
+                BlockCachePolicy::default(),
+            );
+            let mut builder = writer.table_builder();
+            for i in 0..6 {
+                builder
+                    .add_value(
+                        format!("key{i:03}").as_bytes(),
+                        &[i as u8; 64],
+                        Some(i),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+            let table = writer
+                .write_sst(&test_sst_id(0), &builder.build().await.unwrap(), None)
+                .await
+                .unwrap();
+            let cache: Option<Arc<dyn DbCache>> = warm.then(|| {
+                Arc::new(
+                    SplitCache::new()
+                        .with_block_cache(Some(Arc::new(TestCache::new())))
+                        .with_meta_cache(Some(Arc::new(TestCache::new())))
+                        .build(),
+                ) as Arc<dyn DbCache>
+            });
+            let store = Arc::new(TableStore::new(
+                recording.clone(),
+                format,
+                Path::from("dependencies"),
+                cache,
+                TableStoreKind::Main,
+                BlockCachePolicy::default(),
+            ));
+            let index = store
+                .read_index(&table, warm, None, &ReadTrace::none(), None)
+                .await
+                .unwrap();
+            assert_eq!(index.borrow().block_meta().len(), 6);
+            if warm {
+                store
+                    .read_blocks_using_index(
+                        &table,
+                        index,
+                        0..6,
+                        true,
+                        None,
+                        &ReadTrace::none(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+            recording.clear();
+            Self {
+                table: SsTableView::identity(table),
+                store,
+                recording,
+                gated,
+            }
+        }
+
+        fn iterator(
+            &self,
+            point: bool,
+            options: SstIteratorOptions,
+            traced: bool,
+        ) -> InternalSstIterator<'static> {
+            let range = if point {
+                BytesRange::from_slice(b"key002".as_slice()..=b"key002".as_slice())
+            } else {
+                BytesRange::from(..)
+            };
+            InternalSstIterator::new_owned(
+                range,
+                self.table.clone(),
+                self.store.clone(),
+                options,
+                traced.then(|| {
+                    SstTracingContext::new(
+                        SstTraceLevel::L0,
+                        ReadTrace::new(Some(TracingOptions::new("dependency-test"))),
+                    )
+                }),
+            )
+            .unwrap()
+            .unwrap()
+        }
+
+        fn requests(&self) -> Vec<Option<GetRange>> {
+            let mut ranges = self.recording.recorded_get_ranges(false);
+            ranges.sort_by_key(|range| format!("{range:?}"));
+            assert!(self.recording.recorded_get_ranges(true).is_empty());
+            ranges
+        }
+    }
+
+    async fn dependency_rows(iter: &mut InternalSstIterator<'_>) -> Vec<RowEntry> {
+        iter.init().await.unwrap();
+        let mut rows = Vec::new();
+        while let Some(row) = iter.next().await.unwrap() {
+            rows.push(row);
+        }
+        rows
+    }
+
+    fn assert_index_dependencies(recorder: &SpanRecorder, block_count: usize) {
+        let spans = recorder.spans();
+        let indexes: Vec<_> = spans
+            .iter()
+            .filter(|span| span.name == "slatedb.read.read_index")
+            .collect();
+        let blocks: Vec<_> = spans
+            .iter()
+            .filter(|span| span.name == "slatedb.read.read_blocks")
+            .collect();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(
+            blocks.len(),
+            block_count,
+            "Block reads must remain with the index subscriber."
+        );
+        let mut expected: Vec<_> = blocks
+            .iter()
+            .map(|block| (indexes[0].id.into_u64(), block.id.into_u64()))
+            .collect();
+        let mut actual: Vec<_> = recorder
+            .dependencies()
+            .iter()
+            .map(|(predecessor, dependent)| (predecessor.into_u64(), dependent.into_u64()))
+            .collect();
+        expected.sort_unstable();
+        actual.sort_unstable();
+        assert_eq!(
+            actual, expected,
+            "Each block fetch must follow its own index read."
+        );
+    }
+
+    #[rstest]
+    #[case::point(true, false, IterationOrder::Ascending, false)]
+    #[case::lazy(false, false, IterationOrder::Ascending, false)]
+    #[case::eager(false, true, IterationOrder::Ascending, false)]
+    #[case::descending(false, false, IterationOrder::Descending, false)]
+    #[case::cached_point(true, false, IterationOrder::Ascending, true)]
+    #[case::cached_eager(false, true, IterationOrder::Ascending, true)]
+    #[case::cached_descending(false, false, IterationOrder::Descending, true)]
+    #[tokio::test]
+    async fn index_dependencies_preserve_iterator_reads(
+        #[case] point: bool,
+        #[case] eager_spawn: bool,
+        #[case] order: IterationOrder,
+        #[case] warm: bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut results = Vec::new();
+            for traced in [false, true] {
+                let fixture = DependencyFixture::new(warm).await;
+                let recorder = SpanRecorder::default();
+                let subscriber = tracing_subscriber::registry().with(recorder.clone());
+                let rows = async {
+                    let mut iter = fixture.iterator(
+                        point,
+                        SstIteratorOptions {
+                            eager_spawn,
+                            order,
+                            ..SstIteratorOptions::default()
+                        },
+                        traced,
+                    );
+                    assert_eq!(iter.inline_point_read, point);
+                    iter.ensure_metadata_loaded().await.unwrap();
+                    assert_eq!(iter.fetch_tasks.len(), usize::from(eager_spawn));
+                    dependency_rows(&mut iter).await
+                }
+                .with_subscriber(subscriber)
+                .await;
+                let block_count = if point { 1 } else { 6 };
+                assert_eq!(rows.len(), block_count);
+                let expected_keys: Vec<_> = if point {
+                    vec![Bytes::from_static(b"key002")]
+                } else {
+                    let mut keys: Vec<_> =
+                        (0..6).map(|i| Bytes::from(format!("key{i:03}"))).collect();
+                    if matches!(order, IterationOrder::Descending) {
+                        keys.reverse();
+                    }
+                    keys
+                };
+                assert_eq!(
+                    rows.iter().map(|row| &row.key).collect::<Vec<_>>(),
+                    expected_keys.iter().collect::<Vec<_>>()
+                );
+                let requests = fixture.requests();
+                assert_eq!(requests.len(), if warm { 0 } else { block_count + 1 });
+                if traced {
+                    assert_index_dependencies(&recorder, block_count);
+                    for span in recorder.spans() {
+                        match span.name.as_str() {
+                            "slatedb.read.read_index" => assert_eq!(
+                                span.fields.get("cached").map(String::as_str),
+                                Some(if warm { "true" } else { "false" }),
+                            ),
+                            "slatedb.read.read_blocks" => {
+                                assert_eq!(span.fields["cache_hits"], if warm { "1" } else { "0" });
+                                assert_eq!(
+                                    span.fields["cache_misses"],
+                                    if warm { "0" } else { "1" }
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                } else {
+                    assert!(recorder.spans().is_empty());
+                    assert!(recorder.dependencies().is_empty());
+                }
+                results.push((rows, requests));
+            }
+            assert_eq!(results[0], results[1]);
+        })
+        .await
+        .expect("The iterator reads must finish before the timeout.");
+    }
+
+    #[tokio::test]
+    async fn index_reads_precede_parallel_block_fetches() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut results = Vec::new();
+            for traced in [false, true] {
+                let fixture = DependencyFixture::new(false).await;
+                let recorder = SpanRecorder::default();
+                let subscriber = tracing_subscriber::registry().with(recorder.clone());
+                let rows = async {
+                    let mut iter = fixture.iterator(
+                        false,
+                        SstIteratorOptions {
+                            max_fetch_tasks: 2,
+                            ..SstIteratorOptions::default()
+                        },
+                        traced,
+                    );
+                    iter.ensure_metadata_loaded().await.unwrap();
+                    assert_eq!(fixture.requests().len(), 1);
+                    let arrivals = fixture.gated.get_opts_gate.arrivals();
+                    fixture.gated.get_opts_gate.close();
+                    iter.spawn_fetches();
+                    let both_arrived = tokio::time::timeout(
+                        Duration::from_secs(1),
+                        fixture.gated.get_opts_gate.wait_for_arrivals(arrivals + 2),
+                    )
+                    .await;
+                    fixture.gated.get_opts_gate.release();
+                    both_arrived.expect("Both block reads must reach the closed gate.");
+                    assert_eq!(iter.fetch_tasks.len(), 2);
+                    assert_eq!(fixture.requests().len(), 3);
+                    if traced {
+                        assert_index_dependencies(&recorder, 2);
+                    }
+                    dependency_rows(&mut iter).await
+                }
+                .with_subscriber(subscriber)
+                .await;
+                assert_eq!(rows.len(), 6);
+                if traced {
+                    assert_index_dependencies(&recorder, 6);
+                } else {
+                    assert!(recorder.dependencies().is_empty());
+                }
+                results.push((rows, fixture.requests()));
+            }
+            assert_eq!(results[0], results[1]);
+        })
+        .await
+        .expect("The parallel reads must finish before the timeout.");
+    }
+
+    #[tokio::test]
+    async fn iterator_dependencies_keep_the_index_subscriber() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let fixture = DependencyFixture::new(false).await;
+            let recorder_a = SpanRecorder::default();
+            let dispatch_a =
+                tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_a.clone()));
+            let mut iter = tracing::dispatcher::with_default(&dispatch_a, || {
+                fixture.iterator(false, SstIteratorOptions::default(), true)
+            });
+            let first = async {
+                iter.init().await.unwrap();
+                iter.next().await.unwrap().unwrap()
+            }
+            .with_subscriber(dispatch_a)
+            .await;
+            assert_index_dependencies(&recorder_a, 1);
+
+            let recorder_b = SpanRecorder::default();
+            let dispatch_b =
+                tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_b.clone()));
+            let (foreign_trace, foreign_index) =
+                tracing::dispatcher::with_default(&dispatch_b, || {
+                    let trace = ReadTrace::new(Some(TracingOptions::new("foreign-test")));
+                    let index = trace.new_read_index_span(fixture.table.sst.id, None);
+                    (trace, index)
+                });
+            assert_eq!(iter.index_span.id(), foreign_index.id());
+            assert_eq!(
+                iter.read_trace().read_span().id(),
+                foreign_trace.read_span().id(),
+            );
+            let mut rows = vec![first];
+            rows.extend(dependency_rows(&mut iter).with_subscriber(dispatch_b).await);
+            assert_eq!(rows.len(), 6);
+            assert_index_dependencies(&recorder_a, 6);
+            assert!(recorder_b.dependencies().is_empty());
+            assert!(recorder_b
+                .spans()
+                .iter()
+                .all(|span| span.name != "slatedb.read.read_blocks"));
+            assert_eq!(fixture.requests().len(), 7);
+            drop((foreign_trace, foreign_index));
+        })
+        .await
+        .expect("The subscriber change must finish before the timeout.");
     }
 
     #[tokio::test]

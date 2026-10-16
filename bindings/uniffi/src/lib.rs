@@ -59,7 +59,7 @@ pub use metrics::{
 };
 pub use object_store::ObjectStore;
 pub use object_store_builder::{ObjectStoreBuilder, ObjectStoreType};
-pub use read_trace::{ReadSpanKind, ReadSpanRecord};
+pub use read_trace::{ReadDependencyRecord, ReadSpanKind, ReadSpanRecord};
 pub use settings::Settings;
 pub use types::{
     CacheTarget, Checkpoint, CloneSourceSpec, Compaction, CompactionSpec, CompactionStatus,

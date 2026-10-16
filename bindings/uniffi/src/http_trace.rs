@@ -14,7 +14,7 @@ use object_store::ClientOptions;
 use parking_lot::Mutex;
 use tracing::{Instrument, Span};
 
-use crate::read_trace::{read_parent, ReadSpanRecord};
+use crate::read_trace::{read_parent, ReadDependencyRecord, ReadSpanRecord};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum HttpMethod {
@@ -80,6 +80,10 @@ pub struct HttpTraceSnapshot {
     pub read_spans: Vec<ReadSpanRecord>,
     pub open_read_spans: u64,
     pub dropped_read_spans: u64,
+    /// Unselected endpoints do not reach the filtered capture layer.
+    pub read_dependencies: Vec<ReadDependencyRecord>,
+    pub dropped_read_dependencies: u64,
+    pub unresolved_read_dependencies: u64,
 }
 
 #[derive(Debug, Default)]
@@ -92,9 +96,14 @@ struct CaptureState {
     read_open: u64,
     read_dropped: u64,
     read_spans: Vec<ReadSpanRecord>,
+    dependency_started: u64,
+    dependency_dropped: u64,
+    dependency_unresolved: u64,
+    read_dependencies: Vec<ReadDependencyRecord>,
 }
 
-/// Capacity separately bounds calls and read spans, including unfinished reservations.
+/// Capacity separately bounds calls, read spans and observed read dependencies.
+/// Calls and read spans include unfinished reservations.
 /// Read spans are exported on final close. Root trace IDs are limited to 128 UTF-8 bytes.
 /// Calls include credential requests and can contain client-internal retries or redirects.
 /// Byte counts cover response data consumed through the body wrapper.
@@ -127,6 +136,9 @@ impl HttpTraceCapture {
             read_spans: state.read_spans.clone(),
             open_read_spans: state.read_open,
             dropped_read_spans: state.read_dropped,
+            read_dependencies: state.read_dependencies.clone(),
+            dropped_read_dependencies: state.dependency_dropped,
+            unresolved_read_dependencies: state.dependency_unresolved,
         }
     }
 }
@@ -161,6 +173,21 @@ impl HttpTraceCapture {
         state.read_open -= 1;
         if let Some(record) = record {
             state.read_spans.push(record);
+        }
+    }
+
+    pub(crate) fn record_read_dependency(&self, predecessor: Option<u64>, dependent: Option<u64>) {
+        let mut state = self.state.lock();
+        state.dependency_started = state.dependency_started.saturating_add(1);
+        if state.dependency_started > self.capacity {
+            state.dependency_dropped = state.dependency_dropped.saturating_add(1);
+        } else if let (Some(predecessor), Some(dependent)) = (predecessor, dependent) {
+            state.read_dependencies.push(ReadDependencyRecord {
+                predecessor,
+                dependent,
+            });
+        } else {
+            state.dependency_unresolved = state.dependency_unresolved.saturating_add(1);
         }
     }
 

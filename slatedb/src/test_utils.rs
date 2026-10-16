@@ -88,7 +88,7 @@ pub(crate) fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RecordedSpan {
-    id: tracing::Id,
+    pub(crate) id: tracing::Id,
     pub(crate) name: String,
     pub(crate) level: String,
     pub(crate) parent_name: Option<String>,
@@ -99,6 +99,7 @@ pub(crate) struct RecordedSpan {
 pub(crate) struct SpanRecorder {
     span_name: Option<&'static str>,
     spans: Arc<std::sync::Mutex<Vec<RecordedSpan>>>,
+    dependencies: Arc<std::sync::Mutex<Vec<(tracing::Id, tracing::Id)>>>,
 }
 
 impl SpanRecorder {
@@ -106,6 +107,7 @@ impl SpanRecorder {
         Self {
             span_name: Some(span_name),
             spans: Arc::new(std::sync::Mutex::new(Vec::new())),
+            dependencies: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -124,6 +126,10 @@ impl SpanRecorder {
             "The recorder must contain one matching span."
         );
         spans[0].clone()
+    }
+
+    pub(crate) fn dependencies(&self) -> Vec<(tracing::Id, tracing::Id)> {
+        self.dependencies.lock().unwrap().clone()
     }
 }
 
@@ -157,6 +163,18 @@ impl<S> Layer<S> for SpanRecorder
 where
     S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
+    fn on_follows_from(
+        &self,
+        dependent: &tracing::Id,
+        predecessor: &tracing::Id,
+        _: Context<'_, S>,
+    ) {
+        self.dependencies
+            .lock()
+            .unwrap()
+            .push((predecessor.clone(), dependent.clone()));
+    }
+
     fn on_new_span(
         &self,
         attrs: &tracing::span::Attributes<'_>,
