@@ -30,7 +30,7 @@ use crate::object_store_tag::ObjectStoreCallTag;
 pub(crate) use crate::object_store_tag::TableStoreKind;
 use crate::partitioned_keyspace::partitions_covering_range;
 use crate::paths::PathResolver;
-use crate::read_trace::{ReadTrace, SstTraceLevel};
+use crate::read_trace::{ReadSpan, ReadTrace, SstTraceLevel};
 use crate::sst_builder::EncodedSsTableBuilder;
 #[cfg(test)]
 use crate::sst_io::MAX_VALIDATION_RETRIES;
@@ -612,9 +612,9 @@ impl TableStore {
         let sst_format = self.sst_format.clone();
         let tag =
             ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment);
-        let span = tracing::Span::current();
-        let future = with_optional_subscriber(
-            async move {
+        let span = ReadSpan::new(tracing::Span::current());
+        let future = with_optional_subscriber(async move {
+            let result = async move {
                 // Only the stats arm can produce `None` (stats_len > 0 but no
                 // stats decoded); filters and index always yield an entry.
                 let entry = read_with_validation_retry(tag, async |tag| {
@@ -655,8 +655,11 @@ impl TableStore {
                     crate::Error::data("stats_len > 0 but read_stats returned no stats".to_string())
                 })
             }
-            .instrument(span),
-        );
+            .instrument(span.span().clone())
+            .await;
+            drop(span);
+            result
+        });
         Box::new(move || Box::pin(future))
     }
 
@@ -676,9 +679,9 @@ impl TableStore {
         let sst_format = self.sst_format.clone();
         let tag =
             ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment);
-        let span = tracing::Span::current();
-        let future = with_optional_subscriber(
-            async move {
+        let span = ReadSpan::new(tracing::Span::current());
+        let future = with_optional_subscriber(async move {
+            let result = async move {
                 let block = read_with_validation_retry(tag, async |tag| {
                     let obj = ReadOnlyObject {
                         object_store: object_store.clone(),
@@ -693,8 +696,11 @@ impl TableStore {
                 .await?;
                 Ok(CachedEntry::with_block(Arc::new(block)))
             }
-            .instrument(span),
-        );
+            .instrument(span.span().clone())
+            .await;
+            drop(span);
+            result
+        });
         Box::new(move || Box::pin(future))
     }
 
@@ -1332,7 +1338,7 @@ fn slatedb_io_error() -> SlateDBError {
 #[cfg(test)]
 mod tests {
     use crate::config::TracingOptions;
-    use crate::read_trace::{ReadTrace, SstTraceLevel};
+    use crate::read_trace::{ReadSpan, ReadTrace, SstTraceLevel};
     use crate::types::KeyValue;
     use bytes::Bytes;
     use futures::future;
@@ -2493,6 +2499,93 @@ mod tests {
         .join()
         .unwrap();
         assert!(enters.load(Ordering::Relaxed) >= 2);
+    }
+
+    #[rstest]
+    #[case::index_closure(false, 0)]
+    #[case::block_closure(true, 0)]
+    #[case::index_unpolled(false, 1)]
+    #[case::block_unpolled(true, 1)]
+    #[case::index_pending(false, 2)]
+    #[case::block_pending(true, 2)]
+    fn cache_loaders_close_with_their_subscriber(
+        mut read_blocks_span_test: ReadBlocksSpanTest,
+        #[case] block: bool,
+        #[case] stage: u8,
+    ) {
+        tokio_test::block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let fixture = &mut read_blocks_span_test;
+                let gated = Arc::new(crate::test_utils::GatedObjectStore::new(
+                    fixture.reader.object_store.clone(),
+                ));
+                fixture.reader.object_store = gated.clone();
+                let recorder_a = SpanRecorder::default();
+                let dispatch_a =
+                    tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_a.clone()));
+                let loader = tracing::dispatcher::with_default(&dispatch_a, || {
+                    let root = tracing::info_span!("loader-root");
+                    let owner = tracing::info_span!(parent: &root, "loader-owner");
+                    let _entered = owner.enter();
+                    if block {
+                        fixture
+                            .reader
+                            .block_loader(&fixture.handle, fixture.index.clone(), 0, None)
+                    } else {
+                        fixture
+                            .reader
+                            .read_loader(&fixture.handle, CacheTarget::Index, None)
+                    }
+                });
+                assert_eq!(recorder_a.spans().len(), 2);
+                assert!(recorder_a.closed().is_empty());
+                let recorder_b = SpanRecorder::default();
+                let dispatch_b =
+                    tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_b.clone()));
+                let foreign = tracing::dispatcher::with_default(&dispatch_b, || {
+                    let root = tracing::info_span!("foreign-root");
+                    let owner = tracing::info_span!(parent: &root, "foreign-owner");
+                    (root, owner)
+                });
+                assert_eq!(recorder_a.spans()[0].id, recorder_b.spans()[0].id);
+                assert_eq!(recorder_a.spans()[1].id, recorder_b.spans()[1].id);
+                gated.get_opts_gate.close();
+                if stage == 0 {
+                    tracing::dispatcher::with_default(&dispatch_b, || drop(loader));
+                } else {
+                    let mut future = loader();
+                    if stage == 2 {
+                        tokio::select! {
+                            _ = gated.get_opts_gate.wait_for_arrivals(1) => {},
+                            _ = &mut future => panic!("The loader must wait at the gate."),
+                        }
+                    }
+                    tracing::dispatcher::with_default(&dispatch_b, || drop(future));
+                }
+                let mut expected: Vec<_> = recorder_a
+                    .spans()
+                    .iter()
+                    .map(|span| span.id.into_u64())
+                    .collect();
+                let mut closed: Vec<_> = recorder_a
+                    .closed()
+                    .iter()
+                    .map(tracing::Id::into_u64)
+                    .collect();
+                expected.sort_unstable();
+                closed.sort_unstable();
+                assert_eq!(
+                    closed, expected,
+                    "All loader spans must close with their owner."
+                );
+                assert!(recorder_b.closed().is_empty());
+                gated.get_opts_gate.release();
+                tracing::dispatcher::with_default(&dispatch_b, || drop(foreign));
+                assert_eq!(recorder_b.closed().len(), 2);
+            })
+            .await
+            .expect("The loader cancellation must finish before the timeout.");
+        });
     }
 
     fn verify_read_blocks_span(

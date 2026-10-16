@@ -100,6 +100,7 @@ pub(crate) struct SpanRecorder {
     span_name: Option<&'static str>,
     spans: Arc<std::sync::Mutex<Vec<RecordedSpan>>>,
     dependencies: Arc<std::sync::Mutex<Vec<(tracing::Id, tracing::Id)>>>,
+    closed: Arc<std::sync::Mutex<Vec<tracing::Id>>>,
 }
 
 impl SpanRecorder {
@@ -108,6 +109,7 @@ impl SpanRecorder {
             span_name: Some(span_name),
             spans: Arc::new(std::sync::Mutex::new(Vec::new())),
             dependencies: Arc::new(std::sync::Mutex::new(Vec::new())),
+            closed: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -130,6 +132,10 @@ impl SpanRecorder {
 
     pub(crate) fn dependencies(&self) -> Vec<(tracing::Id, tracing::Id)> {
         self.dependencies.lock().unwrap().clone()
+    }
+
+    pub(crate) fn closed(&self) -> Vec<tracing::Id> {
+        self.closed.lock().unwrap().clone()
     }
 }
 
@@ -163,6 +169,12 @@ impl<S> Layer<S> for SpanRecorder
 where
     S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
+    fn on_close(&self, id: tracing::Id, _: Context<'_, S>) {
+        if self.spans.lock().unwrap().iter().any(|span| span.id == id) {
+            self.closed.lock().unwrap().push(id);
+        }
+    }
+
     fn on_follows_from(
         &self,
         dependent: &tracing::Id,
