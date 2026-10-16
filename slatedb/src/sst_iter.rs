@@ -1414,7 +1414,7 @@ mod tests {
             traced: bool,
         ) -> InternalSstIterator<'static> {
             let range = if point {
-                BytesRange::from_slice(b"key005".as_slice()..=b"key005".as_slice())
+                BytesRange::from_slice(b"key000".as_slice()..=b"key000".as_slice())
             } else {
                 BytesRange::from(..)
             };
@@ -1540,6 +1540,7 @@ mod tests {
                     );
                     assert_eq!(iter.inline_point_read, point);
                     iter.ensure_metadata_loaded().await.unwrap();
+                    assert_eq!(iter.block_idx_range.len(), if point { 1 } else { 6 });
                     assert_eq!(iter.fetch_tasks.len(), usize::from(eager_spawn));
                     dependency_rows(&mut iter).await
                 }
@@ -1548,7 +1549,7 @@ mod tests {
                 let block_count = if point { 1 } else { 6 };
                 assert_eq!(rows.len(), block_count);
                 let expected_keys: Vec<_> = if point {
-                    vec![Bytes::from_static(b"key005")]
+                    vec![Bytes::from_static(b"key000")]
                 } else {
                     let mut keys: Vec<_> =
                         (0..6).map(|i| Bytes::from(format!("key{i:03}"))).collect();
