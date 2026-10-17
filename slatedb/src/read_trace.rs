@@ -7,6 +7,30 @@ pub(crate) struct ReadTrace {
     read_span: tracing::Span,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ReadSpan(tracing::Span);
+
+impl ReadSpan {
+    pub(crate) fn new(span: tracing::Span) -> Self {
+        Self(span)
+    }
+
+    pub(crate) fn span(&self) -> &tracing::Span {
+        &self.0
+    }
+}
+
+impl Drop for ReadSpan {
+    fn drop(&mut self) {
+        let span = std::mem::replace(&mut self.0, tracing::Span::none());
+        if let Some(subscriber) =
+            tracing::Span::with_subscriber(&span, |(_, subscriber)| subscriber.clone())
+        {
+            tracing::dispatcher::with_default(&subscriber, || drop(span));
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SstTraceLevel {
     L0,
