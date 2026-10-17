@@ -283,6 +283,11 @@ impl Drop for CallGuard {
         } else {
             HttpCallOutcome::Cancelled
         });
+        let span = std::mem::replace(&mut self.span, Span::none());
+        if let Some(subscriber) = Span::with_subscriber(&span, |(_, subscriber)| subscriber.clone())
+        {
+            tracing::dispatcher::with_default(&subscriber, || drop(span));
+        }
     }
 }
 
@@ -390,6 +395,7 @@ mod tests {
     use http_body_util::{BodyExt, Empty};
     use object_store::client::{HttpErrorKind, HttpRequestBody};
     use object_store::ObjectStoreExt;
+    use std::future::Future;
     use std::io::{Read, Write};
     use tokio::sync::mpsc;
     use tracing::instrument::WithSubscriber;
@@ -398,6 +404,7 @@ mod tests {
     enum Reply {
         Response(Mutex<Option<HttpResponse>>),
         Error,
+        ErrorAfterPending,
         Pending,
     }
 
@@ -407,6 +414,18 @@ mod tests {
             match self {
                 Self::Response(response) => Ok(response.lock().take().unwrap()),
                 Self::Error => Err(body_error()),
+                Self::ErrorAfterPending => {
+                    let mut pending = true;
+                    std::future::poll_fn(|cx| {
+                        if std::mem::replace(&mut pending, false) {
+                            cx.waker().wake_by_ref();
+                            Poll::Pending
+                        } else {
+                            Poll::Ready(Err(body_error()))
+                        }
+                    })
+                    .await
+                }
                 Self::Pending => std::future::pending().await,
             }
         }
@@ -522,6 +541,181 @@ mod tests {
             client(Reply::Response(Mutex::new(Some(response))), capture),
             tx,
         )
+    }
+
+    #[tokio::test]
+    async fn http_calls_close_with_the_query_subscriber() {
+        use crate::read_trace::ReadTraceLayer;
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::registry::LookupSpan;
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        for (case, outcome) in [
+            ("dropped", HttpCallOutcome::BodyDropped),
+            ("cancelled", HttpCallOutcome::Cancelled),
+            ("ended", HttpCallOutcome::Complete),
+            ("complete", HttpCallOutcome::Complete),
+            ("body-error", HttpCallOutcome::BodyError),
+            ("transport-error", HttpCallOutcome::TransportError),
+        ] {
+            let capture = HttpTraceCapture::new(8);
+            let dispatch_a =
+                tracing::Dispatch::new(tracing_subscriber::registry().with(ReadTraceLayer {
+                    capture: capture.clone(),
+                }));
+            let root = tracing::dispatcher::with_default(&dispatch_a, || {
+                tracing::info_span!("slatedb.read", trace_id = "query-owner")
+            });
+            let root_id = root.id().unwrap();
+            let (client, mut tx) = match case {
+                "cancelled" => (client(Reply::Pending, &capture), None),
+                "transport-error" => (client(Reply::ErrorAfterPending, &capture), None),
+                "ended" => {
+                    let response = http::Response::builder()
+                        .status(204)
+                        .body(HttpResponseBody::new(
+                            Empty::<Bytes>::new().map_err(|never| match never {}),
+                        ))
+                        .unwrap();
+                    (
+                        client(Reply::Response(Mutex::new(Some(response))), &capture),
+                        None,
+                    )
+                }
+                _ => {
+                    let (client, tx) = streamed(&capture);
+                    (client, Some(tx))
+                }
+            };
+            let mut call = Box::pin(client.execute(request()));
+            let first = tracing::dispatcher::with_default(&dispatch_a, || {
+                root.in_scope(|| call.as_mut().poll(&mut cx))
+            });
+            let (mut pending, mut response) = match first {
+                Poll::Pending => {
+                    assert!(matches!(case, "cancelled" | "transport-error"));
+                    (Some(call), None)
+                }
+                Poll::Ready(result) => {
+                    tracing::dispatcher::with_default(&dispatch_a, || drop(call));
+                    (None, Some(result.unwrap()))
+                }
+            };
+            tracing::dispatcher::with_default(&dispatch_a, || drop(root));
+            assert_eq!(capture.snapshot().open_read_spans, 1, "{case}");
+
+            let foreign_capture = HttpTraceCapture::new(8);
+            let dispatch_b =
+                tracing::Dispatch::new(tracing_subscriber::registry().with(ReadTraceLayer {
+                    capture: foreign_capture.clone(),
+                }));
+            let foreign = tracing::dispatcher::with_default(&dispatch_b, || {
+                let root = tracing::info_span!("slatedb.read", trace_id = "foreign-query");
+                let child = tracing::info_span!(parent: &root, "slatedb.read.read_index");
+                (root, child)
+            });
+            assert_eq!(Some(root_id.clone()), foreign.0.id(), "{case}");
+            let http_id = foreign.1.id().unwrap();
+            let registry_a = dispatch_a
+                .downcast_ref::<tracing_subscriber::Registry>()
+                .unwrap();
+            assert_eq!(
+                registry_a.span(&http_id).map(|span| span.name()),
+                Some("slatedb.http"),
+                "{case}"
+            );
+            assert_eq!(foreign_capture.snapshot().open_read_spans, 2, "{case}");
+
+            if case == "transport-error" {
+                let result = tracing::dispatcher::with_default(&dispatch_b, || {
+                    pending.as_mut().unwrap().as_mut().poll(&mut cx)
+                });
+                let Poll::Ready(Err(error)) = result else {
+                    panic!("The transport error must finish on its second poll.");
+                };
+                assert_eq!(error.kind(), HttpErrorKind::Decode);
+            } else if matches!(case, "complete" | "body-error") {
+                tx.as_ref()
+                    .unwrap()
+                    .send(Ok(Frame::data(Bytes::from_static(b"abc"))))
+                    .unwrap();
+                let frame = tracing::dispatcher::with_default(&dispatch_b, || {
+                    Pin::new(response.as_mut().unwrap().body_mut()).poll_frame(&mut cx)
+                });
+                let Poll::Ready(Some(Ok(frame))) = frame else {
+                    panic!("The body must return its queued data frame.");
+                };
+                assert_eq!(frame.into_data().unwrap(), Bytes::from_static(b"abc"));
+                if case == "body-error" {
+                    tx.as_ref().unwrap().send(Err(body_error())).unwrap();
+                } else {
+                    drop(tx.take());
+                }
+                let frame = tracing::dispatcher::with_default(&dispatch_b, || {
+                    Pin::new(response.as_mut().unwrap().body_mut()).poll_frame(&mut cx)
+                });
+                if case == "body-error" {
+                    let Poll::Ready(Some(Err(error))) = frame else {
+                        panic!("The body must return its queued error.");
+                    };
+                    assert_eq!(error.kind(), HttpErrorKind::Decode);
+                } else {
+                    assert!(matches!(frame, Poll::Ready(None)));
+                }
+            }
+            tracing::dispatcher::with_default(&dispatch_b, || drop((pending, response)));
+            let snapshot = capture.snapshot();
+            assert_eq!(
+                snapshot.open_read_spans, 0,
+                "HTTP spans must close with the query subscriber: {case}"
+            );
+            assert!(registry_a.span(&http_id).is_none(), "{case}");
+            assert!(registry_a.span(&root_id).is_none(), "{case}");
+            assert_eq!(snapshot.read_spans.len(), 1, "{case}");
+            assert_eq!(
+                snapshot.read_spans[0].trace_id.as_deref(),
+                Some("query-owner")
+            );
+            assert_eq!(snapshot.dropped_read_spans, 0);
+            assert_eq!(snapshot.dropped_read_dependencies, 0);
+            assert_eq!(snapshot.unresolved_read_dependencies, 0);
+            assert_eq!(snapshot.open_calls, 0);
+            assert_eq!(snapshot.dropped_calls, 0);
+            assert_eq!(snapshot.completed_call_count, Some(1));
+            let record = &snapshot.records[0];
+            assert_eq!(record.outcome, outcome, "{case}");
+            assert_eq!(record.span_id, Some(http_id.into_u64()));
+            assert_eq!(record.parent_span_id, Some(root_id.into_u64()));
+            assert_eq!(record.read_span, Some(snapshot.read_spans[0].span));
+            assert_eq!(
+                record.consumed_bytes,
+                if matches!(case, "complete" | "body-error") {
+                    3
+                } else {
+                    0
+                }
+            );
+            assert_eq!(
+                record.status,
+                match case {
+                    "cancelled" | "transport-error" => None,
+                    "ended" => Some(204),
+                    _ => Some(206),
+                }
+            );
+            assert!(record.start_us <= record.finish_us);
+            if let Some(headers) = record.headers_us {
+                assert!(record.start_us <= headers && headers <= record.finish_us);
+            }
+            assert!(record.finish_us <= snapshot.read_spans[0].finish_us);
+            let foreign_snapshot = foreign_capture.snapshot();
+            assert_eq!(foreign_snapshot.open_read_spans, 2, "{case}");
+            assert!(foreign_snapshot.read_spans.is_empty(), "{case}");
+            tracing::dispatcher::with_default(&dispatch_b, || drop(foreign));
+            assert_eq!(foreign_capture.snapshot().open_read_spans, 0, "{case}");
+            assert_eq!(foreign_capture.snapshot().read_spans.len(), 2, "{case}");
+        }
     }
 
     #[tokio::test]
