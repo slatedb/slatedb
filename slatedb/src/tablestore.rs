@@ -420,8 +420,8 @@ impl TableStore {
             return Ok(Arc::from([]));
         }
         let span = trace.new_read_filter_span(handle.id, sst_level);
-        let read = self.read_filters_inner(handle, cache_blocks, segment, span.clone());
-        read.instrument(span).await
+        let read = self.read_filters_inner(handle, cache_blocks, segment, span.span().clone());
+        read.instrument(span.span().clone()).await
     }
 
     async fn read_filters_inner(
@@ -542,7 +542,7 @@ impl TableStore {
         sst_level: Option<&SstTraceLevel>,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         let span = trace.new_read_index_span(handle.id, sst_level);
-        self.read_index_with_span(handle, cache_blocks, segment, span)
+        self.read_index_with_span(handle, cache_blocks, segment, span.span().clone())
             .await
     }
 
@@ -813,8 +813,15 @@ impl TableStore {
         sst_level: Option<&SstTraceLevel>,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
         let span = trace.new_read_block_span(handle.id, sst_level);
-        self.read_blocks_using_index_with_span(handle, index, blocks, cache_blocks, segment, span)
-            .await
+        self.read_blocks_using_index_with_span(
+            handle,
+            index,
+            blocks,
+            cache_blocks,
+            segment,
+            span.span().clone(),
+        )
+        .await
     }
 
     pub(crate) async fn read_blocks_using_index_with_span(

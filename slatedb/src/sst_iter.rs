@@ -295,9 +295,9 @@ impl FilterEvaluator {
         read_trace: &ReadTrace,
     ) -> bool {
         let span = read_trace.new_evaluate_filter_span(sst_id, sst_level, &filter.name);
-        let _guard = span.enter();
+        let _guard = span.span().enter();
         let result = filter.filter.might_match(&self.query);
-        span.record("result", result);
+        span.span().record("result", result);
         result
     }
 
@@ -533,7 +533,7 @@ impl<'a> InternalSstIterator<'a> {
         let subscriber = read_trace.subscriber();
         let single_block = blocks.len() == 1;
         let read = async move {
-            let span = ReadSpan::new(read_trace.new_read_block_span(table.id, sst_level.as_ref()));
+            let span = read_trace.new_read_block_span(table.id, sst_level.as_ref());
             span.span().follows_from(index_span.span());
             table_store
                 .read_blocks_using_index_with_span(
@@ -681,10 +681,8 @@ impl<'a> InternalSstIterator<'a> {
             let read_trace = self.read_trace();
             let subscriber = read_trace.subscriber();
             let read = async {
-                let span = ReadSpan::new(
-                    read_trace
-                        .new_read_index_span(self.view.table_as_ref().sst.id, self.sst_level()),
-                );
+                let span = read_trace
+                    .new_read_index_span(self.view.table_as_ref().sst.id, self.sst_level());
                 let index = self
                     .table_store
                     .read_index_with_span(
@@ -1826,7 +1824,7 @@ mod tests {
             );
             assert_eq!(rows.len(), 6);
             assert_index_dependencies(&recorder_a, 6);
-            assert_eq!(iter.index_span.span().id(), foreign_index.id());
+            assert_eq!(iter.index_span.span().id(), foreign_index.span().id());
             assert!(recorder_b.dependencies().is_empty());
             let foreign_spans = recorder_b.spans();
             assert_eq!(foreign_spans.len(), 2);
@@ -1923,7 +1921,7 @@ mod tests {
                 .unwrap()
                 .id
                 .clone();
-            assert_eq!(Some(index_id), foreign_index.id());
+            assert_eq!(Some(index_id), foreign_index.span().id());
             assert!(recorder_b.closed().is_empty());
             tracing::dispatcher::with_default(&dispatch_b, || drop(init));
             tracing::dispatcher::with_default(&dispatch_b, || drop(iter));
@@ -4048,6 +4046,25 @@ mod tests {
             name: name.to_string(),
             filter: Arc::new(TestFilter(Arc::new(verdict))),
         }
+    }
+
+    #[test]
+    fn filter_evaluation_spans_close_with_the_query_subscriber() {
+        crate::test_utils::assert_read_spans_close_with_owner(
+            "slatedb.read.evaluate_filter",
+            1,
+            |trace| {
+                let mut evaluator =
+                    FilterEvaluator::new_point(Bytes::from_static(b"key"), None, None);
+                evaluator.evaluate(
+                    &[named_filter("test.filter", |_| true)],
+                    test_sst_id(1),
+                    Some(&SstTraceLevel::L0),
+                    &trace,
+                );
+                assert!(!evaluator.is_filtered_out());
+            },
+        );
     }
 
     #[rstest]
