@@ -39,7 +39,7 @@ use crate::sst_stats::SstStats;
 use crate::sst_upload::SstUploadGuard;
 use crate::types::RowEntry;
 use crate::utils::with_optional_subscriber;
-use tracing::Instrument;
+use tracing::{instrument::WithSubscriber, Instrument, Span};
 
 pub(crate) struct TableStore {
     object_store: Arc<dyn ObjectStore>,
@@ -412,16 +412,40 @@ impl TableStore {
         trace: &ReadTrace,
         sst_level: Option<&SstTraceLevel>,
     ) -> Result<Arc<[NamedFilter]>, SlateDBError> {
+        self.read_filters_traced(handle, cache_blocks, segment, trace, sst_level)
+            .await
+            .map(|(filters, _span)| filters)
+    }
+
+    pub(crate) async fn read_filters_traced(
+        &self,
+        handle: &SsTableHandle,
+        cache_blocks: bool,
+        segment: Option<Bytes>,
+        trace: &ReadTrace,
+        sst_level: Option<&SstTraceLevel>,
+    ) -> Result<(Arc<[NamedFilter]>, ReadSpan), SlateDBError> {
         // No filter exists for this SST (either no policies configured, or the
         // SST was built below `min_filter_keys`). Return an empty slice without
         // touching the cache: there is nothing to load, and caching the empty
         // answer would mask a future config change that adds filter policies.
         if self.sst_format.filter_policies.is_empty() || handle.info.filter_len == 0 {
-            return Ok(Arc::from([]));
+            return Ok((Arc::from([]), ReadSpan::new(Span::none())));
         }
-        let span = trace.new_read_filter_span(handle.id, sst_level);
-        let read = self.read_filters_inner(handle, cache_blocks, segment, span.span().clone());
-        read.instrument(span.span().clone()).await
+        let subscriber = trace.subscriber();
+        let read = async {
+            let span = trace.new_read_filter_span(handle.id, sst_level);
+            let filters = self
+                .read_filters_inner(handle, cache_blocks, segment, span.span().clone())
+                .instrument(span.span().clone())
+                .await?;
+            Ok((filters, span))
+        };
+        if let Some(subscriber) = subscriber {
+            read.with_subscriber(subscriber).await
+        } else {
+            read.await
+        }
     }
 
     async fn read_filters_inner(

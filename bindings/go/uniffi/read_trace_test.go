@@ -14,9 +14,10 @@ import (
 	slatedb "slatedb.io/slatedb-go/uniffi"
 )
 
-type readTraceLogs struct{ low atomic.Uint64 }
+type readTraceLogs struct{ low, total atomic.Uint64 }
 
 func (l *readTraceLogs) Log(record slatedb.LogRecord) {
+	l.total.Add(1)
 	if record.Level != slatedb.LogLevelWarn && record.Level != slatedb.LogLevelError {
 		l.low.Add(1)
 	}
@@ -25,7 +26,7 @@ func (l *readTraceLogs) Log(record slatedb.LogRecord) {
 func TestReadTraceCapture(t *testing.T) {
 	mode := os.Getenv("SLATEDB_READ_TRACE_CASE")
 	if mode == "" {
-		for _, child := range []string{"warn", "off", "off-fmt", "late"} {
+		for _, child := range []string{"warn", "off", "off-fmt", "late", "off-filter"} {
 			t.Run(child, func(t *testing.T) {
 				command := exec.Command(os.Args[0], "-test.run=^TestReadTraceCapture$", "-test.v", "-test.timeout=45s")
 				command.Env = append(os.Environ(), "SLATEDB_READ_TRACE_CASE="+child)
@@ -64,6 +65,10 @@ func TestReadTraceCapture(t *testing.T) {
 	}
 	if err := slatedb.InitLogging(level, callback); !errors.Is(err, slatedb.ErrErrorInvalid) {
 		t.Fatalf("duplicate initializer: %v", err)
+	}
+	if mode == "off-filter" {
+		readTraceFilter(t, capture, logs)
+		return
 	}
 	store := newMemoryStore(t)
 	configure := func(t *testing.T, builder *slatedb.DbBuilder) {
@@ -198,6 +203,102 @@ func TestReadTraceCapture(t *testing.T) {
 	for _, private := range []string{"private-row-content", "key-000"} {
 		if strings.Contains(string(encoded), private) {
 			t.Fatalf("capture includes %q", private)
+		}
+	}
+}
+
+func readTraceFilter(t *testing.T, capture *slatedb.HttpTraceCapture, logs *readTraceLogs) {
+	t.Helper()
+	store := newMemoryStore(t)
+	configure := func(t *testing.T, builder *slatedb.DbBuilder) {
+		if err := builder.WithDbCacheDisabled(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writer := openTestDB(t, store, configure)
+	batch := slatedb.NewWriteBatch()
+	defer batch.Destroy()
+	payload := []byte("private-row-content")
+	for i := 0; i < 1000; i++ {
+		if err := batch.Put([]byte(fmt.Sprintf("key-%04d", i)), payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write, err := writer.db.Write(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write.Destroy()
+	if err := writer.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.db.Shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	writer.open = false
+	reader := openTestDB(t, store, configure)
+	value, err := reader.db.GetWithOptions([]byte("key-0000"), slatedb.ReadOptions{
+		DurabilityFilter: slatedb.DurabilityLevelRemote,
+		TracingOptions:   &slatedb.TracingOptions{TraceId: "cold-filter"},
+	})
+	if err != nil || value == nil || !bytes.Equal(*value, payload) {
+		t.Fatalf("filter get: value=%v err=%v", value, err)
+	}
+	snapshot := capture.Snapshot()
+	if snapshot.OpenReadSpans != 0 || snapshot.DroppedReadSpans != 0 || len(snapshot.ReadSpans) > 256 ||
+		snapshot.DroppedReadDependencies != 0 || snapshot.UnresolvedReadDependencies != 0 ||
+		snapshot.OpenCalls != 0 || snapshot.DroppedCalls != 0 {
+		t.Fatalf("incomplete filter capture: %+v", snapshot)
+	}
+	spans := map[slatedb.ReadSpanKind]slatedb.ReadSpanRecord{}
+	for _, span := range snapshot.ReadSpans {
+		if span.StartUs > span.FinishUs {
+			t.Fatalf("filter interval: %+v", span)
+		}
+		if span.Kind == slatedb.ReadSpanKindMemtable {
+			continue
+		}
+		if _, duplicate := spans[span.Kind]; duplicate {
+			t.Fatalf("duplicate filter stage: %+v", span)
+		}
+		spans[span.Kind] = span
+	}
+	root := spans[slatedb.ReadSpanKindRead]
+	if root.Span == 0 || root.TraceId == nil || *root.TraceId != "cold-filter" {
+		t.Fatalf("filter root: %+v", root)
+	}
+	stages := []slatedb.ReadSpanKind{slatedb.ReadSpanKindReadFilters, slatedb.ReadSpanKindEvaluateFilter, slatedb.ReadSpanKindReadIndex, slatedb.ReadSpanKindReadBlocks}
+	for _, kind := range stages {
+		span := spans[kind]
+		if span.Span == 0 || span.ParentSpan == nil || *span.ParentSpan != root.Span {
+			t.Fatalf("filter stage ownership: kind=%v span=%+v", kind, span)
+		}
+	}
+	dependencies := map[uint64]uint64{}
+	for _, dependency := range snapshot.ReadDependencies {
+		if _, duplicate := dependencies[dependency.Dependent]; duplicate {
+			t.Fatalf("duplicate filter dependency: %+v", dependency)
+		}
+		dependencies[dependency.Dependent] = dependency.Predecessor
+	}
+	if len(dependencies) != len(stages)-1 {
+		t.Fatalf("filter dependency chain: %+v", snapshot.ReadDependencies)
+	}
+	for i := 1; i < len(stages); i++ {
+		if dependencies[spans[stages[i]].Span] != spans[stages[i-1]].Span {
+			t.Fatalf("filter dependency chain: %+v", snapshot.ReadDependencies)
+		}
+	}
+	if logs.total.Load() != 0 {
+		t.Fatalf("log callbacks with logging off=%d", logs.total.Load())
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, private := range []string{"private-row-content", "key-0000"} {
+		if strings.Contains(string(encoded), private) {
+			t.Fatalf("filter capture includes %q", private)
 		}
 	}
 }

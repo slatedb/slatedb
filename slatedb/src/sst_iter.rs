@@ -257,6 +257,7 @@ impl FilterEvaluator {
         sst_id: SsTableId,
         sst_level: Option<&SstTraceLevel>,
         read_trace: &ReadTrace,
+        predecessor: &mut ReadSpan,
     ) {
         if self.state != FilterState::NotChecked {
             return;
@@ -270,9 +271,24 @@ impl FilterEvaluator {
         // AND logic: if any filter says the key is NOT present, filter it out.
         // All filters reaching here are decoded. TableStore::read_filters
         // resolves any raw cache entries before returning.
-        let might_match = filters
-            .iter()
-            .all(|nf| self.filter_might_match(nf, sst_id, sst_level, read_trace));
+        let mut evaluate = || {
+            filters.iter().all(|filter| {
+                let span = read_trace.new_evaluate_filter_span(sst_id, sst_level, &filter.name);
+                span.span().follows_from(predecessor.span());
+                let result = span
+                    .span()
+                    .in_scope(|| filter.filter.might_match(&self.query));
+                span.span().record("result", result);
+                *predecessor = span;
+                result
+            })
+        };
+        let subscriber = read_trace.subscriber();
+        let might_match = if let Some(subscriber) = subscriber {
+            tracing::dispatcher::with_default(&subscriber, evaluate)
+        } else {
+            evaluate()
+        };
 
         if might_match {
             if let Some(stats) = &self.db_stats {
@@ -285,20 +301,6 @@ impl FilterEvaluator {
             }
             self.state = FilterState::Negative;
         }
-    }
-
-    fn filter_might_match(
-        &self,
-        filter: &NamedFilter,
-        sst_id: SsTableId,
-        sst_level: Option<&SstTraceLevel>,
-        read_trace: &ReadTrace,
-    ) -> bool {
-        let span = read_trace.new_evaluate_filter_span(sst_id, sst_level, &filter.name);
-        let _guard = span.span().enter();
-        let result = filter.filter.might_match(&self.query);
-        span.span().record("result", result);
-        result
     }
 
     fn positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
@@ -677,12 +679,22 @@ impl<'a> InternalSstIterator<'a> {
     }
 
     async fn ensure_metadata_loaded(&mut self) -> Result<(), SlateDBError> {
+        self.ensure_metadata_loaded_after(None).await
+    }
+
+    async fn ensure_metadata_loaded_after(
+        &mut self,
+        predecessor: Option<&ReadSpan>,
+    ) -> Result<(), SlateDBError> {
         if self.index.is_none() {
             let read_trace = self.read_trace();
             let subscriber = read_trace.subscriber();
             let read = async {
                 let span = read_trace
                     .new_read_index_span(self.view.table_as_ref().sst.id, self.sst_level());
+                if let Some(predecessor) = predecessor {
+                    span.span().follows_from(predecessor.span());
+                }
                 let index = self
                     .table_store
                     .read_index_with_span(
@@ -921,6 +933,7 @@ struct FilterIterator<'a> {
     inner: InternalSstIterator<'a>,
     filter: FilterEvaluator,
     initialized: bool,
+    predecessor: ReadSpan,
 }
 
 impl<'a> FilterIterator<'a> {
@@ -929,6 +942,7 @@ impl<'a> FilterIterator<'a> {
             inner,
             filter,
             initialized: false,
+            predecessor: ReadSpan::new(Span::none()),
         }
     }
 
@@ -936,11 +950,11 @@ impl<'a> FilterIterator<'a> {
         self.filter.is_filtered_out()
     }
 
-    async fn read_filters(&self) -> Result<Arc<[NamedFilter]>, SlateDBError> {
+    async fn read_filters(&self) -> Result<(Arc<[NamedFilter]>, ReadSpan), SlateDBError> {
         let read_trace = self.inner.read_trace();
         self.inner
             .table_store()
-            .read_filters(
+            .read_filters_traced(
                 &self.inner.view().table_as_ref().sst,
                 self.inner.options.cache_metadata,
                 self.inner.options.segment.clone(),
@@ -955,18 +969,33 @@ impl<'a> FilterIterator<'a> {
 impl RowEntryIterator for FilterIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized {
-            let filters = self.read_filters().await?;
+            let (filters, filter_span) = self.read_filters().await?;
             let sst_id = self.inner.view().table_as_ref().sst.id;
             let read_trace = self.inner.read_trace();
-            self.filter
-                .evaluate(&filters, sst_id, self.inner.sst_level(), &read_trace);
+            if self.filter.state == FilterState::NotChecked {
+                self.predecessor = filter_span;
+                self.filter.evaluate(
+                    &filters,
+                    sst_id,
+                    self.inner.sst_level(),
+                    &read_trace,
+                    &mut self.predecessor,
+                );
+            } else {
+                drop(filter_span);
+            }
 
             if self.is_filtered_out() {
+                self.predecessor = ReadSpan::new(Span::none());
                 return Ok(());
             }
 
             // make sure initializing the inner iterator only happens after
             // the filter is evaluated to avoid unnecessary work
+            self.inner
+                .ensure_metadata_loaded_after(Some(&self.predecessor))
+                .await?;
+            self.predecessor = ReadSpan::new(Span::none());
             self.inner.init().await?;
             self.initialized = true;
         }
@@ -1336,12 +1365,20 @@ mod tests {
         }
 
         async fn with_cache(warm: bool, cache: Option<Arc<dyn DbCache>>) -> Self {
-            let gated = Arc::new(GatedObjectStore::new(Arc::new(InMemory::new())));
-            let recording = Arc::new(RecordingObjectStore::new(gated.clone()));
             let format = SsTableFormat {
                 block_size: 32,
                 ..SsTableFormat::default()
             };
+            Self::with_format(warm, cache, format).await
+        }
+
+        async fn with_format(
+            warm: bool,
+            cache: Option<Arc<dyn DbCache>>,
+            format: SsTableFormat,
+        ) -> Self {
+            let gated = Arc::new(GatedObjectStore::new(Arc::new(InMemory::new())));
+            let recording = Arc::new(RecordingObjectStore::new(gated.clone()));
             let writer = TableStore::new(
                 recording.clone(),
                 format.clone(),
@@ -1633,6 +1670,428 @@ mod tests {
         })
         .await
         .expect("The filtered read must finish before the timeout.");
+    }
+
+    #[derive(Clone)]
+    struct DependencyFilterPolicy {
+        name: &'static str,
+        result: bool,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl FilterPolicy for DependencyFilterPolicy {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn builder(&self) -> Box<dyn FilterBuilder> {
+            Box::new(self.clone())
+        }
+
+        fn decode(&self, _data: &[u8]) -> Arc<dyn Filter> {
+            self.clone().build()
+        }
+
+        fn estimate_size(&self, _num_keys: usize) -> usize {
+            1
+        }
+
+        fn supports_range_queries(&self) -> bool {
+            true
+        }
+    }
+
+    impl FilterBuilder for DependencyFilterPolicy {
+        fn add_entry(&mut self, _entry: &RowEntry) {}
+
+        fn build(&mut self) -> Arc<dyn Filter> {
+            let result = self.result;
+            let calls = self.calls.clone();
+            named_filter(self.name, move |_| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                result
+            })
+            .filter
+        }
+    }
+
+    async fn filter_dependency_fixture(
+        verdicts: &[bool],
+        min_filter_keys: u32,
+        warm: bool,
+    ) -> (DependencyFixture, Vec<Arc<std::sync::atomic::AtomicUsize>>) {
+        let mut calls = Vec::new();
+        let policies = verdicts
+            .iter()
+            .enumerate()
+            .map(|(i, result)| {
+                let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                calls.push(counter.clone());
+                Arc::new(DependencyFilterPolicy {
+                    name: ["test.first", "test.second"][i],
+                    result: *result,
+                    calls: counter,
+                }) as Arc<dyn FilterPolicy>
+            })
+            .collect();
+        let cache = warm.then(|| Arc::new(TestCache::new()) as Arc<dyn DbCache>);
+        let fixture = DependencyFixture::with_format(
+            warm,
+            cache,
+            SsTableFormat {
+                block_size: 32,
+                min_filter_keys,
+                filter_policies: policies,
+                ..SsTableFormat::default()
+            },
+        )
+        .await;
+        if warm {
+            fixture
+                .store
+                .read_filters(&fixture.table.sst, true, None, &ReadTrace::none(), None)
+                .await
+                .unwrap();
+            fixture.recording.clear();
+        }
+        (fixture, calls)
+    }
+
+    #[rstest]
+    #[case::disabled_root("slatedb.read")]
+    #[case::disabled_index("slatedb.read.read_index")]
+    #[tokio::test]
+    async fn filter_dependencies_keep_disabled_span_subscriber(#[case] disabled: &'static str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (fixture, calls) = filter_dependency_fixture(&[true, true], 1, false).await;
+            let recorder_a = SpanRecorder::default();
+            let foreign_enters = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let dispatch_a = tracing::Dispatch::new(
+                tracing_subscriber::registry()
+                    .with(recorder_a.clone())
+                    .with(QuerySubscriber(foreign_enters.clone()))
+                    .with(tracing_subscriber::filter::filter_fn(move |metadata| {
+                        metadata.name() != disabled
+                    })),
+            );
+            let mut iter = tracing::dispatcher::with_default(&dispatch_a, || {
+                SstIterator::from_internal(
+                    fixture.iterator(true, SstIteratorOptions::default(), true),
+                    None,
+                )
+            });
+            let recorder_b = SpanRecorder::default();
+            let dispatch_b =
+                tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_b.clone()));
+            let foreign = tracing::dispatcher::with_default(&dispatch_b, || {
+                let root = tracing::info_span!("foreign-root");
+                let child = tracing::info_span!(parent: &root, "foreign-child");
+                (root, child)
+            });
+            let arrivals = fixture.gated.get_opts_gate.arrivals();
+            fixture.gated.get_opts_gate.close();
+            let mut init = Box::pin(iter.init().with_subscriber(dispatch_b.clone()));
+            tokio::select! {
+                result = init.as_mut() => panic!("The filter read must wait at the gate: {result:?}"),
+                _ = fixture.gated.get_opts_gate.wait_for_arrivals(arrivals + 1) => {}
+            }
+            let live = recorder_a.spans();
+            assert_eq!(Some(live[0].id.clone()), foreign.0.id());
+            if disabled != "slatedb.read" {
+                assert_eq!(Some(live[1].id.clone()), foreign.1.id());
+            }
+            assert_eq!(live.last().unwrap().name, "slatedb.read.read_filters");
+            assert!(recorder_a.closed().is_empty());
+            assert!(recorder_b.closed().is_empty());
+            fixture.gated.get_opts_gate.release();
+            init.await.unwrap();
+            let row = iter
+                .next()
+                .with_subscriber(dispatch_b.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.key, Bytes::from_static(b"key000"));
+            assert!(iter
+                .next()
+                .with_subscriber(dispatch_b.clone())
+                .await
+                .unwrap()
+                .is_none());
+            assert_eq!(fixture.requests().len(), 3);
+            assert!(calls
+                .iter()
+                .all(|calls| calls.load(std::sync::atomic::Ordering::SeqCst) == 1));
+            assert_eq!(
+                foreign_enters.load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "Filter work must use the query subscriber."
+            );
+            let spans = recorder_a.spans();
+            assert_eq!(spans.len(), 5);
+            assert!(spans.iter().all(|span| span.name != disabled));
+            assert_eq!(recorder_b.spans().len(), 2);
+            assert!(recorder_b.dependencies().is_empty());
+            assert!(recorder_b.closed().is_empty());
+            tracing::dispatcher::with_default(&dispatch_b, || drop(iter));
+            assert_dependency_spans_closed(&recorder_a);
+            assert!(recorder_b.closed().is_empty());
+            tracing::dispatcher::with_default(&dispatch_b, || drop(foreign));
+            assert_dependency_spans_closed(&recorder_b);
+        })
+        .await
+        .expect("Filter work must finish before the timeout.");
+    }
+
+    fn assert_filter_dependencies(
+        recorder: &SpanRecorder,
+        filter_read: bool,
+        evaluations: usize,
+        index_read: bool,
+        block_reads: usize,
+    ) {
+        let spans = recorder.spans();
+        let by_name = |name: &'static str| spans.iter().filter(move |span| span.name == name);
+        let filters: Vec<_> = by_name("slatedb.read.read_filters").collect();
+        let evaluated: Vec<_> = by_name("slatedb.read.evaluate_filter").collect();
+        let indexes: Vec<_> = by_name("slatedb.read.read_index").collect();
+        let blocks: Vec<_> = by_name("slatedb.read.read_blocks").collect();
+        assert_eq!(filters.len(), usize::from(filter_read));
+        assert_eq!(evaluated.len(), evaluations);
+        assert_eq!(indexes.len(), usize::from(index_read));
+        assert_eq!(blocks.len(), block_reads);
+        assert_eq!(by_name("slatedb.read").count(), 1);
+        let mut expected = Vec::new();
+        let mut predecessor = filters.first().copied();
+        for span in evaluated.iter().chain(indexes.iter()) {
+            if let Some(previous) = predecessor {
+                expected.push((previous.id.clone(), span.id.clone()));
+            }
+            predecessor = Some(span);
+        }
+        for span in &blocks {
+            expected.push((indexes[0].id.clone(), span.id.clone()));
+        }
+        assert_eq!(
+            recorder.dependencies(),
+            expected,
+            "Filter evaluation must precede the index and its block reads."
+        );
+        for span in filters
+            .iter()
+            .chain(&evaluated)
+            .chain(&indexes)
+            .chain(&blocks)
+        {
+            assert_eq!(span.parent_name.as_deref(), Some("slatedb.read"));
+            assert_eq!(span.fields["trace_id"], "dependency-test");
+        }
+    }
+
+    #[rstest]
+    #[case::inline(true)]
+    #[case::spawned(false)]
+    #[tokio::test]
+    async fn filter_dependencies_gate_index_and_block_io(#[case] point: bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut results = Vec::new();
+            for traced in [false, true] {
+                let (fixture, calls) = filter_dependency_fixture(&[true, true], 1, false).await;
+                let recorder = SpanRecorder::default();
+                let dispatch =
+                    tracing::Dispatch::new(tracing_subscriber::registry().with(recorder.clone()));
+                let mut iter = tracing::dispatcher::with_default(&dispatch, || {
+                    SstIterator::from_internal(
+                        fixture.iterator(point, SstIteratorOptions::default(), traced),
+                        None,
+                    )
+                });
+                let arrivals = fixture.gated.get_opts_gate.arrivals();
+                fixture.gated.get_opts_gate.close();
+                let mut init = Box::pin(iter.init().with_subscriber(dispatch.clone()));
+                for stage in 1..=3 {
+                    tokio::select! {
+                        result = init.as_mut() => panic!("The gated read must remain pending: {result:?}"),
+                        _ = fixture.gated.get_opts_gate.wait_for_arrivals(arrivals + stage) => {}
+                    }
+                    assert_eq!(fixture.requests().len(), stage);
+                    if traced {
+                        assert_filter_dependencies(&recorder, true, if stage > 1 { 2 } else { 0 }, stage > 1, usize::from(stage > 2));
+                    }
+                    if stage < 3 {
+                        fixture.gated.get_opts_gate.admit(1);
+                    }
+                }
+                let ranges = fixture.recording.recorded_get_ranges(false);
+                let info = &fixture.table.sst.info;
+                assert_eq!(ranges[0], Some(object_store::GetRange::Bounded(info.filter_offset..info.filter_offset + info.filter_len)));
+                assert_eq!(ranges[1], Some(object_store::GetRange::Bounded(info.index_offset..info.index_offset + info.index_len)));
+                fixture.gated.get_opts_gate.release();
+                init.await.unwrap();
+                let mut rows = Vec::new();
+                while let Some(row) = iter.next().with_subscriber(dispatch.clone()).await.unwrap() {
+                    rows.push(row);
+                }
+                let count = if point { 1 } else { 6 };
+                assert_eq!(rows.len(), count);
+                assert_eq!(fixture.requests().len(), count + 2);
+                assert!(calls.iter().all(|calls| calls.load(std::sync::atomic::Ordering::SeqCst) == 1));
+                drop(iter);
+                if traced {
+                    assert_filter_dependencies(&recorder, true, 2, true, count);
+                    assert_dependency_spans_closed(&recorder);
+                } else {
+                    assert!(recorder.spans().is_empty());
+                }
+                results.push((rows, fixture.requests()));
+            }
+            assert_eq!(results[0], results[1]);
+        }).await.expect("Filter and data reads must finish before the timeout.");
+    }
+
+    #[rstest]
+    #[case::positive(vec![true, true], 1, false, 2, true)]
+    #[case::warm_positive(vec![true, true], 1, true, 2, true)]
+    #[case::first_negative(vec![false, true], 1, false, 1, false)]
+    #[case::last_negative(vec![true, false], 1, false, 2, false)]
+    #[case::warm_negative(vec![false, true], 1, true, 1, false)]
+    #[case::no_policies(vec![], 1, false, 0, true)]
+    #[case::no_filter_block(vec![false, false], 1000, false, 0, true)]
+    #[tokio::test]
+    async fn filter_dependencies_preserve_short_circuit_and_requests(
+        #[case] verdicts: Vec<bool>,
+        #[case] min_filter_keys: u32,
+        #[case] warm: bool,
+        #[case] evaluations: usize,
+        #[case] positive: bool,
+    ) {
+        let mut results = Vec::new();
+        for traced in [false, true] {
+            let (fixture, calls) =
+                filter_dependency_fixture(&verdicts, min_filter_keys, warm).await;
+            let recorder = SpanRecorder::default();
+            let subscriber = tracing_subscriber::registry().with(recorder.clone());
+            let rows = async {
+                let mut iter = SstIterator::from_internal(
+                    fixture.iterator(true, SstIteratorOptions::default(), traced),
+                    None,
+                );
+                iter.init().await.unwrap();
+                let mut rows = Vec::new();
+                while let Some(row) = iter.next().await.unwrap() {
+                    rows.push(row);
+                }
+                rows
+            }
+            .with_subscriber(subscriber)
+            .await;
+            assert_eq!(rows.len(), usize::from(positive));
+            if positive {
+                assert_eq!(rows[0].key, Bytes::from_static(b"key000"));
+            }
+            let filter_read = evaluations > 0;
+            let requests = fixture.requests();
+            assert_eq!(
+                requests.len(),
+                if warm {
+                    0
+                } else {
+                    usize::from(filter_read) + 2 * usize::from(positive)
+                }
+            );
+            for (i, calls) in calls.iter().enumerate() {
+                assert_eq!(
+                    calls.load(std::sync::atomic::Ordering::SeqCst),
+                    usize::from(i < evaluations)
+                );
+            }
+            if traced {
+                assert_filter_dependencies(
+                    &recorder,
+                    filter_read,
+                    evaluations,
+                    positive,
+                    usize::from(positive),
+                );
+                assert_dependency_spans_closed(&recorder);
+            } else {
+                assert!(recorder.spans().is_empty());
+            }
+            results.push((rows, requests));
+        }
+        assert_eq!(results[0], results[1]);
+    }
+
+    #[rstest]
+    #[case::pending_filter(false, false)]
+    #[case::pending_index(true, false)]
+    #[case::retry_index(true, true)]
+    #[tokio::test]
+    async fn cancelled_filter_dependencies_keep_their_subscriber(
+        #[case] filter_loaded: bool,
+        #[case] retry: bool,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (fixture, calls) = filter_dependency_fixture(&[true, true], 1, false).await;
+            let recorder_a = SpanRecorder::default();
+            let dispatch_a =
+                tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_a.clone()));
+            let mut iter = tracing::dispatcher::with_default(&dispatch_a, || {
+                SstIterator::from_internal(
+                    fixture.iterator(true, SstIteratorOptions::default(), true),
+                    None,
+                )
+            });
+            let recorder_b = SpanRecorder::default();
+            let dispatch_b =
+                tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_b.clone()));
+            let foreign = tracing::dispatcher::with_default(&dispatch_b, || {
+                let trace = ReadTrace::new(Some(TracingOptions::new("foreign-test")));
+                let filter = trace.new_read_filter_span(fixture.table.sst.id, None);
+                (trace, filter)
+            });
+            assert_eq!(recorder_a.spans()[0].id, recorder_b.spans()[0].id);
+            let arrivals = fixture.gated.get_opts_gate.arrivals();
+            fixture.gated.get_opts_gate.close();
+            let mut init = Box::pin(iter.init().with_subscriber(dispatch_b.clone()));
+            for stage in 1..=if filter_loaded { 2 } else { 1 } {
+                tokio::select! {
+                    result = init.as_mut() => panic!("The gated read must remain pending: {result:?}"),
+                    _ = fixture.gated.get_opts_gate.wait_for_arrivals(arrivals + stage) => {}
+                }
+                if stage == 1 && filter_loaded {
+                    fixture.gated.get_opts_gate.admit(1);
+                }
+            }
+            assert_eq!(recorder_a.spans()[1].id, recorder_b.spans()[1].id);
+            assert_filter_dependencies(&recorder_a, true, if filter_loaded { 2 } else { 0 }, filter_loaded, 0);
+            tracing::dispatcher::with_default(&dispatch_b, || drop(init));
+            if retry {
+                fixture.gated.get_opts_gate.release();
+                iter.init().with_subscriber(dispatch_b.clone()).await.unwrap();
+                let row = iter.next().with_subscriber(dispatch_b.clone()).await.unwrap().unwrap();
+                assert_eq!(row.key, Bytes::from_static(b"key000"));
+                assert!(iter.next().with_subscriber(dispatch_b.clone()).await.unwrap().is_none());
+                assert!(calls.iter().all(|calls| calls.load(std::sync::atomic::Ordering::SeqCst) == 1));
+                let spans = recorder_a.spans();
+                let evaluations: Vec<_> = spans.iter().filter(|span| span.name == "slatedb.read.evaluate_filter").collect();
+                let indexes: Vec<_> = spans.iter().filter(|span| span.name == "slatedb.read.read_index").collect();
+                assert_eq!(evaluations.len(), 2);
+                assert_eq!(indexes.len(), 2);
+                let edges = recorder_a.dependencies();
+                for index in indexes {
+                    assert!(edges.contains(&(evaluations[1].id.clone(), index.id.clone())), "Each index attempt must retain the accepted filter predecessor.");
+                }
+                assert_eq!(fixture.requests().len(), 5);
+            }
+            tracing::dispatcher::with_default(&dispatch_b, || drop(iter));
+            assert_dependency_spans_closed(&recorder_a);
+            assert_eq!(recorder_b.spans().len(), 2);
+            assert!(recorder_b.dependencies().is_empty());
+            assert!(recorder_b.closed().is_empty());
+            tracing::dispatcher::with_default(&dispatch_b, || drop(foreign));
+            assert_dependency_spans_closed(&recorder_b);
+        }).await.expect("Cancelled filter reads must close before the timeout.");
     }
 
     #[rstest]
@@ -4061,6 +4520,7 @@ mod tests {
                     test_sst_id(1),
                     Some(&SstTraceLevel::L0),
                     &trace,
+                    &mut ReadSpan::new(Span::none()),
                 );
                 assert!(!evaluator.is_filtered_out());
             },
@@ -4086,6 +4546,7 @@ mod tests {
                 sst_id,
                 Some(&SstTraceLevel::SortedRun(SORTED_RUN_ID)),
                 &ReadTrace::new(Some(TracingOptions::new(TRACE_ID))),
+                &mut ReadSpan::new(Span::none()),
             );
             assert_eq!(evaluator.is_filtered_out(), !filter_result);
         });
@@ -4196,6 +4657,7 @@ mod tests {
             SsTableId::new(Ulid::new()),
             None,
             &ReadTrace::none(),
+            &mut ReadSpan::new(Span::none()),
         );
 
         assert!(evaluator.is_filtered_out());
@@ -4215,6 +4677,7 @@ mod tests {
             SsTableId::new(Ulid::new()),
             None,
             &ReadTrace::none(),
+            &mut ReadSpan::new(Span::none()),
         );
         assert!(!evaluator.is_filtered_out());
 
@@ -4239,6 +4702,7 @@ mod tests {
             SsTableId::new(Ulid::new()),
             None,
             &ReadTrace::none(),
+            &mut ReadSpan::new(Span::none()),
         );
         evaluator.notify_finished_iteration();
 
@@ -4282,6 +4746,7 @@ mod tests {
             SsTableId::new(Ulid::new()),
             None,
             &ReadTrace::none(),
+            &mut ReadSpan::new(Span::none()),
         );
 
         assert!(!evaluator.is_filtered_out());
