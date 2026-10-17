@@ -1568,10 +1568,10 @@ mod tests {
                 "Read I/O must use the query subscriber."
             );
             let owner_id = if disabled == "slatedb.read" {
-                assert!(iter.read_trace().read_span().span().is_none());
+                assert!(iter.read_trace().read_span().span().is_disabled());
                 iter.index_span.span().id()
             } else {
-                assert!(iter.index_span.span().is_none());
+                assert!(iter.index_span.span().is_disabled());
                 iter.read_trace().read_span().span().id()
             };
             assert_eq!(owner_id, foreign.0.read_span().span().id());
