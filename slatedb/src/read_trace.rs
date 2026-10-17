@@ -4,7 +4,8 @@ use crate::db_state::SsTableId;
 #[derive(Clone, Debug)]
 pub(crate) struct ReadTrace {
     tracing_options: Option<TracingOptions>,
-    read_span: tracing::Span,
+    subscriber: Option<tracing::Dispatch>,
+    read_span: ReadSpan,
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +49,9 @@ impl SstTraceLevel {
 
 impl ReadTrace {
     pub(crate) fn new(tracing_options: Option<TracingOptions>) -> Self {
+        let subscriber = tracing_options
+            .as_ref()
+            .map(|_| tracing::dispatcher::get_default(Clone::clone));
         let read_span = tracing_options
             .as_ref()
             .map(|tracing_options| {
@@ -56,7 +60,8 @@ impl ReadTrace {
             .unwrap_or_else(tracing::Span::none);
         Self {
             tracing_options,
-            read_span,
+            subscriber,
+            read_span: ReadSpan::new(read_span),
         }
     }
 
@@ -65,13 +70,24 @@ impl ReadTrace {
     }
 
     pub(crate) fn read_span(&self) -> tracing::Span {
-        self.read_span.clone()
+        self.read_span.span().clone()
+    }
+
+    pub(crate) fn subscriber(&self) -> Option<tracing::Dispatch> {
+        self.subscriber.clone()
+    }
+
+    fn enter(&self) -> Option<tracing::dispatcher::DefaultGuard> {
+        self.subscriber
+            .as_ref()
+            .map(tracing::dispatcher::set_default)
     }
 
     pub(crate) fn new_memtable_span(&self) -> tracing::Span {
+        let _entered = self.enter();
         if let Some(tracing_options) = self.tracing_options.as_ref() {
             tracing::debug_span!(
-                parent: &self.read_span,
+                parent: self.read_span.span(),
                 "slatedb.read.memtable",
                 trace_id = tracing_options.trace_id.as_str(),
             )
@@ -91,11 +107,12 @@ impl ReadTrace {
         sst_id: SsTableId,
         sst_level: Option<&SstTraceLevel>,
     ) -> tracing::Span {
+        let _entered = self.enter();
         if let Some(tracing_options) = self.tracing_options.as_ref() {
             let sst_id = sst_id.value().to_string();
             let sst_level = Self::format_sst_level(sst_level);
             tracing::info_span!(
-                parent: &self.read_span,
+                parent: self.read_span.span(),
                 "slatedb.read.read_filters",
                 trace_id = tracing_options.trace_id.as_str(),
                 sst_id = sst_id.as_str(),
@@ -113,11 +130,12 @@ impl ReadTrace {
         sst_level: Option<&SstTraceLevel>,
         filter_name: impl AsRef<str>,
     ) -> tracing::Span {
+        let _entered = self.enter();
         if let Some(tracing_options) = self.tracing_options.as_ref() {
             let sst_id = sst_id.value().to_string();
             let sst_level = Self::format_sst_level(sst_level);
             tracing::info_span!(
-                parent: &self.read_span,
+                parent: self.read_span.span(),
                 "slatedb.read.evaluate_filter",
                 trace_id = tracing_options.trace_id.as_str(),
                 sst_id = sst_id.as_str(),
@@ -135,11 +153,12 @@ impl ReadTrace {
         sst_id: SsTableId,
         sst_level: Option<&SstTraceLevel>,
     ) -> tracing::Span {
+        let _entered = self.enter();
         if let Some(tracing_options) = self.tracing_options.as_ref() {
             let sst_id = sst_id.value().to_string();
             let sst_level = Self::format_sst_level(sst_level);
             tracing::info_span!(
-                parent: &self.read_span,
+                parent: self.read_span.span(),
                 "slatedb.read.read_index",
                 trace_id = tracing_options.trace_id.as_str(),
                 sst_id = sst_id.as_str(),
@@ -156,11 +175,12 @@ impl ReadTrace {
         sst_id: SsTableId,
         sst_level: Option<&SstTraceLevel>,
     ) -> tracing::Span {
+        let _entered = self.enter();
         if let Some(tracing_options) = self.tracing_options.as_ref() {
             let sst_id = sst_id.value().to_string();
             let sst_level = Self::format_sst_level(sst_level);
             tracing::info_span!(
-                parent: &self.read_span,
+                parent: self.read_span.span(),
                 "slatedb.read.read_blocks",
                 trace_id = tracing_options.trace_id.as_str(),
                 sst_id = sst_id.as_str(),
@@ -174,9 +194,10 @@ impl ReadTrace {
     }
 
     pub(crate) fn new_read_merge_span(&self, num_operands: usize) -> tracing::Span {
+        let _entered = self.enter();
         if let Some(tracing_options) = self.tracing_options.as_ref() {
             tracing::info_span!(
-                parent: &self.read_span,
+                parent: self.read_span.span(),
                 "slatedb.read.merge",
                 trace_id = tracing_options.trace_id.as_str(),
                 num_operands,
@@ -248,12 +269,91 @@ mod tests {
         let spans = record_spans(|| {
             let trace = create(None);
             assert!(trace.read_span().is_none());
+            assert!(trace.subscriber().is_none());
             for span in new_all_child_spans(&trace) {
                 assert!(span.is_none());
             }
         });
 
         assert!(spans.is_empty());
+    }
+
+    #[rstest]
+    #[case::disabled_root("slatedb.read")]
+    #[case::disabled_index("slatedb.read.read_index")]
+    fn span_factories_keep_the_query_subscriber(#[case] disabled: &'static str) {
+        let recorder_a = SpanRecorder::default();
+        let dispatch_a = tracing::Dispatch::new(
+            tracing_subscriber::registry()
+                .with(recorder_a.clone())
+                .with(tracing_subscriber::filter::filter_fn(move |metadata| {
+                    metadata.name() != disabled
+                })),
+        );
+        let trace = tracing::dispatcher::with_default(&dispatch_a, || {
+            ReadTrace::new(Some(TracingOptions::new(TRACE_ID)))
+        });
+        let recorder_b = SpanRecorder::default();
+        let dispatch_b =
+            tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_b.clone()));
+        let foreign = tracing::dispatcher::with_default(&dispatch_b, || {
+            let root = tracing::info_span!("foreign-root");
+            let index = tracing::info_span!(parent: &root, "foreign-index");
+            (root, index)
+        });
+        let children: Vec<_> = tracing::dispatcher::with_default(&dispatch_b, || {
+            new_all_child_spans(&trace)
+                .into_iter()
+                .map(ReadSpan::new)
+                .collect()
+        });
+        assert_eq!(
+            recorder_b.spans().len(),
+            2,
+            "Span factories must keep the query subscriber."
+        );
+        let spans = recorder_a.spans();
+        assert_eq!(spans.len(), 6);
+        assert!(spans.iter().all(|span| span.name != disabled));
+        tracing::dispatcher::with_default(&dispatch_b, || drop((children, trace)));
+        assert_eq!(recorder_a.closed().len(), spans.len());
+        assert!(recorder_b.closed().is_empty());
+        tracing::dispatcher::with_default(&dispatch_b, || drop(foreign));
+        assert_eq!(recorder_b.closed().len(), 2);
+    }
+
+    #[test]
+    fn query_root_closes_its_parent_with_the_query_subscriber() {
+        let recorder_a = SpanRecorder::default();
+        let dispatch_a =
+            tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_a.clone()));
+        let (trace, parent_id) = tracing::dispatcher::with_default(&dispatch_a, || {
+            let parent = tracing::info_span!("query-parent");
+            let parent_id = parent.id();
+            let trace = parent.in_scope(|| ReadTrace::new(Some(TracingOptions::new(TRACE_ID))));
+            drop(parent);
+            (trace, parent_id)
+        });
+        let recorder_b = SpanRecorder::default();
+        let dispatch_b =
+            tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_b.clone()));
+        let foreign = tracing::dispatcher::with_default(&dispatch_b, || {
+            let root = tracing::info_span!("foreign-root");
+            let child = tracing::info_span!(parent: &root, "foreign-child");
+            (root, child)
+        });
+        assert_eq!(parent_id, foreign.0.id());
+        assert_eq!(trace.read_span().id(), foreign.1.id());
+        assert!(recorder_a.closed().is_empty());
+        tracing::dispatcher::with_default(&dispatch_b, || drop(trace));
+        assert_eq!(
+            recorder_a.closed().len(),
+            2,
+            "The read root must close its parent with the query subscriber."
+        );
+        assert!(recorder_b.closed().is_empty());
+        tracing::dispatcher::with_default(&dispatch_b, || drop(foreign));
+        assert_eq!(recorder_b.closed().len(), 2);
     }
 
     #[test]

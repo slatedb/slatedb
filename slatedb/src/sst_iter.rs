@@ -530,8 +530,7 @@ impl<'a> InternalSstIterator<'a> {
         let read_trace = self.read_trace();
         let sst_level = self.sst_level().cloned();
         let index_span = self.index_span.clone();
-        let subscriber =
-            Span::with_subscriber(index_span.span(), |(_, subscriber)| subscriber.clone());
+        let subscriber = read_trace.subscriber();
         let single_block = blocks.len() == 1;
         let read = async move {
             let span = ReadSpan::new(read_trace.new_read_block_span(table.id, sst_level.as_ref()));
@@ -680,9 +679,7 @@ impl<'a> InternalSstIterator<'a> {
     async fn ensure_metadata_loaded(&mut self) -> Result<(), SlateDBError> {
         if self.index.is_none() {
             let read_trace = self.read_trace();
-            let subscriber = Span::with_subscriber(&read_trace.read_span(), |(_, subscriber)| {
-                subscriber.clone()
-            });
+            let subscriber = read_trace.subscriber();
             let read = async {
                 let span = ReadSpan::new(
                     read_trace
@@ -1505,6 +1502,139 @@ mod tests {
             actual, expected,
             "All read spans must close with their owner."
         );
+    }
+
+    struct QuerySubscriber(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for QuerySubscriber {
+        fn on_enter(&self, _: &tracing::Id, _: tracing_subscriber::layer::Context<'_, S>) {
+            if !tracing::dispatcher::get_default(|subscriber| subscriber.is::<Self>()) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    #[rstest]
+    #[case::disabled_index_inline("slatedb.read.read_index", true, false)]
+    #[case::disabled_index_spawned("slatedb.read.read_index", false, false)]
+    #[case::disabled_root_inline("slatedb.read", true, false)]
+    #[case::disabled_root_spawned("slatedb.read", false, false)]
+    #[case::cancelled_index_inline("slatedb.read.read_index", true, true)]
+    #[case::cancelled_index_spawned("slatedb.read.read_index", false, true)]
+    #[case::cancelled_root_inline("slatedb.read", true, true)]
+    #[case::cancelled_root_spawned("slatedb.read", false, true)]
+    #[tokio::test]
+    async fn filtered_iterator_spans_keep_the_query_subscriber(
+        #[case] disabled: &'static str,
+        #[case] point: bool,
+        #[case] cancel: bool,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let fixture = DependencyFixture::new(false).await;
+            let recorder_a = SpanRecorder::default();
+            let foreign_enters = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let dispatch_a = tracing::Dispatch::new(
+                tracing_subscriber::registry()
+                    .with(recorder_a.clone())
+                    .with(QuerySubscriber(foreign_enters.clone()))
+                    .with(tracing_subscriber::filter::filter_fn(move |metadata| {
+                        metadata.name() != disabled
+                    })),
+            );
+            let max_fetch_tasks = if point { 1 } else { 2 };
+            let mut iter = tracing::dispatcher::with_default(&dispatch_a, || {
+                fixture.iterator(
+                    point,
+                    SstIteratorOptions {
+                        max_fetch_tasks,
+                        ..SstIteratorOptions::default()
+                    },
+                    true,
+                )
+            });
+            let recorder_b = SpanRecorder::default();
+            let dispatch_b =
+                tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_b.clone()));
+            let foreign = tracing::dispatcher::with_default(&dispatch_b, || {
+                let trace = ReadTrace::new(Some(TracingOptions::new("foreign-test")));
+                let index = trace.new_read_index_span(fixture.table.sst.id, None);
+                (trace, index)
+            });
+            iter.ensure_metadata_loaded()
+                .with_subscriber(dispatch_b.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                foreign_enters.load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "Read I/O must use the query subscriber."
+            );
+            let owner_id = if disabled == "slatedb.read" {
+                assert!(iter.read_trace().read_span().is_none());
+                iter.index_span.span().id()
+            } else {
+                assert!(iter.index_span.span().is_none());
+                iter.read_trace().read_span().id()
+            };
+            assert_eq!(owner_id, foreign.0.read_span().id());
+            let block_count = if cancel {
+                let arrivals = fixture.gated.get_opts_gate.arrivals();
+                fixture.gated.get_opts_gate.close();
+                let mut init = Box::pin(iter.init().with_subscriber(dispatch_b.clone()));
+                tokio::select! {
+                    result = init.as_mut() => panic!("The filtered read must wait at the gate: {result:?}"),
+                    _ = fixture.gated.get_opts_gate.wait_for_arrivals(arrivals + max_fetch_tasks) => {}
+                }
+                assert_eq!(
+                    foreign_enters.load(std::sync::atomic::Ordering::Relaxed),
+                    0,
+                    "Read I/O must use the query subscriber."
+                );
+                tracing::dispatcher::with_default(&dispatch_b, || drop(init));
+                max_fetch_tasks
+            } else {
+                let rows = dependency_rows(&mut iter)
+                    .with_subscriber(dispatch_b.clone())
+                    .await;
+                let count = if point { 1 } else { 6 };
+                assert_eq!(rows.len(), count);
+                assert_eq!(fixture.requests().len(), count + 1);
+                assert_eq!(
+                    foreign_enters.load(std::sync::atomic::Ordering::Relaxed),
+                    0,
+                    "Read I/O must use the query subscriber."
+                );
+                count
+            };
+            assert_eq!(
+                recorder_a.spans().iter().filter(|span| span.name == "slatedb.read.read_blocks").count(),
+                block_count,
+                "Filtered reads must keep the query subscriber."
+            );
+            if disabled == "slatedb.read.read_index" {
+                assert!(recorder_a.dependencies().is_empty());
+            } else {
+                assert_index_dependencies(&recorder_a, block_count);
+            }
+            assert_eq!(recorder_b.spans().len(), 2);
+            assert!(recorder_b.dependencies().is_empty());
+            assert!(recorder_b.closed().is_empty());
+            tracing::dispatcher::with_default(&dispatch_b, || drop(iter));
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while recorder_a.closed().len() != recorder_a.spans().len() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("Filtered read spans must close before the timeout.");
+            assert_dependency_spans_closed(&recorder_a);
+            assert!(recorder_b.closed().is_empty());
+            tracing::dispatcher::with_default(&dispatch_b, || drop(foreign));
+            assert_dependency_spans_closed(&recorder_b);
+            fixture.gated.get_opts_gate.release();
+        })
+        .await
+        .expect("The filtered read must finish before the timeout.");
     }
 
     #[rstest]
