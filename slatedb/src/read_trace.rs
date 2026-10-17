@@ -83,9 +83,9 @@ impl ReadTrace {
             .map(tracing::dispatcher::set_default)
     }
 
-    pub(crate) fn new_memtable_span(&self) -> tracing::Span {
+    pub(crate) fn new_memtable_span(&self) -> ReadSpan {
         let _entered = self.enter();
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
+        let span = if let Some(tracing_options) = self.tracing_options.as_ref() {
             tracing::debug_span!(
                 parent: self.read_span.span(),
                 "slatedb.read.memtable",
@@ -93,7 +93,8 @@ impl ReadTrace {
             )
         } else {
             tracing::Span::none()
-        }
+        };
+        ReadSpan::new(span)
     }
 
     fn format_sst_level(sst_level: Option<&SstTraceLevel>) -> String {
@@ -106,9 +107,9 @@ impl ReadTrace {
         &self,
         sst_id: SsTableId,
         sst_level: Option<&SstTraceLevel>,
-    ) -> tracing::Span {
+    ) -> ReadSpan {
         let _entered = self.enter();
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
+        let span = if let Some(tracing_options) = self.tracing_options.as_ref() {
             let sst_id = sst_id.value().to_string();
             let sst_level = Self::format_sst_level(sst_level);
             tracing::info_span!(
@@ -121,7 +122,8 @@ impl ReadTrace {
             )
         } else {
             tracing::Span::none()
-        }
+        };
+        ReadSpan::new(span)
     }
 
     pub(crate) fn new_evaluate_filter_span(
@@ -129,9 +131,9 @@ impl ReadTrace {
         sst_id: SsTableId,
         sst_level: Option<&SstTraceLevel>,
         filter_name: impl AsRef<str>,
-    ) -> tracing::Span {
+    ) -> ReadSpan {
         let _entered = self.enter();
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
+        let span = if let Some(tracing_options) = self.tracing_options.as_ref() {
             let sst_id = sst_id.value().to_string();
             let sst_level = Self::format_sst_level(sst_level);
             tracing::info_span!(
@@ -145,16 +147,17 @@ impl ReadTrace {
             )
         } else {
             tracing::Span::none()
-        }
+        };
+        ReadSpan::new(span)
     }
 
     pub(crate) fn new_read_index_span(
         &self,
         sst_id: SsTableId,
         sst_level: Option<&SstTraceLevel>,
-    ) -> tracing::Span {
+    ) -> ReadSpan {
         let _entered = self.enter();
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
+        let span = if let Some(tracing_options) = self.tracing_options.as_ref() {
             let sst_id = sst_id.value().to_string();
             let sst_level = Self::format_sst_level(sst_level);
             tracing::info_span!(
@@ -167,16 +170,17 @@ impl ReadTrace {
             )
         } else {
             tracing::Span::none()
-        }
+        };
+        ReadSpan::new(span)
     }
 
     pub(crate) fn new_read_block_span(
         &self,
         sst_id: SsTableId,
         sst_level: Option<&SstTraceLevel>,
-    ) -> tracing::Span {
+    ) -> ReadSpan {
         let _entered = self.enter();
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
+        let span = if let Some(tracing_options) = self.tracing_options.as_ref() {
             let sst_id = sst_id.value().to_string();
             let sst_level = Self::format_sst_level(sst_level);
             tracing::info_span!(
@@ -190,12 +194,13 @@ impl ReadTrace {
             )
         } else {
             tracing::Span::none()
-        }
+        };
+        ReadSpan::new(span)
     }
 
-    pub(crate) fn new_read_merge_span(&self, num_operands: usize) -> tracing::Span {
+    pub(crate) fn new_read_merge_span(&self, num_operands: usize) -> ReadSpan {
         let _entered = self.enter();
-        if let Some(tracing_options) = self.tracing_options.as_ref() {
+        let span = if let Some(tracing_options) = self.tracing_options.as_ref() {
             tracing::info_span!(
                 parent: self.read_span.span(),
                 "slatedb.read.merge",
@@ -204,7 +209,8 @@ impl ReadTrace {
             )
         } else {
             tracing::Span::none()
-        }
+        };
+        ReadSpan::new(span)
     }
 }
 
@@ -247,7 +253,7 @@ mod tests {
             .collect()
     }
 
-    fn new_all_child_spans(trace: &ReadTrace) -> Vec<tracing::Span> {
+    fn new_all_child_spans(trace: &ReadTrace) -> Vec<ReadSpan> {
         let sst_id = test_sst_id();
         let sst_level = Some(&SstTraceLevel::L0);
         vec![
@@ -271,7 +277,7 @@ mod tests {
             assert!(trace.read_span().is_none());
             assert!(trace.subscriber().is_none());
             for span in new_all_child_spans(&trace) {
-                assert!(span.is_none());
+                assert!(span.span().is_none());
             }
         });
 
@@ -301,12 +307,8 @@ mod tests {
             let index = tracing::info_span!(parent: &root, "foreign-index");
             (root, index)
         });
-        let children: Vec<_> = tracing::dispatcher::with_default(&dispatch_b, || {
-            new_all_child_spans(&trace)
-                .into_iter()
-                .map(ReadSpan::new)
-                .collect()
-        });
+        let children: Vec<_> =
+            tracing::dispatcher::with_default(&dispatch_b, || new_all_child_spans(&trace));
         assert_eq!(
             recorder_b.spans().len(),
             2,
@@ -402,7 +404,7 @@ mod tests {
         let spans = record_spans(|| {
             let trace = ReadTrace::new(Some(TracingOptions::new(TRACE_ID)));
             let span = trace.new_read_filter_span(sst_id, sst_level.as_ref());
-            span.record("cached", true);
+            span.span().record("cached", true);
         });
 
         let span = find_span(&spans, "slatedb.read.read_filters");
@@ -435,7 +437,7 @@ mod tests {
         let spans = record_spans(|| {
             let trace = ReadTrace::new(Some(TracingOptions::new(TRACE_ID)));
             let span = trace.new_evaluate_filter_span(sst_id, sst_level.as_ref(), FILTER_NAME);
-            span.record("result", false);
+            span.span().record("result", false);
         });
 
         let span = find_span(&spans, "slatedb.read.evaluate_filter");
@@ -467,7 +469,7 @@ mod tests {
         let spans = record_spans(|| {
             let trace = ReadTrace::new(Some(TracingOptions::new(TRACE_ID)));
             let span = trace.new_read_index_span(sst_id, sst_level.as_ref());
-            span.record("cached", false);
+            span.span().record("cached", false);
         });
 
         let span = find_span(&spans, "slatedb.read.read_index");
@@ -498,8 +500,8 @@ mod tests {
         let spans = record_spans(|| {
             let trace = ReadTrace::new(Some(TracingOptions::new(TRACE_ID)));
             let span = trace.new_read_block_span(sst_id, sst_level.as_ref());
-            span.record("cache_hits", 2_u64);
-            span.record("cache_misses", 3_u64);
+            span.span().record("cache_hits", 2_u64);
+            span.span().record("cache_misses", 3_u64);
         });
 
         let span = find_span(&spans, "slatedb.read.read_blocks");

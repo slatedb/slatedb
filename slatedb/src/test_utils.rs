@@ -34,7 +34,7 @@ use std::thread;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::layer::Context;
+use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
@@ -137,6 +137,52 @@ impl SpanRecorder {
     pub(crate) fn closed(&self) -> Vec<tracing::Id> {
         self.closed.lock().unwrap().clone()
     }
+}
+
+pub(crate) fn assert_read_spans_close_with_owner(
+    child_name: &str,
+    child_count: usize,
+    action: impl FnOnce(crate::read_trace::ReadTrace),
+) {
+    let recorder_a = SpanRecorder::default();
+    let dispatch_a =
+        tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_a.clone()));
+    let trace = tracing::dispatcher::with_default(&dispatch_a, || {
+        crate::read_trace::ReadTrace::new(Some(crate::config::TracingOptions::new("read-owner")))
+    });
+    let recorder_b = SpanRecorder::default();
+    let dispatch_b =
+        tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_b.clone()));
+    let foreign = tracing::dispatcher::with_default(&dispatch_b, || {
+        let root = tracing::info_span!("foreign-root");
+        let child = tracing::info_span!(parent: &root, "foreign-child");
+        (root, child)
+    });
+    assert_eq!(trace.read_span().id(), foreign.0.id());
+    tracing::dispatcher::with_default(&dispatch_b, || action(trace));
+    let spans = recorder_a.spans();
+    let children: Vec<_> = spans
+        .iter()
+        .filter(|span| span.name == child_name)
+        .collect();
+    assert_eq!(children.len(), child_count);
+    assert_eq!(Some(children[0].id.clone()), foreign.1.id());
+    let mut expected: Vec<_> = spans.iter().map(|span| span.id.into_u64()).collect();
+    let mut closed: Vec<_> = recorder_a
+        .closed()
+        .iter()
+        .map(tracing::Id::into_u64)
+        .collect();
+    expected.sort_unstable();
+    closed.sort_unstable();
+    assert_eq!(
+        closed, expected,
+        "Caller spans must close with the query subscriber."
+    );
+    assert_eq!(recorder_b.spans().len(), 2);
+    assert!(recorder_b.closed().is_empty());
+    tracing::dispatcher::with_default(&dispatch_b, || drop(foreign));
+    assert_eq!(recorder_b.closed().len(), 2);
 }
 
 struct SpanFieldRecorder<'a> {
