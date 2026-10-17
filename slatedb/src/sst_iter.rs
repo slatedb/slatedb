@@ -1568,13 +1568,13 @@ mod tests {
                 "Read I/O must use the query subscriber."
             );
             let owner_id = if disabled == "slatedb.read" {
-                assert!(iter.read_trace().read_span().is_none());
+                assert!(iter.read_trace().read_span().span().is_none());
                 iter.index_span.span().id()
             } else {
                 assert!(iter.index_span.span().is_none());
-                iter.read_trace().read_span().id()
+                iter.read_trace().read_span().span().id()
             };
-            assert_eq!(owner_id, foreign.0.read_span().id());
+            assert_eq!(owner_id, foreign.0.read_span().span().id());
             let block_count = if cancel {
                 let arrivals = fixture.gated.get_opts_gate.arrivals();
                 fixture.gated.get_opts_gate.close();
@@ -1814,8 +1814,8 @@ mod tests {
                     (trace, index)
                 });
             assert_eq!(
-                iter.read_trace().read_span().id(),
-                foreign_trace.read_span().id(),
+                iter.read_trace().read_span().span().id(),
+                foreign_trace.read_span().span().id(),
             );
             rows.extend(
                 dependency_rows(&mut iter)
@@ -1901,8 +1901,8 @@ mod tests {
                     (trace, index)
                 });
             assert_eq!(
-                iter.read_trace().read_span().id(),
-                foreign_trace.read_span().id(),
+                iter.read_trace().read_span().span().id(),
+                foreign_trace.read_span().span().id(),
             );
             let block_count = if metadata_loaded { max_fetch_tasks } else { 0 };
             let pending_requests = block_count.max(1);
