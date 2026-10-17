@@ -69,8 +69,8 @@ impl ReadTrace {
         Self::new(None)
     }
 
-    pub(crate) fn read_span(&self) -> tracing::Span {
-        self.read_span.span().clone()
+    pub(crate) fn read_span(&self) -> ReadSpan {
+        self.read_span.clone()
     }
 
     pub(crate) fn subscriber(&self) -> Option<tracing::Dispatch> {
@@ -274,7 +274,7 @@ mod tests {
     ) {
         let spans = record_spans(|| {
             let trace = create(None);
-            assert!(trace.read_span().is_none());
+            assert!(trace.read_span().span().is_none());
             assert!(trace.subscriber().is_none());
             for span in new_all_child_spans(&trace) {
                 assert!(span.span().is_none());
@@ -345,7 +345,7 @@ mod tests {
             (root, child)
         });
         assert_eq!(parent_id, foreign.0.id());
-        assert_eq!(trace.read_span().id(), foreign.1.id());
+        assert_eq!(trace.read_span().span().id(), foreign.1.id());
         assert!(recorder_a.closed().is_empty());
         tracing::dispatcher::with_default(&dispatch_b, || drop(trace));
         assert_eq!(
@@ -363,9 +363,9 @@ mod tests {
         let spans = record_spans(|| {
             let trace = ReadTrace::new(Some(TracingOptions::new(TRACE_ID)));
             let read_span = trace.read_span();
-            assert!(!read_span.is_none());
+            assert!(!read_span.span().is_none());
             assert_eq!(
-                read_span.metadata().map(|metadata| metadata.name()),
+                read_span.span().metadata().map(|metadata| metadata.name()),
                 Some(READ_SPAN_NAME)
             );
         });

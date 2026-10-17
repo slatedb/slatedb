@@ -158,7 +158,7 @@ pub(crate) fn assert_read_spans_close_with_owner(
         let child = tracing::info_span!(parent: &root, "foreign-child");
         (root, child)
     });
-    assert_eq!(trace.read_span().id(), foreign.0.id());
+    assert_eq!(trace.read_span().span().id(), foreign.0.id());
     tracing::dispatcher::with_default(&dispatch_b, || action(trace));
     let spans = recorder_a.spans();
     let children: Vec<_> = spans
