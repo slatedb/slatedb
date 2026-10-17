@@ -8,7 +8,7 @@ use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
     MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
 };
-use crate::read_trace::ReadTrace;
+use crate::read_trace::{ReadSpan, ReadTrace};
 use crate::segment_iterator::{build_l0_point_iters, build_sr_point_iters, SegmentScanContext};
 use crate::types::{KeyValue, RowEntry, ValueDeletable};
 
@@ -254,7 +254,7 @@ pub struct DbIterator {
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
     order: IterationOrder,
-    read_span: tracing::Span,
+    read_span: ReadSpan,
 }
 
 impl DbIterator {
@@ -322,7 +322,7 @@ impl DbIterator {
             iter = Box::new(MergeOperatorRequiredIterator::new(iter));
         }
 
-        iter.init().instrument(read_span.clone()).await?;
+        iter.init().instrument(read_span.span().clone()).await?;
 
         Ok(DbIterator {
             range,
@@ -357,7 +357,9 @@ impl DbIterator {
 
     pub(crate) async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         let read_span = self.read_span.clone();
-        self.next_entry_inner().instrument(read_span).await
+        self.next_entry_inner()
+            .instrument(read_span.span().clone())
+            .await
     }
 
     async fn next_entry_inner(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
@@ -479,13 +481,13 @@ pub struct DbRecencyIterator {
     /// returns it instead of advancing, since after a failure the
     /// iterator's underlying state is unsafe to keep using.
     invalidated_error: Option<SlateDBError>,
-    read_span: tracing::Span,
+    read_span: ReadSpan,
 }
 
 impl DbRecencyIterator {
     pub(crate) fn new(
         iters: VecDeque<Box<dyn RowEntryIterator + 'static>>,
-        read_span: tracing::Span,
+        read_span: ReadSpan,
     ) -> Self {
         Self {
             iters,
@@ -501,7 +503,9 @@ impl DbRecencyIterator {
     /// for the full contract.
     pub async fn next_entry(&mut self) -> Result<Option<RowEntry>, crate::Error> {
         let read_span = self.read_span.clone();
-        self.next_entry_inner().instrument(read_span).await
+        self.next_entry_inner()
+            .instrument(read_span.span().clone())
+            .await
     }
 
     async fn next_entry_inner(&mut self) -> Result<Option<RowEntry>, crate::Error> {
@@ -544,12 +548,13 @@ impl DbRecencyIterator {
 mod tests {
     use crate::batch::{WriteBatch, WriteBatchIterator};
     use crate::bytes_range::BytesRange;
-    use crate::db_iter::{DbIterator, GetIterator};
+    use crate::config::TracingOptions;
+    use crate::db_iter::{DbIterator, DbRecencyIterator, GetIterator};
     use crate::error::SlateDBError;
     use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
     use crate::merge_operator::MergeOperatorType;
     use crate::read_trace::ReadTrace;
-    use crate::test_utils::{StringConcatMergeOperator, TestIterator};
+    use crate::test_utils::{SpanRecorder, StringConcatMergeOperator, TestIterator};
     use crate::types::RowEntry;
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -558,6 +563,95 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    async fn assert_iterator_root_closes_with_owner<F, T>(create: impl FnOnce(ReadTrace) -> F)
+    where
+        F: std::future::Future<Output = T>,
+    {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let recorder_a = SpanRecorder::default();
+            let dispatch_a =
+                tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_a.clone()));
+            let (trace, parent_id) = tracing::dispatcher::with_default(&dispatch_a, || {
+                let parent = tracing::info_span!("query-parent");
+                let parent_id = parent.id();
+                let trace =
+                    parent.in_scope(|| ReadTrace::new(Some(TracingOptions::new("iterator-owner"))));
+                drop(parent);
+                (trace, parent_id)
+            });
+            let root_id = trace.read_span().span().id();
+            let iter = create(trace).with_subscriber(dispatch_a).await;
+            assert!(recorder_a.closed().is_empty());
+            assert_eq!(recorder_a.spans().len(), 2);
+            let recorder_b = SpanRecorder::default();
+            let dispatch_b =
+                tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_b.clone()));
+            let foreign = tracing::dispatcher::with_default(&dispatch_b, || {
+                let root = tracing::info_span!("foreign-root");
+                let child = tracing::info_span!(parent: &root, "foreign-child");
+                (root, child)
+            });
+            assert_eq!(parent_id, foreign.0.id());
+            assert_eq!(root_id, foreign.1.id());
+            tracing::dispatcher::with_default(&dispatch_b, || drop(iter));
+            let mut expected: Vec<_> = recorder_a
+                .spans()
+                .iter()
+                .map(|span| span.id.into_u64())
+                .collect();
+            let mut closed: Vec<_> = recorder_a
+                .closed()
+                .iter()
+                .map(tracing::Id::into_u64)
+                .collect();
+            expected.sort_unstable();
+            closed.sort_unstable();
+            assert_eq!(
+                closed, expected,
+                "Iterator roots must close with the query subscriber."
+            );
+            assert!(recorder_b.closed().is_empty());
+            tracing::dispatcher::with_default(&dispatch_b, || drop(foreign));
+            assert_eq!(recorder_b.closed().len(), 2);
+        })
+        .await
+        .expect("The iterator root must close before the timeout.");
+    }
+
+    #[tokio::test]
+    async fn db_iterator_root_closes_with_the_query_subscriber() {
+        assert_iterator_root_closes_with_owner(|trace| async move {
+            let mut iter = DbIterator::new(
+                BytesRange::from(..),
+                None,
+                Vec::<Box<dyn RowEntryIterator>>::new(),
+                Box::new(EmptyIterator::new()),
+                None,
+                None,
+                IterationOrder::Ascending,
+                trace,
+            )
+            .await
+            .unwrap();
+            assert!(iter.next().await.unwrap().is_none());
+            iter
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn recency_iterator_root_closes_with_the_query_subscriber() {
+        assert_iterator_root_closes_with_owner(|trace| async move {
+            let mut iter = DbRecencyIterator::new(VecDeque::new(), trace.read_span());
+            drop(trace);
+            assert!(iter.next_entry().await.unwrap().is_none());
+            iter
+        })
+        .await;
+    }
 
     /// `ProbeRecord` records how the point lookup probes its sources.
     #[derive(Default)]

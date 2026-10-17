@@ -34,7 +34,7 @@ use std::thread;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::layer::Context;
+use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
@@ -88,7 +88,7 @@ pub(crate) fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RecordedSpan {
-    id: tracing::Id,
+    pub(crate) id: tracing::Id,
     pub(crate) name: String,
     pub(crate) level: String,
     pub(crate) parent_name: Option<String>,
@@ -99,6 +99,8 @@ pub(crate) struct RecordedSpan {
 pub(crate) struct SpanRecorder {
     span_name: Option<&'static str>,
     spans: Arc<std::sync::Mutex<Vec<RecordedSpan>>>,
+    dependencies: Arc<std::sync::Mutex<Vec<(tracing::Id, tracing::Id)>>>,
+    closed: Arc<std::sync::Mutex<Vec<tracing::Id>>>,
 }
 
 impl SpanRecorder {
@@ -106,6 +108,8 @@ impl SpanRecorder {
         Self {
             span_name: Some(span_name),
             spans: Arc::new(std::sync::Mutex::new(Vec::new())),
+            dependencies: Arc::new(std::sync::Mutex::new(Vec::new())),
+            closed: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -125,6 +129,60 @@ impl SpanRecorder {
         );
         spans[0].clone()
     }
+
+    pub(crate) fn dependencies(&self) -> Vec<(tracing::Id, tracing::Id)> {
+        self.dependencies.lock().unwrap().clone()
+    }
+
+    pub(crate) fn closed(&self) -> Vec<tracing::Id> {
+        self.closed.lock().unwrap().clone()
+    }
+}
+
+pub(crate) fn assert_read_spans_close_with_owner(
+    child_name: &str,
+    child_count: usize,
+    action: impl FnOnce(crate::read_trace::ReadTrace),
+) {
+    let recorder_a = SpanRecorder::default();
+    let dispatch_a =
+        tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_a.clone()));
+    let trace = tracing::dispatcher::with_default(&dispatch_a, || {
+        crate::read_trace::ReadTrace::new(Some(crate::config::TracingOptions::new("read-owner")))
+    });
+    let recorder_b = SpanRecorder::default();
+    let dispatch_b =
+        tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_b.clone()));
+    let foreign = tracing::dispatcher::with_default(&dispatch_b, || {
+        let root = tracing::info_span!("foreign-root");
+        let child = tracing::info_span!(parent: &root, "foreign-child");
+        (root, child)
+    });
+    assert_eq!(trace.read_span().span().id(), foreign.0.id());
+    tracing::dispatcher::with_default(&dispatch_b, || action(trace));
+    let spans = recorder_a.spans();
+    let children: Vec<_> = spans
+        .iter()
+        .filter(|span| span.name == child_name)
+        .collect();
+    assert_eq!(children.len(), child_count);
+    assert_eq!(Some(children[0].id.clone()), foreign.1.id());
+    let mut expected: Vec<_> = spans.iter().map(|span| span.id.into_u64()).collect();
+    let mut closed: Vec<_> = recorder_a
+        .closed()
+        .iter()
+        .map(tracing::Id::into_u64)
+        .collect();
+    expected.sort_unstable();
+    closed.sort_unstable();
+    assert_eq!(
+        closed, expected,
+        "Caller spans must close with the query subscriber."
+    );
+    assert_eq!(recorder_b.spans().len(), 2);
+    assert!(recorder_b.closed().is_empty());
+    tracing::dispatcher::with_default(&dispatch_b, || drop(foreign));
+    assert_eq!(recorder_b.closed().len(), 2);
 }
 
 struct SpanFieldRecorder<'a> {
@@ -157,6 +215,24 @@ impl<S> Layer<S> for SpanRecorder
 where
     S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
+    fn on_close(&self, id: tracing::Id, _: Context<'_, S>) {
+        if self.spans.lock().unwrap().iter().any(|span| span.id == id) {
+            self.closed.lock().unwrap().push(id);
+        }
+    }
+
+    fn on_follows_from(
+        &self,
+        dependent: &tracing::Id,
+        predecessor: &tracing::Id,
+        _: Context<'_, S>,
+    ) {
+        self.dependencies
+            .lock()
+            .unwrap()
+            .push((predecessor.clone(), dependent.clone()));
+    }
+
     fn on_new_span(
         &self,
         attrs: &tracing::span::Attributes<'_>,
