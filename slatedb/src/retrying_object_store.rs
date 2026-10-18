@@ -121,6 +121,8 @@ impl RetryingObjectStore {
                 | object_store::Error::NotFound { .. }
                 | object_store::Error::NotImplemented { .. }
                 | object_store::Error::NotSupported { .. }
+                | object_store::Error::Unauthenticated { .. }
+                | object_store::Error::PermissionDenied { .. }
         );
         if !retry {
             debug!("not retrying object store operation [error={:?}]", err);
@@ -228,7 +230,7 @@ impl RetryingObjectStorePolicy {
         // TODO: Use `RetryingObjectStore::should_retry` directly when
         // `object_store::retry::RetryContext` includes the actual `Error`.
         if matches!(failure, RetryFailure::Status(status)
-            if matches!(status.as_u16(), 304 | 404 | 409 | 412))
+            if matches!(status.as_u16(), 304 | 401 | 403 | 404 | 409 | 412))
         {
             debug!("not retrying multipart part upload [failure={:?}]", failure);
             return false;
@@ -667,6 +669,23 @@ mod tests {
 
     fn test_rand() -> Arc<DbRand> {
         Arc::new(DbRand::default())
+    }
+
+    #[test]
+    fn should_not_retry_authentication_errors() {
+        use object_store::Error;
+
+        let unauthenticated = Error::Unauthenticated {
+            path: "x".into(),
+            source: "401".into(),
+        };
+        assert!(!RetryingObjectStore::should_retry(&unauthenticated));
+
+        let permission_denied = Error::PermissionDenied {
+            path: "x".into(),
+            source: "403".into(),
+        };
+        assert!(!RetryingObjectStore::should_retry(&permission_denied));
     }
 
     fn test_clock() -> Arc<DefaultSystemClock> {
