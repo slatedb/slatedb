@@ -61,14 +61,6 @@ impl PathResolver {
         }
     }
 
-    /// Returns a copy of this resolver that also maps `external_ssts` to the
-    /// paths of the databases that own them.
-    pub(crate) fn with_external_ssts(&self, external_ssts: HashMap<SsTableId, Path>) -> Self {
-        let mut resolver = self.clone();
-        resolver.external_ssts.extend(external_ssts);
-        resolver
-    }
-
     pub(crate) fn wal_path(&self) -> Path {
         Path::from(format!("{}/{}/", &self.root_path, WAL_PATH))
     }

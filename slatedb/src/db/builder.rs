@@ -1716,7 +1716,19 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
         let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
         let compactions_store =
             Arc::new(CompactionsStore::new(&path, self.main_object_store.clone()));
-        let table_store = Arc::new(TableStore::new(
+        // Resolve SSTs borrowed from other databases (clones/unions). The
+        // external_dbs list is only written when the clone or union manifest is
+        // created and only shrinks afterwards, so a snapshot taken at startup
+        // covers every SST a later compaction job can reference.
+        let external_ssts =
+            match StoredManifest::try_load(manifest_store.clone(), self.system_clock.clone())
+                .await?
+            {
+                Some(manifest) => manifest.manifest().external_ssts(),
+                None => HashMap::new(),
+            };
+        let path_resolver = PathResolver::new_with_external_ssts(path, external_ssts);
+        let table_store = Arc::new(TableStore::new_with_fp_registry(
             self.main_object_store,
             SsTableFormat {
                 filter_policies: self.filter_policies.clone(),
@@ -1727,7 +1739,8 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
                 block_alignment: self.sst_block_alignment,
                 ..SsTableFormat::default()
             },
-            path,
+            path_resolver,
+            self.fp_registry.clone(),
             None,
             TableStoreKind::Compactor,
             BlockCachePolicy::default(),
@@ -2885,5 +2898,131 @@ mod tests {
         let worker = admin.compaction_worker_builder(CompactionWorkerOptions::default());
         assert!(worker.merge_operator.is_some());
         assert!(worker.block_transformer.is_some());
+    }
+
+    /// A standalone worker built by `CompactionWorkerBuilder` must resolve SSTs
+    /// that a clone borrows from its ancestors. The chain A -> B -> C leaves C
+    /// with L0s owned by A, B and C, so compacting C reads from all three.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_compaction_worker_builder_resolves_ssts_borrowed_through_clone_chain() {
+        use super::CloneBuilder;
+        use crate::config::{CompactionWorkerOptions, FlushOptions, FlushType};
+        use crate::test_utils::OnDemandCompactionSchedulerSupplier;
+        use crate::{CloneSourceSpec, CompactionWorkerBuilder, CompactorBuilder};
+        use std::time::Duration;
+
+        const A: &str = "clone_chain/a";
+        const B: &str = "clone_chain/b";
+        const C: &str = "clone_chain/c";
+
+        fn no_background_tasks() -> Settings {
+            Settings {
+                compactor_options: None,
+                garbage_collector_options: None,
+                ..Settings::default()
+            }
+        }
+
+        async fn put_and_flush_l0(db: &crate::Db, key: &[u8]) {
+            db.put(key, key).await.expect("failed to put");
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .expect("failed to flush memtable");
+        }
+
+        async fn write_l0(path: &str, object_store: Arc<dyn ObjectStore>, key: &[u8]) {
+            let db = crate::Db::builder(path, object_store)
+                .with_settings(no_background_tasks())
+                .build()
+                .await
+                .expect("failed to build db");
+            put_and_flush_l0(&db, key).await;
+            db.close().await.expect("failed to close db");
+        }
+
+        async fn clone_db(parent: &str, child: &str, object_store: Arc<dyn ObjectStore>) {
+            CloneBuilder::new(
+                Path::from(child),
+                CloneSourceSpec::new(Path::from(parent)),
+                object_store,
+            )
+            .build()
+            .await
+            .expect("failed to clone db");
+        }
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        write_l0(A, object_store.clone(), b"a").await;
+        clone_db(A, B, object_store.clone()).await;
+        write_l0(B, object_store.clone(), b"b").await;
+        clone_db(B, C, object_store.clone()).await;
+
+        // The worker snapshots C's external SST mapping when it is built.
+        let worker = CompactionWorkerBuilder::new(C, object_store.clone())
+            .with_options(CompactionWorkerOptions {
+                compactions_poll_interval: Duration::from_millis(50),
+                ..CompactionWorkerOptions::default()
+            })
+            .build()
+            .await
+            .expect("failed to build compaction worker");
+        worker.start().expect("failed to start compaction worker");
+
+        // C's coordinator has no embedded worker, so every job runs on the
+        // standalone worker. Compact once C holds all three L0s.
+        let scheduler = Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+            |state| state.manifest().core().tree.l0.len() >= 3,
+        )));
+        let coordinator = CompactorBuilder::new(C, object_store.clone())
+            .with_options(CompactorOptions {
+                poll_interval: Duration::from_millis(50),
+                worker: None,
+                ..CompactorOptions::default()
+            })
+            .with_scheduler_supplier(scheduler);
+        let db = crate::Db::builder(C, object_store.clone())
+            .with_settings(Settings {
+                garbage_collector_options: None,
+                ..Settings::default()
+            })
+            .with_compactor_builder(coordinator)
+            .build()
+            .await
+            .expect("failed to build db");
+        put_and_flush_l0(&db, b"c").await;
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(C), object_store.clone()));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let manifest = StoredManifest::load(
+                    manifest_store.clone(),
+                    Arc::new(DefaultSystemClock::new()),
+                )
+                .await
+                .expect("failed to load manifest");
+                let tree = &manifest.manifest().core.tree;
+                if tree.l0.is_empty() && !tree.compacted.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("standalone worker did not compact the borrowed L0s");
+
+        for key in [b"a", b"b", b"c"] {
+            assert_eq!(
+                db.get(key).await.expect("failed to get").as_deref(),
+                Some(key.as_ref())
+            );
+        }
+
+        worker
+            .stop()
+            .await
+            .expect("failed to stop compaction worker");
+        db.close().await.expect("failed to close db");
     }
 }

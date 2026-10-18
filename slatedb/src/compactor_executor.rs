@@ -115,9 +115,6 @@ struct SubcompactionArgs {
     is_dest_last_run: bool,
     retention_min_seq: Option<u64>,
     output_ssts: Vec<SsTableHandle>,
-    /// Resolves the external SSTs of the manifest this job was planned
-    /// against.
-    table_store: Arc<TableStore>,
 }
 
 /// A compaction that has been planned and is ready to be executed
@@ -340,12 +337,8 @@ impl TokioCompactionExecutorInner {
         let retention_min_seq = job_args.retention_min_seq;
         let resume_cursor = match job_args.output_ssts.last() {
             Some(output_sst) => {
-                last_written_key_and_seq(
-                    job_args.table_store.clone(),
-                    output_sst,
-                    &job_args.segment,
-                )
-                .await?
+                last_written_key_and_seq(self.table_store.clone(), output_sst, &job_args.segment)
+                    .await?
             }
             None => None,
         };
@@ -369,7 +362,7 @@ impl TokioCompactionExecutorInner {
             SstIterator::new_borrowed_initialized(
                 job_args.range.clone(),
                 h,
-                job_args.table_store.clone(),
+                self.table_store.clone(),
                 sst_iter_options,
             )
         });
@@ -385,7 +378,7 @@ impl TokioCompactionExecutorInner {
                 SortedRunIterator::new_borrowed(
                     slice_range,
                     sr,
-                    job_args.table_store.clone(),
+                    self.table_store.clone(),
                     sst_iter_options,
                 )
                 .await
@@ -496,12 +489,11 @@ impl TokioCompactionExecutorInner {
     async fn plan_compaction_job(
         &self,
         args: StartCompactionJobArgs,
-        table_store: Arc<TableStore>,
     ) -> Result<PlannedCompaction, SlateDBError> {
         let ctx = match args.ctx {
             Some(ctx) => ctx,
             None => CompactionContext::new(
-                self.plan_subcompactions(&args, &table_store).await?,
+                self.plan_subcompactions(&args).await?,
                 args.retention_min_seq,
             ),
         };
@@ -521,7 +513,6 @@ impl TokioCompactionExecutorInner {
                 is_dest_last_run: args.is_dest_last_run,
                 retention_min_seq: ctx.retention_min_seq(),
                 output_ssts: s.output_ssts().clone(),
-                table_store: table_store.clone(),
             })
             .collect::<Vec<_>>();
         Ok(PlannedCompaction {
@@ -570,14 +561,7 @@ impl TokioCompactionExecutorInner {
         let stored_manifest =
             StoredManifest::load(self.manifest_store.clone(), self.clock.clone()).await?;
         let sequence_tracker = Arc::new(stored_manifest.db_state().sequence_tracker.clone());
-        // A standalone worker's store resolves paths from the root only. A
-        // cloned database borrows SSTs from its parent, so map them from the
-        // manifest or the job reads paths that do not exist.
-        let table_store = Arc::new(
-            self.table_store
-                .with_external_ssts(stored_manifest.manifest().external_ssts()),
-        );
-        let planned = self.plan_compaction_job(args, table_store).await?;
+        let planned = self.plan_compaction_job(args).await?;
         Ok((sequence_tracker, planned))
     }
 
@@ -594,10 +578,9 @@ impl TokioCompactionExecutorInner {
     async fn plan_subcompactions(
         &self,
         args: &StartCompactionJobArgs,
-        table_store: &Arc<TableStore>,
     ) -> Result<Vec<Subcompaction>, SlateDBError> {
         let ranges = plan_subcompaction_ranges(
-            table_store,
+            &self.table_store,
             &args.l0_sst_views,
             &args.sorted_runs,
             &args.segment,
@@ -811,7 +794,7 @@ impl TokioCompactionExecutorInner {
     ) -> Result<Vec<SsTableHandle>, SlateDBError> {
         let mut all_iter = self.load_iterators(&args, sequence_tracker).await?;
         let mut output_ssts = args.output_ssts.clone();
-        let mut current_writer = args.table_store.table_writer(
+        let mut current_writer = self.table_store.table_writer(
             SsTableId::from(self.rand.rng().gen_ulid(self.clock.as_ref())),
             Some(args.segment.clone()),
         );
@@ -870,7 +853,7 @@ impl TokioCompactionExecutorInner {
                 }
                 let finished_writer = mem::replace(
                     &mut current_writer,
-                    args.table_store.table_writer(
+                    self.table_store.table_writer(
                         SsTableId::from(self.rand.rng().gen_ulid(self.clock.as_ref())),
                         Some(args.segment.clone()),
                     ),
@@ -1587,7 +1570,6 @@ mod tests {
             is_dest_last_run: false,
             retention_min_seq,
             output_ssts,
-            table_store: table_store.clone(),
         };
 
         // Verify the resumed iterator yields all remaining rows, starting immediately
@@ -2431,7 +2413,7 @@ mod tests {
         let planned = ctx
             .executor
             .inner
-            .plan_compaction_job(args.clone(), ctx.executor.inner.table_store.clone())
+            .plan_compaction_job(args.clone())
             .await
             .unwrap();
         assert_eq!(planned.ctx.subcompactions().len(), 1);
@@ -2451,12 +2433,7 @@ mod tests {
         };
 
         // when/then: the persisted plan is returned verbatim.
-        let planned = ctx
-            .executor
-            .inner
-            .plan_compaction_job(args, ctx.executor.inner.table_store.clone())
-            .await
-            .unwrap();
+        let planned = ctx.executor.inner.plan_compaction_job(args).await.unwrap();
         assert_eq!(planned.ctx.subcompactions(), &persisted);
     }
 
@@ -2490,115 +2467,12 @@ mod tests {
         };
 
         // when: planning the job.
-        let planned = executor
-            .inner
-            .plan_compaction_job(args, table_store.clone())
-            .await
-            .unwrap();
+        let planned = executor.inner.plan_compaction_job(args).await.unwrap();
 
         // then: it splits into multiple ranges, capped at max_subcompactions.
         let n = planned.ctx.subcompactions().len();
         assert!(n > 1, "expected an index-driven split, got {n} range(s)");
         assert!(n <= 4, "must not exceed max_subcompactions");
-    }
-
-    /// A cloned database borrows SSTs from its parent. A standalone worker's
-    /// store is rooted at the clone only, so the job must resolve the borrowed
-    /// inputs from the manifest's external dbs to find them.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn should_compact_ssts_borrowed_from_parent_db() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let clock = Arc::new(DefaultSystemClock::new());
-        let parent_path = Path::from("testdb-borrowed/parent");
-        let child_path = Path::from("testdb-borrowed/child");
-        let new_table_store = |root: &Path| {
-            Arc::new(TableStore::new(
-                object_store.clone(),
-                SsTableFormat {
-                    block_size: 256,
-                    ..SsTableFormat::default()
-                },
-                root.clone(),
-                None,
-                TableStoreKind::Compactor,
-                BlockCachePolicy::default(),
-            ))
-        };
-        let parent_table_store = new_table_store(&parent_path);
-        let child_table_store = new_table_store(&child_path);
-
-        // given: L0 SSTs written under the parent and borrowed by the child.
-        let mut l0_sst_views = Vec::new();
-        for entries in [rows(0..150, 1, "a", 1_000), rows(150..300, 1, "b", 2_000)] {
-            let ssts = write_ssts(&parent_table_store, &entries, SUBCOMPACTION_SST_SIZE).await;
-            l0_sst_views.extend(ssts.into_iter().map(SsTableView::identity));
-        }
-        let manifest_store = Arc::new(ManifestStore::new(&child_path, object_store.clone()));
-        let mut stored_manifest = StoredManifest::create_new_db(
-            manifest_store.clone(),
-            ManifestCore::new(),
-            clock.clone(),
-        )
-        .await
-        .unwrap();
-        let mut dirty = stored_manifest.prepare_dirty().unwrap();
-        dirty.value.external_dbs = vec![crate::manifest::ExternalDb {
-            path: parent_path.to_string(),
-            source_checkpoint_id: uuid::Uuid::new_v4(),
-            final_checkpoint_id: None,
-            sst_ids: l0_sst_views.iter().map(|v| v.sst.id).collect(),
-        }];
-        stored_manifest.update(dirty).await.unwrap();
-
-        let (tx, _rx) = async_channel::unbounded::<WorkerMessage>();
-        let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
-            handle: tokio::runtime::Handle::current(),
-            options: Arc::new(CompactionWorkerOptions {
-                max_sst_size: SUBCOMPACTION_SST_SIZE,
-                max_subcompactions: 4,
-                ..CompactionWorkerOptions::default()
-            }),
-            worker_tx: tx,
-            table_store: child_table_store.clone(),
-            rand: Arc::new(DbRand::new(100u64)),
-            stats: {
-                let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
-                Arc::new(CompactionStats::new(&recorder))
-            },
-            worker_stats: WorkerStats::noop(),
-            clock,
-            manifest_store,
-            merge_operator: None,
-            #[cfg(feature = "compaction_filters")]
-            compaction_filter_supplier: None,
-        });
-        let args = StartCompactionJobArgs {
-            id: Ulid::new(),
-            compaction_id: Ulid::new(),
-            segment: Bytes::new(),
-            destination: 0,
-            l0_sst_views,
-            sorted_runs: vec![],
-            compaction_clock_tick: 0,
-            is_dest_last_run: false,
-            retention_min_seq: Some(0),
-            ctx: None,
-        };
-
-        // when: the clone's executor runs the job.
-        let output = executor
-            .inner
-            .plan_and_execute_compaction_job(args)
-            .await
-            .unwrap();
-
-        // then: the output is written under the clone and holds every key.
-        let entries = read_run_entries(&child_table_store, &output).await;
-        let keys: Vec<Bytes> = entries.into_iter().map(|e| e.key).collect();
-        let expected: Vec<Bytes> = (0..300)
-            .map(|i| Bytes::from(format!("key{:05}", i)))
-            .collect();
-        assert_eq!(keys, expected);
     }
 
     /// A blocked SST `close()` (the object-store flush of a finished output SST)

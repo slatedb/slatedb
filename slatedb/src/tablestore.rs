@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::ops::{Range, RangeBounds};
 use std::sync::Arc;
 
@@ -103,21 +103,6 @@ impl TableStore {
             cache,
             block_cache_policy,
             kind,
-        }
-    }
-
-    /// Returns a store that shares this store's object store and cache, and
-    /// also resolves `external_ssts` to the paths of the databases that own
-    /// them.
-    pub(crate) fn with_external_ssts(&self, external_ssts: HashMap<SsTableId, Path>) -> Self {
-        Self {
-            object_store: self.object_store.clone(),
-            sst_format: self.sst_format.clone(),
-            path_resolver: self.path_resolver.with_external_ssts(external_ssts),
-            fp_registry: self.fp_registry.clone(),
-            cache: self.cache.clone(),
-            block_cache_policy: self.block_cache_policy.clone(),
-            kind: self.kind,
         }
     }
 
