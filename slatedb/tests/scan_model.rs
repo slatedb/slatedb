@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::ops::Bound::{self, Included, Unbounded};
+use std::ops::RangeBounds;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -156,9 +157,60 @@ async fn collect(db: &Db, range: KeyRange, order: IterationOrder) -> Vec<(Bytes,
     got
 }
 
+/// Reads one entry, seeks to `seek_key`, and then reads the remaining entries.
+async fn collect_with_seek(
+    db: &Db,
+    range: KeyRange,
+    order: IterationOrder,
+    seek_key: &Bytes,
+) -> Vec<(Bytes, Bytes)> {
+    let options = ScanOptions::default().with_order(order);
+    let mut iter = db.scan_with_options(range, &options).await.unwrap();
+    let mut got = Vec::new();
+    if let Some(kv) = iter.next().await.unwrap() {
+        got.push((kv.key, kv.value));
+    }
+    iter.seek(seek_key).await.unwrap();
+    while let Some(kv) = iter.next().await.unwrap() {
+        got.push((kv.key, kv.value));
+    }
+    got
+}
+
+/// Returns the entries that a scan returns if it reads one entry and then
+/// seeks to `seek_key`. Returns `None` if the seek is not valid, because
+/// `seek_key` is outside `range` or is not after the first entry in the scan
+/// order.
+fn expected_with_seek(
+    expected: &[(Bytes, Bytes)],
+    range: &KeyRange,
+    order: IterationOrder,
+    seek_key: &Bytes,
+) -> Option<Vec<(Bytes, Bytes)>> {
+    let (first, rest) = expected.split_first()?;
+    let after_first = match order {
+        IterationOrder::Ascending => seek_key > &first.0,
+        IterationOrder::Descending => seek_key < &first.0,
+    };
+    if !range.contains(seek_key) || !after_first {
+        return None;
+    }
+    let mut result = vec![first.clone()];
+    result.extend(
+        rest.iter()
+            .filter(|(key, _)| match order {
+                IterationOrder::Ascending => key >= seek_key,
+                IterationOrder::Descending => key <= seek_key,
+            })
+            .cloned(),
+    );
+    Some(result)
+}
+
 /// Applies a generated write sequence to both a db and a `BTreeMap`, then
 /// checks that a scan of a generated range in a generated direction returns
-/// exactly what the model holds.
+/// exactly what the model holds. It also checks a scan that seeks after the
+/// first entry.
 #[test]
 fn test_scan_matches_model() {
     // Each case opens a db and compacts, so cap the cases well below proptest's
@@ -174,8 +226,12 @@ fn test_scan_matches_model() {
 
     runner
         .run(
-            &(scan_ops(60), proptest::collection::vec(scan_range(), 1..=4)),
-            |(ops, ranges)| {
+            &(
+                scan_ops(60),
+                proptest::collection::vec(scan_range(), 1..=4),
+                (0..=KEY_ALPHABET).prop_map(|byte| Bytes::from(vec![byte])),
+            ),
+            |(ops, ranges, seek_key)| {
                 runtime.block_on(async {
                     let db = open_db("/tmp/test_scan_matches_model").await;
                     // Taken before any write so compaction retains every
@@ -216,6 +272,16 @@ fn test_scan_matches_model() {
                                 expected,
                                 "scan mismatch for range {range:?} order {order:?}"
                             );
+                            if let Some(expected) =
+                                expected_with_seek(expected, range, order, &seek_key)
+                            {
+                                assert_eq!(
+                                    collect_with_seek(&db, range.clone(), order, &seek_key).await,
+                                    expected,
+                                    "seek mismatch for range {range:?} order {order:?} \
+                                     seek key {seek_key:?}"
+                                );
+                            }
                         }
                     }
                     db.close().await.unwrap();

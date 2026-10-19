@@ -214,13 +214,21 @@ where
 
 pub(crate) struct TestIterator {
     entries: VecDeque<Result<RowEntry, SlateDBError>>,
+    order: IterationOrder,
 }
 
 impl TestIterator {
     pub(crate) fn new() -> Self {
         Self {
             entries: VecDeque::new(),
+            order: IterationOrder::Ascending,
         }
+    }
+
+    /// Sets the order that `seek` uses. The caller adds the entries in this order.
+    pub(crate) fn with_order(mut self, order: IterationOrder) -> Self {
+        self.order = order;
+        self
     }
 
     pub(crate) fn with_entry(mut self, key: &'static [u8], val: &'static [u8], seq: u64) -> Self {
@@ -251,7 +259,11 @@ impl RowEntryIterator for TestIterator {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         while let Some(entry_result) = self.entries.front() {
             let entry = entry_result.clone()?;
-            if entry.key < next_key {
+            let before_next_key = match self.order {
+                IterationOrder::Ascending => entry.key < next_key,
+                IterationOrder::Descending => entry.key > next_key,
+            };
+            if before_next_key {
                 self.entries.pop_front();
             } else {
                 break;

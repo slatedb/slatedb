@@ -807,6 +807,24 @@ impl RowEntryIterator for InternalSstIterator<'_> {
         if !self.state.is_initialized() {
             return Err(SlateDBError::IteratorNotInitialized);
         }
+        // A descending scan reads ahead. `descending_buffer` holds the
+        // remaining versions of the current key, and `pending_entry` holds the
+        // first entry of the next key. Keep them if their key is at or before
+        // `next_key`. Otherwise, drop them and seek in the blocks.
+        if let Some(buffer) = self.descending_buffer.as_mut() {
+            if buffer.front().is_some_and(|entry| entry.key <= next_key) {
+                return Ok(());
+            }
+            buffer.clear();
+            if self
+                .pending_entry
+                .as_ref()
+                .is_some_and(|entry| entry.key <= next_key)
+            {
+                return Ok(());
+            }
+            self.pending_entry = None;
+        }
         if !self.view.contains(next_key) {
             if self.view.key_exceeds(next_key) {
                 match self.options.order {
@@ -822,6 +840,11 @@ impl RowEntryIterator for InternalSstIterator<'_> {
                         // the normal seek logic.
                     }
                 }
+            } else if matches!(self.options.order, IterationOrder::Descending) {
+                // Seeking before the start of the view range in descending order
+                // means there are no more results.
+                self.stop();
+                return Ok(());
             } else {
                 return Err(SlateDBError::SeekKeyOutOfKeyRange {
                     key: next_key.to_vec(),
@@ -2286,6 +2309,147 @@ mod tests {
 
         assert_eq!(kv1.key.as_ref(), b"key099");
         assert_eq!(kv2.key.as_ref(), b"key098");
+    }
+
+    /// Builds an SST with small blocks. Each entry is `(key, seq)`, in the
+    /// order that the SST stores them.
+    async fn build_descending_seek_sst(entries: &[(&[u8], u64)]) -> (Arc<TableStore>, SsTableView) {
+        let table_store = Arc::new(TableStore::new(
+            Arc::new(InMemory::new()),
+            SsTableFormat {
+                block_size: 128,
+                min_filter_keys: 3,
+                ..SsTableFormat::default()
+            },
+            Path::from(""),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let mut builder = table_store.table_builder();
+        for (key, seq) in entries {
+            let value = format!("value{seq}");
+            builder
+                .add(RowEntry::new_value(key, value.as_bytes(), *seq))
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        let id = SsTableId::from(Ulid::new());
+        let handle = SsTableView::identity(
+            table_store
+                .write_sst(&id, &encoded, Some(Bytes::new()))
+                .await
+                .unwrap(),
+        );
+        (table_store, handle)
+    }
+
+    fn descending_seek_options() -> SstIteratorOptions {
+        SstIteratorOptions {
+            order: IterationOrder::Descending,
+            ..SstIteratorOptions::default()
+        }
+    }
+
+    async fn next_keys(iter: &mut SstIterator<'_>) -> Vec<(Bytes, u64)> {
+        let mut keys = Vec::new();
+        while let Some(entry) = iter.next().await.unwrap() {
+            keys.push((entry.key, entry.seq));
+        }
+        keys
+    }
+
+    #[tokio::test]
+    async fn test_descending_seek_after_next_drops_read_ahead_entry() {
+        let keys: Vec<Vec<u8>> = (0..100)
+            .map(|i| format!("key{i:03}").into_bytes())
+            .collect();
+        let entries: Vec<(&[u8], u64)> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (key.as_slice(), i as u64))
+            .collect();
+        let (table_store, handle) = build_descending_seek_sst(&entries).await;
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            &handle,
+            table_store,
+            descending_seek_options(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let first = iter.next().await.unwrap().unwrap();
+        assert_eq!(first.key.as_ref(), b"key099");
+
+        // The iterator read key098 ahead. The seek must drop it.
+        iter.seek(b"key002").await.unwrap();
+
+        assert_eq!(
+            next_keys(&mut iter).await,
+            vec![
+                (Bytes::from_static(b"key002"), 2),
+                (Bytes::from_static(b"key001"), 1),
+                (Bytes::from_static(b"key000"), 0),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_descending_seek_to_current_key_keeps_remaining_versions() {
+        let (table_store, handle) = build_descending_seek_sst(&[
+            (b"key1", 1),
+            (b"key2", 4),
+            (b"key2", 3),
+            (b"key2", 2),
+            (b"key3", 5),
+        ])
+        .await;
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            &handle,
+            table_store,
+            descending_seek_options(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        iter.seek(b"key2").await.unwrap();
+        let first = iter.next().await.unwrap().unwrap();
+        assert_eq!((first.key.as_ref(), first.seq), (b"key2".as_slice(), 4));
+
+        // The older versions of key2 are buffered, so a seek to key2 keeps them.
+        iter.seek(b"key2").await.unwrap();
+
+        assert_eq!(
+            next_keys(&mut iter).await,
+            vec![
+                (Bytes::from_static(b"key2"), 3),
+                (Bytes::from_static(b"key2"), 2),
+                (Bytes::from_static(b"key1"), 1),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_descending_seek_before_view_start_exhausts() {
+        let (table_store, handle) =
+            build_descending_seek_sst(&[(b"key5", 1), (b"key6", 2), (b"key7", 3)]).await;
+        let mut iter = SstIterator::new_borrowed_initialized(
+            ..,
+            &handle,
+            table_store,
+            descending_seek_options(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"key7");
+
+        iter.seek(b"key4").await.unwrap();
+
+        assert_eq!(iter.next().await.unwrap(), None);
     }
 
     #[tokio::test]

@@ -19,7 +19,11 @@ impl<'a> MergeIteratorHeapEntry<'a> {
         mut self,
         next_key: &[u8],
     ) -> Result<Option<MergeIteratorHeapEntry<'a>>, SlateDBError> {
-        if self.next_kv.key >= next_key {
+        let at_or_past_next_key = match self.order {
+            IterationOrder::Ascending => self.next_kv.key >= next_key,
+            IterationOrder::Descending => self.next_kv.key <= next_key,
+        };
+        if at_or_past_next_key {
             Ok(Some(self))
         } else {
             self.iterator.seek(next_key).await?;
@@ -563,6 +567,91 @@ mod tests {
                 RowEntry::new_value(b"cccc", b"3333", 0),
                 RowEntry::new_value(b"bbbb", b"2222", 0),
                 RowEntry::new_value(b"aaaa", b"1111", 0),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_descending_seek_merge_iter() {
+        let iter1 = TestIterator::new()
+            .with_order(IterationOrder::Descending)
+            .with_entry(b"ee", b"ee1", 1)
+            .with_entry(b"cc", b"cc1", 2)
+            .with_entry(b"aa", b"aa1", 3);
+        let iter2 = TestIterator::new()
+            .with_order(IterationOrder::Descending)
+            .with_entry(b"dd", b"dd2", 4)
+            .with_entry(b"cc", b"cc2", 5)
+            .with_entry(b"bb", b"bb2", 6);
+
+        let mut merge_iter =
+            MergeIterator::new_with_order([iter1, iter2], IterationOrder::Descending).unwrap();
+        merge_iter.init().await.unwrap();
+        merge_iter.seek(b"cd".as_ref()).await.unwrap();
+
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_value(b"cc", b"cc2", 5),
+                RowEntry::new_value(b"bb", b"bb2", 6),
+                RowEntry::new_value(b"aa", b"aa1", 3),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_descending_seek_merge_iter_keeps_entries_at_or_before_key() {
+        let iter1 = TestIterator::new()
+            .with_order(IterationOrder::Descending)
+            .with_entry(b"ee", b"ee1", 1)
+            .with_entry(b"bb", b"bb1", 2);
+        let iter2 = TestIterator::new()
+            .with_order(IterationOrder::Descending)
+            .with_entry(b"dd", b"dd2", 3)
+            .with_entry(b"aa", b"aa2", 4);
+
+        let mut merge_iter =
+            MergeIterator::new_with_order([iter1, iter2], IterationOrder::Descending).unwrap();
+        assert_next(&mut merge_iter, &RowEntry::new_value(b"ee", b"ee1", 1)).await;
+
+        // iter1 is now at bb, which is before cc, so the seek must keep it.
+        // iter2 is at dd, which is after cc, so the seek must move it.
+        merge_iter.seek(b"cc".as_ref()).await.unwrap();
+
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_value(b"bb", b"bb1", 2),
+                RowEntry::new_value(b"aa", b"aa2", 4),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_descending_seek_merge_iter_returns_highest_seq_first() {
+        let iter1 = TestIterator::new()
+            .with_order(IterationOrder::Descending)
+            .with_entry(b"dd", b"dd1", 1)
+            .with_entry(b"bb", b"bb1", 2)
+            .with_entry(b"aa", b"aa1", 3);
+        let iter2 = TestIterator::new()
+            .with_order(IterationOrder::Descending)
+            .with_entry(b"cc", b"cc2", 4)
+            .with_entry(b"bb", b"bb2", 5);
+
+        let mut merge_iter =
+            MergeIterator::new_with_order([iter1, iter2], IterationOrder::Descending).unwrap();
+        merge_iter.init().await.unwrap();
+        merge_iter.seek(b"bb".as_ref()).await.unwrap();
+
+        assert_iterator(
+            &mut merge_iter,
+            vec![
+                RowEntry::new_value(b"bb", b"bb2", 5),
+                RowEntry::new_value(b"aa", b"aa1", 3),
             ],
         )
         .await;

@@ -2598,34 +2598,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_seek_rejected_for_descending_scan() {
+    async fn test_seek_descending_scan() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let kv_store = Db::builder("/tmp/test_seek_descending_rejected", object_store)
+        let kv_store = Db::builder("/tmp/test_seek_descending_scan", object_store)
             .with_settings(test_db_options(0, 1024, None))
             .build()
             .await
             .unwrap();
 
+        // Put older versions in an L0 SST and newer versions in the memtable.
         kv_store.put(b"a", b"v0").await.unwrap();
         kv_store.put(b"b", b"v1").await.unwrap();
         kv_store.put(b"c", b"v2").await.unwrap();
+        kv_store.put(b"e", b"v4").await.unwrap();
+        kv_store
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        kv_store.put(b"c", b"v2-new").await.unwrap();
+        kv_store.put(b"d", b"v3").await.unwrap();
 
         let scan_options = ScanOptions::default().with_order(IterationOrder::Descending);
         let mut iter = kv_store.scan_with_options(.., &scan_options).await.unwrap();
-        let err = iter.seek(b"b").await.unwrap_err();
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"e");
+
+        // "cc" does not exist, so the seek lands on the largest key before it.
+        iter.seek(b"cc").await.unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
+        assert_eq!(kv.key.as_ref(), b"c");
+        assert_eq!(kv.value.as_ref(), b"v2-new");
+
+        // A seek to the current key or a larger key fails.
+        let err = iter.seek(b"c").await.unwrap_err();
         assert_eq!(err.kind(), crate::ErrorKind::Invalid);
-        assert!(
-            err.to_string().contains("descending"),
-            "unexpected error: {err}"
-        );
 
-        // the scan itself still works
-        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"c");
-
-        // ascending scans still seek
-        let mut iter = kv_store.scan(..).await.unwrap();
-        iter.seek(b"b").await.unwrap();
-        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"b");
+        iter.seek(b"a").await.unwrap();
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"a");
+        assert_eq!(iter.next().await.unwrap(), None);
 
         kv_store.close().await.unwrap();
     }

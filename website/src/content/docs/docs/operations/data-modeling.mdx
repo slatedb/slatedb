@@ -71,9 +71,9 @@ SlateDB supports both ascending and descending iteration through the
 `ScanOptions` API. Use `with_order(IterationOrder::Descending)` for
 descending scans (e.g., "most recent first").
 
-Note that the `seek` API is not yet supported for descending scans. It returns
-a `SeekNotSupportedForDescendingScan` error. If you need to reposition a
-descending iterator, you must create a new scan with an adjusted range.
+The `seek` API works in both directions. In a descending scan, `seek` moves to
+the largest key that is less than or equal to the seek key. The seek key must
+be smaller than the last key that the iterator returned.
 
 The [Descending Order](#descending-order) pattern below remains useful when
 you want reverse chronological ordering as the natural sort order of your
