@@ -62,7 +62,7 @@ SlateDB is implemented in Rust and ships official bindings for Go, Java, Node.js
 
 ## Usage
 
-SlateDB reads and writes through an object store. Every binding exposes `ObjectStore.resolve(...)` which accepts any URL supported by Rust's [`object_store`](https://docs.rs/object_store/latest/object_store/fn.parse_url_opts.html) crate, including `memory:///`, `file:///...`, `s3://`, `gs://`, and `az://`. Pass the database path separately to `Db::open`, `DbBuilder`, or `NewDbBuilder`, as the examples below do.
+SlateDB reads and writes through an object store. Every binding exposes `ObjectStore.resolve(...)` which accepts any URL supported by Rust's [`object_store`](https://docs.rs/object_store/latest/object_store/fn.parse_url_opts.html) crate, including `memory:///`, `file:///...`, `s3://`, `gs://`, and `az://`. For an S3-compatible store such as [Neon Object Storage](/docs/tutorials/neon/), use `s3://` and set `AWS_ENDPOINT_URL_S3` to the endpoint of the store. Pass the database path separately to `Db::open`, `DbBuilder`, or `NewDbBuilder`, as the examples below do.
 
 <Tabs syncKey="lang">
   <TabItem label="Rust">

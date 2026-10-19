@@ -19,7 +19,7 @@ const ogImageAlt = 'SlateDB - An embedded database built on object storage';
 // public/index.md and the "Introducing SlateDB" blog post so agents that
 // cross-check sources see one consistent description.
 const projectDescription =
-	'SlateDB is an open-source (Apache-2.0) embedded key-value database, implemented as an LSM tree, that depends on object storage alone for durability (Amazon S3, Google Cloud Storage, Azure Blob Storage, MinIO, and Cloudflare R2). Built in async Rust with bindings for Rust, Go, Java, Node, and Python, it is the object-native successor to RocksDB — bringing object storage\'s economics, ~11 nines of durability, and managed replication to online, low-latency workloads.';
+	'SlateDB is an open-source (Apache-2.0) embedded key-value database, implemented as an LSM tree, that depends on object storage alone for durability (Amazon S3, Google Cloud Storage, Azure Blob Storage, MinIO, Cloudflare R2, and Neon Object Storage). Built in async Rust with bindings for Rust, Go, Java, Node, and Python, it is the object-native successor to RocksDB — bringing object storage\'s economics, ~11 nines of durability, and managed replication to online, low-latency workloads.';
 
 // https://astro.build/config
 export default defineConfig({
@@ -331,6 +331,10 @@ export default defineConfig({
 						{
 							label: 'Connect to Google Cloud Storage',
 							link: '/docs/tutorials/gcs/',
+						},
+						{
+							label: 'Connect to Neon Object Storage',
+							link: '/docs/tutorials/neon/',
 						},
 						{
 							label: 'Range Scans',

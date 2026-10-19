@@ -40,6 +40,12 @@ test = false
 bench = false
 
 [[bin]]
+name = "neon-object-storage"
+path = "src/neon_object_storage.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "refresh-checkpoint"
 path = "src/refresh_checkpoint.rs"
 test = false

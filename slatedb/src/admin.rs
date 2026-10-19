@@ -954,6 +954,9 @@ pub fn load_memory() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 /// the same as those supported by [`AmazonS3Builder::from_env`]. Refer to the
 /// builder documentation for the full list and meaning of supported variables:
 /// <https://docs.rs/object_store/latest/object_store/aws/struct.AmazonS3Builder.html#method.with_config>
+///
+/// Use this provider for S3-compatible services such as Neon Object Storage too.
+/// Set `AWS_ENDPOINT_URL_S3` to the endpoint of the service and `AWS_BUCKET` to the bucket name.
 #[cfg(feature = "aws")]
 pub fn load_aws() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let builder = object_store::aws::AmazonS3Builder::from_env();

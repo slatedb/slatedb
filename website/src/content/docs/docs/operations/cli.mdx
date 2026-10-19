@@ -26,6 +26,17 @@ The resulting binary will be available at `target/release/slatedb`.
 
 The CLI requires environment variables to configure access to your object store. You can set these variables in your shell environment or provide them via a `.env` file using the `--env-file` option. The required variables depend on your object store provider. See [admin.rs](https://github.com/slatedb/slatedb/blob/main/slatedb/src/admin.rs) for details.
 
+For an S3-compatible object store, set `CLOUD_PROVIDER=aws` and set `AWS_ENDPOINT_URL_S3` to the endpoint of the store. The following `.env` file connects the CLI to a bucket in [Neon Object Storage](/docs/tutorials/neon/):
+
+```bash
+CLOUD_PROVIDER=aws
+AWS_ENDPOINT_URL_S3=https://br-cool-darkness-a1b2c3d4.storage.c-1.us-east-2.aws.neon.tech
+AWS_ACCESS_KEY_ID=nak_live_...
+AWS_SECRET_ACCESS_KEY=nsk_live_...
+AWS_REGION=us-east-2
+AWS_BUCKET=slatedb
+```
+
 Every command requires the `--path` option, which specifies the root directory in your object store.
 
 ## Usage

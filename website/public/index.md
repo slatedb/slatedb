@@ -4,8 +4,9 @@
 
 SlateDB is an open-source (Apache-2.0) embedded key-value database, implemented
 as an LSM tree, that depends on object storage alone for durability — Amazon S3,
-Google Cloud Storage, Azure Blob Storage, MinIO, and Cloudflare R2. It is built
-in async Rust with bindings for Rust, Go, Java, Node, and Python.
+Google Cloud Storage, Azure Blob Storage, MinIO, Cloudflare R2, and Neon Object
+Storage. It is built in async Rust with bindings for Rust, Go, Java, Node, and
+Python.
 
 It is the natural, object-native successor to RocksDB. "Diskless" systems that
 delegate durability to object storage are the future of database systems: the

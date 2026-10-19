@@ -7,7 +7,7 @@ to reason about and use SlateDB correctly.
 
 SlateDB is an open-source (Apache-2.0) embedded key-value database and LSM
 storage engine, written in Rust, that persists data directly to object storage
-(Amazon S3, Google Cloud Storage, Azure Blob Storage, MinIO, Cloudflare R2, etc...). 
+(Amazon S3, Google Cloud Storage, Azure Blob Storage, MinIO, Cloudflare R2, Neon Object Storage, etc...). 
 It ships clients for Rust, Go, Java, Node, and Python.
 
 It is a **library**, not a hosted service or a network server. Therefore it does

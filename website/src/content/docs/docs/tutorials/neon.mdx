@@ -1,0 +1,196 @@
+---
+title: Connect SlateDB to Neon Object Storage
+description: Learn how to connect SlateDB to Neon Object Storage and branch a database with Neon branches
+---
+
+import { Code } from '@astrojs/starlight/components';
+import neonExample from '/../examples/src/neon_object_storage.rs?raw'
+
+This tutorial shows you how to use SlateDB on [Neon Object Storage](https://neon.com/docs/storage/overview). Neon Object Storage is an S3-compatible object store. Each bucket belongs to a Neon branch. A branch is a copy-on-write copy of a Neon project. SlateDB connects to Neon with the `object_store` S3 client, so you do not need a special client.
+
+## Before you begin
+
+You need:
+
+1. A Neon account.
+2. A Neon project in a region that supports object storage. The supported regions are listed in the [Neon Object Storage documentation](https://neon.com/docs/storage/get-started).
+3. The [Neon CLI](https://neon.com/docs/cli/install). Install it with `npm i -g neon`, then run `neon auth`.
+4. The AWS CLI. You use it to look at the objects that SlateDB writes.
+
+## Create a bucket and credentials
+
+1. Link the current directory to your Neon project and branch:
+
+    ```bash
+    neon link
+    ```
+
+2. Create a bucket named `slatedb` on the linked branch:
+
+    ```bash
+    neon buckets create slatedb
+    ```
+
+3. Write the object storage variables of the branch to a `.env` file:
+
+    ```bash
+    neon env pull --service object-storage --file .env
+    ```
+
+The `.env` file now contains these variables:
+
+```bash
+AWS_ENDPOINT_URL_S3=https://br-cool-darkness-a1b2c3d4.storage.c-1.us-east-2.aws.neon.tech
+AWS_ACCESS_KEY_ID=nak_live_...
+AWS_SECRET_ACCESS_KEY=nsk_live_...
+AWS_REGION=us-east-2
+```
+
+The endpoint is different for each branch. The credential is valid for the branch where you made it and for all branches that come from that branch.
+
+:::caution
+
+Do not commit the `.env` file to source control. It contains a secret access key.
+
+:::
+
+## Create a project
+
+Create a new Rust project:
+
+```bash
+cargo init slatedb-neon
+cd slatedb-neon
+```
+
+Move the `.env` file into the new project directory.
+
+## Add dependencies
+
+Add SlateDB and the required dependencies to your `Cargo.toml`:
+
+```bash
+cargo add slatedb tokio --features tokio/macros,tokio/rt-multi-thread
+cargo add object-store --features object-store/aws
+cargo add anyhow
+```
+
+:::note
+
+If you see "`object_store::path::Path` and `object_store::path::Path` have similar names, but are actually distinct types", pin the `object_store` version to the version that `slatedb` uses. SlateDB also exports `slatedb::object_store`, and you can use that instead.
+
+:::
+
+## Write some code
+
+Put this code into your `src/main.rs` file:
+
+<Code code={neonExample} lang="rust" title="main.rs" />
+
+`AmazonS3Builder::from_env` reads the `AWS_*` variables from the environment. When `AWS_ENDPOINT_URL_S3` is set, the builder sends path-style requests. Neon Object Storage accepts only path-style requests.
+
+The code writes 1,001 keys. Then it flushes the memtable, so SlateDB writes an L0 SST to the `compacted` directory in your bucket. Last, the code opens the database again and reads a value back from Neon.
+
+## Run the code
+
+Load the variables from `.env` into your shell, then run the program:
+
+```bash
+set -a; source .env; set +a
+cargo run
+```
+
+The program prints the two values that it reads:
+
+```text
+Some(b"value1")
+Some(b"value999")
+```
+
+## Check the results
+
+List the database path in the bucket:
+
+```bash
+aws --endpoint-url "$AWS_ENDPOINT_URL_S3" s3 ls s3://slatedb/tmp/slatedb_neon_object_storage/
+```
+
+The output shows five directories:
+
+```text
+                           PRE compacted/
+                           PRE compactions/
+                           PRE gc/
+                           PRE manifest/
+                           PRE wal/
+```
+
+- `manifest`: Contains the manifest files. A manifest file defines the state of the database, including the set of SSTs in the database.
+- `wal`: Contains the write-ahead log (WAL) files.
+- `compacted`: Contains the L0 SST files and the compacted SST files.
+- `compactions`: Contains the snapshots of the compaction state.
+- `gc`: Contains the boundary files of the garbage collector.
+
+## Use the SlateDB CLI
+
+The [SlateDB CLI](/docs/operations/cli/) loads the object store from environment variables. Use the `aws` provider and add the bucket name to the `.env` file:
+
+```bash
+CLOUD_PROVIDER=aws
+AWS_BUCKET=slatedb
+```
+
+Then run a command against the database:
+
+```bash
+slatedb --env-file .env --path /tmp/slatedb_neon_object_storage read-manifest
+```
+
+## Use a language binding
+
+The Go, Java, Node.js, and Python bindings resolve an object store from a URL. They read the `AWS_*` variables from the environment. For a Neon bucket, use the `s3://` scheme and the bucket name. The Python example follows:
+
+```python
+import asyncio
+
+from slatedb.uniffi import DbBuilder, ObjectStore
+
+
+async def main() -> None:
+    store = ObjectStore.resolve("s3://slatedb")
+    db = await DbBuilder("tmp/slatedb_neon_python", store).build()
+    try:
+        await db.put(b"hello", b"world")
+        print(await db.get(b"hello"))
+    finally:
+        await db.shutdown()
+
+
+asyncio.run(main())
+```
+
+## Branch a database with Neon branches
+
+A new Neon branch gets all of the buckets and objects of its parent branch. Neon does not copy the data. Writes on the child branch are visible only on the child branch and its descendants. The parent branch does not change. Thus, a Neon branch gives you a writable copy of a SlateDB database. You can use the copy to test a migration or to debug with production data.
+
+1. Create a branch from the branch that holds the database:
+
+    ```bash
+    neon branches create --name slatedb-test
+    ```
+
+2. Write the object storage variables of the new branch to a separate file:
+
+    ```bash
+    neon env pull --branch slatedb-test --service object-storage --file .env.slatedb-test
+    ```
+
+3. Load the variables from `.env.slatedb-test` and run your program.
+
+SlateDB opens the database at the same path on the child branch. The database has all of the data that was durable on the parent branch when you created the child branch. Writes on the child branch do not change the database on the parent branch.
+
+:::note
+
+A Neon branch forks all of the buckets on the branch, at the storage layer. It is different from a [SlateDB clone](/docs/design/clones/). A SlateDB clone is a new database path that shares SST files with the source database in the same bucket.
+
+:::
