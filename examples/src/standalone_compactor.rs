@@ -10,7 +10,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Build a compactor without opening a Db. The database must already exist (i.e.
     // the manifest has been created).
-    let compactor = Arc::new(CompactorBuilder::new("db", object_store).build());
+    let compactor = Arc::new(CompactorBuilder::new("db", object_store).build().await?);
 
     let compactor_task = {
         let compactor = Arc::clone(&compactor);

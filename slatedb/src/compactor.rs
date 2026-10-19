@@ -1694,7 +1694,9 @@ mod tests {
         let before = manifest_store.read_latest_manifest().await.unwrap();
         let compactor = CompactorBuilder::new(PATH, os)
             .with_expected_epoch(0)
-            .build();
+            .build()
+            .await
+            .unwrap();
 
         let error = tokio::time::timeout(Duration::from_secs(5), compactor.run())
             .await

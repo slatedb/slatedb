@@ -76,7 +76,8 @@ impl CompactorActor {
         let next = self
             .compactor_builder(ctx)
             .with_metrics_recorder(recorder.clone())
-            .build();
+            .build()
+            .await?;
         let next_cloned = next.clone();
         let mut new_task = tokio::spawn(async move { next_cloned.run().await });
 
