@@ -41,7 +41,9 @@ pub struct DbStatus {
     /// storage, paired with the version ID of that manifest file.
     ///
     /// Unlike [`Self::current_manifest`], each ID maps to exactly one manifest
-    /// value, and the value matches the stored `.manifest` file. Send this
+    /// value, and the value matches the stored `.manifest` file. The file
+    /// format rounds some values, such as checkpoint times to whole seconds,
+    /// so those values can be more precise here than in the file. Send this
     /// manifest to a [`crate::DbReader`] with
     /// [`crate::DbReader::sync_manifest`].
     pub durable_manifest: VersionedManifest,

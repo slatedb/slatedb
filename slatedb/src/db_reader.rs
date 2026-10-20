@@ -15,6 +15,7 @@ use {
         db_status::{ClosedResultWriter, DbStatus, DbStatusManager},
         dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef},
         error::SlateDBError,
+        flatbuffer_types::FlatBufferManifestCodec,
         manifest::{
             store::{ManifestStore, StoredManifest},
             Manifest, ManifestCore, VersionedManifest,
@@ -196,6 +197,17 @@ struct ReaderState {
     /// [`DbReader::sync_manifest`]. If a read against this state fails because an object is
     /// missing, the reader installs the base state again.
     base: Option<Arc<ReaderState>>,
+}
+
+/// Returns true if `a` and `b` are equal in the form that a `.manifest` file stores. The file
+/// format rounds some values, such as checkpoint times, so two manifests that differ only in
+/// those values are equal here.
+fn same_stored_manifest(a: &Manifest, b: &Manifest) -> bool {
+    if a == b {
+        return true;
+    }
+    FlatBufferManifestCodec::create_from_manifest(a)
+        == FlatBufferManifestCodec::create_from_manifest(b)
 }
 
 static EMPTY_TABLE: LazyLock<Arc<KVTable>> = LazyLock::new(|| Arc::new(KVTable::new()));
@@ -490,8 +502,18 @@ impl DbReaderInner {
     }
 
     async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
-        let new_state = self.rebuild_checkpoint_state(checkpoint).await?;
-        self.install_state(new_state);
+        let prior = Arc::clone(&self.state.read());
+        match self.rebuild_checkpoint_state(checkpoint.clone()).await {
+            Ok(new_state) => self.install_state(new_state),
+            // A sync can install a newer manifest during the WAL replay of the rebuild. See
+            // `maybe_replay_new_wals`. The caller already replaced the old checkpoint, so keep
+            // the new one.
+            Err(error) if !Arc::ptr_eq(&self.state.read(), &prior) => {
+                debug!("dropped rebuild for a replaced reader state [error={error:?}]");
+                self.store_checkpoint(checkpoint);
+            }
+            Err(error) => return Err(error),
+        }
         Ok(())
     }
 
@@ -502,25 +524,44 @@ impl DbReaderInner {
     /// state and only copies the checkpoint of `new_state` to it, because the caller can have
     /// replaced the checkpoint of the installed state.
     fn install_state(&self, new_state: ReaderState) {
-        let durable_seq = new_state.last_remote_persisted_seq;
-        let versioned_manifest = VersionedManifest::from(&new_state);
-        let touched_segments = collect_touched_segments(&new_state);
+        let new_state = Arc::new(new_state);
+        let versioned_manifest = VersionedManifest::from(new_state.as_ref());
+        let touched_segments = collect_touched_segments(new_state.as_ref());
+        // Report the status while the lock is held, so that the status matches the state.
         let mut write_guard = self.state.write();
         if new_state.manifest_id < write_guard.manifest_id {
-            if new_state.checkpoint != write_guard.checkpoint {
-                let mut updated_state = write_guard.as_ref().clone();
-                updated_state.checkpoint = new_state.checkpoint;
-                *write_guard = Arc::new(updated_state);
+            // Keep the newer synced state. `new_state` is now the newest state from object
+            // storage, so it becomes the base state. Its checkpoint also covers the base state.
+            let mut updated_state = write_guard.as_ref().clone();
+            updated_state.checkpoint = new_state.checkpoint.clone();
+            if updated_state
+                .base
+                .as_ref()
+                .is_some_and(|base| base.manifest_id <= new_state.manifest_id)
+            {
+                updated_state.base = Some(Arc::clone(&new_state));
             }
+            *write_guard = Arc::new(updated_state);
+            self.status_manager
+                .report_durable_manifest(versioned_manifest);
             return;
         }
-        self.oracle.advance_durable_seq(durable_seq);
-        *write_guard = Arc::new(new_state);
-        drop(write_guard);
+        self.oracle
+            .advance_durable_seq(new_state.last_remote_persisted_seq);
+        *write_guard = new_state;
         self.status_manager
             .report_durable_manifest(versioned_manifest.clone());
         self.status_manager
             .report_manifest_and_memtable_segments(versioned_manifest, touched_segments);
+    }
+
+    /// Stores `checkpoint` in the installed state. The caller replaced the checkpoint of the
+    /// installed state, but could not build a state for the new checkpoint.
+    fn store_checkpoint(&self, checkpoint: Checkpoint) {
+        let mut write_guard = self.state.write();
+        let mut updated_state = write_guard.as_ref().clone();
+        updated_state.checkpoint = Some(checkpoint);
+        *write_guard = Arc::new(updated_state);
     }
 
     async fn maybe_replay_new_wals(&self) -> Result<(), SlateDBError> {
@@ -529,7 +570,7 @@ impl DbReaderInner {
         }
         let current_state = Arc::clone(&self.state.read());
         let mut imm_memtable = current_state.imm_memtable().clone();
-        let (last_wal_id, last_committed_seq) = Self::replay_wal_into(
+        let replayed = Self::replay_wal_into(
             Arc::clone(&self.table_store),
             self.wal_reader.as_ref(),
             &self.options,
@@ -538,17 +579,31 @@ impl DbReaderInner {
             WalReplayEnd::Latest,
             self.segment_extractor.as_ref(),
         )
-        .await?;
-
-        if last_wal_id > current_state.last_wal_id {
-            let mut write_guard = self.state.write();
-            // A sync or a fallback can replace the state during the replay. The replayed tables
-            // match `current_state` only, so drop them. The next poll replays the WAL again.
-            if !Arc::ptr_eq(&write_guard, &current_state) {
+        .await;
+        let (last_wal_id, last_committed_seq) = match replayed {
+            Ok(watermark) => watermark,
+            // A sync can install a newer manifest during the replay. The WAL reader compares
+            // WAL IDs with the newest reported manifest, so it can report WAL files as truncated
+            // when the L0 of that manifest holds their rows. The newer state does not need them.
+            Err(error) if !Arc::ptr_eq(&self.state.read(), &current_state) => {
+                debug!("dropped WAL replay for a replaced reader state [error={error:?}]");
                 return Ok(());
             }
-            self.oracle.advance_durable_seq(last_committed_seq);
-            *write_guard = Arc::new(ReaderState {
+            Err(error) => return Err(error),
+        };
+        if last_wal_id <= current_state.last_wal_id {
+            return Ok(());
+        }
+        let replayed_tables: VecDeque<_> = imm_memtable
+            .iter()
+            .take(imm_memtable.len() - current_state.imm_memtable.len())
+            .cloned()
+            .collect();
+
+        let mut write_guard = self.state.write();
+        let installed = Arc::clone(&write_guard);
+        let new_state = if Arc::ptr_eq(&installed, &current_state) {
+            ReaderState {
                 manifest_id: current_state.manifest_id,
                 checkpoint: current_state.checkpoint.clone(),
                 manifest: current_state.manifest.clone(),
@@ -556,11 +611,38 @@ impl DbReaderInner {
                 last_wal_id,
                 last_remote_persisted_seq: last_committed_seq,
                 base: current_state.base.clone(),
-            });
-            drop(write_guard);
-            self.status_manager
-                .report_memtable_segments(collect_touched_segments(self.state.read().as_ref()));
-        }
+            }
+        } else if installed.last_remote_persisted_seq >= current_state.last_remote_persisted_seq {
+            // A sync installed a newer manifest during the replay. The installed state holds
+            // every row up to the watermark of `current_state`, and the replayed rows are newer.
+            // Add the replayed rows that the L0 of the installed manifest does not hold.
+            let mut merged =
+                self.retain_newer_than_manifest(&replayed_tables, &installed.manifest)?;
+            if merged.is_empty() && last_wal_id <= installed.last_wal_id {
+                return Ok(());
+            }
+            merged.extend(installed.imm_memtable.iter().cloned());
+            ReaderState {
+                manifest_id: installed.manifest_id,
+                checkpoint: installed.checkpoint.clone(),
+                manifest: installed.manifest.clone(),
+                imm_memtable: merged,
+                last_wal_id: last_wal_id.max(installed.last_wal_id),
+                last_remote_persisted_seq: last_committed_seq
+                    .max(installed.last_remote_persisted_seq),
+                base: installed.base.clone(),
+            }
+        } else {
+            // A fallback installed an older state. Its rows can end before the replayed rows
+            // start, so drop the replayed rows. The next poll replays the WAL again.
+            return Ok(());
+        };
+        self.oracle
+            .advance_durable_seq(new_state.last_remote_persisted_seq);
+        let touched_segments = collect_touched_segments(&new_state);
+        *write_guard = Arc::new(new_state);
+        self.status_manager
+            .report_memtable_segments(touched_segments);
         Ok(())
     }
 
@@ -581,7 +663,13 @@ impl DbReaderInner {
         manifest: Manifest,
     ) -> Result<ReaderState, SlateDBError> {
         let prior = self.state.read().clone();
-        let imm_memtable = self.retain_newer_than_manifest(&prior, &manifest)?;
+        // A synced state can be newer than `manifest`. Its tables then miss the rows between
+        // the L0 of `manifest` and the L0 of the synced manifest, so replay them from the WAL.
+        let imm_memtable = if prior.manifest.core.last_l0_seq > manifest.core.last_l0_seq {
+            VecDeque::new()
+        } else {
+            self.retain_newer_than_manifest(&prior.imm_memtable, &manifest)?
+        };
 
         Self::build_reader_state(
             checkpoint,
@@ -597,15 +685,15 @@ impl DbReaderInner {
         .await
     }
 
-    /// Returns the immutable memtables of `prior` that hold rows newer than the L0 of
-    /// `manifest`. L0 and lower levels already hold the older rows.
+    /// Returns the rows of `tables` that are newer than the L0 of `manifest`, in the same
+    /// order. L0 and lower levels already hold the older rows.
     fn retain_newer_than_manifest(
         &self,
-        prior: &ReaderState,
+        tables: &VecDeque<Arc<ImmutableMemtable>>,
         manifest: &Manifest,
     ) -> Result<VecDeque<Arc<ImmutableMemtable>>, SlateDBError> {
         let mut imm_memtable = VecDeque::new();
-        for table in prior.imm_memtable.iter() {
+        for table in tables.iter() {
             let table_meta = table.table().metadata();
             if table_meta.last_seq <= manifest.core.last_l0_seq {
                 // Skip since the entire table is older than L0+.
@@ -681,9 +769,18 @@ impl DbReaderInner {
         latest_manifest: VersionedManifest,
     ) -> Result<(), SlateDBError> {
         let manifest_id = latest_manifest.id;
-        if manifest_id <= self.state.read().manifest_id {
+        let installed = Arc::clone(&self.state.read());
+        // Object storage is authoritative. If it holds a different manifest with the ID of the
+        // synced manifest, replace the synced manifest.
+        let contradicts_synced_manifest = manifest_id == installed.manifest_id
+            && installed.base.is_some()
+            && !same_stored_manifest(&installed.manifest, &latest_manifest.manifest);
+        if manifest_id <= installed.manifest_id && !contradicts_synced_manifest {
             self.confirm_pushed_state(&latest_manifest);
             return self.maybe_replay_new_wals().await;
+        }
+        if contradicts_synced_manifest {
+            warn!("synced manifest differs from the stored manifest with the same ID, replacing it [manifest_id={manifest_id}]");
         }
 
         let new_state = self
@@ -697,17 +794,20 @@ impl DbReaderInner {
     /// Drops the base state if the installed state holds a pushed manifest that is equal to
     /// `loaded`, a manifest that the reader read from object storage.
     fn confirm_pushed_state(&self, loaded: &VersionedManifest) {
-        let mut write_guard = self.state.write();
-        if write_guard.base.is_none()
-            || write_guard.manifest_id != loaded.id
-            || write_guard.manifest != loaded.manifest
+        let installed = Arc::clone(&self.state.read());
+        if installed.base.is_none()
+            || installed.manifest_id != loaded.id
+            || !same_stored_manifest(&installed.manifest, &loaded.manifest)
         {
             return;
         }
-        let mut confirmed_state = write_guard.as_ref().clone();
+        let mut write_guard = self.state.write();
+        if !Arc::ptr_eq(&write_guard, &installed) {
+            return;
+        }
+        let mut confirmed_state = installed.as_ref().clone();
         confirmed_state.base = None;
         *write_guard = Arc::new(confirmed_state);
-        drop(write_guard);
         self.status_manager.report_durable_manifest(loaded.clone());
     }
 
@@ -734,17 +834,20 @@ impl DbReaderInner {
             let pushed_state = self.build_pushed_state(&current_state, &manifest)?;
             let durable_seq = pushed_state.last_remote_persisted_seq;
             let touched_segments = collect_touched_segments(&pushed_state);
+            let manifest_id = manifest.id;
             let mut write_guard = self.state.write();
             if !Arc::ptr_eq(&write_guard, &current_state) {
                 continue;
             }
-            *write_guard = Arc::new(pushed_state);
-            drop(write_guard);
-
+            // Advance the oracle before the swap, so that no read uses the new state with the
+            // old durable sequence number. Report the status while the lock is held, so that the
+            // status matches the state.
             self.oracle.advance_durable_seq(durable_seq);
-            let manifest_id = manifest.id;
+            *write_guard = Arc::new(pushed_state);
             self.status_manager
                 .report_manifest_and_memtable_segments(manifest, touched_segments);
+            drop(write_guard);
+
             self.sync_stats.applied.increment(1);
             self.wake_poller();
             debug!("synced reader to manifest [manifest_id={manifest_id}]");
@@ -803,7 +906,8 @@ impl DbReaderInner {
         current_state: &Arc<ReaderState>,
         manifest: &VersionedManifest,
     ) -> Result<ReaderState, SlateDBError> {
-        let imm_memtable = self.retain_newer_than_manifest(current_state, &manifest.manifest)?;
+        let imm_memtable =
+            self.retain_newer_than_manifest(&current_state.imm_memtable, &manifest.manifest)?;
         let (last_wal_id, last_remote_persisted_seq) =
             Self::replayed_watermark(&manifest.manifest.core, &imm_memtable);
         let base = current_state
@@ -841,6 +945,12 @@ impl DbReaderInner {
             return Some(Arc::clone(&write_guard));
         }
         *write_guard = Arc::clone(base);
+        // Report the status while the lock is held, so that the status matches the state.
+        self.status_manager
+            .report_reverted_manifest_and_memtable_segments(
+                VersionedManifest::from(base.as_ref()),
+                collect_touched_segments(base.as_ref()),
+            );
         drop(write_guard);
 
         self.sync_stats.fallback.increment(1);
@@ -848,11 +958,6 @@ impl DbReaderInner {
             "read failed against synced manifest, falling back [manifest_id={}, base_manifest_id={}, error={error:?}]",
             failed_state.manifest_id, base.manifest_id
         );
-        self.status_manager
-            .report_reverted_manifest_and_memtable_segments(
-                VersionedManifest::from(base.as_ref()),
-                collect_touched_segments(base.as_ref()),
-            );
         self.wake_poller();
         Some(Arc::clone(base))
     }
@@ -1103,7 +1208,13 @@ impl ManifestPoller {
         .await?;
 
         let latest_manifest = manifest.manifest();
-        if self.inner.checkpoint_behind_synced_manifest(manifest.id())
+        let installed_manifest_id = self.inner.state.read().manifest_id;
+        if manifest.id() < installed_manifest_id {
+            // Object storage is behind a synced manifest. Do not move the checkpoint until it
+            // catches up. Otherwise a manifest that object storage never holds causes a
+            // checkpoint write on each poll.
+            self.inner.maybe_replay_new_wals().await?;
+        } else if self.inner.checkpoint_behind_synced_manifest(manifest.id())
             || self
                 .inner
                 .should_reestablish_checkpoint(&latest_manifest.core)
@@ -1149,7 +1260,8 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
             // A sync needs no extra poll, because this mode does not own a checkpoint.
             (DbReaderMode::FollowLatest, DbReaderMessage::ManifestSynced) => Ok(()),
             // No polling is needed for a pinned checkpoint, so we just return Ok(()).
-            (DbReaderMode::Checkpoint(_), _) => Ok(()),
+            (DbReaderMode::Checkpoint(_), DbReaderMessage::PollManifest)
+            | (DbReaderMode::Checkpoint(_), DbReaderMessage::ManifestSynced) => Ok(()),
         }
     }
 
@@ -4359,6 +4471,25 @@ mod tests {
         options: DbReaderOptions,
         manifest_store: Arc<ManifestStore>,
     ) -> DbReader {
+        open_sync_test_reader_with_stores(
+            test_provider,
+            mode,
+            options,
+            manifest_store,
+            test_provider.wal_store(),
+        )
+        .await
+    }
+
+    /// Like `open_sync_test_reader_with_manifest_store`, but the reader also reads WAL files
+    /// through `wal_store`.
+    async fn open_sync_test_reader_with_stores(
+        test_provider: &TestProvider,
+        mode: DbReaderMode,
+        options: DbReaderOptions,
+        manifest_store: Arc<ManifestStore>,
+        wal_store: Arc<WalTableStore>,
+    ) -> DbReader {
         let manifest = StoredManifest::load(
             test_provider.manifest_store(),
             test_provider.system_clock.clone(),
@@ -4369,7 +4500,7 @@ mod tests {
             DbReaderInner::new(
                 manifest_store,
                 test_provider.table_store(),
-                test_provider.wal_store(),
+                wal_store,
                 None,
                 options,
                 mode,
@@ -4838,9 +4969,13 @@ mod tests {
         )
         .await;
         let checkpoint_before = reader.inner.state.read().checkpoint.clone().unwrap();
-        // A manifest ID that object storage does not hold yet.
+        // A manifest ID that object storage does not hold yet. Its core differs from the stored
+        // manifest, as it does after a compaction.
         let mut synced = reader.manifest();
         synced.id += 100;
+        let mut tree = synced.manifest.core.tree.as_ref().clone();
+        tree.last_compacted_l0_sst_view_id = Some(ulid::Ulid::new());
+        synced.manifest.core.tree = Arc::new(tree);
         reader.sync_manifest(synced.clone()).unwrap();
 
         let mut poller = ManifestPoller {
@@ -4894,7 +5029,15 @@ mod tests {
 
         let state = Arc::clone(&reader.inner.state.read());
         assert_eq!(state.manifest_id, synced.id());
-        assert_eq!(state.checkpoint, Some(moved_checkpoint));
+        assert_eq!(state.checkpoint, Some(moved_checkpoint.clone()));
+        // The loaded state is now the base state, and its checkpoint is the new checkpoint.
+        let base = state.base.as_ref().unwrap();
+        assert_eq!(base.manifest_id, checkpoint.manifest_id);
+        assert_eq!(base.checkpoint, Some(moved_checkpoint));
+        assert_eq!(
+            reader.status().durable_manifest.id(),
+            checkpoint.manifest_id
+        );
         assert_eq!(
             reader.get(b"key").await.unwrap(),
             Some(Bytes::from_static(b"updated"))
@@ -5050,6 +5193,262 @@ mod tests {
             reader.get(b"key").await.unwrap(),
             Some(Bytes::from_static(b"updated"))
         );
+
+        db.close().await.unwrap();
+    }
+
+    /// Opens a FollowLatest reader with WAL replay that reads WAL files through a gated store.
+    async fn open_gated_wal_reader(
+        test_provider: &TestProvider,
+    ) -> (DbReader, Arc<test_utils::GatedObjectStore>) {
+        let gated_store = Arc::new(test_utils::GatedObjectStore::new(Arc::clone(
+            &test_provider.object_store,
+        )));
+        let wal_store = Arc::new(WalTableStore::new_with_fp_registry(
+            gated_store.clone(),
+            SsTableFormat::default(),
+            PathResolver::from_root(test_provider.path.clone()),
+            Arc::clone(&test_provider.fp_registry),
+            TableStoreKind::Reader,
+        ));
+        let reader = open_sync_test_reader_with_stores(
+            test_provider,
+            DbReaderMode::FollowLatest,
+            DbReaderOptions {
+                skip_wal_replay: false,
+                ..sync_test_reader_options()
+            },
+            test_provider.manifest_store(),
+            wal_store,
+        )
+        .await;
+        (reader, gated_store)
+    }
+
+    /// Writes `value` for `key` to the WAL only, and returns a newer durable manifest whose L0
+    /// does not hold that row.
+    async fn put_wal_and_write_manifest(db: &Db, key: &[u8], value: &[u8]) -> VersionedManifest {
+        db.put(key, value).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+        let before = db.status().durable_manifest.id();
+        db.create_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        let durable = db.status().durable_manifest;
+        assert!(durable.id() > before);
+        durable
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wal_replay_should_keep_rows_when_sync_lands_during_replay() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_replay_merge");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"a", b"1").await;
+        let (reader, gated_store) = open_gated_wal_reader(&test_provider).await;
+        let synced = put_wal_and_write_manifest(&db, b"w", b"wal").await;
+
+        // Block the WAL read of the replay, then sync a newer manifest.
+        gated_store.get_opts_gate.close();
+        // The reader already read WAL files through the gate when it opened.
+        let arrivals = gated_store.get_opts_gate.arrivals();
+        let inner = Arc::clone(&reader.inner);
+        let replay = tokio::spawn(async move { inner.maybe_replay_new_wals().await });
+        gated_store
+            .get_opts_gate
+            .wait_for_arrivals(arrivals + 1)
+            .await;
+        assert_eq!(
+            reader.sync_manifest(synced.clone()).unwrap(),
+            ManifestSyncOutcome::Applied
+        );
+        gated_store.get_opts_gate.release();
+        replay.await.unwrap().unwrap();
+
+        // The replayed WAL row is added to the synced state.
+        assert_eq!(reader.manifest().id(), synced.id());
+        assert_eq!(
+            reader.get(b"w").await.unwrap(),
+            Some(Bytes::from_static(b"wal"))
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wal_replay_error_should_be_dropped_when_sync_lands_during_replay() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_replay_error");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"a", b"1").await;
+        let (reader, gated_store) = open_gated_wal_reader(&test_provider).await;
+        let synced = put_wal_and_write_manifest(&db, b"w", b"wal").await;
+
+        // The WAL read fails after a sync replaced the state. In production, the WAL reader
+        // returns `WalTruncated` here when the synced manifest is ahead of the listed WAL files.
+        gated_store.get_opts_gate.close();
+        gated_store
+            .get_opts_gate
+            .set_error(|| object_store::Error::Generic {
+                store: "gated",
+                source: "injected".into(),
+            });
+        // The reader already read WAL files through the gate when it opened.
+        let arrivals = gated_store.get_opts_gate.arrivals();
+        let inner = Arc::clone(&reader.inner);
+        let replay = tokio::spawn(async move { inner.maybe_replay_new_wals().await });
+        gated_store
+            .get_opts_gate
+            .wait_for_arrivals(arrivals + 1)
+            .await;
+        reader.sync_manifest(synced.clone()).unwrap();
+        gated_store.get_opts_gate.release();
+
+        replay.await.unwrap().unwrap();
+        assert_eq!(reader.manifest().id(), synced.id());
+
+        gated_store.get_opts_gate.clear_error();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rebuild_should_replay_rows_between_older_manifest_and_synced_manifest() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_rebuild_gap");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"k", b"1").await;
+        let reader = open_sync_test_reader(
+            &test_provider,
+            DbReaderMode::FollowLatest,
+            DbReaderOptions {
+                skip_wal_replay: false,
+                ..sync_test_reader_options()
+            },
+        )
+        .await;
+        let older = put_and_flush(&db, b"k", b"2").await;
+        let synced = put_and_flush(&db, b"k", b"3").await;
+        // A WAL-only row gives the synced state a replayed table.
+        db.put(b"w", b"wal").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+        reader.inner.maybe_replay_new_wals().await.unwrap();
+        reader.sync_manifest(synced).unwrap();
+        assert!(!reader.inner.state.read().imm_memtable.is_empty());
+
+        // The poller rebuilds a state for the older manifest while the synced state is
+        // installed. The value `3` is newer than the L0 of the older manifest.
+        let older_manifest = test_provider
+            .manifest_store()
+            .read_manifest(older.id())
+            .await
+            .unwrap();
+        let rebuilt = reader
+            .inner
+            .rebuild_state(None, older.id(), older_manifest)
+            .await
+            .unwrap();
+
+        let value = reader
+            .inner
+            .reader
+            .get_key_value_with_options(
+                b"k",
+                &crate::config::ReadOptions::default(),
+                &rebuilt,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(value.value, Bytes::from_static(b"3"));
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn follow_latest_poll_should_replace_synced_manifest_that_storage_contradicts() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_contradicted");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"key", b"initial").await;
+        let reader = open_sync_test_reader(
+            &test_provider,
+            DbReaderMode::FollowLatest,
+            sync_test_reader_options(),
+        )
+        .await;
+        let stored = put_and_flush(&db, b"key", b"updated").await;
+        // A synced manifest with the ID of the stored manifest, but without its newest L0.
+        let mut wrong = stored.clone();
+        let mut tree = wrong.manifest.core.tree.as_ref().clone();
+        tree.l0.pop_front();
+        wrong.manifest.core.tree = Arc::new(tree);
+        reader.sync_manifest(wrong).unwrap();
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"initial"))
+        );
+
+        let mut poller = ManifestPoller {
+            inner: Arc::clone(&reader.inner),
+        };
+        poller.handle(DbReaderMessage::PollManifest).await.unwrap();
+
+        assert_eq!(reader.manifest(), stored);
+        assert!(reader.inner.state.read().base.is_none());
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"updated"))
+        );
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn follow_latest_poll_should_confirm_synced_manifest_with_checkpoint() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_confirm_checkpoint");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"key", b"initial").await;
+        let reader = open_sync_test_reader(
+            &test_provider,
+            DbReaderMode::FollowLatest,
+            sync_test_reader_options(),
+        )
+        .await;
+        // The writer holds checkpoint times with more precision than the stored file.
+        db.create_checkpoint(CheckpointScope::Durable, &CheckpointOptions::default())
+            .await
+            .unwrap();
+        let synced = db.status().durable_manifest;
+        let stored = test_provider
+            .manifest_store()
+            .read_latest_manifest()
+            .await
+            .unwrap();
+        assert_eq!(synced.id(), stored.id());
+        reader.sync_manifest(synced).unwrap();
+
+        let mut poller = ManifestPoller {
+            inner: Arc::clone(&reader.inner),
+        };
+        poller.handle(DbReaderMessage::PollManifest).await.unwrap();
+
+        assert!(reader.inner.state.read().base.is_none());
 
         db.close().await.unwrap();
     }

@@ -990,9 +990,19 @@ impl VersionedManifest {
     /// - Returns an error of kind [`crate::ErrorKind::Invalid`] if the bytes are empty, if the
     ///   format version is unknown, or if the bytes are not a valid manifest.
     pub fn from_bytes(id: u64, bytes: &[u8]) -> Result<Self, crate::Error> {
-        let manifest = FlatBufferManifestCodec {}
-            .decode(&Bytes::copy_from_slice(bytes))
-            .map_err(|err| SlateDBError::InvalidManifestBytes(Arc::from(err)))?;
+        let bytes = Bytes::copy_from_slice(bytes);
+        // The bytes can come from outside the process. The flatbuffer verifier accepts some bytes
+        // that the decoder cannot convert, and some of those paths assert instead of returning
+        // an error. Report such bytes as invalid instead of crashing the caller.
+        let decoded = std::panic::catch_unwind(|| FlatBufferManifestCodec {}.decode(&bytes))
+            .map_err(|_| {
+                SlateDBError::InvalidManifestBytes(Arc::from(Box::<
+                    dyn std::error::Error + Send + Sync,
+                >::from(
+                    "the manifest decoder panicked"
+                )))
+            })?;
+        let manifest = decoded.map_err(|err| SlateDBError::InvalidManifestBytes(Arc::from(err)))?;
         Ok(Self::from_manifest(id, manifest))
     }
 }
@@ -6047,6 +6057,18 @@ mod tests {
             serde_json::from_str(r#"{"id":1,"bytes":[0,2,1,2,3]}"#).unwrap();
 
         let err = VersionedManifest::try_from(transfer).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Invalid);
+    }
+
+    #[test]
+    fn test_versioned_manifest_from_bytes_rejects_bytes_that_the_decoder_cannot_convert() {
+        // The flatbuffer verifier accepts an SST without a first entry, but the decoder cannot
+        // build a view for it.
+        let manifest =
+            VersionedManifest::from_manifest(1, Manifest::initial(core_with_four_ssts()));
+
+        let err = VersionedManifest::from_bytes(manifest.id(), &manifest.to_bytes()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::Invalid);
     }

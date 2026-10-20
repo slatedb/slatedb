@@ -141,6 +141,8 @@ The version ID is not part of the bytes, because a `.manifest` file stores its I
 
 `from_bytes` returns an error of kind `ErrorKind::Invalid` if the bytes are empty, if the format version is unknown, or if the flatbuffer decode fails. The kind is `Invalid` and not `Data`, because the bytes come from the caller and not from object storage.
 
+The flatbuffer verifier accepts some bytes that the decoder cannot convert, and some decoder paths assert instead of returning an error. The bytes can come from outside the process, so `from_bytes` catches a panic in the decoder and returns `ErrorKind::Invalid`. A later change can make those decoder paths return errors.
+
 The bytes follow the compatibility rules of the `.manifest` file format. A reader can decode the bytes from a writer of the same or an older SlateDB version. A reader rejects a format version that it does not know, as it does for a file.
 
 #### ManifestTransfer
@@ -287,15 +289,15 @@ The reader then does these steps while it holds the state write lock:
 
 1. Make sure that the installed state did not change since step 1 of the build. If it changed, rebuild from the new installed state. The build is CPU only, so a retry is cheap.
 2. If no base state is stored, store the installed state as the base state.
-3. Install the pushed state.
-
-After the lock is released, the reader advances the durable sequence number in the oracle and reports the manifest to the status manager, as `install_state` does today.
+3. Advance the durable sequence number in the oracle. A read that uses the pushed state must not use the older durable sequence number, because it can then skip rows of the pushed manifest.
+4. Install the pushed state.
+5. Report the manifest to the status manager. Every change of the installed state reports the status while it holds the lock, so that the status matches the state.
 
 ### Behavior in each reader mode
 
 The mode decides what the poller does after a sync. The mode does not change.
 
-`FollowLatest`: The poller already reads the latest manifest and calls `apply_latest_manifest`. That function ignores a manifest whose ID is not greater than the installed ID, and only replays new WAL SSTs. After a sync, the poller keeps this behavior. When the poller installs a loaded manifest with a greater ID, the reader drops the old base state. When the poller reads a manifest with the same ID as the installed pushed manifest, and the two manifests are equal, the reader also drops the base state, because object storage confirmed the pushed manifest.
+`FollowLatest`: The poller already reads the latest manifest and calls `apply_latest_manifest`. That function ignores a manifest whose ID is not greater than the installed ID, and only replays new WAL SSTs. After a sync, the poller keeps this behavior. When the poller installs a loaded manifest with a greater ID, the reader drops the old base state. When the poller reads a manifest with the same ID as the installed pushed manifest, and the two manifests are equal, the reader also drops the base state, because object storage confirmed the pushed manifest. If the two manifests are not equal, object storage is authoritative: the reader builds a state from the stored manifest and installs it. The reader compares the two manifests in their `.manifest` file form, because the file format rounds some values, such as checkpoint times.
 
 `ManagedCheckpoint`: The reader checkpoint protects the SSTs of the checkpoint manifest from garbage collection. After a sync, the reader reads from a newer manifest that the checkpoint does not cover. The reader sends a `ManifestSynced` message to the poller. The message channel holds one message, so many syncs cause one poll. The poller then does these steps at once, and does not wait for the next tick:
 
@@ -317,8 +319,11 @@ The poller reads the installed state, awaits IO, and then installs a new state. 
 
 The RFC changes both functions to install only if the state did not move:
 
-- `install_state` keeps the state that has the greater manifest ID. If the IDs are equal, it keeps the new state, because that state includes WAL replay. If it keeps the installed state, it copies the checkpoint of the new state to it, because the poller can have replaced the checkpoint during the await.
-- `maybe_replay_new_wals` installs its result only if the installed state is still the same `Arc` that it read. If the state changed, it drops the result. The next tick replays the WAL against the new state.
+- `install_state` keeps the state that has the greater manifest ID. If the IDs are equal, it keeps the new state, because that state includes WAL replay. If it keeps the installed pushed state, it copies the checkpoint of the new state to it, because the poller can have replaced the checkpoint during the await. The new state also becomes the base state of the pushed state, because it is the newest state from object storage and the new checkpoint covers it.
+- `maybe_replay_new_wals` installs its result as before if the installed state is still the same `Arc` that it read. If a sync installed a newer state during the replay, the installed state holds every row up to the watermark of the old state, and the replayed rows are newer. The reader adds the replayed rows that the L0 of the new manifest does not hold. If a fallback installed an older state, the reader drops the result, because the rows of the older state can end before the replayed rows start. The next tick replays the WAL again.
+- `rebuild_state` builds a state for a loaded manifest from the tables of the installed state. If the installed state is a pushed state that is newer than the loaded manifest, its tables miss the rows between the two L0 boundaries. The reader then replays those rows from the WAL.
+
+The WAL reader compares WAL IDs with the newest manifest that the reader reported to its status. A sync can report a newer manifest during a replay. The WAL reader can then report WAL files as truncated when the L0 of the newer manifest holds their rows. If the installed state changed during a replay or a rebuild, the reader ignores the error. In `ManagedCheckpoint` mode, it stores the new checkpoint on the installed state, because the poller already replaced the old one.
 
 ### Fallback after a failed read
 
@@ -482,6 +487,10 @@ The first implementation includes these tests:
   - Fallback: sync a manifest, delete its new SSTs, then `get` or `scan`. The read returns the base state result, and later reads use the base state. A reader without a synced manifest does not fall back.
   - Race: run syncs against a poller that ticks every 5 ms, in managed and follow-latest modes, and make sure that the installed manifest ID never moves back.
   - Bindings: one sync test for each of Python, Node, Java, and Go.
+  - Races, with a gate that blocks the WAL reads of a replay while a sync lands: the replay adds its rows to the synced state, and a replay error after the sync does not fail the poll.
+  - A rebuild for an older manifest while a newer synced state is installed replays the rows between the two L0 boundaries.
+  - Follow-latest mode: a poll that reads a different manifest with the ID of the synced manifest installs the stored manifest. A synced manifest that holds a checkpoint is confirmed, although the file rounds the checkpoint times.
+  - `from_bytes` returns `ErrorKind::Invalid` for bytes that the verifier accepts but the decoder cannot convert.
 - Fault injection: fail the checkpoint write that a sync starts. The poll does not fail the reader. The reader keeps serving reads from the synced manifest, and the next poll moves the checkpoint.
 
 These tests are follow-up work, after the design is final:
