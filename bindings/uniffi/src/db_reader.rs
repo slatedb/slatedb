@@ -3,7 +3,9 @@ use std::sync::Arc;
 use crate::config::{ReadOptions, ScanOptions};
 use crate::error::Error;
 use crate::iterator::DbIterator;
-use crate::types::{CacheTarget, DbStatus, KeyRange, SsTableId};
+use crate::types::{
+    CacheTarget, DbStatus, KeyRange, ManifestSyncOutcome, ManifestTransfer, SsTableId,
+};
 use crate::validation::validate_key;
 use crate::KeyValue;
 use slatedb::DbCacheManagerOps;
@@ -25,6 +27,19 @@ impl DbReader {
     /// Returns the latest reader status snapshot.
     pub fn status(&self) -> DbStatus {
         self.inner.status().into()
+    }
+
+    /// Installs a manifest that the application received from the writer
+    /// without object storage, such as the result of `Db::durable_manifest`.
+    ///
+    /// The call does no object store IO, and the next read uses the manifest.
+    /// It returns `Stale` and changes nothing if the manifest ID is less than or
+    /// equal to the ID of the installed manifest. If a later read fails because
+    /// an object of the manifest is missing, the reader installs its previous
+    /// manifest again and retries the read once.
+    pub fn sync_manifest(&self, manifest: ManifestTransfer) -> Result<ManifestSyncOutcome, Error> {
+        let manifest = slatedb::VersionedManifest::try_from(manifest)?;
+        Ok(self.inner.sync_manifest(manifest)?.into())
     }
 }
 

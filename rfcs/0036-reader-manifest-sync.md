@@ -480,7 +480,7 @@ The file format of `.manifest` objects does not change. `to_bytes`, `from_bytes`
 
 - Phase 1: `VersionedManifest::to_bytes` and `from_bytes`, `ManifestTransfer`, and `DbStatus::durable_manifest` on the writer.
 - Phase 2: `DbReader::sync_manifest`, the conditional install in the poller, and the fallback path.
-- Phase 3: Bindings for `sync_manifest`, `to_bytes`, and `from_bytes`. Bindings do not use serde, so they expose the ID and the bytes directly.
+- Phase 3: Bindings. Bindings do not use serde, so the `ManifestTransfer` binding record has public `id` and `bytes` fields. `Db::durable_manifest` returns the durable manifest as a `ManifestTransfer`, and `DbReader::sync_manifest` takes one. The binding `DbStatus` record gets a `durable_manifest_id` field, so that an application can call `status` to detect a new durable manifest without encoding the manifest on each call.
 - Feature flag: None. The feature is active only when the application calls the new method.
 - Docs: Update `website/src/content/docs/docs/design/readers.mdx` with a section on manifest sync, and add a note to the description of pinned readers.
 

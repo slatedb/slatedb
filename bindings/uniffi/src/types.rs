@@ -136,6 +136,10 @@ pub struct DbStatus {
     /// but not yet flushed. Sorted ascending by prefix and deduplicated; empty
     /// when no segment extractor is configured.
     pub segments: Vec<SegmentPrefix>,
+    /// Version ID of the most recent manifest that this handle wrote to or
+    /// read from object storage. When it changes, a writer can send the
+    /// manifest from `Db::durable_manifest` to readers.
+    pub durable_manifest_id: u64,
 }
 
 impl From<slatedb::DbStatus> for DbStatus {
@@ -145,6 +149,56 @@ impl From<slatedb::DbStatus> for DbStatus {
             durable_seq: value.durable_seq,
             close_reason: value.close_reason.map(Into::into),
             segments,
+            durable_manifest_id: value.durable_manifest.id(),
+        }
+    }
+}
+
+/// A manifest in the `.manifest` file format, with its version ID.
+///
+/// A writer gets it from `Db::durable_manifest` and sends it to readers
+/// without object storage, for example over the network. A reader installs
+/// it with `DbReader::sync_manifest`.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ManifestTransfer {
+    /// Manifest version ID.
+    pub id: u64,
+    /// Manifest in the `.manifest` file format.
+    pub bytes: Vec<u8>,
+}
+
+impl From<&CoreVersionedManifest> for ManifestTransfer {
+    fn from(value: &CoreVersionedManifest) -> Self {
+        Self {
+            id: value.id(),
+            bytes: value.to_bytes().to_vec(),
+        }
+    }
+}
+
+impl TryFrom<ManifestTransfer> for CoreVersionedManifest {
+    type Error = slatedb::Error;
+
+    fn try_from(value: ManifestTransfer) -> Result<Self, Self::Error> {
+        CoreVersionedManifest::from_bytes(value.id, &value.bytes)
+    }
+}
+
+/// The result of a call to `DbReader::sync_manifest`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ManifestSyncOutcome {
+    /// The reader installed the manifest. The next read uses it.
+    Applied,
+    /// The manifest ID is less than or equal to the ID of the installed
+    /// manifest. The reader did not change.
+    Stale,
+}
+
+impl From<slatedb::ManifestSyncOutcome> for ManifestSyncOutcome {
+    fn from(value: slatedb::ManifestSyncOutcome) -> Self {
+        match value {
+            slatedb::ManifestSyncOutcome::Applied => Self::Applied,
+            slatedb::ManifestSyncOutcome::Stale => Self::Stale,
         }
     }
 }

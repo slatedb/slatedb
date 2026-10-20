@@ -996,6 +996,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_db_durable_manifest()
+		})
+		if checksum != 35062 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_durable_manifest: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_db_evict_cached_sst()
 		})
 		if checksum != 27129 {
@@ -1307,6 +1316,15 @@ func uniffiCheckChecksums() {
 		if checksum != 4488 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_status: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_sync_manifest()
+		})
+		if checksum != 29785 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_sync_manifest: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -4087,6 +4105,10 @@ type DbInterface interface {
 	Delete(key []byte) (*WriteHandle, error)
 	// Deletes `key` using custom write options.
 	DeleteWithOptions(key []byte, options WriteOptions) (*WriteHandle, error)
+	// Returns the most recent manifest that this handle wrote to or read
+	// from object storage. Send it to readers, which install it with
+	// `DbReader::sync_manifest`.
+	DurableManifest() ManifestTransfer
 	// Best-effort eviction of block-cache entries for one SST.
 	//
 	// If no block cache is configured, or if the SST is not reachable from
@@ -4268,6 +4290,20 @@ func (_self *Db) DeleteWithOptions(key []byte, options WriteOptions) (*WriteHand
 	}
 
 	return res, err
+}
+
+// Returns the most recent manifest that this handle wrote to or read
+// from object storage. Send it to readers, which install it with
+// `DbReader::sync_manifest`.
+func (_self *Db) DurableManifest() ManifestTransfer {
+	_pointer := _self.ffiObject.incrementPointer("*Db")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterManifestTransferINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_db_durable_manifest(
+				_pointer, _uniffiStatus),
+		}
+	}))
 }
 
 // Best-effort eviction of block-cache entries for one SST.
@@ -5776,6 +5812,15 @@ type DbReaderInterface interface {
 	Shutdown() error
 	// Returns the latest reader status snapshot.
 	Status() DbStatus
+	// Installs a manifest that the application received from the writer
+	// without object storage, such as the result of `Db::durable_manifest`.
+	//
+	// The call does no object store IO, and the next read uses the manifest.
+	// It returns `Stale` and changes nothing if the manifest ID is less than or
+	// equal to the ID of the installed manifest. If a later read fails because
+	// an object of the manifest is missing, the reader installs its previous
+	// manifest again and retries the read once.
+	SyncManifest(manifest ManifestTransfer) (ManifestSyncOutcome, error)
 	// Warms selected cache content for one SST.
 	//
 	// Returns `Err` on the first failing target. If no block cache is
@@ -6191,6 +6236,31 @@ func (_self *DbReader) Status() DbStatus {
 				_pointer, _uniffiStatus),
 		}
 	}))
+}
+
+// Installs a manifest that the application received from the writer
+// without object storage, such as the result of `Db::durable_manifest`.
+//
+// The call does no object store IO, and the next read uses the manifest.
+// It returns `Stale` and changes nothing if the manifest ID is less than or
+// equal to the ID of the installed manifest. If a later read fails because
+// an object of the manifest is missing, the reader installs its previous
+// manifest again and retries the read once.
+func (_self *DbReader) SyncManifest(manifest ManifestTransfer) (ManifestSyncOutcome, error) {
+	_pointer := _self.ffiObject.incrementPointer("*DbReader")
+	defer _self.ffiObject.decrementPointer()
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_dbreader_sync_manifest(
+				_pointer, FfiConverterManifestTransferINSTANCE.Lower(manifest), _uniffiStatus),
+		}
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue ManifestSyncOutcome
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterManifestSyncOutcomeINSTANCE.Lift(_uniffiRV), nil
+	}
 }
 
 // Warms selected cache content for one SST.
@@ -11005,12 +11075,17 @@ type DbStatus struct {
 	// but not yet flushed. Sorted ascending by prefix and deduplicated; empty
 	// when no segment extractor is configured.
 	Segments []SegmentPrefix
+	// Version ID of the most recent manifest that this handle wrote to or
+	// read from object storage. When it changes, a writer can send the
+	// manifest from `Db::durable_manifest` to readers.
+	DurableManifestId uint64
 }
 
 func (r *DbStatus) Destroy() {
 	FfiDestroyerUint64{}.Destroy(r.DurableSeq)
 	FfiDestroyerOptionalCloseReason{}.Destroy(r.CloseReason)
 	FfiDestroyerSequenceSegmentPrefix{}.Destroy(r.Segments)
+	FfiDestroyerUint64{}.Destroy(r.DurableManifestId)
 }
 
 type FfiConverterDbStatus struct{}
@@ -11026,6 +11101,7 @@ func (c FfiConverterDbStatus) Read(reader io.Reader) DbStatus {
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterOptionalCloseReasonINSTANCE.Read(reader),
 		FfiConverterSequenceSegmentPrefixINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
 	}
 }
 
@@ -11041,6 +11117,7 @@ func (c FfiConverterDbStatus) Write(writer io.Writer, value DbStatus) {
 	FfiConverterUint64INSTANCE.Write(writer, value.DurableSeq)
 	FfiConverterOptionalCloseReasonINSTANCE.Write(writer, value.CloseReason)
 	FfiConverterSequenceSegmentPrefixINSTANCE.Write(writer, value.Segments)
+	FfiConverterUint64INSTANCE.Write(writer, value.DurableManifestId)
 }
 
 type FfiDestroyerDbStatus struct{}
@@ -11675,6 +11752,57 @@ func (c FfiConverterLogRecord) Write(writer io.Writer, value LogRecord) {
 type FfiDestroyerLogRecord struct{}
 
 func (_ FfiDestroyerLogRecord) Destroy(value LogRecord) {
+	value.Destroy()
+}
+
+// A manifest in the `.manifest` file format, with its version ID.
+//
+// A writer gets it from `Db::durable_manifest` and sends it to readers
+// without object storage, for example over the network. A reader installs
+// it with `DbReader::sync_manifest`.
+type ManifestTransfer struct {
+	// Manifest version ID.
+	Id uint64
+	// Manifest in the `.manifest` file format.
+	Bytes []byte
+}
+
+func (r *ManifestTransfer) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.Id)
+	FfiDestroyerBytes{}.Destroy(r.Bytes)
+}
+
+type FfiConverterManifestTransfer struct{}
+
+var FfiConverterManifestTransferINSTANCE = FfiConverterManifestTransfer{}
+
+func (c FfiConverterManifestTransfer) Lift(rb RustBufferI) ManifestTransfer {
+	return LiftFromRustBuffer[ManifestTransfer](c, rb)
+}
+
+func (c FfiConverterManifestTransfer) Read(reader io.Reader) ManifestTransfer {
+	return ManifestTransfer{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterBytesINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterManifestTransfer) Lower(value ManifestTransfer) C.RustBuffer {
+	return LowerIntoRustBuffer[ManifestTransfer](c, value)
+}
+
+func (c FfiConverterManifestTransfer) LowerExternal(value ManifestTransfer) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ManifestTransfer](c, value))
+}
+
+func (c FfiConverterManifestTransfer) Write(writer io.Writer, value ManifestTransfer) {
+	FfiConverterUint64INSTANCE.Write(writer, value.Id)
+	FfiConverterBytesINSTANCE.Write(writer, value.Bytes)
+}
+
+type FfiDestroyerManifestTransfer struct{}
+
+func (_ FfiDestroyerManifestTransfer) Destroy(value ManifestTransfer) {
 	value.Destroy()
 }
 
@@ -14134,6 +14262,46 @@ func (FfiConverterLogLevel) Write(writer io.Writer, value LogLevel) {
 type FfiDestroyerLogLevel struct{}
 
 func (_ FfiDestroyerLogLevel) Destroy(value LogLevel) {
+}
+
+// The result of a call to `DbReader::sync_manifest`.
+type ManifestSyncOutcome uint
+
+const (
+	// The reader installed the manifest. The next read uses it.
+	ManifestSyncOutcomeApplied ManifestSyncOutcome = 1
+	// The manifest ID is less than or equal to the ID of the installed
+	// manifest. The reader did not change.
+	ManifestSyncOutcomeStale ManifestSyncOutcome = 2
+)
+
+type FfiConverterManifestSyncOutcome struct{}
+
+var FfiConverterManifestSyncOutcomeINSTANCE = FfiConverterManifestSyncOutcome{}
+
+func (c FfiConverterManifestSyncOutcome) Lift(rb RustBufferI) ManifestSyncOutcome {
+	return LiftFromRustBuffer[ManifestSyncOutcome](c, rb)
+}
+
+func (c FfiConverterManifestSyncOutcome) Lower(value ManifestSyncOutcome) C.RustBuffer {
+	return LowerIntoRustBuffer[ManifestSyncOutcome](c, value)
+}
+
+func (c FfiConverterManifestSyncOutcome) LowerExternal(value ManifestSyncOutcome) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ManifestSyncOutcome](c, value))
+}
+func (FfiConverterManifestSyncOutcome) Read(reader io.Reader) ManifestSyncOutcome {
+	id := readInt32(reader)
+	return ManifestSyncOutcome(id)
+}
+
+func (FfiConverterManifestSyncOutcome) Write(writer io.Writer, value ManifestSyncOutcome) {
+	writeInt32(writer, int32(value))
+}
+
+type FfiDestroyerManifestSyncOutcome struct{}
+
+func (_ FfiDestroyerManifestSyncOutcome) Destroy(value ManifestSyncOutcome) {
 }
 
 // Error returned by a foreign [`crate::MergeOperator`] implementation.

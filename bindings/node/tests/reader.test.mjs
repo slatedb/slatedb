@@ -7,7 +7,9 @@ import {
   CloseReason,
   DbReaderBuilder,
   ErrorData,
+  ErrorInvalid,
   FlushType,
+  ManifestSyncOutcome,
   ReaderMode,
   WriteBatch,
 } from "../index.js";
@@ -434,4 +436,51 @@ test("reader warm_sst and evict_cached_sst", async (t) => {
   ]);
 
   await reader.evict_cached_sst(sstId);
+});
+
+test("reader sync_manifest", async (t) => {
+  const cleanup = createCleanup(t);
+  const store = cleanup.track(newMemoryStore());
+  const db = await openDb(store, { cleanup });
+  const admin = cleanup.track(new AdminBuilder(TEST_DB_PATH, store).build(), {
+    shutdown: false,
+  });
+
+  await db.put_with_options(
+    bytes("key"),
+    bytes("initial"),
+    putOptions(),
+    writeOptions(false),
+  );
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+  // A pinned reader has no poller, so only the sync moves it forward.
+  const checkpoint = await admin.create_detached_checkpoint({
+    lifetime_ms: undefined,
+    source: undefined,
+    name: undefined,
+  });
+  const reader = await openReader(store, {
+    cleanup,
+    configure: (builder) => builder.with_reader_mode(ReaderMode.Checkpoint(checkpoint.id)),
+  });
+
+  await db.put_with_options(
+    bytes("key"),
+    bytes("updated"),
+    putOptions(),
+    writeOptions(false),
+  );
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+  const manifest = db.durable_manifest();
+  assert.equal(BigInt(db.status().durable_manifest_id), BigInt(manifest.id));
+  assert.deepEqual(await reader.get(bytes("key")), bytes("initial"));
+
+  assert.equal(reader.sync_manifest(manifest), ManifestSyncOutcome.Applied);
+  assert.deepEqual(await reader.get(bytes("key")), bytes("updated"));
+  assert.equal(reader.sync_manifest(manifest), ManifestSyncOutcome.Stale);
+
+  await expectError(
+    () => reader.sync_manifest({ id: BigInt(manifest.id) + 1n, bytes: bytes("bad") }),
+    ErrorInvalid,
+  );
 });
