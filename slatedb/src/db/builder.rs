@@ -1456,10 +1456,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     }
 
     /// Builds and returns a Compactor instance.
-    ///
-    /// Loads the database manifest so the compactor's in-process worker can
-    /// resolve SSTs the database borrows from others (e.g. after a clone).
-    pub async fn build(self) -> Result<Compactor, crate::Error> {
+    pub fn build(self) -> Compactor {
         let path: Path = self.path.into();
         let recorder = MetricsRecorderHelper::new(
             self.metrics_recorder,
@@ -1489,34 +1486,17 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             block_alignment: self.sst_block_alignment,
             ..SsTableFormat::default()
         };
-        // Resolve SSTs borrowed from other databases (clones/unions) for the
-        // in-process worker. See `CompactionWorkerBuilder::build` for why a
-        // snapshot taken here covers every SST a later job can reference.
-        let external_ssts =
-            match StoredManifest::try_load(manifest_store.clone(), self.system_clock.clone())
-                .await?
-            {
-                Some(manifest) => manifest.manifest().external_ssts(),
-                None => HashMap::new(),
-            };
-        let table_store = Arc::new(TableStore::new_with_fp_registry(
-            retrying_main_object_store,
-            sst_format,
-            PathResolver::new_with_external_ssts(path, external_ssts),
-            self.fp_registry.clone(),
-            None,
-            TableStoreKind::Compactor,
-            BlockCachePolicy::default(),
-        ));
 
         let scheduler_supplier = self
             .scheduler_supplier
             .unwrap_or(Arc::new(SizeTieredCompactionSchedulerSupplier));
 
-        Ok(Compactor::new(
+        Compactor::new(
             manifest_store,
             compactions_store,
-            table_store,
+            retrying_main_object_store,
+            sst_format,
+            path,
             self.options,
             scheduler_supplier,
             self.expected_epoch,
@@ -1529,7 +1509,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             self.merge_operator,
             #[cfg(feature = "compaction_filters")]
             self.compaction_filter_supplier,
-        ))
+        )
     }
 
     /// Build a CompactorEventHandler and optionally an embedded worker from this builder's
@@ -1727,9 +1707,27 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             .into());
         }
         let path: Path = self.path.into();
-        let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
-        let compactions_store =
-            Arc::new(CompactionsStore::new(&path, self.main_object_store.clone()));
+        let recorder = MetricsRecorderHelper::new(
+            self.metrics_recorder,
+            self.options.metric_level.unwrap_or_default(),
+        );
+        let retrying_main_object_store = instrumented_retrying_object_store(
+            self.main_object_store,
+            &recorder,
+            ObjectStoreComponent::Compactor,
+            ObjectStoreType::Main,
+            self.rand.clone(),
+            self.system_clock.clone(),
+            self.options.object_store_max_retries,
+        );
+        let manifest_store = Arc::new(ManifestStore::new(
+            &path,
+            retrying_main_object_store.clone(),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &path,
+            retrying_main_object_store.clone(),
+        ));
         // Resolve SSTs borrowed from other databases (clones/unions). The
         // external_dbs list is only written when the clone or union manifest is
         // created and only shrinks afterwards, so a snapshot taken at startup
@@ -1743,7 +1741,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             };
         let path_resolver = PathResolver::new_with_external_ssts(path, external_ssts);
         let table_store = Arc::new(TableStore::new_with_fp_registry(
-            self.main_object_store,
+            retrying_main_object_store,
             SsTableFormat {
                 filter_policies: self.filter_policies.clone(),
                 block_transformer: self.block_transformer.clone(),
@@ -1759,10 +1757,6 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             TableStoreKind::Compactor,
             BlockCachePolicy::default(),
         ));
-        let recorder = MetricsRecorderHelper::new(
-            self.metrics_recorder,
-            self.options.metric_level.unwrap_or_default(),
-        );
         let stats = Arc::new(CompactionStats::new(&recorder));
         let worker_runtime = self.worker_runtime.unwrap_or_else(Handle::current);
         let options = Arc::new(self.options);
@@ -2431,16 +2425,20 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
 mod tests {
     use crate::cached_object_store::CachedObjectStore;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
-    use crate::config::{CompactorOptions, GarbageCollectorOptions, MetricLevel, Settings};
+    use crate::config::{
+        CompactionWorkerOptions, CompactorOptions, GarbageCollectorOptions, MetricLevel, Settings,
+    };
     use crate::error::ErrorKind;
     use crate::garbage_collector::stats::GC_COUNT;
     use crate::instrumented_object_store::stats::REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
+    use crate::test_utils::FlakyObjectStore;
     use crate::wal::test_utils::FakeWalWriter;
     use crate::wal::{
         WalError, WalIterator, WalRows, WriterInit, WriterInitResult, WriterManifest,
     };
+    use crate::CompactionWorkerBuilder;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -2699,9 +2697,7 @@ mod tests {
             .build();
         let _compactor = crate::CompactorBuilder::new(path, object_store)
             .with_metrics_recorder(metrics_recorder.clone())
-            .build()
-            .await
-            .expect("failed to build compactor");
+            .build();
 
         // when:
         db.put(b"k1", b"v1")
@@ -2735,6 +2731,57 @@ mod tests {
         );
 
         db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn test_compaction_worker_builder_uses_instrumented_retrying_object_store() {
+        // given: an initialized database, and a worker store whose first two
+        // `list` calls fail transiently
+        let path = "test_compaction_worker_builder_uses_instrumented_retrying_object_store";
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::builder(path, inner.clone())
+            .with_settings(Settings {
+                compactor_options: None,
+                garbage_collector_options: None,
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .expect("failed to build db");
+        db.close().await.expect("failed to close db");
+        let flaky = Arc::new(FlakyObjectStore::new(inner.clone(), 0).with_list_failures(2, 0));
+
+        // when: a worker with a retry bound of 1 loads the manifest
+        let bounded = CompactionWorkerBuilder::new(path, flaky.clone())
+            .with_options(CompactionWorkerOptions {
+                object_store_max_retries: Some(1),
+                ..CompactionWorkerOptions::default()
+            })
+            .build()
+            .await;
+
+        // then: it gives up after one retry
+        assert!(bounded.is_err(), "bounded worker build should fail");
+        assert_eq!(flaky.list_attempts(), 2);
+
+        // when: a worker with default (unbounded) retries loads the manifest
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(2, 0));
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let _worker = CompactionWorkerBuilder::new(path, flaky.clone())
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .expect("unbounded worker build should retry past transient failures");
+
+        // then: it retries past both failures and records the I/O under the
+        // compactor's object-store metric labels
+        assert_eq!(flaky.list_attempts(), 3);
+        assert!(lookup_metric_with_labels(
+            &metrics_recorder,
+            OBJECT_STORE_REQUEST_COUNT,
+            &object_store_labels("compactor", "main", "get", "list"),
+        )
+        .is_some_and(|count| count > 0));
     }
 
     #[tokio::test]
@@ -3059,8 +3106,8 @@ mod tests {
     }
 
     /// A standalone `Compactor` built by `CompactorBuilder` runs its jobs on
-    /// an in-process worker that shares the compactor's table store, so that
-    /// store must also resolve SSTs the clone borrows from its ancestors.
+    /// an in-process worker, whose table store must also resolve SSTs the
+    /// clone borrows from its ancestors.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_compactor_builder_resolves_ssts_borrowed_through_clone_chain() {
         use crate::config::CompactionWorkerOptions;
@@ -3077,7 +3124,7 @@ mod tests {
             .expect("failed to build db");
         put_and_flush_l0(&db, b"c").await;
 
-        // The compactor snapshots C's external SST mapping when it is built.
+        // The compactor snapshots C's external SST mapping when it starts.
         let compactor = CompactorBuilder::new(CHAIN_C, object_store.clone())
             .with_options(CompactorOptions {
                 poll_interval: Duration::from_millis(50),
@@ -3088,9 +3135,7 @@ mod tests {
                 ..CompactorOptions::default()
             })
             .with_scheduler_supplier(compact_all_three_l0s())
-            .build()
-            .await
-            .expect("failed to build compactor");
+            .build();
         compactor.start().await.expect("failed to start compactor");
 
         await_l0_compacted(CHAIN_C, object_store, "standalone compactor").await;

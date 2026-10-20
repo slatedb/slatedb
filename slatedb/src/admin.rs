@@ -380,7 +380,7 @@ impl Admin {
         cancellation_token: CancellationToken,
         options: crate::config::CompactorOptions,
     ) -> Result<(), crate::Error> {
-        let compactor = self.compactor_builder(options).build().await?;
+        let compactor = self.compactor_builder(options).build();
 
         compactor.start().await?;
 
