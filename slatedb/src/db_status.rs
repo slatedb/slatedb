@@ -144,6 +144,22 @@ impl DbStatusManager {
         });
     }
 
+    /// Replaces the current manifest and the memtable segment prefixes, even
+    /// if the manifest is older. A [`crate::DbReader`] calls this after it falls
+    /// back from a synced manifest to an older manifest.
+    pub(crate) fn report_reverted_manifest_and_memtable_segments(
+        &self,
+        versioned: VersionedManifest,
+        prefixes: BTreeSet<Bytes>,
+    ) {
+        self.tx.send_if_modified(|s| {
+            let changed = s.current_manifest != versioned || s.memtable_segments != prefixes;
+            s.current_manifest = versioned;
+            s.memtable_segments = prefixes;
+            changed
+        });
+    }
+
     /// Reports a manifest that this handle wrote to or read from object
     /// storage. The ID must be the version ID of that manifest file.
     pub(crate) fn report_durable_manifest(&self, versioned: VersionedManifest) {

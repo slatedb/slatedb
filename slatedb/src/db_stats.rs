@@ -40,6 +40,15 @@ pub const SST_FILTER_NEGATIVE_COUNT: &str = db_stat_name!("sst_filter_negative_c
 ///   write_amp = (`WAL_FLUSH_BYTES` + `L0_FLUSH_BYTES` + `compactor::stats::BYTES_COMPACTED`)
 ///               / `MEMTABLE_WRITE_BYTES`
 pub const MEMTABLE_WRITE_BYTES: &str = db_stat_name!("memtable_write_bytes");
+/// Count of calls to `DbReader::sync_manifest`, labeled by
+/// [`MANIFEST_SYNC_OUTCOME_LABEL`]. The label value is `applied`, `stale`, or
+/// `rejected`.
+pub const MANIFEST_SYNC_COUNT: &str = db_stat_name!("manifest_sync_count");
+/// Label key for the outcome of a call to `DbReader::sync_manifest`.
+pub const MANIFEST_SYNC_OUTCOME_LABEL: &str = "outcome";
+/// Count of reads that failed against a synced manifest because an object was
+/// missing, after which the reader installed its prior manifest again.
+pub const MANIFEST_SYNC_FALLBACK_COUNT: &str = db_stat_name!("manifest_sync_fallback_count");
 
 /// Label key distinguishing filter metrics by query kind. Value is one of
 /// [`FILTER_KIND_POINT`], [`FILTER_KIND_PREFIX`] or [`FILTER_KIND_RANGE`].

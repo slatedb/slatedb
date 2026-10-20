@@ -103,18 +103,17 @@ The application cannot build this today, for three reasons:
                                                                  5. wake the poller (managed mode)
 ```
 
-The reader keeps one more field next to its current state:
+Each reader state gets one more field. A pushed state holds its base state, so one lock protects both values:
 
 ```rust
-struct DbReaderInner {
+struct ReaderState {
     // ...existing fields
-    state: RwLock<Arc<ReaderState>>,
-    /// The base state, present only while `state` holds a pushed state.
-    base_state: RwLock<Option<Arc<ReaderState>>>,
+    /// The base state. It is `Some` only when this state is a pushed state.
+    base: Option<Arc<ReaderState>>,
 }
 ```
 
-The implementation can put both values behind one lock, so that a reader sees a consistent pair.
+A pushed state that the reader builds from another pushed state keeps the same base state. The chain of base states is never longer than one.
 
 ### Transfer format for VersionedManifest
 
@@ -269,7 +268,7 @@ The reader applies these rules before it changes any state. All rules are CPU on
 4. `last_l0_seq` is greater than or equal to the `last_l0_seq` of the installed manifest.
 5. `segment_extractor_name` is equal to the value in the installed manifest.
 
-If the ID is less than or equal to the installed ID, the reader returns `Stale` before rules 2 to 5.
+If the ID is less than or equal to the installed ID, the reader returns `Stale` before it applies the rules.
 
 These rules do not prove that the manifest belongs to this database. A manifest from a different database can pass them. In that case, the first read that touches a missing SST starts the [fallback](#fallback-after-a-failed-read).
 
@@ -296,20 +295,19 @@ After the lock is released, the reader advances the durable sequence number in t
 
 The mode decides what the poller does after a sync. The mode does not change.
 
-`FollowLatest`: The poller already reads the latest manifest and calls `apply_latest_manifest`. That function ignores a manifest whose ID is not greater than the installed ID, and only replays new WAL SSTs. After a sync, the poller keeps this behavior. When the poller installs a loaded manifest with a greater ID, that state becomes the new base state, and the reader drops the old base state.
+`FollowLatest`: The poller already reads the latest manifest and calls `apply_latest_manifest`. That function ignores a manifest whose ID is not greater than the installed ID, and only replays new WAL SSTs. After a sync, the poller keeps this behavior. When the poller installs a loaded manifest with a greater ID, the reader drops the old base state. When the poller reads a manifest with the same ID as the installed pushed manifest, and the two manifests are equal, the reader also drops the base state, because object storage confirmed the pushed manifest.
 
-`ManagedCheckpoint`: The reader checkpoint protects the SSTs of the checkpoint manifest from garbage collection. After a sync, the reader reads from a newer manifest that the checkpoint does not cover. The reader sends a `ManifestSynced` message to the poller. The poller then moves the checkpoint at once, and does not wait for the next tick:
+`ManagedCheckpoint`: The reader checkpoint protects the SSTs of the checkpoint manifest from garbage collection. After a sync, the reader reads from a newer manifest that the checkpoint does not cover. The reader sends a `ManifestSynced` message to the poller. The message channel holds one message, so many syncs cause one poll. The poller then does these steps at once, and does not wait for the next tick:
 
 1. Load the latest manifest from object storage.
-2. Replace the reader checkpoint with a checkpoint on the latest manifest.
-3. If the ID of the latest manifest is greater than or equal to the installed ID, rebuild the state from the new checkpoint as `reestablish_checkpoint` does today. The rebuilt state becomes the base state.
-4. If the ID of the latest manifest is less than the installed ID, keep the pushed state and store the new checkpoint on it. Object storage can return an older manifest only if the pushed manifest was not durable.
+2. If the ID of the latest manifest is less than the installed ID, do not move the checkpoint. Object storage can return an older manifest only if the pushed manifest is not durable yet. The next poll does this test again. This rule prevents a checkpoint write on each poll for a manifest that object storage never holds.
+3. Otherwise, replace the reader checkpoint with a checkpoint on the latest manifest, and rebuild the state from the new checkpoint as `reestablish_checkpoint` does today. The rebuilt state is a loaded state, so the reader drops the base state.
 
 The poller must also use the checkpoint manifest ID, not the installed manifest, when it decides to move the checkpoint. Today, `should_reestablish_checkpoint` compares the latest manifest with the installed state. After a sync, the two can be equal while the checkpoint still points at an older manifest.
 
-The SSTs of a pushed manifest are not protected by the reader checkpoint until step 2 completes. The garbage collector does not delete a compacted SST until it is older than `compacted_options.min_age`, which is 24 hours by default. The window between a sync and step 2 is one manifest read and one manifest write.
+The SSTs of a pushed manifest are not protected by the reader checkpoint until step 3 completes. The garbage collector does not delete a compacted SST until it is older than `compacted_options.min_age`, which is 24 hours by default. The window between a sync and step 3 is one manifest read and one manifest write.
 
-`Checkpoint(id)`: The poller does nothing in this mode today, and it continues to do nothing. A pinned reader replays the WAL only to the boundary of its manifest. After a sync, the reader reads at the boundary of the pushed manifest. The pinned checkpoint stays the base state for the full life of the reader. The reader does not create or move checkpoints in this mode, so the application is responsible for garbage collection safety of pushed manifests. A pinned reader that gets a manifest which the garbage collector cleaned up falls back to the pinned checkpoint.
+`Checkpoint(id)`: The poller does nothing in this mode today, and it continues to do nothing. A pinned reader replays the WAL only to the boundary of its manifest. After a sync, the reader reads the L0 SSTs and sorted runs of the pushed manifest, and the WAL rows that it already replayed and that are newer than that L0. It does not replay WAL SSTs that the pushed manifest records. The pinned checkpoint stays the base state for the full life of the reader. The reader does not create or move checkpoints in this mode, so the application is responsible for garbage collection safety of pushed manifests. A pinned reader that gets a manifest which the garbage collector cleaned up falls back to the pinned checkpoint.
 
 ### Races with the manifest poller
 
@@ -317,7 +315,7 @@ The poller reads the installed state, awaits IO, and then installs a new state. 
 
 The RFC changes both functions to install only if the state did not move:
 
-- `install_state` keeps the state that has the greater manifest ID. If the IDs are equal, it keeps the new state, because that state includes WAL replay.
+- `install_state` keeps the state that has the greater manifest ID. If the IDs are equal, it keeps the new state, because that state includes WAL replay. If it keeps the installed state, it copies the checkpoint of the new state to it, because the poller can have replaced the checkpoint during the await.
 - `maybe_replay_new_wals` installs its result only if the installed state is still the same `Arc` that it read. If the state changed, it drops the result. The next tick replays the WAL against the new state.
 
 ### Fallback after a failed read
@@ -331,7 +329,9 @@ The application can send a bad manifest. The manifest can refer to SSTs that the
 
 The reader keeps the base state until it installs a newer loaded state. This means that a later read can also fall back, not only the first read. The cost is that the base state keeps its immutable memtables in memory while pushed states are installed.
 
-A `scan` can fall back only while it builds the iterator. If `DbIterator::next` fails in the middle of a scan, the reader still goes back to the base state for later reads. The scan returns the error, because it already returned rows from the pushed state.
+A `scan` can fall back only while it builds the iterator. If `DbIterator::next` fails in the middle of a scan, the scan returns the error, because it already returned rows from the pushed state. The reader does not go back to the base state in that case. The next `get` or `scan` that fails for the same reason does.
+
+After a fallback, the reader reports the base manifest as `DbStatus::current_manifest`, even though its ID is less than the ID of the pushed manifest. In `ManagedCheckpoint` mode, the reader also wakes the poller, so that the poller makes sure that the checkpoint covers the installed state.
 
 The oracle durable sequence number does not move back after a fallback. The base state holds fewer rows, so reads return a subset of what the oracle permits. This is the same visibility as a reader that has not replayed the WAL yet.
 
@@ -443,11 +443,9 @@ The file format of `.manifest` objects does not change. `to_bytes`, `from_bytes`
 ### Observability
 
 - Configuration: No new options.
-- Metrics, in the `DbReader` stats:
-  - `manifest_sync_applied`: count of applied syncs.
-  - `manifest_sync_stale`: count of stale syncs.
-  - `manifest_sync_rejected`: count of syncs that failed validation.
-  - `manifest_sync_fallback`: count of fallbacks to the base state.
+- Metrics, registered by each `DbReader`:
+  - `slatedb.db.manifest_sync_count`: count of calls to `sync_manifest`, with an `outcome` label of `applied`, `stale`, or `rejected`.
+  - `slatedb.db.manifest_sync_fallback_count`: count of fallbacks to the base state.
 - Logging: A `debug` line for each applied sync, and a `warn` line for each rejected sync and each fallback.
 
 ### Compatibility

@@ -9,7 +9,9 @@ use {
         db_cache_manager,
         db_common::extract_segment_prefix,
         db_state::{collect_touched_segments, SsTableHandle, SsTableId},
-        db_stats::DbStats,
+        db_stats::{
+            DbStats, MANIFEST_SYNC_COUNT, MANIFEST_SYNC_FALLBACK_COUNT, MANIFEST_SYNC_OUTCOME_LABEL,
+        },
         db_status::{ClosedResultWriter, DbStatus, DbStatusManager},
         dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef},
         error::SlateDBError,
@@ -34,10 +36,10 @@ use {
     async_trait::async_trait,
     bytes::Bytes,
     futures::stream::BoxStream,
-    log::{info, warn},
+    log::{debug, info, warn},
     object_store::{path::Path, ObjectStore},
     parking_lot::RwLock,
-    slatedb_common::{clock::SystemClock, DbRand},
+    slatedb_common::{clock::SystemClock, metrics::CounterFn, DbRand},
     std::{
         collections::{BTreeSet, VecDeque},
         ops::Sub,
@@ -48,6 +50,17 @@ use {
 };
 
 pub(crate) const DB_READER_TASK_NAME: &str = "manifest_poller";
+
+/// The result of a call to [`DbReader::sync_manifest`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManifestSyncOutcome {
+    /// The reader installed the manifest. The next read uses it.
+    Applied,
+
+    /// The manifest ID is less than or equal to the ID of the installed manifest. The reader did
+    /// not change.
+    Stale,
+}
 
 /// Determines how a [`DbReader`] chooses and refreshes the database state it reads.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -126,6 +139,11 @@ struct DbReaderInner {
     status_manager: DbStatusManager,
     segment_extractor: Option<Arc<dyn PrefixExtractor>>,
     rand: Arc<DbRand>,
+    /// Wakes the manifest poller after [`DbReader::sync_manifest`] installs a manifest. The
+    /// channel holds one message, so that many syncs cause one poll.
+    poller_tx: async_channel::Sender<DbReaderMessage>,
+    poller_rx: async_channel::Receiver<DbReaderMessage>,
+    sync_stats: ManifestSyncStats,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
     /// metric handles in `DbStats` (and other stats structs) are still in use.
     /// See: https://github.com/slatedb/slatedb/issues/1469
@@ -136,6 +154,33 @@ struct DbReaderInner {
 #[derive(Debug)]
 enum DbReaderMessage {
     PollManifest,
+    /// [`DbReader::sync_manifest`] installed a manifest, or a read fell back from one.
+    ManifestSynced,
+}
+
+/// Counters for [`DbReader::sync_manifest`] and for the fallback after a failed read.
+struct ManifestSyncStats {
+    applied: Arc<dyn CounterFn>,
+    stale: Arc<dyn CounterFn>,
+    rejected: Arc<dyn CounterFn>,
+    fallback: Arc<dyn CounterFn>,
+}
+
+impl ManifestSyncStats {
+    fn new(recorder: &slatedb_common::metrics::MetricsRecorderHelper) -> Self {
+        let outcome = |value| {
+            recorder
+                .counter(MANIFEST_SYNC_COUNT)
+                .labels(&[(MANIFEST_SYNC_OUTCOME_LABEL, value)])
+                .register()
+        };
+        Self {
+            applied: outcome("applied"),
+            stale: outcome("stale"),
+            rejected: outcome("rejected"),
+            fallback: recorder.counter(MANIFEST_SYNC_FALLBACK_COUNT).register(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -146,6 +191,11 @@ struct ReaderState {
     imm_memtable: VecDeque<Arc<ImmutableMemtable>>,
     last_wal_id: u64,
     last_remote_persisted_seq: u64,
+    /// The most recent state that the reader built from a manifest that it read from object
+    /// storage. It is `Some` only when this state holds a manifest from
+    /// [`DbReader::sync_manifest`]. If a read against this state fails because an object is
+    /// missing, the reader installs the base state again.
+    base: Option<Arc<ReaderState>>,
 }
 
 static EMPTY_TABLE: LazyLock<Arc<KVTable>> = LazyLock::new(|| Arc::new(KVTable::new()));
@@ -249,6 +299,8 @@ impl DbReaderInner {
         ));
 
         let db_stats = DbStats::new(&recorder);
+        let sync_stats = ManifestSyncStats::new(&recorder);
+        let (poller_tx, poller_rx) = async_channel::bounded(1);
 
         let state = RwLock::new(initial_state);
         let reader = Reader::new(
@@ -272,6 +324,9 @@ impl DbReaderInner {
             status_manager,
             segment_extractor,
             rand,
+            poller_tx,
+            poller_rx,
+            sync_stats,
             recorder,
         };
         Ok(inner)
@@ -323,10 +378,23 @@ impl DbReaderInner {
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, SlateDBError> {
         self.check_closed()?;
+        let key = key.as_ref();
         let db_state = Arc::clone(&self.state.read());
-        self.reader
+        let result = self
+            .reader
             .get_key_value_with_options(key, options, db_state.as_ref(), None, None)
-            .await
+            .await;
+        match result {
+            Err(error) => match self.fall_back_from(&db_state, &error) {
+                Some(retry_state) => {
+                    self.reader
+                        .get_key_value_with_options(key, options, retry_state.as_ref(), None, None)
+                        .await
+                }
+                None => Err(error),
+            },
+            result => result,
+        }
     }
 
     async fn scan_with_options(
@@ -337,18 +405,53 @@ impl DbReaderInner {
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
         let db_state = Arc::clone(&self.state.read());
-        self.reader
+        let result = self
+            .reader
             .scan_with_options(
-                range,
+                range.clone(),
                 options,
                 ScanContext {
                     db_state: db_state.as_ref(),
                     write_batch_iter: None,
                     max_seq: None,
-                    prefix,
+                    prefix: prefix.clone(),
                 },
             )
-            .await
+            .await;
+        // Only the construction of the iterator can fall back. An error from
+        // `DbIterator::next` goes to the caller, because the scan already returned rows.
+        match result {
+            Err(error) => match self.fall_back_from(&db_state, &error) {
+                Some(retry_state) => {
+                    self.reader
+                        .scan_with_options(
+                            range,
+                            options,
+                            ScanContext {
+                                db_state: retry_state.as_ref(),
+                                write_batch_iter: None,
+                                max_seq: None,
+                                prefix,
+                            },
+                        )
+                        .await
+                }
+                None => Err(error),
+            },
+            result => result,
+        }
+    }
+
+    /// Returns true if the installed state holds a manifest from [`DbReader::sync_manifest`]
+    /// that the reader checkpoint does not cover, and object storage holds a manifest with an
+    /// ID of `latest_manifest_id` that is at least as new. If object storage is behind the
+    /// synced manifest, the reader waits for a later poll and does not write a checkpoint.
+    fn checkpoint_behind_synced_manifest(&self, latest_manifest_id: u64) -> bool {
+        let read_guard = self.state.read();
+        read_guard.checkpoint.as_ref().is_some_and(|checkpoint| {
+            checkpoint.manifest_id < read_guard.manifest_id
+                && latest_manifest_id >= read_guard.manifest_id
+        })
     }
 
     fn should_reestablish_checkpoint(&self, latest: &ManifestCore) -> bool {
@@ -392,12 +495,26 @@ impl DbReaderInner {
         Ok(())
     }
 
+    /// Installs a state that the reader built from a manifest that it read from object storage.
+    ///
+    /// [`DbReader::sync_manifest`] can install a newer manifest while the caller awaits IO. If
+    /// the installed manifest is newer than `new_state`, this function keeps the installed
+    /// state and only copies the checkpoint of `new_state` to it, because the caller can have
+    /// replaced the checkpoint of the installed state.
     fn install_state(&self, new_state: ReaderState) {
         let durable_seq = new_state.last_remote_persisted_seq;
         let versioned_manifest = VersionedManifest::from(&new_state);
         let touched_segments = collect_touched_segments(&new_state);
-        self.oracle.advance_durable_seq(durable_seq);
         let mut write_guard = self.state.write();
+        if new_state.manifest_id < write_guard.manifest_id {
+            if new_state.checkpoint != write_guard.checkpoint {
+                let mut updated_state = write_guard.as_ref().clone();
+                updated_state.checkpoint = new_state.checkpoint;
+                *write_guard = Arc::new(updated_state);
+            }
+            return;
+        }
+        self.oracle.advance_durable_seq(durable_seq);
         *write_guard = Arc::new(new_state);
         drop(write_guard);
         self.status_manager
@@ -424,8 +541,13 @@ impl DbReaderInner {
         .await?;
 
         if last_wal_id > current_state.last_wal_id {
-            self.oracle.advance_durable_seq(last_committed_seq);
             let mut write_guard = self.state.write();
+            // A sync or a fallback can replace the state during the replay. The replayed tables
+            // match `current_state` only, so drop them. The next poll replays the WAL again.
+            if !Arc::ptr_eq(&write_guard, &current_state) {
+                return Ok(());
+            }
+            self.oracle.advance_durable_seq(last_committed_seq);
             *write_guard = Arc::new(ReaderState {
                 manifest_id: current_state.manifest_id,
                 checkpoint: current_state.checkpoint.clone(),
@@ -433,6 +555,7 @@ impl DbReaderInner {
                 imm_memtable,
                 last_wal_id,
                 last_remote_persisted_seq: last_committed_seq,
+                base: current_state.base.clone(),
             });
             drop(write_guard);
             self.status_manager
@@ -458,8 +581,30 @@ impl DbReaderInner {
         manifest: Manifest,
     ) -> Result<ReaderState, SlateDBError> {
         let prior = self.state.read().clone();
-        let mut imm_memtable = VecDeque::new();
+        let imm_memtable = self.retain_newer_than_manifest(&prior, &manifest)?;
 
+        Self::build_reader_state(
+            checkpoint,
+            manifest_id,
+            manifest,
+            imm_memtable,
+            WalReplayEnd::for_reader(self.mode, &self.options),
+            Arc::clone(&self.table_store),
+            self.wal_reader.as_ref(),
+            &self.options,
+            self.segment_extractor.as_ref(),
+        )
+        .await
+    }
+
+    /// Returns the immutable memtables of `prior` that hold rows newer than the L0 of
+    /// `manifest`. L0 and lower levels already hold the older rows.
+    fn retain_newer_than_manifest(
+        &self,
+        prior: &ReaderState,
+        manifest: &Manifest,
+    ) -> Result<VecDeque<Arc<ImmutableMemtable>>, SlateDBError> {
+        let mut imm_memtable = VecDeque::new();
         for table in prior.imm_memtable.iter() {
             let table_meta = table.table().metadata();
             if table_meta.last_seq <= manifest.core.last_l0_seq {
@@ -483,19 +628,7 @@ impl DbReaderInner {
                 imm_memtable.push_back(Arc::new(filtered_table));
             }
         }
-
-        Self::build_reader_state(
-            checkpoint,
-            manifest_id,
-            manifest,
-            imm_memtable,
-            WalReplayEnd::for_reader(self.mode, &self.options),
-            Arc::clone(&self.table_store),
-            self.wal_reader.as_ref(),
-            &self.options,
-            self.segment_extractor.as_ref(),
-        )
-        .await
+        Ok(imm_memtable)
     }
 
     async fn build_reader_state(
@@ -534,6 +667,7 @@ impl DbReaderInner {
             imm_memtable,
             last_wal_id,
             last_remote_persisted_seq: last_committed_seq,
+            base: None,
         })
     }
 
@@ -548,6 +682,7 @@ impl DbReaderInner {
     ) -> Result<(), SlateDBError> {
         let manifest_id = latest_manifest.id;
         if manifest_id <= self.state.read().manifest_id {
+            self.confirm_pushed_state(&latest_manifest);
             return self.maybe_replay_new_wals().await;
         }
 
@@ -557,6 +692,178 @@ impl DbReaderInner {
         self.install_state(new_state);
         info!("refreshed reader to latest manifest [manifest_id={manifest_id}]");
         Ok(())
+    }
+
+    /// Drops the base state if the installed state holds a pushed manifest that is equal to
+    /// `loaded`, a manifest that the reader read from object storage.
+    fn confirm_pushed_state(&self, loaded: &VersionedManifest) {
+        let mut write_guard = self.state.write();
+        if write_guard.base.is_none()
+            || write_guard.manifest_id != loaded.id
+            || write_guard.manifest != loaded.manifest
+        {
+            return;
+        }
+        let mut confirmed_state = write_guard.as_ref().clone();
+        confirmed_state.base = None;
+        *write_guard = Arc::new(confirmed_state);
+        drop(write_guard);
+        self.status_manager.report_durable_manifest(loaded.clone());
+    }
+
+    /// Installs a manifest that the application received out of band. See
+    /// [`DbReader::sync_manifest`].
+    fn sync_manifest(
+        &self,
+        manifest: VersionedManifest,
+    ) -> Result<ManifestSyncOutcome, SlateDBError> {
+        self.check_closed()?;
+        loop {
+            let current_state = Arc::clone(&self.state.read());
+            if manifest.id <= current_state.manifest_id {
+                self.sync_stats.stale.increment(1);
+                return Ok(ManifestSyncOutcome::Stale);
+            }
+            if let Err(err) = Self::validate_synced_manifest(&current_state.manifest, &manifest) {
+                self.sync_stats.rejected.increment(1);
+                warn!("rejected synced manifest [error={err}]");
+                return Err(err);
+            }
+
+            // The build is CPU only. If the state changes before the swap, build again.
+            let pushed_state = self.build_pushed_state(&current_state, &manifest)?;
+            let durable_seq = pushed_state.last_remote_persisted_seq;
+            let touched_segments = collect_touched_segments(&pushed_state);
+            let mut write_guard = self.state.write();
+            if !Arc::ptr_eq(&write_guard, &current_state) {
+                continue;
+            }
+            *write_guard = Arc::new(pushed_state);
+            drop(write_guard);
+
+            self.oracle.advance_durable_seq(durable_seq);
+            let manifest_id = manifest.id;
+            self.status_manager
+                .report_manifest_and_memtable_segments(manifest, touched_segments);
+            self.sync_stats.applied.increment(1);
+            self.wake_poller();
+            debug!("synced reader to manifest [manifest_id={manifest_id}]");
+            return Ok(ManifestSyncOutcome::Applied);
+        }
+    }
+
+    /// Applies the local validation rules to a manifest that the application gives to
+    /// [`DbReader::sync_manifest`]. The rules do not prove that the manifest belongs to this
+    /// database.
+    fn validate_synced_manifest(
+        installed: &Manifest,
+        synced: &VersionedManifest,
+    ) -> Result<(), SlateDBError> {
+        let reason = if !synced.manifest.core.initialized {
+            Some("the manifest is not initialized".to_string())
+        } else if synced.manifest.writer_epoch < installed.writer_epoch {
+            Some(format!(
+                "writer_epoch `{}` is less than the installed writer_epoch `{}`",
+                synced.manifest.writer_epoch, installed.writer_epoch
+            ))
+        } else if synced.manifest.compactor_epoch < installed.compactor_epoch {
+            Some(format!(
+                "compactor_epoch `{}` is less than the installed compactor_epoch `{}`",
+                synced.manifest.compactor_epoch, installed.compactor_epoch
+            ))
+        } else if synced.manifest.core.last_l0_seq < installed.core.last_l0_seq {
+            Some(format!(
+                "last_l0_seq `{}` is less than the installed last_l0_seq `{}`",
+                synced.manifest.core.last_l0_seq, installed.core.last_l0_seq
+            ))
+        } else if synced.manifest.core.segment_extractor_name
+            != installed.core.segment_extractor_name
+        {
+            Some(format!(
+                "segment_extractor_name `{:?}` is not equal to the installed segment_extractor_name `{:?}`",
+                synced.manifest.core.segment_extractor_name, installed.core.segment_extractor_name
+            ))
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => Err(SlateDBError::InvalidSyncedManifest {
+                manifest_id: synced.id,
+                reason,
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// Builds the state for a manifest from [`DbReader::sync_manifest`] without IO. The
+    /// state keeps the checkpoint of `current_state`, and it keeps the base state for the
+    /// fallback after a failed read.
+    fn build_pushed_state(
+        &self,
+        current_state: &Arc<ReaderState>,
+        manifest: &VersionedManifest,
+    ) -> Result<ReaderState, SlateDBError> {
+        let imm_memtable = self.retain_newer_than_manifest(current_state, &manifest.manifest)?;
+        let (last_wal_id, last_remote_persisted_seq) =
+            Self::replayed_watermark(&manifest.manifest.core, &imm_memtable);
+        let base = current_state
+            .base
+            .clone()
+            .unwrap_or_else(|| Arc::clone(current_state));
+        Ok(ReaderState {
+            manifest_id: manifest.id,
+            checkpoint: current_state.checkpoint.clone(),
+            manifest: manifest.manifest.clone(),
+            imm_memtable,
+            last_wal_id,
+            last_remote_persisted_seq,
+            base: Some(base),
+        })
+    }
+
+    /// Installs the base state again after a read against `failed_state` returned `error`.
+    ///
+    /// Returns the state to retry the read with, or `None` if the read must not be retried.
+    /// The reader falls back only if `error` comes from a missing object and `failed_state`
+    /// holds a manifest from [`DbReader::sync_manifest`].
+    fn fall_back_from(
+        &self,
+        failed_state: &Arc<ReaderState>,
+        error: &SlateDBError,
+    ) -> Option<Arc<ReaderState>> {
+        if !error.has_object_store_not_found() {
+            return None;
+        }
+        let base = failed_state.base.as_ref()?;
+        let mut write_guard = self.state.write();
+        if !Arc::ptr_eq(&write_guard, failed_state) {
+            // The state changed during the read. Retry with the new state.
+            return Some(Arc::clone(&write_guard));
+        }
+        *write_guard = Arc::clone(base);
+        drop(write_guard);
+
+        self.sync_stats.fallback.increment(1);
+        warn!(
+            "read failed against synced manifest, falling back [manifest_id={}, base_manifest_id={}, error={error:?}]",
+            failed_state.manifest_id, base.manifest_id
+        );
+        self.status_manager
+            .report_reverted_manifest_and_memtable_segments(
+                VersionedManifest::from(base.as_ref()),
+                collect_touched_segments(base.as_ref()),
+            );
+        self.wake_poller();
+        Some(Arc::clone(base))
+    }
+
+    /// Asks the manifest poller to move the reader checkpoint. Only a reader in
+    /// [`DbReaderMode::ManagedCheckpoint`] owns a checkpoint to move.
+    fn wake_poller(&self) {
+        if self.mode == DbReaderMode::ManagedCheckpoint {
+            // A full channel already holds a wake-up message.
+            let _ = self.poller_tx.try_send(DbReaderMessage::ManifestSynced);
+        }
     }
 
     async fn maybe_refresh_checkpoint(
@@ -632,11 +939,10 @@ impl DbReaderInner {
         let poller = ManifestPoller {
             inner: Arc::clone(self),
         };
-        let (_tx, rx) = async_channel::unbounded();
         let result = task_executor.add_handler(
             DB_READER_TASK_NAME.to_string(),
             Box::new(poller),
-            rx,
+            self.poller_rx.clone(),
             &Handle::current(),
         );
         task_executor.monitor_on(&Handle::current())?;
@@ -798,9 +1104,8 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
     }
 
     async fn handle(&mut self, message: DbReaderMessage) -> Result<(), SlateDBError> {
-        assert!(matches!(message, DbReaderMessage::PollManifest));
-        match self.inner.mode {
-            DbReaderMode::ManagedCheckpoint => {
+        match (self.inner.mode, message) {
+            (DbReaderMode::ManagedCheckpoint, _) => {
                 let mut manifest = StoredManifest::load(
                     Arc::clone(&self.inner.manifest_store),
                     self.inner.system_clock.clone(),
@@ -808,9 +1113,10 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
                 .await?;
 
                 let latest_manifest = manifest.manifest();
-                if self
-                    .inner
-                    .should_reestablish_checkpoint(&latest_manifest.core)
+                if self.inner.checkpoint_behind_synced_manifest(manifest.id())
+                    || self
+                        .inner
+                        .should_reestablish_checkpoint(&latest_manifest.core)
                 {
                     let checkpoint = self.inner.replace_checkpoint(&mut manifest).await?;
                     self.inner.reestablish_checkpoint(checkpoint).await?;
@@ -820,15 +1126,17 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
 
                 self.inner.maybe_refresh_checkpoint(&mut manifest).await
             }
-            DbReaderMode::FollowLatest => {
+            (DbReaderMode::FollowLatest, DbReaderMessage::PollManifest) => {
                 let result = self.inner.refresh_latest_manifest().await;
                 if let Err(error) = result {
                     warn!("failed to refresh reader to latest manifest [error={error:?}]");
                 }
                 Ok(())
             }
+            // A sync needs no extra poll, because this mode does not own a checkpoint.
+            (DbReaderMode::FollowLatest, DbReaderMessage::ManifestSynced) => Ok(()),
             // No polling is needed for a pinned checkpoint, so we just return Ok(()).
-            DbReaderMode::Checkpoint(_) => Ok(()),
+            (DbReaderMode::Checkpoint(_), _) => Ok(()),
         }
     }
 
@@ -1442,6 +1750,49 @@ impl DbMetadataOps for DbReader {
 }
 
 impl DbReader {
+    /// Installs a manifest that the application received out of band, such as over the
+    /// network from the writer.
+    ///
+    /// The writer reads [`DbStatus::durable_manifest`] from [`crate::Db::subscribe`] and
+    /// sends it to the reader as a [`crate::manifest::ManifestTransfer`]. The reader installs
+    /// the manifest in memory, and the next read uses it. The call does no object store IO.
+    ///
+    /// The call works in every [`DbReaderMode`] and does not change the mode:
+    ///
+    /// - [`DbReaderMode::ManagedCheckpoint`]: the reader moves its checkpoint to cover the
+    ///   manifest in the background, after object storage holds a manifest that is at least as
+    ///   new.
+    /// - [`DbReaderMode::FollowLatest`]: the poller continues to read newer manifests and WAL
+    ///   files.
+    /// - [`DbReaderMode::Checkpoint`]: the reader reads from the synced manifest. The pinned
+    ///   checkpoint does not protect the SSTs of that manifest from garbage collection.
+    ///
+    /// The reader does not replay WAL files for the synced manifest in this call. The poller
+    /// replays newer WAL files on its next tick.
+    ///
+    /// If a read against a synced manifest fails because an object is missing, the reader
+    /// installs the last manifest that it read from object storage again, and retries the read
+    /// once. This can happen if the garbage collector deleted SSTs of the manifest, or if the
+    /// manifest comes from a different database.
+    ///
+    /// ## Returns
+    /// - [`ManifestSyncOutcome::Applied`] if the reader installed the manifest.
+    /// - [`ManifestSyncOutcome::Stale`] if the manifest ID is less than or equal to the ID of
+    ///   the installed manifest. The reader does not change.
+    ///
+    /// ## Errors
+    /// - Returns an error of kind [`crate::ErrorKind::Closed`] if the reader is closed.
+    /// - Returns an error of kind [`crate::ErrorKind::Invalid`] if the manifest is not
+    ///   initialized, if its writer epoch, compactor epoch, or `last_l0_seq` is less than in the
+    ///   installed manifest, or if its segment extractor name is different. The reader does not
+    ///   change.
+    pub fn sync_manifest(
+        &self,
+        manifest: VersionedManifest,
+    ) -> Result<ManifestSyncOutcome, crate::Error> {
+        self.inner.sync_manifest(manifest).map_err(Into::into)
+    }
+
     /// See [`DbMetadataOps::manifest`].
     pub fn manifest(&self) -> VersionedManifest {
         <Self as DbMetadataOps>::manifest(self)
@@ -1497,7 +1848,10 @@ impl DbCacheManagerOps for DbReader {
 mod tests {
     use crate::wal::slatedb::reader::SlateDbWalReaderOptions;
     use {
-        super::{DbReaderMessage, ManifestPoller, ReaderState, WalReplayEnd},
+        super::{
+            DbReaderMessage, ManifestPoller, ManifestSyncOutcome, ManifestSyncStats, ReaderState,
+            WalReplayEnd,
+        },
         crate::{
             block_cache_policy::BlockCachePolicy,
             clock::MonotonicClock,
@@ -3300,6 +3654,7 @@ mod tests {
             imm_memtable: input_tables.iter().cloned().collect(),
             last_wal_id: 0,
             last_remote_persisted_seq: 0,
+            base: None,
         };
         let next_wal_sst_id = input_tables
             .iter()
@@ -3350,6 +3705,9 @@ mod tests {
             status_manager,
             segment_extractor: None,
             rand: test_provider.rand.clone(),
+            poller_tx: async_channel::bounded(1).0,
+            poller_rx: async_channel::bounded(1).1,
+            sync_stats: ManifestSyncStats::new(&recorder),
             recorder,
         };
 
@@ -3409,6 +3767,7 @@ mod tests {
             )]),
             last_wal_id: 1,
             last_remote_persisted_seq: 10,
+            base: None,
         };
 
         let oracle = Arc::new(DbReaderOracle::new(0, DbStatusManager::new(0)));
@@ -3437,6 +3796,9 @@ mod tests {
             status_manager,
             segment_extractor: None,
             rand: test_provider.rand.clone(),
+            poller_tx: async_channel::bounded(1).0,
+            poller_rx: async_channel::bounded(1).1,
+            sync_stats: ManifestSyncStats::new(&recorder),
             recorder,
         }
     }
@@ -3945,6 +4307,663 @@ mod tests {
         rx.changed().await.unwrap();
         assert!(rx.borrow().close_reason.is_some());
 
+        db.close().await.unwrap();
+    }
+
+    /// Reader options for tests of `sync_manifest`. The poller does not tick during a test,
+    /// and the reader replays no WAL, so only manifests make writes visible.
+    fn sync_test_reader_options() -> DbReaderOptions {
+        DbReaderOptions {
+            manifest_poll_interval: Duration::from_secs(60 * 60),
+            checkpoint_lifetime: Duration::from_secs(3 * 60 * 60),
+            skip_wal_replay: true,
+            ..DbReaderOptions::default()
+        }
+    }
+
+    /// Opens a reader without the background manifest poller. The first poller tick runs at
+    /// once, so a running poller races with the writes in a test. Tests run the poller by hand.
+    async fn open_sync_test_reader(
+        test_provider: &TestProvider,
+        mode: DbReaderMode,
+        options: DbReaderOptions,
+    ) -> DbReader {
+        let manifest_store = test_provider.manifest_store();
+        let manifest = StoredManifest::load(
+            Arc::clone(&manifest_store),
+            test_provider.system_clock.clone(),
+        )
+        .await
+        .unwrap();
+        let inner = Arc::new(
+            DbReaderInner::new(
+                manifest_store,
+                test_provider.table_store(),
+                test_provider.wal_store(),
+                None,
+                options,
+                mode,
+                None,
+                None,
+                test_provider.system_clock.clone(),
+                test_provider.rand.clone(),
+                slatedb_common::metrics::MetricsRecorderHelper::noop(),
+                manifest,
+            )
+            .await
+            .unwrap(),
+        );
+        let task_executor = crate::dispatcher::MessageHandlerExecutor::new(
+            Arc::new(inner.status_manager.clone()),
+            test_provider.system_clock.clone(),
+        );
+        DbReader {
+            inner,
+            task_executor,
+        }
+    }
+
+    /// Writes `value` for `key`, flushes it to L0, and returns the durable manifest.
+    async fn put_and_flush(db: &Db, key: &[u8], value: &[u8]) -> VersionedManifest {
+        db.put(key, value).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        db.status().durable_manifest
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum SyncTestMode {
+        ManagedCheckpoint,
+        FollowLatest,
+        Checkpoint,
+    }
+
+    #[rstest]
+    #[case::managed_checkpoint(SyncTestMode::ManagedCheckpoint)]
+    #[case::follow_latest(SyncTestMode::FollowLatest)]
+    #[case::checkpoint(SyncTestMode::Checkpoint)]
+    #[tokio::test]
+    async fn sync_manifest_should_make_new_l0_visible(#[case] mode: SyncTestMode) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_visible");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"key", b"initial").await;
+        let mode = match mode {
+            SyncTestMode::ManagedCheckpoint => DbReaderMode::ManagedCheckpoint,
+            SyncTestMode::FollowLatest => DbReaderMode::FollowLatest,
+            SyncTestMode::Checkpoint => DbReaderMode::Checkpoint(
+                db.create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
+                    .await
+                    .unwrap()
+                    .id,
+            ),
+        };
+        let reader = open_sync_test_reader(&test_provider, mode, sync_test_reader_options()).await;
+        let checkpoint_before = reader.inner.state.read().checkpoint.clone();
+
+        let durable = put_and_flush(&db, b"key", b"updated").await;
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"initial"))
+        );
+
+        let outcome = reader.sync_manifest(durable.clone()).unwrap();
+
+        assert_eq!(outcome, ManifestSyncOutcome::Applied);
+        assert_eq!(reader.manifest(), durable);
+        assert_eq!(reader.status().current_manifest, durable);
+        assert_ne!(reader.status().durable_manifest, durable);
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"updated"))
+        );
+        // The sync does not move the checkpoint.
+        assert_eq!(reader.inner.state.read().checkpoint, checkpoint_before);
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sync_manifest_should_accept_manifest_transfer() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_transfer");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"key", b"initial").await;
+        let reader = open_sync_test_reader(
+            &test_provider,
+            DbReaderMode::FollowLatest,
+            sync_test_reader_options(),
+        )
+        .await;
+
+        let durable = put_and_flush(&db, b"key", b"updated").await;
+        let message =
+            serde_json::to_vec(&crate::manifest::ManifestTransfer::from(&durable)).unwrap();
+        let transfer: crate::manifest::ManifestTransfer = serde_json::from_slice(&message).unwrap();
+        let outcome = reader
+            .sync_manifest(VersionedManifest::try_from(transfer).unwrap())
+            .unwrap();
+
+        assert_eq!(outcome, ManifestSyncOutcome::Applied);
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"updated"))
+        );
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sync_manifest_should_return_stale_for_old_or_equal_manifest() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_stale");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        let older = put_and_flush(&db, b"key", b"first").await;
+        let newer = put_and_flush(&db, b"key", b"second").await;
+        let reader = open_sync_test_reader(
+            &test_provider,
+            DbReaderMode::FollowLatest,
+            sync_test_reader_options(),
+        )
+        .await;
+        let installed = reader.manifest();
+        assert!(installed.id() >= newer.id());
+
+        assert_eq!(
+            reader.sync_manifest(older).unwrap(),
+            ManifestSyncOutcome::Stale
+        );
+        assert_eq!(
+            reader.sync_manifest(installed.clone()).unwrap(),
+            ManifestSyncOutcome::Stale
+        );
+        assert_eq!(reader.manifest(), installed);
+        assert!(reader.inner.state.read().base.is_none());
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum InvalidSyncedManifest {
+        Uninitialized,
+        OlderWriterEpoch,
+        OlderCompactorEpoch,
+        OlderLastL0Seq,
+        DifferentSegmentExtractor,
+    }
+
+    #[rstest]
+    #[case::uninitialized(InvalidSyncedManifest::Uninitialized)]
+    #[case::older_writer_epoch(InvalidSyncedManifest::OlderWriterEpoch)]
+    #[case::older_compactor_epoch(InvalidSyncedManifest::OlderCompactorEpoch)]
+    #[case::older_last_l0_seq(InvalidSyncedManifest::OlderLastL0Seq)]
+    #[case::different_segment_extractor(InvalidSyncedManifest::DifferentSegmentExtractor)]
+    #[tokio::test]
+    async fn sync_manifest_should_reject_invalid_manifest(#[case] invalid: InvalidSyncedManifest) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_invalid");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"key", b"value").await;
+        let reader = open_sync_test_reader(
+            &test_provider,
+            DbReaderMode::FollowLatest,
+            sync_test_reader_options(),
+        )
+        .await;
+        let installed = reader.manifest();
+
+        let mut synced = installed.clone();
+        synced.id += 1;
+        match invalid {
+            InvalidSyncedManifest::Uninitialized => synced.manifest.core.initialized = false,
+            InvalidSyncedManifest::OlderWriterEpoch => {
+                assert!(synced.manifest.writer_epoch > 0);
+                synced.manifest.writer_epoch -= 1;
+            }
+            InvalidSyncedManifest::OlderCompactorEpoch => {
+                let mut state = reader.inner.state.read().as_ref().clone();
+                state.manifest.compactor_epoch = 1;
+                *reader.inner.state.write() = Arc::new(state);
+                synced.manifest.compactor_epoch = 0;
+            }
+            InvalidSyncedManifest::OlderLastL0Seq => {
+                assert!(synced.manifest.core.last_l0_seq > 0);
+                synced.manifest.core.last_l0_seq -= 1;
+            }
+            InvalidSyncedManifest::DifferentSegmentExtractor => {
+                synced.manifest.core.segment_extractor_name = Some("other".to_string());
+            }
+        }
+        let installed = reader.manifest();
+
+        let err = reader.sync_manifest(synced).unwrap_err();
+
+        assert_eq!(err.kind(), crate::ErrorKind::Invalid);
+        assert_eq!(reader.manifest(), installed);
+        assert!(reader.inner.state.read().base.is_none());
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sync_manifest_should_fail_after_close() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_closed");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        // This test needs the background poller, because closing it records the close.
+        let reader = DbReader::open_internal(
+            test_provider.manifest_store(),
+            test_provider.table_store(),
+            test_provider.wal_store(),
+            DbReaderMode::FollowLatest,
+            None,
+            None,
+            None,
+            sync_test_reader_options(),
+            test_provider.system_clock.clone(),
+            test_provider.rand.clone(),
+            slatedb_common::metrics::MetricsRecorderHelper::noop(),
+        )
+        .await
+        .unwrap();
+        let durable = put_and_flush(&db, b"key", b"value").await;
+
+        reader.close().await.unwrap();
+        let err = reader.sync_manifest(durable).unwrap_err();
+
+        assert!(matches!(err.kind(), crate::ErrorKind::Closed(_)));
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sync_manifest_should_drop_replayed_rows_covered_by_manifest() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_imm");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        db.put(b"key", b"wal").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::Wal,
+        })
+        .await
+        .unwrap();
+        let reader = open_sync_test_reader(
+            &test_provider,
+            DbReaderMode::FollowLatest,
+            DbReaderOptions {
+                skip_wal_replay: false,
+                ..sync_test_reader_options()
+            },
+        )
+        .await;
+        assert!(!reader.inner.state.read().imm_memtable.is_empty());
+
+        let durable = put_and_flush(&db, b"other", b"value").await;
+        assert_eq!(
+            reader.sync_manifest(durable).unwrap(),
+            ManifestSyncOutcome::Applied
+        );
+
+        assert!(reader.inner.state.read().imm_memtable.is_empty());
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"wal"))
+        );
+        assert_eq!(
+            reader.get(b"other").await.unwrap(),
+            Some(Bytes::from_static(b"value"))
+        );
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    /// Deletes the SSTs of `synced` that `base` does not hold.
+    async fn delete_new_ssts(
+        test_provider: &TestProvider,
+        base: &VersionedManifest,
+        synced: &VersionedManifest,
+    ) {
+        let base_ids: std::collections::HashSet<crate::db_state::SsTableId> =
+            base.all_sst_views().map(|view| view.sst.id).collect();
+        let table_store = test_provider.table_store();
+        let mut deleted = 0;
+        for view in synced.all_sst_views() {
+            if !base_ids.contains(&view.sst.id) {
+                table_store.delete_sst(&view.sst.id).await.unwrap();
+                deleted += 1;
+            }
+        }
+        assert!(deleted > 0);
+    }
+
+    #[tokio::test]
+    async fn get_should_fall_back_when_synced_manifest_sst_is_missing() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_fallback_get");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"key", b"initial").await;
+        let reader = open_sync_test_reader(
+            &test_provider,
+            DbReaderMode::FollowLatest,
+            sync_test_reader_options(),
+        )
+        .await;
+        let base = reader.manifest();
+        let synced = put_and_flush(&db, b"key", b"updated").await;
+        reader.sync_manifest(synced.clone()).unwrap();
+        delete_new_ssts(&test_provider, &base, &synced).await;
+
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"initial"))
+        );
+        assert_eq!(reader.manifest(), base);
+        assert_eq!(reader.status().current_manifest, base);
+        assert!(reader.inner.state.read().base.is_none());
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn scan_should_fall_back_when_synced_manifest_sst_is_missing() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_fallback_scan");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"key", b"initial").await;
+        let reader = open_sync_test_reader(
+            &test_provider,
+            DbReaderMode::FollowLatest,
+            sync_test_reader_options(),
+        )
+        .await;
+        let base = reader.manifest();
+        let synced = put_and_flush(&db, b"key", b"updated").await;
+        reader.sync_manifest(synced.clone()).unwrap();
+        delete_new_ssts(&test_provider, &base, &synced).await;
+
+        let mut iter = reader.scan(..).await.unwrap();
+        let kv = iter.next().await.unwrap().unwrap();
+
+        assert_eq!(kv.value, Bytes::from_static(b"initial"));
+        assert_eq!(reader.manifest(), base);
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_should_not_fall_back_without_synced_manifest() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_no_fallback");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        let empty = reader_manifest_before_writes(&test_provider).await;
+        let loaded = put_and_flush(&db, b"key", b"value").await;
+        let reader = open_sync_test_reader(
+            &test_provider,
+            DbReaderMode::FollowLatest,
+            sync_test_reader_options(),
+        )
+        .await;
+        delete_new_ssts(&test_provider, &empty, &loaded).await;
+
+        let err = reader.get(b"key").await.unwrap_err();
+
+        assert_eq!(err.kind(), crate::ErrorKind::Data);
+        assert_eq!(reader.manifest().id(), loaded.id());
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    async fn reader_manifest_before_writes(test_provider: &TestProvider) -> VersionedManifest {
+        test_provider
+            .manifest_store()
+            .read_latest_manifest()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn managed_reader_should_move_checkpoint_after_sync() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_managed");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"key", b"initial").await;
+        let reader = open_sync_test_reader(
+            &test_provider,
+            DbReaderMode::ManagedCheckpoint,
+            sync_test_reader_options(),
+        )
+        .await;
+        let checkpoint_before = reader.inner.state.read().checkpoint.clone().unwrap();
+        let synced = put_and_flush(&db, b"key", b"updated").await;
+        reader.sync_manifest(synced.clone()).unwrap();
+        assert!(matches!(
+            reader.inner.poller_rx.try_recv(),
+            Ok(DbReaderMessage::ManifestSynced)
+        ));
+
+        let mut poller = ManifestPoller {
+            inner: Arc::clone(&reader.inner),
+        };
+        poller
+            .handle(DbReaderMessage::ManifestSynced)
+            .await
+            .unwrap();
+
+        let state = Arc::clone(&reader.inner.state.read());
+        let checkpoint_after = state.checkpoint.clone().unwrap();
+        assert_ne!(checkpoint_after.id, checkpoint_before.id);
+        assert!(checkpoint_after.manifest_id >= synced.id());
+        assert!(state.manifest_id >= synced.id());
+        assert!(state.base.is_none());
+        let checkpoints = test_provider
+            .manifest_store()
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .manifest
+            .core
+            .checkpoints;
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].id, checkpoint_after.id);
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"updated"))
+        );
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn managed_reader_should_not_move_checkpoint_when_storage_is_behind_sync() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_managed_behind");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"key", b"initial").await;
+        let reader = open_sync_test_reader(
+            &test_provider,
+            DbReaderMode::ManagedCheckpoint,
+            sync_test_reader_options(),
+        )
+        .await;
+        let checkpoint_before = reader.inner.state.read().checkpoint.clone().unwrap();
+        // A manifest ID that object storage does not hold yet.
+        let mut synced = reader.manifest();
+        synced.id += 100;
+        reader.sync_manifest(synced.clone()).unwrap();
+
+        let mut poller = ManifestPoller {
+            inner: Arc::clone(&reader.inner),
+        };
+        poller
+            .handle(DbReaderMessage::ManifestSynced)
+            .await
+            .unwrap();
+
+        let state = Arc::clone(&reader.inner.state.read());
+        assert_eq!(state.checkpoint.as_ref().unwrap().id, checkpoint_before.id);
+        assert_eq!(state.manifest_id, synced.id());
+        assert!(state.base.is_some());
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn install_state_should_not_replace_newer_synced_state() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_install_race");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"key", b"initial").await;
+        let reader = open_sync_test_reader(
+            &test_provider,
+            DbReaderMode::ManagedCheckpoint,
+            sync_test_reader_options(),
+        )
+        .await;
+        let checkpoint = reader.inner.state.read().checkpoint.clone().unwrap();
+        // The poller builds a state from the current checkpoint and awaits IO.
+        let older_state = reader
+            .inner
+            .rebuild_checkpoint_state(checkpoint.clone())
+            .await
+            .unwrap();
+        let mut moved_checkpoint = checkpoint.clone();
+        moved_checkpoint.id = Uuid::new_v4();
+        let older_state = ReaderState {
+            checkpoint: Some(moved_checkpoint.clone()),
+            ..older_state
+        };
+        // A sync installs a newer manifest during that IO.
+        let synced = put_and_flush(&db, b"key", b"updated").await;
+        reader.sync_manifest(synced.clone()).unwrap();
+
+        reader.inner.install_state(older_state);
+
+        let state = Arc::clone(&reader.inner.state.read());
+        assert_eq!(state.manifest_id, synced.id());
+        assert_eq!(state.checkpoint, Some(moved_checkpoint));
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"updated"))
+        );
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn follow_latest_poll_should_confirm_synced_manifest() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_confirm");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"key", b"initial").await;
+        let reader = open_sync_test_reader(
+            &test_provider,
+            DbReaderMode::FollowLatest,
+            sync_test_reader_options(),
+        )
+        .await;
+        let synced = put_and_flush(&db, b"key", b"updated").await;
+        reader.sync_manifest(synced.clone()).unwrap();
+        assert!(reader.inner.state.read().base.is_some());
+
+        let mut poller = ManifestPoller {
+            inner: Arc::clone(&reader.inner),
+        };
+        poller.handle(DbReaderMessage::PollManifest).await.unwrap();
+
+        let state = Arc::clone(&reader.inner.state.read());
+        assert_eq!(state.manifest_id, synced.id());
+        assert!(state.base.is_none());
+        assert_eq!(reader.status().durable_manifest, synced);
+
+        reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[rstest]
+    #[case::managed_checkpoint(DbReaderMode::ManagedCheckpoint)]
+    #[case::follow_latest(DbReaderMode::FollowLatest)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sync_manifest_and_poller_should_never_move_manifest_back(#[case] mode: DbReaderMode) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_race");
+        let test_provider = TestProvider::new(path, Arc::clone(&object_store));
+        let db = test_provider
+            .new_db(Settings {
+                flush_interval: Some(Duration::from_millis(1)),
+                // The test has no compactor. Without these limits, L0 backpressure stalls
+                // flushes.
+                l0_max_ssts: 64,
+                l0_max_ssts_per_key: 64,
+                ..Settings::default()
+            })
+            .await
+            .unwrap();
+        put_and_flush(&db, b"key", &0u32.to_be_bytes()).await;
+        let reader = DbReader::open_internal(
+            test_provider.manifest_store(),
+            test_provider.table_store(),
+            test_provider.wal_store(),
+            mode,
+            None,
+            None,
+            None,
+            DbReaderOptions {
+                manifest_poll_interval: Duration::from_millis(5),
+                checkpoint_lifetime: Duration::from_secs(60),
+                ..DbReaderOptions::default()
+            },
+            test_provider.system_clock.clone(),
+            test_provider.rand.clone(),
+            slatedb_common::metrics::MetricsRecorderHelper::noop(),
+        )
+        .await
+        .unwrap();
+
+        let mut last_manifest_id = reader.manifest().id();
+        let mut last_value = 0u32;
+        for i in 1..=50u32 {
+            let durable = put_and_flush(&db, b"key", &i.to_be_bytes()).await;
+            reader.sync_manifest(durable.clone()).unwrap();
+
+            let manifest_id = reader.manifest().id();
+            assert!(manifest_id >= last_manifest_id);
+            assert!(manifest_id >= durable.id());
+            last_manifest_id = manifest_id;
+
+            let value = reader.get(b"key").await.unwrap().unwrap();
+            let value = u32::from_be_bytes(value.as_ref().try_into().unwrap());
+            assert!(value >= i);
+            assert!(value >= last_value);
+            last_value = value;
+        }
+
+        reader.close().await.unwrap();
         db.close().await.unwrap();
     }
 }
