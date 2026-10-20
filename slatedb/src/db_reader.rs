@@ -1094,6 +1094,30 @@ struct ManifestPoller {
     inner: Arc<DbReaderInner>,
 }
 
+impl ManifestPoller {
+    async fn poll_managed_checkpoint(&mut self) -> Result<(), SlateDBError> {
+        let mut manifest = StoredManifest::load(
+            Arc::clone(&self.inner.manifest_store),
+            self.inner.system_clock.clone(),
+        )
+        .await?;
+
+        let latest_manifest = manifest.manifest();
+        if self.inner.checkpoint_behind_synced_manifest(manifest.id())
+            || self
+                .inner
+                .should_reestablish_checkpoint(&latest_manifest.core)
+        {
+            let checkpoint = self.inner.replace_checkpoint(&mut manifest).await?;
+            self.inner.reestablish_checkpoint(checkpoint).await?;
+        } else {
+            self.inner.maybe_replay_new_wals().await?;
+        }
+
+        self.inner.maybe_refresh_checkpoint(&mut manifest).await
+    }
+}
+
 #[async_trait]
 impl MessageHandler<DbReaderMessage> for ManifestPoller {
     fn tickers(&mut self) -> Vec<MessageTickerDef<DbReaderMessage>> {
@@ -1105,26 +1129,15 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
 
     async fn handle(&mut self, message: DbReaderMessage) -> Result<(), SlateDBError> {
         match (self.inner.mode, message) {
-            (DbReaderMode::ManagedCheckpoint, _) => {
-                let mut manifest = StoredManifest::load(
-                    Arc::clone(&self.inner.manifest_store),
-                    self.inner.system_clock.clone(),
-                )
-                .await?;
-
-                let latest_manifest = manifest.manifest();
-                if self.inner.checkpoint_behind_synced_manifest(manifest.id())
-                    || self
-                        .inner
-                        .should_reestablish_checkpoint(&latest_manifest.core)
-                {
-                    let checkpoint = self.inner.replace_checkpoint(&mut manifest).await?;
-                    self.inner.reestablish_checkpoint(checkpoint).await?;
-                } else {
-                    self.inner.maybe_replay_new_wals().await?;
+            (DbReaderMode::ManagedCheckpoint, DbReaderMessage::PollManifest) => {
+                self.poll_managed_checkpoint().await
+            }
+            // A failed poll after a sync must not close the reader. The next tick retries.
+            (DbReaderMode::ManagedCheckpoint, DbReaderMessage::ManifestSynced) => {
+                if let Err(error) = self.poll_managed_checkpoint().await {
+                    warn!("failed to move reader checkpoint after manifest sync [error={error:?}]");
                 }
-
-                self.inner.maybe_refresh_checkpoint(&mut manifest).await
+                Ok(())
             }
             (DbReaderMode::FollowLatest, DbReaderMessage::PollManifest) => {
                 let result = self.inner.refresh_latest_manifest().await;
@@ -4328,9 +4341,26 @@ mod tests {
         mode: DbReaderMode,
         options: DbReaderOptions,
     ) -> DbReader {
-        let manifest_store = test_provider.manifest_store();
+        open_sync_test_reader_with_manifest_store(
+            test_provider,
+            mode,
+            options,
+            test_provider.manifest_store(),
+        )
+        .await
+    }
+
+    /// Like `open_sync_test_reader`, but the reader uses `manifest_store` after it opens. The
+    /// reader still opens, and creates its checkpoint, through the manifest store of
+    /// `test_provider`.
+    async fn open_sync_test_reader_with_manifest_store(
+        test_provider: &TestProvider,
+        mode: DbReaderMode,
+        options: DbReaderOptions,
+        manifest_store: Arc<ManifestStore>,
+    ) -> DbReader {
         let manifest = StoredManifest::load(
-            Arc::clone(&manifest_store),
+            test_provider.manifest_store(),
             test_provider.system_clock.clone(),
         )
         .await
@@ -4964,6 +4994,63 @@ mod tests {
         }
 
         reader.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn managed_reader_should_serve_synced_manifest_when_checkpoint_write_fails() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("/tmp/test_sync_manifest_checkpoint_write_fails");
+        let test_provider = TestProvider::new(path.clone(), Arc::clone(&object_store));
+        let db = test_provider.new_db(Settings::default()).await.unwrap();
+        put_and_flush(&db, b"key", b"initial").await;
+        // The first conditional put through this store fails. Only the poller writes through it.
+        let flaky_store = Arc::new(test_utils::FlakyObjectStore::new(
+            Arc::clone(&object_store),
+            1,
+        ));
+        let reader = open_sync_test_reader_with_manifest_store(
+            &test_provider,
+            DbReaderMode::ManagedCheckpoint,
+            sync_test_reader_options(),
+            Arc::new(ManifestStore::new(&path, flaky_store.clone())),
+        )
+        .await;
+        let checkpoint_before = reader.inner.state.read().checkpoint.clone().unwrap();
+        let synced = put_and_flush(&db, b"key", b"updated").await;
+        reader.sync_manifest(synced.clone()).unwrap();
+        let mut poller = ManifestPoller {
+            inner: Arc::clone(&reader.inner),
+        };
+
+        // The checkpoint write fails. The poll does not fail the reader, and the reader keeps
+        // the synced manifest and its checkpoint.
+        poller
+            .handle(DbReaderMessage::ManifestSynced)
+            .await
+            .unwrap();
+        assert_eq!(flaky_store.put_attempts(), 1);
+        let state = Arc::clone(&reader.inner.state.read());
+        assert_eq!(state.manifest_id, synced.id());
+        assert_eq!(state.checkpoint.as_ref().unwrap().id, checkpoint_before.id);
+        assert!(state.base.is_some());
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"updated"))
+        );
+
+        // The next poll writes the checkpoint and confirms the synced manifest.
+        poller.handle(DbReaderMessage::PollManifest).await.unwrap();
+        let state = Arc::clone(&reader.inner.state.read());
+        let checkpoint_after = state.checkpoint.clone().unwrap();
+        assert_ne!(checkpoint_after.id, checkpoint_before.id);
+        assert!(checkpoint_after.manifest_id >= synced.id());
+        assert!(state.base.is_none());
+        assert_eq!(
+            reader.get(b"key").await.unwrap(),
+            Some(Bytes::from_static(b"updated"))
+        );
+
         db.close().await.unwrap();
     }
 }

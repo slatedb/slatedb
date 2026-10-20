@@ -303,6 +303,8 @@ The mode decides what the poller does after a sync. The mode does not change.
 2. If the ID of the latest manifest is less than the installed ID, do not move the checkpoint. Object storage can return an older manifest only if the pushed manifest is not durable yet. The next poll does this test again. This rule prevents a checkpoint write on each poll for a manifest that object storage never holds.
 3. Otherwise, replace the reader checkpoint with a checkpoint on the latest manifest, and rebuild the state from the new checkpoint as `reestablish_checkpoint` does today. The rebuilt state is a loaded state, so the reader drops the base state.
 
+In managed mode, an error from a poll closes the reader today. A poll that a sync starts is different: if it fails, the reader logs the error and keeps the pushed state, and the next tick retries. A sync then adds no new way for the reader to close.
+
 The poller must also use the checkpoint manifest ID, not the installed manifest, when it decides to move the checkpoint. Today, `should_reestablish_checkpoint` compares the latest manifest with the installed state. After a sync, the two can be equal while the checkpoint still points at an older manifest.
 
 The SSTs of a pushed manifest are not protected by the reader checkpoint until step 3 completes. The garbage collector does not delete a compacted SST until it is older than `compacted_options.min_age`, which is 24 hours by default. The window between a sync and step 3 is one manifest read and one manifest write.
@@ -458,23 +460,34 @@ The file format of `.manifest` objects does not change. `to_bytes`, `from_bytes`
 
 ## Testing
 
+The first implementation includes these tests:
+
 - Unit tests:
-  - `to_bytes` and `from_bytes` round trip, with a proptest over manifests from `proptest_util`.
+  - `to_bytes` and `from_bytes` round trip, with a manifest that holds L0 SSTs, a sorted run, and a segment.
   - `to_bytes` returns the same bytes as the `.manifest` file of that version.
-  - `ManifestTransfer` round trip through `serde_json` and one binary serde format, then `TryFrom` back to an equal `VersionedManifest`.
+  - `ManifestTransfer` round trip through `serde_json` and `bincode`, then `TryFrom` back to an equal `VersionedManifest`.
   - `TryFrom<ManifestTransfer>` returns `ErrorKind::Invalid` for a transfer that `Deserialize` built with bad bytes.
   - `from_bytes` returns `ErrorKind::Invalid` for empty input, an unknown format version, and bad flatbuffer bytes.
   - `sync_manifest` in each of the three modes: a newer manifest is applied, and an equal or older ID returns `Stale`.
   - Each validation rule rejects a manifest and leaves the reader state unchanged.
+  - `sync_manifest` returns `ErrorKind::Closed` after the reader closes.
   - Immutable memtables are filtered at the new `last_l0_seq`.
-  - The writer reports `durable_manifest` with the ID of the file that it wrote.
+  - The writer reports `durable_manifest` with the ID and the value of the file that it wrote.
+  - `install_state` does not replace a newer synced state, and copies the new checkpoint to it.
 - Integration tests:
-  - A writer and a reader share an object store. A task sends `durable_manifest` to the reader. The reader sees new L0 data before its poll interval.
+  - A writer and a reader share an object store. The test sends `durable_manifest` to the reader, also through `ManifestTransfer` and `serde_json`. The reader sees new L0 data without a poll.
   - Managed mode: after a sync, the poller moves the checkpoint to a manifest with an ID greater than or equal to the pushed ID.
-  - Fallback: sync a manifest, delete one of its SSTs, then read. The read returns the base state result, and later reads use the base state.
-  - Race: run syncs and poller ticks at the same time, and make sure that the installed manifest ID never moves back.
-- Deterministic simulation tests: Add a reader that gets manifests by push to `slatedb-dst`, with delayed, dropped, and reordered messages.
-- Fault injection: Fail the checkpoint write after a sync, and make sure that the reader keeps serving reads and retries on the next tick.
+  - Managed mode: if object storage does not hold the synced manifest yet, the poller does not move the checkpoint.
+  - Follow-latest mode: a poll that reads the synced manifest drops the base state.
+  - Fallback: sync a manifest, delete its new SSTs, then `get` or `scan`. The read returns the base state result, and later reads use the base state. A reader without a synced manifest does not fall back.
+  - Race: run syncs against a poller that ticks every 5 ms, in managed and follow-latest modes, and make sure that the installed manifest ID never moves back.
+  - Bindings: one sync test for each of Python, Node, Java, and Go.
+- Fault injection: fail the checkpoint write that a sync starts. The poll does not fail the reader. The reader keeps serving reads from the synced manifest, and the next poll moves the checkpoint.
+
+These tests are follow-up work, after the design is final:
+
+- Deterministic simulation tests: add a reader that gets manifests by push to `slatedb-dst`, with delayed, dropped, and reordered messages.
+- Property tests: round trip `to_bytes` and `from_bytes` over generated manifests. `proptest_util` has no manifest strategy today.
 
 ## Rollout
 
