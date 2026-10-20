@@ -2426,6 +2426,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_status_durable_manifest_matches_stored_manifest() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_status_durable_manifest";
+        let db = Db::builder(path, object_store.clone())
+            .with_settings(test_db_options(0, 1024, None))
+            .build()
+            .await
+            .unwrap();
+        let manifest_store = ManifestStore::new(&Path::from(path), object_store);
+
+        for i in 0..3u8 {
+            db.put([i], b"value").await.unwrap();
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+
+            let durable = db.status().durable_manifest;
+            let stored = manifest_store.read_latest_manifest().await.unwrap();
+            assert_eq!(durable, stored);
+        }
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_coarse_size_estimation_via_manifest() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_coarse_size_estimation";

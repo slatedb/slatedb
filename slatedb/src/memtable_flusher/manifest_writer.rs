@@ -783,6 +783,7 @@ impl ManifestWriterHandler {
             }));
         }
         self.manifest.update(dirty).await?;
+        self.report_durable_manifest();
         Ok(checkpoint_results)
     }
 
@@ -823,6 +824,7 @@ impl ManifestWriterHandler {
     async fn write_current_manifest(&mut self) -> Result<(), SlateDBError> {
         let dirty = self.prepare_local_manifest_for_write(None)?;
         self.manifest.update(dirty.clone()).await?;
+        self.report_durable_manifest();
         self.db.status_manager.report_manifest(dirty.into());
         Ok(())
     }
@@ -873,6 +875,7 @@ impl ManifestWriterHandler {
 
     async fn load_manifest(&mut self) -> Result<(), SlateDBError> {
         self.manifest.refresh().await?;
+        self.report_durable_manifest();
         let remote_dirty = self.manifest.prepare_dirty()?;
         self.merge_remote_manifest(remote_dirty);
         Ok(())
@@ -884,6 +887,7 @@ impl ManifestWriterHandler {
     ) -> Result<(), SlateDBError> {
         let result = async {
             self.manifest.refresh().await?;
+            self.report_durable_manifest();
             let remote_dirty = self.manifest.prepare_dirty()?;
             self.merge_remote_manifest(remote_dirty);
             let _ = self.tracker_tx.send(TrackerMessage::ManifestRefreshed);
@@ -894,6 +898,15 @@ impl ManifestWriterHandler {
             let _ = tx.send(result.clone());
         }
         result
+    }
+
+    /// Reports the manifest that `self.manifest` last wrote or read to the
+    /// status manager, with the version ID of that manifest file.
+    fn report_durable_manifest(&self) {
+        let (id, manifest) = self.manifest.manifest();
+        self.db
+            .status_manager
+            .report_durable_manifest(VersionedManifest::from_manifest(id, manifest.clone()));
     }
 
     fn merge_remote_manifest(&self, remote_dirty: DirtyObject<Manifest>) {

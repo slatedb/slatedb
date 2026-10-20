@@ -37,6 +37,14 @@ pub struct DbStatus {
     /// The current in-memory manifest snapshot observed by this handle,
     /// paired with its manifest version ID.
     pub current_manifest: VersionedManifest,
+    /// The most recent manifest that this handle wrote to or read from object
+    /// storage, paired with the version ID of that manifest file.
+    ///
+    /// Unlike [`Self::current_manifest`], each ID maps to exactly one manifest
+    /// value, and the value matches the stored `.manifest` file. Send this
+    /// manifest to a [`crate::DbReader`] with
+    /// [`crate::DbReader::sync_manifest`].
+    pub durable_manifest: VersionedManifest,
     /// Segment prefixes (RFC-0024) touched by writes or WAL replay in this
     /// handle's memtables but not yet flushed to the manifest. Empty when no
     /// segment extractor is configured. Read it via
@@ -112,6 +120,7 @@ impl DbStatusManager {
     ) -> Self {
         let (tx, _) = watch::channel(DbStatus {
             durable_seq: initial_durable_seq,
+            durable_manifest: initial_manifest.clone(),
             current_manifest: initial_manifest,
             memtable_segments: initial_memtable_segments,
             close_reason: None,
@@ -129,8 +138,22 @@ impl DbStatusManager {
     pub(crate) fn report_fence_manifest(&self, durable_seq: u64, manifest: VersionedManifest) {
         self.tx.send_if_modified(|s| {
             s.durable_seq = durable_seq;
+            s.durable_manifest = manifest.clone();
             s.current_manifest = manifest;
             true
+        });
+    }
+
+    /// Reports a manifest that this handle wrote to or read from object
+    /// storage. The ID must be the version ID of that manifest file.
+    pub(crate) fn report_durable_manifest(&self, versioned: VersionedManifest) {
+        self.tx.send_if_modified(|s| {
+            if versioned.id > s.durable_manifest.id {
+                s.durable_manifest = versioned;
+                true
+            } else {
+                false
+            }
         });
     }
 

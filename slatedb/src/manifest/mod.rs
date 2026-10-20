@@ -8,14 +8,15 @@ use crate::bytes_range::BytesRange;
 use crate::checkpoint::Checkpoint;
 use crate::clone::{CloneSource, SegmentFilterFn, SegmentProjectionFn};
 use crate::error::SlateDBError;
+use crate::flatbuffer_types::FlatBufferManifestCodec;
 use crate::seq_tracker::SequenceTracker;
 use crate::utils::IdGenerator;
 use bytes::Bytes;
 use log::{debug, warn};
 use rand::RngExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use slatedb_common::DbRand;
-use slatedb_txn_obj::DirtyObject;
+use slatedb_txn_obj::{DirtyObject, ObjectCodec};
 use uuid::Uuid;
 
 pub(crate) mod invariants;
@@ -972,6 +973,101 @@ impl VersionedManifest {
             .ok()?;
         Some(&self.manifest.core.segments[idx])
     }
+
+    /// Returns the manifest in the `.manifest` file format.
+    ///
+    /// The bytes do not include the version ID. Use [`Self::id`] to get it, and pass both
+    /// values to [`Self::from_bytes`] to rebuild the manifest. [`ManifestTransfer`] holds both
+    /// values in one serde type.
+    pub fn to_bytes(&self) -> Bytes {
+        FlatBufferManifestCodec {}.encode(&self.manifest)
+    }
+
+    /// Builds a manifest from its version ID and bytes in the `.manifest` file format, such as
+    /// the output of [`Self::to_bytes`].
+    ///
+    /// ## Errors
+    /// - Returns an error of kind [`crate::ErrorKind::Invalid`] if the bytes are empty, if the
+    ///   format version is unknown, or if the bytes are not a valid manifest.
+    pub fn from_bytes(id: u64, bytes: &[u8]) -> Result<Self, crate::Error> {
+        let manifest = FlatBufferManifestCodec {}
+            .decode(&Bytes::copy_from_slice(bytes))
+            .map_err(|err| SlateDBError::InvalidManifestBytes(Arc::from(err)))?;
+        Ok(Self::from_manifest(id, manifest))
+    }
+}
+
+/// A [`VersionedManifest`] in a form that serde can serialize.
+///
+/// The type holds the version ID and the manifest bytes from
+/// [`VersionedManifest::to_bytes`]. An application can put it inside its own message types and
+/// send it in any serde format. This lets a writer send manifests to readers without object
+/// storage. See [`crate::DbReader::sync_manifest`].
+///
+/// The serde shape has two fields, `id` and `bytes`. The shape does not change when the manifest
+/// changes, because the `.manifest` file format holds the manifest content.
+///
+/// ## Examples
+///
+/// ```
+/// use slatedb::{Db, Error};
+/// use slatedb::manifest::{ManifestTransfer, VersionedManifest};
+/// use slatedb::object_store::memory::InMemory;
+/// use std::sync::Arc;
+///
+/// #[tokio::main]
+/// async fn main() -> Result<(), Error> {
+///     let db = Db::open("test_db", Arc::new(InMemory::new())).await?;
+///     let manifest = db.manifest();
+///
+///     let transfer = ManifestTransfer::from(&manifest);
+///     let decoded = VersionedManifest::try_from(transfer)?;
+///     assert_eq!(decoded.id(), manifest.id());
+///     db.close().await?;
+///     Ok(())
+/// }
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestTransfer {
+    id: u64,
+    bytes: Bytes,
+}
+
+impl ManifestTransfer {
+    /// Returns the version ID of the manifest.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Returns the manifest in the `.manifest` file format.
+    pub fn bytes(&self) -> &Bytes {
+        &self.bytes
+    }
+}
+
+impl From<&VersionedManifest> for ManifestTransfer {
+    fn from(manifest: &VersionedManifest) -> Self {
+        Self {
+            id: manifest.id(),
+            bytes: manifest.to_bytes(),
+        }
+    }
+}
+
+impl TryFrom<&ManifestTransfer> for VersionedManifest {
+    type Error = crate::Error;
+
+    fn try_from(transfer: &ManifestTransfer) -> Result<Self, Self::Error> {
+        Self::from_bytes(transfer.id, &transfer.bytes)
+    }
+}
+
+impl TryFrom<ManifestTransfer> for VersionedManifest {
+    type Error = crate::Error;
+
+    fn try_from(transfer: ManifestTransfer) -> Result<Self, Self::Error> {
+        Self::try_from(&transfer)
+    }
 }
 
 impl From<DirtyObject<Manifest>> for VersionedManifest {
@@ -1686,7 +1782,7 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
 
-    use super::{ExternalDb, Manifest, VersionedManifest};
+    use super::{ExternalDb, Manifest, ManifestTransfer, VersionedManifest};
     use crate::clone::{CloneSource, SegmentFilterFn, SegmentProjectionFn};
     use crate::config::CheckpointOptions;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
@@ -1694,10 +1790,11 @@ mod tests {
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::{LsmTreeState, ManifestCore, ProjectionConfig, Segment};
     use crate::Checkpoint;
+    use crate::ErrorKind;
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, ObjectStoreExt};
     use proptest::proptest;
     use rstest::rstest;
     use slatedb_common::DbRand;
@@ -5836,5 +5933,121 @@ mod tests {
         assert!(manifest.segment(b"ts/2026-03-09/14/series-7").is_none());
         // Empty prefix is not a wildcard.
         assert!(manifest.segment(b"").is_none());
+    }
+
+    fn transfer_view(seed: u64) -> SsTableView {
+        SsTableView::new(
+            Ulid::from_parts(seed, 0),
+            SsTableHandle::new(
+                SsTableId::from(Ulid::from_parts(seed, 1)),
+                SST_FORMAT_VERSION_LATEST,
+                SsTableInfo {
+                    first_entry: Some(Bytes::from(format!("key{seed}"))),
+                    ..SsTableInfo::default()
+                },
+            ),
+        )
+    }
+
+    fn manifest_for_transfer() -> VersionedManifest {
+        let mut core = ManifestCore::new();
+        core.tree = Arc::new(LsmTreeState {
+            l0: VecDeque::from([transfer_view(1), transfer_view(2)]),
+            compacted: vec![SortedRun::new(0, [transfer_view(3)])],
+            ..LsmTreeState::default()
+        });
+        core.segments.push(Segment {
+            prefix: Bytes::from_static(b"s"),
+            tree: Arc::new(LsmTreeState {
+                l0: VecDeque::from([transfer_view(4)]),
+                ..LsmTreeState::default()
+            }),
+        });
+        core.segment_extractor_name = Some("prefix".to_string());
+        core.last_l0_seq = 42;
+        core.next_wal_sst_id = 7;
+        core.replay_after_wal_id = 6;
+        let mut manifest = Manifest::initial(core);
+        manifest.writer_epoch = 3;
+        manifest.compactor_epoch = 2;
+        VersionedManifest::from_manifest(9, manifest)
+    }
+
+    #[test]
+    fn test_versioned_manifest_bytes_round_trip() {
+        let manifest = manifest_for_transfer();
+
+        let bytes = manifest.to_bytes();
+        let decoded = VersionedManifest::from_bytes(manifest.id(), &bytes).unwrap();
+
+        assert_eq!(manifest, decoded);
+    }
+
+    #[tokio::test]
+    async fn test_versioned_manifest_to_bytes_matches_stored_file() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        let root = Path::from("/tmp/test_transfer");
+        let store = Arc::new(ManifestStore::new(&root, object_store.clone()));
+        let stored = StoredManifest::create_new_db(store, core_with_four_ssts(), clock)
+            .await
+            .unwrap();
+        let manifest = VersionedManifest::from_manifest(stored.id(), stored.manifest().clone());
+
+        let path = Path::from(format!("{root}/manifest/{:020}.manifest", stored.id()));
+        let file = ObjectStoreExt::get(object_store.as_ref(), &path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+
+        assert_eq!(manifest.to_bytes(), file);
+    }
+
+    #[rstest]
+    #[case::empty(Bytes::new())]
+    #[case::unknown_version(Bytes::from_static(&[0xff, 0xff, 0, 0, 0, 0]))]
+    #[case::bad_flatbuffer(Bytes::from_static(&[0, 2, 1, 2, 3]))]
+    fn test_versioned_manifest_from_bytes_rejects_bad_input(#[case] bytes: Bytes) {
+        let err = VersionedManifest::from_bytes(1, &bytes).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Invalid);
+    }
+
+    #[test]
+    fn test_manifest_transfer_round_trip() {
+        let manifest = manifest_for_transfer();
+
+        let transfer = ManifestTransfer::from(&manifest);
+
+        assert_eq!(transfer.id(), manifest.id());
+        assert_eq!(transfer.bytes(), &manifest.to_bytes());
+        assert_eq!(VersionedManifest::try_from(&transfer).unwrap(), manifest);
+        assert_eq!(VersionedManifest::try_from(transfer).unwrap(), manifest);
+    }
+
+    #[test]
+    fn test_manifest_transfer_serde_round_trip() {
+        let manifest = manifest_for_transfer();
+        let transfer = ManifestTransfer::from(&manifest);
+
+        let json = serde_json::to_vec(&transfer).unwrap();
+        let from_json: ManifestTransfer = serde_json::from_slice(&json).unwrap();
+        let binary = bincode::serialize(&transfer).unwrap();
+        let from_binary: ManifestTransfer = bincode::deserialize(&binary).unwrap();
+
+        assert_eq!(VersionedManifest::try_from(from_json).unwrap(), manifest);
+        assert_eq!(VersionedManifest::try_from(from_binary).unwrap(), manifest);
+    }
+
+    #[test]
+    fn test_manifest_transfer_rejects_bad_bytes_from_deserialize() {
+        let transfer: ManifestTransfer =
+            serde_json::from_str(r#"{"id":1,"bytes":[0,2,1,2,3]}"#).unwrap();
+
+        let err = VersionedManifest::try_from(transfer).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::Invalid);
     }
 }

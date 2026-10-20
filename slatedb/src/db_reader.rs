@@ -401,6 +401,8 @@ impl DbReaderInner {
         *write_guard = Arc::new(new_state);
         drop(write_guard);
         self.status_manager
+            .report_durable_manifest(versioned_manifest.clone());
+        self.status_manager
             .report_manifest_and_memtable_segments(versioned_manifest, touched_segments);
     }
 

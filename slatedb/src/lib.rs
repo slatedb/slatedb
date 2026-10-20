@@ -65,7 +65,7 @@ pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::{GarbageCollectorBuilder, GcFilter};
 pub use instrumented_object_store::stats as instrumented_object_store_stats;
 pub use iter::IterationOrder;
-pub use manifest::VersionedManifest;
+pub use manifest::{ManifestTransfer, VersionedManifest};
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use ops::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbTransactionOps, DbWriteOps};
 pub use paths::PathResolver;
