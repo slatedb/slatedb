@@ -160,9 +160,6 @@ fn bytes_payload(bytes: Bytes) -> GetResultPayload {
 /// local installation or the observation hook failed. Account for that remote
 /// write before deciding whether to retry it.
 ///
-/// Some object names conflict with local metadata or temporary files. See
-/// [`MirrorError::Unsupported`] for the filename restrictions.
-///
 /// # Example
 ///
 /// This policy mirrors every write and serves every read locally. It assumes
@@ -324,7 +321,7 @@ impl ObjectStoreMirror {
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
         let inner = self.inner();
-        let name = LocalName::new(location)?;
+        let name = LocalName::new(location);
         inner.prefixes.lock().check_or_insert(&name)?;
         let ticket = inner
             .ordering
@@ -872,7 +869,7 @@ mod tests {
         ) -> object_store::Result<WriteRoute> {
             Ok(match path.extension() {
                 Some("manifest") => WriteRoute::Observe,
-                Some("sst") | Some("123") => WriteRoute::Mirror,
+                Some("sst") | Some("123") | Some("meta") => WriteRoute::Mirror,
                 _ => WriteRoute::Remote,
             })
         }
@@ -998,7 +995,7 @@ mod tests {
     fn data_file(path: &str) -> String {
         let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
         let prefix = hex::encode(Md5::digest(parent.as_bytes()));
-        format!("{prefix}.{name}")
+        format!("{prefix}.{name}.obj")
     }
 
     fn files(root: &StdPath) -> BTreeSet<String> {
@@ -1212,19 +1209,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_reject_reserved_names_before_writing_remotely() {
+    async fn should_mirror_names_that_look_like_layout_suffixes() {
         let fixture = Fixture::new().await;
-        let path = Path::from("db/compacted/file.123");
-        let err = fixture
-            .mirror
-            .put(&path, PutPayload::from_static(b"x"))
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            mirror_error(&err),
-            MirrorError::Unsupported { .. }
-        ));
-        assert!(fixture.store.head(&path).await.is_err());
+        eventually(|| fixture.policy.run_started.load(Ordering::SeqCst)).await;
+        // `01A.sst.meta` and `01A.sst.123` look like the metadata and a temp
+        // file of `01A.sst`.
+        let objects: [(&str, &'static [u8]); 3] = [
+            (SST, b"sst"),
+            ("db/compacted/01A.sst.meta", b"meta"),
+            ("db/compacted/01A.sst.123", b"temp"),
+        ];
+        for (path, bytes) in objects {
+            fixture
+                .mirror
+                .put(&Path::from(path), PutPayload::from_static(bytes))
+                .await
+                .unwrap();
+        }
+        let paths = objects.map(|(path, _)| path);
+        assert_eq!(fixture.files(), fixture.expected_files(&paths));
+        for (path, bytes) in objects {
+            assert_eq!(fixture.local_bytes(path), bytes, "{path}");
+        }
+
+        let Fixture {
+            _dir,
+            root,
+            store,
+            policy,
+            mirror,
+        } = fixture;
+        drop(mirror);
+        eventually(|| policy.run_stopped.load(Ordering::SeqCst)).await;
+        let mut reopened = None;
+        for _ in 0..100 {
+            if let Ok(mirror) = build(&root, &store, &policy, 8).await {
+                reopened = Some(mirror);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let mirror = reopened.expect("mirror reopened");
+
+        for path in paths {
+            assert!(mirror.handle().contains(&Path::from(path)), "{path}");
+        }
+        assert_eq!(
+            mirror
+                .get(&Path::from(SST))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            "sst"
+        );
+        assert_eq!(store.gets.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

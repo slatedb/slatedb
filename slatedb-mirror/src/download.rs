@@ -35,7 +35,7 @@ impl Inner {
     /// Downloads `path` and installs it, replacing any local copy. The caller
     /// must hold a download ticket for `path`.
     pub(crate) async fn download(&self, path: &Path) -> object_store::Result<Arc<LocalObject>> {
-        let name = LocalName::new(path)?;
+        let name = LocalName::new(path);
         self.downloads
             .flights
             .call(path.clone(), || async {

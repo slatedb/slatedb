@@ -3,15 +3,16 @@
 //! The cache root is flat. Every object-related file name starts with the hex
 //! MD5 of the object's parent path, then a `.`, then the object's file name:
 //!
-//! - `<md5>.<name>` is the complete object.
-//! - `<md5>.<name>.meta` holds its canonical path and metadata.
-//! - `<md5>.<name>.<counter>` and `<md5>.<name>.meta.<counter>` are temporary
-//!   files. The counter is unique within the process.
+//! - `<md5>.<name>.obj` is the complete object.
+//! - `<md5>.<name>.obj.meta` holds its canonical path and metadata.
+//! - `<md5>.<name>.obj.<counter>` and `<md5>.<name>.obj.meta.<counter>` are
+//!   temporary files. The counter is unique within the mirror.
 //! - `LOCK` is held for the mirror's lifetime.
 //!
-//! File names that end in `.meta` or `.<digits>` can't be told apart from
-//! metadata or temporary files, so the mirror refuses to keep local copies that
-//! collide with the local naming scheme.
+//! The suffix after `<name>` always belongs to the mirror, so any object file
+//! name maps to distinct local names. Object `foo.meta` is
+//! `<md5>.foo.meta.obj`, while the metadata of object `foo` is
+//! `<md5>.foo.obj.meta`.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -25,6 +26,8 @@ use crate::MirrorError;
 
 /// The lock file held for the mirror's lifetime.
 pub(crate) const LOCK_FILE: &str = "LOCK";
+
+const OBJECT_SUFFIX: &str = ".obj";
 
 const META_SUFFIX: &str = ".meta";
 
@@ -42,11 +45,12 @@ pub(crate) fn split_path(path: &Path) -> (&str, &str) {
         .unwrap_or(("", path.as_ref()))
 }
 
-/// Returns true if `name` ends in `.` followed by one or more ASCII digits.
+/// Strips a trailing `.` followed by one or more ASCII digits, or returns
+/// `None` if `name` doesn't end in one.
 #[inline]
-fn has_temp_suffix(name: &str) -> bool {
-    name.rsplit_once('.')
-        .is_some_and(|(_, suffix)| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+fn strip_temp_suffix(name: &str) -> Option<&str> {
+    let (stem, suffix) = name.rsplit_once('.')?;
+    (!suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())).then_some(stem)
 }
 
 /// The local file names for one object path.
@@ -56,42 +60,34 @@ pub(crate) struct LocalName {
     pub(crate) prefix: String,
     /// The object's parent path.
     pub(crate) parent: String,
-    /// `<prefix>.<file name>`, the complete object.
+    /// `<prefix>.<file name>.obj`, the complete object.
     pub(crate) object_file_name: String,
 }
 
 impl LocalName {
-    /// Returns the local names for `path`, or `Unsupported` if its file name is
-    /// reserved by the layout.
-    pub(crate) fn new(path: &Path) -> Result<Self, MirrorError> {
+    /// Returns the local names for `path`.
+    pub(crate) fn new(path: &Path) -> Self {
         let (parent, name) = split_path(path);
         let prefix = hex::encode(Md5::digest(parent.as_bytes()));
-        let object_file_name = format!("{prefix}.{name}");
-        // Check the full name so that names like `7` and `meta` are caught too.
-        if name.is_empty() || classify(&object_file_name) != FileKind::Object {
-            return Err(MirrorError::Unsupported {
-                operation: "local copy of a file name that is empty, ends in `.meta` or \
-                     `.<digits>`, or is `meta` or all digits",
-            });
-        }
-        Ok(Self {
+        let object_file_name = format!("{prefix}.{name}{OBJECT_SUFFIX}");
+        Self {
             prefix,
             parent: parent.to_string(),
             object_file_name,
-        })
+        }
     }
 
-    /// `<prefix>.<file name>.meta`
+    /// `<prefix>.<file name>.obj.meta`
     pub(crate) fn meta(&self) -> String {
         format!("{}{META_SUFFIX}", self.object_file_name)
     }
 
-    /// `<prefix>.<file name>.<counter>`
+    /// `<prefix>.<file name>.obj.<counter>`
     pub(crate) fn temp(&self, counter: u64) -> String {
         format!("{}.{counter}", self.object_file_name)
     }
 
-    /// `<prefix>.<file name>.meta.<counter>`
+    /// `<prefix>.<file name>.obj.meta.<counter>`
     pub(crate) fn meta_temp(&self, counter: u64) -> String {
         format!("{}{META_SUFFIX}.{counter}", self.object_file_name)
     }
@@ -107,7 +103,11 @@ pub(crate) enum FileKind<'a> {
     Meta {
         object_file_name: &'a str,
     },
-    Object,
+    /// A complete object with MD5 prefix `prefix` and object file name `name`.
+    Object {
+        prefix: &'a str,
+        name: &'a str,
+    },
     /// Not part of the layout. Left alone.
     Unknown,
 }
@@ -116,7 +116,7 @@ pub(crate) fn classify(name: &str) -> FileKind<'_> {
     if name == LOCK_FILE {
         return FileKind::Lock;
     }
-    let has_prefix = name.len() > PREFIX_LEN + 1
+    let has_prefix = name.len() > PREFIX_LEN
         && name.as_bytes()[PREFIX_LEN] == b'.'
         && name.as_bytes()[..PREFIX_LEN]
             .iter()
@@ -124,19 +124,31 @@ pub(crate) fn classify(name: &str) -> FileKind<'_> {
     if !has_prefix {
         return FileKind::Unknown;
     }
-    if has_temp_suffix(name) {
-        FileKind::Temp
-    } else if let Some(object_file_name) = name.strip_suffix(META_SUFFIX) {
-        FileKind::Meta { object_file_name }
+    // The prefix is ASCII, so these slices are on character boundaries.
+    let prefix = &name[..PREFIX_LEN];
+    let rest = &name[PREFIX_LEN + 1..];
+    if let Some(stem) = strip_temp_suffix(rest) {
+        let stem = stem.strip_suffix(META_SUFFIX).unwrap_or(stem);
+        if stem.ends_with(OBJECT_SUFFIX) {
+            FileKind::Temp
+        } else {
+            FileKind::Unknown
+        }
+    } else if let Some(object_name) = rest.strip_suffix(OBJECT_SUFFIX) {
+        FileKind::Object {
+            prefix,
+            name: object_name,
+        }
+    } else if rest
+        .strip_suffix(META_SUFFIX)
+        .is_some_and(|stem| stem.ends_with(OBJECT_SUFFIX))
+    {
+        FileKind::Meta {
+            object_file_name: &name[..name.len() - META_SUFFIX.len()],
+        }
     } else {
-        FileKind::Object
+        FileKind::Unknown
     }
-}
-
-/// Splits a [`FileKind::Object`] file name into its MD5 prefix and the object's
-/// file name.
-pub(crate) fn split_object_name(name: &str) -> (&str, &str) {
-    (&name[..PREFIX_LEN], &name[PREFIX_LEN + 1..])
 }
 
 /// A complete local copy's metadata, as returned by HEAD and GET.
@@ -297,58 +309,100 @@ mod tests {
 
     #[test]
     fn should_name_files_by_parent_md5() {
-        let name = LocalName::new(&Path::from("path/to/db/compacted/01K.sst")).unwrap();
+        let name = LocalName::new(&Path::from("path/to/db/compacted/01K.sst"));
         assert_eq!(
             name.prefix,
             hex::encode(Md5::digest(b"path/to/db/compacted"))
         );
         assert_eq!(name.parent, "path/to/db/compacted");
-        assert_eq!(name.object_file_name, format!("{}.01K.sst", name.prefix));
-        assert_eq!(name.meta(), format!("{}.01K.sst.meta", name.prefix));
-        assert_eq!(name.temp(7), format!("{}.01K.sst.7", name.prefix));
-        assert_eq!(name.meta_temp(7), format!("{}.01K.sst.meta.7", name.prefix));
+        assert_eq!(
+            name.object_file_name,
+            format!("{}.01K.sst.obj", name.prefix)
+        );
+        assert_eq!(name.meta(), format!("{}.01K.sst.obj.meta", name.prefix));
+        assert_eq!(name.temp(7), format!("{}.01K.sst.obj.7", name.prefix));
+        assert_eq!(
+            name.meta_temp(7),
+            format!("{}.01K.sst.obj.meta.7", name.prefix)
+        );
 
-        let root = LocalName::new(&Path::from("01K.sst")).unwrap();
+        let root = LocalName::new(&Path::from("01K.sst"));
         assert_eq!(root.parent, "");
         assert_eq!(root.prefix, "d41d8cd98f00b204e9800998ecf8427e");
     }
 
     #[test]
-    fn should_reject_reserved_file_names() {
-        for path in ["a/b.meta", "a/b.123", "a/7", "a/meta", "meta.1", ""] {
-            assert!(
-                matches!(
-                    LocalName::new(&Path::from(path)),
-                    Err(MirrorError::Unsupported { .. })
-                ),
+    fn should_classify_files_for_any_object_name() {
+        for path in [
+            "a/b.sst",
+            "a/b.meta",
+            "a/b.123",
+            "a/7",
+            "a/meta",
+            "a/obj",
+            "a/b.obj",
+            "a/b.obj.meta",
+            "a/b.obj.7",
+            "a/.obj",
+            "meta.1",
+            "",
+        ] {
+            let path = Path::from(path);
+            let name = LocalName::new(&path);
+            let (_, file_name) = split_path(&path);
+            assert_eq!(
+                classify(&name.object_file_name),
+                FileKind::Object {
+                    prefix: &name.prefix,
+                    name: file_name,
+                },
                 "{path}"
             );
-        }
-        for path in ["a/b.sst", "a/b.1x", "a/b.", "a/metadata", "a/b.meta.sst"] {
-            assert!(LocalName::new(&Path::from(path)).is_ok(), "{path}");
+            assert_eq!(
+                classify(&name.meta()),
+                FileKind::Meta {
+                    object_file_name: &name.object_file_name
+                },
+                "{path}"
+            );
+            assert_eq!(classify(&name.temp(3)), FileKind::Temp, "{path}");
+            assert_eq!(classify(&name.meta_temp(3)), FileKind::Temp, "{path}");
         }
     }
 
     #[test]
-    fn should_classify_files() {
-        let name = LocalName::new(&Path::from("a/b.sst")).unwrap();
+    fn should_not_collide_with_metadata_or_temp_files() {
+        let foo = LocalName::new(&Path::from("a/foo"));
+        let foo_meta = LocalName::new(&Path::from("a/foo.meta"));
+        let foo_7 = LocalName::new(&Path::from("a/foo.7"));
+        assert_ne!(foo_meta.object_file_name, foo.meta());
+        assert_ne!(foo_7.object_file_name, foo.temp(7));
+    }
+
+    #[test]
+    fn should_classify_unknown_files() {
+        let name = LocalName::new(&Path::from("a/b.sst"));
         assert_eq!(classify("LOCK"), FileKind::Lock);
-        assert_eq!(classify(&name.object_file_name), FileKind::Object);
-        assert_eq!(
-            classify(&name.meta()),
-            FileKind::Meta {
-                object_file_name: &name.object_file_name
-            }
-        );
-        assert_eq!(classify(&name.temp(3)), FileKind::Temp);
-        assert_eq!(classify(&name.meta_temp(3)), FileKind::Temp);
         assert_eq!(classify("notes.txt"), FileKind::Unknown);
         assert_eq!(
-            classify("D41D8CD98F00B204E9800998ECF8427E.b.sst"),
+            classify("D41D8CD98F00B204E9800998ECF8427E.b.sst.obj"),
             FileKind::Unknown
         );
-        assert_eq!(classify(&format!("{}.", name.prefix)), FileKind::Unknown);
-        assert_eq!(classify(&name.prefix), FileKind::Unknown);
+        for suffix in [
+            "",
+            ".",
+            ".b.sst",
+            ".b.sst.meta",
+            ".b.sst.7",
+            ".b.sst.meta.7",
+            ".obj",
+            ".obj.meta",
+            ".b.obj.x",
+            ".b.obj.meta.meta",
+        ] {
+            let file = format!("{}{suffix}", name.prefix);
+            assert_eq!(classify(&file), FileKind::Unknown, "{file}");
+        }
     }
 
     #[test]
@@ -392,7 +446,7 @@ mod tests {
     #[test]
     fn should_reject_conflicting_prefixes() {
         let mut prefixes = PrefixMap::default();
-        let name = LocalName::new(&Path::from("a/b.sst")).unwrap();
+        let name = LocalName::new(&Path::from("a/b.sst"));
         prefixes.check_or_insert(&name).unwrap();
         prefixes.check_or_insert(&name).unwrap();
 

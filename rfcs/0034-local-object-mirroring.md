@@ -322,15 +322,16 @@ Four types of files exist under the cache root:
 
 - `LOCK`: A persistent lock file held exclusively for the lifetime of the
   mirror.
-- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst`: The complete object, copied without
+- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.obj`: The complete object, copied without
   changing its bytes. The mirror does not check its contents for corruption.
-- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.1234567890`: A temporary file that is being
-  written to either for uploading or downloading purposes. The suffix is an
+- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.obj.1234567890`: A temporary file that is being
+  written to either for uploading or downloading purposes. Temporary `.meta`
+  files use the same suffix (`<name>.obj.meta.<counter>`). The suffix is an
   atomic counter owned by the mirror. Only one mirror can hold a directory's
   `LOCK`, so the suffix is unique within the directory. A per-mirror counter
   (rather than a process-wide one) keeps file names deterministic across
   simulation runs in one process.
-- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.meta`: Metadata for the object, including its
+- `01M05WR6EZ6ZF44TGFNN5HFTDD.sst.obj.meta`: Metadata for the object, including its
   canonical object path, ETag, version, and attributes. The path is used to
   recover the remote location after restart and verify the filename hash.
 
@@ -345,13 +346,11 @@ of its object path with the filename stripped. This protects against filename
 collisions between directories (for example, external databases) and keeps the
 cache root flat.
 
-A file name that ends in `.meta` or `.<digits>` (including a bare `meta` or
-`7`) can't be told apart from a metadata or temporary file. Object `foo.meta`
-would even share a local name with the metadata of object `foo`. The mirror
-refuses to keep local copies of such names: a `Local`, `Refetch`, or `Mirror`
-route for one, or a `fetch` of one, fails with `MirrorError::Unsupported`
-before anything reaches the wrapped store. SlateDB's SST names aren't
-affected.
+Every local name ends in a suffix that belongs to the mirror (`.obj`,
+`.obj.meta`, or one of those followed by `.<counter>`), never to the object.
+This lets the mirror keep a local copy of any object name, including names that
+end in `.meta` or `.<digits>`. Object `foo.meta` is stored as `foo.meta.obj`,
+which doesn't collide with `foo.obj.meta`, the metadata of object `foo`.
 
 The mirror maintains an in-memory map from each MD5 prefix to its canonical
 parent path. Startup reconstructs the map from `.meta` files. Each installation
@@ -363,11 +362,11 @@ A directory might look like this:
 ```text
 <cache-root>/
   LOCK
-  754128269b532c9827ffa09d3afb6118.01M05WR6EZ6ZF44TGFNN5HFTDD.sst
-  754128269b532c9827ffa09d3afb6118.01M05WR6EZ6ZF44TGFNN5HFTDD.sst.meta
-  754128269b532c9827ffa09d3afb6118.01M05WR997G22470E93PBPVAA2.sst.3
-  4e7dc5d27c63e00966170758c2ff14bf.01M05WRF0MG8EZY9HJEY36JE4B.sst.5
-  4e7dc5d27c63e00966170758c2ff14bf.01M05WRF0MG8EZY9HJEY36JE4B.sst.meta
+  754128269b532c9827ffa09d3afb6118.01M05WR6EZ6ZF44TGFNN5HFTDD.sst.obj
+  754128269b532c9827ffa09d3afb6118.01M05WR6EZ6ZF44TGFNN5HFTDD.sst.obj.meta
+  754128269b532c9827ffa09d3afb6118.01M05WR997G22470E93PBPVAA2.sst.obj.3
+  4e7dc5d27c63e00966170758c2ff14bf.01M05WRF0MG8EZY9HJEY36JE4B.sst.obj.5
+  4e7dc5d27c63e00966170758c2ff14bf.01M05WRF0MG8EZY9HJEY36JE4B.sst.obj.meta
 ```
 
 This directory contains files for two directories:
@@ -376,11 +375,11 @@ This directory contains files for two directories:
 - /path/to/other/db/compacted (4e7dc5d27c63e00966170758c2ff14bf)
 
 The `754128269b532c9827ffa09d3afb6118` prefix has one fully downloaded SST
-(`01M05WR6EZ6ZF44TGFNN5HFTDD.sst`) and one in-flight SST
-(`01M05WR997G22470E93PBPVAA2.sst.3`).
+(`01M05WR6EZ6ZF44TGFNN5HFTDD.sst.obj`) and one in-flight SST
+(`01M05WR997G22470E93PBPVAA2.sst.obj.3`).
 
 The `4e7dc5d27c63e00966170758c2ff14bf` prefix has one partially downloaded SST
-(`01M05WRF0MG8EZY9HJEY36JE4B.sst.5`) and its metadata. The SST has not yet been
+(`01M05WRF0MG8EZY9HJEY36JE4B.sst.obj.5`) and its metadata. The SST has not yet been
 fully downloaded and renamed.
 
 Upload and download files are undifferentiated. No collision is possible
@@ -447,8 +446,8 @@ The policy's `put_route` picks one of three routes for each PUT:
 - `Observe` writes to the wrapped store, then passes the payload to
   `MirrorPolicy::observe` before returning to the caller.
 - `Mirror` tees bytes to the wrapped store and a local temporary file
-  (`<name>.<counter>`, see [Filesystem layout](#filesystem-layout)). The
-  temporary file is renamed to `<name>` only after the upload succeeds, so a
+  (`<name>.obj.<counter>`, see [Filesystem layout](#filesystem-layout)). The
+  temporary file is renamed to `<name>.obj` only after the upload succeeds, so a
   partial or failed write never looks like a complete local copy.
 
 `put_multipart_route` returns a `MultipartRoute`, which has only `Remote` and
@@ -491,8 +490,7 @@ pub enum MirrorError {
     WriteCommitted { path: Path, source: Box<dyn Error + Send + Sync> },
     /// The policy returned an error from a route or `observe` call.
     Policy { source: Box<dyn Error + Send + Sync> },
-    /// The mirror doesn't support this operation (COPY, RENAME, or a local
-    /// copy of a reserved file name).
+    /// The mirror doesn't support this operation (COPY or RENAME).
     Unsupported { operation: &'static str },
     /// `ObjectStoreMirrorBuilder::build` was given an invalid option, such as
     /// a download concurrency of zero.
@@ -1122,8 +1120,10 @@ There is, however, an open question around the CPU cost of computing the MD5 pre
 
 ## Updates
 
-- Aligned with the `slatedb-mirror` implementation. Reserved file names
-  (`.meta` and `.<digits>` suffixes) can't be mirrored. Added
+- Local object files now end in `.obj`, so every object name can be
+  mirrored. Names ending in `.meta` or `.<digits>` no longer collide with
+  metadata or temporary files.
+- Aligned with the `slatedb-mirror` implementation. Added
   `MirrorError::InvalidConfig`, `with_system_clock`, and `with_max_retries`.
   Adjacent downloads of a path share one GET. Documented how route and
   `observe` errors reach callers, how PUT and multipart tees report local

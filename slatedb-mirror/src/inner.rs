@@ -217,7 +217,7 @@ impl Inner {
     /// the in-memory map has them. The caller must hold `path`'s turn in the
     /// ordering and have removed it from the map.
     async fn remove_files(&self, path: &Path) -> Result<(), MirrorError> {
-        let name = LocalName::new(path)?;
+        let name = LocalName::new(path);
         // Data first, so a crash never leaves a data file without its
         // metadata.
         for file in [&name.object_file_name, &name.meta()] {
@@ -235,10 +235,6 @@ impl Inner {
     /// overtake an earlier write to the same path. Neither side's failure
     /// stops the other.
     pub(crate) async fn delete(&self, path: &Path) -> object_store::Result<()> {
-        if LocalName::new(path).is_err() {
-            // Never mirrored, so there's nothing to order against.
-            return self.remote.delete(path).await;
-        }
         let ticket = self
             .ordering
             .register(path, OpKind::Delete)
@@ -298,7 +294,7 @@ impl Inner {
             let bytes = if range.is_empty() {
                 Bytes::new()
             } else {
-                let name = LocalName::new(path)?;
+                let name = LocalName::new(path);
                 self.vfs
                     .read_range(&self.file(&name.object_file_name), range.clone())
                     .await

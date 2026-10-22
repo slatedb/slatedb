@@ -49,7 +49,7 @@ pub(crate) async fn recover(vfs: &dyn Vfs, root: &StdPath) -> Result<Recovered, 
             FileKind::Meta { .. } => {
                 metas.insert(file.name);
             }
-            FileKind::Object => {
+            FileKind::Object { .. } => {
                 data.insert(file.name, file.size);
             }
         }
@@ -131,7 +131,7 @@ fn validate(
     let bytes = bytes.map_err(|err| format!("unreadable metadata: {err}"))?;
     let object = LocalObject::from_meta_bytes(&bytes).map_err(|err| format!("{err:?}"))?;
     let location = &object.meta.location;
-    let name = LocalName::new(location).map_err(|err| err.to_string())?;
+    let name = LocalName::new(location);
     if name.object_file_name != data {
         return Err(format!("path `{location}` doesn't match the file name"));
     }
@@ -170,7 +170,7 @@ mod tests {
     }
 
     fn write_pair(root: &StdPath, path: &str, contents: &[u8]) -> LocalName {
-        let name = LocalName::new(&Path::from(path)).unwrap();
+        let name = LocalName::new(&Path::from(path));
         write(root, &name.object_file_name, contents);
         write(
             root,
@@ -202,9 +202,9 @@ mod tests {
         write(root, &valid.meta_temp(4), b"partial");
 
         // Data without metadata, and metadata without data.
-        let data_only = LocalName::new(&Path::from("db/compacted/c.sst")).unwrap();
+        let data_only = LocalName::new(&Path::from("db/compacted/c.sst"));
         write(root, &data_only.object_file_name, b"c");
-        let meta_only = LocalName::new(&Path::from("db/compacted/d.sst")).unwrap();
+        let meta_only = LocalName::new(&Path::from("db/compacted/d.sst"));
         write(
             root,
             &meta_only.meta(),
@@ -212,12 +212,12 @@ mod tests {
         );
 
         // Malformed metadata.
-        let malformed = LocalName::new(&Path::from("db/compacted/e.sst")).unwrap();
+        let malformed = LocalName::new(&Path::from("db/compacted/e.sst"));
         write(root, &malformed.object_file_name, b"e");
         write(root, &malformed.meta(), b"{not json");
 
         // Metadata for a different path than the file name.
-        let mismatched = LocalName::new(&Path::from("db/compacted/f.sst")).unwrap();
+        let mismatched = LocalName::new(&Path::from("db/compacted/f.sst"));
         write(root, &mismatched.object_file_name, b"f");
         write(
             root,
@@ -226,7 +226,7 @@ mod tests {
         );
 
         // Torn data file.
-        let torn = LocalName::new(&Path::from("db/compacted/h.sst")).unwrap();
+        let torn = LocalName::new(&Path::from("db/compacted/h.sst"));
         write(root, &torn.object_file_name, b"");
         write(
             root,

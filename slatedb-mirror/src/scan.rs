@@ -10,7 +10,7 @@ use log::{debug, warn};
 use object_store::path::Path;
 
 use crate::inner::Inner;
-use crate::layout::{classify, split_object_name, split_path, FileKind, LocalName, LocalObject};
+use crate::layout::{classify, split_path, FileKind, LocalName, LocalObject};
 use crate::startup::IO_CONCURRENCY;
 
 /// Scans every `interval`, starting immediately. Runs until cancelled.
@@ -50,10 +50,9 @@ pub(crate) async fn scan(inner: &Inner) -> usize {
     {
         let prefixes = inner.prefixes.lock();
         for file in files {
-            if classify(&file.name) != FileKind::Object {
+            let FileKind::Object { prefix, name } = classify(&file.name) else {
                 continue;
-            }
-            let (prefix, name) = split_object_name(&file.name);
+            };
             let path = prefixes.parent(prefix).and_then(|parent| {
                 let path = if parent.is_empty() {
                     name.to_string()
@@ -161,15 +160,14 @@ async fn local_path(inner: &Inner, name: &str) -> Option<Path> {
             return None;
         }
     };
-    match LocalName::new(&path) {
-        Ok(local) if local.object_file_name == name => Some(path),
-        _ => {
-            warn!(
-                "mirror remote scan skipping file whose metadata doesn't match its name [name={}, path={}]",
-                name, path
-            );
-            None
-        }
+    if LocalName::new(&path).object_file_name == name {
+        Some(path)
+    } else {
+        warn!(
+            "mirror remote scan skipping file whose metadata doesn't match its name [name={}, path={}]",
+            name, path
+        );
+        None
     }
 }
 
@@ -199,7 +197,7 @@ mod tests {
     fn expected_files(paths: &[&str]) -> BTreeSet<String> {
         let mut expected = BTreeSet::from(["LOCK".to_string()]);
         for path in paths {
-            let name = LocalName::new(&Path::from(*path)).unwrap();
+            let name = LocalName::new(&Path::from(*path));
             expected.insert(name.meta());
             expected.insert(name.object_file_name);
         }
@@ -224,6 +222,34 @@ mod tests {
         assert!(!mirror.handle().contains(&Path::from(SST)));
         assert!(mirror.handle().contains(&Path::from(SST2)));
         assert_eq!(files(dir.path()), expected_files(&[SST2]));
+    }
+
+    #[tokio::test]
+    async fn should_scan_names_that_look_like_layout_suffixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemory::new());
+        let mirror = ObjectStoreMirror::for_test(dir.path(), Arc::clone(&store) as _).await;
+        let paths = [
+            SST,
+            "db/compacted/01A.sst.meta",
+            "db/compacted/01A.sst.7",
+            "db/compacted/01A.obj",
+            "db/compacted/meta",
+            "7",
+        ];
+        for path in paths {
+            mirror
+                .put(&Path::from(path), PutPayload::from_static(b"x"))
+                .await
+                .unwrap();
+        }
+        assert_eq!(scan(mirror.inner()).await, 0);
+        assert_eq!(files(dir.path()), expected_files(&paths));
+
+        store.delete(&Path::from(SST)).await.unwrap();
+        store.delete(&Path::from("7")).await.unwrap();
+        assert_eq!(scan(mirror.inner()).await, 2);
+        assert_eq!(files(dir.path()), expected_files(&paths[1..5]));
     }
 
     #[tokio::test]

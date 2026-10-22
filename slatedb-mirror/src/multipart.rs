@@ -48,7 +48,7 @@ pub(crate) async fn start(
     path: &Path,
     opts: PutMultipartOptions,
 ) -> object_store::Result<Box<dyn MultipartUpload>> {
-    let name = LocalName::new(path)?;
+    let name = LocalName::new(path);
     inner.prefixes.lock().check_or_insert(&name)?;
     let ticket = inner
         .ordering
