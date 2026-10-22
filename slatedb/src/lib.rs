@@ -51,7 +51,7 @@ pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, SegmentPrefix, WriteHandl
 pub use db_cache::stats as db_cache_stats;
 pub use db_cache::CacheTarget;
 pub use db_iter::{DbIterator, DbRecencyIterator};
-pub use db_reader::{DbReader, DbReaderMode};
+pub use db_reader::{DbReader, DbReaderMode, ManifestSyncOutcome};
 pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
@@ -65,7 +65,7 @@ pub use garbage_collector::stats as garbage_collector_stats;
 pub use garbage_collector::{GarbageCollectorBuilder, GcFilter};
 pub use instrumented_object_store::stats as instrumented_object_store_stats;
 pub use iter::IterationOrder;
-pub use manifest::VersionedManifest;
+pub use manifest::{ManifestTransfer, VersionedManifest};
 pub use merge_operator::{MergeOperator, MergeOperatorError};
 pub use ops::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbTransactionOps, DbWriteOps};
 pub use paths::PathResolver;

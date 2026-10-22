@@ -3688,3 +3688,69 @@ func BenchmarkScanNextBatch(b *testing.B) {
 		})
 	}
 }
+
+func TestDbReaderSyncManifest(t *testing.T) {
+	store := newMemoryStore(t)
+	handle := openTestDB(t, store, nil)
+	admin := openTestAdmin(t, store, nil)
+
+	if _, err := handle.db.Put([]byte("key"), []byte("initial")); err != nil {
+		t.Fatalf("Put(initial): %v", err)
+	}
+	if err := handle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+	// A pinned reader has no poller, so only the sync moves it forward.
+	checkpoint, err := admin.CreateDetachedCheckpoint(slatedb.CheckpointOptions{})
+	if err != nil {
+		t.Fatalf("CreateDetachedCheckpoint(): %v", err)
+	}
+	readerHandle := openTestReader(t, store, func(t *testing.T, builder *slatedb.DbReaderBuilder) {
+		if err := builder.WithReaderMode(slatedb.ReaderModeCheckpoint{Field0: checkpoint.Id}); err != nil {
+			t.Fatalf("WithReaderMode(): %v", err)
+		}
+	})
+	reader := readerHandle.reader
+
+	if _, err := handle.db.Put([]byte("key"), []byte("updated")); err != nil {
+		t.Fatalf("Put(updated): %v", err)
+	}
+	if err := handle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+	manifest := handle.db.DurableManifest()
+	if got := handle.db.Status().DurableManifestId; got != manifest.Id {
+		t.Fatalf("Status().DurableManifestId = %d, want %d", got, manifest.Id)
+	}
+
+	readValue := func() []byte {
+		value, err := reader.Get([]byte("key"))
+		if err != nil {
+			t.Fatalf("DbReader.Get(): %v", err)
+		}
+		if value == nil {
+			t.Fatalf("DbReader.Get(): got nil")
+		}
+		return *value
+	}
+	if got := readValue(); !bytes.Equal(got, []byte("initial")) {
+		t.Fatalf("DbReader.Get() before sync = %q, want %q", got, "initial")
+	}
+
+	outcome, err := reader.SyncManifest(manifest)
+	if err != nil || outcome != slatedb.ManifestSyncOutcomeApplied {
+		t.Fatalf("SyncManifest() = %v, %v; want Applied", outcome, err)
+	}
+	if got := readValue(); !bytes.Equal(got, []byte("updated")) {
+		t.Fatalf("DbReader.Get() after sync = %q, want %q", got, "updated")
+	}
+	outcome, err = reader.SyncManifest(manifest)
+	if err != nil || outcome != slatedb.ManifestSyncOutcomeStale {
+		t.Fatalf("SyncManifest() again = %v, %v; want Stale", outcome, err)
+	}
+
+	bad := slatedb.ManifestTransfer{Id: manifest.Id + 1, Bytes: []byte("bad")}
+	if _, err := reader.SyncManifest(bad); !errors.Is(err, slatedb.ErrErrorInvalid) {
+		t.Fatalf("SyncManifest(bad bytes): got %v, want invalid error", err)
+	}
+}

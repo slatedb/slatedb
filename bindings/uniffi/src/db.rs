@@ -8,7 +8,7 @@ use crate::db_snapshot::DbSnapshot;
 use crate::db_transaction::DbTransaction;
 use crate::error::Error;
 use crate::iterator::DbIterator;
-use crate::types::{CacheTarget, DbStatus, KeyRange, KeyValue, SsTableId};
+use crate::types::{CacheTarget, DbStatus, KeyRange, KeyValue, ManifestTransfer, SsTableId};
 use crate::validation::{validate_key, validate_key_value};
 use crate::write_batch::WriteBatch;
 use crate::write_handle::WriteHandle;
@@ -32,6 +32,13 @@ impl Db {
     /// prefixes (RFC-0024) live as of the snapshot (see [`DbStatus::segments`]).
     pub fn status(&self) -> DbStatus {
         self.inner.status().into()
+    }
+
+    /// Returns the most recent manifest that this handle wrote to or read
+    /// from object storage. Send it to readers, which install it with
+    /// `DbReader::sync_manifest`.
+    pub fn durable_manifest(&self) -> ManifestTransfer {
+        ManifestTransfer::from(&self.inner.status().durable_manifest)
     }
 }
 

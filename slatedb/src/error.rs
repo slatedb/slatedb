@@ -43,6 +43,12 @@ pub(crate) enum SlateDBError {
     #[error("empty manifest")]
     EmptyManifest,
 
+    #[error("invalid manifest bytes")]
+    InvalidManifestBytes(Arc<dyn std::error::Error + Sync + Send + 'static>),
+
+    #[error("invalid synced manifest. manifest_id=`{manifest_id}`, reason=`{reason}`")]
+    InvalidSyncedManifest { manifest_id: u64, reason: String },
+
     #[error("object store error")]
     ObjectStoreError(#[from] Arc<object_store::Error>),
 
@@ -699,6 +705,10 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidEnvironmentVariable { .. } => Error::invalid(msg),
             SlateDBError::InvalidSequenceNumber { .. } => Error::invalid(msg),
             SlateDBError::EmptyBatch => Error::invalid(msg),
+            SlateDBError::InvalidSyncedManifest { .. } => Error::invalid(msg),
+            SlateDBError::InvalidManifestBytes(src) => {
+                Error::invalid(msg).with_source(Box::new(src))
+            }
 
             // Data errors
             SlateDBError::InvalidFlatbuffer(err) => Error::data(msg).with_source(Box::new(err)),
