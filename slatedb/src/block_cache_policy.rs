@@ -26,14 +26,13 @@ pub(crate) fn should_cache_data_block(targets: &[CacheTarget], key_span: &(Bytes
     })
 }
 
-/// Controls block-cache insertion for memtable flush and compaction output.
-///
-// TODO: add control over when reads go through the block cache, e.g. for
-// probing during compaction.
+/// Controls block-cache insertion for memtable flush and compaction output,
+/// and which SST components compactor reads may use.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockCachePolicy {
     flush_targets: Vec<CacheTarget>,
     compaction_output_targets: Vec<CacheTarget>,
+    compaction_read_targets: Vec<CacheTarget>,
 }
 
 impl BlockCachePolicy {
@@ -51,12 +50,23 @@ impl BlockCachePolicy {
         self
     }
 
+    /// Sets the metadata targets compactor reads may use from the cache.
+    /// Data blocks are not cached during compaction reads.
+    pub fn with_compaction_read_targets(mut self, targets: &[CacheTarget]) -> Self {
+        self.compaction_read_targets = targets.to_vec();
+        self
+    }
+
     pub(crate) fn flush_targets(&self) -> &[CacheTarget] {
         &self.flush_targets
     }
 
     pub(crate) fn compaction_output_targets(&self) -> &[CacheTarget] {
         &self.compaction_output_targets
+    }
+
+    pub(crate) fn compaction_read_targets(&self) -> &[CacheTarget] {
+        &self.compaction_read_targets
     }
 }
 
@@ -71,6 +81,7 @@ impl Default for BlockCachePolicy {
                 CacheTarget::Filters,
             ],
             compaction_output_targets: vec![CacheTarget::Index, CacheTarget::Filters],
+            compaction_read_targets: vec![],
         }
     }
 }
@@ -95,6 +106,7 @@ mod tests {
             policy.compaction_output_targets(),
             &[CacheTarget::Index, CacheTarget::Filters]
         );
+        assert!(policy.compaction_read_targets().is_empty());
     }
 
     #[test]
@@ -125,12 +137,14 @@ mod tests {
     fn setters_replace_targets() {
         let policy = BlockCachePolicy::default()
             .with_flush_targets(&[CacheTarget::Stats])
-            .with_compaction_output_targets(&[CacheTarget::Index, CacheTarget::Filters]);
+            .with_compaction_output_targets(&[CacheTarget::Index, CacheTarget::Filters])
+            .with_compaction_read_targets(&[CacheTarget::Filters]);
 
         assert_eq!(policy.flush_targets, &[CacheTarget::Stats]);
         assert_eq!(
             policy.compaction_output_targets,
             &[CacheTarget::Index, CacheTarget::Filters]
         );
+        assert_eq!(policy.compaction_read_targets, &[CacheTarget::Filters]);
     }
 }
