@@ -219,7 +219,7 @@ fn bytes_payload(bytes: Bytes) -> GetResultPayload {
 /// # }
 /// ```
 pub struct ObjectStoreMirror {
-    handle: MirrorHandle,
+    pub(crate) inner: Arc<Inner>,
 }
 
 impl ObjectStoreMirror {
@@ -240,13 +240,11 @@ impl ObjectStoreMirror {
         }
     }
 
-    /// A handle to this mirror, the same one the policy gets.
-    pub fn handle(&self) -> &MirrorHandle {
-        &self.handle
-    }
-
-    pub(crate) fn inner(&self) -> &Arc<Inner> {
-        &self.handle.inner
+    /// A handle to this mirror, like the one the policy gets.
+    pub fn handle(&self) -> MirrorHandle {
+        MirrorHandle {
+            inner: Arc::clone(&self.inner),
+        }
     }
 
     async fn get_observed(
@@ -254,7 +252,7 @@ impl ObjectStoreMirror {
         location: &Path,
         mut options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        let inner = self.inner();
+        let inner = &self.inner;
         if options.head {
             return inner.remote.get_opts(location, options).await;
         }
@@ -270,7 +268,10 @@ impl ObjectStoreMirror {
             Some(range) => range.as_range(bytes.len() as u64).map_err(range_error)?,
             None => 0..bytes.len() as u64,
         };
-        inner.policy.observe(location, &bytes, &self.handle).await?;
+        inner
+            .policy
+            .observe(location, &bytes, &self.handle())
+            .await?;
         Ok(GetResult {
             payload: bytes_payload(bytes.slice(range.start as usize..range.end as usize)),
             meta,
@@ -285,7 +286,7 @@ impl ObjectStoreMirror {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        let inner = self.inner();
+        let inner = &self.inner;
         let Some(object) = inner.local(location) else {
             return Err(MirrorError::NotLocal {
                 path: location.clone(),
@@ -300,7 +301,7 @@ impl ObjectStoreMirror {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        let inner = self.inner();
+        let inner = &self.inner;
         let ticket = inner
             .ordering
             .register(location, OpKind::Download)
@@ -320,7 +321,7 @@ impl ObjectStoreMirror {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
-        let inner = self.inner();
+        let inner = &self.inner;
         let name = LocalName::new(location);
         inner.prefixes.lock().check_or_insert(&name)?;
         let ticket = inner
@@ -370,22 +371,22 @@ impl ObjectStoreMirror {
 
 impl Drop for ObjectStoreMirror {
     fn drop(&mut self) {
-        self.inner().shutdown.cancel();
+        self.inner.shutdown.cancel();
     }
 }
 
 impl fmt::Debug for ObjectStoreMirror {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ObjectStoreMirror")
-            .field("root", &self.inner().root)
-            .field("remote", &self.inner().remote)
+            .field("root", &self.inner.root)
+            .field("remote", &self.inner.remote)
             .finish_non_exhaustive()
     }
 }
 
 impl fmt::Display for ObjectStoreMirror {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ObjectStoreMirror({})", self.inner().remote)
+        write!(f, "ObjectStoreMirror({})", self.inner.remote)
     }
 }
 
@@ -397,7 +398,7 @@ impl ObjectStore for ObjectStoreMirror {
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
-        let inner = self.inner();
+        let inner = &self.inner;
         let route = inner
             .policy
             .put_route(location, &opts)
@@ -409,7 +410,7 @@ impl ObjectStore for ObjectStoreMirror {
                 let put = inner.remote.put_opts(location, payload, opts).await?;
                 inner
                     .policy
-                    .observe(location, &bytes, &self.handle)
+                    .observe(location, &bytes, &self.handle())
                     .await
                     .map_err(|err| committed(location, err))?;
                 Ok(put)
@@ -423,7 +424,7 @@ impl ObjectStore for ObjectStoreMirror {
         location: &Path,
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
-        let inner = self.inner();
+        let inner = &self.inner;
         let route = inner
             .policy
             .put_multipart_route(location, &opts)
@@ -439,7 +440,7 @@ impl ObjectStore for ObjectStoreMirror {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        let inner = self.inner();
+        let inner = &self.inner;
         let route = inner
             .policy
             .read_route(location, &options)
@@ -456,7 +457,7 @@ impl ObjectStore for ObjectStoreMirror {
         &self,
         locations: BoxStream<'static, object_store::Result<Path>>,
     ) -> BoxStream<'static, object_store::Result<Path>> {
-        let inner = Arc::clone(self.inner());
+        let inner = Arc::clone(&self.inner);
         locations
             .then(move |location| {
                 let inner = Arc::clone(&inner);
@@ -470,7 +471,7 @@ impl ObjectStore for ObjectStoreMirror {
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        self.inner().remote.list(prefix)
+        self.inner.remote.list(prefix)
     }
 
     fn list_with_offset(
@@ -478,11 +479,11 @@ impl ObjectStore for ObjectStoreMirror {
         prefix: Option<&Path>,
         offset: &Path,
     ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
-        self.inner().remote.list_with_offset(prefix, offset)
+        self.inner.remote.list_with_offset(prefix, offset)
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
-        self.inner().remote.list_with_delimiter(prefix).await
+        self.inner.remote.list_with_delimiter(prefix).await
     }
 
     async fn copy_opts(
@@ -623,8 +624,8 @@ impl ObjectStoreMirrorBuilder {
         let handle = MirrorHandle {
             inner: Arc::clone(&inner),
         };
-        inner.spawn(Arc::clone(&inner.policy).run(handle.clone()));
-        Ok(Arc::new(ObjectStoreMirror { handle }))
+        inner.spawn(Arc::clone(&inner.policy).run(handle));
+        Ok(Arc::new(ObjectStoreMirror { inner }))
     }
 }
 
@@ -942,7 +943,7 @@ mod tests {
             }
         }
 
-        fn handle(&self) -> &MirrorHandle {
+        fn handle(&self) -> MirrorHandle {
             self.mirror.handle()
         }
 

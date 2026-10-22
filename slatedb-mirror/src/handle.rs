@@ -162,7 +162,7 @@ mod tests {
         mirror.handle().evict([path.clone()]);
         mirror.handle().fetch([path.clone()]).await.unwrap();
         assert!(mirror.handle().contains(&path));
-        eventually(|| mirror.inner().ordering.is_empty()).await;
+        eventually(|| mirror.inner.ordering.is_empty()).await;
         assert!(mirror.handle().contains(&path));
     }
 
@@ -183,7 +183,7 @@ mod tests {
         mirror.handle().evict([path.clone()]);
         tokio::time::sleep(Duration::from_millis(20)).await;
         fetch.await.unwrap();
-        eventually(|| mirror.inner().ordering.is_empty()).await;
+        eventually(|| mirror.inner.ordering.is_empty()).await;
         assert!(!mirror.handle().contains(&path));
     }
 }

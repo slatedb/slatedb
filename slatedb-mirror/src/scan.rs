@@ -218,7 +218,7 @@ mod tests {
         store.delete(&Path::from(SST)).await.unwrap();
         store.delete(&Path::from("root.sst")).await.unwrap();
 
-        assert_eq!(scan(mirror.inner()).await, 2);
+        assert_eq!(scan(&mirror.inner).await, 2);
         assert!(!mirror.handle().contains(&Path::from(SST)));
         assert!(mirror.handle().contains(&Path::from(SST2)));
         assert_eq!(files(dir.path()), expected_files(&[SST2]));
@@ -243,12 +243,12 @@ mod tests {
                 .await
                 .unwrap();
         }
-        assert_eq!(scan(mirror.inner()).await, 0);
+        assert_eq!(scan(&mirror.inner).await, 0);
         assert_eq!(files(dir.path()), expected_files(&paths));
 
         store.delete(&Path::from(SST)).await.unwrap();
         store.delete(&Path::from("7")).await.unwrap();
-        assert_eq!(scan(mirror.inner()).await, 2);
+        assert_eq!(scan(&mirror.inner).await, 2);
         assert_eq!(files(dir.path()), expected_files(&paths[1..5]));
     }
 
@@ -265,7 +265,7 @@ mod tests {
         }
         // Both files stay on disk, but the maps lose track of them. Without the
         // prefix map, the scan reads each `.meta` for its path.
-        let inner = mirror.inner();
+        let inner = &mirror.inner;
         inner.entries.lock().clear();
         *inner.prefixes.lock() = PrefixMap::default();
         store.delete(&Path::from(SST)).await.unwrap();
