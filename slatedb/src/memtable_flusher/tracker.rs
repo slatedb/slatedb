@@ -18,7 +18,7 @@ use futures::StreamExt;
 use log::debug;
 use slatedb_common::metrics::{CounterFn, MetricsRecorderHelper};
 
-use crate::checkpoint::CheckpointCreateResult;
+use crate::checkpoint::CheckpointRequest;
 use crate::config::CheckpointOptions;
 use crate::db::DbInner;
 use crate::dispatcher::MessageHandler;
@@ -31,7 +31,7 @@ use crate::utils::IdGenerator;
 use fail_parallel::fail_point;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use ulid::Ulid;
 
 macro_rules! memtable_flush_stat_name {
@@ -81,9 +81,8 @@ pub(crate) enum TrackerMessage {
     },
     /// Checkpoint creation request from an external caller.
     CheckpointRequest {
-        target: FlushTarget,
         options: CheckpointOptions,
-        sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
+        request: CheckpointRequest,
     },
     /// An upload worker completed successfully.
     UploadComplete(UploadedMemtable),
@@ -125,6 +124,12 @@ pub(super) struct FlushTracker {
     manifest_writer: ManifestWriter,
     frontier: TrackedImmFrontier,
     stats: FlushTrackerStats,
+    /// Publishes the L0 stall state to the manifest writer: 0 while the
+    /// oldest pending memtable can be dispatched, otherwise an id that is
+    /// distinct for every stall.
+    l0_stall_tx: watch::Sender<u64>,
+    /// Number of stalls started so far; the source of stall ids.
+    l0_stalls: u64,
 }
 
 impl FlushTracker {
@@ -132,6 +137,7 @@ impl FlushTracker {
         inner: Arc<DbInner>,
         uploader: Uploader,
         manifest_writer: ManifestWriter,
+        l0_stall_tx: watch::Sender<u64>,
     ) -> Self {
         let stats = FlushTrackerStats::new(&inner.recorder);
         Self {
@@ -140,6 +146,8 @@ impl FlushTracker {
             manifest_writer,
             frontier: TrackedImmFrontier::new(),
             stats,
+            l0_stall_tx,
+            l0_stalls: 0,
         }
     }
 }
@@ -156,14 +164,9 @@ impl MessageHandler<TrackerMessage> for FlushTracker {
                 self.stats.flush_request_count.increment(1);
                 self.handle_flush_request(target, sender).await
             }
-            TrackerMessage::CheckpointRequest {
-                target,
-                options,
-                sender,
-            } => {
+            TrackerMessage::CheckpointRequest { options, request } => {
                 self.stats.checkpoint_request_count.increment(1);
-                self.handle_checkpoint_request(target, options, sender)
-                    .await
+                self.handle_checkpoint_request(options, request).await
             }
             TrackerMessage::UploadComplete(uploaded) => {
                 self.stats.l0_upload_count.increment(1);
@@ -217,17 +220,19 @@ impl FlushTracker {
 
     async fn handle_checkpoint_request(
         &mut self,
-        target: FlushTarget,
         options: CheckpointOptions,
-        sender: oneshot::Sender<Result<CheckpointCreateResult, SlateDBError>>,
+        request: CheckpointRequest,
     ) -> Result<(), SlateDBError> {
         if let Err(err) = self.reconcile_and_dispatch().await {
-            let _ = sender.send(Err(err.clone()));
+            request.lifecycle.fail(err.clone());
             return Err(err);
         }
-        let through_seq = self.frontier.resolve_target(target);
-        self.manifest_writer
-            .send_checkpoint(through_seq, options, sender)?;
+        fail_point!(
+            Arc::clone(&self.inner.fp_registry),
+            "checkpoint-after-reconcile",
+            |_| { Ok(()) }
+        );
+        self.manifest_writer.begin_checkpoint(options, request)?;
         self.dispatch_ready_memtables()
     }
 
@@ -330,6 +335,25 @@ impl FlushTracker {
         true
     }
 
+    /// Publishes a stall transition. Only a change wakes the manifest
+    /// writer's stall notifier, and every stall carries a fresh id so a stall
+    /// that clears and restarts between two reads is still seen as new.
+    fn set_l0_stalled(&mut self, stalled: bool) {
+        let l0_stalls = &mut self.l0_stalls;
+        self.l0_stall_tx.send_if_modified(|state| {
+            if stalled == (*state != 0) {
+                return false;
+            }
+            *state = if stalled {
+                *l0_stalls += 1;
+                *l0_stalls
+            } else {
+                0
+            };
+            true
+        });
+    }
+
     fn dispatch_ready_memtables(&mut self) -> Result<(), SlateDBError> {
         loop {
             // Strict seq order: skipping a blocked older imm
@@ -341,9 +365,11 @@ impl FlushTracker {
                 .iter()
                 .position(|t| matches!(t.state, TrackedImmState::PendingDispatch));
             let Some(idx) = next_idx else {
+                self.set_l0_stalled(false);
                 return Ok(());
             };
             if !self.can_dispatch(&self.frontier.tracked[idx].imm_memtable) {
+                self.set_l0_stalled(true);
                 return Ok(());
             }
             self.frontier.tracked[idx].state = TrackedImmState::Uploading;
@@ -377,8 +403,8 @@ impl FlushTracker {
                 TrackerMessage::FlushRequest { sender, .. } => {
                     let _ = sender.send(Err(err.clone()));
                 }
-                TrackerMessage::CheckpointRequest { sender, .. } => {
-                    let _ = sender.send(Err(err.clone()));
+                TrackerMessage::CheckpointRequest { request, .. } => {
+                    request.lifecycle.fail(err.clone());
                 }
                 TrackerMessage::PollManifest { sender } => {
                     let _ = sender.send(Err(err.clone()));
@@ -457,7 +483,6 @@ impl TrackedImmFrontier {
     /// Resolves a flush target to the sequence that must become durable.
     fn resolve_target(&self, target: FlushTarget) -> Option<u64> {
         match target {
-            FlushTarget::CurrentDurable => None,
             FlushTarget::All => self.tracked.back().map(|t| t.last_seq),
         }
     }
@@ -559,6 +584,7 @@ mod tests {
     use crate::manifest::ManifestCore;
     use crate::mem_table::{ImmutableMemtable, WritableKVTable};
     use crate::memtable_flusher::uploader::Uploader;
+    use crate::memtable_flusher::CheckpointCursor;
     use crate::memtable_flusher::{FlushTarget, MemtableFlusher};
     use crate::paths::PathResolver;
     use crate::prefix_extractor::PrefixExtractor;
@@ -662,10 +688,14 @@ mod tests {
             .await
             .unwrap(),
         );
-        let manifest =
-            FenceableManifest::init_writer(stored_manifest, Duration::from_secs(300), system_clock)
-                .await
-                .unwrap();
+        let manifest = FenceableManifest::init_writer(
+            stored_manifest,
+            Duration::from_secs(300),
+            system_clock,
+            None,
+        )
+        .await
+        .unwrap();
         TestHarness {
             inner,
             manifest,
@@ -974,11 +1004,18 @@ mod tests {
         let path = harness.path.clone();
         let object_store = Arc::clone(&harness.object_store);
         let flusher = start_flusher(harness);
-        freeze_value_imm(&flusher.inner, b"k1", b"v1", 21);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 0);
 
         let checkpoint = timeout(
             Duration::from_secs(5),
-            flusher.create_checkpoint(FlushTarget::All, CheckpointOptions::default()),
+            flusher.create_checkpoint(
+                Some(CheckpointCursor {
+                    seq: 1,
+                    wal_file: Some(0),
+                }),
+                true,
+                CheckpointOptions::default(),
+            ),
         )
         .await
         .unwrap()
@@ -1013,12 +1050,11 @@ mod tests {
         let flusher = start_flusher(harness);
         freeze_value_imm(&flusher.inner, b"k1", b"v1", 61);
 
-        // A CurrentDurable checkpoint should complete promptly even when L0 is
-        // full — it captures whatever is already durable without waiting for
-        // the flush pipeline to drain.
+        // A Durable checkpoint completes even when L0 is full. It does not wait for
+        // pending flushes.
         let checkpoint = timeout(
             Duration::from_secs(5),
-            flusher.create_checkpoint(FlushTarget::CurrentDurable, CheckpointOptions::default()),
+            flusher.create_checkpoint(None, false, CheckpointOptions::default()),
         )
         .await
         .unwrap()
@@ -1082,6 +1118,7 @@ mod tests {
                 stored_manifest,
                 Duration::from_secs(300),
                 Arc::new(DefaultSystemClock::new()),
+                None,
             )
             .await
             .unwrap()
@@ -1145,7 +1182,14 @@ mod tests {
 
         let checkpoint_result = timeout(
             Duration::from_secs(5),
-            flusher.create_checkpoint(FlushTarget::All, CheckpointOptions::default()),
+            flusher.create_checkpoint(
+                Some(CheckpointCursor {
+                    seq: 1,
+                    wal_file: Some(0),
+                }),
+                true,
+                CheckpointOptions::default(),
+            ),
         )
         .await
         .unwrap();
@@ -1202,6 +1246,56 @@ mod tests {
                 .unwrap();
             assert_eq!(result.durable_seq, 1);
         }
+
+        flusher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn should_learn_of_compacted_l0_without_waiting_for_manifest_poll_interval() {
+        let settings = Settings {
+            l0_max_ssts: 1,
+            manifest_poll_interval: Duration::from_secs(60),
+            ..Settings::default()
+        };
+        let harness = setup_harness(
+            "/tmp/test_parallel_l0_flush_flusher_l0_stall_poll",
+            settings,
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        set_local_l0_len(&harness, 1);
+        let compacted_view = {
+            let guard = harness.inner.state.read();
+            guard.state().core().tree.l0.front().unwrap().clone()
+        };
+        let path = harness.path.clone();
+        let object_store = Arc::clone(&harness.object_store);
+        let flusher = start_flusher(harness);
+        freeze_value_imm(&flusher.inner, b"k1", b"v1", 41);
+
+        let flush = flusher.flush(FlushTarget::All);
+        tokio::pin!(flush);
+        assert!(timeout(Duration::from_millis(300), &mut flush)
+            .await
+            .is_err());
+
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store));
+        let mut stored_manifest =
+            StoredManifest::load(manifest_store, Arc::new(DefaultSystemClock::new()))
+                .await
+                .unwrap();
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        let tree = Arc::make_mut(&mut dirty.value.core.tree);
+        tree.l0.clear();
+        tree.last_compacted_l0_sst_view_id = Some(compacted_view.id);
+        tree.last_compacted_l0_sst_id = Some(compacted_view.sst.id.value());
+        stored_manifest.update(dirty).await.unwrap();
+
+        let result = timeout(Duration::from_secs(1), &mut flush)
+            .await
+            .expect("a stalled writer must learn of the compaction within the stall poll")
+            .unwrap();
+        assert_eq!(result.durable_seq, 1);
 
         flusher.shutdown().await;
     }
@@ -1736,13 +1830,6 @@ mod tests {
             assert_eq!(frontier.resolve_target(FlushTarget::All), None);
             frontier.register([make_imm(1), make_imm(2)].into_iter());
             assert_eq!(frontier.resolve_target(FlushTarget::All), Some(2));
-        }
-
-        #[test]
-        fn resolve_target_current_durable_returns_none() {
-            let mut frontier = TrackedImmFrontier::new();
-            frontier.register(std::iter::once(make_imm(1)));
-            assert_eq!(frontier.resolve_target(FlushTarget::CurrentDurable), None);
         }
 
         #[test]

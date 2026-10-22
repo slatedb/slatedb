@@ -111,7 +111,7 @@ use log::info;
 use log::warn;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use rand::RngCore;
+use rand::Rng;
 use tokio::runtime::Handle;
 
 use crate::admin::Admin;
@@ -199,6 +199,7 @@ pub struct DbBuilder<P: Into<Path>> {
     metrics_recorder: Arc<dyn MetricsRecorder>,
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     wal_writer_init: Option<Box<dyn wal::WriterInit>>,
+    expected_epoch: Option<u64>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -231,7 +232,19 @@ impl<P: Into<Path>> DbBuilder<P> {
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             segment_extractor: None,
             wal_writer_init: None,
+            expected_epoch: None,
         }
+    }
+
+    /// Attempts to claim writer epoch `expected_epoch + 1`.
+    ///
+    /// If a different writer epoch is observed, opening fails with
+    /// [`crate::CloseReason::Fenced`]. Compactor epoch changes are tolerated.
+    /// Without this option, opening retries claims against newer writers.
+    /// `expected_epoch` must be less than `u64::MAX`.
+    pub fn with_expected_epoch(mut self, expected_epoch: u64) -> Self {
+        self.expected_epoch = Some(expected_epoch);
+        self
     }
 
     /// Set the segment extractor (RFC-0024). When configured, every
@@ -695,7 +708,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             manifest,
             replay_iterator,
             mut wal_writer,
-        } = fencer.fence(stored_manifest).await?;
+        } = fencer.fence(stored_manifest, self.expected_epoch).await?;
         let (wal_writer, wal_observer) = if DbInner::wal_enabled_in_options(&self.settings) {
             let wal_observer = wal_writer.observer();
             (Some(wal_writer), wal_observer)
@@ -932,6 +945,7 @@ pub struct AdminBuilder<P: Into<Path>> {
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
     merge_operator: Option<MergeOperatorType>,
+    block_transformer: Option<Arc<dyn BlockTransformer>>,
 }
 
 impl<P: Into<Path>> AdminBuilder<P> {
@@ -948,6 +962,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
             merge_operator: None,
+            block_transformer: None,
         }
     }
 
@@ -999,6 +1014,13 @@ impl<P: Into<Path>> AdminBuilder<P> {
         self
     }
 
+    /// Sets the block transformer the database's SSTs are written with, so the
+    /// compactor and compaction worker this admin runs can read and rewrite them.
+    pub fn with_block_transformer(mut self, block_transformer: Arc<dyn BlockTransformer>) -> Self {
+        self.block_transformer = Some(block_transformer);
+        self
+    }
+
     /// Builds and returns an Admin instance.
     pub fn build(self) -> Admin {
         // Store the raw object stores here. Admin wraps them in a
@@ -1034,6 +1056,7 @@ impl<P: Into<Path>> AdminBuilder<P> {
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: self.compaction_filter_supplier,
             merge_operator: self.merge_operator,
+            block_transformer: self.block_transformer,
         }
     }
 }
@@ -1243,6 +1266,7 @@ pub struct CompactorBuilder<P: Into<Path>> {
     compaction_runtime: Handle,
     options: CompactorOptions,
     scheduler_supplier: Option<Arc<dyn CompactionSchedulerSupplier>>,
+    expected_epoch: Option<u64>,
     rand: Arc<DbRand>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
     system_clock: Arc<dyn SystemClock>,
@@ -1266,6 +1290,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             compaction_runtime: Handle::current(),
             options: CompactorOptions::default(),
             scheduler_supplier: None,
+            expected_epoch: None,
             rand: Arc::new(DbRand::default()),
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             system_clock: Arc::new(DefaultSystemClock::default()),
@@ -1288,6 +1313,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             compaction_runtime: self.compaction_runtime,
             options: self.options,
             scheduler_supplier: self.scheduler_supplier,
+            expected_epoch: self.expected_epoch,
             rand: self.rand,
             metrics_recorder: self.metrics_recorder,
             system_clock: self.system_clock,
@@ -1313,6 +1339,17 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// Sets the options to use for the compactor.
     pub fn with_options(mut self, options: CompactorOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    /// Attempts to claim compactor epoch `expected_epoch + 1`.
+    ///
+    /// If a different compactor epoch is observed, startup fails with
+    /// [`crate::CloseReason::Fenced`]. Writer epoch changes are tolerated.
+    /// Without this option, startup retries claims against newer compactors.
+    /// `expected_epoch` must be less than `u64::MAX`.
+    pub fn with_expected_epoch(mut self, expected_epoch: u64) -> Self {
+        self.expected_epoch = Some(expected_epoch);
         self
     }
 
@@ -1468,6 +1505,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             table_store,
             self.options,
             scheduler_supplier,
+            self.expected_epoch,
             self.compaction_runtime,
             self.rand,
             &recorder,
@@ -1512,6 +1550,7 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             stats.clone(),
             self.system_clock.clone(),
             recorder.clone(),
+            self.expected_epoch,
         )
         .await?;
         let worker = options.worker.clone().map(|worker_options| {
@@ -2441,6 +2480,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_expected_writer_epoch_returns_closed_fenced() {
+        let result = crate::Db::builder("epoch-mismatch", Arc::new(InMemory::new()))
+            .with_expected_epoch(1)
+            .build()
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(error) if error.kind() == ErrorKind::Closed(crate::CloseReason::Fenced)
+        ));
+    }
+
+    #[tokio::test]
     async fn test_db_builder_uses_custom_wal_writer_init() {
         let called = Arc::new(AtomicBool::new(false));
         let db = crate::Db::builder(
@@ -2812,5 +2864,26 @@ mod tests {
             Some(b"v1".as_ref())
         );
         db.close().await.expect("failed to close db");
+    }
+
+    #[tokio::test]
+    async fn admin_hands_its_hooks_to_the_compactor_and_worker_it_runs() {
+        use super::AdminBuilder;
+        use crate::config::CompactionWorkerOptions;
+        use crate::test_utils::{IdentityBlockTransformer, StringConcatMergeOperator};
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let admin = AdminBuilder::new("/tmp/admin_hooks", object_store)
+            .with_merge_operator(Arc::new(StringConcatMergeOperator))
+            .with_block_transformer(Arc::new(IdentityBlockTransformer))
+            .build();
+
+        let compactor = admin.compactor_builder(CompactorOptions::default());
+        assert!(compactor.merge_operator.is_some());
+        assert!(compactor.block_transformer.is_some());
+
+        let worker = admin.compaction_worker_builder(CompactionWorkerOptions::default());
+        assert!(worker.merge_operator.is_some());
+        assert!(worker.block_transformer.is_some());
     }
 }

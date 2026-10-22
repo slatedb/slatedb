@@ -26,7 +26,7 @@ use chrono::{DateTime, Utc};
 use log::{error, info};
 use object_store::path::Path;
 use object_store::ObjectStore;
-use rand::RngCore;
+use rand::Rng;
 use slatedb::config::DurabilityLevel;
 use slatedb::{Db, DbRand, PrefixExtractor};
 use slatedb_common::clock::{MockSystemClock, SystemClock};

@@ -16,7 +16,7 @@ async fn main() -> Result<(), Error> {
     db.put(b"key2", b"data_before_snapshot").await?;
 
     // Create a snapshot
-    let snapshot = db.snapshot().await?;
+    let snapshot = db.snapshot()?;
     println!("Snapshot created successfully");
 
     // After creating snapshot, make changes to the database

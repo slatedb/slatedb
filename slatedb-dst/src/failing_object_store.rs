@@ -19,7 +19,7 @@ use object_store::{
     PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
 };
 use parking_lot::RwLock;
-use rand::RngCore;
+use rand::Rng;
 use slatedb::DbRand;
 use slatedb_common::clock::SystemClock;
 

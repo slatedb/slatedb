@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use log::{debug, error, warn};
 use object_store::path::Path;
 use object_store::{Attributes, ObjectMeta};
-use rand::{distr::Alphanumeric, Rng};
+use rand::{distr::Alphanumeric, Rng, RngExt};
 use slatedb_common::clock::SystemClock;
 use slatedb_common::file_handle_cache::{read_exact_at_offset, FileHandleCache};
 use slatedb_common::DbRand;

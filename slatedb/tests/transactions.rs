@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use object_store::{memory::InMemory, ObjectStore};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 16)]
 async fn test_concurrent_bank_transfers() {
@@ -45,7 +45,7 @@ async fn test_concurrent_bank_transfers() {
         .map(|_| {
             let db = db.clone();
             tokio::spawn(async move {
-                let mut rng = StdRng::from_os_rng();
+                let mut rng = rand::make_rng::<StdRng>();
                 for _ in 0..100 {
                     let from = rng.random_range(0..num_accounts);
                     let mut to = rng.random_range(0..num_accounts);
@@ -53,7 +53,7 @@ async fn test_concurrent_bank_transfers() {
                         to = rng.random_range(0..num_accounts);
                     }
                     loop {
-                        let txn = db.begin(slatedb::IsolationLevel::Snapshot).await.unwrap();
+                        let txn = db.begin(slatedb::IsolationLevel::Snapshot).unwrap();
                         let from_bal = get_balance(&txn, &account_key(from)).await;
                         let to_bal = get_balance(&txn, &account_key(to)).await;
                         let amount = rng.random_range(1..=100u64).min(from_bal);

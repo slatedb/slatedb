@@ -390,8 +390,12 @@ pub struct ScanOptions {
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters. See [`FilterContext`].
     ///
-    /// Consulted by `scan_prefix`, and by `scan` only when a registered
-    /// policy reports [`crate::filter_policy::FilterPolicy::supports_range_queries`].
+    /// Consulted by `scan` only when a registered policy reports
+    /// [`crate::filter_policy::FilterPolicy::supports_range_queries`], and by
+    /// `scan_prefix` only when a registered policy reports
+    /// [`crate::filter_policy::FilterPolicy::supports_prefix_queries`] or,
+    /// failing that, `supports_range_queries`, in which case the prefix's key
+    /// range is what the filters are asked about.
     pub filter_context: Option<FilterContext>,
     /// Optional caller-provided tracing settings.
     pub tracing_options: Option<TracingOptions>,
@@ -792,11 +796,12 @@ pub struct Settings {
     /// slot is treated conservatively as contributing to the peak at every point.
     pub l0_max_ssts_per_key: usize,
 
-    /// Number of parallel workers for flushing immutable memtables to L0 SSTs.
-    /// Higher values increase L0 flush throughput at the cost of more concurrent
-    /// object store uploads. Increasing parallelism may require a higher `l0_max_ssts`
-    /// to avoid backpressure from compaction not keeping up with the higher steady-state
-    /// flush rate.
+    /// Maximum number of unfinished L0 SST writers across all memtable flushes.
+    /// Each writer holds a slot from creation through upload completion, regardless
+    /// of its segment or memtable. This also limits the number of memtable workers.
+    /// Multipart requests within each SST use a separate concurrency limit.
+    /// Higher values allow more upload overlap and use more memory.
+    /// If compaction cannot keep up, writes can stall at `l0_max_ssts`.
     pub l0_flush_parallelism: usize,
 
     /// Defines the max number of unflushed key/value pair bytes that should reside in memory
@@ -1646,6 +1651,9 @@ pub struct GarbageCollectorOptions {
     /// Whether manifest and compactions boundary files are advanced before deletion.
     ///
     /// Disable this only for object stores that do not support conditional overwrites (`If-Match`).
+    /// For these stores, including `LocalFileSystem`, set this to `false`.
+    /// If a boundary update returns `NotImplemented`, GC logs a warning and skips deletion
+    /// for that resource.
     /// Without boundary advancement, a SlateDB client or compactor can begin updating a manifest or
     /// compactions file, stop making progress (for example, because its process or host is
     /// suspended), then resume after the garbage collector's `min_age`. It can then recreate a

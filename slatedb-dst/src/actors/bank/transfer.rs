@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use log::info;
-use rand::RngCore;
+use rand::Rng;
 use slatedb::config::WriteOptions;
 use slatedb::{Error, ErrorKind, IsolationLevel};
 
@@ -55,7 +55,7 @@ impl Actor for TransferActor {
             let to_key = self.bank.account_key(to);
 
             loop {
-                let txn = ctx.db().begin(IsolationLevel::Snapshot).await?;
+                let txn = ctx.db().begin(IsolationLevel::Snapshot)?;
                 let from_balance = self.bank.load_balance(&txn, from_key.as_bytes()).await?;
                 let to_balance = self.bank.load_balance(&txn, to_key.as_bytes()).await?;
                 let transfer_amount = sampled_amount.min(from_balance);

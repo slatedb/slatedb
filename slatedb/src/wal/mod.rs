@@ -206,6 +206,14 @@ pub trait WalObserver: Send + Sync + 'static {
 
 pub type FlushResultFuture = BoxFuture<'static, Result<(), WalError>>;
 
+/// The result of [`WalWriter::flush`].
+pub struct WalFlushResult {
+    /// The ID of the last WAL file that the flush includes.
+    pub wal_id: u64,
+    /// Completes when the flush is durable, or returns the flush error.
+    pub completion: FlushResultFuture,
+}
+
 /// The WAL's write API. Used by SlateDB to append new WAL writes. Is returned by
 /// [`WalWriterInit::fence_and_init_writer`].
 ///
@@ -224,9 +232,18 @@ pub trait WalWriter: Send {
     /// Append a write batch to the WAL.
     async fn append(&mut self, write_batch: &[RowEntry]) -> Result<(), WalError>;
 
-    /// Triggers a flush of all appended write batches to durable storage. Returns a
-    /// future that receives the result of the flush once it completes.
-    async fn flush(&mut self) -> Result<FlushResultFuture, WalError>;
+    /// Triggers a flush of all appended write batches to durable storage. Returns the ID of
+    /// the last WAL file that the flush includes. This method does not wait for the upload.
+    /// If there is nothing to flush, the ID is the ID of the previous WAL file.
+    ///
+    /// The returned ID must obey these rules:
+    /// - Rows appended before the call are in WAL files with this ID or a lower ID.
+    /// - Rows appended after the call go to WAL files with a higher ID.
+    /// - The ID is not lower than the ID of a previous call or [`WalStatus::last_flushed_wal_id`].
+    /// - After the upload, [`WalObserver::status`] shows this ID or a higher ID as the last
+    ///   flushed WAL file. If the upload fails, the WAL closes with an error.
+    /// - Each WAL file that a flush uploads contains at least one row.
+    async fn flush(&mut self) -> Result<WalFlushResult, WalError>;
 
     /// Returns true if the WAL implementation wants to request that the current in-memory
     /// writes be flushed to a new l0. WAL implementations can use this to (1) bound the range

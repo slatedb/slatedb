@@ -10,6 +10,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const websiteRoot = path.resolve(__dirname, '..');
 const wrappersDir = path.join(websiteRoot, 'src/content/docs/rfcs');
 const repoRfcsDir = path.resolve(websiteRoot, '..', 'rfcs');
+const repoImagesDir = path.join(repoRfcsDir, 'images');
+const wrappersImagesDir = path.join(wrappersDir, 'images');
 
 // Files in `rfcs/` that are useful in-repo but should not render on the website.
 const excludedRfcFiles = new Set(['0000-template.md']);
@@ -134,6 +136,16 @@ export async function generateRfcWrappers() {
       if (prev !== body) {
         await fs.writeFile(outPath, body, 'utf8');
       }
+    }
+
+    // Copy RFC images next to the wrappers so relative `images/...` links resolve.
+    await fs.rm(wrappersImagesDir, { recursive: true, force: true });
+    const hasImages = await fs
+      .stat(repoImagesDir)
+      .then((s) => s.isDirectory())
+      .catch(() => false);
+    if (hasImages) {
+      await fs.cp(repoImagesDir, wrappersImagesDir, { recursive: true });
     }
   } catch (err) {
     console.warn('[rfcs-generator] Error:', err?.message || err);

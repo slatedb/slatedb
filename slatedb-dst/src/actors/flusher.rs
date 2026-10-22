@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use log::info;
-use rand::Rng;
+use rand::RngExt;
 use slatedb::config::{FlushOptions, FlushType};
 use slatedb::Error;
 use tracing::instrument;

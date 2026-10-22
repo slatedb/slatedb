@@ -254,7 +254,7 @@ impl Db {
 
     /// Creates a read-only snapshot representing a consistent point in time.
     pub async fn snapshot(&self) -> Result<Arc<DbSnapshot>, Error> {
-        Ok(Arc::new(DbSnapshot::new(self.inner.snapshot().await?)))
+        Ok(Arc::new(DbSnapshot::new(self.inner.snapshot()?)))
     }
 
     /// Starts a transaction at the requested isolation level.
@@ -262,7 +262,7 @@ impl Db {
         &self,
         isolation_level: IsolationLevel,
     ) -> Result<Arc<DbTransaction>, Error> {
-        let tx = self.inner.begin(isolation_level.into()).await?;
+        let tx = self.inner.begin(isolation_level.into())?;
         Ok(Arc::new(DbTransaction::new(tx)))
     }
 

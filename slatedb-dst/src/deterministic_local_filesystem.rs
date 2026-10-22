@@ -1033,7 +1033,7 @@ async fn read_range_with_yields_from_file(
     Ok(buffer.into())
 }
 fn convert_walkdir_result(
-    result: std::result::Result<DirEntry, walkdir::Error>,
+    result: Result<DirEntry, walkdir::Error>,
 ) -> object_store::Result<Option<DirEntry>> {
     match result {
         Ok(entry) => match symlink_metadata(entry.path()) {

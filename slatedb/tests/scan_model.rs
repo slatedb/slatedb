@@ -180,7 +180,7 @@ fn test_scan_matches_model() {
                     let db = open_db("/tmp/test_scan_matches_model").await;
                     // Taken before any write so compaction retains every
                     // version, which is what lets a key span SSTs.
-                    let _snapshot = db.snapshot().await.unwrap();
+                    let _snapshot = db.snapshot().unwrap();
 
                     let mut model: BTreeMap<Bytes, Bytes> = BTreeMap::new();
                     for op in &ops {

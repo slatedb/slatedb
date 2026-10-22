@@ -38,3 +38,6 @@ The design is described in detail in [RFC 0004](/rfcs/0004-checkpoints).
 ## Constraints
 
 The clone path must be different from the source path. Clone creation also fails if the source database uses a separate WAL object store. Today, clones only support databases whose WAL and main data share the same object-store root.
+
+Projection assigns a new view ID when the visible range changes, and union clones assign unique L0 view IDs.
+See [union clone view IDs](/docs/operations/compatibility/#union-clone-view-ids) for the limits on existing databases.
