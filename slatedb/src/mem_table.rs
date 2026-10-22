@@ -256,7 +256,7 @@ impl MemTableIterator {
 
     pub(crate) fn next_sync(&mut self) -> Option<RowEntry> {
         let span = self.borrow_read_trace().new_memtable_span();
-        let _guard = span.enter();
+        let _guard = span.span().enter();
         match self.borrow_ordering() {
             IterationOrder::Ascending => self.next_ascending(),
             IterationOrder::Descending => self.next_descending(),
@@ -625,6 +625,17 @@ mod tests {
     use crate::{proptest_util, test_utils};
     use rstest::rstest;
     use tokio::runtime::Runtime;
+
+    #[test]
+    fn memtable_spans_close_with_the_query_subscriber() {
+        test_utils::assert_read_spans_close_with_owner("slatedb.read.memtable", 2, |trace| {
+            let table = WritableKVTable::new();
+            let row = RowEntry::new_value(b"key", b"value", 1);
+            table.put(row.clone());
+            let mut iter = table.table().range(.., IterationOrder::Ascending, trace);
+            assert_eq!(iter.next_sync(), Some(row));
+        });
+    }
 
     #[tokio::test]
     async fn test_memtable_iter() {

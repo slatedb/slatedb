@@ -30,7 +30,7 @@ use crate::object_store_tag::ObjectStoreCallTag;
 pub(crate) use crate::object_store_tag::TableStoreKind;
 use crate::partitioned_keyspace::partitions_covering_range;
 use crate::paths::PathResolver;
-use crate::read_trace::{ReadTrace, SstTraceLevel};
+use crate::read_trace::{ReadSpan, ReadTrace, SstTraceLevel};
 use crate::sst_builder::EncodedSsTableBuilder;
 #[cfg(test)]
 use crate::sst_io::MAX_VALIDATION_RETRIES;
@@ -38,6 +38,7 @@ use crate::sst_io::{read_obj, read_with_validation_retry, ReadOnlyObject};
 use crate::sst_stats::SstStats;
 use crate::sst_upload::SstUploadGuard;
 use crate::types::RowEntry;
+use crate::utils::with_optional_subscriber;
 use tracing::Instrument;
 
 pub(crate) struct TableStore {
@@ -419,8 +420,8 @@ impl TableStore {
             return Ok(Arc::from([]));
         }
         let span = trace.new_read_filter_span(handle.id, sst_level);
-        let read = self.read_filters_inner(handle, cache_blocks, segment, span.clone());
-        read.instrument(span).await
+        let read = self.read_filters_inner(handle, cache_blocks, segment, span.span().clone());
+        read.instrument(span.span().clone()).await
     }
 
     async fn read_filters_inner(
@@ -541,51 +542,55 @@ impl TableStore {
         sst_level: Option<&SstTraceLevel>,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
         let span = trace.new_read_index_span(handle.id, sst_level);
-        let read = self.read_index_inner(handle, cache_blocks, segment, span.clone());
-        read.instrument(span).await
+        self.read_index_with_span(handle, cache_blocks, segment, span.span().clone())
+            .await
     }
 
-    async fn read_index_inner(
+    pub(crate) async fn read_index_with_span(
         &self,
         handle: &SsTableHandle,
         cache_blocks: bool,
         segment: Option<Bytes>,
         span: tracing::Span,
     ) -> Result<Arc<SsTableIndexOwned>, SlateDBError> {
-        let cache_key = (handle.id, handle.info.index_offset).into();
-        if let Some(cache) = self.cache_for_reads() {
-            // See `read_filters` for the rationale on the fall-through path.
-            let fetch = if cache_blocks {
-                cache
-                    .fetch_index(
-                        cache_key,
-                        self.read_loader(handle, CacheTarget::Index, segment.clone()),
-                    )
-                    .await
-                    .ok()
-            } else {
-                cache
-                    .get_index(&cache_key)
-                    .await
-                    .unwrap_or(None)
-                    .map(CacheFetch::hit)
-            };
-            if let Some(CacheFetch { entry, lookup }) = fetch {
-                if let Some(index) = entry.sst_index() {
-                    record_read_cached(&span, lookup);
-                    return Ok(index);
+        async {
+            let cache_key = (handle.id, handle.info.index_offset).into();
+            if let Some(cache) = self.cache_for_reads() {
+                // See `read_filters` for the rationale on the fall-through path.
+                let fetch = if cache_blocks {
+                    cache
+                        .fetch_index(
+                            cache_key,
+                            self.read_loader(handle, CacheTarget::Index, segment.clone()),
+                        )
+                        .await
+                        .ok()
+                } else {
+                    cache
+                        .get_index(&cache_key)
+                        .await
+                        .unwrap_or(None)
+                        .map(CacheFetch::hit)
+                };
+                if let Some(CacheFetch { entry, lookup }) = fetch {
+                    if let Some(index) = entry.sst_index() {
+                        record_read_cached(&span, lookup);
+                        return Ok(index);
+                    }
                 }
             }
+            record_read_cached(&span, CacheLookup::Miss);
+            let index = read_obj!(
+                &self.object_store,
+                self.path(&handle.id),
+                ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment),
+                |obj| self.sst_format.read_index(&handle.info, &obj)
+            )
+            .await?;
+            Ok(Arc::new(index))
         }
-        record_read_cached(&span, CacheLookup::Miss);
-        let index = read_obj!(
-            &self.object_store,
-            self.path(&handle.id),
-            ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment),
-            |obj| self.sst_format.read_index(&handle.info, &obj)
-        )
-        .await?;
-        Ok(Arc::new(index))
+        .instrument(span.clone())
+        .await
     }
 
     /// Build a [`CacheLoader`] for a section-level cache entry (filter, stats,
@@ -607,8 +612,9 @@ impl TableStore {
         let sst_format = self.sst_format.clone();
         let tag =
             ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment);
-        Box::new(move || {
-            Box::pin(async move {
+        let span = ReadSpan::new(tracing::Span::current());
+        let future = with_optional_subscriber(async move {
+            let result = async move {
                 // Only the stats arm can produce `None` (stats_len > 0 but no
                 // stats decoded); filters and index always yield an entry.
                 let entry = read_with_validation_retry(tag, async |tag| {
@@ -648,8 +654,13 @@ impl TableStore {
                 entry.ok_or_else(|| {
                     crate::Error::data("stats_len > 0 but read_stats returned no stats".to_string())
                 })
-            })
-        })
+            }
+            .instrument(span.span().clone())
+            .await;
+            drop(span);
+            result
+        });
+        Box::new(move || Box::pin(future))
     }
 
     /// Builds a fresh boxed closure on every call, even when the cache hits and
@@ -668,8 +679,9 @@ impl TableStore {
         let sst_format = self.sst_format.clone();
         let tag =
             ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment);
-        Box::new(move || {
-            Box::pin(async move {
+        let span = ReadSpan::new(tracing::Span::current());
+        let future = with_optional_subscriber(async move {
+            let result = async move {
                 let block = read_with_validation_retry(tag, async |tag| {
                     let obj = ReadOnlyObject {
                         object_store: object_store.clone(),
@@ -683,8 +695,13 @@ impl TableStore {
                 })
                 .await?;
                 Ok(CachedEntry::with_block(Arc::new(block)))
-            })
-        })
+            }
+            .instrument(span.span().clone())
+            .await;
+            drop(span);
+            result
+        });
+        Box::new(move || Box::pin(future))
     }
 
     #[allow(dead_code)]
@@ -796,18 +813,18 @@ impl TableStore {
         sst_level: Option<&SstTraceLevel>,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
         let span = trace.new_read_block_span(handle.id, sst_level);
-        let read = self.read_blocks_using_index_inner(
+        self.read_blocks_using_index_with_span(
             handle,
             index,
             blocks,
             cache_blocks,
             segment,
-            span.clone(),
-        );
-        read.instrument(span).await
+            span.span().clone(),
+        )
+        .await
     }
 
-    async fn read_blocks_using_index_inner(
+    pub(crate) async fn read_blocks_using_index_with_span(
         &self,
         handle: &SsTableHandle,
         index: Arc<SsTableIndexOwned>,
@@ -816,144 +833,150 @@ impl TableStore {
         segment: Option<Bytes>,
         span: tracing::Span,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
-        // Single-block reads (point-gets via SstIterator::for_key, SstFile::read_block,
-        // etc.) take a dedup-aware fast-path: concurrent callers for the same block
-        // collapse onto one loader. Multi-block reads fall through to the range-
-        // coalesced path below, which issues one object-store GET per contiguous
-        // run of uncached blocks. Cache errors fall through to the direct load,
-        // which produces the authoritative error if any.
-        if cache_blocks && blocks.len() == 1 {
-            if let Some(cache) = self.cache_for_reads() {
-                let block_num = blocks.start;
-                let offset = index.borrow().block_meta().get(block_num).offset();
-                let cache_key: CachedKey = (handle.id, offset).into();
-                let loader = self.block_loader(handle, index.clone(), block_num, segment.clone());
-                if let Ok(fetch) = cache.fetch_block(cache_key, loader).await {
-                    if let Some(block) = fetch.entry.block() {
-                        let (cache_hits, cache_misses) = match fetch.lookup {
-                            CacheLookup::Hit => (1, 0),
-                            CacheLookup::Miss => (0, 1),
-                        };
-                        record_read_block_cache_counts(&span, cache_hits, cache_misses);
-                        let mut result = VecDeque::with_capacity(1);
-                        result.push_back(block);
-                        return Ok(result);
+        async {
+            // Single-block reads (point-gets via SstIterator::for_key, SstFile::read_block,
+            // etc.) take a dedup-aware fast-path: concurrent callers for the same block
+            // collapse onto one loader. Multi-block reads fall through to the range-
+            // coalesced path below, which issues one object-store GET per contiguous
+            // run of uncached blocks. Cache errors fall through to the direct load,
+            // which produces the authoritative error if any.
+            if cache_blocks && blocks.len() == 1 {
+                if let Some(cache) = self.cache_for_reads() {
+                    let block_num = blocks.start;
+                    let offset = index.borrow().block_meta().get(block_num).offset();
+                    let cache_key: CachedKey = (handle.id, offset).into();
+                    let loader =
+                        self.block_loader(handle, index.clone(), block_num, segment.clone());
+                    if let Ok(fetch) = cache.fetch_block(cache_key, loader).await {
+                        if let Some(block) = fetch.entry.block() {
+                            let (cache_hits, cache_misses) = match fetch.lookup {
+                                CacheLookup::Hit => (1, 0),
+                                CacheLookup::Miss => (0, 1),
+                            };
+                            record_read_block_cache_counts(&span, cache_hits, cache_misses);
+                            let mut result = VecDeque::with_capacity(1);
+                            result.push_back(block);
+                            return Ok(result);
+                        }
                     }
                 }
             }
-        }
 
-        let object_store = self.object_store.clone();
-        let path = self.path(&handle.id);
-        // Initialize the result vector and a vector to track uncached ranges
-        let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
-        let mut uncached_ranges = Vec::new();
-        let mut cache_hits = 0;
-        let mut cache_misses = 0;
+            let object_store = self.object_store.clone();
+            let path = self.path(&handle.id);
+            // Initialize the result vector and a vector to track uncached ranges
+            let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
+            let mut uncached_ranges = Vec::new();
+            let mut cache_hits = 0;
+            let mut cache_misses = 0;
 
-        // If block cache is available, try to retrieve cached blocks
-        if let Some(cache) = self.cache_for_reads() {
-            let index_borrow = index.borrow();
-            // Attempt to get all requested blocks from cache concurrently
-            let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
-                let block_meta = index_borrow.block_meta().get(block_num);
-                let offset = block_meta.offset();
-                cache
-                    .get_block(&(handle.id, offset).into())
+            // If block cache is available, try to retrieve cached blocks
+            if let Some(cache) = self.cache_for_reads() {
+                let index_borrow = index.borrow();
+                // Attempt to get all requested blocks from cache concurrently
+                let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
+                    let block_meta = index_borrow.block_meta().get(block_num);
+                    let offset = block_meta.offset();
+                    cache
+                        .get_block(&(handle.id, offset).into())
+                        .await
+                        .unwrap_or(None)
+                        .and_then(|entry| entry.block())
+                }))
+                .await;
+
+                let mut last_uncached_start = None;
+
+                // Process cached block results
+                for (index, block_result) in cached_blocks.into_iter().enumerate() {
+                    match block_result {
+                        Some(cached_block) => {
+                            cache_hits += 1;
+                            // If a cached block is found, add it to blocks_read
+                            if let Some(start) = last_uncached_start.take() {
+                                uncached_ranges
+                                    .push((blocks.start + start)..(blocks.start + index));
+                            }
+                            blocks_read.push_back(cached_block);
+                        }
+                        None => {
+                            cache_misses += 1;
+                            // If a block is not in cache, mark the start of an uncached range
+                            last_uncached_start.get_or_insert(index);
+                        }
+                    }
+                }
+                // Add the last uncached range if it exists
+                if let Some(start) = last_uncached_start {
+                    uncached_ranges.push((blocks.start + start)..blocks.end);
+                }
+            } else {
+                // If no cache is available, treat all blocks as uncached
+                cache_misses = blocks.len();
+                uncached_ranges.push(blocks.clone());
+            }
+            record_read_block_cache_counts(&span, cache_hits, cache_misses);
+            // Read uncached blocks concurrently
+            let uncached_blocks = join_all(uncached_ranges.iter().map(|range| {
+                let object_store = &object_store;
+                let path = &path;
+                let index_ref = &index;
+                let segment = segment.clone();
+                async move {
+                    read_with_validation_retry(
+                        ObjectStoreCallTag::new_with_segment(
+                            self.kind,
+                            SstType::from(&handle.id),
+                            segment,
+                        ),
+                        |tag| {
+                            let obj = ReadOnlyObject {
+                                object_store: object_store.clone(),
+                                path: path.clone(),
+                                tag,
+                            };
+                            async move {
+                                self.sst_format
+                                    .read_blocks(&handle.info, index_ref, range.clone(), &obj)
+                                    .await
+                                    .map_err(|e| e.with_path(&obj.path))
+                            }
+                        },
+                    )
                     .await
-                    .unwrap_or(None)
-                    .and_then(|entry| entry.block())
+                }
             }))
             .await;
 
-            let mut last_uncached_start = None;
-
-            // Process cached block results
-            for (index, block_result) in cached_blocks.into_iter().enumerate() {
-                match block_result {
-                    Some(cached_block) => {
-                        cache_hits += 1;
-                        // If a cached block is found, add it to blocks_read
-                        if let Some(start) = last_uncached_start.take() {
-                            uncached_ranges.push((blocks.start + start)..(blocks.start + index));
-                        }
-                        blocks_read.push_back(cached_block);
+            // Merge uncached blocks with blocks_read and prepare blocks for caching
+            let mut blocks_to_cache = vec![];
+            for (range, range_blocks) in uncached_ranges.into_iter().zip(uncached_blocks) {
+                let index_borrow = index.borrow();
+                for (block_num, block_read) in range.zip(range_blocks?) {
+                    let block = Arc::new(block_read);
+                    if cache_blocks {
+                        let block_meta = index_borrow.block_meta().get(block_num);
+                        let offset = block_meta.offset();
+                        blocks_to_cache.push((handle.id, offset, block.clone()));
                     }
-                    None => {
-                        cache_misses += 1;
-                        // If a block is not in cache, mark the start of an uncached range
-                        last_uncached_start.get_or_insert(index);
-                    }
+                    blocks_read.insert(block_num - blocks.start, block);
                 }
             }
-            // Add the last uncached range if it exists
-            if let Some(start) = last_uncached_start {
-                uncached_ranges.push((blocks.start + start)..blocks.end);
-            }
-        } else {
-            // If no cache is available, treat all blocks as uncached
-            cache_misses = blocks.len();
-            uncached_ranges.push(blocks.clone());
-        }
-        record_read_block_cache_counts(&span, cache_hits, cache_misses);
-        // Read uncached blocks concurrently
-        let uncached_blocks = join_all(uncached_ranges.iter().map(|range| {
-            let object_store = &object_store;
-            let path = &path;
-            let index_ref = &index;
-            let segment = segment.clone();
-            async move {
-                read_with_validation_retry(
-                    ObjectStoreCallTag::new_with_segment(
-                        self.kind,
-                        SstType::from(&handle.id),
-                        segment,
-                    ),
-                    |tag| {
-                        let obj = ReadOnlyObject {
-                            object_store: object_store.clone(),
-                            path: path.clone(),
-                            tag,
-                        };
-                        async move {
-                            self.sst_format
-                                .read_blocks(&handle.info, index_ref, range.clone(), &obj)
-                                .await
-                                .map_err(|e| e.with_path(&obj.path))
-                        }
-                    },
-                )
-                .await
-            }
-        }))
-        .await;
 
-        // Merge uncached blocks with blocks_read and prepare blocks for caching
-        let mut blocks_to_cache = vec![];
-        for (range, range_blocks) in uncached_ranges.into_iter().zip(uncached_blocks) {
-            let index_borrow = index.borrow();
-            for (block_num, block_read) in range.zip(range_blocks?) {
-                let block = Arc::new(block_read);
-                if cache_blocks {
-                    let block_meta = index_borrow.block_meta().get(block_num);
-                    let offset = block_meta.offset();
-                    blocks_to_cache.push((handle.id, offset, block.clone()));
+            // Cache the newly read blocks if caching is enabled
+            if let Some(cache) = self.cache_for_reads() {
+                if !blocks_to_cache.is_empty() {
+                    join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
+                        cache.insert((id, offset).into(), CachedEntry::with_block(block))
+                    }))
+                    .await;
                 }
-                blocks_read.insert(block_num - blocks.start, block);
             }
-        }
 
-        // Cache the newly read blocks if caching is enabled
-        if let Some(cache) = self.cache_for_reads() {
-            if !blocks_to_cache.is_empty() {
-                join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
-                    cache.insert((id, offset).into(), CachedEntry::with_block(block))
-                }))
-                .await;
-            }
+            Ok(blocks_read)
         }
-
-        Ok(blocks_read)
+        .instrument(span.clone())
+        .await
     }
 
     #[allow(dead_code)]
@@ -2436,6 +2459,140 @@ mod tests {
                 num_blocks,
             }
         })
+    }
+
+    #[rstest]
+    fn test_cache_loaders_keep_initiating_span_and_subscriber(
+        read_blocks_span_test: ReadBlocksSpanTest,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Entered(Arc<AtomicUsize>);
+        impl tracing_subscriber::Layer<tracing_subscriber::Registry> for Entered {
+            fn on_enter(
+                &self,
+                id: &tracing::Id,
+                ctx: tracing_subscriber::layer::Context<'_, tracing_subscriber::Registry>,
+            ) {
+                if ctx.span(id).unwrap().metadata().name() == "loader-owner" {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let enters = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(Entered(enters.clone()));
+        let loaders = tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("loader-owner");
+            let _entered = span.enter();
+            let fixture = read_blocks_span_test;
+            vec![
+                fixture
+                    .reader
+                    .read_loader(&fixture.handle, CacheTarget::Index, None),
+                fixture
+                    .reader
+                    .block_loader(&fixture.handle, fixture.index, 0, None),
+            ]
+        });
+        enters.store(0, Ordering::Relaxed);
+        std::thread::spawn(move || {
+            tokio_test::block_on(async move {
+                for loader in loaders {
+                    loader().await.unwrap();
+                }
+            });
+        })
+        .join()
+        .unwrap();
+        assert!(enters.load(Ordering::Relaxed) >= 2);
+    }
+
+    #[rstest]
+    #[case::index_closure(false, 0)]
+    #[case::block_closure(true, 0)]
+    #[case::index_unpolled(false, 1)]
+    #[case::block_unpolled(true, 1)]
+    #[case::index_pending(false, 2)]
+    #[case::block_pending(true, 2)]
+    fn cache_loaders_close_with_their_subscriber(
+        mut read_blocks_span_test: ReadBlocksSpanTest,
+        #[case] block: bool,
+        #[case] stage: u8,
+    ) {
+        tokio_test::block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let fixture = &mut read_blocks_span_test;
+                let gated = Arc::new(crate::test_utils::GatedObjectStore::new(
+                    fixture.reader.object_store.clone(),
+                ));
+                fixture.reader.object_store = gated.clone();
+                let recorder_a = SpanRecorder::default();
+                let dispatch_a =
+                    tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_a.clone()));
+                let loader = tracing::dispatcher::with_default(&dispatch_a, || {
+                    let root = tracing::info_span!("loader-root");
+                    let owner = tracing::info_span!(parent: &root, "loader-owner");
+                    let _entered = owner.enter();
+                    if block {
+                        fixture
+                            .reader
+                            .block_loader(&fixture.handle, fixture.index.clone(), 0, None)
+                    } else {
+                        fixture
+                            .reader
+                            .read_loader(&fixture.handle, CacheTarget::Index, None)
+                    }
+                });
+                assert_eq!(recorder_a.spans().len(), 2);
+                assert!(recorder_a.closed().is_empty());
+                let recorder_b = SpanRecorder::default();
+                let dispatch_b =
+                    tracing::Dispatch::new(tracing_subscriber::registry().with(recorder_b.clone()));
+                let foreign = tracing::dispatcher::with_default(&dispatch_b, || {
+                    let root = tracing::info_span!("foreign-root");
+                    let owner = tracing::info_span!(parent: &root, "foreign-owner");
+                    (root, owner)
+                });
+                assert_eq!(recorder_a.spans()[0].id, recorder_b.spans()[0].id);
+                assert_eq!(recorder_a.spans()[1].id, recorder_b.spans()[1].id);
+                gated.get_opts_gate.close();
+                if stage == 0 {
+                    tracing::dispatcher::with_default(&dispatch_b, || drop(loader));
+                } else {
+                    let mut future = loader();
+                    if stage == 2 {
+                        tokio::select! {
+                            _ = gated.get_opts_gate.wait_for_arrivals(1) => {},
+                            _ = &mut future => panic!("The loader must wait at the gate."),
+                        }
+                    }
+                    tracing::dispatcher::with_default(&dispatch_b, || drop(future));
+                }
+                let mut expected: Vec<_> = recorder_a
+                    .spans()
+                    .iter()
+                    .map(|span| span.id.into_u64())
+                    .collect();
+                let mut closed: Vec<_> = recorder_a
+                    .closed()
+                    .iter()
+                    .map(tracing::Id::into_u64)
+                    .collect();
+                expected.sort_unstable();
+                closed.sort_unstable();
+                assert_eq!(
+                    closed, expected,
+                    "All loader spans must close with their owner."
+                );
+                assert!(recorder_b.closed().is_empty());
+                gated.get_opts_gate.release();
+                tracing::dispatcher::with_default(&dispatch_b, || drop(foreign));
+                assert_eq!(recorder_b.closed().len(), 2);
+            })
+            .await
+            .expect("The loader cancellation must finish before the timeout.");
+        });
     }
 
     fn verify_read_blocks_span(
