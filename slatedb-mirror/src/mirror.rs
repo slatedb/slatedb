@@ -79,34 +79,24 @@ fn bytes_payload(bytes: Bytes) -> GetResultPayload {
 ///
 /// # Read and write routes
 ///
-/// The policy selects a [`ReadRoute`] for each GET and HEAD:
+/// A [`MirrorPolicy`] selects how each request uses the remote store and
+/// local copies:
 ///
-/// - [`Remote`](ReadRoute::Remote) forwards the request to the remote store.
-/// - [`Observe`](ReadRoute::Observe) fetches the whole remote object and calls
-///   [`MirrorPolicy::observe`] before returning the requested bytes. HEAD requests
-///   and requests that return no body skip the hook. This route does not install
-///   a local copy.
-/// - [`Local`](ReadRoute::Local) serves only the local copy. A missing copy returns
-///   [`MirrorError::NotLocal`], with no remote fallback.
-/// - [`Refetch`](ReadRoute::Refetch) downloads the whole object, replaces its local
-///   copy, and serves the request from that copy. Even a range request or HEAD
-///   downloads the whole object.
+/// - GET and HEAD use [`ReadRoute`].
+/// - PUT uses [`WriteRoute`].
+/// - Multipart uploads use [`MultipartRoute`].
 ///
-/// The policy selects a [`WriteRoute`] for each PUT:
+/// The `Observe` routes pass the whole object to [`MirrorPolicy::observe`].
+/// Multipart uploads do not support observation.
 ///
-/// - [`Remote`](WriteRoute::Remote) writes only to the remote store.
-/// - [`Observe`](WriteRoute::Observe) writes remotely, then calls
-///   [`MirrorPolicy::observe`] with the whole payload before returning success.
-/// - [`Mirror`](WriteRoute::Mirror) writes to both stores. Success means that the
-///   remote upload completed and the local copy is in place.
+/// Policies manage local copies through [`MirrorHandle`]:
 ///
-/// Multipart uploads use [`MultipartRoute`], which has the same `Remote` and
-/// `Mirror` routes but no `Observe`.
+/// - [`fetch`](MirrorHandle::fetch) waits for a local copy.
+/// - [`prefetch`](MirrorHandle::prefetch) schedules a background download.
+/// - [`evict`](MirrorHandle::evict) removes a local copy.
 ///
-/// Policies can use [`MirrorHandle::fetch`] to wait for missing local copies,
-/// [`MirrorHandle::prefetch`] to download them in the background, and
-/// [`MirrorHandle::evict`] to remove local copies without deleting remote objects.
-/// Fetching an existing local copy does not refresh it. Use `Refetch` to replace it.
+/// Fetching an existing local copy does not refresh it. Use
+/// [`ReadRoute::Refetch`] to replace it.
 ///
 /// Downloads, mirrored writes, deletes, and evictions coordinate per path.
 /// A later download or mirrored write can cancel an eviction that has not started.

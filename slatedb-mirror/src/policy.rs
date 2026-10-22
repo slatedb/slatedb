@@ -16,14 +16,15 @@ pub enum ReadRoute {
     Remote,
     /// Wrapped store. The whole object goes to [`MirrorPolicy::observe`]
     /// before the caller gets a result. HEADs and GETs that return no body
-    /// skip `observe`.
+    /// skip `observe`. This route does not install a local copy.
     Observe,
-    /// Local copy only. A miss is a `MirrorError::NotLocal`.
+    /// Local copy only. A miss is a [`MirrorError::NotLocal`](crate::MirrorError::NotLocal),
+    /// with no remote fallback.
     /// Contents can be corrupt. Callers must detect corruption and arrange
     /// a retry through [`ReadRoute::Refetch`].
     Local,
     /// Download the whole object again, replace the local copy, and serve the
-    /// request from it.
+    /// request from it. Even a range request or HEAD downloads the whole object.
     Refetch,
 }
 
@@ -32,7 +33,8 @@ pub enum ReadRoute {
 pub enum WriteRoute {
     /// Wrapped store only.
     Remote,
-    /// Wrapped store, then the payload goes to [`MirrorPolicy::observe`].
+    /// Wrapped store, then the whole payload goes to [`MirrorPolicy::observe`]
+    /// before returning success.
     Observe,
     /// Write to both. Returns after the upload succeeds and the local file is
     /// in place.
