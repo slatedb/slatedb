@@ -45,9 +45,14 @@ pub enum WriteRoute {
 /// Policies must only route paths that are never overwritten to
 /// [`ReadRoute::Local`], [`ReadRoute::Refetch`], or [`WriteRoute::Mirror`].
 ///
-/// Route errors that don't already carry a `MirrorError` reach the caller as
-/// `MirrorError::Policy`. `observe` errors reach the caller unchanged on reads
-/// and as `MirrorError::WriteCommitted` on writes.
+/// Errors from the policy reach the caller in three ways:
+///
+/// - A route error becomes `MirrorError::Policy`. If the error already
+///   contains a `MirrorError`, the mirror returns it unchanged.
+/// - An `observe` error on a read is returned unchanged. Nothing was written,
+///   so the caller can retry the read.
+/// - An `observe` error on a write becomes `MirrorError::WriteCommitted`,
+///   because the remote write already succeeded.
 #[async_trait]
 pub trait MirrorPolicy: Send + Sync + 'static {
     /// Runs on every GET and HEAD. `options.head` is true for HEAD. Must be
