@@ -23,10 +23,14 @@
 )]
 
 pub mod clock;
+pub mod file_handle_cache;
 pub mod metrics;
 pub mod object_metadata;
 pub mod rand;
+pub mod retry;
+pub mod single_flight;
 pub mod utils;
+pub mod vfs;
 
 #[cfg(feature = "test-util")]
 pub use clock::MockSystemClock;

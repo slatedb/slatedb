@@ -1257,10 +1257,7 @@ impl EncodedSsTableWriter {
     /// If creation is still pending, it aborts when the handle arrives.
     pub(crate) async fn abort(&mut self) -> Result<(), SlateDBError> {
         self.writer.take();
-        self.upload_guard
-            .abort()
-            .await
-            .map_err(|e| SlateDBError::ObjectStoreError(Arc::new(e)))
+        self.upload_guard.abort().await.map_err(SlateDBError::from)
     }
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {
