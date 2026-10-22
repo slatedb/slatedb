@@ -52,7 +52,7 @@ pub use metrics::{
     Counter, DefaultMetricsRecorder, Gauge, Histogram, HistogramMetricValue, Metric, MetricLabel,
     MetricValue, MetricsRecorder, UpDownCounter,
 };
-pub use object_store::ObjectStore;
+pub use object_store::{ObjectStore, ObjectStoreIterator};
 pub use object_store_builder::{ObjectStoreBuilder, ObjectStoreType};
 pub use settings::Settings;
 pub use types::{

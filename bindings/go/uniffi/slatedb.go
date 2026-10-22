@@ -1779,6 +1779,69 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstore_delete()
+		})
+		if checksum != 65070 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstore_delete: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstore_get()
+		})
+		if checksum != 21102 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstore_get: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstore_get_range()
+		})
+		if checksum != 34257 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstore_get_range: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstore_head()
+		})
+		if checksum != 2709 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstore_head: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstore_list()
+		})
+		if checksum != 25389 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstore_list: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstore_put()
+		})
+		if checksum != 55027 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstore_put: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstoreiterator_next()
+		})
+		if checksum != 9526 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstoreiterator_next: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_objectstorebuilder_build()
 		})
 		if checksum != 43358 {
@@ -8795,6 +8858,18 @@ func (c FfiConverterMetricsRecorder) register() {
 
 // Object store handle used when opening databases, readers, and WAL readers.
 type ObjectStoreInterface interface {
+	// Deleting a missing object succeeds.
+	Delete(location string) error
+	// Missing objects return `None`. Empty objects return `Some` with no bytes.
+	Get(location string) (*[]byte, error)
+	// The byte range starts at `start` and ends before `end`.
+	GetRange(location string, start uint64, end uint64) (*[]byte, error)
+	// Missing objects return `None`.
+	Head(location string) (*ObjectMetadata, error)
+	// The prefix follows object-store path segments. Results have no fixed order.
+	List(prefix *string) (*ObjectStoreIterator, error)
+	// A successful put replaces the whole object at `location`.
+	Put(location string, value []byte) error
 }
 
 // Object store handle used when opening databases, readers, and WAL readers.
@@ -8831,6 +8906,193 @@ func ObjectStoreResolve(url string) (*ObjectStore, error) {
 	}
 }
 
+// Deleting a missing object succeeds.
+func (_self *ObjectStore) Delete(location string) error {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStore")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_objectstore_delete(
+			_pointer, FfiConverterStringINSTANCE.Lower(location)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+// Missing objects return `None`. Empty objects return `Some` with no bytes.
+func (_self *ObjectStore) Get(location string) (*[]byte, error) {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStore")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *[]byte {
+			return FfiConverterOptionalBytesINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_objectstore_get(
+			_pointer, FfiConverterStringINSTANCE.Lower(location)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// The byte range starts at `start` and ends before `end`.
+func (_self *ObjectStore) GetRange(location string, start uint64, end uint64) (*[]byte, error) {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStore")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *[]byte {
+			return FfiConverterOptionalBytesINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_objectstore_get_range(
+			_pointer, FfiConverterStringINSTANCE.Lower(location), FfiConverterUint64INSTANCE.Lower(start), FfiConverterUint64INSTANCE.Lower(end)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Missing objects return `None`.
+func (_self *ObjectStore) Head(location string) (*ObjectMetadata, error) {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStore")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *ObjectMetadata {
+			return FfiConverterOptionalObjectMetadataINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_objectstore_head(
+			_pointer, FfiConverterStringINSTANCE.Lower(location)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// The prefix follows object-store path segments. Results have no fixed order.
+func (_self *ObjectStore) List(prefix *string) (*ObjectStoreIterator, error) {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStore")
+	defer _self.ffiObject.decrementPointer()
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_objectstore_list(
+			_pointer, FfiConverterOptionalStringINSTANCE.Lower(prefix), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *ObjectStoreIterator
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterObjectStoreIteratorINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
+// A successful put replaces the whole object at `location`.
+func (_self *ObjectStore) Put(location string, value []byte) error {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStore")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_objectstore_put(
+			_pointer, FfiConverterStringINSTANCE.Lower(location), FfiConverterBytesINSTANCE.Lower(value)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
 func (object *ObjectStore) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
@@ -9059,6 +9321,105 @@ func LowerToExternalObjectStoreBuilder(value *ObjectStoreBuilder) uint64 {
 type FfiDestroyerObjectStoreBuilder struct{}
 
 func (_ FfiDestroyerObjectStoreBuilder) Destroy(value *ObjectStoreBuilder) {
+	value.Destroy()
+}
+
+type ObjectStoreIteratorInterface interface {
+	// Each call consumes one result. Calls after exhaustion return `None`.
+	Next() (*ObjectMetadata, error)
+}
+type ObjectStoreIterator struct {
+	ffiObject FfiObject
+}
+
+// Each call consumes one result. Calls after exhaustion return `None`.
+func (_self *ObjectStoreIterator) Next() (*ObjectMetadata, error) {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStoreIterator")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *ObjectMetadata {
+			return FfiConverterOptionalObjectMetadataINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_objectstoreiterator_next(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+func (object *ObjectStoreIterator) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterObjectStoreIterator struct{}
+
+var FfiConverterObjectStoreIteratorINSTANCE = FfiConverterObjectStoreIterator{}
+
+func (c FfiConverterObjectStoreIterator) Lift(handle C.uint64_t) *ObjectStoreIterator {
+	result := &ObjectStoreIterator{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_objectstoreiterator(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_objectstoreiterator(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*ObjectStoreIterator).Destroy)
+	return result
+}
+
+func (c FfiConverterObjectStoreIterator) Read(reader io.Reader) *ObjectStoreIterator {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterObjectStoreIterator) Lower(value *ObjectStoreIterator) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*ObjectStoreIterator")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterObjectStoreIterator) Write(writer io.Writer, value *ObjectStoreIterator) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalObjectStoreIterator(handle uint64) *ObjectStoreIterator {
+	return FfiConverterObjectStoreIteratorINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalObjectStoreIterator(value *ObjectStoreIterator) uint64 {
+	return uint64(FfiConverterObjectStoreIteratorINSTANCE.Lower(value))
+}
+
+type FfiDestroyerObjectStoreIterator struct{}
+
+func (_ FfiDestroyerObjectStoreIterator) Destroy(value *ObjectStoreIterator) {
 	value.Destroy()
 }
 
@@ -15582,6 +15943,47 @@ type FfiDestroyerOptionalMetric struct{}
 func (_ FfiDestroyerOptionalMetric) Destroy(value *Metric) {
 	if value != nil {
 		FfiDestroyerMetric{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalObjectMetadata struct{}
+
+var FfiConverterOptionalObjectMetadataINSTANCE = FfiConverterOptionalObjectMetadata{}
+
+func (c FfiConverterOptionalObjectMetadata) Lift(rb RustBufferI) *ObjectMetadata {
+	return LiftFromRustBuffer[*ObjectMetadata](c, rb)
+}
+
+func (_ FfiConverterOptionalObjectMetadata) Read(reader io.Reader) *ObjectMetadata {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterObjectMetadataINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalObjectMetadata) Lower(value *ObjectMetadata) C.RustBuffer {
+	return LowerIntoRustBuffer[*ObjectMetadata](c, value)
+}
+
+func (c FfiConverterOptionalObjectMetadata) LowerExternal(value *ObjectMetadata) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*ObjectMetadata](c, value))
+}
+
+func (_ FfiConverterOptionalObjectMetadata) Write(writer io.Writer, value *ObjectMetadata) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterObjectMetadataINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalObjectMetadata struct{}
+
+func (_ FfiDestroyerOptionalObjectMetadata) Destroy(value *ObjectMetadata) {
+	if value != nil {
+		FfiDestroyerObjectMetadata{}.Destroy(*value)
 	}
 }
 
