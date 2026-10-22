@@ -160,6 +160,7 @@ See who's using SlateDB.
 - [HelixDB](https://github.com/HelixDB/helix-db)
 - [Malstrom](https://github.com/MalstromDevelopers/malstrom)
 - [Massive](https://massive.com)
+- [Mav9](https://mav9.com)
 - [Merklemap](https://merklemap.com)
 - [OpenData](https://www.opendata.dev)
 - [Prisma](https://www.prisma.io)
