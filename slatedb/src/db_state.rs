@@ -216,17 +216,42 @@ impl SsTableView {
         &self.effective_range
     }
 
+    /// Returns the part of `range` that this view keeps when a projection narrows its
+    /// sorted run, or `None` if the view keeps nothing.
+    ///
+    /// `next_view` is the next view in the same sorted run. It is `None` for the last
+    /// view of a run and for L0 views, which can overlap. The result covers these cases:
+    /// - No next view: the view's own effective range, cut to `range`.
+    /// - Next view: the keys from this view's start up to the start of the next view,
+    ///   cut to `range`.
+    /// - Shared boundary key: if this view also contains the first key of the next
+    ///   view, the result includes that key. Two adjacent SSTs can split the versions
+    ///   of one key, for example `[a, m]` followed by `[m, z]`.
+    /// - Gap before the next view: the result stays inside the visible range of this
+    ///   view. An incremental commit can leave a view `[a, g)` before a view that
+    ///   starts at `m`, and the result must not show `[g, m)` again.
+    ///
+    /// TODO: If every SST records `last_entry`, this function can return
+    /// `self.effective_range.intersect(range)` and no longer needs `next_view`.
     pub(crate) fn compacted_intersection(
         &self,
         next_view: Option<&SsTableView>,
         range: &BytesRange,
     ) -> Option<BytesRange> {
         if let Some(next_view) = next_view {
-            BytesRange::new(
-                self.compacted_effective_start_bound(),
-                Excluded(next_view.compacted_effective_start_key().clone()),
-            )
-            .intersect(range)
+            let next_key = next_view.compacted_effective_start_key();
+            let end = if self.effective_range.contains(next_key) {
+                Included(next_key.clone())
+            } else {
+                Excluded(next_key.clone())
+            };
+            let intersection =
+                BytesRange::new(self.compacted_effective_start_bound(), end).intersect(range)?;
+            // A new projection must preserve gaps from earlier projections.
+            match &self.visible_range {
+                Some(visible) => intersection.intersect(visible),
+                None => Some(intersection),
+            }
         } else {
             self.effective_range.intersect(range)
         }
