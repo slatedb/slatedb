@@ -1486,14 +1486,6 @@ impl<P: Into<Path>> CompactorBuilder<P> {
             block_alignment: self.sst_block_alignment,
             ..SsTableFormat::default()
         };
-        let table_store = Arc::new(TableStore::new(
-            retrying_main_object_store,
-            sst_format,
-            path,
-            None,
-            TableStoreKind::Compactor,
-            BlockCachePolicy::default(),
-        ));
 
         let scheduler_supplier = self
             .scheduler_supplier
@@ -1502,7 +1494,9 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         Compactor::new(
             manifest_store,
             compactions_store,
-            table_store,
+            retrying_main_object_store,
+            sst_format,
+            path,
             self.options,
             scheduler_supplier,
             self.expected_epoch,
@@ -1713,11 +1707,41 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             .into());
         }
         let path: Path = self.path.into();
-        let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
-        let compactions_store =
-            Arc::new(CompactionsStore::new(&path, self.main_object_store.clone()));
-        let table_store = Arc::new(TableStore::new(
+        let recorder = MetricsRecorderHelper::new(
+            self.metrics_recorder,
+            self.options.metric_level.unwrap_or_default(),
+        );
+        let retrying_main_object_store = instrumented_retrying_object_store(
             self.main_object_store,
+            &recorder,
+            ObjectStoreComponent::Compactor,
+            ObjectStoreType::Main,
+            self.rand.clone(),
+            self.system_clock.clone(),
+            self.options.object_store_max_retries,
+        );
+        let manifest_store = Arc::new(ManifestStore::new(
+            &path,
+            retrying_main_object_store.clone(),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &path,
+            retrying_main_object_store.clone(),
+        ));
+        // Resolve SSTs borrowed from other databases (clones/unions). The
+        // external_dbs list is only written when the clone or union manifest is
+        // created and only shrinks afterwards, so a snapshot taken at startup
+        // covers every SST a later compaction job can reference.
+        let external_ssts =
+            match StoredManifest::try_load(manifest_store.clone(), self.system_clock.clone())
+                .await?
+            {
+                Some(manifest) => manifest.manifest().external_ssts(),
+                None => HashMap::new(),
+            };
+        let path_resolver = PathResolver::new_with_external_ssts(path, external_ssts);
+        let table_store = Arc::new(TableStore::new_with_fp_registry(
+            retrying_main_object_store,
             SsTableFormat {
                 filter_policies: self.filter_policies.clone(),
                 block_transformer: self.block_transformer.clone(),
@@ -1727,15 +1751,12 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
                 block_alignment: self.sst_block_alignment,
                 ..SsTableFormat::default()
             },
-            path,
+            path_resolver,
+            self.fp_registry.clone(),
             None,
             TableStoreKind::Compactor,
             BlockCachePolicy::default(),
         ));
-        let recorder = MetricsRecorderHelper::new(
-            self.metrics_recorder,
-            self.options.metric_level.unwrap_or_default(),
-        );
         let stats = Arc::new(CompactionStats::new(&recorder));
         let worker_runtime = self.worker_runtime.unwrap_or_else(Handle::current);
         let options = Arc::new(self.options);
@@ -2404,16 +2425,20 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
 mod tests {
     use crate::cached_object_store::CachedObjectStore;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
-    use crate::config::{CompactorOptions, GarbageCollectorOptions, MetricLevel, Settings};
+    use crate::config::{
+        CompactionWorkerOptions, CompactorOptions, GarbageCollectorOptions, MetricLevel, Settings,
+    };
     use crate::error::ErrorKind;
     use crate::garbage_collector::stats::GC_COUNT;
     use crate::instrumented_object_store::stats::REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT;
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
+    use crate::test_utils::FlakyObjectStore;
     use crate::wal::test_utils::FakeWalWriter;
     use crate::wal::{
         WalError, WalIterator, WalRows, WriterInit, WriterInitResult, WriterManifest,
     };
+    use crate::CompactionWorkerBuilder;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -2709,6 +2734,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_compaction_worker_builder_uses_instrumented_retrying_object_store() {
+        // given: an initialized database, and a worker store whose first two
+        // `list` calls fail transiently
+        let path = "test_compaction_worker_builder_uses_instrumented_retrying_object_store";
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::builder(path, inner.clone())
+            .with_settings(Settings {
+                compactor_options: None,
+                garbage_collector_options: None,
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .expect("failed to build db");
+        db.close().await.expect("failed to close db");
+        let flaky = Arc::new(FlakyObjectStore::new(inner.clone(), 0).with_list_failures(2, 0));
+
+        // when: a worker with a retry bound of 1 loads the manifest
+        let bounded = CompactionWorkerBuilder::new(path, flaky.clone())
+            .with_options(CompactionWorkerOptions {
+                object_store_max_retries: Some(1),
+                ..CompactionWorkerOptions::default()
+            })
+            .build()
+            .await;
+
+        // then: it gives up after one retry
+        assert!(bounded.is_err(), "bounded worker build should fail");
+        assert_eq!(flaky.list_attempts(), 2);
+
+        // when: a worker with default (unbounded) retries loads the manifest
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(2, 0));
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let _worker = CompactionWorkerBuilder::new(path, flaky.clone())
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .expect("unbounded worker build should retry past transient failures");
+
+        // then: it retries past both failures and records the I/O under the
+        // compactor's object-store metric labels
+        assert_eq!(flaky.list_attempts(), 3);
+        assert!(lookup_metric_with_labels(
+            &metrics_recorder,
+            OBJECT_STORE_REQUEST_COUNT,
+            &object_store_labels("compactor", "main", "get", "list"),
+        )
+        .is_some_and(|count| count > 0));
+    }
+
+    #[tokio::test]
     async fn test_object_store_cache_does_not_cache_metadata_store_reads() {
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -2885,5 +2961,187 @@ mod tests {
         let worker = admin.compaction_worker_builder(CompactionWorkerOptions::default());
         assert!(worker.merge_operator.is_some());
         assert!(worker.block_transformer.is_some());
+    }
+
+    /// Paths of the clone chain A -> B -> C built by [`build_clone_chain`].
+    const CHAIN_A: &str = "clone_chain/a";
+    const CHAIN_B: &str = "clone_chain/b";
+    const CHAIN_C: &str = "clone_chain/c";
+
+    fn no_background_tasks() -> Settings {
+        Settings {
+            compactor_options: None,
+            garbage_collector_options: None,
+            ..Settings::default()
+        }
+    }
+
+    async fn put_and_flush_l0(db: &crate::Db, key: &[u8]) {
+        db.put(key, key).await.expect("failed to put");
+        db.flush_with_options(crate::config::FlushOptions {
+            flush_type: crate::config::FlushType::MemTable,
+        })
+        .await
+        .expect("failed to flush memtable");
+    }
+
+    async fn write_l0(path: &str, object_store: Arc<dyn ObjectStore>, key: &[u8]) {
+        let db = crate::Db::builder(path, object_store)
+            .with_settings(no_background_tasks())
+            .build()
+            .await
+            .expect("failed to build db");
+        put_and_flush_l0(&db, key).await;
+        db.close().await.expect("failed to close db");
+    }
+
+    async fn clone_db(parent: &str, child: &str, object_store: Arc<dyn ObjectStore>) {
+        super::CloneBuilder::new(
+            Path::from(child),
+            crate::CloneSourceSpec::new(Path::from(parent)),
+            object_store,
+        )
+        .build()
+        .await
+        .expect("failed to clone db");
+    }
+
+    /// Builds the clone chain A -> B -> C, leaving C with one L0 owned by A
+    /// and one owned by B, both borrowed.
+    async fn build_clone_chain(object_store: Arc<dyn ObjectStore>) {
+        write_l0(CHAIN_A, object_store.clone(), b"a").await;
+        clone_db(CHAIN_A, CHAIN_B, object_store.clone()).await;
+        write_l0(CHAIN_B, object_store.clone(), b"b").await;
+        clone_db(CHAIN_B, CHAIN_C, object_store).await;
+    }
+
+    /// Compacts once C holds its own L0 plus the two it borrows.
+    fn compact_all_three_l0s() -> Arc<crate::test_utils::OnDemandCompactionSchedulerSupplier> {
+        Arc::new(crate::test_utils::OnDemandCompactionSchedulerSupplier::new(
+            Arc::new(|state| state.manifest().core().tree.l0.len() >= 3),
+        ))
+    }
+
+    async fn await_l0_compacted(path: &str, object_store: Arc<dyn ObjectStore>, context: &str) {
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from(path), object_store));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let manifest = StoredManifest::load(
+                    manifest_store.clone(),
+                    Arc::new(DefaultSystemClock::new()),
+                )
+                .await
+                .expect("failed to load manifest");
+                let tree = &manifest.manifest().core.tree;
+                if tree.l0.is_empty() && !tree.compacted.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{context} did not compact the borrowed L0s"));
+    }
+
+    async fn assert_chain_keys_readable(db: &crate::Db) {
+        for key in [b"a", b"b", b"c"] {
+            assert_eq!(
+                db.get(key).await.expect("failed to get").as_deref(),
+                Some(key.as_ref())
+            );
+        }
+    }
+
+    /// A standalone worker built by `CompactionWorkerBuilder` must resolve SSTs
+    /// that a clone borrows from its ancestors. The chain A -> B -> C leaves C
+    /// with L0s owned by A, B and C, so compacting C reads from all three.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_compaction_worker_builder_resolves_ssts_borrowed_through_clone_chain() {
+        use crate::config::CompactionWorkerOptions;
+        use crate::{CompactionWorkerBuilder, CompactorBuilder};
+        use std::time::Duration;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        build_clone_chain(object_store.clone()).await;
+
+        // The worker snapshots C's external SST mapping when it is built.
+        let worker = CompactionWorkerBuilder::new(CHAIN_C, object_store.clone())
+            .with_options(CompactionWorkerOptions {
+                compactions_poll_interval: Duration::from_millis(50),
+                ..CompactionWorkerOptions::default()
+            })
+            .build()
+            .await
+            .expect("failed to build compaction worker");
+        worker.start().expect("failed to start compaction worker");
+
+        // C's coordinator has no embedded worker, so every job runs on the
+        // standalone worker.
+        let coordinator = CompactorBuilder::new(CHAIN_C, object_store.clone())
+            .with_options(CompactorOptions {
+                poll_interval: Duration::from_millis(50),
+                worker: None,
+                ..CompactorOptions::default()
+            })
+            .with_scheduler_supplier(compact_all_three_l0s());
+        let db = crate::Db::builder(CHAIN_C, object_store.clone())
+            .with_settings(Settings {
+                garbage_collector_options: None,
+                ..Settings::default()
+            })
+            .with_compactor_builder(coordinator)
+            .build()
+            .await
+            .expect("failed to build db");
+        put_and_flush_l0(&db, b"c").await;
+
+        await_l0_compacted(CHAIN_C, object_store, "standalone worker").await;
+        assert_chain_keys_readable(&db).await;
+
+        worker
+            .stop()
+            .await
+            .expect("failed to stop compaction worker");
+        db.close().await.expect("failed to close db");
+    }
+
+    /// A standalone `Compactor` built by `CompactorBuilder` runs its jobs on
+    /// an in-process worker, whose table store must also resolve SSTs the
+    /// clone borrows from its ancestors.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_compactor_builder_resolves_ssts_borrowed_through_clone_chain() {
+        use crate::config::CompactionWorkerOptions;
+        use crate::CompactorBuilder;
+        use std::time::Duration;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        build_clone_chain(object_store.clone()).await;
+
+        let db = crate::Db::builder(CHAIN_C, object_store.clone())
+            .with_settings(no_background_tasks())
+            .build()
+            .await
+            .expect("failed to build db");
+        put_and_flush_l0(&db, b"c").await;
+
+        // The compactor snapshots C's external SST mapping when it starts.
+        let compactor = CompactorBuilder::new(CHAIN_C, object_store.clone())
+            .with_options(CompactorOptions {
+                poll_interval: Duration::from_millis(50),
+                worker: Some(CompactionWorkerOptions {
+                    compactions_poll_interval: Duration::from_millis(50),
+                    ..CompactionWorkerOptions::default()
+                }),
+                ..CompactorOptions::default()
+            })
+            .with_scheduler_supplier(compact_all_three_l0s())
+            .build();
+        compactor.start().await.expect("failed to start compactor");
+
+        await_l0_compacted(CHAIN_C, object_store, "standalone compactor").await;
+        assert_chain_keys_readable(&db).await;
+
+        compactor.stop().await.expect("failed to stop compactor");
+        db.close().await.expect("failed to close db");
     }
 }

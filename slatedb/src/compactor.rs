@@ -69,6 +69,7 @@ use tokio::runtime::Handle;
 use tracing::instrument;
 use ulid::Ulid;
 
+use crate::block_cache_policy::BlockCachePolicy;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compaction_worker::CompactionWorkerHandler;
@@ -80,11 +81,15 @@ use crate::db_state::{SortedRun, SsTableView};
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::{Error, SlateDBError};
+use crate::format::sst::SsTableFormat;
 use crate::manifest::store::ManifestStore;
 use crate::manifest::{LsmTreeState, ManifestCore};
 use crate::merge_operator::MergeOperatorType;
-use crate::tablestore::TableStore;
+use crate::paths::PathResolver;
+use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::{format_bytes_si, IdGenerator};
+use object_store::path::Path;
+use object_store::ObjectStore;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::{GaugeFn, MetricsRecorderHelper};
 use slatedb_common::DbRand;
@@ -307,7 +312,11 @@ pub(crate) enum CompactorMessage {
 pub struct Compactor {
     manifest_store: Arc<ManifestStore>,
     compactions_store: Arc<CompactionsStore>,
-    table_store: Arc<TableStore>,
+    /// Object store, SST format and root path for the in-process worker's
+    /// table store, which `start` builds once it has loaded the manifest.
+    main_object_store: Arc<dyn ObjectStore>,
+    sst_format: SsTableFormat,
+    path: Path,
     options: Arc<CompactorOptions>,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
     expected_epoch: Option<u64>,
@@ -328,7 +337,9 @@ impl Compactor {
     pub(crate) fn new(
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
-        table_store: Arc<TableStore>,
+        main_object_store: Arc<dyn ObjectStore>,
+        sst_format: SsTableFormat,
+        path: Path,
         options: CompactorOptions,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
         expected_epoch: Option<u64>,
@@ -351,7 +362,9 @@ impl Compactor {
         Self {
             manifest_store,
             compactions_store,
-            table_store,
+            main_object_store,
+            sst_format,
+            path,
             options: Arc::new(options),
             scheduler_supplier,
             expected_epoch,
@@ -398,6 +411,11 @@ impl Compactor {
             self.expected_epoch,
         )
         .await?;
+        // Resolve SSTs the database borrows from others (clones/unions) using
+        // the manifest the handler just loaded. The external_dbs list is only
+        // written when the clone or union manifest is created and only shrinks
+        // afterwards, so this snapshot covers every SST a later job can reference.
+        let external_ssts = handler.state().manifest().value.external_ssts();
         self.task_executor
             .add_handler(
                 COMPACTOR_TASK_NAME.to_string(),
@@ -411,10 +429,19 @@ impl Compactor {
         // own cancellation token; Compactor::stop and run() are responsible for
         // shutting it down alongside the coordinator.
         if let Some(worker_options) = self.options.worker.clone() {
+            let table_store = Arc::new(TableStore::new_with_fp_registry(
+                self.main_object_store.clone(),
+                self.sst_format.clone(),
+                PathResolver::new_with_external_ssts(self.path.clone(), external_ssts),
+                self.fp_registry.clone(),
+                None,
+                TableStoreKind::Compactor,
+                BlockCachePolicy::default(),
+            ));
             let (worker_handler, worker_rx) = CompactionWorkerHandler::build_worker_handler(
                 self.manifest_store.clone(),
                 self.compactions_store.clone(),
-                self.table_store.clone(),
+                table_store,
                 Arc::new(worker_options),
                 self.compactor_runtime.clone(),
                 self.rand.clone(),
