@@ -43,5 +43,5 @@ pub use mirror::{
     ObjectStoreMirror, ObjectStoreMirrorBuilder, DEFAULT_DOWNLOAD_CONCURRENCY,
     DEFAULT_REMOTE_SCAN_INTERVAL,
 };
-pub use policy::{MirrorPolicy, ReadRoute, WriteRoute};
+pub use policy::{MirrorPolicy, MultipartRoute, ReadRoute, WriteRoute};
 pub use slatedb_common::vfs::{StdVfs, Vfs, VfsEntry, VfsLock, VfsWriter};

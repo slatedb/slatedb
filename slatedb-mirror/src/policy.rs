@@ -27,23 +27,34 @@ pub enum ReadRoute {
     Refetch,
 }
 
-/// Where a PUT or multipart upload goes.
+/// Where a PUT goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteRoute {
     /// Wrapped store only.
     Remote,
     /// Wrapped store, then the payload goes to [`MirrorPolicy::observe`].
-    /// Not supported for multipart uploads.
     Observe,
     /// Write to both. Returns after the upload succeeds and the local file is
     /// in place.
     Mirror,
 }
 
+/// Where a multipart upload goes. There's no `Observe` route because it
+/// would mean buffering every part in memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultipartRoute {
+    /// Wrapped store only.
+    Remote,
+    /// Write to both. Returns after the upload completes and the local file
+    /// is in place.
+    Mirror,
+}
+
 /// Decides which objects an `ObjectStoreMirror` keeps locally.
 ///
 /// Policies must only route paths that are never overwritten to
-/// [`ReadRoute::Local`], [`ReadRoute::Refetch`], or [`WriteRoute::Mirror`].
+/// [`ReadRoute::Local`], [`ReadRoute::Refetch`], [`WriteRoute::Mirror`], or
+/// [`MultipartRoute::Mirror`].
 ///
 /// Errors from the policy reach the caller in three ways:
 ///
@@ -62,14 +73,12 @@ pub trait MirrorPolicy: Send + Sync + 'static {
     /// Runs on every PUT. Must be cheap.
     fn put_route(&self, path: &Path, options: &PutOptions) -> object_store::Result<WriteRoute>;
 
-    /// Runs on every multipart upload. Must be cheap. [`WriteRoute::Observe`]
-    /// isn't supported here and fails the upload with
-    /// `MirrorError::Unsupported`.
+    /// Runs on every multipart upload. Must be cheap.
     fn put_multipart_route(
         &self,
         path: &Path,
         options: &PutMultipartOptions,
-    ) -> object_store::Result<WriteRoute>;
+    ) -> object_store::Result<MultipartRoute>;
 
     /// Runs for `Observe` routes, after the remote call succeeds and before the
     /// caller gets the result. `bytes` is the whole object.

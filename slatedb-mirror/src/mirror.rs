@@ -37,7 +37,7 @@ use crate::multipart::{self, committed};
 use crate::ordering::OpKind;
 use crate::retry::Retry;
 use crate::startup::recover;
-use crate::{scan, MirrorError, MirrorHandle, MirrorPolicy, ReadRoute, WriteRoute};
+use crate::{scan, MirrorError, MirrorHandle, MirrorPolicy, MultipartRoute, ReadRoute, WriteRoute};
 use slatedb_common::vfs::{StdVfs, Vfs};
 
 /// The default for [`ObjectStoreMirrorBuilder::with_download_concurrency`].
@@ -92,14 +92,16 @@ fn bytes_payload(bytes: Bytes) -> GetResultPayload {
 ///   copy, and serves the request from that copy. Even a range request or HEAD
 ///   downloads the whole object.
 ///
-/// The policy selects a [`WriteRoute`] for each PUT and multipart upload:
+/// The policy selects a [`WriteRoute`] for each PUT:
 ///
 /// - [`Remote`](WriteRoute::Remote) writes only to the remote store.
 /// - [`Observe`](WriteRoute::Observe) writes remotely, then calls
 ///   [`MirrorPolicy::observe`] with the whole payload before returning success.
-///   Multipart uploads do not support this route.
 /// - [`Mirror`](WriteRoute::Mirror) writes to both stores. Success means that the
 ///   remote upload completed and the local copy is in place.
+///
+/// Multipart uploads use [`MultipartRoute`], which has the same `Remote` and
+/// `Mirror` routes but no `Observe`.
 ///
 /// Policies can use [`MirrorHandle::fetch`] to wait for missing local copies,
 /// [`MirrorHandle::prefetch`] to download them in the background, and
@@ -176,7 +178,7 @@ fn bytes_payload(bytes: Bytes) -> GetResultPayload {
 /// use object_store::{
 ///     GetOptions, ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions,
 /// };
-/// use slatedb_mirror::{MirrorPolicy, ObjectStoreMirror, ReadRoute, WriteRoute};
+/// use slatedb_mirror::{MirrorPolicy, MultipartRoute, ObjectStoreMirror, ReadRoute, WriteRoute};
 ///
 /// struct ImmutableObjects;
 ///
@@ -194,8 +196,8 @@ fn bytes_payload(bytes: Bytes) -> GetResultPayload {
 ///         &self,
 ///         _: &Path,
 ///         _: &PutMultipartOptions,
-///     ) -> object_store::Result<WriteRoute> {
-///         Ok(WriteRoute::Mirror)
+///     ) -> object_store::Result<MultipartRoute> {
+///         Ok(MultipartRoute::Mirror)
 ///     }
 /// }
 ///
@@ -430,12 +432,8 @@ impl ObjectStore for ObjectStoreMirror {
             .put_multipart_route(location, &opts)
             .map_err(policy_error)?;
         match route {
-            WriteRoute::Remote => inner.remote.put_multipart_opts(location, opts).await,
-            WriteRoute::Observe => Err(MirrorError::Unsupported {
-                operation: "multipart upload with the Observe route",
-            }
-            .into()),
-            WriteRoute::Mirror => multipart::start(Arc::clone(inner), location, opts).await,
+            MultipartRoute::Remote => inner.remote.put_multipart_opts(location, opts).await,
+            MultipartRoute::Mirror => multipart::start(Arc::clone(inner), location, opts).await,
         }
     }
 
@@ -652,8 +650,8 @@ impl MirrorPolicy for MirrorAll {
         &self,
         _path: &Path,
         _options: &PutMultipartOptions,
-    ) -> object_store::Result<WriteRoute> {
-        Ok(WriteRoute::Mirror)
+    ) -> object_store::Result<MultipartRoute> {
+        Ok(MultipartRoute::Mirror)
     }
 }
 
@@ -699,7 +697,7 @@ mod tests {
     use parking_lot::Mutex;
     use tokio::sync::Semaphore;
 
-    use crate::{MirrorError, MirrorHandle, MirrorPolicy, ReadRoute, WriteRoute};
+    use crate::{MirrorError, MirrorHandle, MirrorPolicy, MultipartRoute, ReadRoute, WriteRoute};
 
     use super::ObjectStoreMirror;
 
@@ -709,7 +707,6 @@ mod tests {
         inner: InMemory,
         /// Full-object GETs (not HEADs).
         gets: AtomicUsize,
-        multipart_starts: AtomicUsize,
         in_flight: AtomicUsize,
         max_in_flight: AtomicUsize,
         /// Fail this many upcoming GETs with a transient error.
@@ -749,7 +746,6 @@ mod tests {
             location: &Path,
             opts: PutMultipartOptions,
         ) -> object_store::Result<Box<dyn MultipartUpload>> {
-            self.multipart_starts.fetch_add(1, Ordering::SeqCst);
             self.inner.put_multipart_opts(location, opts).await
         }
 
@@ -819,7 +815,6 @@ mod tests {
     /// manifest's body is a newline-separated list of paths to fetch.
     struct TestPolicy {
         sst_read: Mutex<ReadRoute>,
-        sst_multipart: Mutex<WriteRoute>,
         fail_observe: AtomicBool,
         observed: Mutex<Vec<(Path, Bytes)>>,
         run_started: AtomicBool,
@@ -830,7 +825,6 @@ mod tests {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 sst_read: Mutex::new(ReadRoute::Local),
-                sst_multipart: Mutex::new(WriteRoute::Mirror),
                 fail_observe: AtomicBool::new(false),
                 observed: Mutex::new(Vec::new()),
                 run_started: AtomicBool::new(false),
@@ -887,10 +881,10 @@ mod tests {
             &self,
             path: &Path,
             _options: &PutMultipartOptions,
-        ) -> object_store::Result<WriteRoute> {
+        ) -> object_store::Result<MultipartRoute> {
             Ok(match path.extension() {
-                Some("sst") => *self.sst_multipart.lock(),
-                _ => WriteRoute::Remote,
+                Some("sst") => MultipartRoute::Mirror,
+                _ => MultipartRoute::Remote,
             })
         }
 
@@ -1388,22 +1382,6 @@ mod tests {
             .await
             .unwrap();
         assert!(fixture.handle().contains(&path));
-    }
-
-    #[tokio::test]
-    async fn should_reject_observe_multipart_uploads() {
-        let fixture = Fixture::new().await;
-        *fixture.policy.sst_multipart.lock() = WriteRoute::Observe;
-        let err = fixture
-            .mirror
-            .put_multipart(&Path::from(SST))
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            mirror_error(&err),
-            MirrorError::Unsupported { .. }
-        ));
-        assert_eq!(fixture.store.multipart_starts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

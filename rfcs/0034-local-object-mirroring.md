@@ -136,6 +136,14 @@ pub enum WriteRoute {
     Mirror,
 }
 
+pub enum MultipartRoute {
+    /// Wrapped store only.
+    Remote,
+    /// Write to both. Returns after the upload completes and the local file
+    /// is in place.
+    Mirror,
+}
+
 #[async_trait]
 pub trait MirrorPolicy: Send + Sync + 'static {
     /// Runs on every GET and HEAD. `options.head` is true for HEAD. Must be
@@ -145,13 +153,12 @@ pub trait MirrorPolicy: Send + Sync + 'static {
     /// Runs on every PUT. Must be cheap.
     fn put_route(&self, path: &Path, options: &PutOptions) -> Result<WriteRoute>;
 
-    /// Runs on every multipart upload. Must be cheap. `Observe` isn't
-    /// supported here and fails the upload.
+    /// Runs on every multipart upload. Must be cheap.
     fn put_multipart_route(
         &self,
         path: &Path,
         options: &PutMultipartOptions,
-    ) -> Result<WriteRoute>;
+    ) -> Result<MultipartRoute>;
 
     /// Runs for `Observe` routes, after the remote call succeeds and before the
     /// caller gets the result.
@@ -434,8 +441,7 @@ Metadata-only reads for `Local` objects are served from the in-memory cache.
 
 ### Writes
 
-The policy's `put_route` and `put_multipart_route` pick one of three routes for
-each PUT and multipart upload:
+The policy's `put_route` picks one of three routes for each PUT:
 
 - `Remote` writes directly to the wrapped store.
 - `Observe` writes to the wrapped store, then passes the payload to
@@ -445,11 +451,10 @@ each PUT and multipart upload:
   temporary file is renamed to `<name>` only after the upload succeeds, so a
   partial or failed write never looks like a complete local copy.
 
-`Observe` isn't supported for multipart uploads. If `put_multipart_route`
-returns it, `put_multipart` fails with `MirrorError::Unsupported` before
-anything reaches the wrapped store. Supporting it would mean buffering every
-part in memory, and `Observe` is meant for small objects that go through a
-single PUT anyway. SlateDB writes manifests with a single PUT.
+`put_multipart_route` returns a `MultipartRoute`, which has only `Remote` and
+`Mirror`. Multipart has no `Observe` route because it would mean buffering
+every part in memory, and `Observe` is meant for small objects that go through
+a single PUT anyway. SlateDB writes manifests with a single PUT.
 
 A `Mirror` write returns only after the remote upload succeeds, its `.meta`
 file is written, and the complete local file is atomically renamed. A remote
@@ -486,8 +491,8 @@ pub enum MirrorError {
     WriteCommitted { path: Path, source: Box<dyn Error + Send + Sync> },
     /// The policy returned an error from a route or `observe` call.
     Policy { source: Box<dyn Error + Send + Sync> },
-    /// The mirror doesn't support this operation (COPY, RENAME, an
-    /// `Observe` multipart upload, or a local copy of a reserved file name).
+    /// The mirror doesn't support this operation (COPY, RENAME, or a local
+    /// copy of a reserved file name).
     Unsupported { operation: &'static str },
     /// `ObjectStoreMirrorBuilder::build` was given an invalid option, such as
     /// a download concurrency of zero.
@@ -1130,8 +1135,8 @@ There is, however, an open question around the CPU cost of computing the MD5 pre
   "subset of remote" guarantee with eventual cleanup and scoped the mirror to
   write-once paths. Added per-path ordering of fetches and evictions, a
   non-retryable `WriteCommitted` error, and whole-object rules for `Observe`.
-  COPY, RENAME, and `Observe` multipart uploads now fail with
-  `MirrorError::Unsupported`.
+  COPY and RENAME now fail with `MirrorError::Unsupported`. Multipart uploads
+  use `MultipartRoute`, which has no `Observe`.
 - Split the design into a generic `ObjectStoreMirror` crate and a pluggable
   `MirrorPolicy`, with SlateDB's rules in `SlateDbMirrorPolicy`. Renamed the
   periodic GC setting to `with_remote_scan_interval`.

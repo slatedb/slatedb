@@ -939,7 +939,7 @@ mod tests {
     async fn test_put_opts_preserves_committed_mirror_failure() {
         use object_store::PutMultipartOptions;
         use slatedb_mirror::{
-            MirrorHandle, MirrorPolicy, ObjectStoreMirror, ReadRoute, WriteRoute,
+            MirrorHandle, MirrorPolicy, MultipartRoute, ObjectStoreMirror, ReadRoute, WriteRoute,
         };
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -963,8 +963,8 @@ mod tests {
                 &self,
                 _: &Path,
                 _: &PutMultipartOptions,
-            ) -> object_store::Result<WriteRoute> {
-                Ok(WriteRoute::Remote)
+            ) -> object_store::Result<MultipartRoute> {
+                Ok(MultipartRoute::Remote)
             }
 
             async fn observe(
