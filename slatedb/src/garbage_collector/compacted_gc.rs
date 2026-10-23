@@ -165,7 +165,8 @@ fn collect_active_ssts<'a>(manifests: impl Iterator<Item = &'a Manifest>) -> Has
 ///
 /// 1. If there are active L0 SSTs, take the newest (max) L0 timestamp.
 /// 2. Else, if `l0_last_compacted` is set, use that timestamp as a fallback
-///    barrier for recently compacted L0s.
+///    barrier for recently compacted L0s. The last compacted L0 itself is
+///    exempt from this barrier (see [`released_last_compacted_l0_ssts`]).
 /// 3. Else, if the DB has never had L0s, return the Unix epoch to disable
 ///    deletion based on this signal.
 ///
@@ -192,6 +193,37 @@ fn newest_l0_dt(manifest: &Manifest) -> DateTime<Utc> {
         })
         .max()
         .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
+}
+
+/// Returns the SSTs the latest manifest names as each tree's last compacted L0.
+///
+/// [`newest_l0_dt`] falls back to the last compacted L0's timestamp for a tree with
+/// no live L0s, and that SST sits exactly at the bound, so the strict `<` cutoff
+/// would keep it until a later L0 is published, which on a quiet database may never
+/// happen. The newest-L0 bound exists to protect L0s that are uploaded but not yet
+/// published. The SST named here is not one: it was published in L0, the compaction
+/// that consumed it removed it from L0, and the writer never publishes it again (a
+/// new L0 always gets a freshly minted ULID). It is therefore exempt from that bound
+/// only; every other SST at the bound's timestamp, including an unpublished L0 minted
+/// in the same millisecond, stays protected. The `min_age` and compaction low
+/// watermark terms, the active-SST check (which includes checkpoints) and the GC
+/// filter still apply to it.
+///
+/// `last_compacted_l0_sst_id` is the physical SST ULID (the only marker a V1-encoded
+/// manifest keeps). A flushed L0's view id is also its physical SST ULID (RFC-0029
+/// identity views); any other view id names no physical SST, so including it exempts
+/// nothing.
+fn released_last_compacted_l0_ssts(manifest: &Manifest) -> HashSet<SsTableId> {
+    manifest
+        .core
+        .trees()
+        .flat_map(|tree| {
+            tree.last_compacted_l0_sst_view_id
+                .into_iter()
+                .chain(tree.last_compacted_l0_sst_id)
+        })
+        .map(SsTableId::from)
+        .collect()
 }
 
 impl GcTask for CompactedGcTask {
@@ -225,11 +257,13 @@ impl GcTask for CompactedGcTask {
         // been added to the manifest (we write the L0, _then_ add it to the manifest and write the
         // manifest to object storage).
         let newest_l0_dt = newest_l0_dt(&manifest);
+        // The last compacted L0s the manifest has already released are exempt from the
+        // newest-L0 bound only (see `released_last_compacted_l0_ssts`).
+        let released_l0_ssts = released_last_compacted_l0_ssts(&manifest);
+        let retention_cutoff_dt = configured_min_age_dt.min(compaction_low_watermark_dt);
         // Take the minimum of the configured min age, the compaction low watermark, and the most
         // recent SST in the manifest. This is the true upper-limit for SSTs that may be deleted.
-        let cutoff_dt = configured_min_age_dt
-            .min(compaction_low_watermark_dt)
-            .min(newest_l0_dt);
+        let cutoff_dt = retention_cutoff_dt.min(newest_l0_dt);
         log::debug!(
             "calculated compacted SST GC cutoff [cutoff_dt={:?}, configured_min_age_dt={:?}, compaction_low_watermark_dt={:?}, most_recent_sst_dt={:?}]",
             cutoff_dt,
@@ -243,8 +277,14 @@ impl GcTask for CompactedGcTask {
             .list_compacted_ssts(..)
             .await?
             .into_iter()
-            // Filter out SSTs that were more recently created than the cutoff_dt
-            .filter(|sst| DateTime::<Utc>::from(sst.id.value().datetime()) < cutoff_dt)
+            // Filter out SSTs that were more recently created than the cutoff_dt, except
+            // released last compacted L0s, which only need to be older than the
+            // retention cutoff
+            .filter(|sst| {
+                let sst_dt = DateTime::<Utc>::from(sst.id.value().datetime());
+                sst_dt < cutoff_dt
+                    || (sst_dt < retention_cutoff_dt && released_l0_ssts.contains(&sst.id))
+            })
             // Filter out SSTs that are active in the manifest (including actively checkpointed SSTs)
             .filter(|sst| !active_ssts.contains(&sst.id))
             .collect::<Vec<_>>();
@@ -701,6 +741,178 @@ mod tests {
             remaining.contains(&compaction_output_id),
             "expected GC to retain compacted SST output from a running compaction when the watermark is missing"
         );
+    }
+
+    /// Builds a quiet database whose only L0 (`consumed_l0`, an identity view
+    /// at 3_000ms) was compacted into a sorted run (`output`, at 4_000ms) by a
+    /// finished compaction (at 3_500ms). The manifest's L0 is empty and names
+    /// `consumed_l0` as the last compacted L0. Each SST in `extra` is
+    /// written to the table store without being published in the manifest.
+    /// Runs GC with `min_age` at 10_000ms and returns the remaining SSTs.
+    async fn collect_after_full_compaction_of_quiet_tree(
+        consumed_l0: SsTableId,
+        output: SsTableId,
+        extra: &[SsTableId],
+        min_age: Duration,
+    ) -> Vec<SsTableId> {
+        let main_store = Arc::new(InMemory::new());
+        let format = SsTableFormat::default();
+        let table_store = Arc::new(TableStore::new(
+            main_store.clone(),
+            format.clone(),
+            Path::from("/root"),
+            None,
+            TableStoreKind::GC,
+            BlockCachePolicy::default(),
+        ));
+        let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from("/root"),
+            main_store.clone(),
+        ));
+        let mut stored_compactions = StoredCompactions::create(
+            compactions_store.clone(),
+            stored_manifest.manifest().compactor_epoch,
+        )
+        .await
+        .unwrap();
+
+        // The finished compaction that consumed the L0; the compactions file
+        // retains the most recent one, so it sets the low watermark (3_500ms).
+        let mut compactions_dirty = stored_compactions.prepare_dirty().unwrap();
+        compactions_dirty.value.insert(Compaction::new(
+            ulid::Ulid::from_parts(3_500, 0),
+            CompactionSpec::new(vec![SourceId::SortedRun(0)], 0),
+        ));
+        stored_compactions.update(compactions_dirty).await.unwrap();
+
+        table_store
+            .write_sst(
+                &consumed_l0,
+                &build_test_sst(&format, 1).await,
+                Some(Bytes::new()),
+            )
+            .await
+            .unwrap();
+        let output_handle = table_store
+            .write_sst(
+                &output,
+                &build_test_sst(&format, 1).await,
+                Some(Bytes::new()),
+            )
+            .await
+            .unwrap();
+        for id in extra {
+            table_store
+                .write_sst(id, &build_test_sst(&format, 1).await, Some(Bytes::new()))
+                .await
+                .unwrap();
+        }
+
+        // The manifest after the compaction finished: L0 is empty, the run
+        // holds the output, and the consumed L0 is the last compacted one. Both
+        // markers are set as `finish_compaction` does; the V2 encoding keeps
+        // only the view id (a V1 encoding keeps only the SST id).
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        let tree = Arc::make_mut(&mut dirty.value.core.tree);
+        tree.last_compacted_l0_sst_view_id = Some(consumed_l0.value());
+        tree.last_compacted_l0_sst_id = Some(consumed_l0.value());
+        tree.compacted = vec![SortedRun::new(0, [SsTableView::identity(output_handle)])];
+        stored_manifest.update(dirty).await.unwrap();
+
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let task = CompactedGcTask::new(
+            manifest_store,
+            compactions_store,
+            table_store.clone(),
+            Arc::new(GcStats::new(&recorder)),
+            GarbageCollectorDirectoryOptions {
+                interval: None,
+                min_age,
+                dry_run: false,
+            },
+            None,
+        );
+        task.collect(DateTime::<Utc>::from_timestamp_millis(10_000).unwrap())
+            .await
+            .unwrap();
+        table_store
+            .list_compacted_ssts(..)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect()
+    }
+
+    /// A quiet tree whose L0 was fully compacted must not keep the consumed L0
+    /// forever: the manifest has released it, so the newest-L0 bound (which
+    /// falls back to exactly that SST's timestamp) must not protect it.
+    #[tokio::test]
+    async fn test_compacted_gc_deletes_released_last_compacted_l0_on_quiet_tree() {
+        let consumed_l0 = SsTableId::from(ulid::Ulid::from_parts(3_000, 0));
+        let output = SsTableId::from(ulid::Ulid::from_parts(4_000, 0));
+
+        let remaining = collect_after_full_compaction_of_quiet_tree(
+            consumed_l0,
+            output,
+            &[],
+            Duration::from_secs(0),
+        )
+        .await;
+
+        assert_eq!(remaining, vec![output]);
+    }
+
+    /// The bound still protects every SST the manifest does not know about: an
+    /// unpublished L0 minted in the same millisecond as the last compacted L0
+    /// (the `.manifest` L0 cutoff invariant admits equal timestamps) and one
+    /// minted later both survive, while the released L0 is collected.
+    #[tokio::test]
+    async fn test_compacted_gc_protects_unpublished_l0_at_last_compacted_l0_timestamp() {
+        let consumed_l0 = SsTableId::from(ulid::Ulid::from_parts(3_000, 0));
+        let output = SsTableId::from(ulid::Ulid::from_parts(4_000, 0));
+        let unpublished_same_ms = SsTableId::from(ulid::Ulid::from_parts(3_000, 1));
+        let unpublished_newer = SsTableId::from(ulid::Ulid::from_parts(5_000, 0));
+
+        let remaining = collect_after_full_compaction_of_quiet_tree(
+            consumed_l0,
+            output,
+            &[unpublished_same_ms, unpublished_newer],
+            Duration::from_secs(0),
+        )
+        .await;
+
+        assert_eq!(
+            remaining,
+            vec![unpublished_same_ms, output, unpublished_newer]
+        );
+    }
+
+    /// The exemption lifts only the newest-L0 bound: a released last compacted
+    /// L0 younger than `min_age` (8s at 10_000ms puts the cutoff at 2_000ms) is
+    /// kept for readers of older manifests.
+    #[tokio::test]
+    async fn test_compacted_gc_keeps_released_last_compacted_l0_within_min_age() {
+        let consumed_l0 = SsTableId::from(ulid::Ulid::from_parts(3_000, 0));
+        let output = SsTableId::from(ulid::Ulid::from_parts(4_000, 0));
+
+        let remaining = collect_after_full_compaction_of_quiet_tree(
+            consumed_l0,
+            output,
+            &[],
+            Duration::from_secs(8),
+        )
+        .await;
+
+        assert_eq!(remaining, vec![consumed_l0, output]);
     }
 
     fn ulid_at(seq: u64) -> ulid::Ulid {
