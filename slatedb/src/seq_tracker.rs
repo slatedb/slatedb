@@ -184,6 +184,18 @@ impl SequenceTracker {
         }
     }
 
+    /// Whether this tracker could belong to a manifest whose newest flushed
+    /// sequence number is `last_l0_seq`: both columns are sorted and no entry
+    /// is past it.
+    pub(crate) fn is_consistent_with(&self, last_l0_seq: u64) -> bool {
+        self.sequence_numbers.is_sorted()
+            && self.timestamps.is_sorted()
+            && self
+                .sequence_numbers
+                .last()
+                .is_none_or(|&seq| seq <= last_l0_seq)
+    }
+
     /// Serialize the tracker into bytes using the RFC-0012 format.
     pub(crate) fn to_bytes(&self) -> Vec<u8> {
         encode_sequence_tracker(self)
@@ -222,19 +234,52 @@ fn encode_sequence_tracker(tracker: &SequenceTracker) -> Vec<u8> {
     // Write version (u8)
     result.push(SERIALIZATION_VERSION);
 
+    let start = encodable_start(&tracker.sequence_numbers, &tracker.timestamps);
+    let sequence_numbers = &tracker.sequence_numbers[start..];
+    let timestamps = &tracker.timestamps[start..];
+
     // Write length (as u32, little-endian)
-    let len = tracker.sequence_numbers.len() as u32;
+    let len = sequence_numbers.len() as u32;
     result.extend_from_slice(&len.to_le_bytes());
 
     // Encode sequence numbers using Gorilla encoding
-    let encoded_seqs = encode_sequence_numbers(&tracker.sequence_numbers);
+    let encoded_seqs = encode_sequence_numbers(sequence_numbers);
     result.extend_from_slice(&encoded_seqs);
 
     // Encode timestamps using Gorilla encoding
-    let encoded_timestamps = encode_timestamps(&tracker.timestamps);
+    let encoded_timestamps = encode_timestamps(timestamps);
     result.extend_from_slice(&encoded_timestamps);
 
     result
+}
+
+/// Index of the oldest entry the Gorilla encoding can carry.
+///
+/// The widest delta-of-delta case is 32 bits and is sign-extended on decode,
+/// so a step outside `i32` would decode shifted by a multiple of 2^32 and
+/// shift every later entry with it. Entries before the last such step are
+/// left out instead. A tracker missing its oldest entries makes `find_ts`
+/// round up to a later time, so retention keeps versions longer, never
+/// shorter.
+fn encodable_start(sequence_numbers: &[u64], timestamps: &[i64]) -> usize {
+    let fits = |v: i128| i32::try_from(v).is_ok();
+    let mut start = 0;
+    let mut prev = (0i128, 0i128);
+    for i in 1..sequence_numbers.len() {
+        // Sequence numbers are encoded by their i64 bit pattern.
+        let delta = (
+            i128::from(sequence_numbers[i] as i64) - i128::from(sequence_numbers[i - 1] as i64),
+            i128::from(timestamps[i]) - i128::from(timestamps[i - 1]),
+        );
+        if fits(delta.0 - prev.0) && fits(delta.1 - prev.1) {
+            prev = delta;
+        } else {
+            // The stream restarts at `i`, where the delta-of-delta is reset.
+            start = i;
+            prev = (0, 0);
+        }
+    }
+    start
 }
 
 /// Decode a SequenceTracker from bytes
@@ -329,6 +374,10 @@ fn encode_gorilla_i64(values: &[i64]) -> Vec<u8> {
                     w.push32((dod as u32) & 0xFFF, 12);
                 }
                 _ => {
+                    debug_assert!(
+                        i32::try_from(dod).is_ok(),
+                        "delta-of-delta {dod} does not fit the 32-bit Gorilla case"
+                    );
                     w.push32(0b1111, 4);
                     w.push32(dod as u32, 32);
                 }
@@ -903,6 +952,141 @@ mod tests {
             assert_eq!(decoded.timestamps, tracker.timestamps);
         });
     }
+    #[test]
+    fn encoding_keeps_the_suffix_after_an_unrepresentable_step() {
+        let jump = 1u64 << 33;
+        let mut tracker = SequenceTracker::with_config(100, 1);
+        for (i, seq) in [100, 200, 300, 300 + jump, 400 + jump]
+            .into_iter()
+            .enumerate()
+        {
+            tracker.insert(TrackedSeq {
+                seq,
+                ts: DateTime::from_timestamp(1_600_000_000 + i as i64 * 60, 0).unwrap(),
+            });
+        }
+
+        let decoded = SequenceTracker::from_bytes(&tracker.to_bytes()).unwrap();
+
+        assert_eq!(decoded.sequence_numbers, vec![300 + jump, 400 + jump]);
+        assert_eq!(decoded.timestamps, tracker.timestamps[3..]);
+    }
+
+    /// The pre-fix round trip of a sequence-number column: the 32-bit case
+    /// kept the low 32 bits of each delta-of-delta and the decoder
+    /// sign-extended them.
+    fn truncating_round_trip(values: &[u64]) -> Vec<u64> {
+        let mut decoded: Vec<u64> = Vec::with_capacity(values.len());
+        let (mut prev_delta, mut decoded_delta) = (0i64, 0i64);
+        for (i, &value) in values.iter().enumerate() {
+            if i == 0 {
+                decoded.push(value);
+                continue;
+            }
+            let delta = value.wrapping_sub(values[i - 1]) as i64;
+            let dod = delta.wrapping_sub(prev_delta);
+            decoded_delta = decoded_delta.wrapping_add(dod as i32 as i64);
+            prev_delta = delta;
+            decoded.push(decoded[i - 1].wrapping_add(decoded_delta as u64));
+        }
+        decoded
+    }
+
+    #[test]
+    fn constant_write_rate_eventually_overflows_the_oldest_gap() {
+        const SEQS_PER_MINUTE: u64 = 1_200_000;
+        let ts_at =
+            |minute: u64| DateTime::from_timestamp(1_600_000_000 + minute as i64 * 60, 0).unwrap();
+
+        // Downsampling never drops index 0, so each one replaces index 1 with
+        // an older-spaced sample and widens the first gap, even at a constant
+        // write rate.
+        let mut tracker = SequenceTracker::new();
+        let mut minute = 0u64;
+        while tracker.sequence_numbers.len() < 2
+            || tracker.sequence_numbers[1] - tracker.sequence_numbers[0] < 1 << 31
+        {
+            tracker.insert(TrackedSeq {
+                seq: minute * SEQS_PER_MINUTE,
+                ts: ts_at(minute),
+            });
+            minute += 1;
+        }
+        let seqs = tracker.sequence_numbers.clone();
+        let last_seq = *seqs.last().unwrap();
+        let next_seq = minute * SEQS_PER_MINUTE;
+
+        // The gap crosses on a downsample, not on an unusual write.
+        assert_eq!(seqs.len(), DEFAULT_CAPACITY as usize / 2 + 1);
+
+        // Truncating the first delta-of-delta shifts every later entry by one
+        // more 2^32, so the newest wraps past u64::MAX and the next insert
+        // fails the monotonicity assert.
+        let truncated = truncating_round_trip(&seqs);
+        for (i, (&seq, &decoded)) in seqs.iter().zip(&truncated).enumerate() {
+            assert_eq!(seq.wrapping_sub(decoded), (i as u64) << 32);
+        }
+        assert!(*truncated.last().unwrap() > next_seq);
+        let mut corrupt = tracker.clone();
+        corrupt.sequence_numbers = truncated;
+        assert!(!corrupt.is_consistent_with(last_seq));
+
+        let mut decoded = SequenceTracker::from_bytes(&tracker.to_bytes()).unwrap();
+        let start = seqs.len() - decoded.sequence_numbers.len();
+        assert!(start > 0);
+        assert_eq!(decoded.sequence_numbers, seqs[start..]);
+        assert!(decoded.is_consistent_with(last_seq));
+        decoded.insert(TrackedSeq {
+            seq: next_seq,
+            ts: ts_at(minute),
+        });
+        assert_eq!(decoded.sequence_numbers.last(), Some(&next_seq));
+    }
+
+    #[test]
+    fn any_tracker_decodes_to_a_suffix_of_itself() {
+        use proptest::collection::vec;
+        use proptest::prelude::*;
+
+        let steps = vec((any::<u64>(), 0u32..64, 1i64..100_000), 0..=20);
+        proptest!(|(steps in steps)| {
+            let mut tracker = SequenceTracker::with_config(100, 1);
+            let (mut seq, mut ts) = (0u64, 1_600_000_000i64);
+            for (delta, shift, ts_delta) in steps {
+                seq = seq.saturating_add(delta >> shift);
+                ts += ts_delta;
+                tracker.insert(TrackedSeq {
+                    seq,
+                    ts: DateTime::from_timestamp(ts, 0).unwrap(),
+                });
+            }
+
+            let decoded = SequenceTracker::from_bytes(&tracker.to_bytes()).unwrap();
+
+            let start = tracker.sequence_numbers.len() - decoded.sequence_numbers.len();
+            prop_assert_eq!(&decoded.sequence_numbers, &tracker.sequence_numbers[start..]);
+            prop_assert_eq!(&decoded.timestamps, &tracker.timestamps[start..]);
+            prop_assert_eq!(decoded.sequence_numbers.last(), tracker.sequence_numbers.last());
+        });
+    }
+
+    #[test]
+    fn consistency_requires_sorted_entries_within_last_l0_seq() {
+        let mut tracker = SequenceTracker::with_config(10, 1);
+        for (seq, ts) in [(100, 1_000), (200, 2_000)] {
+            tracker.insert(TrackedSeq {
+                seq,
+                ts: DateTime::from_timestamp(ts, 0).unwrap(),
+            });
+        }
+        assert!(tracker.is_consistent_with(200));
+        assert!(!tracker.is_consistent_with(199));
+        assert!(SequenceTracker::new().is_consistent_with(0));
+
+        tracker.sequence_numbers[1] = 50;
+        assert!(!tracker.is_consistent_with(u64::MAX));
+    }
+
     #[test]
     fn admin_seq_tracker_seq_to_ts_rounding() -> Result<(), crate::Error> {
         use crate::admin::AdminBuilder;
