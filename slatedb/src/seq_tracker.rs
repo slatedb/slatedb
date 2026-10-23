@@ -972,6 +972,77 @@ mod tests {
         assert_eq!(decoded.timestamps, tracker.timestamps[3..]);
     }
 
+    /// The pre-fix round trip of a sequence-number column: the 32-bit case
+    /// kept the low 32 bits of each delta-of-delta and the decoder
+    /// sign-extended them.
+    fn truncating_round_trip(values: &[u64]) -> Vec<u64> {
+        let mut decoded: Vec<u64> = Vec::with_capacity(values.len());
+        let (mut prev_delta, mut decoded_delta) = (0i64, 0i64);
+        for (i, &value) in values.iter().enumerate() {
+            if i == 0 {
+                decoded.push(value);
+                continue;
+            }
+            let delta = value.wrapping_sub(values[i - 1]) as i64;
+            let dod = delta.wrapping_sub(prev_delta);
+            decoded_delta = decoded_delta.wrapping_add(dod as i32 as i64);
+            prev_delta = delta;
+            decoded.push(decoded[i - 1].wrapping_add(decoded_delta as u64));
+        }
+        decoded
+    }
+
+    #[test]
+    fn constant_write_rate_eventually_overflows_the_oldest_gap() {
+        const SEQS_PER_MINUTE: u64 = 1_200_000;
+        let ts_at =
+            |minute: u64| DateTime::from_timestamp(1_600_000_000 + minute as i64 * 60, 0).unwrap();
+
+        // Downsampling never drops index 0, so each one replaces index 1 with
+        // an older-spaced sample and widens the first gap, even at a constant
+        // write rate.
+        let mut tracker = SequenceTracker::new();
+        let mut minute = 0u64;
+        while tracker.sequence_numbers.len() < 2
+            || tracker.sequence_numbers[1] - tracker.sequence_numbers[0] < 1 << 31
+        {
+            tracker.insert(TrackedSeq {
+                seq: minute * SEQS_PER_MINUTE,
+                ts: ts_at(minute),
+            });
+            minute += 1;
+        }
+        let seqs = tracker.sequence_numbers.clone();
+        let last_seq = *seqs.last().unwrap();
+        let next_seq = minute * SEQS_PER_MINUTE;
+
+        // The gap crosses on a downsample, not on an unusual write.
+        assert_eq!(seqs.len(), DEFAULT_CAPACITY as usize / 2 + 1);
+
+        // Truncating the first delta-of-delta shifts every later entry by one
+        // more 2^32, so the newest wraps past u64::MAX and the next insert
+        // fails the monotonicity assert.
+        let truncated = truncating_round_trip(&seqs);
+        for (i, (&seq, &decoded)) in seqs.iter().zip(&truncated).enumerate() {
+            assert_eq!(seq.wrapping_sub(decoded), (i as u64) << 32);
+        }
+        assert!(*truncated.last().unwrap() > next_seq);
+        let mut corrupt = tracker.clone();
+        corrupt.sequence_numbers = truncated;
+        assert!(!corrupt.is_consistent_with(last_seq));
+
+        let mut decoded = SequenceTracker::from_bytes(&tracker.to_bytes()).unwrap();
+        let start = seqs.len() - decoded.sequence_numbers.len();
+        assert!(start > 0);
+        assert_eq!(decoded.sequence_numbers, seqs[start..]);
+        assert!(decoded.is_consistent_with(last_seq));
+        decoded.insert(TrackedSeq {
+            seq: next_seq,
+            ts: ts_at(minute),
+        });
+        assert_eq!(decoded.sequence_numbers.last(), Some(&next_seq));
+    }
+
     #[test]
     fn any_tracker_decodes_to_a_suffix_of_itself() {
         use proptest::collection::vec;
