@@ -214,6 +214,31 @@ impl FlatBufferManifestCodec {
         uuid::Uuid::from_u64_pair(uuid.high(), uuid.low())
     }
 
+    /// The tracker only approximates when sequence numbers were written, so
+    /// one that does not decode, or does not fit `last_l0_seq`, is replaced by
+    /// an empty tracker rather than failing the manifest. An empty tracker
+    /// makes time-based retention keep versions longer, never shorter, and
+    /// keeping a bad one would trip the monotonicity assert on the next flush.
+    fn decode_sequence_tracker(bytes: Option<&[u8]>, last_l0_seq: u64) -> SequenceTracker {
+        let Some(bytes) = bytes else {
+            return SequenceTracker::new();
+        };
+        match SequenceTracker::from_bytes(bytes) {
+            Ok(tracker) if tracker.is_consistent_with(last_l0_seq) => tracker,
+            Ok(_) => {
+                warn!(
+                    "discarding sequence tracker inconsistent with manifest [last_l0_seq={}]",
+                    last_l0_seq
+                );
+                SequenceTracker::new()
+            }
+            Err(e) => {
+                warn!("discarding undecodable sequence tracker: {}", e);
+                SequenceTracker::new()
+            }
+        }
+    }
+
     fn decode_bytes_range(range: root_generated::BytesRange) -> BytesRange {
         let start_key = Self::decode_bytes_bound(range.start_bound());
         let end_key = Self::decode_bytes_bound(range.end_bound());
@@ -297,11 +322,10 @@ impl FlatBufferManifestCodec {
                 name: cp.name().map(|s| s.to_string()),
             })
             .collect();
-        let sequence_tracker = match manifest.sequence_tracker() {
-            Some(bytes) => SequenceTracker::from_bytes(bytes.bytes())
-                .expect("Invalid encoding of sequence tracker in manifest."),
-            None => SequenceTracker::new(),
-        };
+        let sequence_tracker = Self::decode_sequence_tracker(
+            manifest.sequence_tracker().map(|bytes| bytes.bytes()),
+            manifest.last_l0_seq(),
+        );
         let external_dbs = manifest
             .external_dbs()
             .map(|external_dbs| {
@@ -421,11 +445,10 @@ impl FlatBufferManifestCodec {
                 name: cp.name().map(|s| s.to_string()),
             })
             .collect();
-        let sequence_tracker = match manifest.sequence_tracker() {
-            Some(bytes) => SequenceTracker::from_bytes(bytes.bytes())
-                .expect("Invalid encoding of sequence tracker in manifest."),
-            None => SequenceTracker::new(),
-        };
+        let sequence_tracker = Self::decode_sequence_tracker(
+            manifest.sequence_tracker().map(|bytes| bytes.bytes()),
+            manifest.last_l0_seq(),
+        );
         let external_dbs = manifest
             .external_dbs()
             .map(|external_dbs| {
@@ -2845,5 +2868,40 @@ mod tests {
         let decoded_v2 = codec.decode(&v2_bytes).expect("failed to decode V2");
 
         assert_eq!(decoded_v1, decoded_v2);
+    }
+
+    #[test]
+    fn manifest_with_a_tracker_past_last_l0_seq_loads_with_an_empty_tracker() {
+        use crate::seq_tracker::{SequenceTracker, TrackedSeq};
+
+        let mut core = ManifestCore::new();
+        core.last_l0_seq = 100;
+        // A negative i64 read back as u64, as left by a 32-bit-truncated
+        // delta-of-delta.
+        core.sequence_tracker.insert(TrackedSeq {
+            seq: (-23_567_833_935_697i64) as u64,
+            ts: DateTime::from_timestamp(1_600_000_000, 0).unwrap(),
+        });
+        let manifest = Manifest::initial(core);
+        let codec = FlatBufferManifestCodec {};
+
+        for bytes in [
+            FlatBufferManifestCodec::create_from_manifest_v1(&manifest),
+            FlatBufferManifestCodec::create_from_manifest(&manifest),
+        ] {
+            let decoded = codec.decode(&bytes).expect("manifest should still decode");
+            assert_eq!(decoded.core.sequence_tracker, SequenceTracker::new());
+            assert_eq!(decoded.core.last_l0_seq, 100);
+        }
+    }
+
+    #[test]
+    fn undecodable_tracker_is_replaced_by_an_empty_one() {
+        use crate::seq_tracker::SequenceTracker;
+
+        assert_eq!(
+            FlatBufferManifestCodec::decode_sequence_tracker(Some(&[0xff, 0, 0]), u64::MAX),
+            SequenceTracker::new()
+        );
     }
 }
