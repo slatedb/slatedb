@@ -51,7 +51,7 @@ pub use db::{Db, DbBuilder, DbReaderBuilder, DbStatus, SegmentPrefix, WriteHandl
 pub use db_cache::stats as db_cache_stats;
 pub use db_cache::CacheTarget;
 pub use db_iter::{DbIterator, DbRecencyIterator};
-pub use db_reader::{DbReader, DbReaderMode};
+pub use db_reader::{DbReader, DbReaderMode, DbReaderSnapshot};
 pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
 pub use error::{CloseReason, Error, ErrorKind};
@@ -156,6 +156,7 @@ mod peeking_iterator;
 mod proptest_util;
 mod read_trace;
 mod reader;
+mod reader_snapshot_manager;
 mod retention_iterator;
 mod retrying_object_store;
 mod segment_iterator;
