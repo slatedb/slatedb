@@ -23,12 +23,16 @@ Authors:
 
 ## Summary
 
-This RFC adds a standalone `SstWriter` and an `Lsm` client for ingesting and
-reading completed SSTs. Applications can build files outside SlateDB's write
-path, then use its file management and compaction. `Lsm` assigns destination
-sequences through the manifest without changing the physical SST format.
-Applications switch between `Lsm` for bulk loading and `Db` for ordinary writes,
-with one active writer for each database.
+This RFC adds a standalone `SstWriter` and an `Lsm` client for bulk loading and
+reading SSTs. The application builds sorted files without going through `Db`'s
+memory write path, then lets SlateDB manage those files and compaction.
+
+For the first ingestion mode, the application opens `Lsm` before building the
+files. `Lsm` assigns each file's final path and ID, so ingestion can publish it
+without copying it. Destination sequences live in the manifest, with no change
+to the physical SST format. Once loading is done, the application closes `Lsm`
+and switches to `Db` for ordinary writes. Only one of them can be the active
+writer for a database.
 
 ## Motivation
 
@@ -77,20 +81,29 @@ a SlateDB ingestion protocol.
 
 ### Component Boundary
 
-`Db` owns ordinary KV operations, memory, transactions, and WAL integration.
-`Lsm` accepts completed files and exposes reads over published state. Both reuse
-file access, manifest publication, compaction, and GC, with a common writer
-fencing protocol. The existing `Reader` provides shared get and scan execution.
+`Db` handles ordinary KV operations, memtables, transactions, and the WAL.
+`Lsm` handles file allocation, publication, and reads over published data.
+The application scans and sorts its input, then feeds those records to the SST
+writer. Both clients reuse manifest publication, compaction, and GC, and follow
+the same writer fencing protocol. They also use the existing `Reader` for get
+and scan execution.
 
-This separates file production from LSM maintenance alongside the pluggable WAL.
-An application can own its write frontend without adopting SlateDB's memtable,
-but it remains responsible for queries and recovery of its unpublished data.
+`Db`, `Lsm`, and `Compactor` share the code that reads and writes SST files.
+That includes `Db`'s L0 flushes and `Compactor`'s output files. Each client still
+keeps its own sequence and publication rules. Normal flushes and compaction
+outputs store their sequence numbers in the files and do not use deferred
+ingestion.
+
+Together with the pluggable WAL, this lets an application provide its own write
+frontend while SlateDB manages the LSM. The application still handles reads and
+recovery for data it hasn't published.
 
 ```mermaid
 flowchart LR
     W[Pluggable WAL] <--> D[Db: ordinary KV operations]
-    P[Application producer] --> S[Standalone SST writer]
-    S --> L[Lsm: ingestion and reads]
+    P[Application: scan and sort] --> S[Shared SST writer]
+    L[Lsm: allocation, ingestion, and reads] -->|Final path and file ID| S
+    S -->|Completed file| L
     D --> M[Shared file access, publication, compaction, and GC]
     L --> M
 ```
@@ -110,10 +123,27 @@ pub enum SstSequenceMode {
     Deferred,
 }
 
+pub struct SstArtifact {
+    handle: SsTableHandle,
+    path: Path,
+    encoded_size: u64,
+    row_count: u64,
+    sequence_mode: SstSequenceMode,
+}
+
+impl SstArtifact {
+    pub fn handle(&self) -> &SsTableHandle;
+    pub fn path(&self) -> &Path;
+    pub fn encoded_size(&self) -> u64;
+    pub fn row_count(&self) -> u64;
+    pub fn sequence_mode(&self) -> &SstSequenceMode;
+}
+
 impl SstWriter {
     pub fn new(
         store: Arc<dyn ObjectStore>,
         path: Path,
+        id: Ulid,
         options: SstWriterOptions,
     ) -> Result<Self, Error>;
 
@@ -137,37 +167,65 @@ filters, block transformation, and sequence mode:
 | Mode | Record contract | Use |
 | --- | --- | --- |
 | Preserve | Supplied sequences and timestamps, including versions and merge operands | Standalone creation and inspection |
-| Deferred | Sequence zero, one value or tombstone per key, no timestamps | `Lsm::ingest` |
+| Deferred | Sequence zero, one regular value, merge operand, or tombstone per key, no timestamps | `Lsm::ingest` |
 
 Keys ascend in byte order, with versions in descending sequence order. The writer
 rejects unordered entries, duplicate key-sequence pairs, empty files, and records
 outside the selected mode or format limits before passing them to the builder.
 
-`close()` completes upload and returns an `SstArtifact` containing the
-`SsTableHandle`, path, byte size, row count, encoded-file SHA-256 digest, and
-optional object version. Failure returns no artifact and attempts an upload
-abort. The producer owns source files and any incomplete uploads that survive
-cleanup. Artifacts use versioned JSON, independently of Rust serialization.
+When `close()` succeeds, the file is uploaded and the caller gets an
+`SstArtifact` with the fields shown above. Its handle includes the file ID, key
+bounds, and format metadata. If upload fails, the writer attempts to abort it
+and returns no artifact.
 
-`SstReaderOptions` makes the cache and database root optional and includes the
-cache scope and block transformer. Existing constructors and database-relative
-open methods remain available. `open_at` needs no root, and callers without an
-artifact supply a fresh physical ID. A cache scope and ID identify immutable
-bytes under one decoding configuration, including cached metadata.
+The artifact can stay in memory. An application can save its metadata if a
+standalone tool needs it, but the API doesn't require a JSON file or a
+serialization format. The artifact describes the completed file; the manifest
+records whether it was published.
+
+Standalone tools can use `SstWriter::new` with an explicit path and physical ID.
+The caller owns the upload and cleanup and must keep the completed file
+immutable. For ingestion into `Lsm`, the application uses `Lsm::new_sst_writer`,
+which supplies the path, ID, and configuration.
+
+A standalone reader opens an SST with `SstReader::open_at(path, id)`, so it does
+not need a database root. Callers without artifact metadata use a fresh ID.
+
+`Lsm` supplies the cache for database reads. Standalone readers can share that
+cache through `SstReaderOptions` or run without one.
+
+Readers sharing a cache scope need to agree on which file each ID refers to and
+how to decode it. Sequence overrides happen after reading cached blocks, and
+writes use the final file ID when caching is enabled.
 
 ### Producing Sorted Files
 
-`SstWriter` accepts sorted records. The producer handles unsorted snapshot input
-by sorting within a memory budget, spilling sorted runs when necessary, and
-merging them into SSTs. Duplicate-key resolution follows the source's update
-order before deferred files are written. Arbitrary chunk or scan completion
-order cannot determine which value wins.
+`SstWriter` expects sorted records, so the application does the source scanning
+and sorting. For unsorted snapshot or rebuild data, it chooses how to sort
+within its memory budget and whether to spill to temporary storage. Sorting and
+spill policy stay in the application; this RFC doesn't add a sorter to SlateDB.
 
-The initial ingestion API uses files staged in the client's configured object
-store, outside database-managed directories. Producers use the same block
-transformation as destination readers and compactors. Local sorting scratch and
-completed object-store SSTs have separate lifetimes, both owned by the producer.
-The external sorter and its spill policy remain application work.
+If a source contains repeated keys, the last source update wins for puts and
+deletes. For example, a delete at source version 20 wins over a put at version
+10, even if a parallel scan returns the put later. The result must not depend
+on which scan finishes first.
+
+Merge operands need more care because keeping only the last operand can lose
+earlier updates. The application must preserve their effects in source order
+and use a compatible merge operator in `Lsm` and the later `Db`.
+It can combine operands if that preserves their meaning. Otherwise, it writes
+them to separate files and publishes those files in source order. Each deferred
+file still has only one entry per key.
+
+The same ordering requirement applies across files with overlapping keys.
+The application allocates and publishes them in source order or removes the
+overlap before writing them. Sequence zero won't tell `Lsm` which source update
+is newer.
+
+The first mode builds files at paths assigned by `Lsm`. The application can do
+the sorting before switching clients, as long as it preserves a consistent
+source snapshot and update order. It also owns the temporary storage used for
+sorting.
 
 ### Lsm API
 
@@ -179,7 +237,6 @@ pub enum IngestSequence {
 
 pub struct IngestOptions {
     pub sequence: IngestSequence,
-    pub ttl: Ttl,
 }
 
 pub struct IngestResult {
@@ -189,6 +246,8 @@ pub struct IngestResult {
 
 impl Lsm {
     pub fn builder(path: Path, store: Arc<dyn ObjectStore>) -> LsmBuilder;
+
+    pub async fn new_sst_writer(&self) -> Result<SstWriter, Error>;
 
     pub async fn ingest(
         &self,
@@ -208,45 +267,69 @@ impl Lsm {
 }
 ```
 
-The builder configures file access, caching, compaction, and the segment
-extractor using existing SlateDB conventions. It also accepts the database's WAL
-configuration, merge operator, and system clock. The WAL configuration selects
-the WAL store or custom `WriterInit` used for handoff. Ingestion uses that
-client's store and transformer, with no per-import override. `Lsm` has no put,
-write, delete, or transaction methods and appends no imported records to the WAL.
+The builder follows the existing SlateDB configuration conventions for file
+access, caching, compaction, and the segment extractor. It also takes the
+database's WAL configuration, merge operator, and system clock. Files use the
+client's store, transformer, and format configuration, with no per-import
+override. `Lsm` has no put, write, delete, or transaction methods.
 
-`Allocate` chooses the next sequence. `Explicit` requires a value above the
-current maximum and uses the same external sequence authority as later `Db`
-writes. Each call accepts one deferred file. Publication order determines
-precedence for overlapping keys, so producers submit dependent files in order.
-The returned SST ID identifies the installed object for diagnostics, but
-compaction can replace and collect that object.
+The WAL configuration selects the WAL store or custom `WriterInit` used for
+fencing and recovery checks when switching from `Db`. Imports don't append WAL
+records. The handoff section describes those checks.
 
-Deferred records do not expire. `Ttl::NoExpiry` bypasses a configured default,
-while `Ttl::Default` requires no default TTL. Explicit expiration is unsupported.
-Creation and expiration timestamps remain absent after compaction. Filters must
-handle absent timestamps, and missing `KeyValue` creation time remains zero.
+`Lsm::new_sst_writer` returns an `SstWriter` with the final path, file ID, and
+deferred record mode. The application adds sorted records, closes the writer,
+and passes the artifact to `ingest`. It requests writers in publication order.
+Files can build and upload in parallel, but `Lsm` publishes them in the order it
+allocated their IDs.
+
+`Allocate` asks the client's oracle for the next sequence. `Explicit` works like
+`WriteOptions::seqnum`: the caller supplies a sequence above the current maximum
+and keeps those values ordered across imports and later `Db` writes.
+Each call accepts one deferred file, and publication order decides which record
+wins when files overlap. The returned SST ID is useful for diagnostics, but
+compaction can replace and collect the object it identifies.
+
+We're leaving creation and expiration timestamps out of the first release to
+keep the initial work focused on bulk loading. They can use overrides in SST
+view metadata, just like sequences. Before adding that support, we need to
+define when the expiration period starts and how reads, merges, compaction, and
+snapshots apply the assigned times.
+
+For now, deferred records don't expire, even if the database has a default TTL,
+so there is no per-import TTL option. Compaction doesn't invent timestamps when
+rewriting a deferred record. If that record merges with later `Db` records, the
+existing merge rules still apply. Filters must handle missing timestamps, and
+`KeyValue` continues to return zero for a missing creation time.
 
 ### Ingestion and Publication
 
-`Lsm` serializes ingestion operations while reads and compaction continue.
-After admission validates the artifact and reserves L0 capacity, the publisher
-assigns a sequence and a fresh destination SST ID. It copies the staged source
-into database-owned storage, checking the digest, checksums, ordering, record
-types, sequence mode, and format limits on the stream it uploads.
+`Lsm` opens only when published SSTs cover earlier WAL writes, as described in
+the handoff section. Otherwise, an import could advance the sequence frontier
+past writes that still need replay.
 
-The copy binds to the source object version when available. Prefetched footer
-and index data must match the copied bytes. Successful upload and supported
-transport checksums provide upload integrity without a full destination reread.
-The caller-owned source remains unchanged.
+Reads and compaction continue while files are built and ingested. `SstWriter`
+checks the records, writes block checksums, and uploads the file to its final
+path. We rely on upload success and supported transport checksums instead of
+reading the whole file back.
 
-Destination IDs follow [RFC 0029](0029-gc-safe-sst-ulid-timestamps.md): physical
-and initial view IDs match, and their timestamps meet the current L0 cutoff.
-No later ingestion passes an unfinished copy or publication. This preserves
-existing GC protection for unpublished L0 files without a pending-import field.
-A new attempt after abandonment or restart allocates a fresh destination ID.
+`ingest` uses the file ID to check that the file was built through this `Lsm`
+client. It also checks the path, sequence mode, and format. Once L0 has space,
+it assigns a sequence and publishes the SST using its handle. There is no copy
+or second record scan.
 
-After upload, a single manifest update publishes the file view and its sequence
+`Lsm` follows [RFC 0029](0029-gc-safe-sst-ulid-timestamps.md): it allocates each
+final SST ID before construction, and the physical ID and initial view ID match.
+Their timestamps must meet the current L0 cutoff and never go backwards in
+allocation order. Equal timestamp milliseconds are allowed.
+
+Publication follows allocation order even when uploads finish out of order.
+A later file can proceed once the earlier file is published or is abandoned
+before publication starts. An abandoned file cannot be published later. This
+keeps unfinished files protected by the existing GC cutoff without adding
+durable pending-import metadata.
+
+Once the file is uploaded, one manifest update publishes its view and sequence
 override. It advances `last_l0_seq` and the monotonic `last_l0_clock_tick`,
 records the sequence/time sample, and updates `recent_snapshot_min_seq` under
 the existing retention rules for active read views.
@@ -255,23 +338,17 @@ Imports advance committed and database-durable progress after local read state
 is installed, without advancing WAL progress or waiting for a nonexistent WAL
 record. Success means the file and publication are durable.
 
-### Segments and Rebuilds
+### Segments
 
-The proposed segment contract accepts one SST belonging to one segment. With an
-extractor configured, validation checks every key against that extractor and
-requires one valid prefix. Publication uses that segment's L0 tree and existing
-prefix-conflict checks. Files spanning segments are rejected, and an
-unsegmented database continues to use its root tree.
+In a segmented database, each SST belongs to one segment. The writer checks key
+order and records the first and last keys in `SsTableInfo`. Those keys must have
+the same valid segment prefix. The extractor's prefix contract ensures that,
+for sorted keys, the keys in between belong to that segment too.
 
-This supports generation-based index cleanup without making a multi-file rebuild
-atomic. The application keeps the affected table unavailable until all files and
-its completion marker are durable. It tracks incomplete generations for restart
-and retires old generations only under its cleanup contract. Importing a file
-does not delete old keys absent from that file.
-
-One database per table permits other tables to continue CDC during this handoff.
-Those databases still share machine and object-store resources. Segment routing
-and the release scope for this use case remain explicit open questions.
+That lets `ingest` choose the segment from the file metadata without reading all
+the records again. It rejects missing bounds, mixed prefixes, or conflicting
+prefixes, then publishes valid files into the segment's L0 tree using the
+existing prefix-conflict checks. An unsegmented database uses its root tree.
 
 ### Switching Between Lsm and Db
 
@@ -294,28 +371,33 @@ close succeed, with manifest ownership rechecked before admission. The monotonic
 clock starts from `last_l0_clock_tick` using the configured system clock. This
 reuses the existing WAL recovery boundary without a separate handoff record.
 
-`Lsm::close` stops admission and settles in-flight publication before releasing
-ownership. A subsequent `Db` reads the latest manifest and starts above the
-last imported sequence. A crash recovers published files from the manifest.
-Unpublished sources and application rebuild progress remain caller-owned.
-An uncertain close or publication cannot authorize a new client to skip fencing
-or recovery checks.
+Before closing `Lsm`, the application stops producing records. `Lsm::close`
+stops accepting work, cancels unfinished file work, and settles publication
+already in progress before releasing ownership. The next `Db` reads the latest
+manifest and starts above the last imported sequence.
+
+If close or publication has an uncertain outcome, the next client still has to
+fence older writers and perform the recovery checks.
 
 ### Read Visibility
 
 Each `Lsm` read captures a consistent published view and sequence through shared
 read machinery and uses existing read-retention rules to protect its files.
 An import at 101 supersedes older records for new reads, while a reader pinned
-to an earlier checkpoint retains its old manifest. This proposal adds no
-cross-client snapshot handle or renewable-checkpoint lifecycle. Existing
-compaction-filter limits on snapshot consistency still apply.
+to an earlier checkpoint retains its old manifest. Existing compaction-filter
+limits on snapshot consistency still apply.
 
-A WAL-following `DbReader` can outlive a client switch, so separate writer clients
-alone do not fix reader ordering. It must capture a bounded WAL end before
-loading a fresh manifest, replay only through that bound, and install the combined
-state before advancing durable progress. Initial open and refresh use the same
-order under the existing checkpoint policy. Pinned readers retain their fixed
-manifest and replay boundary.
+A WAL-following `DbReader` can stay open while the application switches clients.
+For example, it can still hold the manifest for 100 when `Lsm` publishes 101.
+If `Db` then resumes and writes 102, the reader can follow that WAL using its
+old manifest and expose 102 before it sees 101. Updating the replay boundary
+in the new manifest only helps once the reader loads that manifest.
+
+To avoid that race, the reader first captures a bounded WAL end, then loads a
+fresh manifest and replays only through the captured bound. It installs the
+combined state before advancing durable progress. Initial open and refresh use
+this same order under the existing checkpoint policy. Pinned readers keep their
+fixed manifest and replay boundary.
 
 If the captured WAL includes a later `Db` write at 102, the subsequent manifest
 read must include import 101. Sequence gaps cannot identify imports because
@@ -351,10 +433,11 @@ durable request history or pending-import collection.
 
 ### Failures and Retries
 
-A failure before manifest publication leaves no visible import. The upload is
-aborted when possible, and GC collects abandoned destination objects. Restart
-recovers committed manifest state but cannot reconstruct the caller's source
-artifact or resume an unfinished copy.
+If construction or upload fails, nothing is published. Before publication
+starts, dropping the writer or an unused artifact abandons the file. `Lsm` can
+then publish later files, but it will reject the abandoned file. We try to abort
+unfinished uploads, and GC handles anything left behind under the existing age
+and cutoff rules.
 
 `Lsm` retains the operation's sequence `s`, destination ID, writer epoch, and
 exact candidate update for manifest version `m`. Later imports remain blocked
@@ -369,17 +452,22 @@ the import from a competing metadata update. If the competing update won, `Lsm`
 reapplies the import to the latest manifest under the same writer epoch.
 All retries retain the metadata GC boundary checks that reject obsolete versions.
 
-If reads or writes remain uncertain, or another writer fences the client, it
-stops admission and reports unresolved publication. Caller cancellation does
-not abandon this coordination.
+If reads or writes remain uncertain, or another writer fences the client,
+`Lsm` stops accepting imports and reports unresolved publication. Cancelling
+the call doesn't let later imports pass an unresolved publication.
 
-A new API call is a new import, even if it supplies the same artifact. There is
-no request ID, status lookup, or durable deduplication guarantee. After a lost
-response, callers must reconcile their application state before resubmitting:
-a new sequence can overwrite intervening imports. A frontier advanced by another
-writer cannot identify the earlier request, and `Allocate` returns its sequence
-only on success. An SST object's presence or absence also cannot prove the
-original outcome.
+After a restart, published data comes from the manifest. The application owns
+its unpublished input, sorting scratch, and rebuild progress. This RFC doesn't
+define automatic resumption of unfinished uploads or adoption of old
+unreferenced files.
+
+There is no request ID or status lookup, so after a lost response the application
+has to reconcile its progress before retrying. Publishing the same data again
+at a new sequence can overwrite imports made in between. Another writer
+advancing the frontier doesn't identify the earlier request, and `Allocate`
+returns its sequence only on success. Having the SST object or its saved
+metadata doesn't tell us whether publication succeeded. Neither proves that an
+old, unreferenced file is safe to publish under the current GC cutoff.
 
 ## Impact Analysis
 
@@ -448,20 +536,22 @@ checkpoints. Include configured L0 limits and stress cases of 1,000, 10,000, and
 100,000 views. Report encoded size, encode/decode time, decoded memory, and traffic
 from repeated full manifest uploads.
 
-For a staged file of `S` bytes, a streamed copy reads about `S` and uploads `S`,
-plus footer and index requests. It needs one successful publication update,
-excluding opening/fencing, concurrent compaction, multipart requests, and retries.
-Creating the staged file adds another `S` upload. The source and installed copy
-occupy roughly `2S` until the producer deletes the source, before compaction.
-Manifest reads and object listing during open, recovery, and GC also contribute
-requests.
+Building an SST of `S` bytes through `Lsm` uploads those bytes once. Ingestion
+then adds one successful manifest update, without downloading, uploading, or
+scanning the file again. That count excludes opening and fencing, concurrent
+compaction, multipart requests, and retries. Manifest reads and object listings
+during open, recovery, and GC also add requests. The application budgets its
+local sorting scratch separately.
 
-Per database, ingestion runs one file copy and publication at a time. Benchmark
-throughput and L0 waits across file sizes to determine whether serialization or
-compaction limits loading. Parallel destination copies can reuse RFC 0029's
-protection by allocating destination IDs before dispatch in publication order
-and publishing in that order. This needs no separate pending-object GC mechanism
-and remains a follow-up optimization.
+Manifest publication stays ordered while file construction and uploads can
+overlap. Benchmark file sizes, construction concurrency, and L0 waits to see
+whether upload, publication, or compaction limits throughput. Measure peak
+memory and concurrent uploads alongside throughput.
+
+The tradeoff is that `Db` writes to that database stay paused while the files
+are built, uploaded, and published. Reads can continue under the visibility
+rules above. This whole pause needs to be measured when comparing direct
+construction with a future mode that stages files before the handoff.
 
 Compare the complete pipeline with normal batch writes: sorting and spill,
 SST construction, index/filter buffers, upload, validation, publication, and
@@ -473,11 +563,12 @@ of this proposal.
 
 ### Observability
 
-Opening `Lsm` is the explicit opt-in. This proposal adds no `Db` ingestion setting.
-Track staged and imported bytes, L0 admission waits, validation and publication
-time, failures, uncertain outcomes, and manifest size. Expose the published
-sequence and clock, handoff failures, and recovery-required errors. Record object
-and manifest identifiers for diagnostics without treating them as retry tokens.
+Applications opt in by opening `Lsm`; there is no ingestion setting on `Db`.
+Track bytes built and imported, time spent waiting for L0 capacity, file build
+and publication time, failures, uncertain outcomes, and manifest size.
+Expose the published sequence and clock along with handoff failures and errors
+that require recovery. Object and manifest IDs help with diagnostics, but they
+aren't retry tokens.
 
 ### Compatibility
 
@@ -515,26 +606,58 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
 
 ## Testing
 
-- **SST contracts**: Round-trip both modes, standalone paths, versions, timestamps, merges, tombstones, compression, transformers, stats, and digests; reject invalid ordering and mode/format violations before builder access.
-- **Publication and reads**: Import 101 over earlier data and preserve an older checkpoint. Verify get/scan, shared caches, projections, and restart across trivial moves that retain overrides and compactions that materialize sequences.
-- **Handoff**: Close `Db` with published write 100, import 101 through `Lsm`, then reopen `Db` and write 102; race long-lived `DbReader` refreshes and exercise explicit sequence gaps.
-- **Recovery and fencing**: Exercise failed `Db` close, configured WAL stores and custom `WriterInit`, replay exhaustion and errors, WAL-writer close failures, and competing clients. Reject WAL rows beyond file coverage and verify merge behavior and clock continuity across handoff.
-- **Failure boundaries**: Fail or cancel copy, validation, upload, and manifest publication. Retry an identical update at the same manifest ID after a lost response, including a delayed original write and a competing metadata update. Preserve epoch fencing and metadata GC boundary checks. A failed import at 101 followed by another writer publishing 102 must not count as proof of the first import. Exercise caller resubmission and GC during uploads that outlast minimum file age.
-- **Segments and generations**: Route single-segment files, reject mixed or conflicting prefixes, preserve unrelated segments, and restart an incomplete rebuild without publishing its completion marker.
-- **Compatibility**: Cover old-reader rejection, conditional manifest versions, unchanged `.compactions` encoding, and worker lookup of overridden input views. Test downgrade after forced rewrites, including rejection while v3 checkpoints remain. Cover timestamp-free records, optional reader roots/caches, and unchanged public exports.
-- **Simulation and cost**: Combine ingestion, compaction, GC, fencing, and restart in the existing simulation framework; run the metadata and end-to-end experiments above.
+- SST contracts: Round-trip both modes and standalone paths, including versions,
+  timestamps, merges, tombstones, compression, transformers, and stats. Check
+  that invalid ordering and mode or format violations are rejected before
+  reaching the builder. Merge effects must survive ordered deferred files and
+  later `Db` writes.
+- Direct construction: Check that `Lsm` assigns the final path and ID before
+  writing and uploads each file once. Finish uploads out of order and verify
+  that publication stays in allocation order. Abandon an earlier file before
+  ingestion and verify that later files can progress without publishing the
+  abandoned ID. Check that artifacts match the issued physical IDs and file
+  configuration. Segment routing must use the completed key bounds without
+  scanning records at publication time.
+- Publication and reads: Import 101 over earlier data while retaining an older
+  checkpoint. Check get/scan, shared caches, projections, and restart. Overrides
+  must survive trivial moves, and rewrites must materialize their sequences.
+- Handoff: Close `Db` with write 100 published, import 101 through `Lsm`, then
+  reopen `Db` and write 102. Race that handoff with a long-lived `DbReader` still
+  holding the old manifest, and include explicit sequence gaps.
+- Recovery and fencing: Test failed `Db` close, configured WAL stores and custom
+  `WriterInit`, replay exhaustion and errors, WAL-writer close failures, and
+  competing clients. WAL rows beyond file coverage must prevent `Lsm` from
+  opening. Check that merge behavior and clocks remain consistent across the
+  handoff.
+- Failure boundaries: Fail or cancel construction, upload, and manifest
+  publication. After a lost response, retry the identical update at the same
+  manifest ID, including a delayed original write and a competing metadata
+  update. Keep epoch fencing and metadata GC boundary checks in place. Another
+  writer publishing 102 must not count as proof that an import at 101 succeeded.
+  Test writer and artifact cleanup, recovery of published state after restart,
+  and GC during uploads that outlast the minimum file age.
+- Segments: Route files belonging to one segment and reject missing bounds,
+  mixed prefixes, and conflicting prefixes. Unrelated segments must stay intact.
+- Compatibility: Test old-reader rejection, conditional manifest versions,
+  unchanged `.compactions` encoding, and worker lookup of overridden input
+  views. Test downgrade after forced rewrites and rejection while v3 checkpoints
+  remain. Include timestamp-free imports with a configured default TTL,
+  optional reader roots and caches, and unchanged public exports.
+- Simulation and cost: Combine construction, ingestion, compaction, GC, fencing,
+  and restart in the existing simulation framework. Run the metadata and
+  end-to-end experiments described above.
 
 ## Rollout
 
 1. Measure manifest growth and establish a bulk-load baseline, including sorting and L0 waits.
 2. Extract shared SST code with compatible exports, then expose the standalone writer and reader paths.
 3. Add conditional manifest versions and propagate overrides through reads, compaction, and retained manifests.
-4. Add `Lsm` ingestion and reads with exclusive fencing, publication, and uncertain-outcome handling.
+4. Add `Lsm` file allocation, direct SST construction, ingestion, and reads, including exclusive fencing and handling of uncertain outcomes.
 5. Validate the `Db` handoff, long-lived readers, and segment routing before enabling the per-table index workflow.
 
-The standalone interfaces can ship independently. The `Lsm` release must specify
-its supported WAL handoffs and segment scope. Documentation covers source
-ownership, staging, retries, client switching, generation completion, and upgrades.
+The standalone interfaces can ship on their own. The `Lsm` release needs to
+document the supported WAL handoffs and segment scope, along with file
+ownership, upload cleanup, retries, client switching, and upgrades.
 
 ## Alternatives
 
@@ -547,10 +670,25 @@ future extension if a workload requires concurrent write modes within one databa
 
 ### Normal Batch Writes or Writer-Only Release
 
-Normal batches retain the existing lifecycle and avoid external sorting and
-staging. They remain the performance baseline because external files still
-enter L0. A writer-only release is useful for file tooling but does not expose
-LSM publication and reads to application-owned producers.
+Normal batch writes keep the existing lifecycle and don't require the
+application to sort its input. They remain the performance baseline because
+externally built files still enter L0. A writer-only release helps standalone
+file tools, but applications still need `Lsm` for publication and reads over
+database state.
+
+### Stage Files Before Handoff
+
+An application could build SSTs outside managed directories while `Db` keeps
+receiving writes, then switch to `Lsm` to import them. That can shorten the write
+pause, but it needs a way to validate and install those files safely under GC.
+The application also has to account for writes made after its source snapshot.
+This stays outside the first release; we can revisit it if a workload needs a
+shorter write pause.
+
+If a future staged mode copies files, a storage-side COPY could avoid sending
+the bytes through the client. Validation and copying must refer to the same
+source version. The first mode builds directly under `Lsm`, so neither copy
+path is needed.
 
 ### Durable Request Tracking
 
@@ -569,15 +707,15 @@ rules for overlap, bounds, and snapshots.
 ## Open Questions
 
 1. Does the first `Lsm` release include single-segment ingestion, or does adoption wait for a later segment milestone?
-2. What memory, spill, staging, and duplicate-resolution policies does the first producer need for unsorted inputs?
-3. What manifest growth and per-table resource budgets are acceptable at the expected table count?
-4. Does a concrete workload require import-time timestamps, atomic multi-file publication, or durable retry tracking?
+2. What manifest growth and per-table resource budgets are acceptable at the expected table count?
+3. Does a concrete workload require import-time timestamps, atomic multi-file publication, or durable retry tracking?
 
 ## References
 
 - [Issue #1143](https://github.com/slatedb/slatedb/issues/1143) and [RFC #1146](https://github.com/slatedb/slatedb/pull/1146), by [KarinaMilet](https://github.com/KarinaMilet).
 - RFC #1146 requests for the [package boundary](https://github.com/slatedb/slatedb/pull/1146#discussion_r2649290355), [reader paths](https://github.com/slatedb/slatedb/pull/1146#discussion_r2649289303), [returned handle](https://github.com/slatedb/slatedb/pull/1146#discussion_r2674413603), and [SlateDB manifest representation](https://github.com/slatedb/slatedb/pull/1146#discussion_r2674447687).
 - RFC #2103 discussions of the [Lsm client](https://github.com/slatedb/slatedb/pull/2103#pullrequestreview-5286827487), [per-table databases](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5800449727), [producer requirements](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5808365694), [retry guarantees](https://github.com/slatedb/slatedb/pull/2103#discussion_r4078981105), and [shared configuration](https://github.com/slatedb/slatedb/pull/2103#discussion_r4079040923).
+- RFC #2103 reviews of [building SSTs without copying](https://github.com/slatedb/slatedb/pull/2103#discussion_r4202127474), [sorting in the application](https://github.com/slatedb/slatedb/pull/2103#discussion_r4204482400), and [routing from key bounds](https://github.com/slatedb/slatedb/pull/2103#discussion_r4204648367).
 - [Issue #1105](https://github.com/slatedb/slatedb/issues/1105), including [read and freeze coordination](https://github.com/slatedb/slatedb/issues/1105#issuecomment-3666587872).
 - [Pluggable WAL](0030-pluggable-wal.md), [sequence tracking](0012-sequence-tracker.md), [checkpoints](0004-checkpoints.md), and [GC-safe SST identifiers](0029-gc-safe-sst-ulid-timestamps.md).
 - [Segment-oriented compaction](0024-segment-oriented-compaction.md) and [compaction filters](0017-compaction-filters.md).
