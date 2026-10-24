@@ -938,9 +938,11 @@ impl CompactorEventHandler {
     ///
     /// Runs when a Submitted compaction is accepted and when a Compacted entry is
     /// committed, so this is the canonical gate for compaction-against-current-state
-    /// validity. Cross-compaction conflicts (destination collisions across active
-    /// compactions, concurrent drains on the same segment) are enforced upstream in
-    /// [`CompactorState::add_compaction`] and are not re-checked here.
+    /// validity. Scheduler proposals also pass [`CompactorState::add_compaction`]
+    /// (destination collisions, concurrent drains on the same segment), but a spec
+    /// submitted through [`crate::admin::Admin::submit_compaction`] reaches
+    /// `.compactions` without it, so a Submitted spec is checked here against
+    /// every live compaction as well.
     ///
     /// Invariants checked:
     /// - Compaction has sources
@@ -952,6 +954,8 @@ impl CompactorEventHandler {
     /// - A tiered destination does not overwrite a committed SR in any tree unless the SR is among sources
     /// - Drain L0 sources cover every L0 at or below the newest drained L0 in the target tree
     /// - At most one L0 compaction is Running per segment
+    /// - A Submitted spec reads and writes no sorted run or SST view that a
+    ///   Scheduled, Running or Compacted compaction reads or writes
     /// - Scheduler-specific policy via [`CompactionScheduler::validate_compaction`]
     fn validate_compaction(&self, compaction: &Compaction) -> Result<(), SlateDBError> {
         let spec = compaction.spec();
@@ -1062,9 +1066,60 @@ impl CompactorEventHandler {
             }
         }
 
+        if compaction.status() == CompactionStatus::Submitted {
+            self.validate_no_live_conflict(compaction)?;
+        }
+
         self.scheduler
             .validate(&self.state().into(), spec)
             .map_err(|_e| SlateDBError::InvalidCompaction)
+    }
+
+    /// Rejects a Submitted spec that reads or writes a sorted run or SST view
+    /// that a live compaction reads or writes. The size-tiered scheduler never
+    /// proposes one (its conflict checker excludes every active compaction's
+    /// sources and destination), but an externally submitted spec is merged
+    /// into `.compactions` as-is. Without this check two jobs writing one
+    /// destination can both be promoted: a worker that claims both trips the
+    /// executor's one-job-per-destination invariant, and a job whose sources
+    /// another job consumed first can only fail at commit.
+    ///
+    /// Live means claimed (`Scheduled`, `Running`) or finished but not yet
+    /// committed (`Compacted`). Other `Submitted` entries are validated in turn
+    /// by the same pass, so the first of two conflicting submissions to be
+    /// promoted wins and the second is failed when its turn comes. Sorted-run
+    /// ids and SST view ids are unique across segments (RFC-0024), so the
+    /// check spans every segment.
+    fn validate_no_live_conflict(&self, compaction: &Compaction) -> Result<(), SlateDBError> {
+        fn footprint(spec: &CompactionSpec) -> HashSet<SourceId> {
+            spec.sources()
+                .iter()
+                .copied()
+                .chain(spec.destination().map(SourceId::SortedRun))
+                .collect()
+        }
+        let candidate = footprint(compaction.spec());
+        let conflict = self
+            .state()
+            .compactions_with_status(&[
+                CompactionStatus::Scheduled,
+                CompactionStatus::Running,
+                CompactionStatus::Compacted,
+            ])
+            .filter(|live| live.id() != compaction.id())
+            .find(|live| !footprint(live.spec()).is_disjoint(&candidate));
+        if let Some(live) = conflict {
+            warn!(
+                "rejected compaction: it shares a source or destination with a live compaction [id={}, spec={}, live_id={}, live_status={:?}, live_spec={}]",
+                compaction.id(),
+                compaction.spec(),
+                live.id(),
+                live.status(),
+                live.spec(),
+            );
+            return Err(SlateDBError::InvalidCompaction);
+        }
+        Ok(())
     }
 
     /// Rejects a tiered compaction whose destination SR id already exists as a
@@ -5390,6 +5445,125 @@ mod tests {
             deferred,
             "the deferred submission must be promoted once capacity frees"
         );
+    }
+
+    /// Submits `spec` through the external path `Admin::submit_compaction`
+    /// uses, merges it into the handler's state, and runs one validation pass.
+    /// Returns the submitted compaction's id.
+    async fn submit_and_validate(
+        fixture: &mut CompactorEventHandlerTestFixture,
+        spec: CompactionSpec,
+    ) -> Ulid {
+        let id = Compactor::submit(
+            spec,
+            fixture.compactions_store.clone(),
+            Arc::new(DbRand::default()),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .expect("failed to submit compaction");
+        fixture
+            .handler
+            .state_writer
+            .load_compactions()
+            .await
+            .unwrap();
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
+        id
+    }
+
+    fn status_of(fixture: &CompactorEventHandlerTestFixture, id: Ulid) -> CompactionStatus {
+        fixture
+            .handler
+            .state()
+            .compactions()
+            .value
+            .get(&id)
+            .expect("missing compaction")
+            .status()
+    }
+
+    /// A fixture with capacity for two claimable jobs over a tree of one L0
+    /// view and the sorted runs `runs` (newest first, one SST view each).
+    async fn fixture_with_tree(runs: &[u32]) -> (CompactorEventHandlerTestFixture, SsTableView) {
+        let options = Arc::new(CompactorOptions {
+            max_concurrent_compactions: 2,
+            ..compactor_options()
+        });
+        let mut fixture = CompactorEventHandlerTestFixture::new_with_clock(
+            Arc::new(DefaultSystemClock::new()),
+            options,
+        )
+        .await;
+        let l0 = bounded_sst_view(100, b"m", b"n");
+        let core = &mut fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core;
+        Arc::make_mut(&mut core.tree).l0 = VecDeque::from([l0.clone()]);
+        Arc::make_mut(&mut core.tree).compacted = runs
+            .iter()
+            .map(|run| SortedRun::new(*run, [bounded_sst_view(u64::from(*run) + 1, b"a", b"z")]))
+            .collect();
+        (fixture, l0)
+    }
+
+    /// A regular sorted-run compaction into the last run is claimable when an
+    /// external spec compacting every L0 view and every sorted run into that
+    /// same run arrives. Promoting both lets one worker claim both, and its
+    /// executor then holds two jobs writing SR 0.
+    #[tokio::test]
+    async fn test_maybe_validate_submitted_compactions_fails_spec_sharing_a_live_destination() {
+        let (mut fixture, l0) = fixture_with_tree(&[1, 0]).await;
+        let regular = CompactionSpec::new(vec![SourceId::SortedRun(1), SourceId::SortedRun(0)], 0);
+        let regular = submit_and_validate(&mut fixture, regular).await;
+        assert_eq!(status_of(&fixture, regular), CompactionStatus::Scheduled);
+
+        let everything = CompactionSpec::new(
+            vec![
+                SourceId::SstView(l0.id),
+                SourceId::SortedRun(1),
+                SourceId::SortedRun(0),
+            ],
+            0,
+        );
+        let everything = submit_and_validate(&mut fixture, everything).await;
+
+        assert_eq!(status_of(&fixture, everything), CompactionStatus::Failed);
+        assert_eq!(status_of(&fixture, regular), CompactionStatus::Scheduled);
+    }
+
+    /// A spec whose destination is free but whose sources a live compaction
+    /// consumes would only fail at commit, after rewriting them.
+    #[tokio::test]
+    async fn test_maybe_validate_submitted_compactions_fails_spec_sharing_a_live_source() {
+        let (mut fixture, _) = fixture_with_tree(&[2, 1, 0]).await;
+        let running = CompactionSpec::new(vec![SourceId::SortedRun(2), SourceId::SortedRun(1)], 1);
+        let running = submit_and_validate(&mut fixture, running).await;
+        fixture
+            .handler
+            .state_mut()
+            .update_compaction(&running, |c| c.set_status(CompactionStatus::Running));
+        fixture
+            .handler
+            .state_writer
+            .write_compactions_safely()
+            .await
+            .unwrap();
+
+        let overlapping =
+            CompactionSpec::new(vec![SourceId::SortedRun(1), SourceId::SortedRun(0)], 0);
+        let overlapping = submit_and_validate(&mut fixture, overlapping).await;
+
+        assert_eq!(status_of(&fixture, overlapping), CompactionStatus::Failed);
+        assert_eq!(status_of(&fixture, running), CompactionStatus::Running);
     }
 
     /// A scheduling tick must not panic when more compactions are `Running` than

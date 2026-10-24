@@ -900,7 +900,33 @@ impl TokioCompactionExecutorInner {
         let id = args.id;
         let dst = args.destination;
         assert!(!tasks.contains_key(&id));
-        assert!(!tasks.values().any(|task| task.destination == dst));
+        if tasks.values().any(|task| task.destination == dst) {
+            // Two jobs must not write one sorted run. The coordinator no longer
+            // promotes such a pair, but a `.compactions` file written before it
+            // checked can still hold one, and its `Running` entries return as
+            // `Scheduled` on every restart. Report this job failed, so the worker
+            // releases its claim, instead of panicking the worker (and closing
+            // the database) on every open.
+            error!(
+                "refusing compaction job whose destination another running job writes [id={}, destination={}]",
+                id, dst
+            );
+            // Allow send() for the same reason as the completion path below.
+            #[allow(clippy::disallowed_methods)]
+            if let Err(e) = self
+                .worker_tx
+                .try_send(WorkerMessage::CompactionJobFinished {
+                    id,
+                    result: Err(SlateDBError::InvalidCompaction),
+                })
+            {
+                debug!(
+                    "failed to send compaction refused msg (likely DB shutdown) [error={:?}]",
+                    e
+                );
+            }
+            return;
+        }
         self.worker_stats.running_compactions.increment(1);
 
         let this = self.clone();
@@ -2614,6 +2640,136 @@ mod tests {
         .expect("second job should finish after the gate is released")
         .expect("second compaction should succeed");
         assert!(executor.inner.tasks.lock().is_empty());
+    }
+
+    /// A second job for a destination a running job writes is reported failed,
+    /// and the running job is untouched. A `.compactions` file written before
+    /// the coordinator rejected such pairs can still hand a worker both jobs;
+    /// the executor used to assert here, which panicked the worker and closed
+    /// the database on every open.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn should_refuse_a_second_job_for_a_destination_being_written() {
+        // given: a job writing SR 0 that parks while flushing its output.
+        let handle = tokio::runtime::Handle::current();
+        let options = Arc::new(CompactionWorkerOptions {
+            max_sst_size: 1,
+            ..CompactionWorkerOptions::default()
+        });
+        let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated = Arc::new(GatedObjectStore::new(inner));
+        let object_store: Arc<dyn ObjectStore> = gated.clone();
+        let root_path = Path::from("testdb-refuse-shared-destination");
+        let clock = Arc::new(DefaultSystemClock::new());
+        let table_store = Arc::new(TableStore::new(
+            object_store.clone(),
+            SsTableFormat {
+                block_size: 64,
+                ..SsTableFormat::default()
+            },
+            root_path.clone(),
+            None,
+            TableStoreKind::Compactor,
+            BlockCachePolicy::default(),
+        ));
+        let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
+        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
+            .await
+            .unwrap();
+        let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
+            handle,
+            options,
+            worker_tx: tx,
+            table_store: table_store.clone(),
+            rand: Arc::new(DbRand::new(100u64)),
+            stats: {
+                let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+                Arc::new(CompactionStats::new(&recorder))
+            },
+            worker_stats: WorkerStats::noop(),
+            clock,
+            manifest_store,
+            merge_operator: None,
+            #[cfg(feature = "compaction_filters")]
+            compaction_filter_supplier: None,
+        });
+        let entries: Vec<RowEntry> = (0u64..64)
+            .map(|i| {
+                RowEntry::new_value(
+                    format!("key{i:04}").as_bytes(),
+                    format!("val{i:04}").as_bytes(),
+                    i + 1,
+                )
+            })
+            .collect();
+        let input_ssts = write_sst(&table_store, &entries, usize::MAX).await;
+        let l0_sst_views: Vec<SsTableView> =
+            input_ssts.into_iter().map(SsTableView::identity).collect();
+        let setup_puts = gated.put_opts_gate.arrivals();
+        gated.put_opts_gate.close();
+        let job = |id: Ulid| StartCompactionJobArgs {
+            id,
+            compaction_id: id,
+            segment: Bytes::new(),
+            destination: 0,
+            l0_sst_views: l0_sst_views.clone(),
+            sorted_runs: vec![],
+            compaction_clock_tick: 0,
+            is_dest_last_run: false,
+            retention_min_seq: Some(0),
+            ctx: Some(CompactionContext::new(
+                vec![Subcompaction::new(BytesRange::unbounded())],
+                Some(0),
+            )),
+        };
+        let running_id = Ulid::new();
+        executor.start_compaction_job(job(running_id));
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            gated.put_opts_gate.wait_for_arrivals(setup_puts + 1),
+        )
+        .await
+        .expect("a close() should reach the blocked put gate");
+
+        // when: a second job for SR 0 starts.
+        let refused_id = Ulid::new();
+        executor.start_compaction_job(job(refused_id));
+
+        // then: it is reported failed at once, and only the first job runs.
+        let finished = |wanted: Ulid| {
+            let rx = rx.clone();
+            async move {
+                loop {
+                    if let WorkerMessage::CompactionJobFinished { id, result } =
+                        rx.recv().await.unwrap()
+                    {
+                        assert_eq!(id, wanted, "unexpected job finished");
+                        return result;
+                    }
+                }
+            }
+        };
+        let refused = tokio::time::timeout(Duration::from_secs(5), finished(refused_id))
+            .await
+            .expect("the refusal should be reported");
+        assert!(matches!(refused, Err(SlateDBError::InvalidCompaction)));
+        assert_eq!(
+            executor
+                .inner
+                .tasks
+                .lock()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![running_id]
+        );
+
+        // and: released, the first job completes.
+        gated.put_opts_gate.release();
+        tokio::time::timeout(Duration::from_secs(5), finished(running_id))
+            .await
+            .expect("the running job should finish")
+            .expect("the running job should succeed");
     }
 
     #[tokio::test(flavor = "multi_thread")]
