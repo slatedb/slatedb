@@ -164,6 +164,10 @@ required-features = ["bench-internal"]
 name = "db_transaction"
 harness = false
 
+[[bench]]
+name = "memtable_seek"
+harness = false
+
 [lints]
 workspace = true
 

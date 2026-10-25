@@ -796,11 +796,12 @@ pub struct Settings {
     /// slot is treated conservatively as contributing to the peak at every point.
     pub l0_max_ssts_per_key: usize,
 
-    /// Number of parallel workers for flushing immutable memtables to L0 SSTs.
-    /// Higher values increase L0 flush throughput at the cost of more concurrent
-    /// object store uploads. Increasing parallelism may require a higher `l0_max_ssts`
-    /// to avoid backpressure from compaction not keeping up with the higher steady-state
-    /// flush rate.
+    /// Maximum number of unfinished L0 SST writers across all memtable flushes.
+    /// Each writer holds a slot from creation through upload completion, regardless
+    /// of its segment or memtable. This also limits the number of memtable workers.
+    /// Multipart requests within each SST use a separate concurrency limit.
+    /// Higher values allow more upload overlap and use more memory.
+    /// If compaction cannot keep up, writes can stall at `l0_max_ssts`.
     pub l0_flush_parallelism: usize,
 
     /// Defines the max number of unflushed key/value pair bytes that should reside in memory
