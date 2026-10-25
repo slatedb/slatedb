@@ -227,9 +227,14 @@ impl<'de> Deserialize<'de> for SequenceTracker {
 fn encode_sequence_tracker(tracker: &SequenceTracker) -> Vec<u8> {
     let mut result = Vec::new();
 
+    // Each series is walked once: the delta-of-deltas both choose the format version and feed
+    // the encoder. The sequence numbers are bit-cast to i64 as they stream through, so no
+    // converted copy of the array is made.
+    let sequences = DeltaSeries::new(tracker.sequence_numbers.iter().map(|&x| x as i64));
+    let timestamps = DeltaSeries::new(tracker.timestamps.iter().copied());
+
     // Use version 2 only when version 1 cannot store a delta-of-delta.
-    let wide_fallback = needs_wide_fallback(sequence_numbers_as_i64(&tracker.sequence_numbers))
-        || needs_wide_fallback(tracker.timestamps.iter().copied());
+    let wide_fallback = sequences.needs_wide_fallback() || timestamps.needs_wide_fallback();
 
     // Write version (u8)
     result.push(if wide_fallback {
@@ -243,12 +248,10 @@ fn encode_sequence_tracker(tracker: &SequenceTracker) -> Vec<u8> {
     result.extend_from_slice(&len.to_le_bytes());
 
     // Encode sequence numbers using Gorilla encoding
-    let encoded_seqs = encode_sequence_numbers(&tracker.sequence_numbers, wide_fallback);
-    result.extend_from_slice(&encoded_seqs);
+    result.extend_from_slice(&encode_gorilla_i64(&sequences, wide_fallback));
 
     // Encode timestamps using Gorilla encoding
-    let encoded_timestamps = encode_timestamps(&tracker.timestamps, wide_fallback);
-    result.extend_from_slice(&encoded_timestamps);
+    result.extend_from_slice(&encode_gorilla_i64(&timestamps, wide_fallback));
 
     result
 }
@@ -313,45 +316,66 @@ fn decode_sequence_tracker(buf: &[u8]) -> Result<SequenceTracker, String> {
     Ok(tracker)
 }
 
-/// Returns the delta-of-delta for each value after the first one.
+/// A series prepared for Gorilla encoding: its first value, stored in full, and the
+/// delta-of-delta of every later value. Built once per series, because the delta-of-deltas both
+/// choose the format version and feed the encoder.
 ///
 /// The arithmetic wraps. Sequence numbers are `u64` values cast to `i64`, so a delta can be
 /// outside the `i64` range. Wrapping keeps the encode and decode round trip exact.
-fn deltas_of_deltas(values: impl IntoIterator<Item = i64>) -> impl Iterator<Item = i64> {
-    let mut values = values.into_iter();
-    let mut prev_val = values.next();
-    let mut prev_delta: i64 = 0;
-    values.map(move |val| {
-        let delta = val.wrapping_sub(prev_val.replace(val).unwrap_or(val));
-        let dod = delta.wrapping_sub(prev_delta);
-        prev_delta = delta;
-        dod
-    })
+struct DeltaSeries {
+    first: Option<i64>,
+    dods: Vec<i64>,
 }
 
-/// Returns true when a delta-of-delta is outside the range of the 32-bit fallback slot.
-fn needs_wide_fallback(values: impl IntoIterator<Item = i64>) -> bool {
-    deltas_of_deltas(values).any(|dod| i32::try_from(dod).is_err())
-}
+impl DeltaSeries {
+    fn new(values: impl IntoIterator<Item = i64>) -> Self {
+        let mut values = values.into_iter();
+        let Some(first) = values.next() else {
+            return Self {
+                first: None,
+                dods: Vec::new(),
+            };
+        };
+        let mut dods = Vec::new();
+        let mut prev_val = first;
+        let mut prev_delta: i64 = 0;
+        for val in values {
+            let delta = val.wrapping_sub(prev_val);
+            dods.push(delta.wrapping_sub(prev_delta));
+            prev_val = val;
+            prev_delta = delta;
+        }
+        Self {
+            first: Some(first),
+            dods,
+        }
+    }
 
-fn sequence_numbers_as_i64(sequences: &[u64]) -> impl Iterator<Item = i64> + '_ {
-    // Bit cast u64 to i64. This keeps the bit pattern.
-    sequences.iter().map(|&x| x as i64)
+    /// The number of values in the series.
+    fn len(&self) -> usize {
+        self.dods.len() + usize::from(self.first.is_some())
+    }
+
+    /// True when a delta-of-delta is outside the range of the 32-bit fallback slot.
+    fn needs_wide_fallback(&self) -> bool {
+        self.dods.iter().any(|&dod| i32::try_from(dod).is_err())
+    }
 }
 
 /// Generic Gorilla encoding for i64 values (used for both timestamps and sequence numbers)
 ///
-/// If `wide_fallback` is false, every delta-of-delta must be in the `i32` range.
-fn encode_gorilla_i64(values: &[i64], wide_fallback: bool) -> Vec<u8> {
+/// If `wide_fallback` is false, every delta-of-delta must be in the `i32` range, and the encoder
+/// panics rather than truncate one that is not.
+fn encode_gorilla_i64(series: &DeltaSeries, wide_fallback: bool) -> Vec<u8> {
     let mut w = BitWriter::new();
-    w.push32(values.len() as u32, 32);
+    w.push32(series.len() as u32, 32);
 
-    if !values.is_empty() {
+    if let Some(first) = series.first {
         // First value is encoded in full
-        w.push64(values[0] as u64, 64);
+        w.push64(first as u64, 64);
 
         // Encode subsequent values using delta-of-deltas
-        for dod in deltas_of_deltas(values.iter().copied()) {
+        for &dod in &series.dods {
             // this is the gorilla encoding scheme, you can see
             // [this paper](https://www.vldb.org/pvldb/vol8/p1816-teller.pdf)
             // on page 1820 for the full algorithm
@@ -374,7 +398,10 @@ fn encode_gorilla_i64(values: &[i64], wide_fallback: bool) -> Vec<u8> {
                     w.push64(dod as u64, 64);
                 }
                 _ => {
-                    debug_assert!(
+                    // A full assert, not a debug one: silently truncating here is exactly the
+                    // corruption version 2 exists to prevent, and it must never reach a manifest
+                    // in a release build either.
+                    assert!(
                         i32::try_from(dod).is_ok(),
                         "delta-of-delta {} does not fit in the 32-bit fallback slot",
                         dod
@@ -470,12 +497,6 @@ fn decode_gorilla_i64_with_length(
     Ok((bytes_consumed, values))
 }
 
-/// Encode sequence numbers using Gorilla encoding (delta-of-deltas)
-fn encode_sequence_numbers(sequences: &[u64], wide_fallback: bool) -> Vec<u8> {
-    let as_i64: Vec<i64> = sequence_numbers_as_i64(sequences).collect();
-    encode_gorilla_i64(&as_i64, wide_fallback)
-}
-
 /// Decode sequence numbers from Gorilla encoding, returning the number of bytes consumed
 fn decode_sequence_numbers_with_length(
     buf: &[u8],
@@ -488,11 +509,6 @@ fn decode_sequence_numbers_with_length(
     let sequences: Vec<u64> = values.into_iter().map(|v| v as u64).collect();
 
     Ok((bytes_consumed, sequences))
-}
-
-/// Encode timestamps using Gorilla encoding
-fn encode_timestamps(timestamps: &[i64], wide_fallback: bool) -> Vec<u8> {
-    encode_gorilla_i64(timestamps, wide_fallback)
 }
 
 /// Decode timestamps from Gorilla encoding
@@ -986,8 +1002,9 @@ mod tests {
     #[case::large_negative_dod(vec![0, 5_000_000_000, 5_000_000_001])]
     fn test_encode_decode_sequence_numbers(#[case] sequences: Vec<u64>) {
         // when
-        let wide_fallback = needs_wide_fallback(sequence_numbers_as_i64(&sequences));
-        let encoded = encode_sequence_numbers(&sequences, wide_fallback);
+        let series = DeltaSeries::new(sequences.iter().map(|&x| x as i64));
+        let wide_fallback = series.needs_wide_fallback();
+        let encoded = encode_gorilla_i64(&series, wide_fallback);
         let (_, decoded) = decode_sequence_numbers_with_length(&encoded, wide_fallback).unwrap();
 
         // then
@@ -1012,12 +1029,23 @@ mod tests {
     #[case::full_i64_range(vec![i64::MIN, i64::MAX])]
     fn test_encode_decode_timestamps(#[case] timestamps: Vec<i64>) {
         // when
-        let wide_fallback = needs_wide_fallback(timestamps.iter().copied());
-        let encoded = encode_timestamps(&timestamps, wide_fallback);
+        let series = DeltaSeries::new(timestamps.iter().copied());
+        let wide_fallback = series.needs_wide_fallback();
+        let encoded = encode_gorilla_i64(&series, wide_fallback);
         let decoded = decode_timestamps(&encoded, wide_fallback).unwrap();
 
         // then
         assert_eq!(decoded, timestamps);
+    }
+
+    /// The version 1 encoder must refuse, not truncate, a delta-of-delta outside the i32 range.
+    /// Truncating is the corruption that version 2 exists to prevent, so this is a full assert that
+    /// also fires in release builds.
+    #[test]
+    #[should_panic(expected = "does not fit in the 32-bit fallback slot")]
+    fn test_narrow_fallback_refuses_out_of_range_dod() {
+        let series = DeltaSeries::new([0i64, i32::MAX as i64 + 1]);
+        let _ = encode_gorilla_i64(&series, false);
     }
 
     #[test]
