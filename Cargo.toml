@@ -87,7 +87,7 @@ ulid = "1.2.1"
 uuid = "1.18.0"
 url = "2.5.8"
 walkdir = "2.3.3"
-zstd = "0.13.2"
+zstd = "0.14.3"
 
 # dev dependencies
 bincode = "1"
