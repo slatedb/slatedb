@@ -1075,21 +1075,8 @@ impl CompactorEventHandler {
             .map_err(|_e| SlateDBError::InvalidCompaction)
     }
 
-    /// Rejects a Submitted spec that reads or writes a sorted run or SST view
-    /// that a live compaction reads or writes. The size-tiered scheduler never
-    /// proposes one (its conflict checker excludes every active compaction's
-    /// sources and destination), but an externally submitted spec is merged
-    /// into `.compactions` as-is. Without this check two jobs writing one
-    /// destination can both be promoted: a worker that claims both trips the
-    /// executor's one-job-per-destination invariant, and a job whose sources
-    /// another job consumed first can only fail at commit.
-    ///
-    /// Live means claimed (`Scheduled`, `Running`) or finished but not yet
-    /// committed (`Compacted`). Other `Submitted` entries are validated in turn
-    /// by the same pass, so the first of two conflicting submissions to be
-    /// promoted wins and the second is failed when its turn comes. Sorted-run
-    /// ids and SST view ids are unique across segments (RFC-0024), so the
-    /// check spans every segment.
+    /// Rejects submissions that share a source or destination with a scheduled,
+    /// running, or uncommitted compaction, across all segments.
     fn validate_no_live_conflict(&self, compaction: &Compaction) -> Result<(), SlateDBError> {
         fn footprint(spec: &CompactionSpec) -> HashSet<SourceId> {
             spec.sources()
