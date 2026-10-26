@@ -5,22 +5,23 @@ use std::io;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::future::{self, BoxFuture, FutureExt, Shared};
+use futures::future;
 use log::warn;
 use object_store::path::Path;
 use object_store::{
     Attributes, MultipartUpload, ObjectMeta, PutMultipartOptions, PutPayload, PutResult, UploadPart,
 };
+use slatedb_common::vfs::VfsWriter;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 use crate::inner::{local_error, Inner, TempFile};
 use crate::layout::{LocalName, LocalObject};
 use crate::ordering::{OpKind, Ticket};
 use crate::MirrorError;
 
-/// Resolves once every part passed to `put_part` so far is written locally.
-type LocalWrites = Shared<BoxFuture<'static, Result<(), Arc<io::Error>>>>;
-
-type SharedWriter = Arc<tokio::sync::Mutex<Option<Box<dyn slatedb_common::vfs::VfsWriter>>>>;
+/// A part to write locally, and where to send the result.
+type Part = (PutPayload, oneshot::Sender<Result<(), Arc<io::Error>>>);
 
 fn unshare(err: Arc<io::Error>) -> io::Error {
     io::Error::new(err.kind(), err)
@@ -74,19 +75,54 @@ pub(crate) async fn start(
         }
     };
 
+    let (parts, received) = mpsc::unbounded_channel();
+    let writes = inner.runtime.spawn(write_parts(writer, received));
     Ok(Box::new(MirrorUpload {
         inner,
         upload,
         path: path.clone(),
         name,
         attributes,
-        writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
-        local: future::ready(Ok(())).boxed().shared(),
-        local_done: false,
+        parts: Some(parts),
+        writes: Some(writes),
         size: 0,
         temp: Some(temp),
         ticket: Some(ticket),
     }))
+}
+
+/// Writes parts to the local file in the order they were sent, then flushes
+/// it once the sender is dropped. After a failed write, fails every later part
+/// with the same error.
+///
+/// This runs in its own task so that local writes don't depend on anyone
+/// polling the part futures. Aborting the task closes the file.
+async fn write_parts(
+    mut writer: Box<dyn VfsWriter>,
+    mut parts: mpsc::UnboundedReceiver<Part>,
+) -> io::Result<()> {
+    let mut failed: Option<Arc<io::Error>> = None;
+    while let Some((data, done)) = parts.recv().await {
+        let result = match &failed {
+            Some(err) => Err(Arc::clone(err)),
+            None => async {
+                for chunk in &data {
+                    writer.write(chunk.clone()).await?;
+                }
+                Ok::<_, io::Error>(())
+            }
+            .await
+            .map_err(Arc::new),
+        };
+        if let Err(err) = &result {
+            failed = Some(Arc::clone(err));
+        }
+        let _ = done.send(result);
+    }
+    match failed {
+        Some(err) => Err(unshare(err)),
+        None => writer.finish().await,
+    }
 }
 
 struct MirrorUpload {
@@ -95,10 +131,10 @@ struct MirrorUpload {
     path: Path,
     name: LocalName,
     attributes: Attributes,
-    writer: SharedWriter,
-    local: LocalWrites,
-    /// The local file is flushed and closed.
-    local_done: bool,
+    /// Sends parts to `writes`. `None` once no more parts are accepted.
+    parts: Option<mpsc::UnboundedSender<Part>>,
+    /// The task writing the local file. `None` once it has finished.
+    writes: Option<JoinHandle<io::Result<()>>>,
     size: u64,
     /// `None` once the upload is finished.
     temp: Option<TempFile>,
@@ -117,7 +153,12 @@ impl fmt::Debug for MirrorUpload {
 impl MirrorUpload {
     /// Closes and removes the local file and releases the path.
     async fn discard(&mut self) {
-        self.writer.lock().await.take();
+        self.parts.take();
+        if let Some(writes) = self.writes.take() {
+            writes.abort();
+            // Wait for the file to close before removing it.
+            let _ = writes.await;
+        }
         if let Some(temp) = self.temp.take() {
             temp.remove().await;
         }
@@ -126,15 +167,29 @@ impl MirrorUpload {
 
     /// Waits for all local writes, then flushes and closes the file.
     async fn finish_local(&mut self) -> io::Result<()> {
-        if self.local_done {
+        self.parts.take();
+        let Some(writes) = self.writes.as_mut() else {
             return Ok(());
+        };
+        let result = writes
+            .await
+            .unwrap_or_else(|err| Err(io::Error::other(err)));
+        self.writes = None;
+        result
+    }
+}
+
+impl Drop for MirrorUpload {
+    fn drop(&mut self) {
+        // Stop writing, and remove the file once it's closed.
+        if let Some(writes) = self.writes.take() {
+            writes.abort();
+            let temp = self.temp.take();
+            self.inner.runtime.spawn(async move {
+                let _ = writes.await;
+                drop(temp);
+            });
         }
-        self.local.clone().await.map_err(unshare)?;
-        let mut writer = self.writer.lock().await;
-        writer.as_mut().ok_or_else(finished)?.finish().await?;
-        writer.take();
-        self.local_done = true;
-        Ok(())
     }
 }
 
@@ -143,30 +198,24 @@ impl MultipartUpload for MirrorUpload {
     fn put_part(&mut self, data: PutPayload) -> UploadPart {
         self.size += data.content_length() as u64;
 
-        // Chain each part's local write after the previous one's, so parts
-        // land in the file in the order they were given, whatever order their
-        // futures are polled in.
-        let previous = self.local.clone();
-        let writer = Arc::clone(&self.writer);
-        let chunks = data.clone();
-        let local = async move {
-            previous.await?;
-            let mut writer = writer.lock().await;
-            let writer = writer.as_mut().ok_or_else(|| Arc::new(finished()))?;
-            for chunk in &chunks {
-                writer.write(chunk.clone()).await.map_err(Arc::new)?;
-            }
-            Ok(())
+        // The writer task takes parts in the order they were given, whatever
+        // order their futures are polled in. If the upload is finished, `done`
+        // is dropped and the part fails.
+        let (done, written) = oneshot::channel();
+        if let Some(parts) = &self.parts {
+            // The mirror has no `DbStatusManager`. A failed send drops `done`,
+            // which fails the part.
+            #[allow(clippy::disallowed_methods)]
+            let _ = parts.send((data.clone(), done));
         }
-        .boxed()
-        .shared();
-        self.local = local.clone();
 
         let remote = self.upload.put_part(data);
         Box::pin(async move {
-            let (remote, local) = future::join(remote, local).await;
+            let (remote, local) = future::join(remote, written).await;
             remote?;
-            local.map_err(|err| local_error(unshare(err)))?;
+            local
+                .unwrap_or_else(|_| Err(Arc::new(finished())))
+                .map_err(|err| local_error(unshare(err)))?;
             Ok(())
         })
     }

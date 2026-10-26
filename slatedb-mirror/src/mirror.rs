@@ -685,7 +685,10 @@ mod tests {
     use parking_lot::Mutex;
     use tokio::sync::Semaphore;
 
-    use crate::{MirrorError, MirrorHandle, MirrorPolicy, MultipartRoute, ReadRoute, WriteRoute};
+    use crate::{
+        MirrorError, MirrorHandle, MirrorPolicy, MultipartRoute, ReadRoute, StdVfs, Vfs, VfsEntry,
+        VfsLock, VfsWriter, WriteRoute,
+    };
 
     use super::ObjectStoreMirror;
 
@@ -796,6 +799,82 @@ mod tests {
             options: CopyOptions,
         ) -> object_store::Result<()> {
             self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// A [`StdVfs`] whose writes can be held.
+    #[derive(Debug, Default)]
+    struct GatedVfs {
+        inner: StdVfs,
+        /// When set, each write takes a permit first.
+        write_gate: Arc<Mutex<Option<Arc<Semaphore>>>>,
+        /// Writes that have waited on the gate.
+        held_writes: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Vfs for GatedVfs {
+        async fn create_dir_all(&self, path: &StdPath) -> std::io::Result<()> {
+            self.inner.create_dir_all(path).await
+        }
+
+        async fn lock(&self, path: &StdPath) -> std::io::Result<Box<dyn VfsLock>> {
+            self.inner.lock(path).await
+        }
+
+        async fn list(&self, dir: &StdPath) -> std::io::Result<Vec<VfsEntry>> {
+            self.inner.list(dir).await
+        }
+
+        async fn read_range(
+            &self,
+            path: &StdPath,
+            range: std::ops::Range<u64>,
+        ) -> std::io::Result<Bytes> {
+            self.inner.read_range(path, range).await
+        }
+
+        async fn read(&self, path: &StdPath) -> std::io::Result<Bytes> {
+            self.inner.read(path).await
+        }
+
+        async fn create(&self, path: &StdPath) -> std::io::Result<Box<dyn VfsWriter>> {
+            Ok(Box::new(GatedWriter {
+                inner: self.inner.create(path).await?,
+                gate: Arc::clone(&self.write_gate),
+                held: Arc::clone(&self.held_writes),
+            }))
+        }
+
+        async fn rename(&self, from: &StdPath, to: &StdPath) -> std::io::Result<()> {
+            self.inner.rename(from, to).await
+        }
+
+        async fn remove(&self, path: &StdPath) -> std::io::Result<()> {
+            self.inner.remove(path).await
+        }
+    }
+
+    #[derive(Debug)]
+    struct GatedWriter {
+        inner: Box<dyn VfsWriter>,
+        gate: Arc<Mutex<Option<Arc<Semaphore>>>>,
+        held: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl VfsWriter for GatedWriter {
+        async fn write(&mut self, bytes: Bytes) -> std::io::Result<()> {
+            let gate = self.gate.lock().clone();
+            if let Some(gate) = gate {
+                self.held.fetch_add(1, Ordering::SeqCst);
+                gate.acquire().await.unwrap().forget();
+            }
+            self.inner.write(bytes).await
+        }
+
+        async fn finish(&mut self) -> std::io::Result<()> {
+            self.inner.finish().await
         }
     }
 
@@ -1413,6 +1492,50 @@ mod tests {
             .await
             .unwrap();
         assert!(fixture.handle().contains(&path));
+    }
+
+    #[tokio::test]
+    async fn should_abort_multipart_upload_with_a_cancelled_part_mid_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("mirror");
+        let store = Arc::new(TestStore::default());
+        let policy = TestPolicy::new();
+        let vfs = Arc::new(GatedVfs::default());
+        let mirror = ObjectStoreMirror::builder(
+            &root,
+            Arc::clone(&store) as Arc<dyn ObjectStore>,
+            Arc::clone(&policy) as Arc<dyn MirrorPolicy>,
+        )
+        .with_remote_scan_interval(None)
+        .with_vfs(Arc::clone(&vfs) as Arc<dyn Vfs>)
+        .build()
+        .await
+        .unwrap();
+        let path = Path::from(SST);
+        let mut upload = mirror.put_multipart(&path).await.unwrap();
+
+        // Cancel a part while its local write is held, the way
+        // `WriteMultipart` drops its part tasks before aborting.
+        let gate = Arc::new(Semaphore::new(0));
+        *vfs.write_gate.lock() = Some(Arc::clone(&gate));
+        let part = tokio::spawn(upload.put_part(PutPayload::from_static(b"part")));
+        eventually(|| vfs.held_writes.load(Ordering::SeqCst) == 1).await;
+        part.abort();
+        let _ = part.await;
+
+        tokio::time::timeout(Duration::from_secs(5), upload.abort())
+            .await
+            .expect("abort hung")
+            .unwrap();
+        eventually(|| files(&root) == BTreeSet::from(["LOCK".to_string()])).await;
+
+        // The aborted upload released the path.
+        *vfs.write_gate.lock() = None;
+        mirror
+            .put(&path, PutPayload::from_static(b"x"))
+            .await
+            .unwrap();
+        assert!(mirror.handle().contains(&path));
     }
 
     #[tokio::test]
