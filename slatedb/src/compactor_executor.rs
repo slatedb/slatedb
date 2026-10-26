@@ -901,12 +901,8 @@ impl TokioCompactionExecutorInner {
         let dst = args.destination;
         assert!(!tasks.contains_key(&id));
         if tasks.values().any(|task| task.destination == dst) {
-            // Two jobs must not write one sorted run. The coordinator no longer
-            // promotes such a pair, but a `.compactions` file written before it
-            // checked can still hold one, and its `Running` entries return as
-            // `Scheduled` on every restart. Report this job failed, so the worker
-            // releases its claim, instead of panicking the worker (and closing
-            // the database) on every open.
+            // Legacy compaction records may contain conflicting destinations.
+            // Fail the job instead of panicking on every restart.
             error!(
                 "refusing compaction job whose destination another running job writes [id={}, destination={}]",
                 id, dst
