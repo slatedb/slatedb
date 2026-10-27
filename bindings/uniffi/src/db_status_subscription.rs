@@ -19,7 +19,7 @@ impl DbStatusSubscription {
 
 #[uniffi::export]
 impl DbStatusSubscription {
-    /// Returns the current status without consuming a change.
+    /// Returns the current status.
     pub fn status(&self) -> DbStatus {
         self.receiver.borrow().clone().into()
     }
