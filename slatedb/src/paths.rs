@@ -11,7 +11,7 @@ const COMPACTED_PATH: &str = "compacted";
 const SST_EXTENSION: &[u8] = b".sst";
 const SST_FILE_NAME_LEN: usize = ULID_LEN + SST_EXTENSION.len();
 /// Longest SST path [`PathResolver::sst_path`] assembles on the stack; longer
-/// ones cost a second allocation.
+/// paths fall back to [`Path::join`], which allocates twice.
 const SST_PATH_STACK_LEN: usize = 256;
 
 /// Resolves the object store paths of a SlateDB database's files from the
@@ -128,9 +128,8 @@ impl PathResolver {
         ext.copy_from_slice(SST_EXTENSION);
         let file_name = std::str::from_utf8(&file_name).expect("ULID text is ASCII");
 
-        // `clone().join()` allocates the directory at its exact length, then
-        // grows it to append the file name. Assemble the whole path on the stack
-        // instead so `Path::parse` allocates once at the final size.
+        // Assemble the path on the stack so the only allocation is the
+        // exact-size copy `Path::parse` makes.
         let dir = compacted_dir.as_ref().as_bytes();
         let len = dir.len() + 1 + SST_FILE_NAME_LEN;
         if len > SST_PATH_STACK_LEN {
@@ -186,7 +185,7 @@ mod tests {
 
             let local = PathResolver::from_root(root.clone());
             assert_eq!(legacy(&root), local.sst_path(&table_id));
-            // The listing prefix `list_compacted_ssts` used before `compacted_dir`.
+            // `<root>/compacted/` with the trailing delimiter is the same Path.
             assert_eq!(
                 &Path::from(format!("{}/compacted/", root)),
                 local.compacted_dir()
