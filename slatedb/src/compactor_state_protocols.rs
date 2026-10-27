@@ -12,17 +12,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use log::{debug, info};
+use log::{debug, error, info};
 
 use crate::compactions_store::{CompactionsStore, FenceableCompactions, StoredCompactions};
 use crate::compactor_state::{CompactionStatus, CompactorState, VersionedCompactions};
 use crate::config::{CheckpointOptions, CompactorOptions};
-use crate::error::SlateDBError;
+use crate::error::{ErrorKind, SlateDBError};
 use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
 use crate::manifest::VersionedManifest;
 use crate::utils::IdGenerator;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
+use ulid::Ulid;
 
 /// A read-only view of compactor state suitable for consumers like GC.
 ///
@@ -114,6 +115,9 @@ pub(crate) struct CompactorStateWriter {
     checkpoint_lifetime: Duration,
     /// RNG for checkpoint ids.
     rand: Arc<DbRand>,
+    /// The compactions that a worker marked `Failed`, with the kind of the
+    /// error of each job. See [`Self::check_failed_by_workers`].
+    failed_by_workers: Vec<(Ulid, Option<ErrorKind>)>,
 }
 
 impl CompactorStateWriter {
@@ -177,6 +181,7 @@ impl CompactorStateWriter {
             compactions,
             checkpoint_lifetime: options.checkpoint_lifetime,
             rand,
+            failed_by_workers: Vec::new(),
         })
     }
 
@@ -227,13 +232,39 @@ impl CompactorStateWriter {
     /// Refreshes the compactions view and updates the local compactor state with any remote
     /// changes.
     ///
+    /// It also records each active compaction that a worker marked `Failed`, for
+    /// [`Self::check_failed_by_workers`].
+    ///
     /// ## Returns
     /// - `Ok(())` after compactions are refreshed, or `SlateDBError` on failure.
     pub(crate) async fn load_compactions(&mut self) -> Result<(), SlateDBError> {
         self.compactions.refresh().await?;
-        self.state
+        let failed_by_workers = self
+            .state
             .merge_remote_compactions(self.compactions.prepare_dirty()?);
+        if !failed_by_workers.is_empty() {
+            error!(
+                "compaction worker marked compactions failed [failed_by_workers={:?}]",
+                failed_by_workers
+            );
+            self.failed_by_workers.extend(failed_by_workers);
+        }
         Ok(())
+    }
+
+    /// Reports a compaction that a worker marked `Failed`. A `Failed` job does not hold
+    /// its sources, so the coordinator stops instead of letting the scheduler propose the
+    /// same job again. Writes do not call this, so a write that loads such a compaction
+    /// finishes first.
+    ///
+    /// ## Returns
+    /// - `SlateDBError::CompactionJobFailed`, with the kind of the error of the job, if
+    ///   [`Self::load_compactions`] recorded a compaction that a worker marked `Failed`.
+    pub(crate) fn check_failed_by_workers(&self) -> Result<(), SlateDBError> {
+        match self.failed_by_workers.first() {
+            Some(&(id, kind)) => Err(SlateDBError::CompactionJobFailed { id, kind }),
+            None => Ok(()),
+        }
     }
 
     /// Refreshes compactions first, then manifests, to preserve a consistent ordering.
@@ -346,7 +377,7 @@ mod tests {
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{
         Compaction, CompactionContext, CompactionSpec, CompactionStatus, Compactions,
-        CompactorState, VersionedCompactions, WorkerSpec,
+        CompactorState, SourceId, VersionedCompactions, WorkerSpec,
     };
     use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo};
     use crate::error::SlateDBError;
@@ -904,6 +935,167 @@ mod tests {
             .unwrap()
             .id;
         assert_eq!(final_id, start_id + 2);
+    }
+
+    /// Builds a writer over new in-memory stores with an empty manifest.
+    async fn new_writer_with_stores() -> (CompactorStateWriter, Arc<CompactionsStore>) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+        let writer = CompactorStateWriter::new(
+            manifest_store,
+            compactions_store.clone(),
+            system_clock,
+            &CompactorOptions::default(),
+            Arc::new(DbRand::new(7)),
+            None,
+        )
+        .await
+        .unwrap();
+        (writer, compactions_store)
+    }
+
+    /// Writes `compaction` to `.compactions` as a worker does.
+    async fn write_as_worker(compactions_store: &Arc<CompactionsStore>, compaction: Compaction) {
+        let mut stored = StoredCompactions::load(compactions_store.clone())
+            .await
+            .unwrap();
+        let mut dirty = stored.prepare_dirty().unwrap();
+        dirty.value.insert(compaction);
+        stored.update(dirty).await.unwrap();
+    }
+
+    /// A worker that marks a job `Failed` during a conflicting write does not
+    /// stop the write. The writer finishes the write and reports the failure
+    /// after it. So the coordinator does not stop between the manifest write
+    /// and the `.compactions` write.
+    #[tokio::test]
+    async fn test_write_compactions_safely_finishes_when_worker_marks_job_failed() {
+        let (mut writer, compactions_store) = new_writer_with_stores().await;
+        let failed_id = Ulid::from_parts(1, 0);
+        let running = Compaction::new(
+            failed_id,
+            CompactionSpec::new(vec![SourceId::SortedRun(1)], 1),
+        )
+        .with_status(CompactionStatus::Running)
+        .with_worker(Some(WorkerSpec::new("worker-1".to_string(), 0)));
+        writer.state.insert_compaction_for_test(running.clone());
+        writer.write_compactions_safely().await.unwrap();
+
+        // A worker gives up on the job.
+        write_as_worker(
+            &compactions_store,
+            running
+                .with_status(CompactionStatus::Failed)
+                .with_error_kind(Some(ErrorKind::Unavailable)),
+        )
+        .await;
+
+        // The coordinator writes a new compaction, and the write conflicts.
+        let submitted_id = Ulid::from_parts(2, 0);
+        writer.state.insert_compaction_for_test(Compaction::new(
+            submitted_id,
+            CompactionSpec::new(vec![SourceId::SortedRun(2)], 2),
+        ));
+        writer
+            .write_compactions_safely()
+            .await
+            .expect("the write must finish");
+
+        let stored = compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        assert_eq!(
+            stored.get(&submitted_id).expect("missing").status(),
+            CompactionStatus::Submitted
+        );
+        assert_eq!(
+            stored.get(&failed_id).expect("missing").status(),
+            CompactionStatus::Failed
+        );
+        let err = writer
+            .check_failed_by_workers()
+            .expect_err("the writer must report the failed job");
+        assert!(
+            matches!(
+                err,
+                SlateDBError::CompactionJobFailed {
+                    id,
+                    kind: Some(ErrorKind::Unavailable),
+                } if id == failed_id
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// A coordinator that starts with a job in `.compactions` that a worker
+    /// marked `Failed` does not stop. It can schedule the same sources again,
+    /// so compaction continues if the missing SST comes back.
+    #[tokio::test]
+    async fn test_new_does_not_report_failed_job_of_an_earlier_run() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = Arc::new(ManifestStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let compactions_store = Arc::new(CompactionsStore::new(
+            &Path::from(ROOT),
+            Arc::clone(&object_store),
+        ));
+        let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            system_clock.clone(),
+        )
+        .await
+        .unwrap();
+        StoredCompactions::create(compactions_store.clone(), 0)
+            .await
+            .unwrap();
+        let failed_id = Ulid::from_parts(1, 0);
+        write_as_worker(
+            &compactions_store,
+            Compaction::new(
+                failed_id,
+                CompactionSpec::new(vec![SourceId::SortedRun(1)], 1),
+            )
+            .with_status(CompactionStatus::Failed)
+            .with_worker(Some(WorkerSpec::new("worker-1".to_string(), 0)))
+            .with_error_kind(Some(ErrorKind::Data)),
+        )
+        .await;
+
+        let mut writer = CompactorStateWriter::new(
+            manifest_store,
+            compactions_store,
+            system_clock,
+            &CompactorOptions::default(),
+            Arc::new(DbRand::new(7)),
+            None,
+        )
+        .await
+        .unwrap();
+        writer.refresh().await.unwrap();
+
+        writer.check_failed_by_workers().unwrap();
+        assert!(writer.state.active_compactions().next().is_none());
     }
 
     #[tokio::test]

@@ -571,6 +571,119 @@ impl<'a> flatbuffers::Verifiable for CompactionStatus {
 
 impl flatbuffers::SimpleToVerifyInSlice for CompactionStatus {}
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_COMPACTION_ERROR_KIND: i8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_COMPACTION_ERROR_KIND: i8 = 8;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_COMPACTION_ERROR_KIND: [CompactionErrorKind; 9] = [
+  CompactionErrorKind::Unknown,
+  CompactionErrorKind::Transaction,
+  CompactionErrorKind::ClosedClean,
+  CompactionErrorKind::ClosedFenced,
+  CompactionErrorKind::ClosedPanic,
+  CompactionErrorKind::Unavailable,
+  CompactionErrorKind::Invalid,
+  CompactionErrorKind::Data,
+  CompactionErrorKind::Internal,
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct CompactionErrorKind(pub i8);
+#[allow(non_upper_case_globals)]
+impl CompactionErrorKind {
+  pub const Unknown: Self = Self(0);
+  pub const Transaction: Self = Self(1);
+  pub const ClosedClean: Self = Self(2);
+  pub const ClosedFenced: Self = Self(3);
+  pub const ClosedPanic: Self = Self(4);
+  pub const Unavailable: Self = Self(5);
+  pub const Invalid: Self = Self(6);
+  pub const Data: Self = Self(7);
+  pub const Internal: Self = Self(8);
+
+  pub const ENUM_MIN: i8 = 0;
+  pub const ENUM_MAX: i8 = 8;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::Unknown,
+    Self::Transaction,
+    Self::ClosedClean,
+    Self::ClosedFenced,
+    Self::ClosedPanic,
+    Self::Unavailable,
+    Self::Invalid,
+    Self::Data,
+    Self::Internal,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::Unknown => Some("Unknown"),
+      Self::Transaction => Some("Transaction"),
+      Self::ClosedClean => Some("ClosedClean"),
+      Self::ClosedFenced => Some("ClosedFenced"),
+      Self::ClosedPanic => Some("ClosedPanic"),
+      Self::Unavailable => Some("Unavailable"),
+      Self::Invalid => Some("Invalid"),
+      Self::Data => Some("Data"),
+      Self::Internal => Some("Internal"),
+      _ => None,
+    }
+  }
+}
+impl core::fmt::Debug for CompactionErrorKind {
+  fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> flatbuffers::Follow<'a> for CompactionErrorKind {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
+    Self(b)
+  }
+}
+
+impl flatbuffers::Push for CompactionErrorKind {
+    type Output = CompactionErrorKind;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
+    }
+}
+
+impl flatbuffers::EndianScalar for CompactionErrorKind {
+  type Scalar = i8;
+  #[inline]
+  fn to_little_endian(self) -> i8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: i8) -> Self {
+    let b = i8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> flatbuffers::Verifiable for CompactionErrorKind {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    i8::run_verifier(v, pos)
+  }
+}
+
+impl flatbuffers::SimpleToVerifyInSlice for CompactionErrorKind {}
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_COMPACTION_CONTEXT: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MAX_COMPACTION_CONTEXT: u8 = 1;
@@ -3207,6 +3320,7 @@ impl<'a> Compaction<'a> {
   pub const VT_WORKER: flatbuffers::VOffsetT = 14;
   pub const VT_CTX_TYPE: flatbuffers::VOffsetT = 16;
   pub const VT_CTX: flatbuffers::VOffsetT = 18;
+  pub const VT_ERROR_KIND: flatbuffers::VOffsetT = 20;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -3223,6 +3337,7 @@ impl<'a> Compaction<'a> {
     if let Some(x) = args.output_ssts { builder.add_output_ssts(x); }
     if let Some(x) = args.spec { builder.add_spec(x); }
     if let Some(x) = args.id { builder.add_id(x); }
+    builder.add_error_kind(args.error_kind);
     builder.add_ctx_type(args.ctx_type);
     builder.add_status(args.status);
     builder.add_spec_type(args.spec_type);
@@ -3285,6 +3400,13 @@ impl<'a> Compaction<'a> {
     // Created from valid Table for this object
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Table<'a>>>(Compaction::VT_CTX, None)}
+  }
+  #[inline]
+  pub fn error_kind(&self) -> CompactionErrorKind {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<CompactionErrorKind>(Compaction::VT_ERROR_KIND, Some(CompactionErrorKind::Unknown)).unwrap()}
   }
   #[inline]
   #[allow(non_snake_case)]
@@ -3355,6 +3477,7 @@ impl flatbuffers::Verifiable for Compaction<'_> {
           _ => Ok(()),
         }
      })?
+     .visit_field::<CompactionErrorKind>("error_kind", Self::VT_ERROR_KIND, false)?
      .finish();
     Ok(())
   }
@@ -3368,6 +3491,7 @@ pub struct CompactionArgs<'a> {
     pub worker: Option<flatbuffers::WIPOffset<WorkerSpec<'a>>>,
     pub ctx_type: CompactionContext,
     pub ctx: Option<flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>>,
+    pub error_kind: CompactionErrorKind,
 }
 impl<'a> Default for CompactionArgs<'a> {
   #[inline]
@@ -3381,6 +3505,7 @@ impl<'a> Default for CompactionArgs<'a> {
       worker: None,
       ctx_type: CompactionContext::NONE,
       ctx: None,
+      error_kind: CompactionErrorKind::Unknown,
     }
   }
 }
@@ -3421,6 +3546,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> CompactionBuilder<'a, 'b, A> {
   #[inline]
   pub fn add_ctx(&mut self, ctx: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Compaction::VT_CTX, ctx);
+  }
+  #[inline]
+  pub fn add_error_kind(&mut self, error_kind: CompactionErrorKind) {
+    self.fbb_.push_slot::<CompactionErrorKind>(Compaction::VT_ERROR_KIND, error_kind, CompactionErrorKind::Unknown);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> CompactionBuilder<'a, 'b, A> {
@@ -3481,6 +3610,7 @@ impl core::fmt::Debug for Compaction<'_> {
           ds.field("ctx", &x)
         },
       };
+      ds.field("error_kind", &self.error_kind());
       ds.finish()
   }
 }

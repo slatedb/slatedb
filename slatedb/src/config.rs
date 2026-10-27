@@ -1430,6 +1430,37 @@ pub struct CompactionWorkerOptions {
     /// Defaults to [`MetricLevel::default`] when unset.
     pub metric_level: Option<MetricLevel>,
 
+    /// The maximum number of times that this worker runs a failed compaction
+    /// job again. If the value is `None` (the default), the worker runs a
+    /// failed job again without limit. If the value is `Some(n)`, the worker
+    /// runs it again at most `n` times. Each worker counts the failures of a
+    /// job in memory, so the count starts again when the worker restarts.
+    ///
+    /// When a job uses up its retries, the worker stops with the error of the
+    /// job and marks the job `Failed`. A `Db` that runs the worker closes with
+    /// that error. The compaction coordinator also stops, with an error of the
+    /// same [`crate::ErrorKind`], so a `Db` that runs only the coordinator
+    /// closes too. A `Db` that runs neither does not see the error, and its
+    /// memtable flushes keep waiting while L0 is full.
+    ///
+    /// A lost input SST fails the job on the first failure, for every value
+    /// of this option. The worker treats an SST as lost if object storage
+    /// returns `NotFound` for it, the latest manifest still names the inputs
+    /// of the job, and the SST belongs to this database. Other errors, for
+    /// example a checksum mismatch, follow the limit.
+    ///
+    /// A failed object store call counts here only after the object store
+    /// retries give up. A standalone worker uses
+    /// [`CompactionWorkerOptions::object_store_max_retries`], and an embedded
+    /// worker uses the store of its `Db` or compactor. With unbounded object
+    /// store retries, an outage does not count.
+    ///
+    /// Upgrade the compaction coordinator before the workers. A coordinator
+    /// from an earlier release does not accept the `Failed` status that a
+    /// worker writes, so it runs the job again.
+    #[serde(default)]
+    pub compaction_job_max_retries: Option<u32>,
+
     /// Controls wrapper-level retries for the object-store operations of a
     /// standalone worker that [`crate::CompactionWorkerBuilder`] builds.
     /// Defaults to unbounded retries. An embedded worker uses the object store
@@ -1453,6 +1484,7 @@ impl Default for CompactionWorkerOptions {
             min_filter_keys: 1000,
             compression_codec: None,
             metric_level: None,
+            compaction_job_max_retries: None,
             object_store_max_retries: None,
         }
     }
