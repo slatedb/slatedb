@@ -129,6 +129,10 @@ impl From<slatedb::SegmentPrefix> for SegmentPrefix {
 pub struct DbStatus {
     /// Highest durable sequence number observed by this handle.
     pub durable_seq: u64,
+    /// Highest committed sequence number: every write that a read can see
+    /// without requiring durability is at or below it. Never less than
+    /// `durable_seq`; a reader reports its durable sequence number.
+    pub committed_seq: u64,
     /// Present once the handle has been closed.
     pub close_reason: Option<CloseReason>,
     /// All segment prefixes (RFC-0024) as of this snapshot: those in the
@@ -143,6 +147,7 @@ impl From<slatedb::DbStatus> for DbStatus {
         let segments = value.list_segments().into_iter().map(Into::into).collect();
         Self {
             durable_seq: value.durable_seq,
+            committed_seq: value.committed_seq,
             close_reason: value.close_reason.map(Into::into),
             segments,
         }
