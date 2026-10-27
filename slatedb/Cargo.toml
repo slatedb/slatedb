@@ -169,6 +169,11 @@ harness = false
 name = "memtable_seek"
 harness = false
 
+[[bench]]
+name = "sst_block_fetch_bench"
+harness = false
+required-features = ["foyer"]
+
 [lints]
 workspace = true
 
