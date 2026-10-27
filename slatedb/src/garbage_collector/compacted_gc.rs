@@ -247,10 +247,9 @@ impl GcTask for CompactedGcTask {
             .await?
             .into_iter()
             // Filter out SSTs that were more recently created than the cutoff_dt
-            .filter(|sst| DateTime::<Utc>::from(sst.id.value().datetime()) < cutoff_dt)
             .filter(|sst| {
-                DateTime::<Utc>::from(sst.id.value().datetime()) < newest_l0_dt
-                    || compacted_l0s.contains(&sst.id.value())
+                let ts = DateTime::<Utc>::from(sst.id.value().datetime());
+                ts < cutoff_dt && (ts < newest_l0_dt || compacted_l0s.contains(&sst.id.value()))
             })
             // Filter out SSTs that are active in the manifest (including actively checkpointed SSTs)
             .filter(|sst| !active_ssts.contains(&sst.id))
