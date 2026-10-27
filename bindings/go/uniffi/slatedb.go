@@ -10707,6 +10707,9 @@ type Compaction struct {
 	OutputSsts []SsTableHandle
 	// Whether the compaction is active.
 	Active bool
+	// The kind of the error that made a compaction worker mark the
+	// compaction `Failed`, if any.
+	ErrorKind *ErrorKind
 }
 
 func (r *Compaction) Destroy() {
@@ -10716,6 +10719,7 @@ func (r *Compaction) Destroy() {
 	FfiDestroyerCompactionStatus{}.Destroy(r.Status)
 	FfiDestroyerSequenceSsTableHandle{}.Destroy(r.OutputSsts)
 	FfiDestroyerBool{}.Destroy(r.Active)
+	FfiDestroyerOptionalErrorKind{}.Destroy(r.ErrorKind)
 }
 
 type FfiConverterCompaction struct{}
@@ -10734,6 +10738,7 @@ func (c FfiConverterCompaction) Read(reader io.Reader) Compaction {
 		FfiConverterCompactionStatusINSTANCE.Read(reader),
 		FfiConverterSequenceSsTableHandleINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterOptionalErrorKindINSTANCE.Read(reader),
 	}
 }
 
@@ -10752,6 +10757,7 @@ func (c FfiConverterCompaction) Write(writer io.Writer, value Compaction) {
 	FfiConverterCompactionStatusINSTANCE.Write(writer, value.Status)
 	FfiConverterSequenceSsTableHandleINSTANCE.Write(writer, value.OutputSsts)
 	FfiConverterBoolINSTANCE.Write(writer, value.Active)
+	FfiConverterOptionalErrorKindINSTANCE.Write(writer, value.ErrorKind)
 }
 
 type FfiDestroyerCompaction struct{}
@@ -10786,6 +10792,12 @@ type CompactionWorkerOptions struct {
 	// Compression for the SSTs the worker writes. Must match the writer's
 	// `compression_codec`.
 	CompressionCodec *CompressionCodec
+	// The maximum number of times that the worker runs a failed compaction
+	// job again. `None` means no limit.
+	CompactionJobMaxRetries *uint32
+	// Wrapper-level retries for the object-store operations of a standalone
+	// worker. `None` means no limit. An embedded worker ignores this value.
+	ObjectStoreMaxRetries *uint32
 }
 
 func (r *CompactionWorkerOptions) Destroy() {
@@ -10798,6 +10810,8 @@ func (r *CompactionWorkerOptions) Destroy() {
 	FfiDestroyerUint64{}.Destroy(r.MaxSubcompactions)
 	FfiDestroyerUint32{}.Destroy(r.MinFilterKeys)
 	FfiDestroyerOptionalCompressionCodec{}.Destroy(r.CompressionCodec)
+	FfiDestroyerOptionalUint32{}.Destroy(r.CompactionJobMaxRetries)
+	FfiDestroyerOptionalUint32{}.Destroy(r.ObjectStoreMaxRetries)
 }
 
 type FfiConverterCompactionWorkerOptions struct{}
@@ -10819,6 +10833,8 @@ func (c FfiConverterCompactionWorkerOptions) Read(reader io.Reader) CompactionWo
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterUint32INSTANCE.Read(reader),
 		FfiConverterOptionalCompressionCodecINSTANCE.Read(reader),
+		FfiConverterOptionalUint32INSTANCE.Read(reader),
+		FfiConverterOptionalUint32INSTANCE.Read(reader),
 	}
 }
 
@@ -10840,6 +10856,8 @@ func (c FfiConverterCompactionWorkerOptions) Write(writer io.Writer, value Compa
 	FfiConverterUint64INSTANCE.Write(writer, value.MaxSubcompactions)
 	FfiConverterUint32INSTANCE.Write(writer, value.MinFilterKeys)
 	FfiConverterOptionalCompressionCodecINSTANCE.Write(writer, value.CompressionCodec)
+	FfiConverterOptionalUint32INSTANCE.Write(writer, value.CompactionJobMaxRetries)
+	FfiConverterOptionalUint32INSTANCE.Write(writer, value.ObjectStoreMaxRetries)
 }
 
 type FfiDestroyerCompactionWorkerOptions struct{}
@@ -13874,6 +13892,119 @@ func (_ FfiDestroyerError) Destroy(value *Error) {
 	}
 }
 
+// The kind of an error. It matches the `ErrorKind` of SlateDB.
+type ErrorKind interface {
+	Destroy()
+}
+
+// A transaction conflict.
+type ErrorKindTransaction struct {
+}
+
+func (e ErrorKindTransaction) Destroy() {
+}
+
+// The database or reader is closed.
+type ErrorKindClosed struct {
+	Reason CloseReason
+}
+
+func (e ErrorKindClosed) Destroy() {
+	FfiDestroyerCloseReason{}.Destroy(e.Reason)
+}
+
+// A storage or network service is unavailable.
+type ErrorKindUnavailable struct {
+}
+
+func (e ErrorKindUnavailable) Destroy() {
+}
+
+// The request, the configuration, or a user plugin is invalid.
+type ErrorKindInvalid struct {
+}
+
+func (e ErrorKindInvalid) Destroy() {
+}
+
+// Persisted data is in an unexpected state.
+type ErrorKindData struct {
+}
+
+func (e ErrorKindData) Destroy() {
+}
+
+// An unexpected internal error.
+type ErrorKindInternal struct {
+}
+
+func (e ErrorKindInternal) Destroy() {
+}
+
+type FfiConverterErrorKind struct{}
+
+var FfiConverterErrorKindINSTANCE = FfiConverterErrorKind{}
+
+func (c FfiConverterErrorKind) Lift(rb RustBufferI) ErrorKind {
+	return LiftFromRustBuffer[ErrorKind](c, rb)
+}
+
+func (c FfiConverterErrorKind) Lower(value ErrorKind) C.RustBuffer {
+	return LowerIntoRustBuffer[ErrorKind](c, value)
+}
+
+func (c FfiConverterErrorKind) LowerExternal(value ErrorKind) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[ErrorKind](c, value))
+}
+func (FfiConverterErrorKind) Read(reader io.Reader) ErrorKind {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return ErrorKindTransaction{}
+	case 2:
+		return ErrorKindClosed{
+			FfiConverterCloseReasonINSTANCE.Read(reader),
+		}
+	case 3:
+		return ErrorKindUnavailable{}
+	case 4:
+		return ErrorKindInvalid{}
+	case 5:
+		return ErrorKindData{}
+	case 6:
+		return ErrorKindInternal{}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterErrorKind.Read()", id))
+	}
+}
+
+func (FfiConverterErrorKind) Write(writer io.Writer, value ErrorKind) {
+	switch variant_value := value.(type) {
+	case ErrorKindTransaction:
+		writeInt32(writer, 1)
+	case ErrorKindClosed:
+		writeInt32(writer, 2)
+		FfiConverterCloseReasonINSTANCE.Write(writer, variant_value.Reason)
+	case ErrorKindUnavailable:
+		writeInt32(writer, 3)
+	case ErrorKindInvalid:
+		writeInt32(writer, 4)
+	case ErrorKindData:
+		writeInt32(writer, 5)
+	case ErrorKindInternal:
+		writeInt32(writer, 6)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterErrorKind.Write", value))
+	}
+}
+
+type FfiDestroyerErrorKind struct{}
+
+func (_ FfiDestroyerErrorKind) Destroy(value ErrorKind) {
+	value.Destroy()
+}
+
 // Opaque caller-supplied context forwarded to custom filter policies at
 // query time.
 //
@@ -15869,6 +16000,47 @@ type FfiDestroyerOptionalCompressionCodec struct{}
 func (_ FfiDestroyerOptionalCompressionCodec) Destroy(value *CompressionCodec) {
 	if value != nil {
 		FfiDestroyerCompressionCodec{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalErrorKind struct{}
+
+var FfiConverterOptionalErrorKindINSTANCE = FfiConverterOptionalErrorKind{}
+
+func (c FfiConverterOptionalErrorKind) Lift(rb RustBufferI) *ErrorKind {
+	return LiftFromRustBuffer[*ErrorKind](c, rb)
+}
+
+func (_ FfiConverterOptionalErrorKind) Read(reader io.Reader) *ErrorKind {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterErrorKindINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalErrorKind) Lower(value *ErrorKind) C.RustBuffer {
+	return LowerIntoRustBuffer[*ErrorKind](c, value)
+}
+
+func (c FfiConverterOptionalErrorKind) LowerExternal(value *ErrorKind) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*ErrorKind](c, value))
+}
+
+func (_ FfiConverterOptionalErrorKind) Write(writer io.Writer, value *ErrorKind) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterErrorKindINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalErrorKind struct{}
+
+func (_ FfiDestroyerOptionalErrorKind) Destroy(value *ErrorKind) {
+	if value != nil {
+		FfiDestroyerErrorKind{}.Destroy(*value)
 	}
 }
 

@@ -23,7 +23,7 @@ use ulid::Ulid;
 
 use uuid::Uuid;
 
-use crate::error::{CloseReason, Error, SlateDbError};
+use crate::error::{CloseReason, Error, ErrorKind, SlateDbError};
 
 type KeyBound = Bound<Vec<u8>>;
 type KeyBounds = (KeyBound, KeyBound);
@@ -538,6 +538,9 @@ pub struct Compaction {
     pub output_ssts: Vec<SsTableHandle>,
     /// Whether the compaction is active.
     pub active: bool,
+    /// The kind of the error that made a compaction worker mark the
+    /// compaction `Failed`, if any.
+    pub error_kind: Option<ErrorKind>,
 }
 
 impl From<&CoreCompaction> for Compaction {
@@ -553,6 +556,7 @@ impl From<&CoreCompaction> for Compaction {
                 .map(SsTableHandle::from)
                 .collect(),
             active: value.active(),
+            error_kind: value.error_kind().map(Into::into),
         }
     }
 }

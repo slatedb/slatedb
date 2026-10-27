@@ -817,6 +817,14 @@ pub struct CompactionWorkerOptions {
     /// `compression_codec`.
     #[uniffi(default = None)]
     pub compression_codec: Option<CompressionCodec>,
+    /// The maximum number of times that the worker runs a failed compaction
+    /// job again. `None` means no limit.
+    #[uniffi(default = None)]
+    pub compaction_job_max_retries: Option<u32>,
+    /// Wrapper-level retries for the object-store operations of a standalone
+    /// worker. `None` means no limit. An embedded worker ignores this value.
+    #[uniffi(default = None)]
+    pub object_store_max_retries: Option<u32>,
 }
 
 impl Default for CompactionWorkerOptions {
@@ -832,6 +840,8 @@ impl Default for CompactionWorkerOptions {
             max_subcompactions: core.max_subcompactions as u64,
             min_filter_keys: core.min_filter_keys,
             compression_codec: core.compression_codec.map(Into::into),
+            compaction_job_max_retries: core.compaction_job_max_retries,
+            object_store_max_retries: core.object_store_max_retries,
         }
     }
 }
@@ -854,8 +864,8 @@ impl TryFrom<CompactionWorkerOptions> for slatedb::config::CompactionWorkerOptio
             min_filter_keys: value.min_filter_keys,
             compression_codec: value.compression_codec.map(Into::into),
             metric_level: None,
-            compaction_job_max_retries: None,
-            object_store_max_retries: None,
+            compaction_job_max_retries: value.compaction_job_max_retries,
+            object_store_max_retries: value.object_store_max_retries,
         })
     }
 }
@@ -1006,6 +1016,26 @@ mod tests {
         assert_eq!(core.max_subcompactions, engine.max_subcompactions);
         assert_eq!(core.min_filter_keys, engine.min_filter_keys);
         assert_eq!(core.compression_codec, engine.compression_codec);
+        assert_eq!(
+            core.compaction_job_max_retries,
+            engine.compaction_job_max_retries
+        );
+        assert_eq!(
+            core.object_store_max_retries,
+            engine.object_store_max_retries
+        );
+    }
+
+    #[test]
+    fn compaction_worker_options_carry_retry_limits_into_the_engine() {
+        let options = CompactionWorkerOptions {
+            compaction_job_max_retries: Some(2),
+            object_store_max_retries: Some(3),
+            ..CompactionWorkerOptions::default()
+        };
+        let core = slatedb::config::CompactionWorkerOptions::try_from(options).unwrap();
+        assert_eq!(core.compaction_job_max_retries, Some(2));
+        assert_eq!(core.object_store_max_retries, Some(3));
     }
 
     #[test]

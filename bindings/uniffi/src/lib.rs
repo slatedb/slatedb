@@ -41,7 +41,9 @@ pub use db::Db;
 pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
 pub use db_transaction::DbTransaction;
-pub use error::{BlockTransformerCallbackError, CloseReason, Error, MergeOperatorCallbackError};
+pub use error::{
+    BlockTransformerCallbackError, CloseReason, Error, ErrorKind, MergeOperatorCallbackError,
+};
 pub use filter_policy::{
     BloomFilterOptions, FilterContext, FilterPolicy, PrefixExtractor, PrefixTarget,
 };
