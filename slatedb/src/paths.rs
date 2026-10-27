@@ -30,9 +30,9 @@ const SST_PATH_STACK_LEN: usize = 256;
 #[derive(Clone, Debug)]
 pub struct PathResolver {
     root_path: Path,
-    /// `<root_path>/compacted`, precomputed because [`Self::sst_path`] is on the
-    /// read path.
-    compacted_dir: Path,
+    /// `<root_path>/compacted`, the directory holding this database's own SSTs.
+    /// Precomputed because [`Self::sst_path`] is on the read path.
+    pub(crate) compacted_dir: Path,
     /// The `compacted` directory of the database owning each external SST.
     external_compacted_dirs: HashMap<SsTableId, Path>,
 }
@@ -75,11 +75,6 @@ impl PathResolver {
 
     pub(crate) fn wal_path(&self) -> Path {
         Path::from(format!("{}/{}/", &self.root_path, WAL_PATH))
-    }
-
-    /// The directory holding this database's own SSTs.
-    pub(crate) fn compacted_dir(&self) -> &Path {
-        &self.compacted_dir
     }
 
     pub(crate) fn parse_table_id(&self, path: &Path) -> Result<Option<SsTableId>, SlateDBError> {
@@ -188,7 +183,7 @@ mod tests {
             // `<root>/compacted/` with the trailing delimiter is the same Path.
             assert_eq!(
                 &Path::from(format!("{}/compacted/", root)),
-                local.compacted_dir()
+                &local.compacted_dir
             );
 
             let external = PathResolver::new_with_external_ssts(
