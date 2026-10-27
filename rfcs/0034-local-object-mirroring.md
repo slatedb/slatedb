@@ -248,8 +248,17 @@ impl SlateDbMirrorPolicyBuilder {
     /// predicate selects every segment.
     pub fn with_segment_predicate(
         self,
-        predicate: impl Fn(&ManifestCore, &[u8]) -> bool + Send + Sync + 'static,
+        predicate: impl Fn(&VersionedManifest, &[u8]) -> bool + Send + Sync + 'static,
     ) -> Self;
+
+    /// Sets how often `run` reads `.compactions` to prefetch the output of
+    /// active compactions. `None` disables the prefetch. The default is 5
+    /// seconds.
+    pub fn with_compactions_poll_interval(self, interval: Option<Duration>) -> Self;
+
+    /// Sets the clock used for the `.compactions` polls and for retry backoff.
+    /// The default uses Tokio's clock.
+    pub fn with_system_clock(self, clock: Arc<dyn SystemClock>) -> Self;
 
     pub fn build(self) -> Arc<SlateDbMirrorPolicy>;
 }
@@ -411,7 +420,10 @@ Every `.manifest` read and write is routed through `Observe`. The policy decodes
 the manifest, downloads any referenced SSTs that aren't local yet, and only
 then lets the manifest return to the caller. SlateDB only reads compacted SSTs
 that it found in a manifest or wrote itself through a `Mirror` write, so by the
-time it issues a compacted SST read, the file is already on disk.
+time it issues a compacted SST read, the file is already on disk. The exception
+is a compaction worker that resumes a compaction. It reads the partial output
+of an earlier worker, which no manifest references yet. The policy sends
+compactor reads of SSTs that it does not retain to the wrapped store.
 Large compaction outputs are prefetched in the background by polling
 `.compactions`, so the manifest download is a final true-up rather than the
 whole job's output. See [Warming](#warming) for details.
@@ -631,6 +643,7 @@ error instead of `Mirror` for a `PutMode::Update` write:
 | Call | Route |
 |---|---|
 | GET or PUT of `*.manifest` | `Observe` (error if the database root doesn't match) |
+| Compactor read of a tagged compacted SST in a selected segment that is not in `retained` | `Remote` |
 | Tagged compacted SST in a selected segment, with `tag.retry.is_some()` | `Refetch` |
 | Tagged compacted SST in a selected segment | `Local` for reads, `Mirror` for writes |
 | Everything else (untagged, WAL, unselected segments) | `Remote` |
@@ -641,39 +654,43 @@ The policy keeps this state behind a mutex:
 
 - The database root, recorded from the first manifest it sees.
 - The ID of the newest manifest it has processed.
-- `retain`: the SST paths that must not be evicted.
+- `retained`: the SST paths that must not be evicted.
 - Decoded checkpoint manifests, cached by ID. Manifests are immutable, so these
   never go stale.
 
-`retain` only controls eviction. It doesn't cause anything to be downloaded,
-and an SST in `retain` isn't necessarily on disk. Downloads happen only through
+`retained` only controls eviction. It doesn't cause anything to be downloaded,
+and an SST in `retained` isn't necessarily on disk. Downloads happen only through
 `fetch`.
 
-In short, a newer manifest sets `retain` to its own SSTs plus those of its
+In short, a newer manifest sets `retained` to its own SSTs plus those of its
 active checkpoints, fetches its own SSTs, and evicts anything no longer
-retained. An older manifest leaves `retain` alone and fetches whichever of its
+retained. An older manifest leaves `retained` alone and fetches whichever of its
 SSTs are still retained. That second path is how checkpoint readers get warmed.
 
 `observe` for manifest `M`:
 
-1. Decode `M` and build `warm`: `M`'s SSTs, counting only selected segments.
+1. Decode `M`.
 2. Take the lock and check whether `M` is newer than the newest processed
    manifest (or none has been processed yet). If it is, take references to
    the cached manifests of `M`'s active checkpoints and note which ones aren't
    cached. Release the lock.
 3. If `M` is newer, read the uncached checkpoint manifests through
-   `mirror.remote()` so the reads don't loop back into `observe`.
+   `mirror.remote()` so the reads don't loop back into `observe`. Then build
+   `to_download`: `M`'s SSTs, counting only selected segments.
 4. Take the lock.
 5. If `M` is still newer than the newest processed manifest:
    1. Add the checkpoint manifests read in step 3 to the cache.
-   2. Build the new `retain`: `warm` plus the selected SSTs of each active
+   2. Build the new `retained`: `to_download` plus the selected SSTs of each active
       checkpoint.
-   3. `mirror.evict(old_retain - retain)`.
-   4. Save the new `retain` and `M`'s ID. Drop cached checkpoint manifests
+   3. `mirror.evict(old_retained - retained)`.
+   4. Save the new `retained` and `M`'s ID. Drop cached checkpoint manifests
       that are no longer active.
-6. Otherwise, leave `retain` alone and narrow `warm` to `warm & retain`.
+6. Otherwise, leave `retained` alone and set `to_download` to `M`'s SSTs that
+   are in `retained`. The predicate does not run for `M`, because `retained`
+   holds only selected SSTs, and reads run the predicate against the newest
+   manifest.
 7. Release the lock.
-8. Call `mirror.fetch(warm)` and await it. Paths that are already local are
+8. Call `mirror.fetch(to_download)` and await it. Paths that are already local are
    skipped.
 
 The SSTs in a manifest are every SST returned by `ManifestCore::all_sst_views()`.
@@ -681,7 +698,7 @@ This includes L0 and compacted SSTs in the root tree and all named segments.
 SST IDs found in `ExternalDb.sst_ids` are resolved under the external
 database's path; all others are resolved under the database root.
 
-Only newer manifests move `retain` forward, so a late or out-of-order read
+Only newer manifests move `retained` forward, so a late or out-of-order read
 can't roll eviction state back. An older manifest only warms SSTs that are
 already retained. Anything that neither the latest processed manifest nor one
 of its active checkpoints references is eligible for GC, so there's no reason
@@ -691,7 +708,7 @@ Step 8 fetches only `M`'s own SSTs, so on a newer manifest, SSTs referenced
 only by its checkpoints are retained but not downloaded. They're fetched when
 something reads the checkpoint's manifest. A `DbReader` opened on a checkpoint
 does this (`DbReaderInner::new`). The checkpoint's manifest is usually older
-than the latest one, so it takes the step 6 path, and `warm & retain` is the
+than the latest one, so it takes the step 6 path, and `to_download` is the
 checkpoint's SSTs minus anything that's no longer retained. A caller holding
 an older manifest that isn't a checkpoint may get `NotLocal` for SSTs that are
 no longer retained, the same as any read of an unreferenced SST (see
@@ -707,7 +724,7 @@ delete an SST that manifest N+1 retains again.
 The reverse race is allowed. `observe` for N can issue its fetch after
 `observe` for N+1 has evicted some of the same SSTs, which downloads SSTs that
 are no longer retained. The policy never evicts them again, since they're not
-in `retain`. Nothing references them either, so the garbage collector deletes
+in `retained`. Nothing references them either, so the garbage collector deletes
 them remotely and the [remote scan](#remote-scan) removes the local copies.
 
 The lock is never held across a remote call. A slow checkpoint manifest read
@@ -783,13 +800,15 @@ pub struct ObjectStoreCallTag {
 
 The `TableStore` must be updated to receive the field in its read and write SST functions. This touches a wide range of files, but the changes are mechanical and straightforward.
 
-The predicate receives a manifest and the segment prefix being evaluated. It selects every segment by default. An empty prefix identifies the root segment.
+The predicate receives a manifest and the segment prefix being evaluated. It selects every segment by default. An empty prefix identifies the root segment. The manifest is a `VersionedManifest`, the public read-only view of a manifest.
 
-When processing a manifest, the policy evaluates the predicate against the incoming `ManifestCore`. It warms newly selected SSTs before returning the manifest, then evicts SSTs that are no longer selected as part of manifest-driven garbage collection (see above).
+When processing a newer manifest, the policy evaluates the predicate against the incoming manifest. An older manifest does not run the predicate. It downloads only its SSTs that are still retained (step 6). The newer manifest warms newly selected SSTs before returning the manifest, then evicts SSTs that are no longer selected as part of manifest-driven garbage collection (see above).
 
 For `.compactions` entries, reads, and writes, the predicate receives the last manifest observed by the policy. The segment prefix is passed separately, so the predicate can select a new segment before it appears in the manifest. For example, a date-based predicate can recognize a new `YYYYMMDD` prefix when the day rolls over.
 
 Selected reads are routed to the local mirror, and unselected reads to the wrapped object store. Selected writes are written locally and remotely. Unselected writes go directly to the wrapped object store. Only SSTs in selected segments are retained, so an SST whose segment stops being selected is evicted on the next manifest transition. If a later manifest selects it again, the mirror's [ordering](#ordering) cancels the pending eviction or fetches the SST again.
+
+When a predicate is set, a call with no segment and every call before the first manifest are unselected, because the predicate needs both. If the predicate starts to select a segment that already has SSTs, reads of those SSTs can return `NotLocal` until the next manifest downloads them.
 
 #### Compactor Checkpoint Retention
 
@@ -1120,6 +1139,16 @@ There is, however, an open question around the CPU cost of computing the MD5 pre
 
 ## Updates
 
+- Aligned with the `SlateDbMirrorPolicy` implementation. The segment
+  predicate receives a `VersionedManifest` instead of `ManifestCore`, which is
+  crate-private. Added `with_compactions_poll_interval` and
+  `with_system_clock` to `SlateDbMirrorPolicyBuilder`. Documented how the
+  predicate treats calls with no segment and calls before the first manifest.
+  Renamed the `retain` set to `retained` and the `warm` set to `to_download`.
+  An older manifest downloads its retained SSTs without the predicate, so its
+  downloads match the routes, which use the newest manifest. Compactor reads
+  of SSTs that are not retained go to the wrapped store, so a worker can resume
+  a compaction without a local copy of the partial output.
 - Local object files now end in `.obj`, so every object name can be
   mirrored. Names ending in `.meta` or `.<digits>` no longer collide with
   metadata or temporary files.
