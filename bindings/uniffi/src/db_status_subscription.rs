@@ -17,6 +17,44 @@ impl DbStatusSubscription {
     }
 }
 
+#[uniffi::export]
+impl DbStatusSubscription {
+    /// Returns the current status without consuming a change.
+    pub fn status(&self) -> DbStatus {
+        self.receiver.borrow().clone().into()
+    }
+}
+
+#[uniffi::export(async_runtime = "tokio")]
+impl DbStatusSubscription {
+    /// Waits for durability to advance or for the database to close.
+    /// Returns None when the timeout expires.
+    pub async fn wait_for_change(
+        &self,
+        durable_seq: u64,
+        timeout_ms: u32,
+    ) -> Result<Option<DbStatus>, Error> {
+        let mut receiver = self.receiver.clone();
+        let result = tokio::time::timeout(Duration::from_millis(timeout_ms.into()), async {
+            receiver
+                .wait_for(|status| {
+                    status.durable_seq > durable_seq || status.close_reason.is_some()
+                })
+                .await
+                .map(|status| status.clone())
+        })
+        .await;
+        match result {
+            Ok(Ok(status)) => Ok(Some(status.into())),
+            Ok(Err(_)) => Err(Error::Closed {
+                reason: CloseReason::Unknown,
+                message: "Database status subscription closed".to_string(),
+            }),
+            Err(_) => Ok(None),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::future::Future;
@@ -110,43 +148,5 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(closed.close_reason, Some(CloseReason::Clean));
-    }
-}
-
-#[uniffi::export]
-impl DbStatusSubscription {
-    /// Returns the current status without consuming a change.
-    pub fn status(&self) -> DbStatus {
-        self.receiver.borrow().clone().into()
-    }
-}
-
-#[uniffi::export(async_runtime = "tokio")]
-impl DbStatusSubscription {
-    /// Waits for durability to advance or for the database to close.
-    /// Returns None when the timeout expires.
-    pub async fn wait_for_change(
-        &self,
-        durable_seq: u64,
-        timeout_ms: u32,
-    ) -> Result<Option<DbStatus>, Error> {
-        let mut receiver = self.receiver.clone();
-        let result = tokio::time::timeout(Duration::from_millis(timeout_ms.into()), async {
-            receiver
-                .wait_for(|status| {
-                    status.durable_seq > durable_seq || status.close_reason.is_some()
-                })
-                .await
-                .map(|status| status.clone())
-        })
-        .await;
-        match result {
-            Ok(Ok(status)) => Ok(Some(status.into())),
-            Ok(Err(_)) => Err(Error::Closed {
-                reason: CloseReason::Unknown,
-                message: "Database status subscription closed".to_string(),
-            }),
-            Err(_) => Ok(None),
-        }
     }
 }
