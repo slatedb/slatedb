@@ -854,6 +854,7 @@ impl TryFrom<CompactionWorkerOptions> for slatedb::config::CompactionWorkerOptio
             min_filter_keys: value.min_filter_keys,
             compression_codec: value.compression_codec.map(Into::into),
             metric_level: None,
+            object_store_max_retries: None,
         })
     }
 }
