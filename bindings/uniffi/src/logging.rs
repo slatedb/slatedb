@@ -10,6 +10,8 @@ use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::Layer;
 
 use crate::error::Error;
+use crate::http_trace::HttpTraceCapture;
+use crate::read_trace::{ReadSpanKind, ReadTraceLayer};
 
 /// Log level used by [`init_logging`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
@@ -123,6 +125,24 @@ static LOGGING_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// are written to standard error using the default tracing formatter.
 #[uniffi::export]
 pub fn init_logging(level: LogLevel, callback: Option<Arc<dyn LogCallback>>) -> Result<(), Error> {
+    init_logging_inner(level, callback, None)
+}
+
+/// Read capture shares the one process subscriber and does not change the log level.
+#[uniffi::export]
+pub fn init_logging_with_trace(
+    level: LogLevel,
+    callback: Option<Arc<dyn LogCallback>>,
+    capture: Arc<HttpTraceCapture>,
+) -> Result<(), Error> {
+    init_logging_inner(level, callback, Some(capture))
+}
+
+fn init_logging_inner(
+    level: LogLevel,
+    callback: Option<Arc<dyn LogCallback>>,
+    capture: Option<Arc<HttpTraceCapture>>,
+) -> Result<(), Error> {
     if LOGGING_INITIALIZED.load(Ordering::Acquire) {
         return Err(logging_already_initialized_error());
     }
@@ -133,7 +153,7 @@ pub fn init_logging(level: LogLevel, callback: Option<Arc<dyn LogCallback>>) -> 
     }
 
     install_log_tracer(level)?;
-    install_subscriber(level, callback)?;
+    install_subscriber(level, callback, capture)?;
 
     LOGGING_INITIALIZED.store(true, Ordering::Release);
     Ok(())
@@ -149,27 +169,31 @@ fn install_log_tracer(level: LogLevel) -> Result<(), Error> {
 fn install_subscriber(
     level: LogLevel,
     callback: Option<Arc<dyn LogCallback>>,
+    capture: Option<Arc<HttpTraceCapture>>,
 ) -> Result<(), Error> {
     let filter = level.into_tracing_level_filter();
-    if let Some(callback) = callback {
-        let subscriber =
-            tracing_subscriber::registry().with(LogCallbackLayer { callback }.with_filter(filter));
-        tracing::subscriber::set_global_default(subscriber).map_err(|_| {
-            invalid_logging_error(
-                "global tracing subscriber already initialized by another library",
-            )
-        })
+    let read_layer = capture.map(|capture| {
+        ReadTraceLayer { capture }.with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+            metadata.is_span() && ReadSpanKind::from_name(metadata.name()).is_some()
+        }))
+    });
+    let subscriber = tracing_subscriber::registry().with(read_layer);
+    let result = if let Some(callback) = callback {
+        tracing::subscriber::set_global_default(
+            subscriber.with(LogCallbackLayer { callback }.with_filter(filter)),
+        )
     } else {
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(std::io::stderr)
-            .with_max_level(filter)
-            .finish();
-        tracing::subscriber::set_global_default(subscriber).map_err(|_| {
-            invalid_logging_error(
-                "global tracing subscriber already initialized by another library",
-            )
-        })
-    }
+        tracing::subscriber::set_global_default(
+            subscriber.with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_filter(filter),
+            ),
+        )
+    };
+    result.map_err(|_| {
+        invalid_logging_error("global tracing subscriber already initialized by another library")
+    })
 }
 
 fn logging_already_initialized_error() -> Error {

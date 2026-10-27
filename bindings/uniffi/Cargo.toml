@@ -16,6 +16,8 @@ bench = false
 
 [dependencies]
 async-trait = { workspace = true }
+bytes = { workspace = true }
+http-body = "1"
 chrono = { workspace = true }
 log = { workspace = true }
 parking_lot = { workspace = true }
@@ -36,6 +38,9 @@ url = { workspace = true }
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
+http = "1"
+http-body-util = "0.1"
+futures = { workspace = true }
 uniffi_meta = { workspace = true }
 
 [lints]
