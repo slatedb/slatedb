@@ -236,7 +236,8 @@ impl Reader {
             max_seq,
             read_trace.clone(),
         );
-        read.instrument(read_trace.read_span()).await
+        let read_span = read_trace.read_span();
+        read.instrument(read_span.span().clone()).await
     }
 
     async fn get_key_value_with_options_inner<K: AsRef<[u8]>>(
@@ -322,7 +323,8 @@ impl Reader {
     ) -> Result<DbIterator, SlateDBError> {
         let read_trace = Self::read_trace(options.tracing_options.as_ref());
         let read = self.scan_with_options_inner(range, options, ctx, read_trace.clone());
-        read.instrument(read_trace.read_span()).await
+        let read_span = read_trace.read_span();
+        read.instrument(read_span.span().clone()).await
     }
 
     async fn scan_with_options_inner(
@@ -405,7 +407,8 @@ impl Reader {
             db_state,
             read_trace.clone(),
         );
-        read.instrument(read_trace.read_span()).await
+        let read_span = read_trace.read_span();
+        read.instrument(read_span.span().clone()).await
     }
 
     async fn scan_prefix_by_recency_with_options_inner(

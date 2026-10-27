@@ -349,7 +349,7 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
         merge_tracker: &mut MergeTracker,
     ) -> Result<Bytes, SlateDBError> {
         let span = self.read_trace.new_read_merge_span(batch.len());
-        let _guard = span.enter();
+        let _guard = span.span().enter();
 
         batch.reverse();
         let mut operands: Vec<Bytes> = Vec::with_capacity(batch.len());
@@ -439,7 +439,7 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
         let final_result = {
             let num_operands = results.len() + if base_value.is_some() { 1 } else { 0 };
             let span = self.read_trace.new_read_merge_span(num_operands);
-            let _guard = span.enter();
+            let _guard = span.span().enter();
             results.reverse();
             self.merge_operator
                 .merge_batch(&key, base_value, &results)?
@@ -686,6 +686,34 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[rstest]
+    #[case::one_batch(1)]
+    #[case::two_batches(MERGE_BATCH_SIZE + 1)]
+    #[test]
+    fn merge_spans_close_with_the_query_subscriber(#[case] operand_count: usize) {
+        crate::test_utils::assert_read_spans_close_with_owner(
+            "slatedb.read.merge",
+            operand_count.div_ceil(MERGE_BATCH_SIZE) + 1,
+            |trace| {
+                let mut rows = vec![RowEntry::new_value(b"key", b"a", 0)];
+                rows.extend(
+                    (1..=operand_count).map(|seq| RowEntry::new_merge(b"key", b"b", seq as u64)),
+                );
+                let mut iter = MergeOperatorIterator::<MockRowEntryIterator>::new(
+                    Arc::new(MockMergeOperator),
+                    rows.into(),
+                    true,
+                    None,
+                    trace,
+                );
+                let row = tokio_test::block_on(iter.next()).unwrap().unwrap();
+                let mut expected = vec![b'a'];
+                expected.extend(std::iter::repeat_n(b'b', operand_count));
+                assert_eq!(row.value.as_bytes(), Some(Bytes::from(expected)));
+            },
+        );
     }
 
     #[rstest]

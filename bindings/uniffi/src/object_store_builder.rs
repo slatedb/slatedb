@@ -12,6 +12,7 @@ use parking_lot::Mutex;
 use url::Url;
 
 use crate::error::{Error, SlateDbError};
+use crate::http_trace::{HttpTraceCapture, TraceConnector};
 use crate::ObjectStore;
 
 /// Backing provider targeted by an [`ObjectStoreBuilder`].
@@ -201,6 +202,16 @@ impl ObjectStoreBuilderInner {
         }
     }
 
+    fn with_http_trace(self, capture: Arc<HttpTraceCapture>) -> Self {
+        let connector = TraceConnector::new(capture);
+        match self {
+            Self::Aws(b) => Self::Aws(b.with_http_connector(connector)),
+            Self::Azure(b) => Self::Azure(b.with_http_connector(connector)),
+            Self::Gcs(b) => Self::Gcs(b.with_http_connector(connector)),
+            other => other,
+        }
+    }
+
     fn build(self) -> Result<Arc<dyn RawObjectStore>, SlateDbError> {
         match self {
             Self::Aws(b) => {
@@ -315,6 +326,12 @@ impl ObjectStoreBuilder {
     /// Sets a single provider-specific configuration entry.
     pub fn with_config(&self, key: String, value: String) -> Result<(), Error> {
         self.update(|inner| inner.with_config(key, value))
+            .map_err(Into::into)
+    }
+
+    /// Captures connector calls, including credential requests. Local and memory stores emit none.
+    pub fn with_http_trace(&self, capture: Arc<HttpTraceCapture>) -> Result<(), Error> {
+        self.update(|inner| Ok(inner.with_http_trace(capture)))
             .map_err(Into::into)
     }
 
