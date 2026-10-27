@@ -38,6 +38,7 @@ use crate::sst_io::{read_obj, read_with_validation_retry, ReadOnlyObject};
 use crate::sst_stats::SstStats;
 use crate::sst_upload::SstUploadGuard;
 use crate::types::RowEntry;
+use crate::utils::with_optional_subscriber;
 use tracing::Instrument;
 
 pub(crate) struct TableStore {
@@ -607,8 +608,9 @@ impl TableStore {
         let sst_format = self.sst_format.clone();
         let tag =
             ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment);
-        Box::new(move || {
-            Box::pin(async move {
+        let span = tracing::Span::current();
+        let future = with_optional_subscriber(
+            async move {
                 // Only the stats arm can produce `None` (stats_len > 0 but no
                 // stats decoded); filters and index always yield an entry.
                 let entry = read_with_validation_retry(tag, async |tag| {
@@ -648,8 +650,10 @@ impl TableStore {
                 entry.ok_or_else(|| {
                     crate::Error::data("stats_len > 0 but read_stats returned no stats".to_string())
                 })
-            })
-        })
+            }
+            .instrument(span),
+        );
+        Box::new(move || Box::pin(future))
     }
 
     /// Builds a fresh boxed closure on every call, even when the cache hits and
@@ -668,8 +672,9 @@ impl TableStore {
         let sst_format = self.sst_format.clone();
         let tag =
             ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment);
-        Box::new(move || {
-            Box::pin(async move {
+        let span = tracing::Span::current();
+        let future = with_optional_subscriber(
+            async move {
                 let block = read_with_validation_retry(tag, async |tag| {
                     let obj = ReadOnlyObject {
                         object_store: object_store.clone(),
@@ -683,8 +688,10 @@ impl TableStore {
                 })
                 .await?;
                 Ok(CachedEntry::with_block(Arc::new(block)))
-            })
-        })
+            }
+            .instrument(span),
+        );
+        Box::new(move || Box::pin(future))
     }
 
     #[allow(dead_code)]
@@ -2433,6 +2440,53 @@ mod tests {
                 num_blocks,
             }
         })
+    }
+
+    #[rstest]
+    fn test_cache_loaders_keep_initiating_span_and_subscriber(
+        read_blocks_span_test: ReadBlocksSpanTest,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Entered(Arc<AtomicUsize>);
+        impl tracing_subscriber::Layer<tracing_subscriber::Registry> for Entered {
+            fn on_enter(
+                &self,
+                id: &tracing::Id,
+                ctx: tracing_subscriber::layer::Context<'_, tracing_subscriber::Registry>,
+            ) {
+                if ctx.span(id).unwrap().metadata().name() == "loader-owner" {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let enters = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(Entered(enters.clone()));
+        let loaders = tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("loader-owner");
+            let _entered = span.enter();
+            let fixture = read_blocks_span_test;
+            vec![
+                fixture
+                    .reader
+                    .read_loader(&fixture.handle, CacheTarget::Index, None),
+                fixture
+                    .reader
+                    .block_loader(&fixture.handle, fixture.index, 0, None),
+            ]
+        });
+        enters.store(0, Ordering::Relaxed);
+        std::thread::spawn(move || {
+            tokio_test::block_on(async move {
+                for loader in loaders {
+                    loader().await.unwrap();
+                }
+            });
+        })
+        .join()
+        .unwrap();
+        assert!(enters.load(Ordering::Relaxed) >= 2);
     }
 
     fn verify_read_blocks_span(
