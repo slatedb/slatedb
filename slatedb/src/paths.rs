@@ -4,10 +4,11 @@ use crate::db_state::SsTableId;
 use crate::error::SlateDBError;
 use crate::wal::slatedb::store::WalFileId;
 use object_store::path::Path;
-use ulid::Ulid;
+use ulid::{Ulid, ULID_LEN};
 
 const WAL_PATH: &str = "wal";
 const COMPACTED_PATH: &str = "compacted";
+const SST_EXTENSION: &[u8] = b".sst";
 
 /// Resolves the object store paths of a SlateDB database's files from the
 /// database's root path.
@@ -25,7 +26,11 @@ const COMPACTED_PATH: &str = "compacted";
 #[derive(Clone, Debug)]
 pub struct PathResolver {
     root_path: Path,
-    external_ssts: HashMap<SsTableId, Path>,
+    /// `<root_path>/compacted`, precomputed because [`Self::sst_path`] is on the
+    /// read path.
+    compacted_dir: Path,
+    /// The `compacted` directory of the database owning each external SST.
+    external_compacted_dirs: HashMap<SsTableId, Path>,
 }
 
 impl PathResolver {
@@ -42,23 +47,30 @@ impl PathResolver {
     /// paths under `root_path`, so callers must only use this where external
     /// SSTs cannot appear (for example WAL paths).
     pub(crate) fn from_root<P: Into<Path>>(root_path: P) -> Self {
-        Self {
-            root_path: root_path.into(),
-            external_ssts: HashMap::new(),
-        }
+        Self::new_with_external_ssts(root_path, HashMap::new())
     }
 
     pub(crate) fn new_with_external_ssts<P: Into<Path>>(
         root_path: P,
         external_ssts: HashMap<SsTableId, P>,
     ) -> Self {
+        let root_path = root_path.into();
         Self {
-            root_path: root_path.into(),
-            external_ssts: external_ssts
+            compacted_dir: Self::compacted_dir_of(&root_path),
+            external_compacted_dirs: external_ssts
                 .into_iter()
-                .map(|(k, v)| (k, v.into()))
+                .map(|(k, v)| (k, Self::compacted_dir_of(&v.into())))
                 .collect(),
+            root_path,
         }
+    }
+
+    /// Must stay byte-for-byte equal to the prefix the original
+    /// `Path::from(format!("{root}/compacted/{id}.sst"))` produced: that
+    /// re-parses (and so re-encodes) the root's segments, and existing SSTs live
+    /// at those paths.
+    fn compacted_dir_of(root_path: &Path) -> Path {
+        Path::from(format!("{}/{}", root_path, COMPACTED_PATH))
     }
 
     pub(crate) fn wal_path(&self) -> Path {
@@ -103,16 +115,21 @@ impl PathResolver {
 
     /// Returns the path of the SST with the given id.
     pub fn sst_path(&self, table_id: &SsTableId) -> Path {
-        let root_path = match self.external_ssts.get(table_id) {
-            Some(external_path) => external_path,
-            None => &self.root_path,
-        };
-        Path::from(format!(
-            "{}/{}/{}.sst",
-            root_path,
-            COMPACTED_PATH,
-            table_id.value()
-        ))
+        let compacted_dir = self
+            .external_compacted_dirs
+            .get(table_id)
+            .unwrap_or(&self.compacted_dir);
+        // Encode `<ulid>.sst` on the stack. Crockford base32 never needs
+        // percent-encoding, so `join` borrows it instead of re-encoding the
+        // whole path.
+        let mut file_name = [0u8; ULID_LEN + SST_EXTENSION.len()];
+        let (ulid, ext) = file_name.split_at_mut(ULID_LEN);
+        table_id
+            .value()
+            .array_to_str(ulid.try_into().expect("ULID_LEN bytes"));
+        ext.copy_from_slice(SST_EXTENSION);
+        let file_name = std::str::from_utf8(&file_name).expect("ULID text is ASCII");
+        compacted_dir.clone().join(file_name)
     }
 
     /// Returns the path of the WAL SST with the given id.
@@ -134,11 +151,35 @@ mod tests {
     use object_store::path::Path;
     use proptest::arbitrary::any;
     use proptest::proptest;
+    use std::collections::HashMap;
     use ulid::Ulid;
 
     const ROOT: &str = "/root";
 
     proptest! {
+        #[test]
+        fn should_build_sst_path_identical_to_legacy_format(
+            compacted_id in any::<u128>(),
+            root in "[ -~]{0,24}",
+            external_root in "[ -~]{0,24}",
+        ) {
+            let table_id = SsTableId::from(Ulid::from(compacted_id));
+            let legacy = |root: &Path| {
+                Path::from(format!("{}/compacted/{}.sst", root, table_id.value()))
+            };
+            let root = Path::from(root);
+            let external_root = Path::from(external_root);
+
+            let local = PathResolver::from_root(root.clone());
+            assert_eq!(legacy(&root), local.sst_path(&table_id));
+
+            let external = PathResolver::new_with_external_ssts(
+                root,
+                HashMap::from([(table_id, external_root.clone())]),
+            );
+            assert_eq!(legacy(&external_root), external.sst_path(&table_id));
+        }
+
         #[test]
         fn should_serialize_and_deserialize_wal_paths(
             wal_id in any::<u64>(),
