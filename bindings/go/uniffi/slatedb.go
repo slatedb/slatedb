@@ -1203,6 +1203,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbcache_indexed_weight()
+		})
+		if checksum != 57080 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbcache_indexed_weight: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_evict_cached_sst()
 		})
 		if checksum != 58617 {
@@ -1973,6 +1982,15 @@ func uniffiCheckChecksums() {
 		if checksum != 18253 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_systemclock_mock: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_bounded_foyer_cache()
+		})
+		if checksum != 50091 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_dbcache_new_bounded_foyer_cache: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -5442,11 +5460,36 @@ func (_ FfiDestroyerDbBuilder) Destroy(value *DbBuilder) {
 
 // Database cache used to store blocks in memory.
 type DbCacheInterface interface {
+	// Returns the current indexed weight for a bounded Foyer cache.
+	//
+	// Returns None for ordinary Foyer, Moka and split caches. For a split cache,
+	// retain its bounded child handles and observe each child separately.
+	// Shards are sampled separately. Evicted values retained by readers and
+	// pending loads are excluded; this observation does not measure RSS.
+	IndexedWeight() *uint64
 }
 
 // Database cache used to store blocks in memory.
 type DbCache struct {
 	ffiObject FfiObject
+}
+
+// Creates a FIFO cache with a ceiling on indexed entry weight.
+//
+// Capacity and shards must be positive, and shards cannot exceed capacity.
+// Entries weigh at least one byte. Entries larger than capacity / shards
+// are loaded successfully without admission. Retained values and pending
+// loads are outside this ceiling; it is not an RSS limit.
+func DbCacheNewBoundedFoyerCache(options FoyerCacheOptions) (*DbCache, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_dbcache_new_bounded_foyer_cache(FfiConverterFoyerCacheOptionsINSTANCE.Lower(options), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *DbCache
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterDbCacheINSTANCE.Lift(_uniffiRV), nil
+	}
 }
 
 // Creates a new Foyer based DB cache.
@@ -5488,6 +5531,22 @@ func DbCacheNewSplitCache(blockCache *DbCache, metaCache *DbCache) (*DbCache, er
 	}
 }
 
+// Returns the current indexed weight for a bounded Foyer cache.
+//
+// Returns None for ordinary Foyer, Moka and split caches. For a split cache,
+// retain its bounded child handles and observe each child separately.
+// Shards are sampled separately. Evicted values retained by readers and
+// pending loads are excluded; this observation does not measure RSS.
+func (_self *DbCache) IndexedWeight() *uint64 {
+	_pointer := _self.ffiObject.incrementPointer("*DbCache")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterOptionalUint64INSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_dbcache_indexed_weight(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
 func (object *DbCache) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
