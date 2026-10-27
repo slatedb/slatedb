@@ -1150,10 +1150,7 @@ impl CompactorState {
                 .chain(std::iter::once(&SourceId::SortedRun(dst)))
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
-            let first_source = *spec
-                .sources()
-                .first()
-                .expect("illegal: empty compaction spec");
+            assert!(!spec.sources().is_empty(), "illegal: empty compaction spec");
 
             let Some(tree) = db_state.tree_for_segment_mut(&segment) else {
                 error!(
@@ -1190,16 +1187,17 @@ impl CompactorState {
                 new_compacted.push(output_sr);
             }
             Self::assert_compacted_srs_in_id_order(&new_compacted);
-            if let Some(view_id) = first_source.maybe_unwrap_sst_view() {
-                // if there are l0s, the newest must be the first entry in sources.
-                // TODO: validate that this is the case
+            // `tree.l0` is newest-first, so the first entry the spec names is
+            // the newest L0 this compaction absorbed. Read it before `tree.l0`
+            // is replaced below.
+            let newest_compacted_l0 = tree
+                .l0
+                .iter()
+                .find(|v| compaction_l0s.contains(&v.id))
+                .map(|v| (v.id, v.sst.id.value()));
+            if let Some((view_id, sst_id)) = newest_compacted_l0 {
                 tree.last_compacted_l0_sst_view_id = Some(view_id);
-                // Resolve the SST ID from the view before it's removed from l0.
-                tree.last_compacted_l0_sst_id = tree
-                    .l0
-                    .iter()
-                    .find(|v| v.id == view_id)
-                    .map(|v| v.sst.id.value());
+                tree.last_compacted_l0_sst_id = Some(sst_id);
             }
             tree.l0 = new_l0;
             tree.compacted = new_compacted;
@@ -1733,6 +1731,71 @@ mod tests {
             .map(|h| h.sst.id)
             .collect();
         assert_eq!(expected_ids, found_ids);
+    }
+
+    /// The watermark must name the newest absorbed L0, whatever order the spec
+    /// lists its L0 sources in.
+    #[test]
+    fn test_finish_compaction_watermark_is_newest_l0_when_sources_reversed() {
+        // given:
+        let rt = build_runtime();
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
+        let l0 = state.db_state().tree.l0.clone();
+        assert!(l0.len() >= 2, "fixture must seed at least two L0 SSTs");
+        let newest = l0.front().unwrap().clone();
+        let reversed: VecDeque<SsTableView> = l0.iter().rev().cloned().collect();
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = build_l0_compaction(&reversed, 0);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        // when:
+        let sr = SortedRun::new(0, l0.iter().cloned());
+        state.finish_compaction(compaction_id, sr);
+
+        // then:
+        let tree = &state.db_state().tree;
+        assert_eq!(tree.last_compacted_l0_sst_view_id, Some(newest.id));
+        assert_eq!(tree.last_compacted_l0_sst_id, Some(newest.sst.id.value()));
+    }
+
+    /// A watermark naming anything but the newest absorbed L0 cuts the writer's
+    /// L0 list too early, leaving compacted L0s that count against `l0_max_ssts`.
+    #[test]
+    fn test_finish_compaction_merge_retains_no_absorbed_l0_when_sources_reversed() {
+        // given:
+        let rt = build_runtime();
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
+        let writer_tree = state.db_state().tree.as_ref().clone();
+        let l0 = writer_tree.l0.clone();
+        assert!(l0.len() >= 2, "fixture must seed at least two L0 SSTs");
+        let absorbed: HashSet<Ulid> = l0.iter().map(|view| view.id).collect();
+        let reversed: VecDeque<SsTableView> = l0.iter().rev().cloned().collect();
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = build_l0_compaction(&reversed, 0);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        // when:
+        let sr = SortedRun::new(0, l0.iter().cloned());
+        state.finish_compaction(compaction_id, sr);
+        let compactor_tree = state.db_state().tree.as_ref().clone();
+        let merged = writer_tree.merge_from_compactor(&compactor_tree);
+
+        // then:
+        let retained: Vec<Ulid> = merged
+            .l0
+            .iter()
+            .map(|view| view.id)
+            .filter(|id| absorbed.contains(id))
+            .collect();
+        assert!(
+            retained.is_empty(),
+            "writer retained absorbed L0 views: {:?}",
+            retained
+        );
     }
 
     #[test]
