@@ -1187,12 +1187,9 @@ impl CompactorState {
                 new_compacted.push(output_sr);
             }
             Self::assert_compacted_srs_in_id_order(&new_compacted);
-            // The watermark means "this L0 and every older one is compacted",
-            // so it can only name the newest entry of an absorbed run that
-            // reaches the oldest L0. `tree.l0` is newest-first, so walk it
-            // from the back and stop at the first gap: a spec naming a
-            // non-contiguous set must not advance the watermark past an L0 it
-            // never compacted. Read this before `tree.l0` is replaced below.
+            // The watermark covers this L0 and all older L0s. Walk from
+            // oldest to newest and stop at the first uncompacted L0 so the
+            // writer does not discard it when merging.
             let newest_compacted_l0 = tree
                 .l0
                 .iter()
