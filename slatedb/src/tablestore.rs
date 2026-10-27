@@ -334,8 +334,9 @@ impl TableStore {
         id_range: R,
     ) -> Result<Vec<IdentifiedObjectMetadata<SsTableId>>, SlateDBError> {
         let mut sst_list: Vec<IdentifiedObjectMetadata<SsTableId>> = Vec::new();
-        let compacted_path = self.path_resolver.compacted_path();
-        let mut files_stream = self.object_store.list(Some(&compacted_path));
+        let mut files_stream = self
+            .object_store
+            .list(Some(self.path_resolver.compacted_dir()));
 
         while let Some(file) = files_stream.next().await.transpose()? {
             match self.path_resolver.parse_table_id(&file.location) {
