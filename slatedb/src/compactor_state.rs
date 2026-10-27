@@ -1187,13 +1187,18 @@ impl CompactorState {
                 new_compacted.push(output_sr);
             }
             Self::assert_compacted_srs_in_id_order(&new_compacted);
-            // `tree.l0` is newest-first, so the first entry the spec names is
-            // the newest L0 this compaction absorbed. Read it before `tree.l0`
-            // is replaced below.
+            // The watermark means "this L0 and every older one is compacted",
+            // so it can only name the newest entry of an absorbed run that
+            // reaches the oldest L0. `tree.l0` is newest-first, so walk it
+            // from the back and stop at the first gap: a spec naming a
+            // non-contiguous set must not advance the watermark past an L0 it
+            // never compacted. Read this before `tree.l0` is replaced below.
             let newest_compacted_l0 = tree
                 .l0
                 .iter()
-                .find(|v| compaction_l0s.contains(&v.id))
+                .rev()
+                .take_while(|v| compaction_l0s.contains(&v.id))
+                .last()
                 .map(|v| (v.id, v.sst.id.value()));
             if let Some((view_id, sst_id)) = newest_compacted_l0 {
                 tree.last_compacted_l0_sst_view_id = Some(view_id);
@@ -1795,6 +1800,82 @@ mod tests {
             retained.is_empty(),
             "writer retained absorbed L0 views: {:?}",
             retained
+        );
+    }
+
+    /// A spec naming a non-contiguous set of L0s must not advance the watermark
+    /// past an L0 it never compacted, or the writer's merge drops live data.
+    #[test]
+    fn test_finish_compaction_keeps_uncompacted_l0_when_sources_non_contiguous() {
+        // given:
+        let rt = build_runtime();
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
+        let writer_tree = state.db_state().tree.as_ref().clone();
+        let l0 = writer_tree.l0.clone();
+        assert!(l0.len() >= 3, "fixture must seed at least three L0 SSTs");
+        // `l0` is newest-first. Name the oldest and the third-oldest, leaving
+        // the second-oldest uncompacted between them.
+        let oldest = l0[l0.len() - 1].clone();
+        let skipped = l0[l0.len() - 2].clone();
+        let third_oldest = l0[l0.len() - 3].clone();
+        let sources = VecDeque::from(vec![oldest.clone(), third_oldest.clone()]);
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = build_l0_compaction(&sources, 0);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        // when:
+        let sr = SortedRun::new(0, sources.iter().cloned());
+        state.finish_compaction(compaction_id, sr);
+        let compactor_tree = state.db_state().tree.as_ref().clone();
+        let merged = writer_tree.merge_from_compactor(&compactor_tree);
+
+        // then:
+        assert_eq!(
+            compactor_tree.last_compacted_l0_sst_view_id,
+            Some(oldest.id),
+            "watermark must stop at the gap"
+        );
+        assert!(
+            merged.l0.iter().any(|view| view.id == skipped.id),
+            "dropped an L0 that was never compacted"
+        );
+    }
+
+    /// A spec that leaves the oldest L0 uncompacted must not advance the
+    /// watermark at all. A single cut point cannot say "these middle L0s are
+    /// gone", so trimming on one would drop the older L0s that are still live.
+    #[test]
+    fn test_finish_compaction_keeps_oldest_l0_when_sources_exclude_it() {
+        // given:
+        let rt = build_runtime();
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
+        let writer_tree = state.db_state().tree.as_ref().clone();
+        let l0 = writer_tree.l0.clone();
+        assert!(l0.len() >= 3, "fixture must seed at least three L0 SSTs");
+        // `l0` is newest-first. Compact the second- and third-oldest, listed
+        // newest-first, leaving the oldest L0 out of the spec.
+        let oldest = l0[l0.len() - 1].clone();
+        let second_oldest = l0[l0.len() - 2].clone();
+        let third_oldest = l0[l0.len() - 3].clone();
+        let sources = VecDeque::from(vec![third_oldest.clone(), second_oldest.clone()]);
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = build_l0_compaction(&sources, 0);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        // when:
+        let sr = SortedRun::new(0, sources.iter().cloned());
+        state.finish_compaction(compaction_id, sr);
+        let compactor_tree = state.db_state().tree.as_ref().clone();
+        let merged = writer_tree.merge_from_compactor(&compactor_tree);
+
+        // then:
+        assert!(
+            merged.l0.iter().any(|view| view.id == oldest.id),
+            "dropped the oldest L0, which this compaction never absorbed"
         );
     }
 
