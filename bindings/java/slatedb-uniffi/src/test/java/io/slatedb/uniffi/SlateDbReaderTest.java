@@ -334,18 +334,14 @@ class SlateDbReaderTest {
     @Test
     void readerSyncManifest() throws Exception {
         try (ObjectStore store = TestSupport.newMemoryStore();
-                TestSupport.ManagedDb dbHandle = TestSupport.openDb(store);
-                AdminBuilder adminBuilder = new AdminBuilder(TestSupport.TEST_DB_PATH, store);
-                Admin admin = adminBuilder.build()) {
+                TestSupport.ManagedDb dbHandle = TestSupport.openDb(store)) {
             Db db = dbHandle.db();
             TestSupport.await(db.put(TestSupport.bytes("key"), TestSupport.bytes("initial")));
             TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
-            // A pinned reader has no poller, so only the sync moves it forward.
-            CheckpointCreateResult checkpoint =
-                    TestSupport.await(admin.createDetachedCheckpoint(new CheckpointOptions(null, null, null)));
 
+            // A manual reader has no poller, so only a sync or a refresh moves it forward.
             try (TestSupport.ManagedReader readerHandle = TestSupport.openReader(
-                    store, builder -> builder.withReaderMode(new ReaderMode.Checkpoint(checkpoint.id())))) {
+                    store, builder -> builder.withReaderMode(new ReaderMode.Manual()))) {
                 DbReader reader = readerHandle.reader();
                 TestSupport.await(db.put(TestSupport.bytes("key"), TestSupport.bytes("updated")));
                 TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
@@ -365,6 +361,16 @@ class SlateDbReaderTest {
                         Error.Invalid.class,
                         () -> reader.syncManifest(
                                 new ManifestTransfer(manifest.id() + 1, TestSupport.bytes("bad"))));
+
+                TestSupport.await(db.put(TestSupport.bytes("key"), TestSupport.bytes("refreshed")));
+                TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+                assertArrayEquals(
+                        TestSupport.bytes("updated"),
+                        TestSupport.await(reader.get(TestSupport.bytes("key"))));
+                TestSupport.await(reader.refresh());
+                assertArrayEquals(
+                        TestSupport.bytes("refreshed"),
+                        TestSupport.await(reader.get(TestSupport.bytes("key"))));
             }
         }
     }

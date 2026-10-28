@@ -31,6 +31,7 @@ impl DbReader {
 
     /// Installs a manifest that the application received from the writer
     /// without object storage, such as the result of `Db::durable_manifest`.
+    /// The reader must be in `ReaderMode::Manual`.
     ///
     /// The call does no object store IO, and the next read uses the manifest.
     /// It returns `Stale` and changes nothing if the manifest ID is less than or
@@ -45,6 +46,12 @@ impl DbReader {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl DbReader {
+    /// Loads the latest manifest and WAL files from object storage. The
+    /// reader must be in `ReaderMode::Manual`.
+    pub async fn refresh(&self) -> Result<(), Error> {
+        Ok(self.inner.refresh().await?)
+    }
+
     /// Reads the current value for `key`.
     pub async fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>, Error> {
         validate_key(&key)?;

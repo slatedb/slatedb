@@ -49,6 +49,9 @@ pub(crate) enum SlateDBError {
     #[error("invalid synced manifest. manifest_id=`{manifest_id}`, reason=`{reason}`")]
     InvalidSyncedManifest { manifest_id: u64, reason: String },
 
+    #[error("operation requires DbReaderMode::Manual. operation=`{operation}`")]
+    ManualReaderModeRequired { operation: &'static str },
+
     #[error("object store error")]
     ObjectStoreError(#[from] Arc<object_store::Error>),
 
@@ -706,6 +709,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::InvalidSequenceNumber { .. } => Error::invalid(msg),
             SlateDBError::EmptyBatch => Error::invalid(msg),
             SlateDBError::InvalidSyncedManifest { .. } => Error::invalid(msg),
+            SlateDBError::ManualReaderModeRequired { .. } => Error::invalid(msg),
             SlateDBError::InvalidManifestBytes(src) => {
                 Error::invalid(msg).with_source(Box::new(src))
             }

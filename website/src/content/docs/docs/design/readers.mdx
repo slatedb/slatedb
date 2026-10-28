@@ -30,7 +30,7 @@ async fn main() -> Result<(), Error> {
 
 Without [`DbReaderBuilder::with_checkpoint_id`](https://docs.rs/slatedb/latest/slatedb/struct.DbReaderBuilder.html#method.with_checkpoint_id), SlateDB creates a checkpoint in the latest manifest and sets its lifetime from [`DbReaderOptions::checkpoint_lifetime`](https://docs.rs/slatedb/latest/slatedb/config/struct.DbReaderOptions.html#structfield.checkpoint_lifetime). That checkpoint pins the initial L0 and sorted-run view. The reader then replays newer WAL SSTs into immutable memtables unless [`DbReaderOptions::skip_wal_replay`](https://docs.rs/slatedb/latest/slatedb/config/struct.DbReaderOptions.html#structfield.skip_wal_replay) is `true`.
 
-With an explicit checkpoint ID, SlateDB opens exactly the manifest pinned by that checkpoint. It does not create a new checkpoint, refresh the user-managed checkpoint, delete it on close, or follow newer manifests or WAL SSTs. The application can still move the reader to a newer manifest with [manifest sync](#manifest-sync).
+With an explicit checkpoint ID, SlateDB opens exactly the manifest pinned by that checkpoint. It does not create a new checkpoint, refresh the user-managed checkpoint, delete it on close, or follow newer manifests or WAL SSTs.
 
 When `skip_wal_replay` is `true`, the reader only sees data already referenced by the manifest it opened. If the reader owns the checkpoint, it can still pick up later memtable flushes and compaction results when the manifest changes, but it ignores WAL-only data between those manifest updates.
 
@@ -48,9 +48,18 @@ On each tick, SlateDB loads the latest manifest. If the visible SST layout chang
 
 SlateDB refreshes the checkpoint expiration after half of the configured lifetime has elapsed. [`DbReader::close`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html#method.close) stops the poller and deletes the checkpoint the reader created for itself.
 
+## Manual Mode
+
+In [`DbReaderMode::Manual`](https://docs.rs/slatedb/latest/slatedb/enum.DbReaderMode.html#variant.Manual), the reader loads the latest manifest when it opens and has no poller. It creates no checkpoint, so like `FollowLatest` it does no object store writes and does not protect its SSTs from garbage collection. The application decides when the reader changes, with one of two calls:
+
+- [`DbReader::refresh`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html#method.refresh) loads the latest manifest and the newer WAL SSTs from object storage. It does the same work as one poll of a `FollowLatest` reader.
+- [`DbReader::sync_manifest`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html#method.sync_manifest) installs a manifest that the application received from the writer, without object store IO. See [Manifest Sync](#manifest-sync).
+
+Both calls return an error of kind `Invalid` in the other modes.
+
 ## Manifest Sync
 
-An application can send manifests from the writer to its readers without object storage, for example over its own network connection. The reader then reads the new data without waiting for its next poll.
+An application can send manifests from the writer to its readers without object storage, for example over its own network connection. A reader in `Manual` mode then reads the new data without a request to object storage.
 
 On the writer, [`DbStatus::durable_manifest`](https://docs.rs/slatedb/latest/slatedb/struct.DbStatus.html#structfield.durable_manifest) from [`Db::subscribe`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html#method.subscribe) holds the most recent manifest that the writer wrote to or read from object storage. [`ManifestTransfer`](https://docs.rs/slatedb/latest/slatedb/manifest/struct.ManifestTransfer.html) holds that manifest in the `.manifest` file format, and it implements serde `Serialize` and `Deserialize`. The application chooses the serde format and the transport.
 
@@ -68,15 +77,9 @@ let outcome = reader.sync_manifest(VersionedManifest::try_from(transfer)?)?;
 
 [`DbReader::sync_manifest`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html#method.sync_manifest) installs the manifest in memory and does no object store IO. The next read uses it. The call returns `Stale` and changes nothing if the manifest ID is less than or equal to the ID of the installed manifest. The call returns an error of kind `Invalid` if the manifest is not initialized, if its writer epoch, compactor epoch, or `last_l0_seq` is less than in the installed manifest, or if its segment extractor name is different.
 
-The reader keeps its mode after a sync:
+The sync does not replay WAL SSTs. A call to `refresh` replays newer WAL SSTs.
 
-- A reader that owns its checkpoint moves the checkpoint in the background, after object storage holds a manifest that is at least as new as the synced manifest.
-- A reader in `FollowLatest` mode continues to poll. When a poll reads the synced manifest from object storage, the reader no longer keeps the older state for the fallback that this section describes below.
-- A reader with an explicit checkpoint ID reads from the synced manifest. The checkpoint does not protect the SSTs of that manifest from garbage collection.
-
-The sync does not replay WAL SSTs. The poller replays newer WAL SSTs on its next tick.
-
-The reader keeps the last state that it built from a manifest in object storage. If a read against a synced manifest fails because an object is missing, the reader installs that state again and retries the read once. A scan can retry only while SlateDB builds the iterator. This protects the reader from a manifest whose SSTs the garbage collector deleted, or from a manifest of a different database.
+The reader keeps the last state that it built from a manifest in object storage, when it opened or in the last `refresh`. If a read against a synced manifest fails because an object is missing, the reader installs that state again and retries the read once. A scan can retry only while SlateDB builds the iterator. This protects the reader from a manifest whose SSTs the garbage collector deleted, or from a manifest of a different database.
 
 The reader counts syncs in the `slatedb.db.manifest_sync_count` metric, with an `outcome` label of `applied`, `stale`, or `rejected`. It counts fallbacks in `slatedb.db.manifest_sync_fallback_count`.
 

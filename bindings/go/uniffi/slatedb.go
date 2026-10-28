@@ -1266,6 +1266,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_refresh()
+		})
+		if checksum != 25864 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_refresh: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_scan()
 		})
 		if checksum != 19340 {
@@ -1322,7 +1331,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_sync_manifest()
 		})
-		if checksum != 29785 {
+		if checksum != 25988 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_sync_manifest: UniFFI API checksum mismatch")
 		}
@@ -5799,6 +5808,9 @@ type DbReaderInterface interface {
 	GetKeyValueWithOptions(key []byte, options ReadOptions) (*KeyValue, error)
 	// Reads the current value for `key` using custom read options.
 	GetWithOptions(key []byte, options ReadOptions) (*[]byte, error)
+	// Loads the latest manifest and WAL files from object storage. The
+	// reader must be in `ReaderMode::Manual`.
+	Refresh() error
 	// Scans rows inside `range`.
 	Scan(varRange KeyRange) (*DbIterator, error)
 	// Scans rows whose keys start with `prefix`, restricted to `subrange`.
@@ -5814,6 +5826,7 @@ type DbReaderInterface interface {
 	Status() DbStatus
 	// Installs a manifest that the application received from the writer
 	// without object storage, such as the result of `Db::durable_manifest`.
+	// The reader must be in `ReaderMode::Manual`.
 	//
 	// The call does no object store IO, and the next read uses the manifest.
 	// It returns `Stale` and changes nothing if the manifest ID is less than or
@@ -6057,6 +6070,39 @@ func (_self *DbReader) GetWithOptions(key []byte, options ReadOptions) (*[]byte,
 	return res, err
 }
 
+// Loads the latest manifest and WAL files from object storage. The
+// reader must be in `ReaderMode::Manual`.
+func (_self *DbReader) Refresh() error {
+	_pointer := _self.ffiObject.incrementPointer("*DbReader")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_dbreader_refresh(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
 // Scans rows inside `range`.
 func (_self *DbReader) Scan(varRange KeyRange) (*DbIterator, error) {
 	_pointer := _self.ffiObject.incrementPointer("*DbReader")
@@ -6240,6 +6286,7 @@ func (_self *DbReader) Status() DbStatus {
 
 // Installs a manifest that the application received from the writer
 // without object storage, such as the result of `Db::durable_manifest`.
+// The reader must be in `ReaderMode::Manual`.
 //
 // The call does no object store IO, and the next read uses the manifest.
 // It returns `Stale` and changes nothing if the manifest ID is less than or
@@ -14707,6 +14754,15 @@ type ReaderModeFollowLatest struct {
 func (e ReaderModeFollowLatest) Destroy() {
 }
 
+// Change the database state only when the application calls `DbReader::refresh` or
+// `DbReader::sync_manifest`. The reader has no background poller and creates no
+// checkpoint.
+type ReaderModeManual struct {
+}
+
+func (e ReaderModeManual) Destroy() {
+}
+
 type FfiConverterReaderMode struct{}
 
 var FfiConverterReaderModeINSTANCE = FfiConverterReaderMode{}
@@ -14733,6 +14789,8 @@ func (FfiConverterReaderMode) Read(reader io.Reader) ReaderMode {
 		}
 	case 3:
 		return ReaderModeFollowLatest{}
+	case 4:
+		return ReaderModeManual{}
 	default:
 		panic(fmt.Sprintf("invalid enum value %v in FfiConverterReaderMode.Read()", id))
 	}
@@ -14747,6 +14805,8 @@ func (FfiConverterReaderMode) Write(writer io.Writer, value ReaderMode) {
 		FfiConverterStringINSTANCE.Write(writer, variant_value.Field0)
 	case ReaderModeFollowLatest:
 		writeInt32(writer, 3)
+	case ReaderModeManual:
+		writeInt32(writer, 4)
 	default:
 		_ = variant_value
 		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterReaderMode.Write", value))

@@ -188,6 +188,10 @@ pub enum ReaderMode {
     Checkpoint(String),
     /// Follow the latest manifest without creating or maintaining a checkpoint.
     FollowLatest,
+    /// Change the database state only when the application calls `DbReader::refresh` or
+    /// `DbReader::sync_manifest`. The reader has no background poller and creates no
+    /// checkpoint.
+    Manual,
 }
 
 impl TryFrom<ReaderMode> for slatedb::DbReaderMode {
@@ -200,6 +204,7 @@ impl TryFrom<ReaderMode> for slatedb::DbReaderMode {
                 Self::Checkpoint(try_checkpoint_id_from_str(&checkpoint_id)?)
             }
             ReaderMode::FollowLatest => Self::FollowLatest,
+            ReaderMode::Manual => Self::Manual,
         })
     }
 }

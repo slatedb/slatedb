@@ -16,8 +16,6 @@ from conftest import (
 )
 
 from slatedb.uniffi import (
-    AdminBuilder,
-    CheckpointOptions,
     CloseReason,
     DbCache,
     DbReaderBuilder,
@@ -385,17 +383,10 @@ async def test_reader_sync_manifest() -> None:
     async with open_db(store) as db:
         await db.put(b"key", b"initial")
         await db.flush_with_options(FlushOptions(flush_type=FlushType.MEM_TABLE))
-        # A pinned reader has no poller, so only the sync moves it forward.
-        admin = AdminBuilder(TEST_DB_PATH, store).build()
-        checkpoint = await admin.create_detached_checkpoint(
-            CheckpointOptions(lifetime_ms=None, source=None, name=None)
-        )
-
+        # A manual reader has no poller, so only a sync or a refresh moves it forward.
         async with open_reader(
             store,
-            configure=lambda builder: builder.with_reader_mode(
-                ReaderMode.CHECKPOINT(checkpoint.id)
-            ),
+            configure=lambda builder: builder.with_reader_mode(ReaderMode.MANUAL()),
         ) as reader:
             await db.put(b"key", b"updated")
             await db.flush_with_options(FlushOptions(flush_type=FlushType.MEM_TABLE))
@@ -409,3 +400,9 @@ async def test_reader_sync_manifest() -> None:
 
             with pytest.raises(Error.Invalid):
                 reader.sync_manifest(ManifestTransfer(id=manifest.id + 1, bytes=b"bad"))
+
+            await db.put(b"key", b"refreshed")
+            await db.flush_with_options(FlushOptions(flush_type=FlushType.MEM_TABLE))
+            assert await reader.get(b"key") == b"updated"
+            await reader.refresh()
+            assert await reader.get(b"key") == b"refreshed"

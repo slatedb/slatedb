@@ -3692,7 +3692,6 @@ func BenchmarkScanNextBatch(b *testing.B) {
 func TestDbReaderSyncManifest(t *testing.T) {
 	store := newMemoryStore(t)
 	handle := openTestDB(t, store, nil)
-	admin := openTestAdmin(t, store, nil)
 
 	if _, err := handle.db.Put([]byte("key"), []byte("initial")); err != nil {
 		t.Fatalf("Put(initial): %v", err)
@@ -3700,13 +3699,9 @@ func TestDbReaderSyncManifest(t *testing.T) {
 	if err := handle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
 		t.Fatalf("FlushWithOptions(MemTable): %v", err)
 	}
-	// A pinned reader has no poller, so only the sync moves it forward.
-	checkpoint, err := admin.CreateDetachedCheckpoint(slatedb.CheckpointOptions{})
-	if err != nil {
-		t.Fatalf("CreateDetachedCheckpoint(): %v", err)
-	}
+	// A manual reader has no poller, so only a sync or a refresh moves it forward.
 	readerHandle := openTestReader(t, store, func(t *testing.T, builder *slatedb.DbReaderBuilder) {
-		if err := builder.WithReaderMode(slatedb.ReaderModeCheckpoint{Field0: checkpoint.Id}); err != nil {
+		if err := builder.WithReaderMode(slatedb.ReaderModeManual{}); err != nil {
 			t.Fatalf("WithReaderMode(): %v", err)
 		}
 	})
@@ -3752,5 +3747,21 @@ func TestDbReaderSyncManifest(t *testing.T) {
 	bad := slatedb.ManifestTransfer{Id: manifest.Id + 1, Bytes: []byte("bad")}
 	if _, err := reader.SyncManifest(bad); !errors.Is(err, slatedb.ErrErrorInvalid) {
 		t.Fatalf("SyncManifest(bad bytes): got %v, want invalid error", err)
+	}
+
+	if _, err := handle.db.Put([]byte("key"), []byte("refreshed")); err != nil {
+		t.Fatalf("Put(refreshed): %v", err)
+	}
+	if err := handle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+	if got := readValue(); !bytes.Equal(got, []byte("updated")) {
+		t.Fatalf("DbReader.Get() before refresh = %q, want %q", got, "updated")
+	}
+	if err := reader.Refresh(); err != nil {
+		t.Fatalf("Refresh(): %v", err)
+	}
+	if got := readValue(); !bytes.Equal(got, []byte("refreshed")) {
+		t.Fatalf("DbReader.Get() after refresh = %q, want %q", got, "refreshed")
 	}
 }

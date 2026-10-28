@@ -442,9 +442,6 @@ test("reader sync_manifest", async (t) => {
   const cleanup = createCleanup(t);
   const store = cleanup.track(newMemoryStore());
   const db = await openDb(store, { cleanup });
-  const admin = cleanup.track(new AdminBuilder(TEST_DB_PATH, store).build(), {
-    shutdown: false,
-  });
 
   await db.put_with_options(
     bytes("key"),
@@ -453,15 +450,10 @@ test("reader sync_manifest", async (t) => {
     writeOptions(false),
   );
   await db.flush_with_options({ flush_type: FlushType.MemTable });
-  // A pinned reader has no poller, so only the sync moves it forward.
-  const checkpoint = await admin.create_detached_checkpoint({
-    lifetime_ms: undefined,
-    source: undefined,
-    name: undefined,
-  });
+  // A manual reader has no poller, so only a sync or a refresh moves it forward.
   const reader = await openReader(store, {
     cleanup,
-    configure: (builder) => builder.with_reader_mode(ReaderMode.Checkpoint(checkpoint.id)),
+    configure: (builder) => builder.with_reader_mode(ReaderMode.Manual()),
   });
 
   await db.put_with_options(
@@ -483,4 +475,15 @@ test("reader sync_manifest", async (t) => {
     () => reader.sync_manifest({ id: BigInt(manifest.id) + 1n, bytes: bytes("bad") }),
     ErrorInvalid,
   );
+
+  await db.put_with_options(
+    bytes("key"),
+    bytes("refreshed"),
+    putOptions(),
+    writeOptions(false),
+  );
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+  assert.deepEqual(await reader.get(bytes("key")), bytes("updated"));
+  await reader.refresh();
+  assert.deepEqual(await reader.get(bytes("key")), bytes("refreshed"));
 });
