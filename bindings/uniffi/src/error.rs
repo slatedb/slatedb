@@ -146,6 +146,42 @@ impl From<slatedb::CloseReason> for CloseReason {
     }
 }
 
+/// The kind of an error. It matches the `ErrorKind` of SlateDB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum ErrorKind {
+    /// A transaction conflict.
+    Transaction,
+    /// The database or reader is closed.
+    Closed {
+        /// The reason that the database or reader closed.
+        reason: CloseReason,
+    },
+    /// A storage or network service is unavailable.
+    Unavailable,
+    /// The request, the configuration, or a user plugin is invalid.
+    Invalid,
+    /// Persisted data is in an unexpected state.
+    Data,
+    /// An unexpected internal error.
+    Internal,
+}
+
+impl From<slatedb::ErrorKind> for ErrorKind {
+    fn from(kind: slatedb::ErrorKind) -> Self {
+        match kind {
+            slatedb::ErrorKind::Transaction => Self::Transaction,
+            slatedb::ErrorKind::Closed(reason) => Self::Closed {
+                reason: reason.into(),
+            },
+            slatedb::ErrorKind::Unavailable => Self::Unavailable,
+            slatedb::ErrorKind::Invalid => Self::Invalid,
+            slatedb::ErrorKind::Data => Self::Data,
+            slatedb::ErrorKind::Internal => Self::Internal,
+            _ => Self::Internal,
+        }
+    }
+}
+
 /// Error type returned by the UniFFI bindings.
 #[derive(Debug, Error, uniffi::Error)]
 pub enum Error {
@@ -231,6 +267,20 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn error_kinds_map_to_binding_kinds() {
+        assert_eq!(
+            ErrorKind::from(slatedb::ErrorKind::Unavailable),
+            ErrorKind::Unavailable
+        );
+        assert_eq!(
+            ErrorKind::from(slatedb::ErrorKind::Closed(slatedb::CloseReason::Fenced)),
+            ErrorKind::Closed {
+                reason: CloseReason::Fenced
+            }
+        );
+    }
 
     #[test]
     fn wal_errors_preserve_binding_categories() {

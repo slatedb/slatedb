@@ -24,6 +24,24 @@ enum CompactionStatus : byte {
     Scheduled,
 }
 
+// The kind of the error that made a compaction worker mark a compaction
+// `Failed`. The values match the public `ErrorKind` and `CloseReason` of
+// SlateDB.
+enum CompactionErrorKind : byte {
+    // The entry has no error kind. The coordinator writes no kind when a
+    // compaction fails validation. A writer from an earlier release drops the
+    // kind when it rewrites `.compactions`.
+    Unknown = 0,
+    Transaction,
+    ClosedClean,
+    ClosedFenced,
+    ClosedPanic,
+    Unavailable,
+    Invalid,
+    Data,
+    Internal,
+}
+
 table TieredCompactionSpec {
     // deprecated: use l0_view_ids
     ssts: [Ulid];
@@ -114,6 +132,9 @@ table Compaction {
 
     // Information required to resume a compaction job on a worker
     ctx: CompactionContext;
+
+    // The kind of the error that made a worker mark this compaction `Failed`
+    error_kind: CompactionErrorKind;
 }
 
 // A compaction over a sub-range of the parent compaction's key space

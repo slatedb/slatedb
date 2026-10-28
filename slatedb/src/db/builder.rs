@@ -1713,11 +1713,24 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             .into());
         }
         let path: Path = self.path.into();
-        let manifest_store = Arc::new(ManifestStore::new(&path, self.main_object_store.clone()));
-        let compactions_store =
-            Arc::new(CompactionsStore::new(&path, self.main_object_store.clone()));
-        let table_store = Arc::new(TableStore::new(
+        let recorder = MetricsRecorderHelper::new(
+            self.metrics_recorder,
+            self.options.metric_level.unwrap_or_default(),
+        );
+        // Same retry layer as `CompactorBuilder::build`.
+        let main_object_store = instrumented_retrying_object_store(
             self.main_object_store,
+            &recorder,
+            ObjectStoreComponent::Compactor,
+            ObjectStoreType::Main,
+            self.rand.clone(),
+            self.system_clock.clone(),
+            self.options.object_store_max_retries,
+        );
+        let manifest_store = Arc::new(ManifestStore::new(&path, main_object_store.clone()));
+        let compactions_store = Arc::new(CompactionsStore::new(&path, main_object_store.clone()));
+        let table_store = Arc::new(TableStore::new(
+            main_object_store,
             SsTableFormat {
                 filter_policies: self.filter_policies.clone(),
                 block_transformer: self.block_transformer.clone(),
@@ -1732,10 +1745,6 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
             TableStoreKind::Compactor,
             BlockCachePolicy::default(),
         ));
-        let recorder = MetricsRecorderHelper::new(
-            self.metrics_recorder,
-            self.options.metric_level.unwrap_or_default(),
-        );
         let stats = Arc::new(CompactionStats::new(&recorder));
         let worker_runtime = self.worker_runtime.unwrap_or_else(Handle::current);
         let options = Arc::new(self.options);
