@@ -81,10 +81,6 @@ impl Subcompaction {
         self.status == SubcompactionStatus::Completed
     }
 
-    pub(crate) fn mark_completed(&mut self) {
-        self.status = SubcompactionStatus::Completed;
-    }
-
     /// Returns the key range covered by this subcompaction.
     pub(crate) fn range(&self) -> &BytesRange {
         &self.range

@@ -12,8 +12,7 @@ use crate::db_state::{SortedRun, SsTableHandle, SsTableView};
 use crate::error::SlateDBError;
 use crate::incremental_progress::IncrementalProgress;
 use crate::manifest::{Manifest, ManifestCore};
-use crate::subcompaction::Subcompaction;
-use slatedb_common::clock::SystemClock;
+use crate::subcompaction::{Subcompaction, SubcompactionStatus};
 use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
 
@@ -392,7 +391,10 @@ impl CompactionContext {
     }
 
     pub(crate) fn mark_completed(&mut self, subcompaction: usize) {
-        self.subcompactions[subcompaction].mark_completed();
+        let subcompaction = &mut self.subcompactions[subcompaction];
+        *subcompaction = subcompaction
+            .clone()
+            .with_status(SubcompactionStatus::Completed);
     }
 
     /// Returns the subcompactions of this compaction, if any.
@@ -712,16 +714,14 @@ impl Display for Compaction {
         }
         // TODO: fix me by implementing Display for CompactionJob
         if !self.subcompactions().is_empty() {
-            // Count ranges with stored output, including unfinished ranges.
-            let with_output = self
+            let completed = self
                 .subcompactions()
                 .iter()
-                .filter(|s| !s.output_ssts().is_empty())
+                .filter(|s| s.completed())
                 .count();
             write!(
                 f,
-                " [{}/{} subcompactions with output]",
-                with_output,
+                " [{completed}/{} subcompactions completed]",
                 self.subcompactions().len()
             )?;
         }
@@ -1085,10 +1085,9 @@ impl CompactorState {
         job: &Compaction,
         progress: &IncrementalProgress,
         rand: &DbRand,
-        clock: &dyn SystemClock,
     ) -> Result<bool, SlateDBError> {
         let mut core = self.db_state().clone();
-        progress.apply_to_manifest_core(&mut core, job.spec(), rand, clock)?;
+        progress.apply_to_manifest_core(&mut core, job.spec(), rand)?;
         let changed = &core != self.db_state();
         self.manifest.value.core = core;
         self.manifest.value.prune_external_sst_ids();
@@ -1405,7 +1404,7 @@ mod tests {
     fn test_subcompaction_completion_cannot_revert() {
         let completed = CompactionContext::new(
             vec![Subcompaction::new(BytesRange::unbounded())
-                .with_status(crate::subcompaction::SubcompactionStatus::Completed)],
+                .with_status(SubcompactionStatus::Completed)],
             Some(42),
         );
         let incomplete =
@@ -1422,7 +1421,7 @@ mod tests {
         let mut compaction =
             test_compaction_with_subcompactions(vec![Subcompaction::new(range.clone())
                 .with_output_ssts(vec![sst.clone()])
-                .with_status(crate::subcompaction::SubcompactionStatus::Completed)]);
+                .with_status(SubcompactionStatus::Completed)]);
 
         // when/then: adding an output SST to the completed range panics, even
         // though the new list starts with the old list
@@ -1430,7 +1429,7 @@ mod tests {
             &mut compaction,
             vec![Subcompaction::new(range)
                 .with_output_ssts(vec![sst, test_subcompaction_sst(b"m")])
-                .with_status(crate::subcompaction::SubcompactionStatus::Completed)],
+                .with_status(SubcompactionStatus::Completed)],
         );
     }
 
@@ -1516,6 +1515,19 @@ mod tests {
 
         // then: the extended output SSTs are accepted
         assert_eq!(compaction.subcompactions()[0].output_ssts().len(), 2);
+    }
+
+    #[test]
+    fn test_display_counts_completed_subcompactions() {
+        let compaction = test_compaction_with_subcompactions(vec![
+            Subcompaction::new(BytesRange::from_slice(..b"m".as_slice()))
+                .with_status(SubcompactionStatus::Completed),
+            Subcompaction::new(BytesRange::from_slice(b"m".as_slice()..))
+                .with_output_ssts(vec![test_subcompaction_sst(b"m")]),
+        ]);
+        assert!(compaction
+            .to_string()
+            .ends_with(" [1/2 subcompactions completed]"));
     }
 
     #[test]

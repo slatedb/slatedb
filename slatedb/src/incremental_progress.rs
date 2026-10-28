@@ -10,7 +10,6 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::RangeBounds;
 
 use bytes::Bytes;
-use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
 
 use crate::bytes_range::BytesRange;
@@ -18,7 +17,6 @@ use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
 use crate::db_state::{SortedRun, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::manifest::ManifestCore;
-use crate::utils::IdGenerator;
 
 /// Durable progress of one job, built from its stored subcompactions.
 pub(crate) struct IncrementalProgress {
@@ -45,8 +43,10 @@ impl IncrementalProgress {
     ///   versions of that key.
     /// - Unfinished without output: no interval.
     ///
+    /// Each cut output view gets a new view ID from `rand`.
+    ///
     /// Panics if the last output SST of an unfinished range has no `last_entry`.
-    pub(crate) fn from_compaction(job: &Compaction) -> Self {
+    pub(crate) fn from_compaction(job: &Compaction, rand: &DbRand) -> Self {
         let mut intervals = Vec::new();
         let mut output = Vec::new();
         let mut output_ids = HashSet::new();
@@ -86,7 +86,7 @@ impl IncrementalProgress {
                 // them ends at that key. Cut such an SST to end before the key. An SST
                 // that holds only the boundary key drops out.
                 if sst.info.last_entry.as_ref() == Some(&boundary) {
-                    if let Some(cut_view) = cut_view(&view, interval.to_range()) {
+                    if let Some(cut_view) = view.try_with_visible_range(interval.to_range(), rand) {
                         output.push(cut_view);
                     }
                 } else {
@@ -108,9 +108,9 @@ impl IncrementalProgress {
     /// commit with more progress replaces the views of an earlier commit, and the
     /// same progress applied twice gives the same result:
     /// - Every view of a recorded output SST is removed first.
-    /// - Each durable interval is cut out of each remaining input view. If a view
-    ///   splits, the first piece keeps its ID, and each other piece gets a new view
-    ///   ID from `rand` and `clock`. A view with no keys left is removed.
+    /// - Each durable interval is cut out of each remaining input view. Each piece
+    ///   whose range changes gets a new view ID from `rand`. A view with no keys left
+    ///   is removed.
     /// - The destination run gets the views in `output`, sorted by start key.
     ///
     /// Input runs stay in the manifest, even when empty, so recovery can still find
@@ -127,7 +127,6 @@ impl IncrementalProgress {
         core: &mut ManifestCore,
         spec: &CompactionSpec,
         rand: &DbRand,
-        clock: &dyn SystemClock,
     ) -> Result<(), SlateDBError> {
         assert!(
             !spec.has_l0_sources() && spec.reuses_input_run(),
@@ -172,18 +171,14 @@ impl IncrementalProgress {
                         .flat_map(|range| interval.subtract_from(&range))
                         .collect();
                 }
-                // A view can split into several pieces. The first piece keeps the view ID,
-                // and each other piece gets a new view ID. A view with no keys left is gone.
-                for (index, range) in retained.into_iter().enumerate() {
-                    let mut piece = if &range == view.compacted_effective_range() {
+                // A view can split into several pieces. A view with no keys left is gone.
+                for range in retained {
+                    views.push(if &range == view.compacted_effective_range() {
                         view.clone()
                     } else {
-                        cut_view(view, range).expect("retained range intersects its SST")
-                    };
-                    if index > 0 {
-                        piece.id = rand.rng().gen_ulid(clock);
-                    }
-                    views.push(piece);
+                        view.try_with_visible_range(range, rand)
+                            .expect("retained range intersects its SST")
+                    });
                 }
             }
             // The destination run also gets the output views, sorted by start key.
@@ -200,34 +195,6 @@ impl IncrementalProgress {
         }
         Ok(())
     }
-}
-
-/// Returns `view` cut to `range`, with the same view ID. Returns `None` if the SST
-/// has no keys in `range`.
-///
-/// This function does not use [`SsTableView::try_with_visible_range`], because that
-/// method gives each cut view a new random ID. [`IncrementalProgress::from_compaction`]
-/// builds the output views again for each commit. With a new ID each time, the same
-/// progress gives a different manifest, and each commit interval writes the manifest
-/// even when the job made no progress.
-///
-/// Keeping the ID is safe for these views. A new ID protects L0 views, because
-/// compaction specs and the L0 watermark refer to L0 views by view ID. An incremental
-/// commit changes only sorted-run views, and compactions refer to sorted runs by run
-/// ID. The view ID also stays unique in the manifest: the cut view replaces the view
-/// that it comes from, and [`IncrementalProgress::apply_to_manifest_core`] gives the
-/// other pieces of a split view new IDs.
-fn cut_view(view: &SsTableView, range: BytesRange) -> Option<SsTableView> {
-    view.sst
-        .info
-        .physical_range()
-        .expect("SST always has a first entry.")
-        .intersect(&range)?;
-    Some(SsTableView::new_projected(
-        view.id,
-        view.sst.clone(),
-        Some(range),
-    ))
 }
 
 /// A durable interval `[start, end)`: the key range of one subcompaction whose output
@@ -306,7 +273,6 @@ mod tests {
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::subcompaction::Subcompaction;
     use bytes::Bytes;
-    use slatedb_common::clock::DefaultSystemClock;
     use std::sync::Arc;
     use ulid::Ulid;
 
@@ -345,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_views_preserve_ids_projections_and_empty_runs() {
+    fn incremental_views_get_new_ids_keep_projections_and_empty_runs() {
         let original = view(b"a", b"z")
             .with_visible_range(BytesRange::from_slice(b"c".as_slice()..b"x".as_slice()));
         let released = view(b"g", b"j");
@@ -367,12 +333,7 @@ mod tests {
             output: vec![output],
         };
         progress
-            .apply_to_manifest_core(
-                &mut core,
-                job.spec(),
-                &DbRand::default(),
-                &DefaultSystemClock::new(),
-            )
+            .apply_to_manifest_core(&mut core, job.spec(), &DbRand::default())
             .unwrap();
         assert_eq!(
             core.tree
@@ -385,8 +346,11 @@ mod tests {
         assert!(core.tree.compacted[0].sst_views().is_empty());
         let views = core.tree.compacted[1].sst_views();
         assert_eq!(views.len(), 3);
-        assert_eq!(views[0].id, original.id);
-        assert_ne!(views[2].id, original.id);
+        assert_ne!(views[0].id, views[2].id);
+        for piece in [&views[0], &views[2]] {
+            assert_ne!(piece.id, original.id);
+            assert_eq!(piece.id.timestamp_ms(), original.id.timestamp_ms());
+        }
         assert_eq!(
             views[0].compacted_effective_range(),
             &BytesRange::from_slice(b"c".as_slice()..b"g".as_slice())
@@ -397,12 +361,7 @@ mod tests {
         );
         let before = core.clone();
         progress
-            .apply_to_manifest_core(
-                &mut core,
-                job.spec(),
-                &DbRand::default(),
-                &DefaultSystemClock::new(),
-            )
+            .apply_to_manifest_core(&mut core, job.spec(), &DbRand::default())
             .unwrap();
         assert_eq!(core, before);
     }
@@ -473,7 +432,7 @@ mod tests {
                 Some(0),
             )))
         };
-        let progress = IncrementalProgress::from_compaction(&make_job(output));
+        let progress = IncrementalProgress::from_compaction(&make_job(output), &DbRand::default());
         assert_eq!(
             progress.intervals,
             vec![
@@ -509,7 +468,7 @@ mod tests {
             ],
             Some(0),
         )));
-        let progress = IncrementalProgress::from_compaction(&job);
+        let progress = IncrementalProgress::from_compaction(&job, &DbRand::default());
         assert_eq!(progress.output.len(), 2);
         assert!(progress.output[0].visible_range().is_none());
         assert!(!progress.output[1]
@@ -534,18 +493,13 @@ mod tests {
             ],
             Some(0),
         )));
-        let progress = IncrementalProgress::from_compaction(&job);
+        let progress = IncrementalProgress::from_compaction(&job, &DbRand::default());
         progress
-            .apply_to_manifest_core(
-                &mut core,
-                job.spec(),
-                &DbRand::default(),
-                &DefaultSystemClock::new(),
-            )
+            .apply_to_manifest_core(&mut core, job.spec(), &DbRand::default())
             .unwrap();
         let views = core.tree.compacted[0].sst_views();
         assert_eq!(views.len(), 5);
-        assert_eq!(views[0].id, input.id);
+        assert_eq!(views[0].sst.id, input.sst.id);
         assert_eq!(
             views[1..4]
                 .iter()
@@ -553,7 +507,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             outputs.iter().map(|view| view.sst.id).collect::<Vec<_>>()
         );
-        let tail_id = views[4].id;
         assert!(!views[3]
             .compacted_effective_range()
             .contains(&Bytes::from_static(b"m")));
@@ -561,18 +514,13 @@ mod tests {
         let mut ctx = job.ctx().unwrap().clone();
         ctx.mark_completed(0);
         job.set_ctx(Some(ctx));
-        let completed = IncrementalProgress::from_compaction(&job);
+        let completed = IncrementalProgress::from_compaction(&job, &DbRand::default());
         completed
-            .apply_to_manifest_core(
-                &mut core,
-                job.spec(),
-                &DbRand::default(),
-                &DefaultSystemClock::new(),
-            )
+            .apply_to_manifest_core(&mut core, job.spec(), &DbRand::default())
             .unwrap();
         let views = core.tree.compacted[0].sst_views();
         assert_eq!(views.len(), 5);
-        assert_eq!(views[4].id, tail_id);
+        assert_eq!(views[4].sst.id, input.sst.id);
         assert!(views[3]
             .compacted_effective_range()
             .contains(&Bytes::from_static(b"m")));
@@ -582,12 +530,7 @@ mod tests {
         );
         let before = core.clone();
         completed
-            .apply_to_manifest_core(
-                &mut core,
-                job.spec(),
-                &DbRand::default(),
-                &DefaultSystemClock::new(),
-            )
+            .apply_to_manifest_core(&mut core, job.spec(), &DbRand::default())
             .unwrap();
         assert_eq!(core, before);
     }

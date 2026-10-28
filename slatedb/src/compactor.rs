@@ -899,7 +899,7 @@ impl CompactorEventHandler {
         }
 
         let final_changed = self.apply_final_commits(&finished_jobs);
-        let incremental_changed = self.apply_incremental_commits(&incremental_jobs)?;
+        let incremental_changed = self.apply_incremental_commits(&incremental_jobs);
         self.log_compaction_state();
 
         if final_changed || incremental_changed {
@@ -1001,22 +1001,28 @@ impl CompactorEventHandler {
 
     /// Applies the stored progress of `jobs` to the in-memory manifest.
     ///
+    /// Skips a job if its segment or an input run is missing from the manifest. This
+    /// happens when another job removed an input run that both jobs share. The skipped
+    /// job keeps running, and its final commit fails validation and marks it `Failed`.
+    ///
     /// Returns whether the manifest changed. The caller writes the manifest.
-    fn apply_incremental_commits(&mut self, jobs: &[Compaction]) -> Result<bool, SlateDBError> {
+    fn apply_incremental_commits(&mut self, jobs: &[Compaction]) -> bool {
         let mut changed = false;
         for job in jobs {
-            let progress = IncrementalProgress::from_compaction(job);
-            changed |= self
+            let progress = IncrementalProgress::from_compaction(job, &self.rand);
+            match self
                 .state_writer
                 .state
-                .apply_incremental_progress_to_manifest(
-                    job,
-                    &progress,
-                    &self.rand,
-                    self.system_clock.as_ref(),
-                )?;
+                .apply_incremental_progress_to_manifest(job, &progress, &self.rand)
+            {
+                Ok(job_changed) => changed |= job_changed,
+                Err(e) => warn!(
+                    "skipped incremental commit, job inputs are missing [id={}, error={e:?}]",
+                    job.id()
+                ),
+            }
         }
-        Ok(changed)
+        changed
     }
 
     /// Returns whether the manifest already holds the final commit of `job`.
@@ -1403,11 +1409,11 @@ impl CompactorEventHandler {
                     );
                     continue;
                 }
-                // A job that already ran can come back as Submitted with its context.
-                // A worker that stops or fails returns the job to Scheduled, and a
-                // coordinator restart moves Scheduled jobs back to Submitted. Keep the
-                // context, so the next worker resumes the job. After incremental commits,
-                // the job needs it to find its own output in the destination run.
+                // A job can come back here with its context because a reclaim
+                // moves it to Scheduled, and a restart moves it to Submitted.
+                // We keep the context so the next worker resumes the job and
+                // does not redo its stored output because incremental progress
+                // has been made already.
                 self.state_mut().update_compaction(&compaction.id(), |c| {
                     c.set_status(CompactionStatus::Scheduled)
                 });
@@ -7139,36 +7145,6 @@ mod tests {
                 .ctx(),
             job.ctx()
         );
-
-        Arc::make_mut(
-            &mut fixture
-                .handler
-                .state_mut()
-                .manifest_mut_for_test()
-                .value
-                .core
-                .tree,
-        )
-        .compacted
-        .retain(|run| run.id != 0);
-        fixture
-            .handler
-            .state_writer
-            .write_manifest_safely()
-            .await
-            .unwrap();
-        let without_duplicate = fixture.manifest_store.read_latest_manifest().await.unwrap();
-        fixture.handler.last_incremental_commit = None;
-        fixture.handler.commit_compacted_entries().await.unwrap();
-        assert_eq!(
-            fixture
-                .manifest_store
-                .read_latest_manifest()
-                .await
-                .unwrap()
-                .id(),
-            without_duplicate.id()
-        );
     }
 
     #[rstest]
@@ -7405,6 +7381,77 @@ mod tests {
                 .status(),
             CompactionStatus::Running
         );
+    }
+
+    #[tokio::test]
+    async fn incremental_commit_skips_job_with_missing_input_runs() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let job = seed_incremental_job(&mut fixture).await;
+        // The final commit of `finished` removes both input runs of `job`.
+        Arc::make_mut(
+            &mut fixture
+                .handler
+                .state_mut()
+                .manifest_mut_for_test()
+                .value
+                .core
+                .tree,
+        )
+        .compacted
+        .push(SortedRun::new(0, []));
+        let finished = Compaction::new(
+            Ulid::from_parts(2, 0),
+            CompactionSpec::new(
+                vec![
+                    SourceId::SortedRun(2),
+                    SourceId::SortedRun(1),
+                    SourceId::SortedRun(0),
+                ],
+                0,
+            ),
+        )
+        .with_status(CompactionStatus::Compacted)
+        .with_output_ssts(vec![fake_output_sst()]);
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(finished.clone());
+        fixture
+            .handler
+            .state_writer
+            .write_state_safely()
+            .await
+            .unwrap();
+        fixture.handler.enable_incremental_compaction = true;
+
+        fixture.handler.commit_compacted_entries().await.unwrap();
+
+        let manifest = fixture.manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(
+            manifest
+                .core()
+                .tree
+                .compacted
+                .iter()
+                .map(|run| run.id)
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+        let stored = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        assert_eq!(
+            stored.get(&finished.id()).unwrap().status(),
+            CompactionStatus::Completed
+        );
+        assert_eq!(
+            stored.get(&job.id()).unwrap().status(),
+            CompactionStatus::Running
+        );
+        assert!(fixture.handler.last_incremental_commit.is_none());
     }
 
     #[tokio::test]
