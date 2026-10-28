@@ -34,15 +34,16 @@ pub(crate) use root_generated::{
 
 use crate::config::CompressionCodec;
 use crate::db_state::SsTableId;
-use crate::error::SlateDBError;
+use crate::error::{CloseReason, ErrorKind, SlateDBError};
 use crate::flatbuffer_types::root_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
     CompactedSsTableArgs, CompactedSsTableV2, CompactedSsTableV2Args, CompactedSsTableView,
     CompactedSsTableViewArgs, Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
-    CompactionContext as FbCompactionContext, CompactionSpec as FbCompactionSpec,
-    CompactionStatus as FbCompactionStatus, CompactionsV1, CompactionsV1Args, CompressionFormat,
-    DrainSegmentSpec, DrainSegmentSpecArgs, Segment as FbSegment, SegmentArgs as FbSegmentArgs,
-    SortedRunV2, SortedRunV2Args, SstType as FbSstType, Subcompaction as FbSubcompaction,
+    CompactionContext as FbCompactionContext, CompactionErrorKind as FbCompactionErrorKind,
+    CompactionSpec as FbCompactionSpec, CompactionStatus as FbCompactionStatus, CompactionsV1,
+    CompactionsV1Args, CompressionFormat, DrainSegmentSpec, DrainSegmentSpecArgs,
+    Segment as FbSegment, SegmentArgs as FbSegmentArgs, SortedRunV2, SortedRunV2Args,
+    SstType as FbSstType, Subcompaction as FbSubcompaction,
     SubcompactionArgs as FbSubcompactionArgs, TieredCompactionContext as FbTieredCompactionContext,
     TieredCompactionContextArgs as FbTieredCompactionContextArgs, TieredCompactionSpec,
     TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid, UuidArgs,
@@ -637,7 +638,8 @@ impl FlatBufferCompactionsCodec {
             .with_status(status)
             .with_worker(worker)
             .with_output_ssts(output_ssts)
-            .with_ctx(ctx))
+            .with_ctx(ctx)
+            .with_error_kind(compaction.error_kind().into()))
     }
 
     fn compaction_context(ctx: FbTieredCompactionContext) -> CompactorCompactionContext {
@@ -1105,6 +1107,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
                 worker,
                 ctx_type,
                 ctx,
+                error_kind: FbCompactionErrorKind::from(compaction.error_kind()),
             },
         )
     }
@@ -1522,6 +1525,39 @@ impl From<FbCompactionStatus> for CompactionStatus {
             FbCompactionStatus::Completed => CompactionStatus::Completed,
             FbCompactionStatus::Failed => CompactionStatus::Failed,
             _ => CompactionStatus::Submitted,
+        }
+    }
+}
+
+impl From<Option<ErrorKind>> for FbCompactionErrorKind {
+    fn from(value: Option<ErrorKind>) -> Self {
+        match value {
+            None => FbCompactionErrorKind::Unknown,
+            Some(ErrorKind::Transaction) => FbCompactionErrorKind::Transaction,
+            Some(ErrorKind::Closed(CloseReason::Clean)) => FbCompactionErrorKind::ClosedClean,
+            Some(ErrorKind::Closed(CloseReason::Fenced)) => FbCompactionErrorKind::ClosedFenced,
+            Some(ErrorKind::Closed(CloseReason::Panic)) => FbCompactionErrorKind::ClosedPanic,
+            Some(ErrorKind::Unavailable) => FbCompactionErrorKind::Unavailable,
+            Some(ErrorKind::Invalid) => FbCompactionErrorKind::Invalid,
+            Some(ErrorKind::Data) => FbCompactionErrorKind::Data,
+            Some(ErrorKind::Internal) => FbCompactionErrorKind::Internal,
+        }
+    }
+}
+
+impl From<FbCompactionErrorKind> for Option<ErrorKind> {
+    fn from(value: FbCompactionErrorKind) -> Self {
+        match value {
+            FbCompactionErrorKind::Transaction => Some(ErrorKind::Transaction),
+            FbCompactionErrorKind::ClosedClean => Some(ErrorKind::Closed(CloseReason::Clean)),
+            FbCompactionErrorKind::ClosedFenced => Some(ErrorKind::Closed(CloseReason::Fenced)),
+            FbCompactionErrorKind::ClosedPanic => Some(ErrorKind::Closed(CloseReason::Panic)),
+            FbCompactionErrorKind::Unavailable => Some(ErrorKind::Unavailable),
+            FbCompactionErrorKind::Invalid => Some(ErrorKind::Invalid),
+            FbCompactionErrorKind::Data => Some(ErrorKind::Data),
+            FbCompactionErrorKind::Internal => Some(ErrorKind::Internal),
+            // `Unknown`, or a value written by a newer version.
+            _ => None,
         }
     }
 }
@@ -1970,6 +2006,54 @@ mod tests {
         let decoded_none = codec.decode(&bytes_none).unwrap();
 
         assert_eq!(decoded_none.core.recent_snapshot_min_seq, 0);
+    }
+
+    #[test]
+    fn test_should_encode_decode_compaction_error_kind() {
+        use super::root_generated::CompactionErrorKind as FbCompactionErrorKind;
+        use crate::ErrorKind;
+
+        // Every schema value maps to a kind and back. A new schema value with
+        // no decode arm decodes as `None` and fails here.
+        let error_kinds: Vec<Option<ErrorKind>> = FbCompactionErrorKind::ENUM_VALUES
+            .iter()
+            .map(|fb_kind| {
+                let error_kind = Option::<ErrorKind>::from(*fb_kind);
+                assert_eq!(
+                    FbCompactionErrorKind::from(error_kind),
+                    *fb_kind,
+                    "{fb_kind:?} does not round-trip"
+                );
+                error_kind
+            })
+            .collect();
+        let mut compactions = Compactions::new(1);
+        let failed: Vec<Compaction> = error_kinds
+            .into_iter()
+            .map(|error_kind| {
+                Compaction::new(
+                    ulid::Ulid::new(),
+                    CompactionSpec::new(vec![SourceId::SortedRun(1)], 1),
+                )
+                .with_status(CompactionStatus::Failed)
+                .with_error_kind(error_kind)
+            })
+            .collect();
+        for compaction in &failed {
+            compactions.insert(compaction.clone());
+        }
+
+        let codec = FlatBufferCompactionsCodec {};
+        let decoded = codec
+            .decode(&codec.encode(&compactions))
+            .expect("failed to decode compactions");
+
+        for compaction in &failed {
+            assert_eq!(
+                decoded.get(&compaction.id()).expect("missing compaction"),
+                compaction
+            );
+        }
     }
 
     #[test]
@@ -2555,6 +2639,7 @@ mod tests {
                 worker: None,
                 ctx_type: root_generated::CompactionContext::NONE,
                 ctx: None,
+                error_kind: root_generated::CompactionErrorKind::Unknown,
             },
         );
         let compactions_vec = fbb.create_vector(&[compaction]);
@@ -2631,6 +2716,7 @@ mod tests {
                 worker: None,
                 ctx_type: root_generated::CompactionContext::NONE,
                 ctx: None,
+                error_kind: root_generated::CompactionErrorKind::Unknown,
             },
         );
         let compactions_vec = fbb.create_vector(&[compaction]);
@@ -2699,6 +2785,7 @@ mod tests {
                 worker: None,
                 ctx_type: root_generated::CompactionContext::NONE,
                 ctx: None,
+                error_kind: root_generated::CompactionErrorKind::Unknown,
             },
         );
         let compactions_vec = fbb.create_vector(&[compaction]);

@@ -565,7 +565,8 @@ impl MessageHandler<CompactorMessage> for CompactorEventHandler {
                 }
             }
         }
-        Ok(())
+        // A write retry can also load a job that a worker marked `Failed`.
+        self.state_writer.check_failed_by_workers()
     }
 
     async fn cleanup(
@@ -734,6 +735,8 @@ impl CompactorEventHandler {
     /// Handles a polling tick by refreshing compactions and the manifest, then possibly scheduling compactions.
     async fn handle_ticker(&mut self) -> Result<(), SlateDBError> {
         self.state_writer.refresh().await?;
+        // Stop before the scheduler proposes the sources of a failed job again.
+        self.state_writer.check_failed_by_workers()?;
         self.reclaim_stale_workers().await?;
         self.update_distributed_compaction_metrics();
         self.commit_compacted_entries().await?;
@@ -6918,6 +6921,209 @@ mod tests {
             manifest_id_after, manifest_id_before,
             "validation-only failures must not checkpoint or rewrite the manifest"
         );
+    }
+
+    /// A job that a worker marks `Failed` stops the coordinator with an error
+    /// of the same kind as the error of the job. A `Failed` job does not hold
+    /// its sources. Without the stop, the coordinator schedules a new job with
+    /// the same inputs.
+    #[tokio::test]
+    async fn test_coordinator_stops_when_worker_marks_job_failed() {
+        // given: a Scheduled L0 compaction
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.write_l0().await;
+        let spec = fixture.build_l0_compaction().await;
+        fixture.scheduler.inject_compaction(spec);
+        fixture.handler.handle_ticker().await.unwrap();
+        let scheduled = fixture.get_scheduled_compactions().await;
+        assert_eq!(scheduled.len(), 1);
+        let id = scheduled[0].id();
+
+        // when: a worker claims the job, uses up its retries on an object
+        // store outage, and marks the job Failed
+        let mut stored = StoredCompactions::try_load(fixture.compactions_store.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        for (status, error_kind) in [
+            (CompactionStatus::Running, None),
+            (
+                CompactionStatus::Failed,
+                Some(crate::ErrorKind::Unavailable),
+            ),
+        ] {
+            stored.refresh().await.unwrap();
+            let mut dirty = stored.prepare_dirty().unwrap();
+            dirty.value.insert(
+                scheduled[0]
+                    .clone()
+                    .with_status(status)
+                    .with_worker(Some(WorkerSpec::new("worker-1".to_string(), 0)))
+                    .with_error_kind(error_kind),
+            );
+            stored.update(dirty).await.unwrap();
+        }
+
+        // then: the next coordinator message returns the failure
+        let err = fixture
+            .handler
+            .handle(CompactorMessage::CommitCompacted)
+            .await
+            .expect_err("a job that a worker marked Failed must stop the coordinator");
+        assert!(
+            matches!(
+                err,
+                SlateDBError::CompactionJobFailed {
+                    id: failed,
+                    kind: Some(crate::ErrorKind::Unavailable),
+                } if failed == id
+            ),
+            "{err:?}"
+        );
+        assert_eq!(Error::from(err).kind(), crate::ErrorKind::Unavailable);
+        let stored = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        assert_eq!(
+            stored.get(&id).expect("missing compaction").status(),
+            CompactionStatus::Failed
+        );
+    }
+
+    /// Fills L0 up to `l0_max_ssts` and starts a memtable flush that waits for
+    /// compaction to free L0. If `lose_oldest_sst` is true, storage loses the
+    /// oldest L0 SST first. Compaction starts only after the flush waits, and
+    /// then reads every L0 SST.
+    async fn start_flush_that_waits_for_compaction(
+        lose_oldest_sst: bool,
+    ) -> (Db, tokio::task::JoinHandle<Result<(), Error>>) {
+        use crate::db_stats::{L0_STALL_COUNT, L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS};
+        use crate::test_utils::OnDemandCompactionSchedulerSupplier;
+        use futures::TryStreamExt;
+        use object_store::ObjectStoreExt;
+        use slatedb_common::metrics::{lookup_metric_with_labels, DefaultMetricsRecorder};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let compact_now = Arc::new(AtomicBool::new(false));
+        let scheduler = {
+            let compact_now = compact_now.clone();
+            Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+                move |_state| compact_now.load(Ordering::SeqCst),
+            )))
+        };
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(Settings {
+                l0_max_ssts: 3,
+                ..db_options(None)
+            })
+            .with_metrics_recorder(metrics_recorder.clone())
+            .with_compactor_builder(compactor_builder_with_scheduler(
+                os.clone(),
+                scheduler,
+                Arc::new(DefaultSystemClock::new()),
+            ))
+            // Compaction must read the input SSTs from storage.
+            .with_db_cache_disabled()
+            .build()
+            .await
+            .unwrap();
+
+        put_and_flush_memtable(&db, b"key-0", b"value").await;
+        if lose_oldest_sst {
+            let ssts: Vec<Path> = os
+                .list(Some(&Path::from(format!("{PATH}/compacted"))))
+                .map_ok(|meta| meta.location)
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(ssts.len(), 1, "{ssts:?}");
+            os.delete(&ssts[0]).await.unwrap();
+        }
+        put_and_flush_memtable(&db, b"key-1", b"value").await;
+        put_and_flush_memtable(&db, b"key-2", b"value").await;
+        assert_eq!(read_db_state_core(&db).tree.l0.len(), 3);
+
+        db.put(b"key-3", b"value").await.unwrap();
+        let flush = {
+            let db = db.clone();
+            tokio::spawn(async move {
+                db.flush_with_options(FlushOptions {
+                    flush_type: FlushType::MemTable,
+                })
+                .await
+            })
+        };
+        // The flusher counts a stall when it holds back a memtable on a full L0.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while lookup_metric_with_labels(
+                &metrics_recorder,
+                L0_STALL_COUNT,
+                &[(L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS)],
+            )
+            .unwrap_or(0)
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the flush must wait while L0 is full");
+        assert!(!flush.is_finished(), "the flush must wait while L0 is full");
+
+        compact_now.store(true, Ordering::SeqCst);
+        (db, flush)
+    }
+
+    /// Control: when every input SST is present, compaction frees L0 and the
+    /// waiting flush returns.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_compaction_frees_full_l0_for_waiting_flush() {
+        let (db, flush) = start_flush_that_waits_for_compaction(false).await;
+
+        tokio::time::timeout(Duration::from_secs(10), flush)
+            .await
+            .expect("compaction must free L0")
+            .unwrap()
+            .expect("the flush must succeed");
+
+        assert!(db.status().close_reason.is_none());
+        db.close().await.unwrap();
+    }
+
+    /// When storage lost a compaction input SST, the job fails and closes the
+    /// `Db` with the error of the job. The waiting flush returns that error
+    /// and does not wait forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_db_closes_when_compaction_input_sst_is_missing() {
+        let (db, flush) = start_flush_that_waits_for_compaction(true).await;
+
+        let err = tokio::time::timeout(Duration::from_secs(10), flush)
+            .await
+            .expect("the flush must not wait forever")
+            .unwrap()
+            .expect_err("the flush must return the error of the compaction job");
+
+        assert_eq!(err.kind(), crate::ErrorKind::Data, "{err:?}");
+        let source = std::error::Error::source(&err)
+            .and_then(|source| source.downcast_ref::<Arc<object_store::Error>>());
+        assert!(
+            matches!(
+                source.map(|e| e.as_ref()),
+                Some(object_store::Error::NotFound { .. })
+            ),
+            "{err:?}"
+        );
+        assert!(db.status().close_reason.is_some());
+        let err = db
+            .put(b"key-4", b"value")
+            .await
+            .expect_err("a closed db must reject writes");
+        assert_eq!(err.kind(), crate::ErrorKind::Data, "{err:?}");
     }
 
     /// A Running compaction whose heartbeat is older than the timeout must be

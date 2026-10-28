@@ -1200,6 +1200,27 @@ mod tests {
     }
 
     #[test]
+    fn test_failed_job_does_not_hold_its_sources() {
+        // A `Failed` job is not active, so its sources are free again. A job
+        // that a worker marks `Failed` leaves its L0 SSTs in place, and the
+        // next tick proposes a new job with the same sources. This is why the
+        // coordinator stops when a worker marks a job `Failed`.
+        let scheduler = SizeTieredCompactionScheduler::default();
+        let l0: Vec<SsTableView> = (0..4).map(|_| create_sst_view(1)).collect();
+        let mut state =
+            create_compactor_state(create_db_state(l0.iter().cloned().collect(), vec![]));
+        let failed_spec = create_l0_compaction(&l0, 0);
+        state.insert_compaction_for_test(
+            Compaction::new(ulid::Ulid::new(), failed_spec.clone())
+                .with_status(CompactionStatus::Failed),
+        );
+
+        let requests = scheduler.propose(&(&state).into());
+
+        assert_eq!(requests, vec![failed_spec]);
+    }
+
+    #[test]
     fn test_compacted_job_does_not_consume_compaction_slot() {
         // A finished worker job in one tree is still waiting for its manifest
         // commit, while a disjoint tree has eligible work. With one worker
