@@ -10,8 +10,10 @@ use ulid::Ulid;
 
 use crate::db_state::{SortedRun, SsTableHandle, SsTableView};
 use crate::error::SlateDBError;
+use crate::incremental_progress::IncrementalProgress;
 use crate::manifest::{Manifest, ManifestCore};
-use crate::subcompaction::Subcompaction;
+use crate::subcompaction::{Subcompaction, SubcompactionStatus};
+use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
 
 /// Identifier for a compaction input source.
@@ -181,6 +183,12 @@ impl CompactionSpec {
     /// Returns true if this is a [`CompactionSpec::DrainSegment`] spec.
     pub fn is_drain(&self) -> bool {
         matches!(self, CompactionSpec::DrainSegment(_))
+    }
+
+    /// Returns whether this job reuses an input run as its destination.
+    pub(crate) fn reuses_input_run(&self) -> bool {
+        self.destination()
+            .is_some_and(|id| self.sources().contains(&SourceId::SortedRun(id)))
     }
 
     /// Returns true if any of the compaction sources are L0 SST views.
@@ -382,6 +390,13 @@ impl CompactionContext {
             .set_output_ssts(output_ssts);
     }
 
+    pub(crate) fn mark_completed(&mut self, subcompaction: usize) {
+        let subcompaction = &mut self.subcompactions[subcompaction];
+        *subcompaction = subcompaction
+            .clone()
+            .with_status(SubcompactionStatus::Completed);
+    }
+
     /// Returns the subcompactions of this compaction, if any.
     pub fn subcompactions(&self) -> &Vec<Subcompaction> {
         &self.subcompactions
@@ -406,6 +421,17 @@ impl CompactionContext {
             .iter()
             .zip(updated.subcompactions.iter())
         {
+            assert!(
+                !prev.completed() || next.completed(),
+                "completed subcompactions must remain complete"
+            );
+            if prev.completed() {
+                assert_eq!(
+                    prev.output_ssts().len(),
+                    next.output_ssts().len(),
+                    "completed subcompaction output SSTs must not change"
+                );
+            }
             assert_eq!(
                 prev.range(),
                 next.range(),
@@ -688,17 +714,14 @@ impl Display for Compaction {
         }
         // TODO: fix me by implementing Display for CompactionJob
         if !self.subcompactions().is_empty() {
-            // Subcompactions carry no status, so report how many ranges have
-            // produced output so far rather than a completion count.
-            let with_output = self
+            let completed = self
                 .subcompactions()
                 .iter()
-                .filter(|s| !s.output_ssts().is_empty())
+                .filter(|s| s.completed())
                 .count();
             write!(
                 f,
-                " [{}/{} subcompactions with output]",
-                with_output,
+                " [{completed}/{} subcompactions completed]",
                 self.subcompactions().len()
             )?;
         }
@@ -1049,6 +1072,28 @@ impl CompactorState {
         self.manifest = remote_manifest;
     }
 
+    /// Applies `progress` of `job` to the in-memory manifest.
+    ///
+    /// [`IncrementalProgress::apply_to_manifest_core`] describes how the views
+    /// change. This method also removes parent SST IDs that no view uses anymore
+    /// from `external_dbs`.
+    ///
+    /// Returns whether the manifest changed. The caller writes the manifest. If this
+    /// method returns an error, the manifest does not change.
+    pub(crate) fn apply_incremental_progress_to_manifest(
+        &mut self,
+        job: &Compaction,
+        progress: &IncrementalProgress,
+        rand: &DbRand,
+    ) -> Result<bool, SlateDBError> {
+        let mut core = self.db_state().clone();
+        progress.apply_to_manifest_core(&mut core, job.spec(), rand)?;
+        let changed = &core != self.db_state();
+        self.manifest.value.core = core;
+        self.manifest.value.prune_external_sst_ids();
+        Ok(changed)
+    }
+
     /// Registers a newly proposed compaction in the compactor's local state.
     ///
     /// Only enforces invariants about *conflicts across in-flight compactions* — checks
@@ -1355,6 +1400,40 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "completed subcompactions must remain complete")]
+    fn test_subcompaction_completion_cannot_revert() {
+        let completed = CompactionContext::new(
+            vec![Subcompaction::new(BytesRange::unbounded())
+                .with_status(SubcompactionStatus::Completed)],
+            Some(42),
+        );
+        let incomplete =
+            CompactionContext::new(vec![Subcompaction::new(BytesRange::unbounded())], Some(42));
+        completed.validate_update(&incomplete);
+    }
+
+    #[test]
+    #[should_panic(expected = "completed subcompaction output SSTs must not change")]
+    fn test_should_panic_when_completed_subcompaction_output_ssts_change() {
+        // given: a completed subcompaction that recorded output SST "a"
+        let range = BytesRange::unbounded();
+        let sst = test_subcompaction_sst(b"a");
+        let mut compaction =
+            test_compaction_with_subcompactions(vec![Subcompaction::new(range.clone())
+                .with_output_ssts(vec![sst.clone()])
+                .with_status(SubcompactionStatus::Completed)]);
+
+        // when/then: adding an output SST to the completed range panics, even
+        // though the new list starts with the old list
+        set_test_subcompactions(
+            &mut compaction,
+            vec![Subcompaction::new(range)
+                .with_output_ssts(vec![sst, test_subcompaction_sst(b"m")])
+                .with_status(SubcompactionStatus::Completed)],
+        );
+    }
+
+    #[test]
     fn test_trivial_move_output_builds_sorted_run_from_disjoint_inputs() {
         let l0 = bounded_sst_view(2, b"m", b"n");
         let sr_first = bounded_sst_view(1, b"a", b"b");
@@ -1436,6 +1515,19 @@ mod tests {
 
         // then: the extended output SSTs are accepted
         assert_eq!(compaction.subcompactions()[0].output_ssts().len(), 2);
+    }
+
+    #[test]
+    fn test_display_counts_completed_subcompactions() {
+        let compaction = test_compaction_with_subcompactions(vec![
+            Subcompaction::new(BytesRange::from_slice(..b"m".as_slice()))
+                .with_status(SubcompactionStatus::Completed),
+            Subcompaction::new(BytesRange::from_slice(b"m".as_slice()..))
+                .with_output_ssts(vec![test_subcompaction_sst(b"m")]),
+        ]);
+        assert!(compaction
+            .to_string()
+            .ends_with(" [1/2 subcompactions completed]"));
     }
 
     #[test]
