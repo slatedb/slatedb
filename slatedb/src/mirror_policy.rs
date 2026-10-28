@@ -33,10 +33,10 @@ use slatedb_mirror::{
 use slatedb_txn_obj::ObjectCodec;
 
 use crate::compactions_store::CompactionsStore;
-use crate::compactor_state::VersionedCompactions;
-use crate::flatbuffer_types::FlatBufferManifestCodec;
+use crate::compactor_state::{Compactions, VersionedCompactions};
+use crate::flatbuffer_types::{FlatBufferCompactionsCodec, FlatBufferManifestCodec};
 use crate::manifest::{Manifest, VersionedManifest};
-use crate::object_store_tag::{ObjectStoreCallTag, SstType, TableStoreKind};
+use crate::object_store_tag::{ObjectStoreCallTag, SstType};
 use crate::paths::PathResolver;
 use crate::retrying_object_store::RetryingObjectStore;
 
@@ -46,6 +46,10 @@ const POLICY_STORE_NAME: &str = "SlateDbMirrorPolicy";
 const MANIFEST_DIR: &str = "manifest";
 /// The suffix of a manifest file name, after the manifest ID.
 const MANIFEST_SUFFIX: &str = ".manifest";
+/// The directory under the database root that holds the `.compactions` objects.
+const COMPACTIONS_DIR: &str = "compactions";
+/// The suffix of a `.compactions` file name, after its ID.
+const COMPACTIONS_SUFFIX: &str = ".compactions";
 /// The default for [`SlateDbMirrorPolicyBuilder::with_compactions_poll_interval`].
 const DEFAULT_COMPACTIONS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -55,9 +59,10 @@ type SegmentPredicate = dyn Fn(&VersionedManifest, &[u8]) -> bool + Send + Sync;
 
 /// A [`MirrorPolicy`] that mirrors the compacted SSTs of one SlateDB database.
 ///
-/// The policy serves the database root of the first manifest that it reads or
-/// writes. It rejects manifests of other roots. SSTs of other databases that
-/// the manifest references (for example, after a clone) are mirrored.
+/// The policy serves the database root of the first manifest or `.compactions`
+/// object that it reads or writes. It rejects these objects of other roots.
+/// SSTs of other databases that the manifest references (for example, after a
+/// clone) are mirrored.
 ///
 /// Creating a clone and detaching a clone from its parent change the manifest
 /// of the parent database, so they fail through this policy. Run them on the
@@ -120,31 +125,25 @@ impl SlateDbMirrorPolicy {
 impl MirrorPolicy for SlateDbMirrorPolicy {
     fn read_route(&self, path: &Path, options: &GetOptions) -> object_store::Result<ReadRoute> {
         // Mirrored SSTs come first, so that their reads do not parse the path.
+        // A read that SlateDB retries because the SST contents were corrupt
+        // downloads the SST again, because the local copy can be the corrupt
+        // one. Other reads use the local copy.
         if let Some(tag) = self.mirrored_sst_tag(&options.extensions) {
-            // A compactor read of an SST that the policy does not retain goes
-            // to the wrapped store, because no manifest downloaded the SST. A
-            // worker that resumes a compaction reads such an SST: the partial
-            // output that an earlier worker wrote.
-            if tag.kind == TableStoreKind::Compactor && !self.state.lock().retained.contains(path) {
-                return Ok(ReadRoute::Remote);
-            }
-            // A read that SlateDB retries because the SST contents were corrupt
-            // downloads the SST again, because the local copy can be the
-            // corrupt one. Other reads use the local copy.
             return Ok(match tag.retry {
                 Some(_) => ReadRoute::Refetch,
                 None => ReadRoute::Local,
             });
         }
-        // A manifest is read from object storage. Then `observe` downloads its
-        // SSTs before the caller gets the manifest. A manifest of a database
-        // other than the first one fails.
-        if let Some((root, _)) = parse_manifest_path(path) {
+        // A manifest or `.compactions` object is read from object storage.
+        // Then `observe` downloads the SSTs that SlateDB reads next, before
+        // the caller gets the object. An object of a database other than the
+        // first one fails.
+        if let Some(root) = manifest_or_compactions_root(path) {
             self.record_or_check_root(&root)?;
             return Ok(ReadRoute::Observe);
         }
         // WAL SSTs, compacted SSTs in segments that are not selected, and all
-        // other objects, such as `.compactions`, are read from object storage.
+        // other objects are read from object storage.
         Ok(ReadRoute::Remote)
     }
 
@@ -159,10 +158,17 @@ impl MirrorPolicy for SlateDbMirrorPolicy {
             }
             return Ok(WriteRoute::Mirror);
         }
-        // A manifest is written to object storage. Then `observe` downloads
-        // its SSTs before the write returns. A manifest of a database other
-        // than the first one fails.
-        if let Some((root, _)) = parse_manifest_path(path) {
+        // A manifest or `.compactions` object is written to object storage.
+        // Then `observe` downloads the SSTs that SlateDB reads next, before
+        // the write returns.
+        //
+        // Observing reads alone is not enough for `.compactions`. When the
+        // coordinator takes a compaction back from a stopped worker, it writes
+        // a new `.compactions` object. Its embedded worker shares the
+        // coordinator's `CompactionsStore`, which keeps the bytes of its own
+        // last write. So the worker gets that object without a GET, and only
+        // this write can download the output that the worker resumes from.
+        if let Some(root) = manifest_or_compactions_root(path) {
             self.record_or_check_root(&root)?;
             return Ok(WriteRoute::Observe);
         }
@@ -183,6 +189,62 @@ impl MirrorPolicy for SlateDbMirrorPolicy {
         })
     }
 
+    /// Processes a manifest or `.compactions` object that SlateDB read or
+    /// wrote. See `observe_manifest` and `observe_compactions`.
+    async fn observe(
+        &self,
+        path: &Path,
+        bytes: &Bytes,
+        mirror: &MirrorHandle,
+    ) -> object_store::Result<()> {
+        // Only manifests and `.compactions` objects use the `Observe` routes.
+        if let Some((root, manifest_id)) = parse_manifest_path(path) {
+            return self
+                .observe_manifest(&root, manifest_id, bytes, mirror)
+                .await;
+        }
+        if let Some((root, _)) = parse_compactions_path(path) {
+            return self.observe_compactions(&root, bytes, mirror).await;
+        }
+        Ok(())
+    }
+
+    async fn run(self: Arc<Self>, mirror: MirrorHandle) {
+        let Some(interval) = self.compactions_poll_interval else {
+            return;
+        };
+        let mut compactions_store = None;
+        loop {
+            self.system_clock.sleep(interval).await;
+            let (root, manifest) = {
+                let state = self.state.lock();
+                match (&state.root, &state.newest) {
+                    (Some(root), Some(newest)) => (root.clone(), Arc::clone(newest)),
+                    _ => continue,
+                }
+            };
+            let store = compactions_store
+                .get_or_insert_with(|| CompactionsStore::new(&root, Arc::clone(mirror.remote())));
+            let compactions = match store.try_read_latest_compactions().await {
+                Ok(Some(compactions)) => compactions,
+                Ok(None) => continue,
+                Err(err) => {
+                    warn!("failed to read compactions for mirror prefetch [error={err}]");
+                    continue;
+                }
+            };
+            // Skip local SSTs, so that a poll during a large compaction stays
+            // cheap.
+            mirror.prefetch(
+                self.compaction_outputs(&root, &manifest, &compactions)
+                    .into_iter()
+                    .filter(|sst| !mirror.contains(sst)),
+            );
+        }
+    }
+}
+
+impl SlateDbMirrorPolicy {
     /// Processes a manifest that SlateDB read or wrote, and downloads the
     /// selected SSTs of the manifest before the caller gets it.
     ///
@@ -191,22 +253,19 @@ impl MirrorPolicy for SlateDbMirrorPolicy {
     /// SSTs that it no longer retains. An older manifest, for example the
     /// manifest of a checkpoint that a reader opens, does not change the
     /// state. It downloads only its SSTs that are still retained.
-    async fn observe(
+    async fn observe_manifest(
         &self,
-        path: &Path,
+        root: &Path,
+        manifest_id: u64,
         bytes: &Bytes,
         mirror: &MirrorHandle,
     ) -> object_store::Result<()> {
-        // Only manifest calls use the `Observe` routes.
-        let Some((root, manifest_id)) = parse_manifest_path(path) else {
-            return Ok(());
-        };
         let versioned_manifest = Arc::new(VersionedManifest::from_manifest(
             manifest_id,
             decode_manifest(bytes)?,
         ));
         let manifest_paths = Arc::new(ManifestSstPaths::from_manifest(
-            &root,
+            root,
             &versioned_manifest.manifest,
         ));
 
@@ -220,7 +279,7 @@ impl MirrorPolicy for SlateDbMirrorPolicy {
         // predicate.
         let update = if newer {
             let checkpoints = self
-                .checkpoint_paths(mirror, &root, &versioned_manifest, &manifest_paths)
+                .checkpoint_paths(mirror, root, &versioned_manifest, &manifest_paths)
                 .await?;
             let to_download: HashSet<Path> = self
                 .selected_ssts(&versioned_manifest, &manifest_paths)
@@ -278,42 +337,44 @@ impl MirrorPolicy for SlateDbMirrorPolicy {
         mirror.fetch(to_download).await
     }
 
-    async fn run(self: Arc<Self>, mirror: MirrorHandle) {
-        let Some(interval) = self.compactions_poll_interval else {
-            return;
-        };
-        let mut compactions_store = None;
-        loop {
-            self.system_clock.sleep(interval).await;
-            let (root, manifest) = {
-                let state = self.state.lock();
-                match (&state.root, &state.newest) {
-                    (Some(root), Some(newest)) => (root.clone(), Arc::clone(newest)),
-                    _ => continue,
-                }
-            };
-            let store = compactions_store
-                .get_or_insert_with(|| CompactionsStore::new(&root, Arc::clone(mirror.remote())));
-            let compactions = match store.try_read_latest_compactions().await {
-                Ok(Some(compactions)) => compactions,
-                Ok(None) => continue,
-                Err(err) => {
-                    warn!("failed to read compactions for mirror prefetch [error={err}]");
-                    continue;
-                }
-            };
-            // Skip local SSTs, so that a poll during a large compaction stays
-            // cheap.
-            mirror.prefetch(
-                self.compaction_outputs(&root, &manifest, &compactions)
-                    .into_iter()
-                    .filter(|sst| !mirror.contains(sst)),
-            );
+    /// Downloads the SSTs that a worker reads to resume a compaction: the last
+    /// output SST of each range of a `Scheduled` compaction. Such a compaction
+    /// has output only when the coordinator took it back from a worker that
+    /// stopped, and that worker can be on another node.
+    ///
+    /// A resume reads only the last output SST of each range, to find the key
+    /// where the range continues (`last_written_key_and_seq`). Nothing reads
+    /// the earlier output SSTs until the compaction commits, and then the
+    /// manifest downloads them. So this call does not wait for all of the
+    /// output, which can be large.
+    async fn observe_compactions(
+        &self,
+        root: &Path,
+        bytes: &Bytes,
+        mirror: &MirrorHandle,
+    ) -> object_store::Result<()> {
+        let compactions: Compactions = FlatBufferCompactionsCodec {}
+            .decode(bytes)
+            .map_err(|source| MirrorError::Policy { source })?;
+        let resolver = PathResolver::from_root(root.clone());
+        let resume_ssts = compactions
+            .iter()
+            .filter(|compaction| {
+                compaction.scheduled()
+                    && self.mirrors_segment(Some(compaction.spec().segment().as_ref()))
+            })
+            .flat_map(|compaction| compaction.subcompactions())
+            .filter_map(|subcompaction| subcompaction.output_ssts().last())
+            .map(|sst| resolver.sst_path(&sst.id));
+        // A failed download fails only the resumed compaction, with
+        // `NotLocal`. An error from `observe` fails a write of `.compactions`
+        // and closes the compactor, so log the error instead.
+        if let Err(err) = mirror.fetch(resume_ssts).await {
+            warn!("failed to download the output of a compaction to resume [error={err}]");
         }
+        Ok(())
     }
-}
 
-impl SlateDbMirrorPolicy {
     /// Returns the tag of a compacted SST call in a segment that the policy
     /// mirrors. WAL SST calls, calls with no tag, and compacted SST calls in
     /// other segments return `None`.
@@ -343,7 +404,7 @@ impl SlateDbMirrorPolicy {
         let mut state = self.state.lock();
         match &state.root {
             Some(known) if known != root => Err(policy_error(format!(
-                "manifest is outside the mirrored database. root=`{root}`, mirrored_root=`{known}`"
+                "object is outside the mirrored database. root=`{root}`, mirrored_root=`{known}`"
             ))),
             Some(_) => Ok(()),
             None => {
@@ -608,18 +669,36 @@ fn compacted_sst_tag(extensions: &Extensions) -> Option<&ObjectStoreCallTag> {
         .filter(|tag| tag.sst_type == SstType::Compacted)
 }
 
-/// Splits `<root>/manifest/<id>.manifest` into the root and the manifest ID.
-/// Other paths return early, before anything is allocated.
-fn parse_manifest_path(path: &Path) -> Option<(Path, u64)> {
-    let (dir, file) = path.as_ref().rsplit_once(DELIMITER)?;
-    let id = file.strip_suffix(MANIFEST_SUFFIX)?.parse().ok()?;
-    let root = match dir.rsplit_once(DELIMITER) {
-        Some((root, MANIFEST_DIR)) => root,
-        None if dir == MANIFEST_DIR => "",
+/// Splits `<root>/<dir>/<id><suffix>` into the root and the ID. Other paths
+/// return early, before anything is allocated.
+fn parse_sequenced_path(path: &Path, dir: &str, suffix: &str) -> Option<(Path, u64)> {
+    let (parent, file) = path.as_ref().rsplit_once(DELIMITER)?;
+    let id = file.strip_suffix(suffix)?.parse().ok()?;
+    let root = match parent.rsplit_once(DELIMITER) {
+        Some((root, name)) if name == dir => root,
+        None if parent == dir => "",
         _ => return None,
     };
     // `root` is part of a valid path, so parsing it keeps its encoding.
     Some((Path::parse(root).ok()?, id))
+}
+
+/// Splits `<root>/manifest/<id>.manifest` into the root and the manifest ID.
+fn parse_manifest_path(path: &Path) -> Option<(Path, u64)> {
+    parse_sequenced_path(path, MANIFEST_DIR, MANIFEST_SUFFIX)
+}
+
+/// Splits `<root>/compactions/<id>.compactions` into the root and the ID.
+fn parse_compactions_path(path: &Path) -> Option<(Path, u64)> {
+    parse_sequenced_path(path, COMPACTIONS_DIR, COMPACTIONS_SUFFIX)
+}
+
+/// Returns the root of a manifest or `.compactions` object, the objects that
+/// `observe` processes.
+fn manifest_or_compactions_root(path: &Path) -> Option<Path> {
+    parse_manifest_path(path)
+        .or_else(|| parse_compactions_path(path))
+        .map(|(root, _)| root)
 }
 
 fn policy_error(message: String) -> object_store::Error {
@@ -665,6 +744,7 @@ mod tests {
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::ManifestStore;
     use crate::manifest::{LsmTreeState, ManifestCore, Segment};
+    use crate::object_store_tag::TableStoreKind;
     use crate::subcompaction::Subcompaction;
     use crate::{Db, DbReader, DbReaderMode};
 
@@ -672,6 +752,12 @@ mod tests {
 
     fn manifest_file(id: u64) -> Path {
         manifest_path(&Path::from(ROOT), id)
+    }
+
+    fn compactions_file(id: u64) -> Path {
+        Path::from(format!(
+            "{ROOT}/{COMPACTIONS_DIR}/{id:020}{COMPACTIONS_SUFFIX}"
+        ))
     }
 
     fn sst_id(n: u64) -> SsTableId {
@@ -705,21 +791,23 @@ mod tests {
         }
     }
 
+    fn handle(n: u64) -> SsTableHandle {
+        SsTableHandle::new(
+            sst_id(n),
+            SST_FORMAT_VERSION_LATEST,
+            // A decoded manifest needs each SST's first key.
+            SsTableInfo {
+                first_entry: Some(Bytes::from_static(b"a")),
+                ..SsTableInfo::default()
+            },
+        )
+    }
+
     fn l0(ssts: &[u64]) -> LsmTreeState {
         LsmTreeState {
             l0: ssts
                 .iter()
-                .map(|n| {
-                    SsTableView::identity(SsTableHandle::new(
-                        sst_id(*n),
-                        SST_FORMAT_VERSION_LATEST,
-                        // A decoded manifest needs each SST's first key.
-                        SsTableInfo {
-                            first_entry: Some(Bytes::from_static(b"a")),
-                            ..SsTableInfo::default()
-                        },
-                    ))
-                })
+                .map(|n| SsTableView::identity(handle(*n)))
                 .collect::<VecDeque<_>>(),
             ..LsmTreeState::default()
         }
@@ -831,6 +919,7 @@ mod tests {
         let wal = ObjectStoreCallTag::new(TableStoreKind::Main, SstType::Wal);
 
         assert_eq!(route(&manifest_file(1), None), ReadRoute::Observe);
+        assert_eq!(route(&compactions_file(1), None), ReadRoute::Observe);
         assert_eq!(route(&sst(1), Some(tag(Some(b"")))), ReadRoute::Local);
         assert_eq!(route(&sst(1), Some(tag(None))), ReadRoute::Local);
         assert_eq!(route(&sst(1), Some(retry)), ReadRoute::Refetch);
@@ -843,12 +932,14 @@ mod tests {
         let policy = SlateDbMirrorPolicy::builder().build();
         let route = |tag, mode| policy.put_route(&sst(1), &put_options(tag, mode));
 
-        assert_eq!(
-            policy
-                .put_route(&manifest_file(1), &put_options(None, PutMode::Create))
-                .unwrap(),
-            WriteRoute::Observe
-        );
+        for observed in [manifest_file(1), compactions_file(1)] {
+            assert_eq!(
+                policy
+                    .put_route(&observed, &put_options(None, PutMode::Create))
+                    .unwrap(),
+                WriteRoute::Observe
+            );
+        }
         assert_eq!(
             route(Some(tag(Some(b""))), PutMode::Create).unwrap(),
             WriteRoute::Mirror
@@ -1027,22 +1118,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compactor_reads_sst_that_is_not_retained_remotely() {
-        let fixture = Fixture::new(1, SlateDbMirrorPolicy::builder()).await;
-        fixture.observe(1, &manifest(&[1], &[])).await.unwrap();
-        let route = |n, kind| {
-            let tag = ObjectStoreCallTag::new(kind, SstType::Compacted);
-            fixture
-                .policy
-                .read_route(&sst(n), &get_options(Some(tag)))
-                .unwrap()
+    async fn test_observe_compactions_downloads_resume_output() {
+        let fixture = Fixture::new(3, SlateDbMirrorPolicy::builder()).await;
+        let with_output = |n, status, ssts: &[u64]| {
+            let range = Subcompaction::new(BytesRange::unbounded())
+                .with_output_ssts(ssts.iter().map(|n| handle(*n)).collect());
+            Compaction::new(
+                Ulid::from_parts(n, 0),
+                CompactionSpec::for_segment(Bytes::new(), vec![], 0),
+            )
+            .with_status(status)
+            .with_ctx(Some(CompactionContext::new(vec![range], None)))
         };
+        // The coordinator took compaction 1 back from a stopped worker. A live
+        // worker runs compaction 2.
+        let compactions = Compactions::new(0).with_compactions(vec![
+            with_output(1, CompactionStatus::Scheduled, &[1, 2]),
+            with_output(2, CompactionStatus::Running, &[3]),
+        ]);
 
-        assert_eq!(route(1, TableStoreKind::Compactor), ReadRoute::Local);
-        // SST 2 is in no manifest, like the partial output of a compaction
-        // that a worker resumes.
-        assert_eq!(route(2, TableStoreKind::Compactor), ReadRoute::Remote);
-        assert_eq!(route(2, TableStoreKind::Main), ReadRoute::Local);
+        fixture
+            .policy
+            .observe(
+                &compactions_file(1),
+                &FlatBufferCompactionsCodec {}.encode(&compactions),
+                &fixture.mirror.handle(),
+            )
+            .await
+            .unwrap();
+        // A resume reads only the last output SST of each range.
+        assert!(fixture.contains(2));
+        assert!(!fixture.contains(1) && !fixture.contains(3));
     }
 
     #[tokio::test]
@@ -1050,8 +1156,6 @@ mod tests {
         let policy = SlateDbMirrorPolicy::builder()
             .with_segment_predicate(|_, segment| segment != b"cold")
             .build();
-        let handle =
-            |n| SsTableHandle::new(sst_id(n), SST_FORMAT_VERSION_LATEST, SsTableInfo::default());
         let compaction = |n, segment: &'static [u8]| {
             Compaction::new(
                 Ulid::from_parts(n, 0),
@@ -1089,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_manifest_path() {
+    fn test_parse_sequenced_path() {
         assert_eq!(
             parse_manifest_path(&Path::from("db/manifest/00000000000000000007.manifest")),
             Some((Path::from("db"), 7))
@@ -1115,6 +1219,11 @@ mod tests {
             None
         );
         assert_eq!(parse_manifest_path(&Path::from("db/compacted/x.sst")), None);
+        assert_eq!(
+            parse_compactions_path(&compactions_file(7)),
+            Some((Path::from("db"), 7))
+        );
+        assert_eq!(parse_manifest_path(&compactions_file(7)), None);
     }
 
     async fn latest_ssts(remote: Arc<dyn ObjectStore>) -> HashSet<Path> {

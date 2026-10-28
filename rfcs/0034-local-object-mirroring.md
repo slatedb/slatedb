@@ -29,8 +29,8 @@ SST reads are from local files and all writes are durable to object storage
 before returning success.
 
 Each `SlateDbMirrorPolicy` serves one database root. The root is detected from
-the first `.manifest` read or write. Subsequent `.manifest` operations for a
-different root are rejected. External SSTs referenced by the database remain
+the first `.manifest` or `.compactions` read or write. Subsequent operations on
+these objects for a different root are rejected. External SSTs referenced by the database remain
 supported and may reside under other roots.
 
 ## Motivation
@@ -421,9 +421,13 @@ the manifest, downloads any referenced SSTs that aren't local yet, and only
 then lets the manifest return to the caller. SlateDB only reads compacted SSTs
 that it found in a manifest or wrote itself through a `Mirror` write, so by the
 time it issues a compacted SST read, the file is already on disk. The exception
-is a compaction worker that resumes a compaction. It reads the partial output
-of an earlier worker, which no manifest references yet. The policy sends
-compactor reads of SSTs that it does not retain to the wrapped store.
+is a compaction worker that resumes a compaction. It reads the last output SST
+of each range that an earlier worker wrote, which no manifest references yet.
+So every `.compactions` read and write also goes through `Observe`. For each
+`Scheduled` compaction, `observe` downloads the last output SST of each range.
+Writes are observed too, because the embedded worker of a coordinator reads
+the coordinator's writes from a cache. A failed download is logged, and only
+the resumed compaction fails.
 Large compaction outputs are prefetched in the background by polling
 `.compactions`, so the manifest download is a final true-up rather than the
 whole job's output. See [Warming](#warming) for details.
@@ -642,8 +646,7 @@ error instead of `Mirror` for a `PutMode::Update` write:
 
 | Call | Route |
 |---|---|
-| GET or PUT of `*.manifest` | `Observe` (error if the database root doesn't match) |
-| Compactor read of a tagged compacted SST in a selected segment that is not in `retained` | `Remote` |
+| GET or PUT of `*.manifest` or `*.compactions` | `Observe` (error if the database root doesn't match) |
 | Tagged compacted SST in a selected segment, with `tag.retry.is_some()` | `Refetch` |
 | Tagged compacted SST in a selected segment | `Local` for reads, `Mirror` for writes |
 | Everything else (untagged, WAL, unselected segments) | `Remote` |
@@ -652,7 +655,8 @@ error instead of `Mirror` for a `PutMode::Update` write:
 
 The policy keeps this state behind a mutex:
 
-- The database root, recorded from the first manifest it sees.
+- The database root, recorded from the first manifest or `.compactions` object
+  it sees.
 - The ID of the newest manifest it has processed.
 - `retained`: the SST paths that must not be evicted.
 - Decoded checkpoint manifests, cached by ID. Manifests are immutable, so these
@@ -1146,9 +1150,9 @@ There is, however, an open question around the CPU cost of computing the MD5 pre
   predicate treats calls with no segment and calls before the first manifest.
   Renamed the `retain` set to `retained` and the `warm` set to `to_download`.
   An older manifest downloads its retained SSTs without the predicate, so its
-  downloads match the routes, which use the newest manifest. Compactor reads
-  of SSTs that are not retained go to the wrapped store, so a worker can resume
-  a compaction without a local copy of the partial output.
+  downloads match the routes, which use the newest manifest. `.compactions`
+  reads and writes go through `Observe`, which downloads the output SSTs that
+  a worker reads to resume a compaction.
 - Local object files now end in `.obj`, so every object name can be
   mirrored. Names ending in `.meta` or `.<digits>` no longer collide with
   metadata or temporary files.
