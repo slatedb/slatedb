@@ -774,6 +774,7 @@ impl TryFrom<CompactorOptions> for slatedb::config::CompactorOptions {
             worker: value.worker.map(TryInto::try_into).transpose()?,
             metric_level: None,
             commit_compacted_interval: Duration::from_millis(value.commit_compacted_interval_ms),
+            enable_experimental_incremental_compaction: false,
             checkpoint_lifetime: Duration::from_millis(value.checkpoint_lifetime_ms),
             worker_heartbeat_timeout: Duration::from_millis(value.worker_heartbeat_timeout_ms),
             object_store_max_retries: value.object_store_max_retries,
