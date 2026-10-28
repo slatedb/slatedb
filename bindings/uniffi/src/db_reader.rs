@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::config::{ReadOptions, ScanOptions};
+use crate::db_status_subscription::DbStatusSubscription;
 use crate::error::Error;
 use crate::iterator::DbIterator;
 use crate::types::{
@@ -41,6 +42,11 @@ impl DbReader {
     pub fn sync_manifest(&self, manifest: ManifestTransfer) -> Result<ManifestSyncOutcome, Error> {
         let manifest = slatedb::VersionedManifest::try_from(manifest)?;
         Ok(self.inner.sync_manifest(manifest)?.into())
+    }
+
+    /// Subscribes to durability and lifecycle changes.
+    pub fn subscribe(&self) -> Arc<DbStatusSubscription> {
+        Arc::new(DbStatusSubscription::new(self.inner.subscribe()))
     }
 }
 
