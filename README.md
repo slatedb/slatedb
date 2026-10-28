@@ -153,6 +153,7 @@ SlateDB follows Semantic Versioning. We release new versions approximately every
 See who's using SlateDB.
 
 - [4og.io](https://4og.io)
+- [Atomix](https://www.atomix.com)
 - [Dropbox](https://www.dropbox.com)
 - [Embucket](https://www.embucket.com)
 - [Gadget](https://gadget.dev)
@@ -160,6 +161,7 @@ See who's using SlateDB.
 - [HelixDB](https://github.com/HelixDB/helix-db)
 - [Malstrom](https://github.com/MalstromDevelopers/malstrom)
 - [Massive](https://massive.com)
+- [Mav9](https://mav9.com)
 - [Merklemap](https://merklemap.com)
 - [OpenData](https://www.opendata.dev)
 - [Prisma](https://www.prisma.io)
