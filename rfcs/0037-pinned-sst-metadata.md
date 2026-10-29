@@ -203,6 +203,7 @@ read still pays for the cache lookup.
 ### Configuration
 
 ```rust
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MetadataPinning {
     /// Do not pin. Filters and indexes are read through `DbCache`.
@@ -217,6 +218,8 @@ pub enum MetadataPinning {
 ```
 
 Exposed as `Settings::metadata_pinning` and `DbReaderOptions::metadata_pinning`.
+The enum is `#[non_exhaustive]`, so a later mode (for example, a size limit
+like RocksDB's `kFlushedAndSimilar` heuristic) is not a breaking change.
 The option reaches the language bindings through `Settings`, so the bindings
 need no code change.
 
@@ -229,8 +232,10 @@ need no code change.
   exists: a trivial move (`CompactorOptions::enable_trivial_move`) puts an L0
   SST into a sorted run without rewriting it. Such an SST keeps the pin it
   received in L0, in every mode that gave it one, until compaction retires
-  it. With segments ([RFC 0024](0024-segment-oriented-compaction.md)), L0
-  means the L0 of every segment.
+  it. RocksDB behaves the same way: it decides pinning when it opens a table
+  reader, and a trivial move does not reopen the reader. With segments
+  ([RFC 0024](0024-segment-oriented-compaction.md)), L0 means the L0 of every
+  segment.
 
 ### Mapping to RocksDB
 
@@ -326,7 +331,8 @@ unchanged. Nothing new runs in the background.
 already receive and do the following:
 
 1. If the handle has a slot and the slot holds the value, return it, recording
-   `lookup = pinned` when a read trace is active.
+   `pinned = true` on the read span when a read trace is active. The span has
+   no `cached` field, because no cache lookup happens.
 2. Otherwise, use today's path unchanged. If the handle has a slot, store the
    result in it before returning.
 
@@ -357,14 +363,17 @@ for (view, level) in candidates, pulled lazily by the walk:
 
 Lazy construction keeps the walk as it is today. `GetIterator` initializes
 the newest source first and stops on a hit, so an SST the walk never reaches
-is never built and its filter is never evaluated, pinned or not. Filter
-metrics therefore count the same SSTs as before. A filter-negative pinned SST
-is skipped when the walk pulls it, so it never occupies a lookahead slot.
+is never built and its filter is never evaluated, pinned or not. A
+filter-negative pinned SST is skipped when the walk pulls it, so it never
+occupies a lookahead slot. Filter positives are therefore counted for the same
+SSTs as before. Filter negatives can be counted for more SSTs: while the
+lookahead window fills with sources, the walk evaluates every pinned negative
+it passes, including some beyond the SST that holds the key.
 
 - `TableStore::pinned_filters` is synchronous. It returns the slot value when
   present and opens the same read-filter span that `read_filters` opens, with
-  `lookup = pinned`. So the trace of a pinned point lookup has the same spans
-  and fields as today.
+  `pinned = true`. So the trace of a pinned point lookup has the same spans as
+  today.
 - Reusing `FilterEvaluator` keeps `FilterContext` handling (pluggable filters,
   [RFC 0022](0022-pluggable-filter.md)), the AND across multiple filters, the
   positive/negative counters, and false-positive accounting unchanged.
@@ -388,18 +397,27 @@ Handles decoded from a newly read manifest have no slot. That happens in:
 Both paths already hold the prior state when they build the new one:
 `rebuild_state` clones it on its first line, and `StateModifier::new` clones
 the current copy-on-write state. Both call
-`carry_pins(prev: &ManifestCore, next: &mut ManifestCore)` before installing
-the new state. `carry_pins` builds a temporary map from `SsTableId` to slot out
-of the prior state's `sst_views()`, then walks the new state once and, for each
-handle:
+`carry_pins(prev: Option<&ManifestCore>, next: &mut ManifestCore)` before
+installing the new state. Opening a writer or a reader calls it with no prior
+state, which gives fresh slots only. `carry_pins` builds a temporary map from
+`SsTableId` to slot out of the prior state's `sst_views()` and any slot already
+on a handle of the new state. It then walks the new state's L0 views, then its
+sorted-run views, and for each handle without a slot:
 
 - If the map has a slot for that SST id, it installs that slot on the handle.
 - Otherwise, if the mode selects the SST, it gives the handle a fresh, empty
-  slot.
+  slot and adds it to the map.
+
+An SST can have several views, for example projections in different runs.
+Because fresh slots go into the map, every view of an SST shares one slot, and
+visiting L0 first gives an SST with an L0 view an L0 slot.
 
 The map is dropped when `carry_pins` returns. The cost is O(number of SSTs) per
-manifest install and nothing per read. A retired SST never re-enters the
-manifest, so no state outlives the install. Without this step, every refresh
+manifest install and nothing per read. Attaching a slot to a sorted-run SST
+rebuilds its run, so a run is rebuilt only when one of its handles gains a
+slot. In `MetadataPinning::L0` that is only a run holding a trivially moved
+SST. A retired SST never re-enters the manifest, so no state outlives the
+install. Without this step, every refresh
 would silently discard every pin. This is the work RocksDB's table cache does
 by keeping table readers keyed by file number across versions.
 
@@ -410,17 +428,24 @@ External SSTs (clones and checkpoints) are keyed by `SsTableId`, the same as
 
 As in RocksDB, pinned memory is proportional to live SSTs and has no eviction:
 
-- With `MetadataPinning::L0`, it is bounded by the L0 size the writer allows.
-  `l0_max_ssts` is enforced per tree, so the bound is the number of trees
-  times `l0_max_ssts`. A manifest union can push the total above that for a
-  time. It stays small.
+- With `MetadataPinning::L0`, it covers the L0 SSTs and any SST trivially
+  moved out of L0, until compaction rewrites it.
+  - With trivial moves off (the default), it is bounded by the L0 size the
+    writer allows. `l0_max_ssts` is enforced per tree, so the bound is the
+    number of trees times `l0_max_ssts`. A manifest union can push the total
+    above that for a time. It stays small.
+  - With trivial moves on, a moved SST keeps its slot in the sorted run, as in
+    RocksDB. A workload whose compactions are mostly trivial moves, such as
+    one writing keys in order, can pin much more than L0 holds. The `l0` label
+    of the metrics below counts these SSTs, so operators can see it.
 - With `MetadataPinning::All`, it is the metadata of the entire database.
   This is the same trade RocksDB users make with
   `cache_index_and_filter_blocks = false` and `max_open_files = -1`, and it
   should be sized with the formulas below.
 
 There is no byte limit on pinned memory. SlateDB has no byte accounting outside
-the cache layer, and size limits belong there. The L0 mode is the bounded mode.
+the cache layer, and size limits belong there. The L0 mode with trivial moves
+off is the bounded mode.
 
 ### Interaction with the block cache
 
@@ -505,7 +530,10 @@ cache to skip.
 - [x] Language bindings (Go/Python/etc)
 - [x] Observability (metrics/logging/tracing)
 
-The option reaches the bindings through `Settings`. No binding code changes.
+The writer option reaches the bindings through `Settings`, which they pass as
+JSON. The reader option needs a binding change: the UniFFI `ReaderOptions`
+gains an optional `metadata_pinning` field and a `MetadataPinning` enum, and
+the generated Go package is regenerated.
 
 ## Operations
 
@@ -523,47 +551,64 @@ The option reaches the bindings through `Settings`. No binding code changes.
 ### Observability
 
 - Configuration: `MetadataPinning`, `None` by default.
-- Metrics (names illustrative):
-  - `pinned_bytes{level=l0|sorted_run, component=filter|index}` gauge
-  - `pinned_ssts{level}` gauge
-- Tracing: filter and index read spans record `lookup = pinned` for pinned
-  reads.
+- Metrics (up-down counters):
+  - `slatedb.db.pinned_sst_count{level=l0|sorted_run}`: SSTs whose slot holds
+    their filters, their index, or both. An empty slot is not counted. `level`
+    is the level the SST had when it got its slot, so a trivially moved SST
+    stays under `l0`.
+  - `slatedb.db.pinned_sst_metadata_bytes{level=l0|sorted_run,
+    component=filter|index}`: bytes of filled slots.
+- Tracing: filter and index read spans record `pinned = true` for pinned
+  reads, and have no `cached` field.
 
 ### Compatibility
 
 - No on-disk or manifest format change.
-- Public API: additive (`MetadataPinning`). `SsTableHandle` gains a private
-  field; equality and serialization are unchanged.
+- Public API: additive (`MetadataPinning`, `#[non_exhaustive]`).
+  `SsTableHandle` gains a private field; equality and serialization are
+  unchanged.
 - Mixed versions: not applicable; pinning is process-local.
 
 ## Testing
 
 - Unit tests:
   - `PartialEq` and `Serialize` ignore the slot.
-  - The pinned-bytes gauge drops when the last handle for an SST drops.
+  - The pinned-bytes counter drops when the last handle for an SST drops.
   - `carry_pins` carries slots across `rebuild_state` and
     `merge_remote_manifest`, gives fresh slots only to selected SSTs, and
     drops slots for retired SSTs.
-  - `MetadataPinning::L0` never pins sorted-run SSTs.
+  - `MetadataPinning::L0` gives no fresh slot to a sorted-run SST. A trivially
+    moved SST keeps the slot it had in L0.
+  - `carry_pins` rebuilds only the sorted runs that gain a slot.
+  - Every view of an SST shares one slot, whichever level each view is in.
+  - The writer's `merge_remote_manifest` keeps the slots of its L0 SSTs and
+    of a trivially moved SST, and gives a rewritten SST a fresh slot only in
+    `MetadataPinning::All`.
+  - `pinned_sst_count` counts a slot once, when it is first filled.
   - A flushed L0 SST enters the state with its slot filled.
   - The first read of a selected SST fills the slot, and the second read uses
     it without a cache lookup.
-- Differential tests: randomized workloads produce identical `get` and `scan`
-  results with `None`, `L0`, and `All`. Filter positives are identical, and
-  filter negatives exist in every mode. Negative counts can differ by the
-  lookahead window, as they do today between runs.
-- Deterministic simulation tests: run existing DST scenarios with each pinning
-  mode.
-- Performance tests: a microbenchmark of `get` across many sorted runs with a
-  high filter-negative rate, measuring CPU per lookup for each mode, and a
-  profile of a point-lookup-heavy reader.
+- Differential tests: randomized write, flush and compaction sequences run
+  against a writer in a random mode, with a live compactor and trivial moves
+  on or off, and a `BTreeMap` model. The writer, and a reader in each of
+  `None`, `L0`, and `All`, must match the model on every `get`, read twice so
+  the second pass reads filled slots, and on a full scan. A fixed-layout test
+  checks that filter positives are identical across modes and that filter
+  negatives exist in every mode. Negative counts can differ between modes,
+  because pinned negatives do not occupy the lookahead window.
+- Deterministic simulation tests: DST picks a random pinning mode for each
+  writer and reader.
+- Performance tests: the `pinned_metadata_get` benchmark measures `get` on a
+  reader over 8 L0 SSTs spanning the keyspace and a sorted run of several
+  SSTs, for keys no SST holds and for keys only the run holds, in each mode.
+  A profile of a point-lookup-heavy reader confirms the result in production.
 
 ## Rollout
 
-- Milestones / phases:
-  1. Pin slot, `carry_pins`, fill on flush and on read, `MetadataPinning::L0`,
-     and the filter check before iterator construction.
-  2. `MetadataPinning::All` and the sizing docs.
+- Milestones / phases: one change delivers the pin slot, `carry_pins`, fill
+  on flush and on read, all three modes, the filter check before iterator
+  construction, and the docs. Both modes are opt-in, so there is nothing to
+  stage.
 - Feature flags / opt-in: the option defaults to `None`.
 - Docs updates: document the option, the RocksDB mapping, and the sizing
   formulas.
