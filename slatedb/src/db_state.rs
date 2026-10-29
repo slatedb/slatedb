@@ -664,12 +664,7 @@ impl SortedRun {
     ///
     /// The bound is normally the next view's start key, but becomes inclusive
     /// when adjacent views overlap on that boundary key.
-    fn table_end_bound(&self, idx: usize) -> Bound<Bytes> {
-        self.table_end_bound_ref(idx).cloned()
-    }
-
-    /// Borrowing form of [`Self::table_end_bound`].
-    fn table_end_bound_ref(&self, idx: usize) -> Bound<&Bytes> {
+    fn table_end_bound(&self, idx: usize) -> Bound<&Bytes> {
         let current_sst = &self.sst_views[idx];
         if idx + 1 < self.sst_views.len() {
             let next_start = self.sst_views[idx + 1].compacted_effective_start_key();
@@ -686,7 +681,7 @@ impl SortedRun {
     /// Whether the view at `idx` can hold `key`, bounded by the next view's
     /// start as in [`Self::table_end_bound`].
     fn point_intersects_table(&self, idx: usize, key: &[u8]) -> bool {
-        let end_bound = self.table_end_bound_ref(idx).map(Bytes::as_ref);
+        let end_bound = self.table_end_bound(idx).map(Bytes::as_ref);
         self.sst_views[idx].intersects_point(end_bound, key)
     }
 
@@ -738,7 +733,7 @@ impl SortedRun {
             Unbounded => views.len() - 1,
         };
 
-        if !views[max_idx].intersects_range(self.table_end_bound(max_idx), range) {
+        if !views[max_idx].intersects_range(self.table_end_bound(max_idx).cloned(), range) {
             return 0..0;
         }
 
@@ -753,13 +748,16 @@ impl SortedRun {
         };
 
         let mut min_idx = match start_candidate {
-            Some(idx) if views[idx].intersects_range(self.table_end_bound(idx), range) => idx,
+            Some(idx) if views[idx].intersects_range(self.table_end_bound(idx).cloned(), range) => {
+                idx
+            }
             Some(idx) => idx + 1,
             None => 0,
         };
 
         while min_idx > 0
-            && views[min_idx - 1].intersects_range(self.table_end_bound(min_idx - 1), range)
+            && views[min_idx - 1]
+                .intersects_range(self.table_end_bound(min_idx - 1).cloned(), range)
         {
             min_idx -= 1;
         }
