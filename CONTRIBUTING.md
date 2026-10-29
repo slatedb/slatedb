@@ -8,7 +8,12 @@ We no longer welcome pull requests from the general public. You must become a Sl
 submit pull requests. See [GOVERNANCE.md](./GOVERNANCE.md) for more information on how to become a
 contributor.
 
-If you urgently need a code change, we encourage you to fork SlateDB and make the change in your fork.
+If you urgently need a code change, we encourage you to:
+
+1. Open a Github issue describing what you need.
+2. Fork SlateDB and make the change in your fork.
+
+We can then discuss an appropriate fix for SlateDB without blocking your work.
 
 ## Pull Requests
 
