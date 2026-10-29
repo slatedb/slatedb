@@ -156,7 +156,9 @@ read still pays for the cache lookup.
   semantics.
 - Remove the `DbCache` lookup from reads of pinned filters and indexes.
 - Skip iterator construction for filter-negative SSTs in point lookups.
-- Keep results, filter metrics, and read tracing identical to the unpinned path.
+- Keep results and read tracing identical to the unpinned path, and keep
+  filter metrics on the same walk: a filter is evaluated when the lookup
+  reaches its SST, as today.
 - Make it opt-in; the default behavior is unchanged.
 
 ## Non-Goals
@@ -221,12 +223,14 @@ need no code change.
 - Filters and indexes are pinned together, as in RocksDB. Every candidate SST
   needs its filter, and the filter-positive ones then need their index.
   Pinning only one leaves the other on the cache path for the same lookups.
-- Level is the selection criterion, as in RocksDB. In SlateDB, an SST's level
-  never changes: L0 SSTs are memtable flushes and sorted-run SSTs are compaction
-  outputs, and compaction always writes new SSTs. So "is this SST pinned" is
-  decided once, when the SST enters the database state. With segments
-  ([RFC 0024](0024-segment-oriented-compaction.md)), L0 means the L0 of every
-  segment.
+- Level is the selection criterion, as in RocksDB. L0 SSTs are memtable
+  flushes and sorted-run SSTs are compaction outputs. So "is this SST pinned"
+  is decided once, when the SST enters the database state. One exception
+  exists: a trivial move (`CompactorOptions::enable_trivial_move`) puts an L0
+  SST into a sorted run without rewriting it. Such an SST keeps the pin it
+  received in L0, in every mode that gave it one, until compaction retires
+  it. With segments ([RFC 0024](0024-segment-oriented-compaction.md)), L0
+  means the L0 of every segment.
 
 ### Mapping to RocksDB
 
@@ -332,20 +336,30 @@ lookups and scans.
 ### Filter check before iterator construction
 
 This is the SlateDB counterpart of RocksDB checking the filter inside the table
-reader's `Get`. `build_l0_point_iters` and `build_sr_point_iters` consult the
-slot before calling `SstIterator::new_owned_with_stats`:
+reader's `Get`. `GetIterator::from_lsm_tree` lists the candidate SSTs (every
+L0 SST, then the covering SST of each sorted run) and builds each per-SST
+iterator lazily, when the walk pulls it. `build_point_iter` consults the slot
+before it builds the iterator:
 
 ```text
-for handle in candidates:
-    match table_store.pinned_filters(handle, read_trace, level):
+candidates = L0 SSTs, then the covering SST of each sorted run   // cheap list
+for (view, level) in candidates, pulled lazily by the walk:
+    if the key is outside the view's range: skip                 // today
+    match table_store.pinned_filters(view, read_trace, level):
         Some(filters):
             evaluator = FilterEvaluator::new_point(key, filter_context, db_stats)
             evaluator.evaluate(filters, ...)
-            if evaluator.is_filtered_out(): continue      // no iterator, no await
-            push SstIterator::with_evaluated_filter(handle, evaluator)
+            if evaluator.is_filtered_out(): skip                 // no iterator, no await
+            yield SstIterator::with_evaluated_filter(view, evaluator)
         None:
-            push SstIterator::new_owned_with_stats(handle, ...)   // today
+            yield SstIterator::new_owned_in_view_range(view, ...) // today
 ```
+
+Lazy construction keeps the walk as it is today. `GetIterator` initializes
+the newest source first and stops on a hit, so an SST the walk never reaches
+is never built and its filter is never evaluated, pinned or not. Filter
+metrics therefore count the same SSTs as before. A filter-negative pinned SST
+is skipped when the walk pulls it, so it never occupies a lookahead slot.
 
 - `TableStore::pinned_filters` is synchronous. It returns the slot value when
   present and opens the same read-filter span that `read_filters` opens, with
@@ -356,8 +370,9 @@ for handle in candidates:
   positive/negative counters, and false-positive accounting unchanged.
 - A positive SST receives the already-evaluated evaluator, so
   `FilterIterator::init` does not read the filter a second time.
-- Filter-negative SSTs no longer occupy `GetIterator`'s lookahead window, so
-  `max_parallel` concurrent initializations go to SSTs that can contain the key.
+- Filter-negative pinned SSTs never occupy `GetIterator`'s lookahead window,
+  so `max_parallel` concurrent initializations go to SSTs that can contain
+  the key.
 
 ### Carrying pins across manifest updates
 
@@ -534,7 +549,9 @@ The option reaches the bindings through `Settings`. No binding code changes.
   - The first read of a selected SST fills the slot, and the second read uses
     it without a cache lookup.
 - Differential tests: randomized workloads produce identical `get` and `scan`
-  results, and identical filter metrics, with `None`, `L0`, and `All`.
+  results with `None`, `L0`, and `All`. Filter positives are identical, and
+  filter negatives exist in every mode. Negative counts can differ by the
+  lookahead window, as they do today between runs.
 - Deterministic simulation tests: run existing DST scenarios with each pinning
   mode.
 - Performance tests: a microbenchmark of `get` across many sorted runs with a
