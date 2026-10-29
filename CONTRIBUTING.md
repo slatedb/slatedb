@@ -12,7 +12,7 @@ If you urgently need a code change, we encourage you to fork SlateDB and make th
 
 ## Pull Requests
 
-If you are a contributor, please follow the instructions in the [pull request template](.github/PULL_REQUEST_TEMPLATE.md).
+If you are a contributor, please follow the instructions in the [pull request template](.github/pull_request_template.md).
 
 SlateDB encourages AI usage for pull requests. We ask that you, a human:
 

@@ -1,14 +1,12 @@
 # Writing instructions
 
-All writing must use ASD-STE100 Simplified Technical English: Linear tickets and comments, PR titles and descriptions, RFCs, review comments, commit messages, docs and code comments. Active voice, sentences under 30 words, two ideas per sentence at most, no filler.
+All writing must use line-wrapped (100 character) ASD-STE100 Simplified Technical English: Github issues and comments, PR titles and descriptions, RFCs, review comments, commit messages, docs and code comments. Active voice, sentences under 30 words, two ideas per sentence at most, no filler.
 
 When you write a pull request description, you always follow `.github/pull_request_template.md`.
 
-You line-wrap comments and prose at 100 characters.
-
 ## Brevity
 
-You follow the spirit of Churchill's brevity memorandum when writing pull requests descriptions and documentation. The memorandum is reproduced below.
+You follow the spirit of Churchill's brevity memorandum when writing prose. The memorandum is reproduced below.
 
 To do our work, we all have to read a mass of papers. Nearly all of them are far too long. This wastes time, while energy has to be spent in looking for the essential points.
 
