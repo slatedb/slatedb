@@ -865,7 +865,7 @@ impl ObjectStore for FlakyObjectStore {
     ) -> object_store::Result<GetResult> {
         if self
             .fail_first_get_not_found
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
                 if v > 0 {
                     Some(v - 1)
                 } else {
@@ -886,7 +886,7 @@ impl ObjectStore for FlakyObjectStore {
             self.head_attempts.fetch_add(1, Ordering::SeqCst);
             if self
                 .fail_first_head
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
                     if v > 0 {
                         Some(v - 1)
                     } else {
@@ -907,7 +907,7 @@ impl ObjectStore for FlakyObjectStore {
             self.get_range_attempts.fetch_add(1, Ordering::SeqCst);
             let should_fail = self
                 .fail_first_get_range
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
                     if v > 0 {
                         Some(v - 1)
                     } else {
@@ -928,7 +928,7 @@ impl ObjectStore for FlakyObjectStore {
             let should_truncate = truncate_bytes > 0
                 && self
                     .truncate_get_range_count
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
                         if v > 0 {
                             Some(v - 1)
                         } else {
@@ -1000,7 +1000,7 @@ impl ObjectStore for FlakyObjectStore {
         }
         if self
             .fail_first_put_opts
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
                 if v > 0 {
                     Some(v - 1)
                 } else {
@@ -1041,7 +1041,7 @@ impl ObjectStore for FlakyObjectStore {
         self.list_attempts.fetch_add(1, Ordering::SeqCst);
         if self
             .fail_first_list
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
                 if v > 0 {
                     Some(v - 1)
                 } else {
@@ -1070,7 +1070,7 @@ impl ObjectStore for FlakyObjectStore {
             .fetch_add(1, Ordering::SeqCst);
         if self
             .fail_first_list_with_offset
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
                 if v > 0 {
                     Some(v - 1)
                 } else {
