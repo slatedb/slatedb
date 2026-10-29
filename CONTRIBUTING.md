@@ -18,7 +18,7 @@ SlateDB encourages AI usage for pull requests. We ask that you, a human:
 
 1. Review all non-test code line-by-line before submitting your PR.
 2. Skim all test code. You don't need to review it line-by-line unless you deem it necessary.
-3. Read your pull request description line-by-line to ensure it is accurate, complete, and brief.
+3. Write PR descriptions manually. If you use AI, read your PR description line-by-line to ensure it is accurate, complete, and brief.
 4. Adhere to SlateDB's [CLEAN_SLATE.md](./CLEAN_SLATE.md) style guide.
 
 If you plan on making a substantial change, please follow these steps:
