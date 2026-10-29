@@ -757,7 +757,7 @@ mod tests {
             }
             let result = if self
                 .fail_gets
-                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                 .is_ok()
             {
                 Err(object_store::Error::Generic {
