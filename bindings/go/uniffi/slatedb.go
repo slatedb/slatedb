@@ -1412,7 +1412,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbstatussubscription_status()
 		})
-		if checksum != 21998 {
+		if checksum != 62016 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbstatussubscription_status: UniFFI API checksum mismatch")
 		}
@@ -6999,7 +6999,7 @@ func (_ FfiDestroyerDbSnapshot) Destroy(value *DbSnapshot) {
 
 // A subscription to database status changes.
 type DbStatusSubscriptionInterface interface {
-	// Returns the current status without consuming a change.
+	// Returns the current status.
 	Status() DbStatus
 	// Waits for durability to advance or for the database to close.
 	// Returns None when the timeout expires.
@@ -7011,7 +7011,7 @@ type DbStatusSubscription struct {
 	ffiObject FfiObject
 }
 
-// Returns the current status without consuming a change.
+// Returns the current status.
 func (_self *DbStatusSubscription) Status() DbStatus {
 	_pointer := _self.ffiObject.incrementPointer("*DbStatusSubscription")
 	defer _self.ffiObject.decrementPointer()
