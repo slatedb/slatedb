@@ -5,10 +5,10 @@ Table of Contents:
 <!-- TOC start (generate with https://bitdowntoc.derlin.ch) -->
 
 - [Summary](#summary)
-- [Background: RocksDB](#background-rocksdb)
 - [Motivation](#motivation)
   - [Where point-lookup CPU goes today](#where-point-lookup-cpu-goes-today)
   - [Why the block cache is the wrong home for this data](#why-the-block-cache-is-the-wrong-home-for-this-data)
+  - [Prior art: RocksDB](#prior-art-rocksdb)
 - [Goals](#goals)
 - [Non-Goals](#non-goals)
 - [Design](#design)
@@ -57,56 +57,6 @@ the per-SST iterator is built, so an SST that cannot contain the key costs a
 few hash probes and nothing else. The default, `MetadataPinning::None`, leaves
 today's behavior unchanged.
 
-## Background: RocksDB
-
-RocksDB's block-based tables have the same three metadata components as SlateDB
-SSTs: a filter, an index, and data blocks. Where the filter and index live is
-controlled by `BlockBasedTableOptions`:
-
-- **`cache_index_and_filter_blocks = false` (the default).** Each open table
-  reader loads its index and filter when it opens the file and holds them for
-  the life of the reader, outside the block cache. A lookup reads them through
-  the table reader with no cache lookup. Memory is bounded by the number of open
-  table readers (`max_open_files`). Deployments commonly set
-  `max_open_files = -1`, which opens and pins every live table.
-- **`cache_index_and_filter_blocks = true`.** Index and filter blocks go through
-  the block cache like data blocks: they are charged to its capacity, can be
-  evicted, and every use is a cache lookup.
-  `cache_index_and_filter_blocks_with_high_priority` puts them in the cache's
-  high-priority pool so data blocks are evicted first.
-- **`pin_l0_filter_and_index_blocks_in_cache = true`** (meaningful only with
-  the previous option). L0 table readers hold a reference to their index and
-  filter cache entries, so the entries stay in the cache, charged to its
-  capacity, and are only evicted when the table reader is freed. The reader
-  uses them without a further lookup. L0 is singled out because every point
-  lookup consults every L0 file, and L0 files are flushed often and so are cold
-  in the cache when they appear.
-- **`metadata_cache_options`** is the newer, more general form, and the L0
-  option above is now deprecated in its favor. `unpartitioned_pinning` takes a
-  `PinningTier`: `kNone`, `kFlushedAndSimilar` (L0 tables no larger than about
-  1.5 times `write_buffer_size`, which are flushes and flush-like outputs),
-  `kAll`, or `kFallback`, which defers to the deprecated option (`false` maps
-  to `kNone`, `true` to `kFlushedAndSimilar`). Like the deprecated option, it
-  only has an effect when `cache_index_and_filter_blocks = true`; otherwise the
-  table reader already holds everything.
-
-RocksDB therefore has two ways to keep every table's metadata pinned: hold it in
-table-reader memory (`cache_index_and_filter_blocks = false`), or hold it in the
-block cache with an unevictable reference (`cache_index_and_filter_blocks =
-true` and `unpartitioned_pinning = kAll`). Either way, reads go through the
-table reader's reference and never look the blocks up again.
-
-RocksDB's point lookup (`Version::Get`) walks the candidate files and calls the
-table reader's `Get`. That checks the filter first and searches the index only
-when the filter passes. A filter-negative file costs a filter probe, with no
-iterator and no cache lookup.
-
-SlateDB has the equivalent of `cache_index_and_filter_blocks = true` only:
-filters and indexes are always read through `DbCache`. `SplitCache` is the
-counterpart of the high-priority pool. Its separate `meta_cache` keeps data
-blocks from evicting metadata, but every read is still a cache lookup. SlateDB
-has no counterpart to either pinning mode. This RFC adds both.
-
 ## Motivation
 
 ### Where point-lookup CPU goes today
@@ -118,22 +68,18 @@ the filter up in `DbCache`, then evaluates it. Only a filter-positive SST goes
 on to `TableStore::read_index` and a data block.
 
 A CPU profile of a production reader doing almost nothing but point lookups,
-with every filter and index resident in a foyer cache, shows:
+with every filter and index resident in a foyer cache, showed where the time
+went. The `DbCache` lookup for a filter, which is a shard `RwLock`, hit and
+miss metrics, an entry clone and drop, and an `Arc` clone, cost several times
+more than the bloom probe it served. Index reads cost a smaller but visible
+share. Filter reads ran far more often than index reads, which means that most
+candidate SSTs in that workload were filter-negative. Those SSTs still paid for
+an iterator, a cache lookup, and an `await`, only to be discarded.
 
-| Component                                   | Share of total CPU |
-|---------------------------------------------|--------------------|
-| `read_filters` (all of it)                  | 13.5%              |
-| … of which the `DbCache` lookup             | 10.0%              |
-| … of which the filter probe                 | 2.3%               |
-| `read_index`                                | 2.8%               |
-
-The `DbCache` lookup is a shard `RwLock`, hit/miss metrics, an entry
-clone/drop, and an `Arc` clone. It costs more than four times the bloom probe it
-serves. Filter reads also run about 4.5 times as often as index reads. Index
-reads also come from scans and from SSTs that have no filter, so this ratio is
-a lower bound: at least roughly 80% of candidate SSTs are filter-negative.
-Those SSTs still pay for an iterator, a cache lookup, and an `await`, only to
-be discarded.
+The exact shares depend on the workload, the cache implementation, and the
+rest of the read path, so this RFC does not fix them in writing. The
+benchmark in [Testing](#testing) measures the effect of this change on a fixed
+layout.
 
 ### Why the block cache is the wrong home for this data
 
@@ -147,19 +93,47 @@ SlateDB already offers two ways to keep this metadata resident.
 `SplitCache` gives filters and indexes their own `meta_cache`, so data blocks
 cannot evict them. [RFC 0031](0031-block-cache-policy.md) lists "keep indexes
 and filters in memory" as a motivating workload and controls which entries are
-inserted into the cache. Both make sure the metadata is in the cache, but every
-read still pays for the cache lookup.
+inserted into the cache. Both make sure that the metadata is in the cache, but
+every read still pays for the cache lookup.
+
+### Prior art: RocksDB
+
+RocksDB block-based tables have the same three metadata components as SlateDB
+SSTs: a filter, an index, and data blocks. RocksDB has two ways to keep a
+table's filter and index pinned in memory:
+
+- With `cache_index_and_filter_blocks = false`, which is the default, each
+  open table reader loads its index and filter when it opens the file and
+  holds them for the life of the reader, outside the block cache. Memory is
+  bounded by the number of open table readers (`max_open_files`).
+- With `cache_index_and_filter_blocks = true`, index and filter blocks go
+  through the block cache. `metadata_cache_options.unpartitioned_pinning`
+  then selects tables whose entries the table reader holds a reference to, so
+  the cache cannot evict them: `kNone`, `kFlushedAndSimilar` (L0 tables that
+  are flushes or flush-like outputs), or `kAll`. The older
+  `pin_l0_filter_and_index_blocks_in_cache` option is the deprecated form of
+  `kFlushedAndSimilar`. Memory is bounded by the cache capacity.
+
+Either way, a lookup reads the filter and index through the table reader's
+reference and never looks the blocks up again. RocksDB's point lookup checks
+the filter inside the table reader's `Get` before it searches the index, so a
+filter-negative file costs a filter probe and nothing else.
+
+SlateDB has the equivalent of `cache_index_and_filter_blocks = true` only.
+`SplitCache` is the counterpart of RocksDB's high-priority cache pool. SlateDB
+has no counterpart to either pinning mode. This RFC adds both.
 
 ## Goals
 
 - Offer RocksDB's two pinning modes, L0 only and all SSTs, with matching
-  semantics.
+  selection semantics.
 - Remove the `DbCache` lookup from reads of pinned filters and indexes.
 - Skip iterator construction for filter-negative SSTs in point lookups.
-- Keep results and read tracing identical to the unpinned path, and keep
-  filter metrics on the same walk: a filter is evaluated when the lookup
-  reaches its SST, as today.
-- Make it opt-in; the default behavior is unchanged.
+- Keep results and read tracing identical to the unpinned path.
+- Keep filter-positive counts identical to the unpinned path. Filter-negative
+  counts can be higher with pinning. See
+  [Filter check before iterator construction](#filter-check-before-iterator-construction).
+- Make it opt-in. The default behavior is unchanged.
 
 ## Non-Goals
 
@@ -174,6 +148,8 @@ read still pays for the cache lookup.
 - Pinning filters and indexes separately.
 - Loading metadata only to pin it. The pin is filled from data that is already
   in memory.
+- A byte limit on pinned memory. See [Memory](#memory) and
+  [Open Questions](#open-questions).
 
 ## Design
 
@@ -203,13 +179,12 @@ read still pays for the cache lookup.
 ### Configuration
 
 ```rust
-#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MetadataPinning {
     /// Do not pin. Filters and indexes are read through `DbCache`.
     #[default]
     None,
-    /// Pin the filters and index of every L0 SST for as long as it is live.
+    /// Pin the filters and index of every L0 SST for as long as it is in L0.
     L0,
     /// Pin the filters and index of every SST, L0 and sorted runs, for as long
     /// as it is live.
@@ -218,24 +193,29 @@ pub enum MetadataPinning {
 ```
 
 Exposed as `Settings::metadata_pinning` and `DbReaderOptions::metadata_pinning`.
-The enum is `#[non_exhaustive]`, so a later mode (for example, a size limit
-like RocksDB's `kFlushedAndSimilar` heuristic) is not a breaking change.
-The option reaches the language bindings through `Settings`, so the bindings
-need no code change.
+The enum is exhaustive. A later mode, for example a size limit like RocksDB's
+`kFlushedAndSimilar` heuristic, is a breaking change to matches on the enum,
+which this project accepts. The writer option reaches the language bindings
+through `Settings`. The reader option needs a binding change. See
+[Impact Analysis](#impact-analysis).
 
 - Filters and indexes are pinned together, as in RocksDB. Every candidate SST
   needs its filter, and the filter-positive ones then need their index.
   Pinning only one leaves the other on the cache path for the same lookups.
 - Level is the selection criterion, as in RocksDB. L0 SSTs are memtable
-  flushes and sorted-run SSTs are compaction outputs. So "is this SST pinned"
-  is decided once, when the SST enters the database state. One exception
-  exists: a trivial move (`CompactorOptions::enable_trivial_move`) puts an L0
-  SST into a sorted run without rewriting it. Such an SST keeps the pin it
-  received in L0, in every mode that gave it one, until compaction retires
-  it. RocksDB behaves the same way: it decides pinning when it opens a table
-  reader, and a trivial move does not reopen the reader. With segments
-  ([RFC 0024](0024-segment-oriented-compaction.md)), L0 means the L0 of every
-  segment.
+  flushes and sorted-run SSTs are compaction outputs. Every point lookup
+  consults every L0 SST, and every point lookup consults one SST per sorted
+  run. With segments ([RFC 0024](0024-segment-oriented-compaction.md)), L0
+  means the L0 of every segment.
+- In `MetadataPinning::L0`, an SST is pinned only while it has a view in L0.
+  A trivial move (`CompactorOptions::enable_trivial_move`) puts an L0 SST
+  into a sorted run without rewriting it. The moved SST loses its pin at the
+  manifest install that moves it, because the reason to pin it, that every
+  lookup consults it, no longer holds. This keeps the L0 mode bounded by the
+  L0 size. RocksDB differs here: it decides pinning when it opens a table
+  reader, and a trivial move does not reopen the reader. In
+  `MetadataPinning::All`, a trivially moved SST keeps its pin, because every
+  SST is selected.
 
 ### Mapping to RocksDB
 
@@ -250,7 +230,7 @@ SlateDB's L0 is the set of memtable flushes, so `MetadataPinning::L0`
 selects the same tables as `kFlushedAndSimilar` without its size heuristic.
 RocksDB needs that heuristic because intra-L0 compaction and ingestion can put
 large files in L0. SlateDB L0 SSTs are, today, only ever memtable flushes. If
-SST ingestion lands with ingestion into L0, this mode may need the same size
+SST ingestion lands with ingestion into L0, this mode will need the same size
 heuristic.
 
 There is one deliberate difference. RocksDB's in-cache pinning modes keep the
@@ -259,8 +239,8 @@ metadata for both modes lives outside `DbCache`, as with RocksDB's
 `cache_index_and_filter_blocks = false`. `DbCache` implementations such as foyer
 cannot make an entry unevictable. Holding an entry handle keeps the value alive
 after the cache evicts its key, so the cache's capacity accounting would stop
-matching memory. Keeping pinned data outside the cache, with its own gauge, is
-the honest accounting.
+matching memory. Pinned data therefore lives outside the cache, with its own
+gauge.
 
 ### Where pinned data lives
 
@@ -279,6 +259,9 @@ pub struct SsTableHandle {
 }
 
 pub(crate) struct PinnedSstMetadata {
+    /// The level the SST had when it received this slot. Used as the
+    /// `level` label of the pinned metrics.
+    level: PinnedLevel,
     filters: std::sync::OnceLock<Arc<[NamedFilter]>>,
     index: std::sync::OnceLock<Arc<SsTableIndexOwned>>,
 }
@@ -296,9 +279,9 @@ pub(crate) struct PinnedSstMetadata {
 - Each `OnceLock` is written once, by whichever path first holds the value in
   memory. A later `set` is a no-op. No path waits on the cell, because no path
   loads only to fill it.
-- When the last handle for an SST is dropped, for example after compaction
-  removes it and older snapshots are released, the slot drops and its memory is
-  freed.
+- When the last handle for an SST is dropped, the slot drops and its memory is
+  freed. Snapshots, transactions, and checkpoints hold older state, so a
+  retired SST stays pinned until they are released. See [Memory](#memory).
 
 ### When pins are filled
 
@@ -320,7 +303,8 @@ The same holds for every SST in the initial manifest at `Db` and `DbReader`
 open. The first read of an SST that this process did not create costs what it
 costs today, and later reads are pinned. The slot is carried across manifest
 installs (see below), so this happens once per SST lifetime, not once per
-compaction.
+compaction. The `pinned_sst_count` metric shows how much of the selected
+set is filled.
 
 Manifest installs never wait on metadata I/O, so data visibility for readers is
 unchanged. Nothing new runs in the background.
@@ -337,7 +321,10 @@ already receive and do the following:
    result in it before returning.
 
 Because both functions keep their signatures, every caller benefits: point
-lookups and scans.
+lookups and scans. `TableStore` does not know the pinning mode. The mode is
+applied where state is built (see
+[Carrying pins across manifest updates](#carrying-pins-across-manifest-updates)),
+and `TableStore` only fills and reads a slot when a handle has one.
 
 ### Filter check before iterator construction
 
@@ -349,9 +336,9 @@ before it builds the iterator:
 
 ```text
 candidates = L0 SSTs, then the covering SST of each sorted run   // cheap list
-for (view, level) in candidates, pulled lazily by the walk:
+for view in candidates, pulled lazily by the walk:
     if the key is outside the view's range: skip                 // today
-    match table_store.pinned_filters(view, read_trace, level):
+    match table_store.pinned_filters(view, read_trace):
         Some(filters):
             evaluator = FilterEvaluator::new_point(key, filter_context, db_stats)
             evaluator.evaluate(filters, ...)
@@ -368,7 +355,10 @@ filter-negative pinned SST is skipped when the walk pulls it, so it never
 occupies a lookahead slot. Filter positives are therefore counted for the same
 SSTs as before. Filter negatives can be counted for more SSTs: while the
 lookahead window fills with sources, the walk evaluates every pinned negative
-it passes, including some beyond the SST that holds the key.
+it passes, including some beyond the SST that holds the key. This is a known
+difference in the `filter_negatives` metric between modes. The extra
+evaluations are hash probes on pinned data and cost no I/O and no cache
+lookup.
 
 - `TableStore::pinned_filters` is synchronous. It returns the slot value when
   present and opens the same read-filter span that `read_filters` opens, with
@@ -376,7 +366,7 @@ it passes, including some beyond the SST that holds the key.
   today.
 - Reusing `FilterEvaluator` keeps `FilterContext` handling (pluggable filters,
   [RFC 0022](0022-pluggable-filter.md)), the AND across multiple filters, the
-  positive/negative counters, and false-positive accounting unchanged.
+  positive and negative counters, and false-positive accounting unchanged.
 - A positive SST receives the already-evaluated evaluator, so
   `FilterIterator::init` does not read the filter a second time.
 - Filter-negative pinned SSTs never occupy `GetIterator`'s lookahead window,
@@ -397,55 +387,66 @@ Handles decoded from a newly read manifest have no slot. That happens in:
 Both paths already hold the prior state when they build the new one:
 `rebuild_state` clones it on its first line, and `StateModifier::new` clones
 the current copy-on-write state. Both call
-`carry_pins(prev: Option<&ManifestCore>, next: &mut ManifestCore)` before
-installing the new state. Opening a writer or a reader calls it with no prior
-state, which gives fresh slots only. `carry_pins` builds a temporary map from
-`SsTableId` to slot out of the prior state's `sst_views()` and any slot already
-on a handle of the new state. It then walks the new state's L0 views, then its
-sorted-run views, and for each handle without a slot:
+`carry_pins(mode, prev: Option<&ManifestCore>, next: &mut ManifestCore)`
+before installing the new state. Opening a writer or a reader calls it with no
+prior state, which gives fresh slots only. `carry_pins` does the following:
 
-- If the map has a slot for that SST id, it installs that slot on the handle.
-- Otherwise, if the mode selects the SST, it gives the handle a fresh, empty
-  slot and adds it to the map.
+1. Build a temporary map from `SsTableId` to slot out of the prior state's
+   `sst_views()`.
+2. Walk the new state's L0 views. For each handle without a slot, install the
+   slot from the map if there is one. Otherwise, if the mode is `L0` or
+   `All`, give the handle a fresh, empty slot. Add every L0 slot to a second
+   map of L0 slots.
+3. Walk the new state's sorted-run views. For each handle without a slot:
+   - In `MetadataPinning::All`, install the slot from either map if there is
+     one. Otherwise give the handle a fresh, empty slot and add it to the map.
+   - In `MetadataPinning::L0`, install the slot from the L0 map if there is
+     one. Otherwise leave the handle without a slot. A trivially moved SST
+     that no longer has an L0 view therefore loses its pin here.
 
 An SST can have several views, for example projections in different runs.
 Because fresh slots go into the map, every view of an SST shares one slot, and
 visiting L0 first gives an SST with an L0 view an L0 slot.
 
-The map is dropped when `carry_pins` returns. The cost is O(number of SSTs) per
-manifest install and nothing per read. Attaching a slot to a sorted-run SST
-rebuilds its run, so a run is rebuilt only when one of its handles gains a
-slot. In `MetadataPinning::L0` that is only a run holding a trivially moved
-SST. A retired SST never re-enters the manifest, so no state outlives the
-install. Without this step, every refresh
-would silently discard every pin. This is the work RocksDB's table cache does
-by keeping table readers keyed by file number across versions.
+The maps are dropped when `carry_pins` returns. The cost is O(number of SSTs)
+per manifest install and nothing per read. Attaching a slot to a sorted-run
+SST rebuilds its run, so a run is rebuilt only when one of its handles gains a
+slot. In `MetadataPinning::L0` that is only a run that holds a projection of
+an SST that is still in L0. A retired SST never re-enters the manifest, so no
+state outlives the install. Without this step, every refresh would silently
+discard every pin. This is the work RocksDB's table cache does by keeping
+table readers keyed by file number across versions.
 
 External SSTs (clones and checkpoints) are keyed by `SsTableId`, the same as
 `DbCache` keys, so they pin like any other SST.
 
 ### Memory
 
-As in RocksDB, pinned memory is proportional to live SSTs and has no eviction:
+As in RocksDB, pinned memory is proportional to the selected SSTs and has no
+eviction:
 
-- With `MetadataPinning::L0`, it covers the L0 SSTs and any SST trivially
-  moved out of L0, until compaction rewrites it.
-  - With trivial moves off (the default), it is bounded by the L0 size the
-    writer allows. `l0_max_ssts` is enforced per tree, so the bound is the
-    number of trees times `l0_max_ssts`. A manifest union can push the total
-    above that for a time. It stays small.
-  - With trivial moves on, a moved SST keeps its slot in the sorted run, as in
-    RocksDB. A workload whose compactions are mostly trivial moves, such as
-    one writing keys in order, can pin much more than L0 holds. The `l0` label
-    of the metrics below counts these SSTs, so operators can see it.
+- With `MetadataPinning::L0`, it covers the SSTs that have a view in L0.
+  `l0_max_ssts` is enforced per tree, so the bound is the number of trees
+  times `l0_max_ssts`. A manifest union can push the total above that for a
+  time. It stays small. A trivially moved SST loses its pin when it leaves
+  L0, so trivial moves do not change this bound.
 - With `MetadataPinning::All`, it is the metadata of the entire database.
   This is the same trade RocksDB users make with
   `cache_index_and_filter_blocks = false` and `max_open_files = -1`, and it
-  should be sized with the formulas below.
+  must be sized with the formulas in [Sizing](#sizing).
+
+Snapshots, transactions, and checkpoints that hold older state keep the handles
+of retired SSTs alive, and with them their slots. A long-lived snapshot
+therefore extends pinned memory past compaction. The `pinned_sst_count`
+metric counts these SSTs until the snapshot is released.
 
 There is no byte limit on pinned memory. SlateDB has no byte accounting outside
-the cache layer, and size limits belong there. The L0 mode with trivial moves
-off is the bounded mode.
+the cache layer. `MetadataPinning::L0` is the bounded mode. If
+`MetadataPinning::All` exceeds the memory available to the process, SlateDB
+does not degrade. The process runs out of memory. Operators must measure the
+pinned bytes on a representative database before they enable `All` in
+production, and must watch the `pinned_sst_metadata_bytes` gauge after. See
+[Open Questions](#open-questions) for a capped mode.
 
 ### Interaction with the block cache
 
@@ -453,18 +454,37 @@ Pinned entries are not read through `DbCache`. The pin is filled by the
 existing read path, so cache population, including a hybrid disk tier, behaves
 as it does today. Any copy already in the cache (for example, inserted on write
 by the `BlockCachePolicy` of RFC 0031) stops receiving hits and is evicted by
-the cache's normal policy, so long-term capacity is not double-counted.
+the cache's normal policy, so long-term capacity is not double-counted. Until
+that eviction, the cache and the slot hold two copies.
+
+SlateDB now has three configuration points that shape where filters and
+indexes live. Each answers a different question:
+
+- `SplitCache` with a `meta_cache` decides whether data blocks can evict
+  metadata from the cache. Use it when filters and indexes must stay cached
+  but the lookup cost is acceptable.
+- `BlockCachePolicy` ([RFC 0031](0031-block-cache-policy.md)) decides which
+  entries are inserted into the cache at all.
+- `MetadataPinning` decides which SSTs skip the cache for their filters and
+  indexes.
+
+`MetadataPinning::All` pairs well with a `BlockCachePolicy` that does not
+insert filters and indexes into the cache. The first read of each SST then
+goes to the object store and fills the slot directly, and the cache holds only
+data blocks. `MetadataPinning::L0` pairs well with any policy, because the
+writer fills L0 slots on flush and the reader fills them on first read.
 
 ### Sizing
 
-- Filters: `keys × filter_bits_per_key / 8`. At 10 bits per key, 100M keys take
-  about 125 MB.
+- Filters: `keys × filter_bits_per_key / 8`.
 - Indexes: about `data_bytes / block_size × (avg_first_key_len + per-entry overhead)`,
   where the per-entry overhead is the `BlockMeta` offset, length, and flatbuffer
-  framing. For example, under assumed values of 64 GiB of data, 4 KiB blocks,
-  and 32-byte first keys with roughly 24 bytes of overhead, that is about 0.9 GB.
-  The real figure depends heavily on the workload and should be measured before
-  enabling `MetadataPinning::All` on large databases.
+  framing.
+
+The real figure depends on the key sizes, the block size, and the filter
+configuration, so measure it with the `pinned_sst_metadata_bytes` gauge on a
+representative database before you enable `MetadataPinning::All` on a large
+one.
 
 ## Impact Analysis
 
@@ -483,8 +503,12 @@ when a range or prefix filter policy is registered.
 ### Consistency, Isolation, and Multi-Versioning
 
 - [ ] Transactions
-- [ ] Snapshots
+- [x] Snapshots
 - [ ] Sequence numbers
+
+Snapshots and transactions do not change behavior. They hold older state, so
+they extend the lifetime of pinned memory for retired SSTs. See
+[Memory](#memory).
 
 ### Time, Retention, and Derived State
 
@@ -496,14 +520,15 @@ when a range or prefix filter policy is registered.
 ### Metadata, Coordination, and Lifecycles
 
 - [ ] Manifest format
-- [ ] Checkpoints
+- [x] Checkpoints
 - [x] Clones
 - [ ] Garbage collection
 - [ ] Database splitting and merging
 - [ ] Multi-writer
 
 The manifest format is unchanged. Pins are carried across manifest installs by
-SST id, which covers external SSTs referenced by clones.
+SST id, which covers external SSTs referenced by clones. A checkpoint holds
+older state and extends pinned memory in the same way as a snapshot.
 
 ### Compaction
 
@@ -513,8 +538,10 @@ SST id, which covers external SSTs referenced by clones.
 - [ ] Distributed compaction
 - [ ] Compactions format
 
-The compactor is unchanged. It reads no filters, and its `TableStore` has no
-cache to skip.
+The compactor is unchanged. Compactor state is built from the manifest without
+`carry_pins`, so its handles never have a slot, and its `TableStore` reads
+indexes through `DbCache` as it does today. The compactor reads no filters.
+The compactor does not receive the `MetadataPinning` option.
 
 ### Storage Engine Internals
 
@@ -540,11 +567,11 @@ the generated Go package is regenerated.
 ### Performance & Cost
 
 - Latency and CPU: pinned filter and index reads skip the `DbCache` lookup.
-  Filter-negative SSTs skip iterator construction. In the motivating profile,
-  this targets up to about 11% of total CPU for filters (`read_filters` minus
-  the probe) and up to about 2.8% for indexes. The effect of skipping iterator
-  construction must be measured. `MetadataPinning::L0` alone captures the
-  share that comes from L0 SSTs.
+  Filter-negative SSTs skip iterator construction. The saving per lookup is
+  the cache lookup cost for each candidate SST, plus the iterator setup for
+  each filter-negative SST. `MetadataPinning::L0` alone captures the share
+  that comes from L0 SSTs. The `pinned_metadata_get` benchmark measures the
+  effect on a fixed layout (see [Testing](#testing)).
 - Object-store requests: unchanged. No request is issued only to pin.
 - Memory: the decoded metadata of the selected SSTs, outside `DbCache`.
 
@@ -554,8 +581,8 @@ the generated Go package is regenerated.
 - Metrics (up-down counters):
   - `slatedb.db.pinned_sst_count{level=l0|sorted_run}`: SSTs whose slot holds
     their filters, their index, or both. An empty slot is not counted. `level`
-    is the level the SST had when it got its slot, so a trivially moved SST
-    stays under `l0`.
+    is the level the SST had when it got its slot, stored on the slot. In
+    `MetadataPinning::All`, a trivially moved SST stays under `l0`.
   - `slatedb.db.pinned_sst_metadata_bytes{level=l0|sorted_run,
     component=filter|index}`: bytes of filled slots.
 - Tracing: filter and index read spans record `pinned = true` for pinned
@@ -564,54 +591,65 @@ the generated Go package is regenerated.
 ### Compatibility
 
 - No on-disk or manifest format change.
-- Public API: additive (`MetadataPinning`, `#[non_exhaustive]`).
-  `SsTableHandle` gains a private field; equality and serialization are
-  unchanged.
-- Mixed versions: not applicable; pinning is process-local.
+- Public API: additive (`MetadataPinning`). `SsTableHandle` gains a private
+  field. Equality and serialization are unchanged.
+- Mixed versions: not applicable. Pinning is process-local.
 
 ## Testing
 
 - Unit tests:
   - `PartialEq` and `Serialize` ignore the slot.
-  - The pinned-bytes counter drops when the last handle for an SST drops.
+  - The pinned-bytes counter drops when the last handle for an SST drops, and
+    not before, when a snapshot holds the older state.
   - `carry_pins` carries slots across `rebuild_state` and
     `merge_remote_manifest`, gives fresh slots only to selected SSTs, and
     drops slots for retired SSTs.
   - `MetadataPinning::L0` gives no fresh slot to a sorted-run SST. A trivially
-    moved SST keeps the slot it had in L0.
+    moved SST loses its slot when it no longer has an L0 view. In
+    `MetadataPinning::All`, it keeps the slot and the `l0` label.
   - `carry_pins` rebuilds only the sorted runs that gain a slot.
   - Every view of an SST shares one slot, whichever level each view is in.
   - The writer's `merge_remote_manifest` keeps the slots of its L0 SSTs and
-    of a trivially moved SST, and gives a rewritten SST a fresh slot only in
-    `MetadataPinning::All`.
+    gives a rewritten SST a fresh slot only in `MetadataPinning::All`.
   - `pinned_sst_count` counts a slot once, when it is first filled.
   - A flushed L0 SST enters the state with its slot filled.
   - The first read of a selected SST fills the slot, and the second read uses
     it without a cache lookup.
+  - With no `DbCache` configured, the first read of a selected SST fills the
+    slot from the object store, and the second read issues no object-store
+    request.
 - Differential tests: randomized write, flush and compaction sequences run
   against a writer in a random mode, with a live compactor and trivial moves
   on or off, and a `BTreeMap` model. The writer, and a reader in each of
   `None`, `L0`, and `All`, must match the model on every `get`, read twice so
   the second pass reads filled slots, and on a full scan. A fixed-layout test
-  checks that filter positives are identical across modes and that filter
+  makes sure that filter positives are identical across modes and that filter
   negatives exist in every mode. Negative counts can differ between modes,
   because pinned negatives do not occupy the lookahead window.
 - Deterministic simulation tests: DST picks a random pinning mode for each
   writer and reader.
 - Performance tests: the `pinned_metadata_get` benchmark measures `get` on a
-  reader over 8 L0 SSTs spanning the keyspace and a sorted run of several
-  SSTs, for keys no SST holds and for keys only the run holds, in each mode.
-  A profile of a point-lookup-heavy reader confirms the result in production.
+  reader over a fixed number of L0 SSTs that span the keyspace and a sorted
+  run of several SSTs, for keys no SST holds and for keys only the run holds,
+  in each mode. The benchmark reports the relative change between modes. A
+  profile of a point-lookup-heavy reader confirms the result in production.
 
 ## Rollout
 
-- Milestones / phases: one change delivers the pin slot, `carry_pins`, fill
-  on flush and on read, all three modes, the filter check before iterator
-  construction, and the docs. Both modes are opt-in, so there is nothing to
-  stage.
-- Feature flags / opt-in: the option defaults to `None`.
-- Docs updates: document the option, the RocksDB mapping, and the sizing
-  formulas.
+The change is delivered in three pull requests, so that each stays small
+enough to review on its own:
+
+1. The pin slot on `SsTableHandle`, `carry_pins`, fill on flush and on read,
+   all three modes, and the metrics. After this change, pinned reads skip
+   `DbCache`, but point lookups still build an iterator per candidate SST.
+2. The filter check before iterator construction in `GetIterator`, with the
+   differential test and the `pinned_metadata_get` benchmark.
+3. The `DbReaderOptions` binding change, the DST mode selection, and the
+   documentation: the option, the RocksDB mapping, the three configuration
+   points, and the sizing formulas.
+
+Every mode is opt-in, and the option defaults to `None`, so no change needs a
+feature flag.
 
 ## Alternatives
 
@@ -626,18 +664,19 @@ filters, indexes, and stats to a separate `meta_cache` and data blocks to
 `block_cache`. It keeps data-block churn from evicting metadata, which is the
 residency half of the problem. It does not address the CPU half: every probe
 is still a `DbCache` lookup (a foyer shard lock, metrics, and an entry and
-`Arc` clone), so the cost in the motivating profile is the same whether the
-metadata sits in a shared cache or a dedicated one. Pinning is complementary.
-`SplitCache` remains the right home for unpinned metadata. A new concurrent map
-keyed by SST id would have the same problem on a smaller scale: a hash, a lock
-or shard, and refcounting on every probe.
+`Arc` clone), so the cost is the same whether the metadata sits in a shared
+cache or a dedicated one. Pinning is complementary. `SplitCache` remains the
+right home for unpinned metadata. A new concurrent map keyed by SST id would
+have the same problem on a smaller scale: a hash, a lock or shard, and
+refcounting on every probe.
 
 **Pinning inside `DbCache`, as RocksDB's `unpartitioned_pinning` does.** Hold a
-cache entry handle on the SST handle instead of a private copy. This would charge pinned
-memory to cache capacity as RocksDB does, but `DbCache` has no pin or unevictable
-operation. With foyer, the cache would evict the key while the handle keeps the
-value alive, so capacity accounting would drift from real memory. Adding a pin
-operation to the `DbCache` trait would be required for every implementation.
+cache entry handle on the SST handle instead of a private copy. This would
+charge pinned memory to cache capacity as RocksDB does, but `DbCache` has no
+pin or unevictable operation. With foyer, the cache would evict the key while
+the handle keeps the value alive, so capacity accounting would drift from real
+memory. Adding a pin operation to the `DbCache` trait would be required for
+every implementation.
 
 **Storing the filter and index in `SsTableInfo`.** This would remove the
 runtime slot and the hand-written `PartialEq`. But `SsTableInfo` is embedded in
@@ -653,11 +692,18 @@ object-store requests only to pin, and nothing bounds the parallelism of such
 loads today. The RFC fills pins only from data that is already in memory. See
 Open Questions.
 
-**Per-component byte budgets (an earlier draft of this RFC).** Separate
-`filter_budget_bytes` and `index_budget_bytes`. This gives finer control, but
-it has no RocksDB analogue, it makes users size two budgets instead of choosing
-a level, and SlateDB has no byte accounting outside the cache layer to build it
-on. Level-based selection matches RocksDB and the access pattern: every lookup
+**Keeping the pin of a trivially moved SST in `MetadataPinning::L0`.** This is
+what RocksDB does, because it decides pinning when it opens a table reader.
+It makes the L0 mode unbounded on a workload whose compactions are mostly
+trivial moves, such as one that writes keys in order. The RFC drops the pin
+instead, because the reason to pin an L0 SST, that every lookup consults it,
+no longer holds after the move.
+
+**Per-component byte budgets.** Separate `filter_budget_bytes` and
+`index_budget_bytes`. This gives finer control, but it has no RocksDB
+analogue, it makes users size two budgets instead of choosing a level, and
+SlateDB has no byte accounting outside the cache layer to build it on.
+Level-based selection matches RocksDB and the access pattern: every lookup
 consults every L0 SST, and every lookup consults one SST per sorted run.
 
 **A persistent registry of slots.** Keep a map from `SsTableId` to a weak
@@ -667,7 +713,7 @@ same work with no weak references, no pruning, and no owner.
 
 **RocksDB-style table cache of open table readers.** Moves all per-SST state,
 including parsed footers, into a bounded table-reader cache. That is a larger
-restructuring than needed; the SST handle already plays the role of the table
+restructuring than needed. The SST handle already plays the role of the table
 reader, and `carry_pins` plays the role of the table cache's identity map.
 
 **Partitioned filters and indexes.** Reduce memory for very large SSTs by
@@ -681,6 +727,12 @@ future work.
   as RocksDB's table opens do? Nothing bounds the parallelism of such loads
   today. A prefetch needs a bound, and the value of that bound needs
   discussion before it is added.
+- Should `MetadataPinning` gain a capped mode, so that a database can pin
+  more than L0 without pinning everything? Two shapes are possible. A
+  size-tiered mode, like RocksDB's `kFlushedAndSimilar`, pins every SST below
+  a size threshold. A byte-capped mode pins SSTs in level order until a byte
+  budget is spent, and needs the byte accounting that SlateDB does not have
+  outside the cache layer today. Either one is a new enum variant.
 
 ## References
 
