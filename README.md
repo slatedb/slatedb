@@ -140,10 +140,6 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 - [x] Change data capture (CDC) ([#249](https://github.com/slatedb/slatedb/issues/249))
 - [x] Database split/merge ([RFC](https://github.com/slatedb/slatedb/blob/main/rfcs/0004-checkpoints.md#manifest-projection-and-union))
 
-## Projects
-
-Check out [CONTRIBUTING.md](CONTRIBUTING.md) for fun (and useful) projects to work on.
-
 ## Release Schedule
 
 SlateDB follows Semantic Versioning. We release new versions approximately every 2 months at the end of each even month (February, April, and so on). We guarantee forward/backward compatibility for storage formats between adjacent versions, but we do not currently guarantee API compatibility at this time (we reserve the right to break compile-time API compatibility).
