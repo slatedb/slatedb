@@ -127,12 +127,8 @@ impl BloomFilter {
         if self.buffer.is_empty() {
             return false;
         }
-        for p in probes_for_key(hash, self.num_probes, self.filter_bits()) {
-            if !check_bit(p as usize, &self.buffer) {
-                return false;
-            }
-        }
-        true
+        probes_for_key(hash, self.num_probes, self.filter_bits())
+            .all(|p| check_bit(p as usize, &self.buffer))
     }
 }
 
@@ -207,21 +203,22 @@ fn filter_hash(key: &[u8]) -> u64 {
     hasher.hash(key)
 }
 
-fn probes_for_key(key_hash: u64, num_probes: u16, filter_bits: u32) -> Vec<u32> {
+fn probes_for_key(key_hash: u64, num_probes: u16, filter_bits: u32) -> impl Iterator<Item = u32> {
     // implements enhanced double hashing from:
     // https://www.khoury.northeastern.edu/~pete/pub/bloom-filters-verification.pdf
     // as suggested by the author P. Dillinger for RocksDB's legacy filters here:
     // https://github.com/facebook/rocksdb/issues/4120
-    let mut probes = vec![0u32; num_probes as usize];
+    //
+    // Lazy, so a lookup allocates nothing and stops at the first unset bit.
     let filter_bits = filter_bits as u64;
     let mut h = ((key_hash << 32) >> 32) % filter_bits; // lower 32 bits of hash
     let mut delta = (key_hash >> 32) % filter_bits; // higher 32 bits of hash
-    for i in 0..num_probes {
+    (0..num_probes).map(move |i| {
         delta = (delta + i as u64) % filter_bits;
-        probes[i as usize] = h as u32;
+        let probe = h as u32;
         h = (h + delta) % filter_bits;
-    }
-    probes
+        probe
+    })
 }
 
 fn check_bit(bit: usize, buf: &[u8]) -> bool {
@@ -319,7 +316,7 @@ mod tests {
     fn test_compute_probes() {
         // h1 = 0xDEADBEEF, h2 = 0xDF77EF56
         let hash = 0xDF77EF56DEADBEEFu64;
-        let probes = probes_for_key(hash, 7, 1000000);
+        let probes: Vec<u32> = probes_for_key(hash, 7, 1000000).collect();
         assert_eq!(
             probes,
             vec![
