@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::config::{ReadOptions, ScanOptions};
+use crate::db_status_subscription::DbStatusSubscription;
 use crate::error::Error;
 use crate::iterator::DbIterator;
 use crate::types::{CacheTarget, DbStatus, KeyRange, SsTableId};
@@ -25,6 +26,11 @@ impl DbReader {
     /// Returns the latest reader status snapshot.
     pub fn status(&self) -> DbStatus {
         self.inner.status().into()
+    }
+
+    /// Subscribes to durability and lifecycle changes.
+    pub fn subscribe(&self) -> Arc<DbStatusSubscription> {
+        Arc::new(DbStatusSubscription::new(self.inner.subscribe()))
     }
 }
 

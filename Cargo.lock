@@ -1200,7 +1200,7 @@ dependencies = [
  "serde",
  "tracing",
  "twox-hash",
- "zstd",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -1484,6 +1484,12 @@ name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
+
+[[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "http"
@@ -3280,6 +3286,7 @@ dependencies = [
  "serde_json",
  "siphasher",
  "slatedb-common",
+ "slatedb-mirror",
  "slatedb-txn-obj",
  "smallvec",
  "snap",
@@ -3295,7 +3302,7 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
- "zstd",
+ "zstd 0.14.3",
 ]
 
 [[package]]
@@ -3340,12 +3347,17 @@ dependencies = [
 name = "slatedb-common"
 version = "0.17.0"
 dependencies = [
+ "async-trait",
+ "bytes",
  "chrono",
  "log",
+ "lru",
  "object_store",
+ "parking_lot",
  "rand 0.10.3",
  "rand_xoshiro",
  "serde",
+ "tempfile",
  "thread_local",
  "tokio",
 ]
@@ -3373,6 +3385,29 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
+]
+
+[[package]]
+name = "slatedb-mirror"
+version = "0.17.0"
+dependencies = [
+ "async-trait",
+ "backon",
+ "bytes",
+ "chrono",
+ "futures",
+ "hex",
+ "log",
+ "md-5",
+ "object_store",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "slatedb-common",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4902,7 +4937,16 @@ version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
 dependencies = [
- "zstd-safe",
+ "zstd-safe 7.2.4",
+]
+
+[[package]]
+name = "zstd"
+version = "0.14.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
+dependencies = [
+ "zstd-safe 8.2.0",
 ]
 
 [[package]]
@@ -4915,10 +4959,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
+name = "zstd-safe"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.2+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",

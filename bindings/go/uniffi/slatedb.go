@@ -1176,6 +1176,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_db_subscribe()
+		})
+		if checksum != 46380 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_subscribe: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_db_warm_sst()
 		})
 		if checksum != 54684 {
@@ -1311,6 +1320,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_subscribe()
+		})
+		if checksum != 15162 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_subscribe: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_warm_sst()
 		})
 		if checksum != 4708 {
@@ -1388,6 +1406,24 @@ func uniffiCheckChecksums() {
 		if checksum != 63293 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_with_options: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbstatussubscription_status()
+		})
+		if checksum != 62016 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbstatussubscription_status: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbstatussubscription_wait_for_change()
+		})
+		if checksum != 43939 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbstatussubscription_wait_for_change: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -4147,6 +4183,8 @@ type DbInterface interface {
 	// Returns the latest database status snapshot, including the segment
 	// prefixes (RFC-0024) live as of the snapshot (see [`DbStatus::segments`]).
 	Status() DbStatus
+	// Subscribes to durability and lifecycle changes.
+	Subscribe() *DbStatusSubscription
 	// Warms selected cache content for one SST.
 	//
 	// Returns `Err` on the first failing target. If no block cache is
@@ -4941,6 +4979,16 @@ func (_self *Db) Status() DbStatus {
 			inner: C.uniffi_slatedb_uniffi_fn_method_db_status(
 				_pointer, _uniffiStatus),
 		}
+	}))
+}
+
+// Subscribes to durability and lifecycle changes.
+func (_self *Db) Subscribe() *DbStatusSubscription {
+	_pointer := _self.ffiObject.incrementPointer("*Db")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterDbStatusSubscriptionINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_db_subscribe(
+			_pointer, _uniffiStatus)
 	}))
 }
 
@@ -5776,6 +5824,8 @@ type DbReaderInterface interface {
 	Shutdown() error
 	// Returns the latest reader status snapshot.
 	Status() DbStatus
+	// Subscribes to durability and lifecycle changes.
+	Subscribe() *DbStatusSubscription
 	// Warms selected cache content for one SST.
 	//
 	// Returns `Err` on the first failing target. If no block cache is
@@ -6190,6 +6240,16 @@ func (_self *DbReader) Status() DbStatus {
 			inner: C.uniffi_slatedb_uniffi_fn_method_dbreader_status(
 				_pointer, _uniffiStatus),
 		}
+	}))
+}
+
+// Subscribes to durability and lifecycle changes.
+func (_self *DbReader) Subscribe() *DbStatusSubscription {
+	_pointer := _self.ffiObject.incrementPointer("*DbReader")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterDbStatusSubscriptionINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_dbreader_subscribe(
+			_pointer, _uniffiStatus)
 	}))
 }
 
@@ -6934,6 +6994,124 @@ func LowerToExternalDbSnapshot(value *DbSnapshot) uint64 {
 type FfiDestroyerDbSnapshot struct{}
 
 func (_ FfiDestroyerDbSnapshot) Destroy(value *DbSnapshot) {
+	value.Destroy()
+}
+
+// A subscription to database status changes.
+type DbStatusSubscriptionInterface interface {
+	// Returns the current status.
+	Status() DbStatus
+	// Waits for durability to advance or for the database to close.
+	// Returns None when the timeout expires.
+	WaitForChange(durableSeq uint64, timeoutMs uint32) (*DbStatus, error)
+}
+
+// A subscription to database status changes.
+type DbStatusSubscription struct {
+	ffiObject FfiObject
+}
+
+// Returns the current status.
+func (_self *DbStatusSubscription) Status() DbStatus {
+	_pointer := _self.ffiObject.incrementPointer("*DbStatusSubscription")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterDbStatusINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_dbstatussubscription_status(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
+// Waits for durability to advance or for the database to close.
+// Returns None when the timeout expires.
+func (_self *DbStatusSubscription) WaitForChange(durableSeq uint64, timeoutMs uint32) (*DbStatus, error) {
+	_pointer := _self.ffiObject.incrementPointer("*DbStatusSubscription")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *DbStatus {
+			return FfiConverterOptionalDbStatusINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_dbstatussubscription_wait_for_change(
+			_pointer, FfiConverterUint64INSTANCE.Lower(durableSeq), FfiConverterUint32INSTANCE.Lower(timeoutMs)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+func (object *DbStatusSubscription) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterDbStatusSubscription struct{}
+
+var FfiConverterDbStatusSubscriptionINSTANCE = FfiConverterDbStatusSubscription{}
+
+func (c FfiConverterDbStatusSubscription) Lift(handle C.uint64_t) *DbStatusSubscription {
+	result := &DbStatusSubscription{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_dbstatussubscription(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_dbstatussubscription(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*DbStatusSubscription).Destroy)
+	return result
+}
+
+func (c FfiConverterDbStatusSubscription) Read(reader io.Reader) *DbStatusSubscription {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterDbStatusSubscription) Lower(value *DbStatusSubscription) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*DbStatusSubscription")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterDbStatusSubscription) Write(writer io.Writer, value *DbStatusSubscription) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalDbStatusSubscription(handle uint64) *DbStatusSubscription {
+	return FfiConverterDbStatusSubscriptionINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalDbStatusSubscription(value *DbStatusSubscription) uint64 {
+	return uint64(FfiConverterDbStatusSubscriptionINSTANCE.Lower(value))
+}
+
+type FfiDestroyerDbStatusSubscription struct{}
+
+func (_ FfiDestroyerDbStatusSubscription) Destroy(value *DbStatusSubscription) {
 	value.Destroy()
 }
 
@@ -15336,6 +15514,47 @@ type FfiDestroyerOptionalCompactorOptions struct{}
 func (_ FfiDestroyerOptionalCompactorOptions) Destroy(value *CompactorOptions) {
 	if value != nil {
 		FfiDestroyerCompactorOptions{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalDbStatus struct{}
+
+var FfiConverterOptionalDbStatusINSTANCE = FfiConverterOptionalDbStatus{}
+
+func (c FfiConverterOptionalDbStatus) Lift(rb RustBufferI) *DbStatus {
+	return LiftFromRustBuffer[*DbStatus](c, rb)
+}
+
+func (_ FfiConverterOptionalDbStatus) Read(reader io.Reader) *DbStatus {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterDbStatusINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalDbStatus) Lower(value *DbStatus) C.RustBuffer {
+	return LowerIntoRustBuffer[*DbStatus](c, value)
+}
+
+func (c FfiConverterOptionalDbStatus) LowerExternal(value *DbStatus) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*DbStatus](c, value))
+}
+
+func (_ FfiConverterOptionalDbStatus) Write(writer io.Writer, value *DbStatus) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterDbStatusINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalDbStatus struct{}
+
+func (_ FfiDestroyerOptionalDbStatus) Destroy(value *DbStatus) {
+	if value != nil {
+		FfiDestroyerDbStatus{}.Destroy(*value)
 	}
 }
 
