@@ -325,6 +325,9 @@ fn decode_sequence_tracker(buf: &[u8]) -> Result<SequenceTracker, String> {
 struct DeltaSeries {
     first: Option<i64>,
     dods: Vec<i64>,
+    /// True when a delta-of-delta is outside the range of the 32-bit fallback slot. Decided
+    /// while the delta-of-deltas are produced, so no second pass over them is needed.
+    needs_wide_fallback: bool,
 }
 
 impl DeltaSeries {
@@ -334,20 +337,25 @@ impl DeltaSeries {
             return Self {
                 first: None,
                 dods: Vec::new(),
+                needs_wide_fallback: false,
             };
         };
         let mut dods = Vec::new();
+        let mut needs_wide_fallback = false;
         let mut prev_val = first;
         let mut prev_delta: i64 = 0;
         for val in values {
             let delta = val.wrapping_sub(prev_val);
-            dods.push(delta.wrapping_sub(prev_delta));
+            let dod = delta.wrapping_sub(prev_delta);
+            needs_wide_fallback |= i32::try_from(dod).is_err();
+            dods.push(dod);
             prev_val = val;
             prev_delta = delta;
         }
         Self {
             first: Some(first),
             dods,
+            needs_wide_fallback,
         }
     }
 
@@ -358,7 +366,7 @@ impl DeltaSeries {
 
     /// True when a delta-of-delta is outside the range of the 32-bit fallback slot.
     fn needs_wide_fallback(&self) -> bool {
-        self.dods.iter().any(|&dod| i32::try_from(dod).is_err())
+        self.needs_wide_fallback
     }
 }
 
