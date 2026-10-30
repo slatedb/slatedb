@@ -1,0 +1,105 @@
+//! The policy that decides which objects the mirror keeps.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use object_store::path::Path;
+use object_store::{GetOptions, PutMultipartOptions, PutOptions};
+
+use crate::MirrorHandle;
+
+/// Where a GET or HEAD is served from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadRoute {
+    /// Wrapped store only.
+    Remote,
+    /// Wrapped store. The whole object goes to [`MirrorPolicy::observe`]
+    /// before the caller gets a result. HEADs and GETs that return no body
+    /// skip `observe`. This route does not install a local copy.
+    Observe,
+    /// Local copy only. A miss is a [`MirrorError::NotLocal`](crate::MirrorError::NotLocal),
+    /// with no remote fallback.
+    /// Contents can be corrupt. Callers must detect corruption and arrange
+    /// a retry through [`ReadRoute::Refetch`].
+    Local,
+    /// Download the whole object again, replace the local copy, and serve the
+    /// request from it. Even a range request or HEAD downloads the whole object.
+    Refetch,
+}
+
+/// Where a PUT goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteRoute {
+    /// Wrapped store only.
+    Remote,
+    /// Wrapped store, then the whole payload goes to [`MirrorPolicy::observe`]
+    /// before returning success.
+    Observe,
+    /// Write to both. Returns after the upload succeeds and the local file is
+    /// in place.
+    Mirror,
+}
+
+/// Where a multipart upload goes. There's no `Observe` route because it
+/// would mean buffering every part in memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultipartRoute {
+    /// Wrapped store only.
+    Remote,
+    /// Write to both. Returns after the upload completes and the local file
+    /// is in place.
+    Mirror,
+}
+
+/// Decides which objects an `ObjectStoreMirror` keeps locally.
+///
+/// Policies must only route paths that are never overwritten to
+/// [`ReadRoute::Local`], [`ReadRoute::Refetch`], [`WriteRoute::Mirror`], or
+/// [`MultipartRoute::Mirror`].
+///
+/// Errors from the policy reach the caller in three ways:
+///
+/// - A route error becomes `MirrorError::Policy`. If the error already
+///   contains a `MirrorError`, the mirror returns it unchanged.
+/// - An `observe` error on a read is returned unchanged. Nothing was written,
+///   so the caller can retry the read.
+/// - An `observe` error on a write becomes `MirrorError::WriteCommitted`,
+///   because the remote write already succeeded.
+#[async_trait]
+pub trait MirrorPolicy: Send + Sync + 'static {
+    /// Runs on every GET and HEAD. `options.head` is true for HEAD. Must be
+    /// cheap.
+    fn read_route(&self, path: &Path, options: &GetOptions) -> object_store::Result<ReadRoute>;
+
+    /// Runs on every PUT. Must be cheap.
+    fn put_route(&self, path: &Path, options: &PutOptions) -> object_store::Result<WriteRoute>;
+
+    /// Runs on every multipart upload. Must be cheap.
+    fn put_multipart_route(
+        &self,
+        path: &Path,
+        options: &PutMultipartOptions,
+    ) -> object_store::Result<MultipartRoute>;
+
+    /// Runs for `Observe` routes, after the remote call succeeds and before the
+    /// caller gets the result. `bytes` is the whole object.
+    async fn observe(
+        &self,
+        path: &Path,
+        bytes: &Bytes,
+        mirror: &MirrorHandle,
+    ) -> object_store::Result<()> {
+        let _ = (path, bytes, mirror);
+        Ok(())
+    }
+
+    /// Runs in the background for the life of the mirror. `build()` spawns
+    /// this task and it's cancelled when the mirror is dropped.
+    ///
+    /// The handle keeps the mirror's local state (and its `LOCK`) alive, so a
+    /// policy shouldn't store it anywhere that outlives this call.
+    async fn run(self: Arc<Self>, mirror: MirrorHandle) {
+        let _ = mirror;
+    }
+}

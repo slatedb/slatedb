@@ -796,11 +796,12 @@ pub struct Settings {
     /// slot is treated conservatively as contributing to the peak at every point.
     pub l0_max_ssts_per_key: usize,
 
-    /// Number of parallel workers for flushing immutable memtables to L0 SSTs.
-    /// Higher values increase L0 flush throughput at the cost of more concurrent
-    /// object store uploads. Increasing parallelism may require a higher `l0_max_ssts`
-    /// to avoid backpressure from compaction not keeping up with the higher steady-state
-    /// flush rate.
+    /// Maximum number of unfinished L0 SST writers across all memtable flushes.
+    /// Each writer holds a slot from creation through upload completion, regardless
+    /// of its segment or memtable. This also limits the number of memtable workers.
+    /// Multipart requests within each SST use a separate concurrency limit.
+    /// Higher values allow more upload overlap and use more memory.
+    /// If compaction cannot keep up, writes can stall at `l0_max_ssts`.
     pub l0_flush_parallelism: usize,
 
     /// Defines the max number of unflushed key/value pair bytes that should reside in memory
@@ -1280,6 +1281,26 @@ pub struct CompactorOptions {
     #[serde(serialize_with = "serialize_duration")]
     pub commit_compacted_interval: Duration,
 
+    /// Whether a running compaction publishes the output that it already wrote before
+    /// the compaction finishes. Defaults to false.
+    ///
+    /// This option is experimental. Incremental compaction is not stable yet, and a
+    /// later release can change or remove this option.
+    ///
+    /// When this option is false, readers use the input SSTs of a compaction until the
+    /// compaction finishes. When this option is true, the compactor publishes the
+    /// written output at most once a minute, and readers use that output for its keys.
+    /// During a long compaction, this frees storage earlier, and reads of those keys
+    /// search fewer SSTs.
+    ///
+    /// Garbage collection deletes an input SST only after readers need none of its
+    /// keys and the compactor checkpoint expires. See [`Self::checkpoint_lifetime`].
+    ///
+    /// This option applies to compactions that merge sorted runs. A compaction with L0
+    /// SSTs in its inputs publishes its output only when it finishes.
+    #[serde(default)]
+    pub enable_experimental_incremental_compaction: bool,
+
     /// How long the compactor checkpoint protects input SSTs while publishing a
     /// manifest that replaces them with compacted output.
     ///
@@ -1327,6 +1348,7 @@ impl Default for CompactorOptions {
             worker: Some(CompactionWorkerOptions::default()),
             metric_level: None,
             commit_compacted_interval: Duration::from_secs(1),
+            enable_experimental_incremental_compaction: false,
             checkpoint_lifetime: default_compactor_checkpoint_lifetime(),
             worker_heartbeat_timeout: Duration::from_secs(30),
             object_store_max_retries: None,
@@ -1349,6 +1371,10 @@ impl std::fmt::Debug for CompactorOptions {
             .field("worker", &self.worker)
             .field("metric_level", &self.metric_level)
             .field("commit_compacted_interval", &self.commit_compacted_interval)
+            .field(
+                "enable_experimental_incremental_compaction",
+                &self.enable_experimental_incremental_compaction,
+            )
             .field("checkpoint_lifetime", &self.checkpoint_lifetime)
             .field("worker_heartbeat_timeout", &self.worker_heartbeat_timeout)
             .field("object_store_max_retries", &self.object_store_max_retries)
@@ -1650,6 +1676,9 @@ pub struct GarbageCollectorOptions {
     /// Whether manifest and compactions boundary files are advanced before deletion.
     ///
     /// Disable this only for object stores that do not support conditional overwrites (`If-Match`).
+    /// For these stores, including `LocalFileSystem`, set this to `false`.
+    /// If a boundary update returns `NotImplemented`, GC logs a warning and skips deletion
+    /// for that resource.
     /// Without boundary advancement, a SlateDB client or compactor can begin updating a manifest or
     /// compactions file, stop making progress (for example, because its process or host is
     /// suspended), then resume after the garbage collector's `min_age`. It can then recreate a
@@ -1933,6 +1962,26 @@ mod tests {
     fn test_db_options_default_metric_level() {
         let options = Settings::default();
         assert_eq!(MetricLevel::default(), options.metric_level);
+    }
+
+    #[test]
+    fn test_compactor_enable_experimental_incremental_compaction_config() {
+        assert!(!CompactorOptions::default().enable_experimental_incremental_compaction);
+
+        let mut value = serde_json::to_value(CompactorOptions::default()).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "enable_experimental_incremental_compaction".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        let configured: CompactorOptions = serde_json::from_value(value.clone()).unwrap();
+        assert!(configured.enable_experimental_incremental_compaction);
+
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("enable_experimental_incremental_compaction");
+        let omitted: CompactorOptions = serde_json::from_value(value).unwrap();
+        assert!(!omitted.enable_experimental_incremental_compaction);
     }
 
     #[test]

@@ -519,6 +519,33 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_run_compaction_worker()
+		})
+		if checksum != 46277 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_run_compaction_worker: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_run_compactor()
+		})
+		if checksum != 52129 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_run_compactor: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_admin_run_gc()
+		})
+		if checksum != 41658 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_admin_run_gc: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_admin_run_gc_once()
 		})
 		if checksum != 14634 {
@@ -888,6 +915,24 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_cancellationtoken_cancel()
+		})
+		if checksum != 41759 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_cancellationtoken_cancel: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_cancellationtoken_is_cancelled()
+		})
+		if checksum != 63511 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_cancellationtoken_is_cancelled: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_systemclock_advance()
 		})
 		if checksum != 53270 {
@@ -1131,6 +1176,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_db_subscribe()
+		})
+		if checksum != 46380 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_subscribe: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_db_warm_sst()
 		})
 		if checksum != 54684 {
@@ -1266,6 +1320,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_subscribe()
+		})
+		if checksum != 15162 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbreader_subscribe: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_warm_sst()
 		})
 		if checksum != 4708 {
@@ -1343,6 +1406,24 @@ func uniffiCheckChecksums() {
 		if checksum != 63293 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbsnapshot_scan_with_options: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbstatussubscription_status()
+		})
+		if checksum != 62016 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbstatussubscription_status: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_dbstatussubscription_wait_for_change()
+		})
+		if checksum != 43939 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_dbstatussubscription_wait_for_change: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -1905,6 +1986,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_cancellationtoken_new()
+		})
+		if checksum != 40185 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_cancellationtoken_new: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_constructor_systemclock_default_clock()
 		})
 		if checksum != 17122 {
@@ -2460,6 +2550,23 @@ type AdminInterface interface {
 	ReadManifest(id *uint64) (*VersionedManifest, error)
 	// Refresh the lifetime of an existing checkpoint.
 	RefreshCheckpoint(id string, lifetimeMs *uint64) error
+	// Runs a standalone compaction worker in the foreground until
+	// `cancellation_token` is cancelled, then shuts it down and returns.
+	//
+	// When `options` is `None`, SlateDB's default worker options are used.
+	RunCompactionWorker(cancellationToken *CancellationToken, options *CompactionWorkerOptions) error
+	// Runs the compactor in the foreground until `cancellation_token` is
+	// cancelled, then shuts it down and returns.
+	//
+	// When `options` is `None`, SlateDB's default compactor options are used,
+	// which embed a compaction worker. A deployment whose workers are
+	// separate processes passes options with `worker` unset.
+	RunCompactor(cancellationToken *CancellationToken, options *CompactorOptions) error
+	// Runs the garbage collector in the foreground until `cancellation_token`
+	// is cancelled, then shuts it down and returns.
+	//
+	// When `options` is `None`, SlateDB's default garbage collector options are used.
+	RunGc(cancellationToken *CancellationToken, options *GarbageCollectorOptions) error
 	// Runs the garbage collector once with the provided options.
 	//
 	// When `options` is `None`, SlateDB's default garbage collector options are used.
@@ -2941,6 +3048,113 @@ func (_self *Admin) RefreshCheckpoint(id string, lifetimeMs *uint64) error {
 		func(_ struct{}) struct{} { return struct{}{} },
 		C.uniffi_slatedb_uniffi_fn_method_admin_refresh_checkpoint(
 			_pointer, FfiConverterStringINSTANCE.Lower(id), FfiConverterOptionalUint64INSTANCE.Lower(lifetimeMs)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+// Runs a standalone compaction worker in the foreground until
+// `cancellation_token` is cancelled, then shuts it down and returns.
+//
+// When `options` is `None`, SlateDB's default worker options are used.
+func (_self *Admin) RunCompactionWorker(cancellationToken *CancellationToken, options *CompactionWorkerOptions) error {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_admin_run_compaction_worker(
+			_pointer, FfiConverterCancellationTokenINSTANCE.Lower(cancellationToken), FfiConverterOptionalCompactionWorkerOptionsINSTANCE.Lower(options)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+// Runs the compactor in the foreground until `cancellation_token` is
+// cancelled, then shuts it down and returns.
+//
+// When `options` is `None`, SlateDB's default compactor options are used,
+// which embed a compaction worker. A deployment whose workers are
+// separate processes passes options with `worker` unset.
+func (_self *Admin) RunCompactor(cancellationToken *CancellationToken, options *CompactorOptions) error {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_admin_run_compactor(
+			_pointer, FfiConverterCancellationTokenINSTANCE.Lower(cancellationToken), FfiConverterOptionalCompactorOptionsINSTANCE.Lower(options)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_void(handle)
+		},
+	)
+
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
+// Runs the garbage collector in the foreground until `cancellation_token`
+// is cancelled, then shuts it down and returns.
+//
+// When `options` is `None`, SlateDB's default garbage collector options are used.
+func (_self *Admin) RunGc(cancellationToken *CancellationToken, options *GarbageCollectorOptions) error {
+	_pointer := _self.ffiObject.incrementPointer("*Admin")
+	defer _self.ffiObject.decrementPointer()
+	_, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) struct{} {
+			C.ffi_slatedb_uniffi_rust_future_complete_void(handle, status)
+			return struct{}{}
+		},
+		// liftFn
+		func(_ struct{}) struct{} { return struct{}{} },
+		C.uniffi_slatedb_uniffi_fn_method_admin_run_gc(
+			_pointer, FfiConverterCancellationTokenINSTANCE.Lower(cancellationToken), FfiConverterOptionalGarbageCollectorOptionsINSTANCE.Lower(options)),
 		// pollFn
 		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_poll_void(handle, continuation, data)
@@ -3506,6 +3720,105 @@ func (c FfiConverterBlockTransformer) register() {
 	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_blocktransformer(&UniffiVTableCallbackInterfaceBlockTransformerINSTANCE)
 }
 
+// A handle that stops a foreground `Admin` loop such as `run_gc` or
+// `run_compactor`. Cancelling is idempotent and may happen from any thread
+// before or after the loop starts; a loop given an already cancelled token
+// returns without starting. Dropping a loop's future stops the loop as well.
+type CancellationTokenInterface interface {
+	// Requests shutdown of every loop holding this token.
+	Cancel()
+	IsCancelled() bool
+}
+
+// A handle that stops a foreground `Admin` loop such as `run_gc` or
+// `run_compactor`. Cancelling is idempotent and may happen from any thread
+// before or after the loop starts; a loop given an already cancelled token
+// returns without starting. Dropping a loop's future stops the loop as well.
+type CancellationToken struct {
+	ffiObject FfiObject
+}
+
+func NewCancellationToken() *CancellationToken {
+	return FfiConverterCancellationTokenINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_cancellationtoken_new(_uniffiStatus)
+	}))
+}
+
+// Requests shutdown of every loop holding this token.
+func (_self *CancellationToken) Cancel() {
+	_pointer := _self.ffiObject.incrementPointer("*CancellationToken")
+	defer _self.ffiObject.decrementPointer()
+	rustCall(func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_cancellationtoken_cancel(
+			_pointer, _uniffiStatus)
+		return false
+	})
+}
+
+func (_self *CancellationToken) IsCancelled() bool {
+	_pointer := _self.ffiObject.incrementPointer("*CancellationToken")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterBoolINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_slatedb_uniffi_fn_method_cancellationtoken_is_cancelled(
+			_pointer, _uniffiStatus)
+	}))
+}
+func (object *CancellationToken) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterCancellationToken struct{}
+
+var FfiConverterCancellationTokenINSTANCE = FfiConverterCancellationToken{}
+
+func (c FfiConverterCancellationToken) Lift(handle C.uint64_t) *CancellationToken {
+	result := &CancellationToken{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_cancellationtoken(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_cancellationtoken(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*CancellationToken).Destroy)
+	return result
+}
+
+func (c FfiConverterCancellationToken) Read(reader io.Reader) *CancellationToken {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterCancellationToken) Lower(value *CancellationToken) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*CancellationToken")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterCancellationToken) Write(writer io.Writer, value *CancellationToken) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalCancellationToken(handle uint64) *CancellationToken {
+	return FfiConverterCancellationTokenINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalCancellationToken(value *CancellationToken) uint64 {
+	return uint64(FfiConverterCancellationTokenINSTANCE.Lower(value))
+}
+
+type FfiDestroyerCancellationToken struct{}
+
+func (_ FfiDestroyerCancellationToken) Destroy(value *CancellationToken) {
+	value.Destroy()
+}
+
 type CloneBuilderInterface interface {
 	// Runs the clone operation and consumes this builder.
 	Build() error
@@ -3879,6 +4192,8 @@ type DbInterface interface {
 	// Returns the latest database status snapshot, including the segment
 	// prefixes (RFC-0024) live as of the snapshot (see [`DbStatus::segments`]).
 	Status() DbStatus
+	// Subscribes to durability and lifecycle changes.
+	Subscribe() *DbStatusSubscription
 	// Warms selected cache content for one SST.
 	//
 	// Returns `Err` on the first failing target. If no block cache is
@@ -4673,6 +4988,16 @@ func (_self *Db) Status() DbStatus {
 			inner: C.uniffi_slatedb_uniffi_fn_method_db_status(
 				_pointer, _uniffiStatus),
 		}
+	}))
+}
+
+// Subscribes to durability and lifecycle changes.
+func (_self *Db) Subscribe() *DbStatusSubscription {
+	_pointer := _self.ffiObject.incrementPointer("*Db")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterDbStatusSubscriptionINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_db_subscribe(
+			_pointer, _uniffiStatus)
 	}))
 }
 
@@ -5508,6 +5833,8 @@ type DbReaderInterface interface {
 	Shutdown() error
 	// Returns the latest reader status snapshot.
 	Status() DbStatus
+	// Subscribes to durability and lifecycle changes.
+	Subscribe() *DbStatusSubscription
 	// Warms selected cache content for one SST.
 	//
 	// Returns `Err` on the first failing target. If no block cache is
@@ -5922,6 +6249,16 @@ func (_self *DbReader) Status() DbStatus {
 			inner: C.uniffi_slatedb_uniffi_fn_method_dbreader_status(
 				_pointer, _uniffiStatus),
 		}
+	}))
+}
+
+// Subscribes to durability and lifecycle changes.
+func (_self *DbReader) Subscribe() *DbStatusSubscription {
+	_pointer := _self.ffiObject.incrementPointer("*DbReader")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterDbStatusSubscriptionINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_method_dbreader_subscribe(
+			_pointer, _uniffiStatus)
 	}))
 }
 
@@ -6666,6 +7003,124 @@ func LowerToExternalDbSnapshot(value *DbSnapshot) uint64 {
 type FfiDestroyerDbSnapshot struct{}
 
 func (_ FfiDestroyerDbSnapshot) Destroy(value *DbSnapshot) {
+	value.Destroy()
+}
+
+// A subscription to database status changes.
+type DbStatusSubscriptionInterface interface {
+	// Returns the current status.
+	Status() DbStatus
+	// Waits for durability to advance or for the database to close.
+	// Returns None when the timeout expires.
+	WaitForChange(durableSeq uint64, timeoutMs uint32) (*DbStatus, error)
+}
+
+// A subscription to database status changes.
+type DbStatusSubscription struct {
+	ffiObject FfiObject
+}
+
+// Returns the current status.
+func (_self *DbStatusSubscription) Status() DbStatus {
+	_pointer := _self.ffiObject.incrementPointer("*DbStatusSubscription")
+	defer _self.ffiObject.decrementPointer()
+	return FfiConverterDbStatusINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) RustBufferI {
+		return GoRustBuffer{
+			inner: C.uniffi_slatedb_uniffi_fn_method_dbstatussubscription_status(
+				_pointer, _uniffiStatus),
+		}
+	}))
+}
+
+// Waits for durability to advance or for the database to close.
+// Returns None when the timeout expires.
+func (_self *DbStatusSubscription) WaitForChange(durableSeq uint64, timeoutMs uint32) (*DbStatus, error) {
+	_pointer := _self.ffiObject.incrementPointer("*DbStatusSubscription")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
+			return GoRustBuffer{
+				inner: res,
+			}
+		},
+		// liftFn
+		func(ffi RustBufferI) *DbStatus {
+			return FfiConverterOptionalDbStatusINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_dbstatussubscription_wait_for_change(
+			_pointer, FfiConverterUint64INSTANCE.Lower(durableSeq), FfiConverterUint32INSTANCE.Lower(timeoutMs)),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+func (object *DbStatusSubscription) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterDbStatusSubscription struct{}
+
+var FfiConverterDbStatusSubscriptionINSTANCE = FfiConverterDbStatusSubscription{}
+
+func (c FfiConverterDbStatusSubscription) Lift(handle C.uint64_t) *DbStatusSubscription {
+	result := &DbStatusSubscription{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_dbstatussubscription(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_dbstatussubscription(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*DbStatusSubscription).Destroy)
+	return result
+}
+
+func (c FfiConverterDbStatusSubscription) Read(reader io.Reader) *DbStatusSubscription {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterDbStatusSubscription) Lower(value *DbStatusSubscription) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*DbStatusSubscription")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterDbStatusSubscription) Write(writer io.Writer, value *DbStatusSubscription) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalDbStatusSubscription(handle uint64) *DbStatusSubscription {
+	return FfiConverterDbStatusSubscriptionINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalDbStatusSubscription(value *DbStatusSubscription) uint64 {
+	return uint64(FfiConverterDbStatusSubscriptionINSTANCE.Lower(value))
+}
+
+type FfiDestroyerDbStatusSubscription struct{}
+
+func (_ FfiDestroyerDbStatusSubscription) Destroy(value *DbStatusSubscription) {
 	value.Destroy()
 }
 
@@ -10512,6 +10967,193 @@ func (c FfiConverterCompaction) Write(writer io.Writer, value Compaction) {
 type FfiDestroyerCompaction struct{}
 
 func (_ FfiDestroyerCompaction) Destroy(value Compaction) {
+	value.Destroy()
+}
+
+// Options for a compaction worker, embedded in a compactor through
+// [`CompactorOptions::worker`] or run standalone through
+// [`crate::Admin::run_compaction_worker`], mirroring SlateDB's
+// `CompactionWorkerOptions`. Durations are milliseconds.
+type CompactionWorkerOptions struct {
+	// How many compactions one worker may hold at once.
+	MaxConcurrentCompactions uint64
+	// How often the worker polls for new compactions.
+	CompactionsPollIntervalMs uint64
+	// How often the worker heartbeats the compactions it owns.
+	HeartbeatIntervalMs uint64
+	// Maximum size of an output SST before a new one is started.
+	MaxSstSize uint64
+	// How many block fetches run concurrently per input SST.
+	MaxFetchTasks uint64
+	// Target bytes per read-ahead request while iterating input SSTs.
+	BytesToFetch uint64
+	// How many key-range subcompactions one compaction may be split into;
+	// a value of 1 or less disables splitting.
+	MaxSubcompactions uint64
+	// Write a bloom filter for an SST with at least this many keys. Must
+	// match the writer's `min_filter_keys`.
+	MinFilterKeys uint32
+	// Compression for the SSTs the worker writes. Must match the writer's
+	// `compression_codec`.
+	CompressionCodec *CompressionCodec
+}
+
+func (r *CompactionWorkerOptions) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.MaxConcurrentCompactions)
+	FfiDestroyerUint64{}.Destroy(r.CompactionsPollIntervalMs)
+	FfiDestroyerUint64{}.Destroy(r.HeartbeatIntervalMs)
+	FfiDestroyerUint64{}.Destroy(r.MaxSstSize)
+	FfiDestroyerUint64{}.Destroy(r.MaxFetchTasks)
+	FfiDestroyerUint64{}.Destroy(r.BytesToFetch)
+	FfiDestroyerUint64{}.Destroy(r.MaxSubcompactions)
+	FfiDestroyerUint32{}.Destroy(r.MinFilterKeys)
+	FfiDestroyerOptionalCompressionCodec{}.Destroy(r.CompressionCodec)
+}
+
+type FfiConverterCompactionWorkerOptions struct{}
+
+var FfiConverterCompactionWorkerOptionsINSTANCE = FfiConverterCompactionWorkerOptions{}
+
+func (c FfiConverterCompactionWorkerOptions) Lift(rb RustBufferI) CompactionWorkerOptions {
+	return LiftFromRustBuffer[CompactionWorkerOptions](c, rb)
+}
+
+func (c FfiConverterCompactionWorkerOptions) Read(reader io.Reader) CompactionWorkerOptions {
+	return CompactionWorkerOptions{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint32INSTANCE.Read(reader),
+		FfiConverterOptionalCompressionCodecINSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterCompactionWorkerOptions) Lower(value CompactionWorkerOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[CompactionWorkerOptions](c, value)
+}
+
+func (c FfiConverterCompactionWorkerOptions) LowerExternal(value CompactionWorkerOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[CompactionWorkerOptions](c, value))
+}
+
+func (c FfiConverterCompactionWorkerOptions) Write(writer io.Writer, value CompactionWorkerOptions) {
+	FfiConverterUint64INSTANCE.Write(writer, value.MaxConcurrentCompactions)
+	FfiConverterUint64INSTANCE.Write(writer, value.CompactionsPollIntervalMs)
+	FfiConverterUint64INSTANCE.Write(writer, value.HeartbeatIntervalMs)
+	FfiConverterUint64INSTANCE.Write(writer, value.MaxSstSize)
+	FfiConverterUint64INSTANCE.Write(writer, value.MaxFetchTasks)
+	FfiConverterUint64INSTANCE.Write(writer, value.BytesToFetch)
+	FfiConverterUint64INSTANCE.Write(writer, value.MaxSubcompactions)
+	FfiConverterUint32INSTANCE.Write(writer, value.MinFilterKeys)
+	FfiConverterOptionalCompressionCodecINSTANCE.Write(writer, value.CompressionCodec)
+}
+
+type FfiDestroyerCompactionWorkerOptions struct{}
+
+func (_ FfiDestroyerCompactionWorkerOptions) Destroy(value CompactionWorkerOptions) {
+	value.Destroy()
+}
+
+// Options for a compactor run through [`crate::Admin::run_compactor`],
+// mirroring SlateDB's `CompactorOptions`. Durations are milliseconds.
+type CompactorOptions struct {
+	// How often the compactor polls the manifest and decides whether a
+	// compaction must be scheduled.
+	PollIntervalMs uint64
+	// How long a manifest update is retried before giving up.
+	ManifestUpdateTimeoutMs uint64
+	// The maximum number of compactions in flight at once.
+	MaxConcurrentCompactions uint64
+	// Whether non-overlapping input SSTs may be moved into the destination
+	// sorted run without being rewritten. A trivial move removes no
+	// tombstones and applies no compaction filter or merge.
+	EnableTrivialMove bool
+	// Scheduler-specific options as string key/value pairs.
+	SchedulerOptions map[string]string
+	// Options for the compaction worker embedded in the compactor. Unset
+	// runs no embedded worker, for a deployment whose workers are separate
+	// processes ([`crate::Admin::run_compaction_worker`]); nothing in this
+	// process then executes the compactions the compactor schedules.
+	Worker *CompactionWorkerOptions
+	// How often compactions marked `Compacted` are committed to the manifest.
+	CommitCompactedIntervalMs uint64
+	// How long the compactor's checkpoint protects input SSTs after a
+	// manifest replaces them with compacted output. A read that began before
+	// that manifest and outlives this lifetime may fail once GC deletes an
+	// input SST.
+	CheckpointLifetimeMs uint64
+	// How long a `Running` compaction may go without a worker heartbeat
+	// before the coordinator reclaims it for another worker.
+	WorkerHeartbeatTimeoutMs uint64
+	// Wrapper-level retries for a single object-store operation; `None`
+	// retries transient errors indefinitely.
+	ObjectStoreMaxRetries *uint32
+}
+
+func (r *CompactorOptions) Destroy() {
+	FfiDestroyerUint64{}.Destroy(r.PollIntervalMs)
+	FfiDestroyerUint64{}.Destroy(r.ManifestUpdateTimeoutMs)
+	FfiDestroyerUint64{}.Destroy(r.MaxConcurrentCompactions)
+	FfiDestroyerBool{}.Destroy(r.EnableTrivialMove)
+	FfiDestroyerMapStringString{}.Destroy(r.SchedulerOptions)
+	FfiDestroyerOptionalCompactionWorkerOptions{}.Destroy(r.Worker)
+	FfiDestroyerUint64{}.Destroy(r.CommitCompactedIntervalMs)
+	FfiDestroyerUint64{}.Destroy(r.CheckpointLifetimeMs)
+	FfiDestroyerUint64{}.Destroy(r.WorkerHeartbeatTimeoutMs)
+	FfiDestroyerOptionalUint32{}.Destroy(r.ObjectStoreMaxRetries)
+}
+
+type FfiConverterCompactorOptions struct{}
+
+var FfiConverterCompactorOptionsINSTANCE = FfiConverterCompactorOptions{}
+
+func (c FfiConverterCompactorOptions) Lift(rb RustBufferI) CompactorOptions {
+	return LiftFromRustBuffer[CompactorOptions](c, rb)
+}
+
+func (c FfiConverterCompactorOptions) Read(reader io.Reader) CompactorOptions {
+	return CompactorOptions{
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterMapStringStringINSTANCE.Read(reader),
+		FfiConverterOptionalCompactionWorkerOptionsINSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterUint64INSTANCE.Read(reader),
+		FfiConverterOptionalUint32INSTANCE.Read(reader),
+	}
+}
+
+func (c FfiConverterCompactorOptions) Lower(value CompactorOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[CompactorOptions](c, value)
+}
+
+func (c FfiConverterCompactorOptions) LowerExternal(value CompactorOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[CompactorOptions](c, value))
+}
+
+func (c FfiConverterCompactorOptions) Write(writer io.Writer, value CompactorOptions) {
+	FfiConverterUint64INSTANCE.Write(writer, value.PollIntervalMs)
+	FfiConverterUint64INSTANCE.Write(writer, value.ManifestUpdateTimeoutMs)
+	FfiConverterUint64INSTANCE.Write(writer, value.MaxConcurrentCompactions)
+	FfiConverterBoolINSTANCE.Write(writer, value.EnableTrivialMove)
+	FfiConverterMapStringStringINSTANCE.Write(writer, value.SchedulerOptions)
+	FfiConverterOptionalCompactionWorkerOptionsINSTANCE.Write(writer, value.Worker)
+	FfiConverterUint64INSTANCE.Write(writer, value.CommitCompactedIntervalMs)
+	FfiConverterUint64INSTANCE.Write(writer, value.CheckpointLifetimeMs)
+	FfiConverterUint64INSTANCE.Write(writer, value.WorkerHeartbeatTimeoutMs)
+	FfiConverterOptionalUint32INSTANCE.Write(writer, value.ObjectStoreMaxRetries)
+}
+
+type FfiDestroyerCompactorOptions struct{}
+
+func (_ FfiDestroyerCompactorOptions) Destroy(value CompactorOptions) {
 	value.Destroy()
 }
 
@@ -14822,6 +15464,129 @@ type FfiDestroyerOptionalCompaction struct{}
 func (_ FfiDestroyerOptionalCompaction) Destroy(value *Compaction) {
 	if value != nil {
 		FfiDestroyerCompaction{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalCompactionWorkerOptions struct{}
+
+var FfiConverterOptionalCompactionWorkerOptionsINSTANCE = FfiConverterOptionalCompactionWorkerOptions{}
+
+func (c FfiConverterOptionalCompactionWorkerOptions) Lift(rb RustBufferI) *CompactionWorkerOptions {
+	return LiftFromRustBuffer[*CompactionWorkerOptions](c, rb)
+}
+
+func (_ FfiConverterOptionalCompactionWorkerOptions) Read(reader io.Reader) *CompactionWorkerOptions {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterCompactionWorkerOptionsINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalCompactionWorkerOptions) Lower(value *CompactionWorkerOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[*CompactionWorkerOptions](c, value)
+}
+
+func (c FfiConverterOptionalCompactionWorkerOptions) LowerExternal(value *CompactionWorkerOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*CompactionWorkerOptions](c, value))
+}
+
+func (_ FfiConverterOptionalCompactionWorkerOptions) Write(writer io.Writer, value *CompactionWorkerOptions) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterCompactionWorkerOptionsINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalCompactionWorkerOptions struct{}
+
+func (_ FfiDestroyerOptionalCompactionWorkerOptions) Destroy(value *CompactionWorkerOptions) {
+	if value != nil {
+		FfiDestroyerCompactionWorkerOptions{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalCompactorOptions struct{}
+
+var FfiConverterOptionalCompactorOptionsINSTANCE = FfiConverterOptionalCompactorOptions{}
+
+func (c FfiConverterOptionalCompactorOptions) Lift(rb RustBufferI) *CompactorOptions {
+	return LiftFromRustBuffer[*CompactorOptions](c, rb)
+}
+
+func (_ FfiConverterOptionalCompactorOptions) Read(reader io.Reader) *CompactorOptions {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterCompactorOptionsINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalCompactorOptions) Lower(value *CompactorOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[*CompactorOptions](c, value)
+}
+
+func (c FfiConverterOptionalCompactorOptions) LowerExternal(value *CompactorOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*CompactorOptions](c, value))
+}
+
+func (_ FfiConverterOptionalCompactorOptions) Write(writer io.Writer, value *CompactorOptions) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterCompactorOptionsINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalCompactorOptions struct{}
+
+func (_ FfiDestroyerOptionalCompactorOptions) Destroy(value *CompactorOptions) {
+	if value != nil {
+		FfiDestroyerCompactorOptions{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalDbStatus struct{}
+
+var FfiConverterOptionalDbStatusINSTANCE = FfiConverterOptionalDbStatus{}
+
+func (c FfiConverterOptionalDbStatus) Lift(rb RustBufferI) *DbStatus {
+	return LiftFromRustBuffer[*DbStatus](c, rb)
+}
+
+func (_ FfiConverterOptionalDbStatus) Read(reader io.Reader) *DbStatus {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterDbStatusINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalDbStatus) Lower(value *DbStatus) C.RustBuffer {
+	return LowerIntoRustBuffer[*DbStatus](c, value)
+}
+
+func (c FfiConverterOptionalDbStatus) LowerExternal(value *DbStatus) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*DbStatus](c, value))
+}
+
+func (_ FfiConverterOptionalDbStatus) Write(writer io.Writer, value *DbStatus) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterDbStatusINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalDbStatus struct{}
+
+func (_ FfiDestroyerOptionalDbStatus) Destroy(value *DbStatus) {
+	if value != nil {
+		FfiDestroyerDbStatus{}.Destroy(*value)
 	}
 }
 

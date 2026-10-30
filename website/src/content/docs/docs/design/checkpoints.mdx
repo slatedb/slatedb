@@ -29,6 +29,37 @@ A new checkpoint can also be created from an existing checkpoint through [`Check
 
 [`CheckpointOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.CheckpointOptions.html) lets you set a lifetime, a source checkpoint, and an optional name. Names are labels for listing checkpoints. They are not unique.
 
+## Start and Wait Separately
+
+`Db::begin_checkpoint` starts a checkpoint and returns a `CheckpointHandle`.
+With `CheckpointScope::All`, the checkpoint includes writes that finish before the call starts.
+Writes that overlap the call can fall inside or outside the checkpoint.
+The checkpoint excludes writes that start after the call returns.
+Call `handle.wait().await` to wait until SlateDB stores the checkpoint.
+`Db::create_checkpoint` does both steps in one call.
+
+Dropping the handle does not cancel or delete the checkpoint.
+If you need the ID after an error, save `handle.id()` before `wait()`.
+If `wait()` reports an unknown outcome, the checkpoint can still exist.
+
+## Lifetime
+
+If you set `CheckpointOptions::lifetime`, the checkpoint expires and garbage collection can delete it.
+If the lifetime is `None`, the checkpoint stays until you delete it.
+
+To record a permanent checkpoint in another system, use these steps:
+
+1. Create the checkpoint with a finite lifetime.
+2. Wait until SlateDB stores the checkpoint.
+3. Store the checkpoint ID in the other system so that the record survives restarts.
+4. Call `Admin::refresh_checkpoint(id, None)` to remove the expiration time.
+5. When you no longer need the checkpoint, call `Admin::delete_checkpoint(id)`.
+
+The two systems do not update together.
+Choose a lifetime that gives your application time to recover after a crash.
+If the application stops after step 3, repeat step 4 before the checkpoint expires.
+Repeating step 4 is safe.
+
 ## Readers and Background Tasks
 
 [`DbReader`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html) uses checkpoints to separate reader lifetime from writer lifetime. You choose how the reader tracks database state by passing a [`DbReaderMode`](https://docs.rs/slatedb/latest/slatedb/enum.DbReaderMode.html):

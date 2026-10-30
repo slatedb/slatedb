@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use log::info;
-use rand::RngCore;
+use rand::Rng;
 use slatedb::compactor::stats::COMPACTOR_EPOCH;
 use slatedb::config::CompactorOptions;
 use slatedb::{CloseReason, CompactorBuilder, Error, ErrorKind};

@@ -11,7 +11,7 @@
 
 use crate::DbRand;
 use chrono::{DateTime, Utc};
-use rand::Rng;
+use rand::RngExt;
 use std::{fmt::Debug, future::Future, ops::Range, pin::Pin, sync::Arc, time::Duration};
 
 #[cfg(feature = "test-util")]

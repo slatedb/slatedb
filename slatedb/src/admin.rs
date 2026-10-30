@@ -23,7 +23,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
-use rand::RngCore;
+use rand::Rng;
 use slatedb_common::DbRand;
 use std::env;
 use std::env::VarError;
@@ -561,7 +561,7 @@ impl Admin {
     /// Refresh the lifetime of an existing checkpoint. Takes the id of an existing checkpoint
     /// and a lifetime, and sets the lifetime of the checkpoint to the specified lifetime. If
     /// there is no checkpoint with the specified id, then this fn fails with
-    /// SlateDBError::InvalidDbState
+    /// SlateDBError::InvalidDbState. If the lifetime is `None`, the checkpoint never expires.
     pub async fn refresh_checkpoint(
         &self,
         id: Uuid,
@@ -937,10 +937,10 @@ pub fn load_local() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let local_path = get_env_variable("LOCAL_PATH")?;
     let lfs =
         object_store::local::LocalFileSystem::new_with_prefix(local_path).map_err(|error| {
-            SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+            SlateDBError::from(object_store::Error::Generic {
                 store: "local",
                 source: Box::new(error),
-            }))
+            })
         })?;
     Ok(Arc::new(lfs) as Arc<dyn ObjectStore>)
 }
@@ -959,10 +959,10 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let builder = object_store::aws::AmazonS3Builder::from_env();
 
     Ok(Arc::new(builder.build().map_err(|error| {
-        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+        SlateDBError::from(object_store::Error::Generic {
             store: "AmazonS3",
             source: Box::new(error),
-        }))
+        })
     })?) as Arc<dyn ObjectStore>)
 }
 
@@ -974,10 +974,10 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let builder = object_store::azure::MicrosoftAzureBuilder::from_env();
     Ok(Arc::new(builder.build().map_err(|error| {
-        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+        SlateDBError::from(object_store::Error::Generic {
             store: "MicrosoftAzure",
             source: Box::new(error),
-        }))
+        })
     })?) as Arc<dyn ObjectStore>)
 }
 
@@ -989,10 +989,10 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 pub fn load_gcp() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let builder = object_store::gcp::GoogleCloudStorageBuilder::from_env();
     Ok(Arc::new(builder.build().map_err(|error| {
-        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+        SlateDBError::from(object_store::Error::Generic {
             store: "GoogleCloudStorage",
             source: Box::new(error),
-        }))
+        })
     })?) as Arc<dyn ObjectStore>)
 }
 

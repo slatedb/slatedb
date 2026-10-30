@@ -9,11 +9,12 @@ use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::manifest::ManifestCore;
 use crate::paths::PathResolver;
+use crate::read_trace::ReadTrace;
 use crate::tablestore::TableStore;
 use bytes::{Buf, BufMut, Bytes};
 use futures::FutureExt;
 use log::{error, warn};
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt};
 use slatedb_common::clock::SystemClock;
 use std::any::Any;
 use std::future::Future;
@@ -24,6 +25,8 @@ use uuid::Uuid;
 
 use futures::StreamExt;
 use std::collections::VecDeque;
+use tracing::instrument::WithSubscriber;
+use tracing::subscriber::NoSubscriber;
 
 static EMPTY_KEY: Bytes = Bytes::new();
 
@@ -147,6 +150,51 @@ pub(crate) fn merge_options<T>(
     }
 }
 
+/// Attaches the current subscriber only if a subscriber is set.
+///
+/// In an application using only log without a subscriber, spawning a task for a future with
+/// the current subscriber attached, i.e.,
+/// ```rust,no_run
+/// # use tracing::instrument::WithSubscriber;
+/// # let future = async {};
+/// tokio::spawn(future.with_current_subscriber());
+/// ```
+/// sets tracing::dispatcher::has_been_set() and permanently disables tracing-to-log forwarding,
+/// even with query tracing disabled. That means, logging messages with
+/// ```rust
+/// tracing::info!("message");
+/// ```
+/// does not work anymore after the spawning.
+/// However, direct logging (not tracing-to-log forwarding) with
+/// ```rust
+/// log::info!("message");
+/// ```
+/// still works.
+///
+/// To avoid disabling tracing-to-log forwarding, this helper checks if a subscriber is set, if a
+/// subscriber is set the subscriber is attached to the future, else `.with_current_subscriber()`
+/// is not called.
+pub(crate) fn spawn_with_optional_subscriber<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(with_optional_subscriber(future))
+}
+
+/// Runs the future with the current tracing subscriber if one is set.
+pub(crate) fn with_optional_subscriber<F: Future>(future: F) -> impl Future<Output = F::Output> {
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+
+    async move {
+        if dispatch.is::<NoSubscriber>() {
+            future.await
+        } else {
+            future.with_subscriber(dispatch).await
+        }
+    }
+}
+
 /// Determines the last key and sequence number written by an output SST.
 ///
 /// ## Arguments
@@ -170,7 +218,7 @@ pub(crate) async fn last_written_key_and_seq(
             output_sst,
             false,
             Some(segment.clone()),
-            &crate::reader::ReadTrace::new(None),
+            &ReadTrace::none(),
             None,
         )
         .await?;
@@ -186,6 +234,8 @@ pub(crate) async fn last_written_key_and_seq(
             last_block_idx..last_block_idx + 1,
             false,
             Some(segment.clone()),
+            &ReadTrace::none(),
+            None,
         )
         .await?;
     let Some(block) = blocks.pop_front() else {
@@ -265,7 +315,7 @@ pub(crate) trait IdGenerator {
     fn gen_ulid(&mut self, clock: &dyn SystemClock) -> Ulid;
 }
 
-impl<R: RngCore> IdGenerator for R {
+impl<R: Rng> IdGenerator for R {
     /// Generates a random UUID using the provided RNG.
     fn gen_uuid(&mut self) -> Uuid {
         let mut bytes = [0u8; 16];
@@ -840,6 +890,25 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use ulid::Ulid;
+
+    #[tokio::test]
+    async fn should_capture_optional_subscriber_before_spawning() {
+        let dispatch = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+        let check_subscriber = || async {
+            tracing::dispatcher::get_default(|current| current.is::<tracing_subscriber::Registry>())
+        };
+        let spawned = tracing::dispatcher::with_default(&dispatch, || {
+            super::spawn_with_optional_subscriber(check_subscriber())
+        });
+        assert!(spawned.await.unwrap());
+
+        let future = tracing::dispatcher::with_default(&dispatch, || {
+            super::with_optional_subscriber(check_subscriber())
+        });
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(future);
+        assert!(tasks.join_next().await.unwrap().unwrap());
+    }
 
     struct ResultCaptor<T: Clone> {
         error: Mutex<Option<Result<T, SlateDBError>>>,

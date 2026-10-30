@@ -5,7 +5,9 @@ use crate::manifest::{Manifest, ManifestCore};
 use crate::mem_table::{ImmutableMemtable, KVTable, WritableKVTable};
 use crate::reader::DbStateReader;
 use bytes::Bytes;
+use rand::RngExt;
 use serde::Serialize;
+use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter};
@@ -161,10 +163,24 @@ impl SsTableView {
     /// SST owns the range logically but holds no physical keys in it: it
     /// contributes nothing to the projection and is dropped rather than
     /// constructing a view whose physical/visible intersection is empty.
-    pub(crate) fn try_with_visible_range(&self, visible_range: BytesRange) -> Option<Self> {
+    pub(crate) fn try_with_visible_range(
+        &self,
+        visible_range: BytesRange,
+        rand: &DbRand,
+    ) -> Option<Self> {
         self.physical_range().intersect(&visible_range)?;
+        if self.visible_range.as_ref() == Some(&visible_range) {
+            return Some(self.clone());
+        }
+        // A changed range is a new view. Preserve the timestamp for GC watermarks.
+        let id = loop {
+            let id = Ulid::from_parts(self.id.timestamp_ms(), rand.rng().random::<u128>());
+            if id != self.id {
+                break id;
+            }
+        };
         Some(Self::new_projected(
-            self.id,
+            id,
             self.sst.clone(),
             Some(visible_range),
         ))
@@ -200,20 +216,67 @@ impl SsTableView {
         &self.effective_range
     }
 
+    /// Returns the part of `range` that this view keeps when a projection narrows its
+    /// sorted run, or `None` if the view keeps nothing.
+    ///
+    /// `next_view` is the next view in the same sorted run. It is `None` for the last
+    /// view of a run and for L0 views, which can overlap. The result covers these cases:
+    /// - No next view: the view's own effective range, cut to `range`.
+    /// - Next view: the keys from this view's start up to the start of the next view,
+    ///   cut to `range`.
+    /// - Shared boundary key: if this view also contains the first key of the next
+    ///   view, the result includes that key. Two adjacent SSTs can split the versions
+    ///   of one key, for example `[a, m]` followed by `[m, z]`.
+    /// - Gap before the next view: the result stays inside the visible range of this
+    ///   view. An incremental commit can leave a view `[a, g)` before a view that
+    ///   starts at `m`, and the result must not show `[g, m)` again.
+    ///
+    /// TODO: If every SST records `last_entry`, this function can return
+    /// `self.effective_range.intersect(range)` and no longer needs `next_view`.
     pub(crate) fn compacted_intersection(
         &self,
         next_view: Option<&SsTableView>,
         range: &BytesRange,
     ) -> Option<BytesRange> {
         if let Some(next_view) = next_view {
-            BytesRange::new(
-                self.compacted_effective_start_bound(),
-                Excluded(next_view.compacted_effective_start_key().clone()),
-            )
-            .intersect(range)
+            let next_key = next_view.compacted_effective_start_key();
+            let end = if self.effective_range.contains(next_key) {
+                Included(next_key.clone())
+            } else {
+                Excluded(next_key.clone())
+            };
+            let intersection =
+                BytesRange::new(self.compacted_effective_start_bound(), end).intersect(range)?;
+            // A new projection must preserve gaps from earlier projections.
+            match &self.visible_range {
+                Some(visible) => intersection.intersect(visible),
+                None => Some(intersection),
+            }
         } else {
             self.effective_range.intersect(range)
         }
+    }
+
+    /// Point-key form of [`Self::intersects_range`]: equivalent to
+    /// `self.intersects_range(end_bound, &BytesRange::from_slice(key..=key))`
+    /// without building or cloning any range.
+    ///
+    /// As there, `end_bound` replaces the view's own end, so a key in the gap
+    /// between this view's last key and `end_bound` still intersects.
+    pub(crate) fn intersects_point(&self, end_bound: Bound<&[u8]>, key: &[u8]) -> bool {
+        let after_start = match self.effective_range.start_bound() {
+            Included(start) => key >= start.as_ref(),
+            Excluded(start) => key > start.as_ref(),
+            Unbounded => true,
+        };
+        let before_end = match end_bound {
+            Included(end) => key <= end,
+            Excluded(end) => key < end,
+            Unbounded => true,
+        };
+        // An SST without a first entry has an empty effective range, which
+        // intersects nothing even though its start bound may admit `key`.
+        after_start && before_end && self.effective_range.non_empty()
     }
 
     pub(crate) fn intersects_range(&self, end_bound: Bound<Bytes>, range: &BytesRange) -> bool {
@@ -626,21 +689,25 @@ impl SortedRun {
     ///
     /// The bound is normally the next view's start key, but becomes inclusive
     /// when adjacent views overlap on that boundary key.
-    fn table_end_bound(&self, idx: usize) -> Bound<Bytes> {
+    fn table_end_bound(&self, idx: usize) -> Bound<&Bytes> {
         let current_sst = &self.sst_views[idx];
         if idx + 1 < self.sst_views.len() {
-            let next_sst = &self.sst_views[idx + 1];
-            if current_sst
-                .compacted_effective_range()
-                .contains(next_sst.compacted_effective_start_key())
-            {
-                Included(next_sst.compacted_effective_start_key().clone())
+            let next_start = self.sst_views[idx + 1].compacted_effective_start_key();
+            if current_sst.compacted_effective_range().contains(next_start) {
+                Included(next_start)
             } else {
-                Excluded(next_sst.compacted_effective_start_key().clone())
+                Excluded(next_start)
             }
         } else {
             Unbounded
         }
+    }
+
+    /// Whether the view at `idx` can hold `key`, bounded by the next view's
+    /// start as in [`Self::table_end_bound`].
+    fn point_intersects_table(&self, idx: usize, key: &[u8]) -> bool {
+        let end_bound = self.table_end_bound(idx).map(Bytes::as_ref);
+        self.sst_views[idx].intersects_point(end_bound, key)
     }
 
     /// Returns the contiguous range of SST view indices that can contribute to a
@@ -652,16 +719,12 @@ impl SortedRun {
         let Some(max_idx) = self.find_last_sst_with_range_covering_key(key) else {
             return 0..0;
         };
-        let point_range = BytesRange::from_slice(key..=key);
-        if !self.sst_views[max_idx].intersects_range(self.table_end_bound(max_idx), &point_range) {
+        if !self.point_intersects_table(max_idx, key) {
             return 0..0;
         }
 
         let mut min_idx = max_idx;
-        while min_idx > 0
-            && self.sst_views[min_idx - 1]
-                .intersects_range(self.table_end_bound(min_idx - 1), &point_range)
-        {
+        while min_idx > 0 && self.point_intersects_table(min_idx - 1, key) {
             min_idx -= 1;
         }
 
@@ -695,7 +758,7 @@ impl SortedRun {
             Unbounded => views.len() - 1,
         };
 
-        if !views[max_idx].intersects_range(self.table_end_bound(max_idx), range) {
+        if !views[max_idx].intersects_range(self.table_end_bound(max_idx).cloned(), range) {
             return 0..0;
         }
 
@@ -710,13 +773,16 @@ impl SortedRun {
         };
 
         let mut min_idx = match start_candidate {
-            Some(idx) if views[idx].intersects_range(self.table_end_bound(idx), range) => idx,
+            Some(idx) if views[idx].intersects_range(self.table_end_bound(idx).cloned(), range) => {
+                idx
+            }
             Some(idx) => idx + 1,
             None => 0,
         };
 
         while min_idx > 0
-            && views[min_idx - 1].intersects_range(self.table_end_bound(min_idx - 1), range)
+            && views[min_idx - 1]
+                .intersects_range(self.table_end_bound(min_idx - 1).cloned(), range)
         {
             min_idx -= 1;
         }
@@ -937,9 +1003,10 @@ mod tests {
     use proptest::collection::vec;
     use proptest::proptest;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::DbRand;
     use std::collections::BTreeSet;
     use std::collections::VecDeque;
-    use std::ops::Bound::{Excluded, Included, Unbounded};
+    use std::ops::Bound::{self, Excluded, Included, Unbounded};
     use std::ops::RangeBounds;
     use std::sync::Arc;
 
@@ -1301,6 +1368,87 @@ mod tests {
         assert!(sorted_run.tables_covering_point_key(b"0").is_empty());
     }
 
+    /// Keys from a two-letter alphabet, at most two long: seven keys in all,
+    /// so generated bounds and probes often coincide and the
+    /// inclusive/exclusive edges get exercised.
+    fn small_key() -> impl proptest::strategy::Strategy<Value = Bytes> {
+        use proptest::strategy::Strategy;
+        vec(0u8..2, 0..=2).prop_map(Bytes::from)
+    }
+
+    fn small_bound() -> impl proptest::strategy::Strategy<Value = Bound<Bytes>> {
+        use proptest::prelude::{prop_oneof, Just};
+        use proptest::strategy::Strategy;
+        prop_oneof![
+            Just(Unbounded),
+            small_key().prop_map(Included),
+            small_key().prop_map(Excluded),
+        ]
+    }
+
+    #[test]
+    fn test_intersects_point_matches_intersects_range() {
+        proptest!(|(
+            first in proptest::option::of(small_key()),
+            last in proptest::option::of(small_key()),
+            visible_start in proptest::option::of(small_key()),
+            visible_end in small_bound(),
+            end_bound in small_bound(),
+            key in small_key(),
+        )| {
+            let view = match first {
+                // No first entry: the view's effective range is empty.
+                None => create_compacted_sst_view(None),
+                Some(first) => {
+                    let last = last.filter(|last| *last >= first);
+                    let view = create_compacted_sst_view_with_bounds(&first, last.as_deref());
+                    let visible_start = visible_start.map_or(Unbounded, Included);
+                    match BytesRange::try_new(visible_start, visible_end) {
+                        Some(visible) => view
+                            .try_with_visible_range(visible, &DbRand::new(0))
+                            .unwrap_or(view),
+                        None => view,
+                    }
+                }
+            };
+            let point_range = BytesRange::from_slice(&key[..]..=&key[..]);
+            let expected = view.intersects_range(end_bound.clone(), &point_range);
+            let actual = view.intersects_point(end_bound.as_ref().map(Bytes::as_ref), &key);
+            proptest::prop_assert_eq!(
+                actual,
+                expected,
+                "view {:?}, end {:?}, key {:?}",
+                view,
+                end_bound,
+                key
+            );
+        });
+    }
+
+    #[test]
+    fn test_point_covering_matches_range_covering() {
+        // Sorting 2n keys and pairing them up gives views in sorted-run order,
+        // with duplicates making adjacent views share a boundary key.
+        proptest!(|(
+            mut keys in vec(small_key(), 2..=12),
+            open_last in proptest::bool::ANY,
+            probe in small_key(),
+        )| {
+            keys.sort();
+            let pairs: Vec<_> = keys.chunks_exact(2).collect();
+            let views = pairs.iter().enumerate().map(|(i, pair)| {
+                let last = (!(open_last && i == pairs.len() - 1)).then_some(&pair[1][..]);
+                create_compacted_sst_view_with_bounds(&pair[0], last)
+            });
+            let sorted_run = SortedRun::new(0, views);
+            let point_range = BytesRange::from_slice(&probe[..]..=&probe[..]);
+            proptest::prop_assert_eq!(
+                sorted_run.point_table_idx_covering_key(&probe),
+                sorted_run.table_idx_covering_range(&point_range)
+            );
+        });
+    }
+
     #[test]
     fn test_sorted_run_clone_shares_sst_views() {
         let sorted_run = SortedRun::new(0, [create_compacted_sst_view(Some(Bytes::from("a")))]);
@@ -1360,6 +1508,33 @@ mod tests {
         let sst_id = SsTableId::new(ulid::Ulid::new());
         let handle = SsTableHandle::new(sst_id, SST_FORMAT_VERSION_LATEST, sst_info);
         SsTableView::identity(handle)
+    }
+
+    #[test]
+    fn test_projection_assigns_new_view_ids_only_when_range_changes() {
+        let base = create_compacted_sst_view_with_size(b"a", b"z", 100);
+        let rand = DbRand::new(42);
+        let left_range = BytesRange::from_ref("a".."m");
+        let left = base
+            .try_with_visible_range(left_range.clone(), &rand)
+            .unwrap();
+        let right = base
+            .try_with_visible_range(BytesRange::from_ref("m"..="z"), &rand)
+            .unwrap();
+
+        assert_ne!(left.id, base.id);
+        assert_ne!(right.id, base.id);
+        assert_ne!(left.id, right.id);
+        for view in [&left, &right] {
+            assert_eq!(view.id.timestamp_ms(), base.id.timestamp_ms());
+            assert_eq!(view.sst, base.sst);
+        }
+        assert_eq!(left.visible_range, Some(left_range.clone()));
+        assert_eq!(left.try_with_visible_range(left_range, &rand), Some(left));
+        assert!(base
+            .try_with_visible_range(BytesRange::from_ref("zz"..), &rand)
+            .is_none());
+        assert_eq!(base.visible_range, None);
     }
 
     #[test]

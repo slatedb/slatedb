@@ -28,6 +28,7 @@ use crate::merge_operator::{
     MergeOperatorType,
 };
 use crate::peeking_iterator::PeekingIterator;
+use crate::read_trace::ReadTrace;
 use crate::retention_iterator::RetentionIterator;
 use crate::seq_tracker::SequenceTracker;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -400,6 +401,7 @@ impl TokioCompactionExecutorInner {
                     merge_iter,
                     false,
                     retention_min_seq,
+                    ReadTrace::none(),
                 ))
             } else {
                 Box::new(MergeOperatorRequiredIterator::new(merge_iter))
@@ -590,17 +592,16 @@ impl TokioCompactionExecutorInner {
     }
 
     /// Executes a compaction job's subcompactions (RFC-0028), running every
-    /// range concurrently.
+    /// unfinished range concurrently.
     ///
     /// The plan is reported (and buffered by the worker for its next
     /// heartbeat to publish) before any range output is recorded against it;
     /// per-range output SSTs are then reported as they advance so an
-    /// interrupted compaction can resume at range granularity. Subcompactions
-    /// carry no persisted status, so every range is run: a range resumes from
-    /// the output recorded against it, and one that is already complete finds
-    /// nothing left to merge and finishes immediately. On the first range
-    /// failure the remaining subcompactions are aborted and the job fails;
-    /// progress recorded by then stays resumable.
+    /// interrupted compaction can resume at range granularity. Completed
+    /// ranges do not run again. Each other range resumes from the output
+    /// recorded against it. When the first range fails, the remaining
+    /// subcompactions are aborted and the job fails. Progress recorded by
+    /// then stays resumable.
     async fn execute_compaction_job(
         self: &Arc<Self>,
         id: Ulid,
@@ -621,9 +622,8 @@ impl TokioCompactionExecutorInner {
         // Per-range bytes-processed, summed into the job's progress total. Each
         // range folds its own resume offset into the values it reports (see
         // `start_bytes_processed` in `run_subcompaction_merge`), so a range's
-        // latest event is its full cumulative contribution across attempts —
-        // including a range that resumes already-complete, which reports its
-        // full estimated size up front.
+        // latest event is its full cumulative contribution across attempts.
+        // Completed ranges do not run, so they add nothing to the total.
         let mut bytes_processed_by_sub: Vec<u64> = vec![0; subcompaction_args.len()];
 
         // For a fresh job, report the plan immediately so the worker buffers
@@ -647,9 +647,11 @@ impl TokioCompactionExecutorInner {
         let (sub_tx, mut sub_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut sub_tasks = Vec::new();
         for args in subcompaction_args {
-            // Each range runs as its own task, resuming from the output already
-            // recorded against it. A range whose output is already complete
-            // finds nothing left to merge and finishes immediately.
+            // A resumed job can have completed ranges. Their output is already
+            // stored, so they do not run again.
+            if ctx.subcompactions()[args.index].completed() {
+                continue;
+            }
             let this = self.clone();
             let index = args.index;
             let sequence_tracker = sequence_tracker.clone();
@@ -696,9 +698,8 @@ impl TokioCompactionExecutorInner {
         }
         drop(sub_tx);
 
-        let mut completed = vec![false; num_subcompactions];
         let mut first_error: Option<SlateDBError> = None;
-        while !completed.iter().all(|done| *done) {
+        while !ctx.subcompactions().iter().all(Subcompaction::completed) {
             let Some(event) = sub_rx.recv().await else {
                 break;
             };
@@ -718,7 +719,7 @@ impl TokioCompactionExecutorInner {
                 SubcompactionEvent::Finished { index, result } => match result {
                     Ok(output_ssts) => {
                         ctx.set_output_ssts(index, output_ssts);
-                        completed[index] = true;
+                        ctx.mark_completed(index);
                         let total_bytes = bytes_processed_by_sub.iter().sum();
                         self.send_compaction_progress(id, total_bytes, ctx.clone());
                     }
@@ -739,7 +740,7 @@ impl TokioCompactionExecutorInner {
         if let Some(e) = first_error {
             return Err(e);
         }
-        if !completed.iter().all(|done| *done) {
+        if !ctx.subcompactions().iter().all(Subcompaction::completed) {
             // The event channel closed before every subcompaction reported a
             // successful result; treat the job as failed so it can be
             // rescheduled.
@@ -2099,8 +2100,7 @@ mod tests {
     /// Resuming from any persisted snapshot — the bare plan, a mid-flight
     /// state, or the fully-complete state — converges to the same merged output
     /// and reuses the output SSTs already recorded against each range. Resuming
-    /// a completed compaction does no merge work but still reports its full
-    /// processed size rather than regressing to zero.
+    /// a completed compaction runs no range and reports no progress.
     #[tokio::test(flavor = "multi_thread")]
     async fn should_resume_from_any_snapshot() {
         let (executor, table_store, rx) = subcompaction_env(
@@ -2165,9 +2165,7 @@ mod tests {
                 );
             }
 
-            // The fully-complete snapshot must do no merge work — the run is
-            // rebuilt purely from recorded output — yet still report its full
-            // processed size, never regressing to zero.
+            // A completed plan rebuilds its output without reading inputs or reporting new work.
             if index == snapshots.len() - 1 {
                 let recorded: usize = snapshot.iter().map(|s| s.output_ssts().len()).sum();
                 assert_eq!(
@@ -2176,11 +2174,108 @@ mod tests {
                     "resuming a completed compaction must not produce new SSTs"
                 );
                 assert!(
-                    !resume_bytes.is_empty() && resume_bytes.iter().all(|&b| b > 0),
-                    "resuming a completed compaction must never report zero bytes, got {resume_bytes:?}"
+                    resume_bytes.is_empty(),
+                    "completed ranges must not execute again: {resume_bytes:?}"
                 );
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn incremental_resume_reads_only_retained_inputs() {
+        use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
+        use crate::incremental_progress::IncrementalProgress;
+        use std::collections::HashSet;
+
+        let (executor, table_store, rx) = subcompaction_env(
+            "testdb-incremental-resume",
+            #[cfg(feature = "compaction_filters")]
+            None,
+        )
+        .await;
+        let (_, sorted_runs) = split_inputs(&table_store).await;
+        let baseline = executor
+            .inner
+            .plan_and_execute_compaction_job(job_with_subcompactions(
+                vec![],
+                sorted_runs.clone(),
+                four_ranges(),
+            ))
+            .await
+            .unwrap();
+        let expected = read_run_entries(&table_store, &baseline).await;
+        let snapshots = collect_snapshots(&rx);
+        let sources = sorted_runs
+            .iter()
+            .map(|run| SourceId::SortedRun(run.id))
+            .collect::<Vec<_>>();
+        let original_ids = sorted_runs
+            .iter()
+            .flat_map(|run| run.sst_views().iter().map(|view| view.sst.id))
+            .collect::<HashSet<_>>();
+        let mut core = ManifestCore::new();
+        Arc::make_mut(&mut core.tree).compacted = sorted_runs;
+        let mut resume_job = None;
+        let mut released = HashSet::new();
+        for snapshot in snapshots {
+            if snapshot.iter().all(|sub| sub.completed()) {
+                break;
+            }
+            let job = Compaction::new(
+                Ulid::new(),
+                CompactionSpec::new(sources.clone(), sources.last().unwrap().unwrap_sorted_run()),
+            )
+            .with_ctx(Some(CompactionContext::new(snapshot, Some(0))));
+            let progress = IncrementalProgress::from_compaction(&job, &DbRand::default());
+            progress
+                .apply_to_manifest_core(&mut core, job.spec(), &DbRand::default())
+                .unwrap();
+            for order in [IterationOrder::Ascending, IterationOrder::Descending] {
+                let mut visible = Vec::new();
+                for run in &core.tree.compacted {
+                    let mut iter = SortedRunIterator::new_owned_initialized(
+                        ..,
+                        run.clone(),
+                        table_store.clone(),
+                        SstIteratorOptions {
+                            order,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    while let Some(entry) = iter.next().await.unwrap() {
+                        visible.push(entry);
+                    }
+                }
+                visible.sort_by(|a, b| a.key.cmp(&b.key).then_with(|| b.seq.cmp(&a.seq)));
+                assert_eq!(visible, expected);
+            }
+            let retained = core
+                .all_sst_views()
+                .map(|view| view.sst.id)
+                .collect::<HashSet<_>>();
+            released = original_ids.difference(&retained).copied().collect();
+            if !released.is_empty() && job.subcompactions().iter().any(|sub| sub.completed()) {
+                resume_job = Some(job);
+                break;
+            }
+        }
+        let job = resume_job.expect("expected incremental progress that releases inputs");
+        for id in released {
+            table_store.delete_sst(&id).await.unwrap();
+        }
+        let remaining = job.get_sorted_runs(&core);
+        let resumed = executor
+            .inner
+            .plan_and_execute_compaction_job(job_with_subcompactions(
+                vec![],
+                remaining,
+                job.subcompactions().clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(read_run_entries(&table_store, &resumed).await, expected);
     }
 
     /// When one subcompaction fails, the job must abort its sibling ranges and
@@ -2433,6 +2528,37 @@ mod tests {
         // when/then: the persisted plan is returned verbatim.
         let planned = ctx.executor.inner.plan_compaction_job(args).await.unwrap();
         assert_eq!(planned.ctx.subcompactions(), &persisted);
+    }
+
+    /// A completed range does not run again, even when it has no output. The
+    /// only input SST was never written, so any read of it fails the job.
+    #[tokio::test]
+    async fn should_skip_completed_range_with_no_output() {
+        let ctx = TestContextBuilder::new("testdb-completed-range")
+            .build()
+            .await;
+        let missing = SsTableHandle::new(
+            SsTableId::from(Ulid::new()),
+            crate::format::sst::SST_FORMAT_VERSION_LATEST,
+            crate::db_state::SsTableInfo {
+                first_entry: Some(Bytes::from_static(b"a")),
+                last_entry: Some(Bytes::from_static(b"z")),
+                ..Default::default()
+            },
+        );
+        let args = job_with_subcompactions(
+            vec![SsTableView::identity(missing)],
+            vec![],
+            vec![Subcompaction::new(BytesRange::unbounded())
+                .with_status(crate::subcompaction::SubcompactionStatus::Completed)],
+        );
+        let output = ctx
+            .executor
+            .inner
+            .plan_and_execute_compaction_job(args)
+            .await
+            .unwrap();
+        assert!(output.sst_views().is_empty());
     }
 
     /// The planner reads the real input SST indexes and splits a sizable
@@ -2889,6 +3015,13 @@ mod tests {
                     retention_min_seq,
                 )),
             };
+            self.run_job(compaction).await
+        }
+
+        async fn run_job(
+            self,
+            compaction: StartCompactionJobArgs,
+        ) -> Result<SortedRun, SlateDBError> {
             self.executor.start_compaction_job(compaction);
 
             tokio::time::timeout(Duration::from_secs(5), async move {
@@ -2902,6 +3035,100 @@ mod tests {
             .await
             .unwrap()
         }
+    }
+
+    #[rstest]
+    #[case::union(false, false)]
+    #[case::single_source_clone(true, false)]
+    #[case::legacy_union_clone(true, true)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_clone_compaction_removes_deleted_merge_without_flush(
+        #[case] clone_again: bool,
+        #[case] legacy_boundary: bool,
+    ) {
+        use crate::clone::CloneSource;
+        use crate::manifest::Manifest;
+        use crate::Checkpoint;
+        use uuid::Uuid;
+
+        let ctx = TestContextBuilder::new("testdb-clone-retention")
+            .with_merge_operator(Arc::new(StringConcatMergeOperator {}))
+            .build()
+            .await;
+        let table_store = ctx.table_store.clone();
+        let live = RowEntry::new_merge(b"z-live", b"live", 890_866);
+        let entries = [
+            vec![
+                RowEntry::new_tombstone(b"a-deleted", 886_642),
+                RowEntry::new_merge(b"a-deleted", b"old", 884_364),
+            ],
+            vec![live.clone()],
+        ];
+        let mut sources = Vec::new();
+        for (index, rows) in entries.iter().enumerate() {
+            let ssts = write_sst(&table_store, rows, usize::MAX).await;
+            let mut core = ManifestCore::new();
+            core.last_l0_seq = rows.iter().map(|row| row.seq).max().unwrap();
+            Arc::make_mut(&mut core.tree).compacted.push(SortedRun::new(
+                0,
+                ssts.into_iter().map(SsTableView::identity),
+            ));
+            sources.push(CloneSource {
+                manifest: Manifest::initial(core),
+                path: Path::from(format!("source-{index}")),
+                checkpoint: Checkpoint {
+                    id: Uuid::new_v4(),
+                    manifest_id: 1,
+                    expire_time: None,
+                    create_time: DefaultSystemClock::new().now(),
+                    name: None,
+                },
+            });
+        }
+        let rand = Arc::new(DbRand::new(42));
+        let mut manifest = Manifest::cloned_from_union(sources, rand.clone()).unwrap();
+        if legacy_boundary {
+            manifest.core.recent_snapshot_min_seq = 0;
+        }
+        if clone_again {
+            manifest = Manifest::cloned(&manifest, "union".into(), Uuid::new_v4(), rand);
+        }
+        assert!(manifest.core.tree.l0.is_empty());
+
+        let retention_min_seq = Some(manifest.core.recent_snapshot_min_seq);
+        let result = ctx
+            .run_job(StartCompactionJobArgs {
+                id: Ulid::new(),
+                compaction_id: Ulid::new(),
+                segment: Bytes::new(),
+                destination: 0,
+                l0_sst_views: vec![],
+                sorted_runs: manifest.core.tree.compacted.clone(),
+                compaction_clock_tick: manifest.core.last_l0_clock_tick,
+                is_dest_last_run: true,
+                retention_min_seq,
+                ctx: Some(CompactionContext::new(
+                    vec![Subcompaction::new(BytesRange::unbounded())],
+                    retention_min_seq,
+                )),
+            })
+            .await
+            .unwrap();
+
+        let mut rows = Vec::new();
+        for sst in result.sst_views() {
+            let mut iter = SstIterator::new(
+                SstView::Borrowed(sst, BytesRange::unbounded()),
+                table_store.clone(),
+                SstIteratorOptions::default(),
+            )
+            .unwrap();
+            iter.init().await.unwrap();
+            while let Some(row) = iter.next().await.unwrap() {
+                rows.push(row);
+            }
+        }
+        assert_eq!(rows, vec![live]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

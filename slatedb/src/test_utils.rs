@@ -20,7 +20,7 @@ use object_store::{
     ObjectStore, PutMultipartOptions, PutOptions as OS_PutOptions, PutPayload, PutResult,
     RenameOptions,
 };
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
@@ -133,6 +133,11 @@ struct SpanFieldRecorder<'a> {
 
 impl tracing::field::Visit for SpanFieldRecorder<'_> {
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
         self.fields
             .insert(field.name().to_string(), value.to_string());
     }
@@ -1236,7 +1241,7 @@ impl Gate {
 /// Each ObjectStore method has its own [`Gate`] that can be independently closed,
 /// released, and configured to inject errors. Gates default to **open** (pass-through).
 ///
-/// # Usage pattern (mirrors `single_flight.rs` tests)
+/// # Usage pattern (mirrors `slatedb_common::single_flight` tests)
 /// ```ignore
 /// let inner = Arc::new(InMemory::new());
 /// let gated = Arc::new(GatedObjectStore::new(inner));
@@ -1264,12 +1269,16 @@ pub(crate) struct GatedObjectStore {
     pub(crate) head_gate: Gate,
     pub(crate) put_opts_gate: Gate,
     pub(crate) put_multipart_opts_gate: Gate,
+    pub(crate) multipart_created_gate: Arc<Gate>,
+    pub(crate) multipart_put_part_gate: Arc<Gate>,
+    pub(crate) multipart_complete_gate: Arc<Gate>,
     pub(crate) copy_gate: Gate,
     pub(crate) rename_gate: Gate,
     /// Gates each path emitted by `delete_stream`. Per-item gating preserves
     /// the pre-0.13 single-call `delete` semantics now that callers go through
     /// `ObjectStoreExt::delete`, which fans out into `delete_stream`.
     pub(crate) delete_stream_gate: Arc<Gate>,
+    pub(crate) multipart_aborts: Arc<AtomicUsize>,
 }
 
 impl GatedObjectStore {
@@ -1280,10 +1289,44 @@ impl GatedObjectStore {
             head_gate: Gate::default(),
             put_opts_gate: Gate::default(),
             put_multipart_opts_gate: Gate::default(),
+            multipart_created_gate: Arc::new(Gate::default()),
+            multipart_put_part_gate: Arc::new(Gate::default()),
+            multipart_complete_gate: Arc::new(Gate::default()),
             copy_gate: Gate::default(),
             rename_gate: Gate::default(),
             delete_stream_gate: Arc::new(Gate::default()),
+            multipart_aborts: Arc::new(AtomicUsize::new(0)),
         }
+    }
+}
+
+#[derive(Debug)]
+struct AbortCountingUpload {
+    inner: Box<dyn MultipartUpload>,
+    aborts: Arc<AtomicUsize>,
+    put_part_gate: Arc<Gate>,
+    complete_gate: Arc<Gate>,
+}
+
+#[async_trait]
+impl MultipartUpload for AbortCountingUpload {
+    fn put_part(&mut self, data: PutPayload) -> object_store::UploadPart {
+        let put_part = self.inner.put_part(data);
+        let gate = Arc::clone(&self.put_part_gate);
+        Box::pin(async move {
+            gate.wait().await?;
+            put_part.await
+        })
+    }
+
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        self.complete_gate.wait().await?;
+        self.inner.complete().await
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        self.aborts.fetch_add(1, Ordering::SeqCst);
+        self.inner.abort().await
     }
 }
 
@@ -1324,7 +1367,14 @@ impl ObjectStore for GatedObjectStore {
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         self.put_multipart_opts_gate.wait().await?;
-        self.inner.put_multipart_opts(location, opts).await
+        let inner = self.inner.put_multipart_opts(location, opts).await?;
+        self.multipart_created_gate.wait().await?;
+        Ok(Box::new(AbortCountingUpload {
+            inner,
+            aborts: Arc::clone(&self.multipart_aborts),
+            put_part_gate: Arc::clone(&self.multipart_put_part_gate),
+            complete_gate: Arc::clone(&self.multipart_complete_gate),
+        }))
     }
 
     fn delete_stream(

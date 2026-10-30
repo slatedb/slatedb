@@ -20,6 +20,7 @@ use std::sync::OnceLock;
 use std::task::{Context, Poll};
 
 use tokio::runtime::{Builder, Handle, Runtime};
+use tokio::task::JoinHandle;
 
 const RUNTIME_THREADS_ENV: &str = "SLATEDB_UNIFFI_RUNTIME_THREADS";
 const FALLBACK_WORKER_THREADS: usize = 4;
@@ -36,6 +37,17 @@ where
         handle: runtime().handle().clone(),
         future: Box::pin(future),
     }
+}
+
+/// Spawns `future` on the dedicated runtime, for work that must outlive the
+/// foreign future awaiting it. `enter` keeps a future on the caller's poll
+/// path instead, which is what open needs for its synchronous callbacks.
+pub(crate) fn spawn<F>(future: F) -> JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    runtime().spawn(future)
 }
 
 // Wraps an open future so every poll occurs inside `handle.enter()`.

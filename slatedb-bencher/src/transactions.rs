@@ -24,7 +24,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rand::{Rng, RngCore, SeedableRng};
+use rand::{Rng, RngExt};
 use rand_xorshift::XorShiftRng;
 use slatedb::config::WriteOptions;
 use slatedb::{Db, IsolationLevel, WriteBatch};
@@ -167,7 +167,7 @@ impl TransactionTask {
     ///
     /// This method runs a loop, executing transactions with multiple operations.
     async fn run(&mut self) {
-        let mut random = XorShiftRng::from_os_rng();
+        let mut random = rand::make_rng::<XorShiftRng>();
         let mut commits = 0u64;
         let mut aborts = 0u64;
         let mut conflicts = 0u64;

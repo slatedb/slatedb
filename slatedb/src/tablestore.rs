@@ -12,6 +12,7 @@ use object_store::{GetOptions, ObjectStore, ObjectStoreExt};
 use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_common::ObjectMetadata;
 use tokio::io::AsyncWriteExt;
+use tokio_util::sync::CancellationToken;
 use ulid::Ulid;
 
 use crate::block_cache_policy::{should_cache_data_block, BlockCachePolicy};
@@ -29,19 +30,23 @@ use crate::object_store_tag::ObjectStoreCallTag;
 pub(crate) use crate::object_store_tag::TableStoreKind;
 use crate::partitioned_keyspace::partitions_covering_range;
 use crate::paths::PathResolver;
-use crate::reader::{ReadTrace, SstTraceLevel};
+use crate::read_trace::{ReadTrace, SstTraceLevel};
 use crate::sst_builder::EncodedSsTableBuilder;
 #[cfg(test)]
 use crate::sst_io::MAX_VALIDATION_RETRIES;
 use crate::sst_io::{read_obj, read_with_validation_retry, ReadOnlyObject};
 use crate::sst_stats::SstStats;
+use crate::sst_upload::SstUploadGuard;
 use crate::types::RowEntry;
 use tracing::Instrument;
 
 pub(crate) struct TableStore {
     object_store: Arc<dyn ObjectStore>,
-    sst_format: SsTableFormat,
-    path_resolver: PathResolver,
+    // `sst_format` and `path_resolver` are behind `Arc`s so that building a
+    // cache-miss loader on every cached read is a few refcount bumps rather than
+    // a deep clone plus path formatting.
+    sst_format: Arc<SsTableFormat>,
+    path_resolver: Arc<PathResolver>,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
     /// In-memory cache for data blocks and SST metadata.
@@ -57,6 +62,11 @@ fn record_read_cached(span: &tracing::Span, lookup: CacheLookup) {
         CacheLookup::Hit => span.record("cached", true),
         CacheLookup::Miss => span.record("cached", false),
     };
+}
+
+fn record_read_block_cache_counts(span: &tracing::Span, cache_hits: usize, cache_misses: usize) {
+    span.record("cache_hits", cache_hits as u64);
+    span.record("cache_misses", cache_misses as u64);
 }
 
 impl TableStore {
@@ -90,8 +100,8 @@ impl TableStore {
     ) -> Self {
         Self {
             object_store,
-            sst_format,
-            path_resolver,
+            sst_format: Arc::new(sst_format),
+            path_resolver: Arc::new(path_resolver),
             fp_registry,
             cache,
             block_cache_policy,
@@ -115,18 +125,19 @@ impl TableStore {
         segment: Option<Bytes>,
     ) -> EncodedSsTableWriter {
         let object_store = self.object_store.clone();
+        let (object_store, upload_guard) = SstUploadGuard::new(object_store);
         let path = self.path(&id);
         EncodedSsTableWriter {
             id,
             builder: self.sst_format.table_builder(),
-            writer: tagged_buf_writer(
+            writer: Some(tagged_buf_writer(
                 object_store,
                 path,
                 ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&id), segment),
-            ),
+            )),
             table_store: self.clone(),
             bytes_written: 0,
-            shutdown_started: false,
+            upload_guard,
             #[cfg(test)]
             blocks_written: 0,
         }
@@ -323,8 +334,9 @@ impl TableStore {
         id_range: R,
     ) -> Result<Vec<IdentifiedObjectMetadata<SsTableId>>, SlateDBError> {
         let mut sst_list: Vec<IdentifiedObjectMetadata<SsTableId>> = Vec::new();
-        let compacted_path = self.path_resolver.compacted_path();
-        let mut files_stream = self.object_store.list(Some(&compacted_path));
+        let mut files_stream = self
+            .object_store
+            .list(Some(&self.path_resolver.compacted_dir));
 
         while let Some(file) = files_stream.next().await.transpose()? {
             match self.path_resolver.parse_table_id(&file.location) {
@@ -584,23 +596,25 @@ impl TableStore {
     /// or index). Panics on [`CacheTarget::Data`]: data blocks resolve through
     /// [`Self::block_loader`] because they require a block index lookup.
     ///
-    /// Builds a fresh boxed closure on every call, even when the cache hits and
-    /// the loader is never invoked; revisit if cache-hit allocations show up in
-    /// profiles.
+    /// Called on every cached read, including hits where the loader never runs,
+    /// so it only captures cheap handles; the SST path is resolved inside the
+    /// loader.
     fn read_loader(
         &self,
         handle: &SsTableHandle,
         target: CacheTarget,
         segment: Option<Bytes>,
     ) -> CacheLoader {
+        let id = handle.id;
         let info = handle.info.clone();
         let object_store = self.object_store.clone();
-        let path = self.path(&handle.id);
+        let path_resolver = self.path_resolver.clone();
         let sst_format = self.sst_format.clone();
         let tag =
             ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment);
         Box::new(move || {
             Box::pin(async move {
+                let path = path_resolver.sst_path(&id);
                 // Only the stats arm can produce `None` (stats_len > 0 but no
                 // stats decoded); filters and index always yield an entry.
                 let entry = read_with_validation_retry(tag, async |tag| {
@@ -644,9 +658,8 @@ impl TableStore {
         })
     }
 
-    /// Builds a fresh boxed closure on every call, even when the cache hits and
-    /// the loader is never invoked; revisit if cache-hit allocations show up in
-    /// profiles.
+    /// Like [`Self::read_loader`], this runs on every cached block read, so it
+    /// only captures cheap handles and resolves the SST path inside the loader.
     fn block_loader(
         &self,
         handle: &SsTableHandle,
@@ -654,14 +667,16 @@ impl TableStore {
         block_num: usize,
         segment: Option<Bytes>,
     ) -> CacheLoader {
+        let id = handle.id;
         let info = handle.info.clone();
         let object_store = self.object_store.clone();
-        let path = self.path(&handle.id);
+        let path_resolver = self.path_resolver.clone();
         let sst_format = self.sst_format.clone();
         let tag =
             ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment);
         Box::new(move || {
             Box::pin(async move {
+                let path = path_resolver.sst_path(&id);
                 let block = read_with_validation_retry(tag, async |tag| {
                     let obj = ReadOnlyObject {
                         object_store: object_store.clone(),
@@ -775,6 +790,8 @@ impl TableStore {
     /// It can optionally cache newly read blocks.
     /// `segment` is a hint attached to the [`ObjectStoreCallTag`] for
     /// object-store routing.
+    /// `trace` owns the span for the block read.
+    /// `sst_level` identifies the level that contains the SST.
     pub(crate) async fn read_blocks_using_index(
         &self,
         handle: &SsTableHandle,
@@ -782,6 +799,29 @@ impl TableStore {
         blocks: Range<usize>,
         cache_blocks: bool,
         segment: Option<Bytes>,
+        trace: &ReadTrace,
+        sst_level: Option<&SstTraceLevel>,
+    ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
+        let span = trace.new_read_block_span(handle.id, sst_level);
+        let read = self.read_blocks_using_index_inner(
+            handle,
+            index,
+            blocks,
+            cache_blocks,
+            segment,
+            span.clone(),
+        );
+        read.instrument(span).await
+    }
+
+    async fn read_blocks_using_index_inner(
+        &self,
+        handle: &SsTableHandle,
+        index: Arc<SsTableIndexOwned>,
+        blocks: Range<usize>,
+        cache_blocks: bool,
+        segment: Option<Bytes>,
+        span: tracing::Span,
     ) -> Result<VecDeque<Arc<Block>>, SlateDBError> {
         // Single-block reads (point-gets via SstIterator::for_key, SstFile::read_block,
         // etc.) take a dedup-aware fast-path: concurrent callers for the same block
@@ -797,6 +837,11 @@ impl TableStore {
                 let loader = self.block_loader(handle, index.clone(), block_num, segment.clone());
                 if let Ok(fetch) = cache.fetch_block(cache_key, loader).await {
                     if let Some(block) = fetch.entry.block() {
+                        let (cache_hits, cache_misses) = match fetch.lookup {
+                            CacheLookup::Hit => (1, 0),
+                            CacheLookup::Miss => (0, 1),
+                        };
+                        record_read_block_cache_counts(&span, cache_hits, cache_misses);
                         let mut result = VecDeque::with_capacity(1);
                         result.push_back(block);
                         return Ok(result);
@@ -810,6 +855,8 @@ impl TableStore {
         // Initialize the result vector and a vector to track uncached ranges
         let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
         let mut uncached_ranges = Vec::new();
+        let mut cache_hits = 0;
+        let mut cache_misses = 0;
 
         // If block cache is available, try to retrieve cached blocks
         if let Some(cache) = self.cache_for_reads() {
@@ -832,6 +879,7 @@ impl TableStore {
             for (index, block_result) in cached_blocks.into_iter().enumerate() {
                 match block_result {
                     Some(cached_block) => {
+                        cache_hits += 1;
                         // If a cached block is found, add it to blocks_read
                         if let Some(start) = last_uncached_start.take() {
                             uncached_ranges.push((blocks.start + start)..(blocks.start + index));
@@ -839,6 +887,7 @@ impl TableStore {
                         blocks_read.push_back(cached_block);
                     }
                     None => {
+                        cache_misses += 1;
                         // If a block is not in cache, mark the start of an uncached range
                         last_uncached_start.get_or_insert(index);
                     }
@@ -850,8 +899,10 @@ impl TableStore {
             }
         } else {
             // If no cache is available, treat all blocks as uncached
+            cache_misses = blocks.len();
             uncached_ranges.push(blocks.clone());
         }
+        record_read_block_cache_counts(&span, cache_hits, cache_misses);
         // Read uncached blocks concurrently
         let uncached_blocks = join_all(uncached_ranges.iter().map(|range| {
             let object_store = &object_store;
@@ -1041,7 +1092,7 @@ impl TableStore {
         // Best effort: if we can't read the index we can't enumerate blocks,
         // so log and skip. Remaining entries will age out under normal pressure.
         let index = match self
-            .read_index(handle, false, segment, &ReadTrace::new(None), None)
+            .read_index(handle, false, segment, &ReadTrace::none(), None)
             .await
         {
             Ok(index) => index,
@@ -1069,17 +1120,16 @@ impl TableStore {
     }
 }
 
+const BUF_WRITER_CAPACITY: usize = 10 * 1024 * 1024;
+
 /// Builds a [`BufWriter`] whose upload carries `tag` in its extensions.
 fn tagged_buf_writer(
     object_store: Arc<dyn ObjectStore>,
     path: Path,
     tag: ObjectStoreCallTag,
 ) -> BufWriter {
-    // The one sanctioned `BufWriter::new`: it attaches the tag right after, so
-    // every SST streaming write carries it. Other sites are steered here by the
-    // clippy `disallowed-methods` rule on `BufWriter::new`.
-    #[allow(clippy::disallowed_methods)]
-    BufWriter::new(object_store, path).with_extensions(tag.into())
+    // Attach the tag here so every SST streaming write carries it.
+    BufWriter::with_capacity(object_store, path, BUF_WRITER_CAPACITY).with_extensions(tag.into())
 }
 
 #[cfg(test)]
@@ -1101,10 +1151,10 @@ async fn write_sst_streaming_in_object_store(
 pub(crate) struct EncodedSsTableWriter {
     id: SsTableId,
     builder: EncodedSsTableBuilder,
-    writer: BufWriter,
+    writer: Option<BufWriter>,
     table_store: Arc<TableStore>,
     bytes_written: usize,
-    shutdown_started: bool,
+    upload_guard: SstUploadGuard,
     #[cfg(test)]
     blocks_written: usize,
 }
@@ -1128,23 +1178,27 @@ impl EncodedSsTableWriter {
     /// On failure, aborts the upload before returning the error. This
     /// discards any blocks already sent to object storage for this
     /// SST.
-    pub(crate) async fn close(mut self) -> Result<(SsTableHandle, u64), SlateDBError> {
+    pub(crate) async fn close(self) -> Result<(SsTableHandle, u64), SlateDBError> {
+        self.close_unless_cancelled(&CancellationToken::new()).await
+    }
+
+    pub(crate) async fn close_unless_cancelled(
+        mut self,
+        cancel: &CancellationToken,
+    ) -> Result<(SsTableHandle, u64), SlateDBError> {
+        let id = self.id;
+        let cancelled = || SlateDBError::BackgroundTaskCancelled(format!("sst_close[{:?}]", id));
         let result = async {
-            fail_point!(
-                self.table_store.fp_registry.clone(),
-                "write-compacted-sst-io-error",
-                |_| Err(slatedb_io_error())
-            );
-            let builder = std::mem::replace(&mut self.builder, self.table_store.table_builder());
-            let encoded_sst = builder.build().await?;
-            for block in &encoded_sst.unconsumed_blocks {
-                self.writer.write_all(block.padded_bytes.as_ref()).await?;
-                self.bytes_written += block.padded_bytes.len();
+            let encoded_sst = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(cancelled()),
+                encoded_sst = self.write_tail() => encoded_sst?,
+            };
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(cancelled()),
+                result = self.writer.as_mut().expect("SST writer is active").shutdown() => result?,
             }
-            self.writer.write_all(encoded_sst.footer.as_ref()).await?;
-            self.bytes_written += encoded_sst.footer.len();
-            self.shutdown_started = true;
-            self.writer.shutdown().await?;
 
             // Cache inserts happen after writer shutdown so an SST whose upload
             // fails contributes no metadata entries.
@@ -1155,6 +1209,7 @@ impl EncodedSsTableWriter {
             self.table_store
                 .cache_on_sst_write(self.id, &encoded_sst)
                 .await;
+            self.upload_guard.disarm();
             Ok((
                 SsTableHandle::new(self.id, encoded_sst.format_version, encoded_sst.info),
                 self.bytes_written as u64,
@@ -1173,6 +1228,31 @@ impl EncodedSsTableWriter {
         result
     }
 
+    async fn write_tail(&mut self) -> Result<EncodedSsTable, SlateDBError> {
+        fail_point!(
+            self.table_store.fp_registry.clone(),
+            "write-compacted-sst-io-error",
+            |_| Err(slatedb_io_error())
+        );
+        let builder = std::mem::replace(&mut self.builder, self.table_store.table_builder());
+        let encoded_sst = builder.build().await?;
+        for block in &encoded_sst.unconsumed_blocks {
+            self.writer
+                .as_mut()
+                .expect("SST writer is active")
+                .write_all(block.padded_bytes.as_ref())
+                .await?;
+            self.bytes_written += block.padded_bytes.len();
+        }
+        self.writer
+            .as_mut()
+            .expect("SST writer is active")
+            .write_all(encoded_sst.footer.as_ref())
+            .await?;
+        self.bytes_written += encoded_sst.footer.len();
+        Ok(encoded_sst)
+    }
+
     /// Tell object storage to discard this SST's upload.
     ///
     /// If the upload never grew past the small in-memory buffer,
@@ -1180,17 +1260,11 @@ impl EncodedSsTableWriter {
     /// Otherwise this cancels the multipart upload and asks object
     /// storage to delete the parts already stored.
     ///
-    /// Once shutdown has started this is a no-op: the underlying
-    /// `BufWriter` panics if aborted after shutdown, and a failed
-    /// shutdown leaves nothing this can usefully cancel.
+    /// Drop pending writes before aborting the retained upload handle.
+    /// If creation is still pending, it aborts when the handle arrives.
     pub(crate) async fn abort(&mut self) -> Result<(), SlateDBError> {
-        if self.shutdown_started {
-            return Ok(());
-        }
-        self.writer
-            .abort()
-            .await
-            .map_err(|e| SlateDBError::ObjectStoreError(Arc::new(e)))
+        self.writer.take();
+        self.upload_guard.abort().await.map_err(SlateDBError::from)
     }
 
     async fn drain_blocks(&mut self) -> Result<(), SlateDBError> {
@@ -1210,7 +1284,11 @@ impl EncodedSsTableWriter {
             "write-compacted-sst-io-error",
             |_| Err(slatedb_io_error())
         );
-        self.writer.write_all(block.padded_bytes.as_ref()).await?;
+        self.writer
+            .as_mut()
+            .expect("SST writer is active")
+            .write_all(block.padded_bytes.as_ref())
+            .await?;
         self.bytes_written += block.padded_bytes.len();
         if let (Some(cache), Some(key_span)) = (&self.table_store.cache, &block.key_span) {
             let targets = self.table_store.targets_to_cache(&self.id);
@@ -1248,16 +1326,17 @@ fn slatedb_io_error() -> SlateDBError {
 #[cfg(test)]
 mod tests {
     use crate::config::TracingOptions;
-    use crate::reader::{ReadTrace, SstTraceLevel};
+    use crate::read_trace::{ReadTrace, SstTraceLevel};
     use crate::types::KeyValue;
     use bytes::Bytes;
     use futures::future;
     use futures::StreamExt;
     use object_store::{memory::InMemory, path::Path, ObjectStore, ObjectStoreExt};
-    use rstest::rstest;
+    use rstest::{fixture, rstest};
     use std::collections::{HashMap, VecDeque};
     use std::ops::Range;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
     use tracing_subscriber::layer::SubscriberExt;
 
     use crate::block_cache_policy::BlockCachePolicy;
@@ -1576,6 +1655,222 @@ mod tests {
         ts.open_sst(&id, Some(Bytes::new())).await.unwrap();
     }
 
+    fn gated_table_store() -> (Arc<TableStore>, Arc<crate::test_utils::GatedObjectStore>) {
+        let os = Arc::new(crate::test_utils::GatedObjectStore::new(Arc::new(
+            InMemory::new(),
+        )));
+        let ts = Arc::new(TableStore::new(
+            os.clone(),
+            SsTableFormat::default(),
+            Path::from(ROOT),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        (ts, os)
+    }
+
+    #[tokio::test]
+    async fn should_abort_multipart_upload_when_close_is_cancelled() {
+        let (ts, os) = gated_table_store();
+        let id = SsTableId::from(ulid::Ulid::new());
+        let mut writer = ts.table_writer(id, Some(Bytes::new()));
+        let value = vec![7u8; 1024];
+        let mut i = 0u64;
+        while writer.bytes_written <= super::BUF_WRITER_CAPACITY {
+            writer
+                .add(RowEntry::new_value(&i.to_be_bytes(), &value, i))
+                .await
+                .unwrap();
+            i += 1;
+        }
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let result = writer.close_unless_cancelled(&cancel).await;
+
+        assert!(matches!(
+            result,
+            Err(error::SlateDBError::BackgroundTaskCancelled(_))
+        ));
+        assert_eq!(
+            os.multipart_aborts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(os.head(&ts.path(&id)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn should_cancel_single_put_close_during_shutdown() {
+        let (ts, os) = gated_table_store();
+        os.put_opts_gate.close();
+        let id = SsTableId::from(ulid::Ulid::new());
+        let mut writer = ts.table_writer(id, Some(Bytes::new()));
+        writer
+            .add(RowEntry::new_value(b"key", b"value", 0))
+            .await
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let close = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { writer.close_unless_cancelled(&cancel).await }
+        });
+        os.put_opts_gate.wait_for_arrivals(1).await;
+
+        cancel.cancel();
+        let result = close.await.unwrap();
+
+        assert!(matches!(
+            result,
+            Err(error::SlateDBError::BackgroundTaskCancelled(_))
+        ));
+        assert_eq!(
+            os.multipart_aborts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        os.put_opts_gate.release();
+    }
+
+    async fn large_tail_writer(ts: &Arc<TableStore>) -> super::EncodedSsTableWriter {
+        let mut writer = ts.table_writer(SsTableId::from(ulid::Ulid::new()), Some(Bytes::new()));
+        writer
+            .add(RowEntry::new_value(
+                b"key",
+                &vec![7; super::BUF_WRITER_CAPACITY + 1],
+                0,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(writer.bytes_written, 0);
+        writer
+    }
+
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn should_cancel_multipart_close_during_shutdown(#[case] during_complete: bool) {
+        let (ts, os) = gated_table_store();
+        let gate = if during_complete {
+            &os.multipart_complete_gate
+        } else {
+            &os.multipart_put_part_gate
+        };
+        gate.close();
+        let writer = large_tail_writer(&ts).await;
+        let id = writer.id;
+        let cancel = CancellationToken::new();
+        let close = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { writer.close_unless_cancelled(&cancel).await }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_for_arrivals(1))
+            .await
+            .unwrap();
+
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), close)
+            .await
+            .expect("cancellation must stop multipart shutdown")
+            .unwrap();
+
+        assert!(matches!(
+            result,
+            Err(error::SlateDBError::BackgroundTaskCancelled(_))
+        ));
+        assert_eq!(
+            os.multipart_aborts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(os.head(&ts.path(&id)).await.is_err());
+        gate.release();
+    }
+
+    #[tokio::test]
+    async fn should_abort_upload_created_after_tail_write_is_cancelled() {
+        let (ts, os) = gated_table_store();
+        os.multipart_created_gate.close();
+        let writer = large_tail_writer(&ts).await;
+        let id = writer.id;
+        let cancel = CancellationToken::new();
+        let close = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { writer.close_unless_cancelled(&cancel).await }
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            os.multipart_created_gate.wait_for_arrivals(1),
+        )
+        .await
+        .unwrap();
+
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), close)
+            .await
+            .expect("cancellation must return while upload creation is pending")
+            .unwrap();
+        assert!(matches!(
+            result,
+            Err(error::SlateDBError::BackgroundTaskCancelled(_))
+        ));
+        os.multipart_created_gate.release();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while os
+                .multipart_aborts
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the upload must abort after creation returns its handle");
+        assert!(os.head(&ts.path(&id)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn should_preserve_upload_creation_panic() {
+        let (ts, os) = gated_table_store();
+        os.put_multipart_opts_gate
+            .set_error(|| panic!("upload creation panic"));
+        let writer = large_tail_writer(&ts).await;
+        let close = tokio::spawn(async move { writer.close().await });
+
+        assert!(close.await.unwrap_err().is_panic());
+    }
+
+    #[tokio::test]
+    async fn should_abort_multipart_upload_when_close_task_is_dropped() {
+        let (ts, os) = gated_table_store();
+        os.multipart_complete_gate.close();
+        let writer = large_tail_writer(&ts).await;
+        let close = tokio::spawn(async move { writer.close().await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            os.multipart_complete_gate.wait_for_arrivals(1),
+        )
+        .await
+        .unwrap();
+
+        close.abort();
+        assert!(close.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while os
+                .multipart_aborts
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the close task must abort its upload");
+        os.multipart_complete_gate.release();
+    }
+
     #[tokio::test]
     async fn test_checksum_mismatch_error_includes_path() {
         let os = Arc::new(InMemory::new());
@@ -1683,19 +1978,21 @@ mod tests {
 
         // Read the index
         let index = ts
-            .read_index(
-                &handle,
-                true,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
 
         // Test 1: SST hit
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                0..20,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1727,7 +2024,15 @@ mod tests {
 
         // Test 2: Partial cache hit, everything should be returned since missing blocks are returned from sst
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                0..20,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data).await;
@@ -1752,7 +2057,15 @@ mod tests {
 
         // Test 3: All blocks should be in cache after SST file is emptied
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 0..20, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                0..20,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data).await;
@@ -1773,13 +2086,29 @@ mod tests {
 
         // Test 4: Verify that reading specific ranges still works after SST file is emptied
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 5..10, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                5..10,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data[5..10]).await;
 
         let blocks = ts
-            .read_blocks_using_index(&handle, index.clone(), 15..20, true, Some(Bytes::new()))
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                15..20,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
             .await
             .unwrap();
         assert_blocks(&blocks, &expected_data[15..20]).await;
@@ -1833,13 +2162,7 @@ mod tests {
         assert_eq!(meta_cache.entry_count(), 0);
 
         let _ = reader
-            .read_index(
-                &handle,
-                false,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
         assert!(meta_cache
@@ -1849,13 +2172,7 @@ mod tests {
             .is_none());
 
         let _ = reader
-            .read_index(
-                &handle,
-                true,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
         assert!(meta_cache
@@ -1949,7 +2266,7 @@ mod tests {
                                     &handle,
                                     true,
                                     Some(Bytes::new()),
-                                    &ReadTrace::new(None),
+                                    &ReadTrace::none(),
                                     None,
                                 )
                                 .await
@@ -1961,7 +2278,7 @@ mod tests {
                                     &handle,
                                     true,
                                     Some(Bytes::new()),
-                                    &ReadTrace::new(None),
+                                    &ReadTrace::none(),
                                     None,
                                 )
                                 .await
@@ -2021,6 +2338,275 @@ mod tests {
         );
     }
 
+    struct ReadBlocksSpanTest {
+        writer: TableStore,
+        reader: TableStore,
+        block_cache: Arc<TestCache>,
+        handle: SsTableHandle,
+        index: Arc<SsTableIndexOwned>,
+        num_blocks: usize,
+    }
+
+    impl ReadBlocksSpanTest {
+        fn all_blocks(&self) -> Range<usize> {
+            0..self.num_blocks
+        }
+
+        fn fill_cache(&self, blocks: Range<usize>) {
+            tokio_test::block_on(async {
+                self.reader
+                    .read_blocks_using_index(
+                        &self.handle,
+                        self.index.clone(),
+                        blocks,
+                        true,
+                        Some(Bytes::new()),
+                        &ReadTrace::none(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            });
+        }
+
+        fn evict_block(&self, block: usize) {
+            tokio_test::block_on(async {
+                let offset = self.index.borrow().block_meta().get(block).offset();
+                self.block_cache
+                    .remove(&(self.handle.id, offset).into())
+                    .await;
+            });
+        }
+    }
+
+    #[fixture]
+    fn read_blocks_span_test() -> ReadBlocksSpanTest {
+        tokio_test::block_on(async {
+            let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let format = SsTableFormat {
+                block_size: 32,
+                min_filter_keys: u32::MAX,
+                ..SsTableFormat::default()
+            };
+            let writer = TableStore::new(
+                main_store.clone(),
+                format.clone(),
+                Path::from(ROOT),
+                None,
+                TableStoreKind::Main,
+                BlockCachePolicy::default(),
+            );
+
+            let mut builder = writer.table_builder();
+            for i in 0..8 {
+                builder
+                    .add(RowEntry::new_value(&[i; 16], &[i + 1; 16], 0))
+                    .await
+                    .unwrap();
+            }
+            let id = SsTableId::from(ulid::Ulid::new());
+            let handle = writer
+                .write_sst(&id, &builder.build().await.unwrap(), Some(Bytes::new()))
+                .await
+                .unwrap();
+
+            let block_cache = Arc::new(TestCache::new());
+            let cache = Arc::new(
+                SplitCache::new()
+                    .with_block_cache(Some(block_cache.clone()))
+                    .build(),
+            );
+            let reader = TableStore::new(
+                main_store,
+                format,
+                Path::from(ROOT),
+                Some(cache),
+                TableStoreKind::Main,
+                BlockCachePolicy::default(),
+            );
+            let index = reader
+                .read_index(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None)
+                .await
+                .unwrap();
+            let num_blocks = index.borrow().block_meta().len();
+            assert!(num_blocks > 1);
+
+            ReadBlocksSpanTest {
+                writer,
+                reader,
+                block_cache,
+                handle,
+                index,
+                num_blocks,
+            }
+        })
+    }
+
+    fn verify_read_blocks_span(
+        store: &TableStore,
+        handle: &SsTableHandle,
+        index: Arc<SsTableIndexOwned>,
+        trace_id: &str,
+        blocks: Range<usize>,
+        cache_blocks: bool,
+        cache_hits: usize,
+        cache_misses: usize,
+    ) {
+        let span_recorder = SpanRecorder::for_name("slatedb.read.read_blocks");
+        let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            tokio_test::block_on(async {
+                let trace = ReadTrace::new(Some(TracingOptions::new(trace_id)));
+                let sst_level = SstTraceLevel::SortedRun(7);
+                let expected_blocks = blocks.len();
+                let blocks = store
+                    .read_blocks_using_index(
+                        handle,
+                        index,
+                        blocks,
+                        cache_blocks,
+                        Some(Bytes::new()),
+                        &trace,
+                        Some(&sst_level),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(blocks.len(), expected_blocks);
+
+                let span = span_recorder.only_span();
+                assert_eq!(span.level, "INFO");
+                assert_eq!(span.parent_name.as_deref(), Some("slatedb.read"));
+                assert_eq!(
+                    span.fields.get("trace_id").map(String::as_str),
+                    Some(trace_id)
+                );
+                assert_eq!(
+                    span.fields.get("sst_id").map(String::as_str),
+                    Some(handle.id.value().to_string().as_str())
+                );
+                assert_eq!(
+                    span.fields.get("sst_level").map(String::as_str),
+                    Some("sorted_run:7")
+                );
+                assert_eq!(
+                    span.fields.get("cache_hits").map(String::as_str),
+                    Some(cache_hits.to_string().as_str())
+                );
+                assert_eq!(
+                    span.fields.get("cache_misses").map(String::as_str),
+                    Some(cache_misses.to_string().as_str())
+                );
+            })
+        });
+    }
+
+    #[rstest]
+    fn test_read_blocks_span_all_miss(read_blocks_span_test: ReadBlocksSpanTest) {
+        let blocks = read_blocks_span_test.all_blocks();
+        verify_read_blocks_span(
+            &read_blocks_span_test.reader,
+            &read_blocks_span_test.handle,
+            read_blocks_span_test.index.clone(),
+            "all-miss",
+            blocks.clone(),
+            true,
+            0,
+            blocks.len(),
+        );
+    }
+
+    #[rstest]
+    fn test_read_blocks_span_all_hit(read_blocks_span_test: ReadBlocksSpanTest) {
+        let blocks = read_blocks_span_test.all_blocks();
+        read_blocks_span_test.fill_cache(blocks.clone());
+        verify_read_blocks_span(
+            &read_blocks_span_test.reader,
+            &read_blocks_span_test.handle,
+            read_blocks_span_test.index.clone(),
+            "all-hit",
+            blocks.clone(),
+            true,
+            blocks.len(),
+            0,
+        );
+    }
+
+    #[rstest]
+    fn test_read_blocks_span_partial_hit(read_blocks_span_test: ReadBlocksSpanTest) {
+        let blocks = read_blocks_span_test.all_blocks();
+        read_blocks_span_test.fill_cache(blocks.clone());
+        read_blocks_span_test.evict_block(1);
+        verify_read_blocks_span(
+            &read_blocks_span_test.reader,
+            &read_blocks_span_test.handle,
+            read_blocks_span_test.index.clone(),
+            "partial-hit",
+            blocks.clone(),
+            true,
+            blocks.len() - 1,
+            1,
+        );
+    }
+
+    #[rstest]
+    fn test_read_blocks_span_single_hit(read_blocks_span_test: ReadBlocksSpanTest) {
+        read_blocks_span_test.fill_cache(0..1);
+        verify_read_blocks_span(
+            &read_blocks_span_test.reader,
+            &read_blocks_span_test.handle,
+            read_blocks_span_test.index.clone(),
+            "single-hit",
+            0..1,
+            true,
+            1,
+            0,
+        );
+    }
+
+    #[rstest]
+    fn test_read_blocks_span_single_miss(read_blocks_span_test: ReadBlocksSpanTest) {
+        verify_read_blocks_span(
+            &read_blocks_span_test.reader,
+            &read_blocks_span_test.handle,
+            read_blocks_span_test.index.clone(),
+            "single-miss",
+            0..1,
+            true,
+            0,
+            1,
+        );
+    }
+
+    #[rstest]
+    fn test_read_blocks_span_when_cache_is_disabled(read_blocks_span_test: ReadBlocksSpanTest) {
+        verify_read_blocks_span(
+            &read_blocks_span_test.reader,
+            &read_blocks_span_test.handle,
+            read_blocks_span_test.index.clone(),
+            "cache-disabled",
+            0..1,
+            false,
+            0,
+            1,
+        );
+        assert_eq!(read_blocks_span_test.block_cache.entry_count(), 0);
+    }
+
+    #[rstest]
+    fn test_read_blocks_span_without_cache(read_blocks_span_test: ReadBlocksSpanTest) {
+        let blocks = read_blocks_span_test.all_blocks();
+        verify_read_blocks_span(
+            &read_blocks_span_test.writer,
+            &read_blocks_span_test.handle,
+            read_blocks_span_test.index.clone(),
+            "no-cache",
+            blocks.clone(),
+            true,
+            0,
+            blocks.len(),
+        );
+    }
+
     #[tokio::test]
     async fn test_read_filter_honors_cache_blocks() {
         let main_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -2069,13 +2655,7 @@ mod tests {
         assert_eq!(meta_cache.entry_count(), 0);
 
         let filters = reader
-            .read_filters(
-                &handle,
-                false,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_filters(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
         assert!(!filters.is_empty());
@@ -2086,13 +2666,7 @@ mod tests {
             .is_none());
 
         let _ = reader
-            .read_filters(
-                &handle,
-                true,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_filters(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
         assert!(meta_cache
@@ -2509,13 +3083,7 @@ mod tests {
         // be used and reading the index will just return an error.
         os.delete(&ts.path(&id)).await.unwrap();
         assert!(ts
-            .read_index(
-                &handle,
-                false,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None,)
             .await
             .is_err());
     }
@@ -2993,13 +3561,7 @@ mod tests {
             let handle = handle.clone();
             async move {
                 reader
-                    .read_index(
-                        &handle,
-                        true,
-                        Some(Bytes::new()),
-                        &ReadTrace::new(None),
-                        None,
-                    )
+                    .read_index(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
                     .await
             }
         });
@@ -3019,13 +3581,7 @@ mod tests {
             let handle = handle.clone();
             async move {
                 reader
-                    .read_index(
-                        &handle,
-                        true,
-                        Some(Bytes::new()),
-                        &ReadTrace::new(None),
-                        None,
-                    )
+                    .read_index(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
                     .await
             }
         };
@@ -3092,13 +3648,7 @@ mod tests {
         // sees only block reads (the fast-path takes `index` as an argument, so no
         // extra index read happens inside the race).
         let index = writer
-            .read_index(
-                &handle,
-                false,
-                Some(Bytes::new()),
-                &ReadTrace::new(None),
-                None,
-            )
+            .read_index(&handle, false, Some(Bytes::new()), &ReadTrace::none(), None)
             .await
             .unwrap();
 
@@ -3132,7 +3682,15 @@ mod tests {
             let index = index.clone();
             async move {
                 reader
-                    .read_blocks_using_index(&handle, index, 0..1, true, Some(Bytes::new()))
+                    .read_blocks_using_index(
+                        &handle,
+                        index,
+                        0..1,
+                        true,
+                        Some(Bytes::new()),
+                        &ReadTrace::none(),
+                        None,
+                    )
                     .await
             }
         });
@@ -3153,7 +3711,15 @@ mod tests {
             let index = index.clone();
             async move {
                 reader
-                    .read_blocks_using_index(&handle, index, 0..1, true, Some(Bytes::new()))
+                    .read_blocks_using_index(
+                        &handle,
+                        index,
+                        0..1,
+                        true,
+                        Some(Bytes::new()),
+                        &ReadTrace::none(),
+                        None,
+                    )
                     .await
             }
         };
@@ -3188,7 +3754,7 @@ mod tests {
         use crate::db_state::{SsTableId, SstType};
         use crate::error::{RetryReason, SlateDBError};
         use crate::format::sst::SsTableFormat;
-        use crate::reader::ReadTrace;
+        use crate::read_trace::ReadTrace;
         use crate::tablestore::TableStore;
         use crate::test_utils::{build_test_sst, RecordingObjectStore};
         use bytes::Bytes;
@@ -3234,7 +3800,7 @@ mod tests {
                 &handle,
                 false,
                 Some(segment.clone()),
-                &ReadTrace::new(None),
+                &ReadTrace::none(),
                 None,
             )
             .await

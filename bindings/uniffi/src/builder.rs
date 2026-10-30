@@ -391,7 +391,9 @@ impl AdminBuilder {
     pub fn build(&self) -> Result<Arc<Admin>, Error> {
         let builder = self.take_builder()?;
         let admin = builder.build();
-        Ok(Arc::new(Admin { inner: admin }))
+        Ok(Arc::new(Admin {
+            inner: Arc::new(admin),
+        }))
     }
 }
 
