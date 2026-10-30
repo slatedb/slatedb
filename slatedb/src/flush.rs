@@ -313,12 +313,37 @@ impl DbInner {
     /// close between the reads of the three inputs. Taking the minimum
     /// still yields a safe boundary, so the race is acceptable.
     ///
-    /// Call this once per flush attempt. Reuse the same value on every
-    /// retry of that attempt. The three inputs can change between
-    /// retries; reading a fresh value on each retry could make each
-    /// retry keep a different set of entries.
+    /// Flushes of a memtable use [`DbInner::compute_flush_retention_seq`].
+    #[cfg(test)]
     pub(crate) fn compute_min_retention_seq(&self) -> Option<u64> {
+        self.min_retention_seq_above(self.oracle.last_remote_persisted_seq())
+    }
+
+    /// Compute the retention boundary for a memtable ending at `last_seq`.
+    ///
+    /// With the WAL enabled, the L0 is published only after the WAL is
+    /// durable through `last_seq` (#1255). A [`crate::DbReader`] also raises
+    /// its durable watermark to the manifest's `last_l0_seq`. A reader
+    /// cannot therefore see this L0 with a durable watermark below `last_seq`.
+    /// Use the greater of `last_seq` and the current durable watermark as
+    /// the durable input to the boundary.
+    ///
+    /// Without the WAL, use the current durable watermark. In either case,
+    /// an open snapshot or transaction may lower the boundary.
+    ///
+    /// Compute the boundary once per upload and reuse it across retries so
+    /// each attempt retains the same entries.
+    pub(crate) fn compute_flush_retention_seq(&self, last_seq: u64) -> Option<u64> {
         let durable_seq = self.oracle.last_remote_persisted_seq();
+        if self.wal_enabled {
+            self.min_retention_seq_above(durable_seq.max(last_seq))
+        } else {
+            self.min_retention_seq_above(durable_seq)
+        }
+    }
+
+    /// The retention boundary with `durable_seq` as its durable input.
+    fn min_retention_seq_above(&self, durable_seq: u64) -> Option<u64> {
         [
             Some(durable_seq),
             self.snapshot_manager.min_active_seq(),
