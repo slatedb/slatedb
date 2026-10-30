@@ -791,7 +791,7 @@ mod tests {
     use crate::manifest::store::StoredManifest;
     use crate::manifest::ManifestCore;
     use crate::tablestore::{TableStore, TableStoreKind};
-    use crate::test_utils::{build_sorted_runs, write_ssts, GatedObjectStore};
+    use crate::test_utils::{build_sorted_runs, write_ssts, FlakyObjectStore, GatedObjectStore};
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
     use bytes::Bytes;
@@ -1155,6 +1155,43 @@ mod tests {
         assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
         assert!(!fx.handler.job_progress.contains_key(&id));
+    }
+
+    /// A standalone worker reads through a retrying object store, so a
+    /// transient object store error does not stop it.
+    #[tokio::test(start_paused = true)]
+    async fn test_standalone_worker_retries_transient_object_store_errors() {
+        // given: `.compactions` exists, and the first list of the store fails
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from(ROOT);
+        StoredCompactions::create(Arc::new(CompactionsStore::new(&path, inner.clone())), 0)
+            .await
+            .unwrap();
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(1, 0));
+        let worker = crate::db::builder::CompactionWorkerBuilder::new(
+            path,
+            flaky.clone() as Arc<dyn ObjectStore>,
+        )
+        .build()
+        .await
+        .unwrap();
+
+        // when: the first poll loads `.compactions`, which lists the store
+        worker.start().unwrap();
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while flaky.list_attempts() < 2 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the worker must list `.compactions` again");
+
+        // then: the retry layer listed once more, and the worker still runs
+        assert_eq!(flaky.list_attempts(), 2);
+        worker
+            .stop()
+            .await
+            .expect("a transient object store error must not stop the worker");
     }
 
     #[tokio::test]
