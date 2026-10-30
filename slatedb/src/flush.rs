@@ -319,29 +319,20 @@ impl DbInner {
         self.min_retention_seq_above(self.oracle.last_remote_persisted_seq())
     }
 
-    /// Compute the retention boundary for uploading a memtable whose
-    /// newest entry is `last_seq`.
+    /// Compute the retention boundary for a memtable ending at `last_seq`.
     ///
-    /// With the WAL enabled, the manifest writer publishes an L0 only once
-    /// the WAL is durable through the L0's last sequence (see #1255), and a
-    /// [`crate::DbReader`] that installs a manifest raises its durable
-    /// watermark to the manifest's `last_l0_seq`. No reader that caps
-    /// visibility at a durable watermark can therefore see this L0 with a
-    /// watermark below `last_seq`, so the durable input to the boundary is
-    /// at least `last_seq`, however far the WAL has got when the upload
-    /// starts. Reading the watermark as it stands instead keeps every
-    /// shadowed version written since the last WAL flush, which a memtable
-    /// frozen right after a write (an explicit flush, or one that fills)
-    /// then carries into the L0 for nothing.
+    /// With the WAL enabled, the L0 is published only after the WAL is
+    /// durable through `last_seq` (#1255). A [`crate::DbReader`] also raises
+    /// its durable watermark to the manifest's `last_l0_seq`. A reader
+    /// cannot therefore see this L0 with a durable watermark below `last_seq`.
+    /// Use the greater of `last_seq` and the current durable watermark as
+    /// the durable input to the boundary.
     ///
-    /// Snapshots and transactions still lower the boundary. Without the
-    /// WAL the durable watermark advances only when an L0 is published, so
-    /// it is the durable input as it stands.
+    /// Without the WAL, use the current durable watermark. In either case,
+    /// an open snapshot or transaction may lower the boundary.
     ///
-    /// Call this once per flush attempt. Reuse the same value on every
-    /// retry of that attempt. The inputs can change between retries;
-    /// reading a fresh value on each retry could make each retry keep a
-    /// different set of entries.
+    /// Compute the boundary once per upload and reuse it across retries so
+    /// each attempt retains the same entries.
     pub(crate) fn compute_flush_retention_seq(&self, last_seq: u64) -> Option<u64> {
         let durable_seq = self.oracle.last_remote_persisted_seq();
         if self.wal_enabled {
