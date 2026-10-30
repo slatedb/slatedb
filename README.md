@@ -150,6 +150,7 @@ See who's using SlateDB.
 
 - [4og.io](https://4og.io)
 - [Atomix](https://www.atomix.com)
+- [Cloudmersive](https://cloudmersive.com)
 - [Dropbox](https://www.dropbox.com)
 - [Embucket](https://www.embucket.com)
 - [Gadget](https://gadget.dev)
