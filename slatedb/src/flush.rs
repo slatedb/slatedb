@@ -313,12 +313,46 @@ impl DbInner {
     /// close between the reads of the three inputs. Taking the minimum
     /// still yields a safe boundary, so the race is acceptable.
     ///
-    /// Call this once per flush attempt. Reuse the same value on every
-    /// retry of that attempt. The three inputs can change between
-    /// retries; reading a fresh value on each retry could make each
-    /// retry keep a different set of entries.
+    /// Flushes of a memtable use [`DbInner::compute_flush_retention_seq`].
+    #[cfg(test)]
     pub(crate) fn compute_min_retention_seq(&self) -> Option<u64> {
+        self.min_retention_seq_above(self.oracle.last_remote_persisted_seq())
+    }
+
+    /// Compute the retention boundary for uploading a memtable whose
+    /// newest entry is `last_seq`.
+    ///
+    /// With the WAL enabled, the manifest writer publishes an L0 only once
+    /// the WAL is durable through the L0's last sequence (see #1255), and a
+    /// [`crate::DbReader`] that installs a manifest raises its durable
+    /// watermark to the manifest's `last_l0_seq`. No reader that caps
+    /// visibility at a durable watermark can therefore see this L0 with a
+    /// watermark below `last_seq`, so the durable input to the boundary is
+    /// at least `last_seq`, however far the WAL has got when the upload
+    /// starts. Reading the watermark as it stands instead keeps every
+    /// shadowed version written since the last WAL flush, which a memtable
+    /// frozen right after a write (an explicit flush, or one that fills)
+    /// then carries into the L0 for nothing.
+    ///
+    /// Snapshots and transactions still lower the boundary. Without the
+    /// WAL the durable watermark advances only when an L0 is published, so
+    /// it is the durable input as it stands.
+    ///
+    /// Call this once per flush attempt. Reuse the same value on every
+    /// retry of that attempt. The inputs can change between retries;
+    /// reading a fresh value on each retry could make each retry keep a
+    /// different set of entries.
+    pub(crate) fn compute_flush_retention_seq(&self, last_seq: u64) -> Option<u64> {
         let durable_seq = self.oracle.last_remote_persisted_seq();
+        if self.wal_enabled {
+            self.min_retention_seq_above(durable_seq.max(last_seq))
+        } else {
+            self.min_retention_seq_above(durable_seq)
+        }
+    }
+
+    /// The retention boundary with `durable_seq` as its durable input.
+    fn min_retention_seq_above(&self, durable_seq: u64) -> Option<u64> {
         [
             Some(durable_seq),
             self.snapshot_manager.min_active_seq(),
