@@ -225,11 +225,14 @@ impl GcTask for CompactedGcTask {
         // been added to the manifest (we write the L0, _then_ add it to the manifest and write the
         // manifest to object storage).
         let newest_l0_dt = newest_l0_dt(&manifest);
-        // Take the minimum of the configured min age, the compaction low watermark, and the most
-        // recent SST in the manifest. This is the true upper-limit for SSTs that may be deleted.
-        let cutoff_dt = configured_min_age_dt
-            .min(compaction_low_watermark_dt)
-            .min(newest_l0_dt);
+        // The marker names a published L0. An unpublished L0 can share its timestamp,
+        // so compare the full ID.
+        let compacted_l0s: HashSet<_> = manifest
+            .core
+            .trees()
+            .filter_map(|tree| tree.last_compacted_l0_sst_view_id)
+            .collect();
+        let cutoff_dt = configured_min_age_dt.min(compaction_low_watermark_dt);
         log::debug!(
             "calculated compacted SST GC cutoff [cutoff_dt={:?}, configured_min_age_dt={:?}, compaction_low_watermark_dt={:?}, most_recent_sst_dt={:?}]",
             cutoff_dt,
@@ -244,7 +247,10 @@ impl GcTask for CompactedGcTask {
             .await?
             .into_iter()
             // Filter out SSTs that were more recently created than the cutoff_dt
-            .filter(|sst| DateTime::<Utc>::from(sst.id.value().datetime()) < cutoff_dt)
+            .filter(|sst| {
+                let ts = DateTime::<Utc>::from(sst.id.value().datetime());
+                ts < cutoff_dt && (ts < newest_l0_dt || compacted_l0s.contains(&sst.id.value()))
+            })
             // Filter out SSTs that are active in the manifest (including actively checkpointed SSTs)
             .filter(|sst| !active_ssts.contains(&sst.id))
             .collect::<Vec<_>>();
@@ -272,7 +278,7 @@ mod tests {
     use crate::cached_object_store::stats::CachedObjectStoreStats;
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
-    use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
+    use crate::compactor_state::{Compaction, CompactionSpec, CompactionStatus, SourceId};
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::StoredManifest;
@@ -285,6 +291,185 @@ mod tests {
     use slatedb_common::DbRand;
     use std::collections::{BTreeMap, VecDeque};
     use std::time::Duration;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum RetiredL0Protection {
+        None,
+        MinAge,
+        RunningCompaction,
+        MissingCompactions,
+        EmptyCompactions,
+        Checkpoint,
+        SharedView,
+        DryRun,
+    }
+
+    #[rstest::rstest]
+    #[case::quiet_root(false, RetiredL0Protection::None)]
+    #[case::quiet_segment(true, RetiredL0Protection::None)]
+    #[case::min_age_boundary(false, RetiredL0Protection::MinAge)]
+    #[case::compaction_boundary(false, RetiredL0Protection::RunningCompaction)]
+    #[case::missing_compactions(false, RetiredL0Protection::MissingCompactions)]
+    #[case::empty_compactions(false, RetiredL0Protection::EmptyCompactions)]
+    #[case::checkpoint(false, RetiredL0Protection::Checkpoint)]
+    #[case::shared_view(true, RetiredL0Protection::SharedView)]
+    #[case::dry_run(false, RetiredL0Protection::DryRun)]
+    #[tokio::test]
+    async fn test_compacted_gc_retires_last_l0(
+        #[case] segmented: bool,
+        #[case] protection: RetiredL0Protection,
+    ) {
+        let object_store = Arc::new(InMemory::new());
+        let root = Path::from("/root");
+        let format = SsTableFormat::default();
+        let table_store = Arc::new(TableStore::new(
+            object_store.clone(),
+            format.clone(),
+            root.clone(),
+            None,
+            TableStoreKind::GC,
+            BlockCachePolicy::default(),
+        ));
+        let manifest_store = Arc::new(ManifestStore::new(&root, object_store.clone()));
+        let compactions_store = Arc::new(CompactionsStore::new(&root, object_store));
+        let mut stored_manifest = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        let retired_id = SsTableId::from(ulid::Ulid::from_parts(2_000, 1));
+        let output_id = SsTableId::from(ulid_at(3_000));
+        let ids = [
+            retired_id,
+            SsTableId::from(ulid::Ulid::from_parts(2_000, 0)),
+            SsTableId::from(ulid::Ulid::from_parts(2_000, 2)),
+            SsTableId::from(ulid_at(4_000)),
+            output_id,
+        ];
+        let sst = build_test_sst(&format, 1).await;
+        let mut handles = vec![];
+        for id in ids {
+            handles.push(
+                table_store
+                    .write_sst(&id, &sst, Some(Bytes::new()))
+                    .await
+                    .unwrap(),
+            );
+        }
+        let retired_view = SsTableView::identity(handles[0].clone());
+        let output_view = SsTableView::identity(handles[4].clone());
+        let prefix = if segmented { &b"segment/"[..] } else { &[] };
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        if segmented {
+            dirty.value.core.segment_extractor_name = Some("test".into());
+            dirty.value.core.segments.push(Segment {
+                prefix: Bytes::copy_from_slice(prefix),
+                tree: Arc::new(LsmTreeState::default()),
+            });
+        }
+        dirty
+            .value
+            .core
+            .tree_for_segment_mut(prefix)
+            .unwrap()
+            .l0
+            .push_back(retired_view.clone());
+        stored_manifest.update(dirty).await.unwrap();
+
+        let mut dirty = stored_manifest.prepare_dirty().unwrap();
+        if protection == RetiredL0Protection::Checkpoint {
+            dirty
+                .value
+                .core
+                .checkpoints
+                .push(crate::checkpoint::Checkpoint {
+                    id: uuid::Uuid::new_v4(),
+                    manifest_id: stored_manifest.id(),
+                    expire_time: None,
+                    create_time: DateTime::<Utc>::UNIX_EPOCH,
+                    name: None,
+                });
+        }
+        let tree = dirty.value.core.tree_for_segment_mut(prefix).unwrap();
+        tree.l0.clear();
+        tree.last_compacted_l0_sst_view_id = Some(retired_id.value());
+        tree.compacted = vec![SortedRun::new(0, [output_view])];
+        if protection == RetiredL0Protection::SharedView {
+            dirty.value.core.segment_extractor_name = Some("test".into());
+            dirty.value.core.segments.push(Segment {
+                prefix: Bytes::from_static(b"shared/"),
+                tree: Arc::new(LsmTreeState {
+                    compacted: vec![SortedRun::new(
+                        0,
+                        [SsTableView::new(ulid_at(6_000), retired_view.sst)],
+                    )],
+                    ..LsmTreeState::default()
+                }),
+            });
+        }
+        stored_manifest.update(dirty).await.unwrap();
+
+        if protection != RetiredL0Protection::MissingCompactions {
+            let mut stored_compactions = StoredCompactions::create(
+                compactions_store.clone(),
+                stored_manifest.manifest().compactor_epoch,
+            )
+            .await
+            .unwrap();
+            if protection != RetiredL0Protection::EmptyCompactions {
+                let running = protection == RetiredL0Protection::RunningCompaction;
+                let mut compaction = Compaction::new(
+                    ulid_at(if running { 2_000 } else { 2_500 }),
+                    CompactionSpec::new(vec![SourceId::SortedRun(0)], 0),
+                );
+                compaction.set_status(if running {
+                    CompactionStatus::Running
+                } else {
+                    CompactionStatus::Completed
+                });
+                let mut dirty = stored_compactions.prepare_dirty().unwrap();
+                dirty.value.insert(compaction);
+                stored_compactions.update(dirty).await.unwrap();
+            }
+        }
+
+        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
+        let task = CompactedGcTask::new(
+            manifest_store,
+            compactions_store,
+            table_store.clone(),
+            Arc::new(GcStats::new(&recorder)),
+            GarbageCollectorDirectoryOptions {
+                interval: None,
+                min_age: if protection == RetiredL0Protection::MinAge {
+                    Duration::from_secs(8)
+                } else {
+                    Duration::ZERO
+                },
+                dry_run: protection == RetiredL0Protection::DryRun,
+            },
+            None,
+        );
+        task.collect(DateTime::<Utc>::from_timestamp_millis(10_000).unwrap())
+            .await
+            .unwrap();
+
+        let remaining: HashSet<_> = table_store
+            .list_compacted_ssts(..)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|sst| sst.id)
+            .collect();
+        let mut expected = HashSet::from(ids);
+        if protection == RetiredL0Protection::None {
+            expected.remove(&retired_id);
+        }
+        assert_eq!(remaining, expected);
+    }
 
     #[tokio::test]
     async fn test_compacted_gc_respects_min_age_cutoff() {
