@@ -23,6 +23,7 @@ npm install @slatedb/uniffi
 ## API Model
 
 - `ObjectStore.resolve(...)` opens an object store from a URL such as `memory:///` or `file:///...`
+- `ObjectStore.resolve_with_options(...)` does the same, but also takes a `Map` of store options such as S3 credentials
 - `DbBuilder` opens a writable database and `DbReaderBuilder` opens a read-only reader
 - keys and values are binary; pass `Buffer` or `Uint8Array`
 - most database operations are async and should be awaited
@@ -72,6 +73,32 @@ main().catch((error) => {
 ```
 
 Replace `memory:///` with any object store URL supported by Rust's [`object_store`](https://docs.rs/object_store/latest/object_store/fn.parse_url_opts.html) crate.
+
+## Object Store Options
+
+Use `ObjectStore.resolve_with_options(...)` to give a store its own credentials.
+The options apply only to that store. They do not change `process.env`.
+
+```js
+import { ObjectStore } from "@slatedb/uniffi";
+
+const store = ObjectStore.resolve_with_options(
+  "s3://my-bucket",
+  new Map(
+    Object.entries({
+      aws_access_key_id: credentials.accessKeyId,
+      aws_secret_access_key: credentials.secretAccessKey,
+      aws_session_token: credentials.sessionToken,
+      aws_region: "us-east-1",
+    }),
+  ),
+);
+```
+
+Option keys are the `object_store` crate's config keys. For S3, see
+[`AmazonS3ConfigKey`](https://docs.rs/object_store/latest/object_store/aws/enum.AmazonS3ConfigKey.html).
+An option overrides an environment variable with the same name.
+An unknown key for an S3, Azure, or GCS URL causes an error.
 
 ## Metrics
 

@@ -1885,12 +1885,51 @@ impl Db {
     /// - `Error`: if the URL is unparseable, if the URL contains a path component, or if
     ///   there was an error initializing the object store.
     pub fn resolve_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, crate::Error> {
+        Self::resolve_object_store_with_options(url, std::iter::empty::<(String, String)>())
+    }
+
+    /// Resolve an object store from a URL and explicit options.
+    ///
+    /// This works like [`Db::resolve_object_store`], but also applies `options` to the
+    /// store. Options use the `object_store` crate's config keys, for example
+    /// `aws_access_key_id`, `aws_secret_access_key`, `aws_session_token`, and `aws_region`
+    /// for S3. Keys are case-insensitive. An option overrides an environment variable with
+    /// the same key. The options apply only to the returned store. They do not change the
+    /// process environment.
+    ///
+    /// Like `object_store::parse_url_opts`, this ignores keys that the store does not
+    /// recognize.
+    ///
+    /// ## Arguments
+    /// - `url`: the URL to resolve with no trailing path, for example `s3://my-bucket`.
+    /// - `options`: config key and value pairs for the store.
+    ///
+    /// ## Returns
+    /// - `Result<Arc<dyn ObjectStore>, crate::Error>`: the resolved object store
+    ///
+    /// ## Errors
+    /// - `Error`: if the URL is unparseable, if the URL contains a path component, or if
+    ///   there was an error initializing the object store.
+    pub fn resolve_object_store_with_options<I, K, V>(
+        url: &str,
+        options: I,
+    ) -> Result<Arc<dyn ObjectStore>, crate::Error>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: Into<String>,
+    {
         let url = url
             .try_into()
             .map_err(|e| SlateDBError::InvalidObjectStoreURL(url.to_string(), e))?;
-        // Lowercase env keys because parse_url_opts only recognizes lower case option keys.
+        // Lowercase keys because parse_url_opts only recognizes lower case option keys.
+        // Explicit options come after env vars so that they take precedence.
         let env_vars = std::env::vars().map(|(key, value)| (key.to_ascii_lowercase(), value));
-        let (object_store, path) = parse_url_opts(&url, env_vars).map_err(SlateDBError::from)?;
+        let options = options
+            .into_iter()
+            .map(|(key, value)| (key.as_ref().to_ascii_lowercase(), value.into()));
+        let (object_store, path) =
+            parse_url_opts(&url, env_vars.chain(options)).map_err(SlateDBError::from)?;
         if !path.as_ref().is_empty() {
             return Err(SlateDBError::InvalidObjectStorePath(path.to_string()))?;
         }
