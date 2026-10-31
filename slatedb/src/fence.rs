@@ -377,6 +377,43 @@ mod tests {
             }
         }
 
+        async fn replay_after_wal_id(&self) -> u64 {
+            self.manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .manifest
+                .core
+                .replay_after_wal_id
+        }
+
+        /// Writes the fence format that versions before 0.16 used: an empty WAL SST.
+        async fn write_empty_wal(&self, wal_id: u64) {
+            let encoded = self.wal_store.table_builder().build().await.unwrap();
+            self.wal_store
+                .write_sst(wal_id.into(), &encoded)
+                .await
+                .unwrap();
+        }
+
+        /// Asserts that an open replays at most the fence it just wrote: what sits above the
+        /// replay boundary does not grow with the number of opens.
+        async fn assert_at_most_one_wal_above_replay_boundary(&self) {
+            let replay_after_wal_id = self.replay_after_wal_id().await;
+            let replayable: Vec<u64> = self
+                .wal_store
+                .list_wal_ssts(WalFileId::from(replay_after_wal_id + 1)..)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|wal| wal.id.value())
+                .collect();
+            assert!(
+                replayable.len() <= 1,
+                "every open replays the wals above replay_after_wal_id={replay_after_wal_id}: {replayable:?}"
+            );
+        }
+
         async fn assert_data(&self) {
             let db = self.db().await;
             for (k, v) in &self.data {
@@ -425,6 +462,85 @@ mod tests {
         h.assert_fencing_wal().await;
         h.assert_wals_contiguous().await;
         h.assert_data().await;
+    }
+
+    #[tokio::test]
+    async fn test_replay_boundary_does_not_accumulate_on_reopens_without_writes() {
+        let h = WriterFencerTestHarness::new(
+            "/tmp/test_replay_boundary_does_not_accumulate_on_reopens_without_writes",
+        )
+        .await;
+
+        // open and close the db three times without writing anything
+        for _ in 0..3 {
+            h.db().await.close().await.unwrap();
+        }
+        h.assert_at_most_one_wal_above_replay_boundary().await;
+
+        // three more opens must not add anything to replay
+        for _ in 0..3 {
+            h.db().await.close().await.unwrap();
+        }
+        h.assert_at_most_one_wal_above_replay_boundary().await;
+    }
+
+    #[tokio::test]
+    async fn test_replay_boundary_advances_past_legacy_empty_fence_wals() {
+        let h = WriterFencerTestHarness::new(
+            "/tmp/test_replay_boundary_advances_past_legacy_empty_fence_wals",
+        )
+        .await;
+
+        // Versions before 0.16 wrote a fence as an empty WAL SST instead of a zero-byte
+        // object. The first open after the upgrade must step over such a fence too.
+        h.write_empty_wal(1).await;
+        let legacy_fence = h
+            .wal_store
+            .list_wal_ssts(WalFileId::from(1)..=WalFileId::from(1))
+            .await
+            .unwrap();
+        assert!(
+            legacy_fence[0].metadata.size > 0,
+            "a legacy fence has bytes, so the size of the object does not identify a fence"
+        );
+
+        h.db().await.close().await.unwrap();
+
+        assert!(
+            h.replay_after_wal_id().await >= 1,
+            "the legacy fence was replayed instead of being left below the boundary"
+        );
+        h.assert_at_most_one_wal_above_replay_boundary().await;
+    }
+
+    #[tokio::test]
+    async fn test_replay_boundary_stays_below_a_wal_with_rows() {
+        let h =
+            WriterFencerTestHarness::new("/tmp/test_replay_boundary_stays_below_a_wal_with_rows")
+                .await;
+
+        // A WAL with rows above the boundary holds data that is not in the LSM tree. The
+        // open must not move the boundary past it, or a crash before the next L0 flush
+        // would lose the rows.
+        let mut builder = h.wal_store.table_builder();
+        builder
+            .add(crate::RowEntry::new_value(b"replayed", b"value", 7))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
+        h.wal_store.write_sst(1.into(), &encoded).await.unwrap();
+
+        let db = h.db().await;
+        assert_eq!(
+            db.get(b"replayed").await.unwrap(),
+            Some(Bytes::from_static(b"value"))
+        );
+        assert_eq!(
+            h.replay_after_wal_id().await,
+            0,
+            "the open moved replay_after_wal_id past a WAL with rows"
+        );
+        db.close().await.unwrap();
     }
 
     struct FencerFencedTestCase {
