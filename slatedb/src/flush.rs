@@ -401,6 +401,7 @@ mod tests {
     use crate::merge_operator::{MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH};
     use crate::object_store::memory::InMemory;
     use crate::read_trace::ReadTrace;
+    use crate::snapshot_manager::SnapshotSeqs;
     use crate::test_utils::{
         lookup_merge_operator_operands, FixedThreeBytePrefixExtractor, StringConcatMergeOperator,
     };
@@ -664,7 +665,10 @@ mod tests {
         let db = setup_test_db_with_merge_operator().await;
         db.inner
             .snapshot_manager
-            .new_snapshot(Some(test_case.min_active_seq));
+            .new_snapshot(Some(
+                SnapshotSeqs::new(test_case.min_active_seq, test_case.min_active_seq).unwrap(),
+            ))
+            .unwrap();
         // Set durable watermark high so it doesn't interfere with transaction-based retention tests
         db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
@@ -744,7 +748,10 @@ mod tests {
     async fn test_err_when_merge_operator_not_set_and_merges_exist() {
         // Given
         let db = setup_test_db_without_merge_operator().await;
-        db.inner.snapshot_manager.new_snapshot(Some(0));
+        db.inner
+            .snapshot_manager
+            .new_snapshot(Some(SnapshotSeqs::new(0, 0).unwrap()))
+            .unwrap();
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
         table.put(RowEntry::new_merge(&Bytes::from("key"), b"value2", 2));
@@ -767,7 +774,10 @@ mod tests {
     async fn test_no_err_merge_operator_not_set_and_no_merges() {
         // Given
         let db = setup_test_db_without_merge_operator().await;
-        db.inner.snapshot_manager.new_snapshot(Some(0));
+        db.inner
+            .snapshot_manager
+            .new_snapshot(Some(SnapshotSeqs::new(0, 0).unwrap()))
+            .unwrap();
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key1"), b"value1", 1));
         table.put(RowEntry::new_tombstone(&Bytes::from("key2"), 2));
@@ -851,8 +861,13 @@ mod tests {
         db.inner.oracle.advance_durable_seq(test_case.durable_seq);
 
         if let Some(snapshot_seq) = test_case.snapshot_seq {
-            let (_, started_seq) = db.inner.snapshot_manager.new_snapshot(Some(snapshot_seq));
-            assert_eq!(started_seq, snapshot_seq)
+            let (_, seqs) = db
+                .inner
+                .snapshot_manager
+                .new_snapshot(Some(SnapshotSeqs::new(snapshot_seq, snapshot_seq).unwrap()))
+                .unwrap();
+            assert_eq!(seqs.memory_seq(), snapshot_seq);
+            assert_eq!(seqs.remote_seq(), snapshot_seq);
         }
 
         if let Some(txn_seq) = test_case.txn_seq {
@@ -894,8 +909,12 @@ mod tests {
 
         // Opening a snapshot lowers the live boundary. A flush that reuses
         // its pinned boundary must ignore this change.
-        let (_, snapshot_seq) = db.inner.snapshot_manager.new_snapshot(Some(1));
-        assert_eq!(snapshot_seq, 1);
+        let (_, snapshot_seqs) = db
+            .inner
+            .snapshot_manager
+            .new_snapshot(Some(SnapshotSeqs::new(1, 1).unwrap()))
+            .unwrap();
+        assert_eq!(snapshot_seqs.remote_seq(), 1);
         assert_eq!(db.inner.compute_min_retention_seq(), Some(1));
 
         for _ in 0..2 {
