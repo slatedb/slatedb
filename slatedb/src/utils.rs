@@ -9,11 +9,12 @@ use crate::format::sst::{SST_FORMAT_VERSION, SST_FORMAT_VERSION_V2};
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::manifest::ManifestCore;
 use crate::paths::PathResolver;
+use crate::read_trace::ReadTrace;
 use crate::tablestore::TableStore;
 use bytes::{Buf, BufMut, Bytes};
 use futures::FutureExt;
 use log::{error, warn};
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt};
 use slatedb_common::clock::SystemClock;
 use std::any::Any;
 use std::future::Future;
@@ -24,8 +25,28 @@ use uuid::Uuid;
 
 use futures::StreamExt;
 use std::collections::VecDeque;
+use tracing::instrument::WithSubscriber;
+use tracing::subscriber::NoSubscriber;
 
 static EMPTY_KEY: Bytes = Bytes::new();
+
+/// Whether the object store holds the main data path or the WAL.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ObjectStoreType {
+    /// The primary object store (SSTs, manifests, compacted data).
+    Main,
+    /// The dedicated WAL object store, when configured separately.
+    Wal,
+}
+
+impl ObjectStoreType {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Wal => "wal",
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct WatchableOnceCell<T: Clone> {
@@ -129,11 +150,57 @@ pub(crate) fn merge_options<T>(
     }
 }
 
+/// Attaches the current subscriber only if a subscriber is set.
+///
+/// In an application using only log without a subscriber, spawning a task for a future with
+/// the current subscriber attached, i.e.,
+/// ```rust,no_run
+/// # use tracing::instrument::WithSubscriber;
+/// # let future = async {};
+/// tokio::spawn(future.with_current_subscriber());
+/// ```
+/// sets tracing::dispatcher::has_been_set() and permanently disables tracing-to-log forwarding,
+/// even with query tracing disabled. That means, logging messages with
+/// ```rust
+/// tracing::info!("message");
+/// ```
+/// does not work anymore after the spawning.
+/// However, direct logging (not tracing-to-log forwarding) with
+/// ```rust
+/// log::info!("message");
+/// ```
+/// still works.
+///
+/// To avoid disabling tracing-to-log forwarding, this helper checks if a subscriber is set, if a
+/// subscriber is set the subscriber is attached to the future, else `.with_current_subscriber()`
+/// is not called.
+pub(crate) fn spawn_with_optional_subscriber<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(with_optional_subscriber(future))
+}
+
+/// Runs the future with the current tracing subscriber if one is set.
+pub(crate) fn with_optional_subscriber<F: Future>(future: F) -> impl Future<Output = F::Output> {
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+
+    async move {
+        if dispatch.is::<NoSubscriber>() {
+            future.await
+        } else {
+            future.with_subscriber(dispatch).await
+        }
+    }
+}
+
 /// Determines the last key and sequence number written by an output SST.
 ///
 /// ## Arguments
 /// - `table_store`: Table store for reading the SST index and blocks.
 /// - `output_sst`: Output SST already written for a compaction being resumed.
+/// - `segment`: Segment containing the output SST.
 ///
 /// ## Returns
 /// - `Ok(Some((Bytes, u64)))`: last key and sequence number from the final block.
@@ -144,15 +211,32 @@ pub(crate) fn merge_options<T>(
 pub(crate) async fn last_written_key_and_seq(
     table_store: Arc<TableStore>,
     output_sst: &SsTableHandle,
+    segment: &Bytes,
 ) -> Result<Option<(Bytes, u64)>, SlateDBError> {
-    let index = table_store.read_index(output_sst, false).await?;
+    let index = table_store
+        .read_index(
+            output_sst,
+            false,
+            Some(segment.clone()),
+            &ReadTrace::none(),
+            None,
+        )
+        .await?;
     let num_blocks = index.borrow().block_meta().len();
     if num_blocks == 0 {
         return Ok(None);
     }
     let last_block_idx = num_blocks - 1;
     let mut blocks = table_store
-        .read_blocks_using_index(output_sst, index, last_block_idx..last_block_idx + 1, false)
+        .read_blocks_using_index(
+            output_sst,
+            index,
+            last_block_idx..last_block_idx + 1,
+            false,
+            Some(segment.clone()),
+            &ReadTrace::none(),
+            None,
+        )
         .await?;
     let Some(block) = blocks.pop_front() else {
         return Ok(None);
@@ -231,7 +315,7 @@ pub(crate) trait IdGenerator {
     fn gen_ulid(&mut self, clock: &dyn SystemClock) -> Ulid;
 }
 
-impl<R: RngCore> IdGenerator for R {
+impl<R: Rng> IdGenerator for R {
     /// Generates a random UUID using the provided RNG.
     fn gen_uuid(&mut self) -> Uuid {
         let mut bytes = [0u8; 16];
@@ -807,6 +891,25 @@ mod tests {
     use std::time::Duration;
     use ulid::Ulid;
 
+    #[tokio::test]
+    async fn should_capture_optional_subscriber_before_spawning() {
+        let dispatch = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+        let check_subscriber = || async {
+            tracing::dispatcher::get_default(|current| current.is::<tracing_subscriber::Registry>())
+        };
+        let spawned = tracing::dispatcher::with_default(&dispatch, || {
+            super::spawn_with_optional_subscriber(check_subscriber())
+        });
+        assert!(spawned.await.unwrap());
+
+        let future = tracing::dispatcher::with_default(&dispatch, || {
+            super::with_optional_subscriber(check_subscriber())
+        });
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(future);
+        assert!(tasks.join_next().await.unwrap().unwrap());
+    }
+
     struct ResultCaptor<T: Clone> {
         error: Mutex<Option<Result<T, SlateDBError>>>,
     }
@@ -837,7 +940,7 @@ mod tests {
             ..Default::default()
         };
         SsTableView::identity(SsTableHandle::new(
-            SsTableId::Compacted(Ulid::new()),
+            SsTableId::from(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             info,
         ))
@@ -1103,7 +1206,11 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let _sst1 = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst)
+            .write_sst(
+                &SsTableId::from(Ulid::new()),
+                &encoded_sst,
+                Some(Bytes::new()),
+            )
             .await
             .unwrap();
 
@@ -1118,14 +1225,19 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let sst2 = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst)
+            .write_sst(
+                &SsTableId::from(Ulid::new()),
+                &encoded_sst,
+                Some(Bytes::new()),
+            )
             .await
             .unwrap();
 
-        let (last_key, last_seq) = last_written_key_and_seq(table_store.clone(), &sst2)
-            .await
-            .unwrap()
-            .expect("missing last entry");
+        let (last_key, last_seq) =
+            last_written_key_and_seq(table_store.clone(), &sst2, &Bytes::new())
+                .await
+                .unwrap()
+                .expect("missing last entry");
         assert_eq!(last_key, Bytes::from(b"z".as_slice()));
         assert_eq!(last_seq, 4);
     }
@@ -1156,15 +1268,20 @@ mod tests {
             .unwrap();
         let encoded_sst = sst_builder.build().await.unwrap();
         let sst = table_store
-            .write_sst(&SsTableId::Compacted(Ulid::new()), &encoded_sst)
+            .write_sst(
+                &SsTableId::from(Ulid::new()),
+                &encoded_sst,
+                Some(Bytes::new()),
+            )
             .await
             .unwrap();
 
         // when: getting last written key and seq
-        let (last_key, last_seq) = last_written_key_and_seq(table_store.clone(), &sst)
-            .await
-            .unwrap()
-            .expect("missing last entry");
+        let (last_key, last_seq) =
+            last_written_key_and_seq(table_store.clone(), &sst, &Bytes::new())
+                .await
+                .unwrap()
+                .expect("missing last entry");
 
         // then: should return the last key and seq from the V1 formatted SST
         assert_eq!(last_key, Bytes::from(b"zzz".as_slice()));

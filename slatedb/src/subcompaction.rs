@@ -21,7 +21,17 @@ use crate::bytes_range::BytesRange;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableView};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
+use crate::read_trace::ReadTrace;
 use crate::tablestore::TableStore;
+
+/// The worker's progress through one planned key range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) enum SubcompactionStatus {
+    /// The range can produce more output. It need not have started yet.
+    InProgress,
+    /// The worker stored all output for the range, including an empty result.
+    Completed,
+}
 
 /// A compaction over a sub-range of the parent compaction's key space
 /// (RFC-0028).
@@ -29,11 +39,8 @@ use crate::tablestore::TableStore;
 /// Subcompactions are only valid within the context of a parent
 /// [`Compaction`](crate::compactor_state::Compaction) and let a single logical
 /// compaction execute its disjoint ranges in parallel while resuming at range
-/// granularity after a failure. A subcompaction carries no lifecycle status:
-/// the parent [`Compaction`](crate::compactor_state::Compaction) owns status,
-/// and a range's progress is captured entirely by its recorded `output_ssts`.
-/// On resume every range is re-run from its persisted output; a range that
-/// already finished has nothing left to merge and completes immediately.
+/// granularity after a failure. Completed ranges do not run again, even when
+/// they produce no output.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Subcompaction {
     /// Key range covered by this subcompaction. The ranges of the
@@ -42,6 +49,7 @@ pub struct Subcompaction {
     range: BytesRange,
     /// Output SSTs produced by this subcompaction so far.
     output_ssts: Vec<SsTableHandle>,
+    status: SubcompactionStatus,
 }
 
 impl Subcompaction {
@@ -49,12 +57,28 @@ impl Subcompaction {
         Self {
             range,
             output_ssts: Vec::new(),
+            status: SubcompactionStatus::InProgress,
         }
     }
 
     pub(crate) fn with_output_ssts(mut self, output_ssts: Vec<SsTableHandle>) -> Self {
         self.output_ssts = output_ssts;
         self
+    }
+
+    pub(crate) fn with_status(mut self, status: SubcompactionStatus) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// Returns the worker's progress through this range.
+    pub(crate) fn status(&self) -> SubcompactionStatus {
+        self.status
+    }
+
+    /// Returns whether the worker stored all output for this range.
+    pub(crate) fn completed(&self) -> bool {
+        self.status == SubcompactionStatus::Completed
     }
 
     /// Returns the key range covered by this subcompaction.
@@ -102,6 +126,7 @@ pub(crate) async fn plan_subcompaction_ranges(
     table_store: &Arc<TableStore>,
     sst_views: &[SsTableView],
     sorted_runs: &[SortedRun],
+    segment: &Bytes,
     max_subcompactions: usize,
     max_fetch_tasks: usize,
 ) -> Result<Vec<BytesRange>, SlateDBError> {
@@ -144,8 +169,11 @@ pub(crate) async fn plan_subcompaction_ranges(
     let anchors: Vec<(Bytes, u64)> = stream::iter(views)
         .map(|view| {
             let table_store = table_store.clone();
+            let segment = segment.clone();
             async move {
-                let index = table_store.read_index(&view.sst, true).await?;
+                let index = table_store
+                    .read_index(&view.sst, true, Some(segment), &ReadTrace::none(), None)
+                    .await?;
                 // `filter_offset` marks the end of the data-block region: the
                 // filter, index, and stats blocks all follow it, and when the
                 // SST has no filter it aliases `index_offset`. Using
@@ -338,6 +366,7 @@ mod tests {
                     &BlockMetaArgs {
                         offset: *offset,
                         first_key: Some(first_key),
+                        encoded_len: 0,
                     },
                 )
             })

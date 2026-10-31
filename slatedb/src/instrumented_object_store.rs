@@ -41,7 +41,7 @@ use object_store::{
 };
 use slatedb_common::metrics::MetricsRecorderHelper;
 
-use crate::object_stores::ObjectStoreType;
+use crate::utils::ObjectStoreType;
 
 /// Which SlateDB component is issuing object store requests.
 ///
@@ -283,7 +283,7 @@ pub mod stats {
     };
 
     use crate::instrumented_object_store::ObjectStoreComponent;
-    use crate::object_stores::ObjectStoreType;
+    use crate::utils::ObjectStoreType;
 
     macro_rules! object_store_stat_name {
         ($suffix:expr) => {
@@ -469,9 +469,9 @@ mod tests {
         get_labels, ERROR_COUNT, REQUEST_COUNT, REQUEST_DURATION_SECONDS,
     };
     use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
-    use crate::object_stores::ObjectStoreType;
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
+    use crate::utils::ObjectStoreType;
     use slatedb_common::DbRand;
 
     fn histogram_count(

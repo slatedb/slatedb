@@ -3,7 +3,7 @@
 use backon::{ExponentialBuilder, Retryable};
 use log::warn;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::RngExt;
 use slatedb::admin;
 use slatedb::config::{
     CompactorOptions, DurabilityLevel, FlushOptions, FlushType, PutOptions, ReadOptions, Settings,
@@ -20,6 +20,24 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::fmt::format::FmtSpan;
+
+#[tokio::test]
+async fn test_key_larger_than_u16_round_trips_through_sst() {
+    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let key = vec![b'k'; u16::MAX as usize + 1];
+    let value = b"value";
+    let path = "/large-key-round-trip";
+
+    let db = Db::open(path, object_store.clone()).await.unwrap();
+    db.put(&key, value).await.unwrap();
+    db.flush().await.unwrap();
+    db.close().await.unwrap();
+
+    let db = Db::open(path, object_store).await.unwrap();
+    let actual = db.get(&key).await.unwrap().unwrap();
+    assert_eq!(actual.as_ref(), value);
+    db.close().await.unwrap();
+}
 
 /// Verify that writes succeed after WAL replay when replayed immutable
 /// memtables have not yet been flushed to L0. Previously, the WAL buffer's
@@ -267,7 +285,7 @@ async fn test_concurrent_writers_and_readers() {
             tokio::spawn(async move {
                 let mut latest_values = HashMap::<usize, AtomicU64>::new();
                 let mut iterations = 0;
-                let mut rng = StdRng::from_os_rng();
+                let mut rng = rand::make_rng::<StdRng>();
 
                 while !reader_cancellation_token.is_cancelled() {
                     // Pick a random key and validate that it's higher than the last value for that key

@@ -8,7 +8,7 @@ use slatedb::{Db, DbTransaction, Error, MergeOperator, MergeOperatorError};
 pub use self::auditor::{AuditorActor, BankAuditView};
 pub use self::transfer::{TransferActor, TransferMode};
 
-const ACCUMULATOR_BYTES: usize = std::mem::size_of::<i64>();
+const ACCUMULATOR_BYTES: usize = size_of::<i64>();
 
 /// Configuration for the deterministic bank workload.
 #[derive(Clone, Debug)]

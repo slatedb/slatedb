@@ -7,7 +7,7 @@ use std::time::Duration;
 use log::info;
 use object_store::path::Path;
 use object_store::ObjectStore;
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt};
 use rstest::rstest;
 use slatedb::{Db, DbRand, Error};
 use slatedb_common::clock::MockSystemClock;

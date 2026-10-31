@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::filter_policy::{Filter, FilterBuilder, FilterQuery};
+use crate::filter_policy::{Filter, FilterBuilder, FilterQuery, FilterTarget};
 use crate::prefix_extractor::{PrefixExtractor, PrefixTarget};
 use crate::types::RowEntry;
 use crate::utils::clamp_allocated_size_bytes;
@@ -127,12 +127,8 @@ impl BloomFilter {
         if self.buffer.is_empty() {
             return false;
         }
-        for p in probes_for_key(hash, self.num_probes, self.filter_bits()) {
-            if !check_bit(p as usize, &self.buffer) {
-                return false;
-            }
-        }
-        true
+        probes_for_key(hash, self.num_probes, self.filter_bits())
+            .all(|p| check_bit(p as usize, &self.buffer))
     }
 }
 
@@ -149,7 +145,7 @@ impl FilterBuilder for BloomFilterBuilder {
 impl Filter for BloomFilter {
     fn might_match(&self, query: &FilterQuery) -> bool {
         // Full-key hash gives the tightest answer whenever it was stored.
-        if let (PrefixTarget::Point(key), true) = (&query.target, self.whole_key_filtering) {
+        if let (FilterTarget::Point(key), true) = (&query.target, self.whole_key_filtering) {
             return self.might_contain(filter_hash(key.as_ref()));
         }
 
@@ -164,10 +160,14 @@ impl Filter for BloomFilter {
         let Some(ref extractor) = self.prefix_extractor else {
             return true;
         };
-        let Some(n) = extractor.prefix_len(&query.target) else {
+        // Hashes of keys and prefixes only, so a range is unanswerable here.
+        let Some(prefix_target) = query.target.as_prefix_target() else {
             return true;
         };
-        let bytes = match &query.target {
+        let Some(n) = extractor.prefix_len(&prefix_target) else {
+            return true;
+        };
+        let bytes = match &prefix_target {
             PrefixTarget::Point(k) => k.as_ref(),
             PrefixTarget::Prefix(p) => p.as_ref(),
         };
@@ -203,21 +203,22 @@ fn filter_hash(key: &[u8]) -> u64 {
     hasher.hash(key)
 }
 
-fn probes_for_key(key_hash: u64, num_probes: u16, filter_bits: u32) -> Vec<u32> {
+fn probes_for_key(key_hash: u64, num_probes: u16, filter_bits: u32) -> impl Iterator<Item = u32> {
     // implements enhanced double hashing from:
     // https://www.khoury.northeastern.edu/~pete/pub/bloom-filters-verification.pdf
     // as suggested by the author P. Dillinger for RocksDB's legacy filters here:
     // https://github.com/facebook/rocksdb/issues/4120
-    let mut probes = vec![0u32; num_probes as usize];
+    //
+    // Lazy, so a lookup allocates nothing and stops at the first unset bit.
     let filter_bits = filter_bits as u64;
     let mut h = ((key_hash << 32) >> 32) % filter_bits; // lower 32 bits of hash
     let mut delta = (key_hash >> 32) % filter_bits; // higher 32 bits of hash
-    for i in 0..num_probes {
+    (0..num_probes).map(move |i| {
         delta = (delta + i as u64) % filter_bits;
-        probes[i as usize] = h as u32;
+        let probe = h as u32;
         h = (h + delta) % filter_bits;
-    }
-    probes
+        probe
+    })
 }
 
 fn check_bit(bit: usize, buf: &[u8]) -> bool {
@@ -242,6 +243,7 @@ fn optimal_num_probes(bits_per_key: u32) -> u16 {
 mod tests {
     use super::*;
     use bytes::BytesMut;
+    use std::ops::Bound;
 
     fn point_builder(bits_per_key: u32) -> BloomFilterBuilder {
         BloomFilterBuilder::new(bits_per_key, true, None)
@@ -314,7 +316,7 @@ mod tests {
     fn test_compute_probes() {
         // h1 = 0xDEADBEEF, h2 = 0xDF77EF56
         let hash = 0xDF77EF56DEADBEEFu64;
-        let probes = probes_for_key(hash, 7, 1000000);
+        let probes: Vec<u32> = probes_for_key(hash, 7, 1000000).collect();
         assert_eq!(
             probes,
             vec![
@@ -482,6 +484,24 @@ mod tests {
         // reporting "might match", so the stored short keys stay reachable.
         assert!(filter.might_match(&FilterQuery::prefix(Bytes::from_static(b"a"))));
         assert!(filter.might_match(&FilterQuery::point(Bytes::from_static(b"a"))));
+    }
+
+    #[test]
+    fn test_bloom_filter_abstains_on_range_queries() {
+        let mut builder = BloomFilterBuilder::new(10, false, Some(Arc::new(GatedFixed4)));
+        builder.add_key(&Bytes::from_static(b"aaaa_key"));
+        let filter = builder.build_filter();
+
+        // The filter has real content: a prefix it never saw is rejected.
+        assert!(!filter.might_match(&FilterQuery::prefix(Bytes::from_static(b"bbbb"))));
+
+        // It stores hashes of keys and prefixes, never ranges, so a range
+        // query must abstain rather than reject. A wrong `false` here would
+        // skip an SST holding rows the scan must see.
+        assert!(filter.might_match(&FilterQuery::range(
+            Bound::Included(Bytes::from_static(b"bbbb")),
+            Bound::Excluded(Bytes::from_static(b"bbbc")),
+        )));
     }
 
     #[test]

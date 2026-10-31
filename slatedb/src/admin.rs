@@ -14,16 +14,16 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::VersionedManifest;
 use slatedb_common::clock::SystemClock;
 
-use crate::object_stores::{ObjectStoreType, ObjectStores};
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::seq_tracker::FindOption;
 use crate::utils::IdGenerator;
+use crate::utils::ObjectStoreType;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
-use rand::RngCore;
+use rand::Rng;
 use slatedb_common::DbRand;
 use std::env;
 use std::env::VarError;
@@ -31,6 +31,8 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+use crate::format::sst::BlockTransformer;
 use ulid::Ulid;
 use uuid::Uuid;
 
@@ -47,8 +49,11 @@ use slatedb_txn_obj::TransactionalObject;
 pub struct Admin {
     /// The path to the database.
     pub(crate) path: Path,
-    /// The object stores to use for the main database and WAL.
-    pub(crate) object_stores: ObjectStores,
+    /// The main object store used for manifests and compacted SSTs.
+    pub(crate) main_object_store: Arc<dyn ObjectStore>,
+    /// The object store used for the WAL. This is the main object store when no
+    /// dedicated WAL object store was configured.
+    pub(crate) wal_object_store: Option<Arc<dyn ObjectStore>>,
     /// The system clock to use for operations.
     pub(crate) system_clock: Arc<dyn SystemClock>,
     /// The random number generator to use for randomness.
@@ -59,6 +64,7 @@ pub struct Admin {
     pub(crate) compaction_filter_supplier:
         Option<Arc<dyn crate::compaction_filter::CompactionFilterSupplier>>,
     pub(crate) merge_operator: Option<MergeOperatorType>,
+    pub(crate) block_transformer: Option<Arc<dyn BlockTransformer>>,
     pub(crate) wal_admin: Arc<dyn WalAdmin>,
 }
 
@@ -107,11 +113,21 @@ impl Admin {
             .map_err(crate::Error::from)?;
         let mut manifests = Vec::with_capacity(manifest_metadata.len());
         for metadata in manifest_metadata {
-            let manifest = manifest_store
-                .read_manifest(metadata.id)
+            match manifest_store
+                .try_read_manifest(metadata.id)
                 .await
-                .map_err(crate::Error::from)?;
-            manifests.push(VersionedManifest::from_manifest(metadata.id, manifest));
+                .map_err(crate::Error::from)?
+            {
+                Some(manifest) => {
+                    manifests.push(VersionedManifest::from_manifest(metadata.id, manifest))
+                }
+                // Deleted after LIST by a concurrent GC
+                // See https://github.com/slatedb/slatedb/issues/1215 for more details.
+                None => log::warn!(
+                    "listed manifest missing on read, skipping [id={}]",
+                    metadata.id
+                ),
+            }
         }
         Ok(manifests)
     }
@@ -284,11 +300,11 @@ impl Admin {
     pub async fn run_gc_once(&self, gc_opts: GarbageCollectorOptions) -> Result<(), crate::Error> {
         let gc = GarbageCollectorBuilder::new(
             self.path.clone(),
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.object_store(ObjectStoreType::Main).clone(),
         )
         .with_system_clock(self.system_clock.clone())
         .with_wal_gc(self.wal_admin.garbage_collector(&self.path))
-        .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
+        .with_wal_object_store(self.object_store(ObjectStoreType::Wal).clone())
         .with_options(gc_opts)
         .with_seed(self.rand.rng().next_u64())
         .build();
@@ -318,11 +334,11 @@ impl Admin {
     ) -> Result<(), crate::Error> {
         let gc = GarbageCollectorBuilder::new(
             self.path.clone(),
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.object_store(ObjectStoreType::Main).clone(),
         )
         .with_system_clock(self.system_clock.clone())
         .with_wal_gc(self.wal_admin.garbage_collector(&self.path))
-        .with_wal_object_store(self.object_stores.store_of(ObjectStoreType::Wal).clone())
+        .with_wal_object_store(self.object_store(ObjectStoreType::Wal).clone())
         .with_options(gc_opts)
         .with_seed(self.rand.rng().next_u64())
         .build();
@@ -364,25 +380,7 @@ impl Admin {
         cancellation_token: CancellationToken,
         options: crate::config::CompactorOptions,
     ) -> Result<(), crate::Error> {
-        #[allow(unused_mut)]
-        let mut builder = crate::CompactorBuilder::new(
-            self.path.clone(),
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
-        )
-        .with_options(options)
-        .with_system_clock(self.system_clock.clone())
-        .with_seed(self.rand.rng().next_u64());
-
-        #[cfg(feature = "compaction_filters")]
-        if let Some(supplier) = &self.compaction_filter_supplier {
-            builder = builder.with_compaction_filter_supplier(supplier.clone());
-        }
-
-        if let Some(merge_operator) = &self.merge_operator {
-            builder = builder.with_merge_operator(merge_operator.clone());
-        }
-
-        let compactor = builder.build();
+        let compactor = self.compactor_builder(options).build();
 
         compactor.start().await?;
 
@@ -425,10 +423,29 @@ impl Admin {
         cancellation_token: CancellationToken,
         options: crate::config::CompactionWorkerOptions,
     ) -> Result<(), crate::Error> {
+        let worker = self.compaction_worker_builder(options).build().await?;
+
+        worker.start()?;
+
+        tokio::select! {
+            result = worker.join() => result,
+            _ = cancellation_token.cancelled() => {
+                worker.stop().await
+            }
+        }
+    }
+
+    /// The compactor this admin runs carries every hook the admin was built
+    /// with: the compaction filter supplier, the merge operator and the block
+    /// transformer.
+    pub(crate) fn compactor_builder(
+        &self,
+        options: crate::config::CompactorOptions,
+    ) -> crate::CompactorBuilder<Path> {
         #[allow(unused_mut)]
-        let mut builder = crate::CompactionWorkerBuilder::new(
+        let mut builder = crate::CompactorBuilder::new(
             self.path.clone(),
-            self.object_stores.store_of(ObjectStoreType::Main).clone(),
+            self.object_store(ObjectStoreType::Main).clone(),
         )
         .with_options(options)
         .with_system_clock(self.system_clock.clone())
@@ -439,16 +456,46 @@ impl Admin {
             builder = builder.with_compaction_filter_supplier(supplier.clone());
         }
 
-        let worker = builder.build().await?;
-
-        worker.start()?;
-
-        tokio::select! {
-            result = worker.join() => result,
-            _ = cancellation_token.cancelled() => {
-                worker.stop().await
-            }
+        if let Some(merge_operator) = &self.merge_operator {
+            builder = builder.with_merge_operator(merge_operator.clone());
         }
+
+        if let Some(block_transformer) = &self.block_transformer {
+            builder = builder.with_block_transformer(block_transformer.clone());
+        }
+
+        builder
+    }
+
+    /// The compaction worker this admin runs carries the same hooks as its
+    /// compactor.
+    pub(crate) fn compaction_worker_builder(
+        &self,
+        options: crate::config::CompactionWorkerOptions,
+    ) -> crate::CompactionWorkerBuilder<Path> {
+        #[allow(unused_mut)]
+        let mut builder = crate::CompactionWorkerBuilder::new(
+            self.path.clone(),
+            self.object_store(ObjectStoreType::Main).clone(),
+        )
+        .with_options(options)
+        .with_system_clock(self.system_clock.clone())
+        .with_seed(self.rand.rng().next_u64());
+
+        #[cfg(feature = "compaction_filters")]
+        if let Some(supplier) = &self.compaction_filter_supplier {
+            builder = builder.with_compaction_filter_supplier(supplier.clone());
+        }
+
+        if let Some(merge_operator) = &self.merge_operator {
+            builder = builder.with_merge_operator(merge_operator.clone());
+        }
+
+        if let Some(block_transformer) = &self.block_transformer {
+            builder = builder.with_block_transformer(block_transformer.clone());
+        }
+
+        builder
     }
 
     /// Creates a checkpoint of the db stored in the object store at the specified path using the
@@ -496,7 +543,7 @@ impl Admin {
         let mut stored_manifest =
             StoredManifest::load(manifest_store, self.system_clock.clone()).await?;
 
-        let configured_wal_uri = self.object_stores.has_wal_object_store().then(String::new);
+        let configured_wal_uri = self.wal_object_store.is_some().then(String::new);
         stored_manifest
             .db_state()
             .validate_wal_object_store_uri(configured_wal_uri.as_deref())?;
@@ -514,7 +561,7 @@ impl Admin {
     /// Refresh the lifetime of an existing checkpoint. Takes the id of an existing checkpoint
     /// and a lifetime, and sets the lifetime of the checkpoint to the specified lifetime. If
     /// there is no checkpoint with the specified id, then this fn fails with
-    /// SlateDBError::InvalidDbState
+    /// SlateDBError::InvalidDbState. If the lifetime is `None`, the checkpoint never expires.
     pub async fn refresh_checkpoint(
         &self,
         id: Uuid,
@@ -733,11 +780,21 @@ impl Admin {
     /// detected rather than surfaced as a spurious error.
     fn retrying_store(&self, store_type: ObjectStoreType) -> Arc<dyn ObjectStore> {
         Arc::new(RetryingObjectStore::new(
-            self.object_stores.store_of(store_type).clone(),
+            self.object_store(store_type).clone(),
             self.rand.clone(),
             self.system_clock.clone(),
             self.object_store_max_retries,
         ))
+    }
+
+    fn object_store(&self, store_type: ObjectStoreType) -> &Arc<dyn ObjectStore> {
+        match store_type {
+            ObjectStoreType::Main => &self.main_object_store,
+            ObjectStoreType::Wal => self
+                .wal_object_store
+                .as_ref()
+                .unwrap_or(&self.main_object_store),
+        }
     }
 
     fn manifest_store(&self) -> ManifestStore {
@@ -880,10 +937,10 @@ pub fn load_local() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let local_path = get_env_variable("LOCAL_PATH")?;
     let lfs =
         object_store::local::LocalFileSystem::new_with_prefix(local_path).map_err(|error| {
-            SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+            SlateDBError::from(object_store::Error::Generic {
                 store: "local",
                 source: Box::new(error),
-            }))
+            })
         })?;
     Ok(Arc::new(lfs) as Arc<dyn ObjectStore>)
 }
@@ -902,10 +959,10 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let builder = object_store::aws::AmazonS3Builder::from_env();
 
     Ok(Arc::new(builder.build().map_err(|error| {
-        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+        SlateDBError::from(object_store::Error::Generic {
             store: "AmazonS3",
             source: Box::new(error),
-        }))
+        })
     })?) as Arc<dyn ObjectStore>)
 }
 
@@ -917,10 +974,10 @@ pub fn load_aws() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let builder = object_store::azure::MicrosoftAzureBuilder::from_env();
     Ok(Arc::new(builder.build().map_err(|error| {
-        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+        SlateDBError::from(object_store::Error::Generic {
             store: "MicrosoftAzure",
             source: Box::new(error),
-        }))
+        })
     })?) as Arc<dyn ObjectStore>)
 }
 
@@ -932,10 +989,10 @@ pub fn load_azure() -> Result<Arc<dyn ObjectStore>, crate::Error> {
 pub fn load_gcp() -> Result<Arc<dyn ObjectStore>, crate::Error> {
     let builder = object_store::gcp::GoogleCloudStorageBuilder::from_env();
     Ok(Arc::new(builder.build().map_err(|error| {
-        SlateDBError::ObjectStoreError(Arc::new(object_store::Error::Generic {
+        SlateDBError::from(object_store::Error::Generic {
             store: "GoogleCloudStorage",
             source: Box::new(error),
-        }))
+        })
     })?) as Arc<dyn ObjectStore>)
 }
 
@@ -1504,6 +1561,16 @@ mod tests {
         assert!(admin.merge_operator.is_some());
     }
 
+    #[test]
+    fn test_admin_builder_with_block_transformer() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let admin = AdminBuilder::new("/tmp/test_block_transformer", object_store)
+            .with_block_transformer(Arc::new(crate::test_utils::IdentityBlockTransformer))
+            .build();
+
+        assert!(admin.block_transformer.is_some());
+    }
+
     #[tokio::test]
     async fn test_create_clone_builder() {
         use crate::admin::CloneSourceSpec;
@@ -1976,5 +2043,63 @@ mod tests {
                 "pinned checkpoint should be removed from every parent"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod gc_tolerant_list_manifests_tests {
+    use crate::admin::AdminBuilder;
+    use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::ManifestCore;
+    use crate::test_utils::FlakyObjectStore;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+    use slatedb_common::clock::DefaultSystemClock;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_list_manifests_skips_manifest_gced_between_list_and_read() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0));
+        let store: Arc<dyn ObjectStore> = flaky.clone();
+        let path = Path::from("/tmp/test_gc_tolerant_list_manifests");
+
+        let manifest_store = Arc::new(ManifestStore::new(&path, store.clone()));
+        let mut sm = StoredManifest::create_new_db(
+            manifest_store,
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        sm.update(sm.prepare_dirty().unwrap()).await.unwrap();
+        sm.update(sm.prepare_dirty().unwrap()).await.unwrap();
+
+        let admin = AdminBuilder::new(path.clone(), store.clone()).build();
+        let ids: Vec<u64> = admin
+            .list_manifests(..)
+            .await
+            .unwrap()
+            .iter()
+            .map(|vm| vm.id())
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+
+        // manifest 1 is listed, but missing on read
+        flaky.with_get_not_found_failures(1);
+
+        let ids: Vec<u64> = admin
+            .list_manifests(..)
+            .await
+            .unwrap()
+            .iter()
+            .map(|vm| vm.id())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![2, 3],
+            "a manifest GC'd mid-listing should be skipped, not fail the operation"
+        );
     }
 }

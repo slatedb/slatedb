@@ -1,23 +1,25 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::{future::BoxFuture, FutureExt};
 use log::error;
 use slatedb_common::metrics::CounterFn;
-use std::cmp::min;
 use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, Range, RangeBounds};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::block_iterator::DataBlockIterator;
 use crate::bytes_range::BytesRange;
 use crate::db_state::{SsTableId, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::filter_policy::{FilterContext, FilterQuery, NamedFilter};
+use crate::filter_policy::{FilterContext, FilterQuery, FilterTarget, NamedFilter};
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
-use crate::prefix_extractor::PrefixTarget;
+use crate::read_trace::{ReadTrace, SstTraceLevel};
+use crate::utils::spawn_with_optional_subscriber;
 use crate::{
     iter::{IterationOrder, RowEntryIterator},
     partitioned_keyspace,
@@ -27,33 +29,56 @@ use crate::{
 };
 
 enum FetchTask {
-    InFlight(JoinHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
+    InFlight(AbortOnDropHandle<Result<VecDeque<Arc<Block>>, SlateDBError>>),
+    /// A single-block point read, polled by the iterator itself: one block, one
+    /// task and no read-ahead leave a spawn nothing to overlap, and `init`
+    /// awaits the first block either way. Dropping the future cancels the read,
+    /// as aborting the handle does. The mutex is only for `Sync`; polling goes
+    /// through `get_mut`, so no lock is held across an await.
+    Inline(parking_lot::Mutex<BoxFuture<'static, Result<VecDeque<Arc<Block>>, SlateDBError>>>),
     Finished(VecDeque<Arc<Block>>),
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct SstIteratorOptions {
     pub(crate) max_fetch_tasks: usize,
-    pub(crate) blocks_to_fetch: usize,
+    pub(crate) target_bytes_to_fetch: usize,
     pub(crate) cache_blocks: bool,
     pub(crate) cache_metadata: bool,
     pub(crate) eager_spawn: bool,
     pub(crate) order: IterationOrder,
     pub(crate) prefix: Option<Bytes>,
     pub(crate) filter_context: Option<FilterContext>,
+    pub(crate) segment: Option<Bytes>,
 }
 
 impl Default for SstIteratorOptions {
     fn default() -> Self {
         SstIteratorOptions {
             max_fetch_tasks: 1,
-            blocks_to_fetch: 1,
+            target_bytes_to_fetch: 1,
             cache_blocks: true,
             cache_metadata: true,
             eager_spawn: false,
             order: IterationOrder::Ascending,
             prefix: None,
             filter_context: None,
+            segment: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SstTracingContext {
+    pub(crate) sst_level: SstTraceLevel,
+    pub(crate) read_trace: ReadTrace,
+}
+
+impl SstTracingContext {
+    pub(crate) fn new(sst_level: SstTraceLevel, read_trace: ReadTrace) -> Self {
+        Self {
+            sst_level,
+            read_trace,
         }
     }
 }
@@ -77,6 +102,16 @@ impl SstView<'_> {
     fn end_key(&self) -> Bound<&[u8]> {
         match self {
             SstView::Owned(_, r) | SstView::Borrowed(_, r) => r.end_bound().map(|b| b.as_ref()),
+        }
+    }
+
+    /// The view's bounds.
+    fn bounds(&self) -> (Bound<Bytes>, Bound<Bytes>) {
+        match self {
+            SstView::Owned(_, r) | SstView::Borrowed(_, r) => (
+                r.comparable_start_bound().cloned().into(),
+                r.comparable_end_bound().cloned().into(),
+            ),
         }
     }
 
@@ -194,12 +229,33 @@ impl FilterEvaluator {
         }
     }
 
+    fn new_range(
+        lower: Bound<Bytes>,
+        upper: Bound<Bytes>,
+        context: Option<FilterContext>,
+        db_stats: Option<DbStats>,
+    ) -> Self {
+        Self {
+            query: FilterQuery::range(lower, upper).with_context(context),
+            db_stats,
+            state: FilterState::NotChecked,
+            found_key: false,
+            false_positive_recorded: false,
+        }
+    }
+
     /// Evaluate the filters against the query using AND logic.
     ///
     /// All filters must agree the query might match for the read to proceed.
     /// If any filter says the query is absent, the SST is skipped.
     /// If no filters are provided, the state is set to `NoFilter`.
-    async fn evaluate(&mut self, filters: &[NamedFilter]) {
+    fn evaluate(
+        &mut self,
+        filters: &[NamedFilter],
+        sst_id: SsTableId,
+        sst_level: Option<&SstTraceLevel>,
+        read_trace: &ReadTrace,
+    ) {
         if self.state != FilterState::NotChecked {
             return;
         }
@@ -212,7 +268,9 @@ impl FilterEvaluator {
         // AND logic: if any filter says the key is NOT present, filter it out.
         // All filters reaching here are decoded. TableStore::read_filters
         // resolves any raw cache entries before returning.
-        let might_match = filters.iter().all(|nf| nf.filter.might_match(&self.query));
+        let might_match = filters
+            .iter()
+            .all(|nf| self.filter_might_match(nf, sst_id, sst_level, read_trace));
 
         if might_match {
             if let Some(stats) = &self.db_stats {
@@ -227,24 +285,41 @@ impl FilterEvaluator {
         }
     }
 
+    fn filter_might_match(
+        &self,
+        filter: &NamedFilter,
+        sst_id: SsTableId,
+        sst_level: Option<&SstTraceLevel>,
+        read_trace: &ReadTrace,
+    ) -> bool {
+        let span = read_trace.new_evaluate_filter_span(sst_id, sst_level, &filter.name);
+        let _guard = span.enter();
+        let result = filter.filter.might_match(&self.query);
+        span.record("result", result);
+        result
+    }
+
     fn positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
         match &self.query.target {
-            PrefixTarget::Point(_) => &stats.sst_filter_point_positives,
-            PrefixTarget::Prefix(_) => &stats.sst_filter_prefix_positives,
+            FilterTarget::Point(_) => &stats.sst_filter_point_positives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_positives,
+            FilterTarget::Range { .. } => &stats.sst_filter_range_positives,
         }
     }
 
     fn negatives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
         match &self.query.target {
-            PrefixTarget::Point(_) => &stats.sst_filter_point_negatives,
-            PrefixTarget::Prefix(_) => &stats.sst_filter_prefix_negatives,
+            FilterTarget::Point(_) => &stats.sst_filter_point_negatives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_negatives,
+            FilterTarget::Range { .. } => &stats.sst_filter_range_negatives,
         }
     }
 
     fn false_positives_counter<'a>(&self, stats: &'a DbStats) -> &'a Arc<dyn CounterFn> {
         match &self.query.target {
-            PrefixTarget::Point(_) => &stats.sst_filter_point_false_positives,
-            PrefixTarget::Prefix(_) => &stats.sst_filter_prefix_false_positives,
+            FilterTarget::Point(_) => &stats.sst_filter_point_false_positives,
+            FilterTarget::Prefix(_) => &stats.sst_filter_prefix_false_positives,
+            FilterTarget::Range { .. } => &stats.sst_filter_range_false_positives,
         }
     }
 
@@ -254,8 +329,11 @@ impl FilterEvaluator {
 
     fn notify_key_found(&mut self, key: &[u8]) {
         match &self.query.target {
-            PrefixTarget::Point(k) if key == k.as_ref() => self.found_key = true,
-            PrefixTarget::Prefix(p) if key.starts_with(p.as_ref()) => self.found_key = true,
+            FilterTarget::Point(k) if key == k.as_ref() => self.found_key = true,
+            FilterTarget::Prefix(p) if key.starts_with(p.as_ref()) => self.found_key = true,
+            // Keys the iterator yields are already inside the range, so any
+            // row confirms the match.
+            FilterTarget::Range { .. } => self.found_key = true,
             _ => {}
         }
     }
@@ -279,6 +357,11 @@ pub(crate) struct InternalSstIterator<'a> {
     fetch_tasks: VecDeque<FetchTask>,
     table_store: Arc<TableStore>,
     options: SstIteratorOptions,
+    /// A point range read by one fetch task: its one block, when the range
+    /// is one block, is polled inline rather than spawned. Fixed for the
+    /// iterator's life, so decided once here.
+    inline_point_read: bool,
+    tracing_context: Option<SstTracingContext>,
     /// Buffer for descending iteration to maintain correct sequence order within keys.
     descending_buffer: Option<VecDeque<RowEntry>>,
     /// Pending entry that was read ahead but belongs to the next key group.
@@ -291,14 +374,16 @@ impl<'a> InternalSstIterator<'a> {
         view: SstView<'a>,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
     ) -> Result<Self, SlateDBError> {
         assert!(options.max_fetch_tasks > 0);
-        assert!(options.blocks_to_fetch > 0);
+        assert!(options.target_bytes_to_fetch > 0);
 
         let descending_buffer = match options.order {
             IterationOrder::Descending => Some(VecDeque::new()),
             IterationOrder::Ascending => None,
         };
+        let inline_point_read = view.point_key().is_some() && options.max_fetch_tasks == 1;
 
         Ok(Self {
             view,
@@ -309,6 +394,8 @@ impl<'a> InternalSstIterator<'a> {
             fetch_tasks: VecDeque::new(),
             table_store,
             options,
+            inline_point_read,
+            tracing_context,
             descending_buffer,
             pending_entry: None,
         })
@@ -322,17 +409,31 @@ impl<'a> InternalSstIterator<'a> {
         &self.table_store
     }
 
+    fn sst_level(&self) -> Option<&SstTraceLevel> {
+        self.tracing_context
+            .as_ref()
+            .map(|context| &context.sst_level)
+    }
+
+    fn read_trace(&self) -> ReadTrace {
+        self.tracing_context
+            .as_ref()
+            .map(|context| context.read_trace.clone())
+            .unwrap_or_else(ReadTrace::none)
+    }
+
     fn new_owned<T: RangeBounds<Bytes>>(
         range: T,
         table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
     ) -> Result<Option<Self>, SlateDBError> {
         let Some(view_range) = table.calculate_view_range(BytesRange::from(range)) else {
             return Ok(None);
         };
         let view = SstView::Owned(Box::new(table), view_range);
-        Self::new(view, table_store, options).map(Some)
+        Self::new(view, table_store, options, tracing_context).map(Some)
     }
 
     fn new_borrowed<T: RangeBounds<Bytes>>(
@@ -345,7 +446,7 @@ impl<'a> InternalSstIterator<'a> {
             return Ok(None);
         };
         let view = SstView::Borrowed(table, view_range);
-        Self::new(view, table_store, options).map(Some)
+        Self::new(view, table_store, options, None).map(Some)
     }
 
     fn for_key(
@@ -371,7 +472,7 @@ impl<'a> InternalSstIterator<'a> {
     /// decrementing `next_block_idx_to_fetch` as blocks are scheduled. Stops when reaching
     /// `block_idx_range.start`.
     fn spawn_fetches(&mut self) {
-        let Some(index) = self.index.as_ref() else {
+        let Some(index) = self.index.clone() else {
             return;
         };
 
@@ -381,28 +482,17 @@ impl<'a> InternalSstIterator<'a> {
                 while self.fetch_tasks.len() < self.options.max_fetch_tasks
                     && self.block_idx_range.contains(&self.next_block_idx_to_fetch)
                 {
-                    let blocks_to_fetch = min(
-                        self.options.blocks_to_fetch,
-                        self.block_idx_range.end - self.next_block_idx_to_fetch,
+                    let mut blocks = self.table_store.block_range_for_target_bytes(
+                        &self.view.table_as_ref().sst,
+                        &index,
+                        self.next_block_idx_to_fetch,
+                        self.options.target_bytes_to_fetch,
+                        IterationOrder::Ascending,
                     );
-                    let table = self.view.table_as_ref().sst.clone();
-                    let table_store = self.table_store.clone();
-                    let blocks_start = self.next_block_idx_to_fetch;
-                    let blocks_end = self.next_block_idx_to_fetch + blocks_to_fetch;
-                    let index = index.clone();
-                    let cache_blocks = self.options.cache_blocks;
-                    self.fetch_tasks
-                        .push_back(FetchTask::InFlight(tokio::spawn(async move {
-                            table_store
-                                .read_blocks_using_index(
-                                    &table,
-                                    index,
-                                    blocks_start..blocks_end,
-                                    cache_blocks,
-                                )
-                                .await
-                        })));
-                    self.next_block_idx_to_fetch = blocks_end;
+                    blocks.end = blocks.end.min(self.block_idx_range.end);
+                    self.next_block_idx_to_fetch = blocks.end;
+                    let fetch = self.start_fetch(index.clone(), blocks);
+                    self.fetch_tasks.push_back(fetch);
                 }
             }
             IterationOrder::Descending => {
@@ -410,30 +500,49 @@ impl<'a> InternalSstIterator<'a> {
                 while self.fetch_tasks.len() < self.options.max_fetch_tasks
                     && self.next_block_idx_to_fetch > self.block_idx_range.start
                 {
-                    let blocks_to_fetch = min(
-                        self.options.blocks_to_fetch,
-                        self.next_block_idx_to_fetch - self.block_idx_range.start,
+                    let mut blocks = self.table_store.block_range_for_target_bytes(
+                        &self.view.table_as_ref().sst,
+                        &index,
+                        self.next_block_idx_to_fetch - 1,
+                        self.options.target_bytes_to_fetch,
+                        IterationOrder::Descending,
                     );
-                    let table = self.view.table_as_ref().sst.clone();
-                    let table_store = self.table_store.clone();
-                    let blocks_end = self.next_block_idx_to_fetch;
-                    let blocks_start = blocks_end - blocks_to_fetch;
-                    let index = index.clone();
-                    let cache_blocks = self.options.cache_blocks;
-                    self.fetch_tasks
-                        .push_back(FetchTask::InFlight(tokio::spawn(async move {
-                            table_store
-                                .read_blocks_using_index(
-                                    &table,
-                                    index,
-                                    blocks_start..blocks_end,
-                                    cache_blocks,
-                                )
-                                .await
-                        })));
-                    self.next_block_idx_to_fetch = blocks_start;
+                    blocks.start = blocks.start.max(self.block_idx_range.start);
+                    self.next_block_idx_to_fetch = blocks.start;
+                    let fetch = self.start_fetch(index.clone(), blocks);
+                    self.fetch_tasks.push_back(fetch);
                 }
             }
+        }
+    }
+
+    /// Starts the read of `blocks`: inline for a one-task point read's single
+    /// block, as a task on the runtime for everything else.
+    fn start_fetch(&self, index: Arc<SsTableIndexOwned>, blocks: Range<usize>) -> FetchTask {
+        let table = self.view.table_as_ref().sst.clone();
+        let table_store = self.table_store.clone();
+        let cache_blocks = self.options.cache_blocks;
+        let segment = self.options.segment.clone();
+        let read_trace = self.read_trace();
+        let sst_level = self.sst_level().cloned();
+        let single_block = blocks.len() == 1;
+        let read = async move {
+            table_store
+                .read_blocks_using_index(
+                    &table,
+                    index,
+                    blocks,
+                    cache_blocks,
+                    segment,
+                    &read_trace,
+                    sst_level.as_ref(),
+                )
+                .await
+        };
+        if self.inline_point_read && single_block {
+            FetchTask::Inline(parking_lot::Mutex::new(Box::pin(read)))
+        } else {
+            FetchTask::InFlight(AbortOnDropHandle::new(spawn_with_optional_subscriber(read)))
         }
     }
 
@@ -452,6 +561,15 @@ impl<'a> InternalSstIterator<'a> {
             }
             if let Some(fetch_task) = self.fetch_tasks.front_mut() {
                 match fetch_task {
+                    FetchTask::Inline(read) => {
+                        // Keep the future in the queue if the caller cancels this
+                        // next/init await: the block cursor has already advanced.
+                        let blocks = AssertUnwindSafe(read.get_mut())
+                            .catch_unwind()
+                            .await
+                            .map_err(|panic| block_fetch_panic_error(panic, sst_id))??;
+                        *fetch_task = FetchTask::Finished(blocks);
+                    }
                     FetchTask::InFlight(jh) => {
                         let blocks = jh
                             .await
@@ -546,9 +664,16 @@ impl<'a> InternalSstIterator<'a> {
 
     async fn ensure_metadata_loaded(&mut self) -> Result<(), SlateDBError> {
         if self.index.is_none() {
+            let read_trace = self.read_trace();
             let index = self
                 .table_store
-                .read_index(&self.view.table_as_ref().sst, self.options.cache_metadata)
+                .read_index(
+                    &self.view.table_as_ref().sst,
+                    self.options.cache_metadata,
+                    self.options.segment.clone(),
+                    &read_trace,
+                    self.sst_level(),
+                )
                 .await?;
             let block_idx_range = partitioned_keyspace::partitions_covering_range(
                 &index.borrow(),
@@ -785,21 +910,31 @@ impl<'a> FilterIterator<'a> {
     fn is_filtered_out(&self) -> bool {
         self.filter.is_filtered_out()
     }
+
+    async fn read_filters(&self) -> Result<Arc<[NamedFilter]>, SlateDBError> {
+        let read_trace = self.inner.read_trace();
+        self.inner
+            .table_store()
+            .read_filters(
+                &self.inner.view().table_as_ref().sst,
+                self.inner.options.cache_metadata,
+                self.inner.options.segment.clone(),
+                &read_trace,
+                self.inner.sst_level(),
+            )
+            .await
+    }
 }
 
 #[async_trait]
 impl RowEntryIterator for FilterIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized {
-            let filters = self
-                .inner
-                .table_store()
-                .read_filters(
-                    &self.inner.view().table_as_ref().sst,
-                    self.inner.options.cache_metadata,
-                )
-                .await?;
-            self.filter.evaluate(&filters).await;
+            let filters = self.read_filters().await?;
+            let sst_id = self.inner.view().table_as_ref().sst.id;
+            let read_trace = self.inner.read_trace();
+            self.filter
+                .evaluate(&filters, sst_id, self.inner.sst_level(), &read_trace);
 
             if self.is_filtered_out() {
                 return Ok(());
@@ -853,11 +988,38 @@ impl<'a> SstIterator<'a> {
     fn from_internal(internal: InternalSstIterator<'a>, db_stats: Option<DbStats>) -> Self {
         let point_key = internal.view().point_key().map(Bytes::copy_from_slice);
         let prefix = internal.options.prefix.clone();
+        let range = internal.view().bounds();
         let filter_context = internal.options.filter_context.clone();
-        let filter_evaluator = match (point_key, prefix) {
-            (Some(key), _) => Some(FilterEvaluator::new_point(key, filter_context, db_stats)),
-            (None, Some(p)) => Some(FilterEvaluator::new_prefix(p, filter_context, db_stats)),
-            (None, None) => None,
+        let filter_evaluator = match (point_key, prefix, range) {
+            (Some(key), _, _) => Some(FilterEvaluator::new_point(key, filter_context, db_stats)),
+            // A prefix scan reads this SST's filters only when there is a
+            // registered policy that can answer a prefix; a whole-key bloom
+            // filter cannot, and fetching it would prune nothing.
+            (None, Some(p), _)
+                if internal
+                    .table_store()
+                    .any_filter_policy_supports_prefix_queries() =>
+            {
+                Some(FilterEvaluator::new_prefix(p, filter_context, db_stats))
+            }
+            // No policy answers a prefix, but one answers a range: a prefix
+            // scan's bounds are the prefix's key range, so the range evaluator
+            // prunes the same SSTs a range scan over those bounds would.
+            // Likewise a plain range scan reads this SST's filters only when
+            // there is a registered policy that can answer a range.
+            (None, _, (lower, upper))
+                if internal
+                    .table_store()
+                    .any_filter_policy_supports_range_queries() =>
+            {
+                Some(FilterEvaluator::new_range(
+                    lower,
+                    upper,
+                    filter_context,
+                    db_stats,
+                ))
+            }
+            (None, _, _) => None,
         };
         let delegate = match filter_evaluator {
             Some(fe) => SstIteratorDelegate::Filter(FilterIterator::new(internal, fe)),
@@ -872,16 +1034,17 @@ impl<'a> SstIterator<'a> {
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Self, SlateDBError> {
-        Self::new_with_stats(view, table_store, options, None)
+        Self::new_with_stats(view, table_store, options, None, None)
     }
 
     pub(crate) fn new_with_stats(
         view: SstView<'a>,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
         db_stats: Option<DbStats>,
     ) -> Result<Self, SlateDBError> {
-        let internal = InternalSstIterator::new(view, table_store, options)?;
+        let internal = InternalSstIterator::new(view, table_store, options, tracing_context)?;
         Ok(Self::from_internal(internal, db_stats))
     }
 
@@ -891,9 +1054,11 @@ impl<'a> SstIterator<'a> {
         table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
         db_stats: Option<DbStats>,
     ) -> Result<Option<Self>, SlateDBError> {
-        let internal = InternalSstIterator::new_owned(range, table, table_store, options)?;
+        let internal =
+            InternalSstIterator::new_owned(range, table, table_store, options, tracing_context)?;
         Ok(internal.map(|iter| Self::from_internal(iter, db_stats.clone())))
     }
 
@@ -903,17 +1068,19 @@ impl<'a> SstIterator<'a> {
         table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
     ) -> Result<Option<Self>, SlateDBError> {
-        Self::new_owned_with_stats(range, table, table_store, options, None)
+        Self::new_owned_with_stats(range, table, table_store, options, tracing_context, None)
     }
 
+    #[cfg(test)]
     pub(crate) async fn new_owned_initialized<T: RangeBounds<Bytes>>(
         range: T,
         table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
     ) -> Result<Option<Self>, SlateDBError> {
-        Self::new_owned_initialized_with_stats(range, table, table_store, options, None).await
+        Self::new_owned_initialized_with_stats(range, table, table_store, options, None, None).await
     }
 
     pub(crate) async fn new_owned_initialized_with_stats<T: RangeBounds<Bytes>>(
@@ -921,12 +1088,14 @@ impl<'a> SstIterator<'a> {
         table: SsTableView,
         table_store: Arc<TableStore>,
         options: SstIteratorOptions,
+        tracing_context: Option<SstTracingContext>,
         db_stats: Option<DbStats>,
     ) -> Result<Option<Self>, SlateDBError> {
         // Construct the inner iterator without initializing it. The filter
         // is evaluated first so that an SST whose filter rules out the query
         // never pays for an index or data block read.
-        let internal = InternalSstIterator::new_owned(range, table, table_store, options)?;
+        let internal =
+            InternalSstIterator::new_owned(range, table, table_store, options, tracing_context)?;
         match internal {
             Some(inner) => {
                 let mut iterator = Self::from_internal(inner, db_stats);
@@ -1008,7 +1177,7 @@ impl<'a> SstIterator<'a> {
         Ok(internal.map(|iter| Self::from_internal(iter, db_stats.clone())))
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) async fn for_key_with_stats_initialized(
         table: &'a SsTableView,
         key: &'a [u8],
@@ -1068,18 +1237,23 @@ impl RowEntryIterator for SstIterator<'_> {
 /// so the iterator reports the cancellation to its caller instead of panicking
 /// the task that is awaiting the fetch.
 fn block_fetch_join_error(join_err: tokio::task::JoinError, sst_id: SsTableId) -> SlateDBError {
-    let task_name = format!("sst_block_fetch[{:?}]", sst_id);
     match join_err.try_into_panic() {
-        Ok(panic_err) => {
-            error!(
-                "sst block fetch task panicked unexpectedly. [task_name={}, panic={}]",
-                task_name,
-                panic_string(&panic_err),
-            );
-            SlateDBError::BackgroundTaskPanic(task_name)
-        }
-        Err(_) => SlateDBError::BackgroundTaskCancelled(task_name),
+        Ok(panic_err) => block_fetch_panic_error(panic_err, sst_id),
+        Err(_) => SlateDBError::BackgroundTaskCancelled(format!("sst_block_fetch[{:?}]", sst_id)),
     }
+}
+
+fn block_fetch_panic_error(
+    panic_err: Box<dyn std::any::Any + Send>,
+    sst_id: SsTableId,
+) -> SlateDBError {
+    let task_name = format!("sst_block_fetch[{:?}]", sst_id);
+    error!(
+        "sst block fetch task panicked unexpectedly. [task_name={}, panic={}]",
+        task_name,
+        panic_string(&panic_err),
+    );
+    SlateDBError::BackgroundTaskPanic(task_name)
 }
 
 #[cfg(test)]
@@ -1087,24 +1261,34 @@ mod tests {
     use super::*;
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_generator::OrderedBytesGenerator;
+    use crate::config::TracingOptions;
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::DbCache;
     use crate::db_cache::SplitCache;
     use crate::db_state::{SsTableId, SsTableView};
     use crate::db_stats::DbStats;
-    use crate::filter_policy::{BloomFilterPolicy, FilterQuery};
+    use crate::filter_policy::{
+        BloomFilterPolicy, Filter, FilterBuilder, FilterPolicy, FilterQuery,
+    };
     use crate::format::sst::SsTableFormat;
-    use crate::object_stores::ObjectStores;
     use crate::sst_builder::BlockFormat;
     use crate::tablestore::TableStoreKind;
-    use crate::test_utils::assert_kv;
+    use crate::test_utils::{assert_kv, SpanRecorder};
     use crate::types::{KeyValue, ValueDeletable};
     use object_store::path::Path;
-    use object_store::{memory::InMemory, ObjectStore};
+    use object_store::{memory::InMemory, ObjectStore, ObjectStoreExt};
+    use rstest::rstest;
     use slatedb_common::metrics::{
         lookup_metric_with_labels, DefaultMetricsRecorder, MetricLevel, MetricsRecorderHelper,
     };
+    use std::collections::HashMap;
     use std::sync::Arc;
+    use tracing_subscriber::layer::SubscriberExt;
+    use ulid::Ulid;
+
+    fn test_sst_id(id: u64) -> SsTableId {
+        SsTableId::from(Ulid::from_parts(id, 0))
+    }
 
     #[tokio::test]
     async fn test_one_block_sst_iter() {
@@ -1120,7 +1304,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -1146,11 +1330,23 @@ mod tests {
             .unwrap();
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
-        let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
-        let index = table_store.read_index(&sst_handle, true).await.unwrap();
+        let sst_handle = table_store
+            .open_sst(&test_sst_id(0), Some(Bytes::new()))
+            .await
+            .unwrap();
+        let index = table_store
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
+            .await
+            .unwrap();
         assert_eq!(index.borrow().block_meta().len(), 1);
 
         let sst_iter_options = SstIteratorOptions {
@@ -1302,8 +1498,9 @@ mod tests {
         let existing_keys = [b"k1".as_slice(), b"k3".as_slice()];
         let sst_handle = build_single_block_sst(&table_store, &existing_keys).await;
 
+        let read_trace = ReadTrace::none();
         let filters = table_store
-            .read_filters(&sst_handle.sst, true)
+            .read_filters(&sst_handle.sst, true, Some(Bytes::new()), &read_trace, None)
             .await
             .expect("filter read should succeed");
         assert!(!filters.is_empty(), "filter should exist");
@@ -1371,7 +1568,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let writer = TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+            object_store.clone(),
             format.clone(),
             root_path.clone(),
             None,
@@ -1389,8 +1586,9 @@ mod tests {
             .unwrap();
         let sst = writer
             .write_sst(
-                &SsTableId::Compacted(ulid::Ulid::new()),
+                &SsTableId::from(Ulid::new()),
                 &builder.build().await.unwrap(),
+                Some(Bytes::new()),
             )
             .await
             .unwrap();
@@ -1403,7 +1601,7 @@ mod tests {
                 .build(),
         );
         let reader = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             Some(cache),
@@ -1459,7 +1657,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let writer = TableStore::new(
-            ObjectStores::new(object_store.clone(), None),
+            object_store.clone(),
             format.clone(),
             root_path.clone(),
             None,
@@ -1477,8 +1675,9 @@ mod tests {
             .unwrap();
         let sst = writer
             .write_sst(
-                &SsTableId::Compacted(ulid::Ulid::new()),
+                &SsTableId::from(Ulid::new()),
                 &builder.build().await.unwrap(),
+                Some(Bytes::new()),
             )
             .await
             .unwrap();
@@ -1491,7 +1690,7 @@ mod tests {
                 .build(),
         );
         let reader = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             Some(cache),
@@ -1547,7 +1746,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             None,
@@ -1566,8 +1765,13 @@ mod tests {
                 .unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap())
+        let id = SsTableId::from(Ulid::new());
+        SsTableView::identity(
+            table_store
+                .write_sst(&id, &encoded, Some(Bytes::new()))
+                .await
+                .unwrap(),
+        )
     }
 
     #[tokio::test]
@@ -1584,7 +1788,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -1607,16 +1811,28 @@ mod tests {
 
         let encoded = builder.build().await.unwrap();
         table_store
-            .write_sst(&SsTableId::Wal(0), &encoded)
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
             .await
             .unwrap();
-        let sst_handle = table_store.open_sst(&SsTableId::Wal(0)).await.unwrap();
-        let index = table_store.read_index(&sst_handle, true).await.unwrap();
+        let sst_handle = table_store
+            .open_sst(&test_sst_id(0), Some(Bytes::new()))
+            .await
+            .unwrap();
+        let index = table_store
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
+            .await
+            .unwrap();
         assert_eq!(index.borrow().block_meta().len(), 8);
 
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 3,
-            blocks_to_fetch: 3,
+            target_bytes_to_fetch: 3 * 4096,
             cache_blocks: true,
             order,
             ..SstIteratorOptions::default()
@@ -1652,6 +1868,203 @@ mod tests {
         assert!(next.is_none());
     }
 
+    /// Never answers data-block reads (ranged reads that end at or before
+    /// `hold_below`, the SST's index offset), like an unresponsive endpoint.
+    /// Counts the held reads that started and the ones whose future was
+    /// dropped, which only happens if the task awaiting it is aborted.
+    #[derive(Debug)]
+    struct HoldReadsStore {
+        inner: Arc<dyn ObjectStore>,
+        hold_below: std::sync::atomic::AtomicU64,
+        started: std::sync::atomic::AtomicUsize,
+        dropped: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl std::fmt::Display for HoldReadsStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "HoldReadsStore({})", self.inner)
+        }
+    }
+
+    /// Counts its own drop: a held read is dropped only when cancelled.
+    struct DropCounter(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for HoldReadsStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            let hold_below = self.hold_below.load(std::sync::atomic::Ordering::SeqCst);
+            let is_data_block = matches!(
+                &options.range,
+                Some(object_store::GetRange::Bounded(r)) if r.end <= hold_below
+            );
+            if is_data_block {
+                self.started
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _counter = DropCounter(Arc::clone(&self.dropped));
+                return std::future::pending().await;
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// Dropping an iterator must abort its in-flight block fetches. Before the
+    /// fix they kept running detached; against a store that never answers (or
+    /// a retrying store whose `object_store_max_retries` is `None`) they never
+    /// ended. https://github.com/slatedb/slatedb/issues/2139
+    #[tokio::test]
+    async fn test_dropping_iterator_aborts_in_flight_fetches() {
+        let store = Arc::new(HoldReadsStore {
+            inner: Arc::new(InMemory::new()),
+            hold_below: std::sync::atomic::AtomicU64::new(0),
+            started: std::sync::atomic::AtomicUsize::new(0),
+            dropped: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let object_store: Arc<dyn ObjectStore> = store.clone();
+        let format = SsTableFormat {
+            min_filter_keys: 3,
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            Path::from(""),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let mut builder = table_store.table_builder();
+        for i in 0..1000 {
+            builder
+                .add_value(
+                    format!("key{}", i).as_bytes(),
+                    format!("value{}", i).as_bytes(),
+                    Some(i),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let encoded = builder.build().await.unwrap();
+        table_store
+            .write_sst(&test_sst_id(0), &encoded, Some(Bytes::new()))
+            .await
+            .unwrap();
+        let sst_handle = table_store
+            .open_sst(&test_sst_id(0), Some(Bytes::new()))
+            .await
+            .unwrap();
+
+        // Hold every data-block read: the store accepts the request and never
+        // answers, like an unresponsive endpoint.
+        store.hold_below.store(
+            sst_handle.info.index_offset,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+
+        // One block per fetch and three fetches in flight, uncached, so every
+        // data-block read reaches the store.
+        let options = SstIteratorOptions {
+            max_fetch_tasks: 3,
+            target_bytes_to_fetch: 1,
+            cache_blocks: false,
+            ..SstIteratorOptions::default()
+        };
+        // Initialization spawns the first fetches and waits on the held read;
+        // the deadline gives up, dropping the iterator mid-scan.
+        let opened = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            SstIterator::new_owned_initialized(
+                ..,
+                SsTableView::identity(sst_handle),
+                table_store.clone(),
+                options,
+            ),
+        )
+        .await;
+        assert!(opened.is_err(), "the held read must block the scan");
+        let started = store.started.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(started > 0, "the scan must have started block fetches");
+
+        // Every held read belongs to a fetch the dropped iterator owned, so
+        // each must be cancelled rather than left waiting. Aborts land on the
+        // runtime's next turn; without them `dropped` stays 0 forever.
+        let all_dropped = async {
+            while store.dropped.load(std::sync::atomic::Ordering::SeqCst) < started {
+                tokio::task::yield_now().await;
+            }
+        };
+        let aborted = tokio::time::timeout(std::time::Duration::from_secs(5), all_dropped).await;
+        assert!(
+            aborted.is_ok(),
+            "every in-flight fetch must be aborted when the iterator drops: {} of {} were",
+            store.dropped.load(std::sync::atomic::Ordering::SeqCst),
+            started,
+        );
+        assert_eq!(
+            store.dropped.load(std::sync::atomic::Ordering::SeqCst),
+            started,
+            "only the dropped iterator's fetches are cancelled"
+        );
+    }
+
     #[tokio::test]
     async fn test_iter_from_key() {
         let root_path = Path::from("");
@@ -1662,7 +2075,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -1714,7 +2127,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -1760,7 +2173,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -1803,7 +2216,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -1832,8 +2245,13 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
+        let id = SsTableId::from(Ulid::new());
+        let sst_handle = SsTableView::identity(
+            table_store
+                .write_sst(&id, &encoded, Some(Bytes::new()))
+                .await
+                .unwrap(),
+        );
 
         // Initialize iterator in descending order with full range
         let mut iter = SstIterator::new_borrowed_initialized(
@@ -1880,7 +2298,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -1900,13 +2318,14 @@ mod tests {
             table_store.clone(),
             SstIteratorOptions {
                 max_fetch_tasks: 32,
-                blocks_to_fetch: 256,
+                target_bytes_to_fetch: 256 * 128,
                 cache_blocks: true,
                 cache_metadata: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,
                 filter_context: None,
+                segment: Some(Bytes::new()),
             },
         )
         .await
@@ -1919,13 +2338,14 @@ mod tests {
             table_store.clone(),
             SstIteratorOptions {
                 max_fetch_tasks: 1,
-                blocks_to_fetch: 1,
+                target_bytes_to_fetch: 1,
                 cache_blocks: true,
                 cache_metadata: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,
                 filter_context: None,
+                segment: Some(Bytes::new()),
             },
         )
         .await
@@ -1959,14 +2379,14 @@ mod tests {
         mut key_gen: OrderedBytesGenerator,
         mut val_gen: OrderedBytesGenerator,
     ) -> (SsTableView, usize) {
-        let mut writer = ts.table_writer(SsTableId::Wal(0));
+        let mut writer = ts.table_writer(test_sst_id(0), Some(Bytes::new()));
         let mut nkeys = 0usize;
         while writer.blocks_written() < n {
             let entry = RowEntry::new_value(key_gen.next().as_ref(), val_gen.next().as_ref(), 0);
             writer.add(entry).await.unwrap();
             nkeys += 1;
         }
-        let sst = writer.close().await.unwrap();
+        let (sst, _) = writer.close().await.unwrap();
         (SsTableView::identity(sst), nkeys)
     }
 
@@ -1992,7 +2412,7 @@ mod tests {
                 .build(),
         );
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             Some(split_cache.clone()),
@@ -2018,9 +2438,12 @@ mod tests {
             .await
             .unwrap();
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, &encoded).await.unwrap();
-        let sst_handle = table_store.open_sst(&id).await.unwrap();
+        let id = SsTableId::from(Ulid::new());
+        table_store
+            .write_sst(&id, &encoded, Some(Bytes::new()))
+            .await
+            .unwrap();
+        let sst_handle = table_store.open_sst(&id, Some(Bytes::new())).await.unwrap();
 
         let sst_iter_options = SstIteratorOptions {
             cache_blocks: true,
@@ -2054,7 +2477,7 @@ mod tests {
 
         // remove block from cache and verify that it is not cached when iterating with cache_blocks=false
         block_cache.remove(&(id, 0).into()).await;
-        let sst_handle = table_store.open_sst(&id).await.unwrap();
+        let sst_handle = table_store.open_sst(&id, Some(Bytes::new())).await.unwrap();
         let sst_iter_options = SstIteratorOptions {
             cache_blocks: false,
             ..SstIteratorOptions::default()
@@ -2097,8 +2520,13 @@ mod tests {
             builder.add_value(key, value, Some(0), None).await.unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
-        SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap())
+        let id = SsTableId::from(Ulid::new());
+        SsTableView::identity(
+            table_store
+                .write_sst(&id, &encoded, Some(Bytes::new()))
+                .await
+                .unwrap(),
+        )
     }
 
     #[tokio::test]
@@ -2111,7 +2539,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             None,
@@ -2161,7 +2589,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             None,
@@ -2213,7 +2641,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             None,
@@ -2237,8 +2665,13 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
+        let id = SsTableId::from(Ulid::new());
+        let sst_handle = SsTableView::identity(
+            table_store
+                .write_sst(&id, &encoded, Some(Bytes::new()))
+                .await
+                .unwrap(),
+        );
 
         // when: iterating over all keys
         let sst_iter_options = SstIteratorOptions {
@@ -2277,7 +2710,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             None,
@@ -2301,11 +2734,23 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle = table_store.write_sst(&id, &encoded).await.unwrap();
+        let id = SsTableId::from(Ulid::new());
+        let sst_handle = table_store
+            .write_sst(&id, &encoded, Some(Bytes::new()))
+            .await
+            .unwrap();
 
         // Verify we have multiple blocks
-        let index = table_store.read_index(&sst_handle, true).await.unwrap();
+        let index = table_store
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
+            .await
+            .unwrap();
         assert!(
             index.borrow().block_meta().len() > 1,
             "Expected multiple blocks but got {}",
@@ -2347,7 +2792,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             None,
@@ -2370,8 +2815,13 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
+        let id = SsTableId::from(Ulid::new());
+        let sst_handle = SsTableView::identity(
+            table_store
+                .write_sst(&id, &encoded, Some(Bytes::new()))
+                .await
+                .unwrap(),
+        );
 
         // when: searching for a non-existent key (odd number)
         let mut iter = SstIterator::for_key_with_stats_initialized(
@@ -2401,7 +2851,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path,
             None,
@@ -2423,8 +2873,13 @@ mod tests {
         }
 
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
-        let sst_handle = SsTableView::identity(table_store.write_sst(&id, &encoded).await.unwrap());
+        let id = SsTableId::from(Ulid::new());
+        let sst_handle = SsTableView::identity(
+            table_store
+                .write_sst(&id, &encoded, Some(Bytes::new()))
+                .await
+                .unwrap(),
+        );
 
         // when: seeking past the last key
         let iter = SstIterator::new_borrowed_initialized(
@@ -2461,7 +2916,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -2484,11 +2939,23 @@ mod tests {
                 .unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, &encoded).await.unwrap();
-        let sst_handle = table_store.open_sst(&id).await.unwrap();
+        let id = SsTableId::from(Ulid::new());
+        table_store
+            .write_sst(&id, &encoded, Some(Bytes::new()))
+            .await
+            .unwrap();
+        let sst_handle = table_store.open_sst(&id, Some(Bytes::new())).await.unwrap();
 
-        let index = table_store.read_index(&sst_handle, true).await.unwrap();
+        let index = table_store
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
+            .await
+            .unwrap();
         let num_blocks = index.borrow().block_meta().len();
         assert!(
             num_blocks >= 4,
@@ -2506,13 +2973,14 @@ mod tests {
 
         let sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: 3,
-            blocks_to_fetch: 3,
+            target_bytes_to_fetch: 3 * 128,
             cache_blocks: true,
             cache_metadata: true,
             eager_spawn: false,
             order,
             prefix: None,
             filter_context: None,
+            segment: Some(Bytes::new()),
         };
         let mut iter = SstIterator::new_owned_initialized(
             BytesRange::from_slice(start_key.as_ref()..=end_key.as_ref()),
@@ -2601,7 +3069,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -2623,11 +3091,23 @@ mod tests {
                 .unwrap();
         }
         let encoded = builder.build().await.unwrap();
-        let id = SsTableId::Compacted(ulid::Ulid::new());
-        table_store.write_sst(&id, &encoded).await.unwrap();
-        let sst_handle = table_store.open_sst(&id).await.unwrap();
+        let id = SsTableId::from(Ulid::new());
+        table_store
+            .write_sst(&id, &encoded, Some(Bytes::new()))
+            .await
+            .unwrap();
+        let sst_handle = table_store.open_sst(&id, Some(Bytes::new())).await.unwrap();
 
-        let index = table_store.read_index(&sst_handle, true).await.unwrap();
+        let index = table_store
+            .read_index(
+                &sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
+            .await
+            .unwrap();
         let num_blocks = index.borrow().block_meta().len();
         assert!(
             num_blocks >= 2,
@@ -2672,7 +3152,7 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -2680,7 +3160,7 @@ mod tests {
             BlockCachePolicy::default(),
         ));
 
-        let mut writer = table_store.table_writer(SsTableId::Wal(0));
+        let mut writer = table_store.table_writer(test_sst_id(0), Some(Bytes::new()));
         writer
             .add(RowEntry::new_value(b"key_a", b"value_100", 100))
             .await
@@ -2705,7 +3185,7 @@ mod tests {
             .add(RowEntry::new_value(b"key_c", b"value_50", 50))
             .await
             .unwrap();
-        let handle = writer.close().await.unwrap();
+        let (handle, _) = writer.close().await.unwrap();
 
         let mut iter = SstIterator::new_owned_initialized(
             ..,
@@ -2770,7 +3250,7 @@ mod tests {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             format,
             root_path.clone(),
             None,
@@ -2780,7 +3260,7 @@ mod tests {
 
         // Keys spaced by 10: key_000, key_010, key_020, ..., key_190.
         // Gaps like key_035 don't exist.
-        let mut writer = table_store.table_writer(SsTableId::Wal(0));
+        let mut writer = table_store.table_writer(test_sst_id(0), Some(Bytes::new()));
         for i in 0..20 {
             let key = format!("key_{:03}", i * 10);
             let val = format!("val_{:03}", i * 10);
@@ -2789,7 +3269,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let sst_handle = writer.close().await.unwrap();
+        let (sst_handle, _) = writer.close().await.unwrap();
         let sst = SsTableView::identity(sst_handle);
 
         // Minimal prefetch: 1 block at a time, 1 task max.
@@ -2799,13 +3279,14 @@ mod tests {
             table_store.clone(),
             SstIteratorOptions {
                 max_fetch_tasks: 1,
-                blocks_to_fetch: 1,
+                target_bytes_to_fetch: 1,
                 cache_blocks: true,
                 cache_metadata: true,
                 eager_spawn: false,
                 order: IterationOrder::Ascending,
                 prefix: None,
                 filter_context: None,
+                segment: Some(Bytes::new()),
             },
         )
         .await
@@ -2836,7 +3317,7 @@ mod tests {
     async fn test_next_iter_prefetch_task_cancelled() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             SsTableFormat::default(),
             Path::from(""),
             None,
@@ -2873,5 +3354,832 @@ mod tests {
             panic!("a cancelled prefetch task must be reported as an error");
         };
         assert!(matches!(err, SlateDBError::BackgroundTaskCancelled(_)));
+    }
+
+    /// A [`Filter`] backed by a closure, so a test can express a verdict rule
+    /// without a real filter's encoding. The rule lives in the closure, so
+    /// `encode` writes a placeholder byte and a policy's `decode` rebuilds the
+    /// rule rather than reading it back.
+    struct TestFilter(Arc<dyn Fn(&FilterQuery) -> bool + Send + Sync>);
+
+    impl Filter for TestFilter {
+        fn might_match(&self, query: &FilterQuery) -> bool {
+            (self.0)(query)
+        }
+
+        fn encode(&self, writer: &mut dyn bytes::BufMut) {
+            writer.put_u8(0);
+        }
+
+        fn size(&self) -> usize {
+            1
+        }
+
+        fn clamp_allocated_size(&self) -> Arc<dyn Filter> {
+            Arc::new(Self(Arc::clone(&self.0)))
+        }
+    }
+
+    fn named_filter(
+        name: &str,
+        verdict: impl Fn(&FilterQuery) -> bool + Send + Sync + 'static,
+    ) -> NamedFilter {
+        NamedFilter {
+            name: name.to_string(),
+            filter: Arc::new(TestFilter(Arc::new(verdict))),
+        }
+    }
+
+    #[rstest]
+    #[case::filter_returns_true(true)]
+    #[case::filter_returns_false(false)]
+    #[test]
+    fn test_evaluate_filter_span_fields(#[case] filter_result: bool) {
+        const TRACE_ID: &str = "filter-evaluation-trace";
+        const FILTER_NAME: &str = "test.filter";
+        const SORTED_RUN_ID: u32 = 7;
+
+        let span_recorder = SpanRecorder::for_name("slatedb.read.evaluate_filter");
+        let subscriber = tracing_subscriber::registry().with(span_recorder.clone());
+        let sst_id = test_sst_id(1);
+        tracing::subscriber::with_default(subscriber, || {
+            let mut evaluator = FilterEvaluator::new_point(Bytes::from_static(b"key"), None, None);
+            evaluator.evaluate(
+                &[named_filter(FILTER_NAME, move |_| filter_result)],
+                sst_id,
+                Some(&SstTraceLevel::SortedRun(SORTED_RUN_ID)),
+                &ReadTrace::new(Some(TracingOptions::new(TRACE_ID))),
+            );
+            assert_eq!(evaluator.is_filtered_out(), !filter_result);
+        });
+
+        let span = span_recorder.only_span();
+        assert_eq!(
+            span.fields,
+            HashMap::from([
+                ("trace_id".to_string(), TRACE_ID.to_string()),
+                ("sst_id".to_string(), sst_id.value().to_string()),
+                (
+                    "sst_level".to_string(),
+                    format!("sorted_run:{SORTED_RUN_ID}"),
+                ),
+                ("filter_name".to_string(), FILTER_NAME.to_string()),
+                ("result".to_string(), filter_result.to_string()),
+            ])
+        );
+    }
+
+    // Three doubles cover the range tests:
+    // - `abstaining_filter` stands in for a policy that indexes keys alone,
+    //   which cannot answer a range and so always matches.
+    // - `context_parity_filter` answers from the query context instead of the
+    //   target, so it is the one that can reject a range.
+    // - `bounds_filter` checks the bounds themselves.
+
+    /// Accepts all queries.
+    fn abstaining_filter() -> NamedFilter {
+        named_filter("test.abstaining", |_| true)
+    }
+
+    /// Accepts when the context byte's parity is `parity`, and abstains
+    /// without a context.
+    fn context_parity_filter(parity: u64) -> NamedFilter {
+        named_filter("test.context_parity", move |query| match &query.context {
+            Some(FilterContext::Inline(buf)) => u64::from(buf[0]) % 2 == parity,
+            _ => true,
+        })
+    }
+
+    /// Rejects unless the range bounds are exactly `expected`.
+    fn bounds_filter(expected: (Bound<Bytes>, Bound<Bytes>)) -> NamedFilter {
+        named_filter("test.bounds", move |query| match &query.target {
+            FilterTarget::Range { lower, upper } => (lower.clone(), upper.clone()) == expected,
+            _ => false,
+        })
+    }
+
+    fn context(byte: u8) -> Option<FilterContext> {
+        let mut buf = [0u8; 64];
+        buf[0] = byte;
+        Some(FilterContext::Inline(buf))
+    }
+
+    fn stats() -> (Arc<DefaultMetricsRecorder>, DbStats) {
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let db_stats = DbStats::new(&helper);
+        (recorder, db_stats)
+    }
+
+    fn metric(recorder: &Arc<DefaultMetricsRecorder>, name: &str, kind: &str) -> Option<i64> {
+        lookup_metric_with_labels(
+            recorder,
+            name,
+            &[(crate::db_stats::FILTER_KIND_LABEL, kind)],
+        )
+    }
+
+    /// `(positives, negatives, false_positives)` recorded for `kind`.
+    fn verdicts(
+        recorder: &Arc<DefaultMetricsRecorder>,
+        kind: &str,
+    ) -> (Option<i64>, Option<i64>, Option<i64>) {
+        (
+            metric(recorder, crate::db_stats::SST_FILTER_POSITIVE_COUNT, kind),
+            metric(recorder, crate::db_stats::SST_FILTER_NEGATIVE_COUNT, kind),
+            metric(
+                recorder,
+                crate::db_stats::SST_FILTER_FALSE_POSITIVE_COUNT,
+                kind,
+            ),
+        )
+    }
+
+    fn range_evaluator(
+        context: Option<FilterContext>,
+        db_stats: Option<DbStats>,
+    ) -> FilterEvaluator {
+        FilterEvaluator::new_range(
+            Included(Bytes::from_static(b"a")),
+            Excluded(Bytes::from_static(b"z")),
+            context,
+            db_stats,
+        )
+    }
+
+    #[tokio::test]
+    async fn should_reject_range_query_when_only_one_of_several_filters_rejects() {
+        let (recorder, db_stats) = stats();
+        let mut evaluator = range_evaluator(context(1), Some(db_stats));
+
+        // AND logic: one filter abstains, so the verdict is the context
+        // filter's alone. This is how a range scan is pruned in practice.
+        evaluator.evaluate(
+            &[abstaining_filter(), context_parity_filter(0)],
+            SsTableId::new(Ulid::new()),
+            None,
+            &ReadTrace::none(),
+        );
+
+        assert!(evaluator.is_filtered_out());
+        assert_eq!(
+            verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE),
+            (Some(0), Some(1), Some(0))
+        );
+    }
+
+    #[tokio::test]
+    async fn should_accept_range_query_when_every_filter_agrees() {
+        let (recorder, db_stats) = stats();
+        let mut evaluator = range_evaluator(context(0), Some(db_stats));
+
+        evaluator.evaluate(
+            &[abstaining_filter(), context_parity_filter(0)],
+            SsTableId::new(Ulid::new()),
+            None,
+            &ReadTrace::none(),
+        );
+        assert!(!evaluator.is_filtered_out());
+
+        // Any row in the view's range confirms a range verdict, so no false
+        // positive is recorded.
+        evaluator.notify_key_found(b"anything");
+        evaluator.notify_finished_iteration();
+
+        assert_eq!(
+            verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE),
+            (Some(1), Some(0), Some(0))
+        );
+    }
+
+    #[tokio::test]
+    async fn should_record_range_false_positive_when_no_row_is_yielded() {
+        let (recorder, db_stats) = stats();
+        let mut evaluator = range_evaluator(context(0), Some(db_stats));
+
+        evaluator.evaluate(
+            &[context_parity_filter(0)],
+            SsTableId::new(Ulid::new()),
+            None,
+            &ReadTrace::none(),
+        );
+        evaluator.notify_finished_iteration();
+
+        assert_eq!(
+            verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE),
+            (Some(1), Some(0), Some(1))
+        );
+    }
+
+    #[tokio::test]
+    async fn should_report_the_views_bounds() {
+        let table_store = bloom_filter_enabled_table_store(10);
+        let table = build_single_block_sst(&table_store, &[b"k1"]).await;
+        let view = SstView::Owned(
+            Box::new(table),
+            BytesRange::new(
+                Included(Bytes::from_static(b"b")),
+                Excluded(Bytes::from_static(b"y")),
+            ),
+        );
+
+        assert_eq!(
+            view.bounds(),
+            (
+                Included(Bytes::from_static(b"b")),
+                Excluded(Bytes::from_static(b"y"))
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn should_pass_the_callers_range_bounds_to_the_filter() {
+        let (recorder, db_stats) = stats();
+        let mut evaluator = range_evaluator(context(0), Some(db_stats));
+
+        evaluator.evaluate(
+            &[bounds_filter((
+                Included(Bytes::from_static(b"a")),
+                Excluded(Bytes::from_static(b"z")),
+            ))],
+            SsTableId::new(Ulid::new()),
+            None,
+            &ReadTrace::none(),
+        );
+
+        assert!(!evaluator.is_filtered_out());
+        assert_eq!(
+            verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE),
+            (Some(1), Some(0), Some(0))
+        );
+    }
+
+    /// A policy whose filter rejects every range query, registered on a real
+    /// table store so a scan is pruned end to end.
+    struct RangeCapablePolicy;
+
+    impl FilterPolicy for RangeCapablePolicy {
+        fn name(&self) -> &str {
+            "test.range_capable"
+        }
+
+        fn builder(&self) -> Box<dyn FilterBuilder> {
+            Box::new(RangeCapableBuilder)
+        }
+
+        fn decode(&self, _data: &[u8]) -> Arc<dyn Filter> {
+            RangeCapableBuilder.build()
+        }
+
+        fn estimate_size(&self, _num_keys: usize) -> usize {
+            1
+        }
+
+        fn supports_range_queries(&self) -> bool {
+            true
+        }
+
+        fn supports_prefix_queries(&self) -> bool {
+            false
+        }
+    }
+
+    struct RangeCapableBuilder;
+
+    impl FilterBuilder for RangeCapableBuilder {
+        fn add_entry(&mut self, _entry: &RowEntry) {}
+
+        fn build(&mut self) -> Arc<dyn Filter> {
+            Arc::new(TestFilter(Arc::new(|query: &FilterQuery| {
+                !matches!(query.target, FilterTarget::Range { .. })
+            })))
+        }
+    }
+
+    #[tokio::test]
+    async fn should_not_read_filters_for_a_range_when_no_policy_supports_ranges() {
+        // A bloom filter cannot answer a range, so a bloom-only database must
+        // build no evaluator for a range scan and must not read the SST's
+        // filters, with or without a caller-supplied context.
+        for filter_context in [context(0), None] {
+            let (recorder, db_stats) = stats();
+            let table_store = bloom_filter_enabled_table_store(10);
+            let table = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
+            let options = SstIteratorOptions {
+                filter_context,
+                ..Default::default()
+            };
+
+            let iter = SstIterator::new_owned_initialized_with_stats(
+                ..,
+                table,
+                table_store,
+                options,
+                None,
+                Some(db_stats),
+            )
+            .await
+            .unwrap();
+            assert!(iter.is_some(), "nothing rejected the SST");
+            assert_eq!(
+                verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE),
+                (Some(0), Some(0), Some(0)),
+                "no evaluator should have been built"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn should_skip_sst_when_a_range_capable_policy_rejects() {
+        let (recorder, db_stats) = stats();
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            filter_policies: vec![Arc::new(RangeCapablePolicy)],
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path,
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let table = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
+
+        // No filter context: this policy reasons from the target alone.
+        let iter = SstIterator::new_owned_initialized_with_stats(
+            ..,
+            table,
+            table_store,
+            SstIteratorOptions::default(),
+            None,
+            Some(db_stats),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            iter.is_none(),
+            "the policy rejects every range, so the SST is skipped"
+        );
+        let (positives, negatives, _) = verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE);
+        assert_eq!((positives, negatives), (Some(0), Some(1)));
+    }
+
+    struct PointReadCache {
+        inner: TestCache,
+        mode: std::sync::atomic::AtomicU8,
+        started: std::sync::atomic::AtomicUsize,
+        dropped: Arc<std::sync::atomic::AtomicUsize>,
+        release: tokio::sync::Notify,
+    }
+
+    struct PointReadDrop(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for PointReadDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl DbCache for PointReadCache {
+        async fn get_block(
+            &self,
+            key: &crate::db_cache::CachedKey,
+        ) -> Result<Option<crate::db_cache::CachedEntry>, crate::Error> {
+            use std::sync::atomic::Ordering::SeqCst;
+            match self.mode.load(SeqCst) {
+                1 => {
+                    self.started.fetch_add(1, SeqCst);
+                    let _drop = PointReadDrop(self.dropped.clone());
+                    self.release.notified().await;
+                }
+                2 => panic!("point block read panic control"),
+                _ => {}
+            }
+            self.inner.get_block(key).await
+        }
+        async fn get_index(
+            &self,
+            key: &crate::db_cache::CachedKey,
+        ) -> Result<Option<crate::db_cache::CachedEntry>, crate::Error> {
+            self.inner.get_index(key).await
+        }
+        async fn get_filter(
+            &self,
+            key: &crate::db_cache::CachedKey,
+        ) -> Result<Option<crate::db_cache::CachedEntry>, crate::Error> {
+            self.inner.get_filter(key).await
+        }
+        async fn get_stats(
+            &self,
+            key: &crate::db_cache::CachedKey,
+        ) -> Result<Option<crate::db_cache::CachedEntry>, crate::Error> {
+            self.inner.get_stats(key).await
+        }
+        async fn insert(
+            &self,
+            key: crate::db_cache::CachedKey,
+            value: crate::db_cache::CachedEntry,
+        ) {
+            self.inner.insert(key, value).await;
+        }
+        async fn remove(&self, key: &crate::db_cache::CachedKey) {
+            self.inner.remove(key).await;
+        }
+        fn entry_count(&self) -> u64 {
+            self.inner.entry_count()
+        }
+    }
+
+    fn point_read_cache() -> Arc<PointReadCache> {
+        Arc::new(PointReadCache {
+            inner: TestCache::new(),
+            mode: std::sync::atomic::AtomicU8::new(0),
+            started: std::sync::atomic::AtomicUsize::new(0),
+            dropped: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+
+    async fn point_read_fixture() -> (
+        Arc<TableStore>,
+        SsTableView,
+        Arc<PointReadCache>,
+        Arc<dyn ObjectStore>,
+    ) {
+        let cache = point_read_cache();
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let table_store = Arc::new(TableStore::new(
+            object_store.clone(),
+            SsTableFormat::default(),
+            Path::from("point-inline"),
+            Some(cache.clone()),
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let sst = build_single_block_sst(&table_store, &[b"k"]).await;
+        let mut warm = SstIterator::for_key_with_stats_initialized(
+            &sst,
+            b"k",
+            table_store.clone(),
+            SstIteratorOptions::default(),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(warm.next().await.unwrap().unwrap().key.as_ref(), b"k");
+        drop(warm);
+        (table_store, sst, cache, object_store)
+    }
+
+    async fn evict_point_blocks(cache: &PointReadCache) {
+        for key in cache.inner.keys() {
+            if cache
+                .inner
+                .get_block(&key)
+                .await
+                .unwrap()
+                .and_then(|entry| entry.block())
+                .is_some()
+            {
+                cache.inner.remove(&key).await;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn point_inline_retains_pending_read_when_init_is_cancelled() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (store, sst, cache, _) = point_read_fixture().await;
+        evict_point_blocks(&cache).await;
+        cache.mode.store(1, SeqCst);
+        let mut iter =
+            SstIterator::for_key_with_stats(&sst, b"k", store, SstIteratorOptions::default(), None)
+                .unwrap()
+                .unwrap();
+        {
+            let mut init = Box::pin(iter.init());
+            assert!(futures::poll!(init.as_mut()).is_pending());
+            assert_eq!(cache.started.load(SeqCst), 1);
+        }
+        assert_eq!(
+            cache.dropped.load(SeqCst),
+            0,
+            "the iterator must retain the pending block future"
+        );
+        cache.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), iter.init())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(iter.next().await.unwrap().unwrap().key.as_ref(), b"k");
+        assert_eq!(
+            cache.started.load(SeqCst),
+            1,
+            "retry must poll the original future"
+        );
+        assert_eq!(cache.dropped.load(SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn point_inline_drop_releases_pending_read() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (store, sst, cache, _) = point_read_fixture().await;
+        cache.mode.store(1, SeqCst);
+        let mut iter =
+            SstIterator::for_key_with_stats(&sst, b"k", store, SstIteratorOptions::default(), None)
+                .unwrap()
+                .unwrap();
+        {
+            let mut init = Box::pin(iter.init());
+            assert!(futures::poll!(init.as_mut()).is_pending());
+            assert_eq!(cache.started.load(SeqCst), 1);
+        }
+        assert_eq!(cache.dropped.load(SeqCst), 0);
+        drop(iter);
+        assert_eq!(
+            cache.dropped.load(SeqCst),
+            1,
+            "dropping a point iterator must drop its direct pending read"
+        );
+    }
+
+    #[tokio::test]
+    async fn point_inline_preserves_block_panic_error() {
+        let (store, sst, cache, _) = point_read_fixture().await;
+        cache.mode.store(2, std::sync::atomic::Ordering::SeqCst);
+        let mut iter =
+            SstIterator::for_key_with_stats(&sst, b"k", store, SstIteratorOptions::default(), None)
+                .unwrap()
+                .unwrap();
+        assert!(matches!(
+            iter.init().await,
+            Err(SlateDBError::BackgroundTaskPanic(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn point_inline_preserves_missing_and_corrupt_block_errors() {
+        use futures::TryStreamExt;
+        for corrupt in [false, true] {
+            let (store, sst, cache, object_store) = point_read_fixture().await;
+            evict_point_blocks(&cache).await;
+            let objects: Vec<_> = object_store.list(None).try_collect().await.unwrap();
+            assert_eq!(objects.len(), 1);
+            let object = &objects[0];
+            if corrupt {
+                object_store
+                    .put(
+                        &object.location,
+                        Bytes::from(vec![0; object.size as usize]).into(),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                object_store.delete(&object.location).await.unwrap();
+            }
+            let mut iter = SstIterator::for_key_with_stats(
+                &sst,
+                b"k",
+                store,
+                SstIteratorOptions::default(),
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(
+                iter.init().await.is_err(),
+                "missing/corrupt data must not deliver a row"
+            );
+        }
+    }
+
+    /// Inline is decided by the shape of the read alone: a point range, one
+    /// fetch task, one block, in either order. Read-ahead over a one-block SST
+    /// is still one block. Read-ahead across tasks keeps its spawned fetch, so
+    /// on a dead runtime only it fails.
+    #[tokio::test]
+    async fn point_read_inline_is_detected_from_the_read_shape() {
+        let (store, sst, _, _) = point_read_fixture().await;
+        let dead = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .unwrap();
+        let handle = dead.handle().clone();
+        dead.shutdown_background();
+        let point = Bytes::from_static(b"k")..=Bytes::from_static(b"k");
+        let cases = [
+            (IterationOrder::Ascending, 1, 1, true),
+            (IterationOrder::Ascending, 1, 2, true),
+            (IterationOrder::Descending, 1, 1, true),
+            (IterationOrder::Ascending, 2, 1, false),
+            (IterationOrder::Descending, 2, 1, false),
+        ];
+        for (order, max_fetch_tasks, target_bytes_to_fetch, inline) in cases {
+            let options = SstIteratorOptions {
+                order,
+                max_fetch_tasks,
+                target_bytes_to_fetch,
+                ..SstIteratorOptions::default()
+            };
+            let mut iter =
+                SstIterator::new_owned(point.clone(), sst.clone(), store.clone(), options, None)
+                    .unwrap()
+                    .unwrap();
+            let result = {
+                let _entered = handle.enter();
+                iter.init().await
+            };
+            assert_eq!(
+                result.is_ok(),
+                inline,
+                "{order:?} tasks={max_fetch_tasks} bytes={target_bytes_to_fetch}: {result:?}"
+            );
+            if !inline {
+                assert!(matches!(
+                    result,
+                    Err(SlateDBError::BackgroundTaskCancelled(_))
+                ));
+            }
+        }
+        // A broad scan is clipped to the SST's own key range, so over a one-key
+        // SST it is the same single-block read and is inline too.
+        let mut scan = SstIterator::new_owned(.., sst, store, SstIteratorOptions::default(), None)
+            .unwrap()
+            .unwrap();
+        let result = {
+            let _entered = handle.enter();
+            scan.init().await
+        };
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn point_inline_reads_all_versions_after_cancelled_next() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let cache = point_read_cache();
+        let store = Arc::new(TableStore::new(
+            Arc::new(InMemory::new()),
+            SsTableFormat {
+                block_size: 128,
+                ..SsTableFormat::default()
+            },
+            Path::from("point-versions"),
+            Some(cache.clone()),
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        let mut builder = store.table_builder();
+        for seq in (1..=20).rev() {
+            builder
+                .add(RowEntry::new_value(b"k", &[seq as u8; 128], seq))
+                .await
+                .unwrap();
+        }
+        builder
+            .add(RowEntry::new_value(b"z", b"adjacent", 1))
+            .await
+            .unwrap();
+        let encoded = builder.build().await.unwrap();
+        let sst = SsTableView::identity(
+            store
+                .write_sst(&test_sst_id(1), &encoded, None)
+                .await
+                .unwrap(),
+        );
+        let index = store
+            .read_index(&sst.sst, true, None, &ReadTrace::new(None), None)
+            .await
+            .unwrap();
+        assert_eq!(index.borrow().block_meta().len(), 21);
+        let mut iter = SstIterator::for_key_with_stats_initialized(
+            &sst,
+            b"k",
+            store,
+            SstIteratorOptions::default(),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(iter.next().await.unwrap().unwrap().seq, 20);
+        cache.mode.store(1, SeqCst);
+        {
+            let mut next = Box::pin(iter.next());
+            assert!(futures::poll!(next.as_mut()).is_pending());
+            assert_eq!(cache.started.load(SeqCst), 1);
+        }
+        assert_eq!(cache.dropped.load(SeqCst), 0);
+        cache.mode.store(0, SeqCst);
+        cache.release.notify_one();
+        for seq in (1..20).rev() {
+            let entry = tokio::time::timeout(std::time::Duration::from_secs(2), iter.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(entry.key.as_ref(), b"k");
+            assert_eq!(entry.seq, seq);
+        }
+        assert_eq!(cache.started.load(SeqCst), 1);
+        assert_eq!(cache.dropped.load(SeqCst), 1);
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn should_not_read_filters_for_a_prefix_when_no_policy_supports_prefixes() {
+        // A whole-key bloom filter cannot answer a prefix or a range, so a
+        // bloom-only database must build no evaluator for a prefix scan and
+        // must not read the SST's filters.
+        for filter_context in [context(0), None] {
+            let (recorder, db_stats) = stats();
+            let table_store = bloom_filter_enabled_table_store(10);
+            let table = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
+            let options = SstIteratorOptions {
+                prefix: Some(Bytes::from_static(b"k")),
+                filter_context,
+                ..Default::default()
+            };
+
+            let iter = SstIterator::new_owned_initialized_with_stats(
+                BytesRange::from_prefix_and_subrange(b"k", ..),
+                table,
+                table_store,
+                options,
+                None,
+                Some(db_stats),
+            )
+            .await
+            .unwrap();
+            assert!(iter.is_some(), "nothing rejected the SST");
+            for kind in [
+                crate::db_stats::FILTER_KIND_PREFIX,
+                crate::db_stats::FILTER_KIND_RANGE,
+            ] {
+                assert_eq!(
+                    verdicts(&recorder, kind),
+                    (Some(0), Some(0), Some(0)),
+                    "no evaluator should have been built"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn should_prune_a_prefix_by_its_range_when_only_a_range_policy_exists() {
+        // No policy answers a prefix, but one answers a range: the prefix
+        // scan's bounds are the prefix's key range, so the range evaluator
+        // prunes the same SSTs a range scan over those bounds would.
+        let (recorder, db_stats) = stats();
+        let root_path = Path::from("");
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            min_filter_keys: 1,
+            filter_policies: vec![Arc::new(RangeCapablePolicy)],
+            ..SsTableFormat::default()
+        };
+        let table_store = Arc::new(TableStore::new(
+            object_store,
+            format,
+            root_path,
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        ));
+        assert!(!table_store.any_filter_policy_supports_prefix_queries());
+        assert!(table_store.any_filter_policy_supports_range_queries());
+        let table = build_single_block_sst(&table_store, &[b"k1", b"k2"]).await;
+
+        let iter = SstIterator::new_owned_initialized_with_stats(
+            BytesRange::from_prefix_and_subrange(b"k", ..),
+            table,
+            table_store,
+            SstIteratorOptions {
+                prefix: Some(Bytes::from_static(b"k")),
+                ..Default::default()
+            },
+            None,
+            Some(db_stats),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            iter.is_none(),
+            "the policy rejects every range, so the prefix's range skips the SST"
+        );
+        let (positives, negatives, _) = verdicts(&recorder, crate::db_stats::FILTER_KIND_RANGE);
+        assert_eq!((positives, negatives), (Some(0), Some(1)));
+        assert_eq!(
+            verdicts(&recorder, crate::db_stats::FILTER_KIND_PREFIX),
+            (Some(0), Some(0), Some(0)),
+            "no prefix evaluator exists without a prefix-capable policy"
+        );
     }
 }

@@ -69,6 +69,7 @@ use tokio::runtime::Handle;
 use tracing::instrument;
 use ulid::Ulid;
 
+use crate::block_cache_policy::BlockCachePolicy;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compaction_worker::CompactionWorkerHandler;
@@ -76,15 +77,20 @@ use crate::compactions_store::{CompactionsStore, StoredCompactions};
 use crate::compactor::stats::CompactionStats;
 use crate::compactor_state_protocols::CompactorStateWriter;
 use crate::config::CompactorOptions;
-use crate::db_state::{SortedRun, SsTableView};
+use crate::db_state::{SortedRun, SsTableId, SsTableView};
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::{Error, SlateDBError};
+use crate::format::sst::{validate_block_alignment, SsTableFormat};
+use crate::incremental_progress::IncrementalProgress;
 use crate::manifest::store::ManifestStore;
 use crate::manifest::{LsmTreeState, ManifestCore};
 use crate::merge_operator::MergeOperatorType;
-use crate::tablestore::TableStore;
+use crate::paths::PathResolver;
+use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::{format_bytes_si, IdGenerator};
+use object_store::path::Path;
+use object_store::ObjectStore;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::{GaugeFn, MetricsRecorderHelper};
 use slatedb_common::DbRand;
@@ -97,6 +103,9 @@ pub use crate::db::builder::CompactorBuilder;
 pub use crate::size_tiered_compaction::SizeTieredCompactionSchedulerSupplier;
 
 pub(crate) const COMPACTOR_TASK_NAME: &str = "compactor";
+
+/// Minimum time between successful incremental commits across all jobs.
+const INCREMENTAL_COMMIT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Supplies a concrete [`CompactionScheduler`] implementation.
 ///
@@ -307,9 +316,14 @@ pub(crate) enum CompactorMessage {
 pub struct Compactor {
     manifest_store: Arc<ManifestStore>,
     compactions_store: Arc<CompactionsStore>,
-    table_store: Arc<TableStore>,
+    /// Object store, SST format and root path for the in-process worker's
+    /// table store, which `start` builds once it has loaded the manifest.
+    main_object_store: Arc<dyn ObjectStore>,
+    sst_format: SsTableFormat,
+    path: Path,
     options: Arc<CompactorOptions>,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+    expected_epoch: Option<u64>,
     task_executor: Arc<MessageHandlerExecutor>,
     compactor_runtime: Handle,
     rand: Arc<DbRand>,
@@ -327,9 +341,12 @@ impl Compactor {
     pub(crate) fn new(
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
-        table_store: Arc<TableStore>,
+        main_object_store: Arc<dyn ObjectStore>,
+        sst_format: SsTableFormat,
+        path: Path,
         options: CompactorOptions,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
+        expected_epoch: Option<u64>,
         compactor_runtime: Handle,
         rand: Arc<DbRand>,
         recorder: &MetricsRecorderHelper,
@@ -349,9 +366,12 @@ impl Compactor {
         Self {
             manifest_store,
             compactions_store,
-            table_store,
+            main_object_store,
+            sst_format,
+            path,
             options: Arc::new(options),
             scheduler_supplier,
+            expected_epoch,
             task_executor,
             compactor_runtime,
             rand,
@@ -381,6 +401,15 @@ impl Compactor {
     pub(crate) async fn start(&self) -> Result<(), Error> {
         // The coordinator delegates compaction execution to [`crate::compaction_worker::CompactionWorker`]
         // either spawned in this process (set `worker: Some`) or running standalone (set `worker: None`).
+        // Validate the in-process worker's options before claiming the
+        // compactor epoch, so a bad configuration does not fence a running
+        // compactor.
+        if let Some(worker_options) = &self.options.worker {
+            validate_block_alignment(
+                self.sst_format.block_alignment,
+                worker_options.compression_codec,
+            )?;
+        }
         let (_tx, rx) = async_channel::unbounded::<CompactorMessage>();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
         let handler = CompactorEventHandler::new(
@@ -392,26 +421,44 @@ impl Compactor {
             self.stats.clone(),
             self.system_clock.clone(),
             self.recorder.clone(),
+            self.expected_epoch,
         )
         .await?;
-        self.task_executor
-            .add_handler(
-                COMPACTOR_TASK_NAME.to_string(),
-                Box::new(handler),
-                rx,
-                &Handle::current(),
-            )
-            .map_err(Error::from)?;
 
         // Spawn an in-process worker if configured. The worker runs under its
         // own cancellation token; Compactor::stop and run() are responsible for
-        // shutting it down alongside the coordinator.
-        if let Some(worker_options) = self.options.worker.clone() {
+        // shutting it down alongside the coordinator. Handlers only start in
+        // monitor_on, so registering the worker before the coordinator does not
+        // change startup order; it lets the worker read the handler's manifest
+        // before the handler moves into the executor.
+        if let Some(worker_options) = &self.options.worker {
+            // Resolve SSTs the database borrows from others (clones/unions)
+            // using the manifest the handler just loaded. The external_dbs list
+            // is only written when the clone or union manifest is created and
+            // only shrinks afterwards, so this snapshot covers every SST a
+            // later job can reference.
+            let external_ssts = handler.state().manifest().value.external_ssts();
+            // Match the format CompactionWorkerBuilder::build gives a
+            // standalone worker.
+            let sst_format = SsTableFormat {
+                min_filter_keys: worker_options.min_filter_keys,
+                compression_codec: worker_options.compression_codec,
+                ..self.sst_format.clone()
+            };
+            let table_store = Arc::new(TableStore::new_with_fp_registry(
+                self.main_object_store.clone(),
+                sst_format,
+                PathResolver::new_with_external_ssts(self.path.clone(), external_ssts),
+                self.fp_registry.clone(),
+                None,
+                TableStoreKind::Compactor,
+                BlockCachePolicy::default(),
+            ));
             let (worker_handler, worker_rx) = CompactionWorkerHandler::build_worker_handler(
                 self.manifest_store.clone(),
                 self.compactions_store.clone(),
-                self.table_store.clone(),
-                Arc::new(worker_options),
+                table_store,
+                Arc::new(worker_options.clone()),
                 self.compactor_runtime.clone(),
                 self.rand.clone(),
                 self.stats.clone(),
@@ -431,6 +478,15 @@ impl Compactor {
                 )
                 .map_err(Error::from)?;
         }
+
+        self.task_executor
+            .add_handler(
+                COMPACTOR_TASK_NAME.to_string(),
+                Box::new(handler),
+                rx,
+                &Handle::current(),
+            )
+            .map_err(Error::from)?;
 
         self.task_executor.monitor_on(&Handle::current())?;
         Ok(())
@@ -524,6 +580,16 @@ pub(crate) struct CompactorEventHandler {
     /// Cached handles for per-worker `worker_last_heartbeat_ms` gauges. Handles are
     /// retained for every worker id observed by this coordinator process.
     worker_heartbeat_gauges: HashMap<String, Arc<dyn GaugeFn>>,
+    /// Time of the most recent successful manifest write that included incremental
+    /// progress.
+    ///
+    /// The next incremental commit waits until [`INCREMENTAL_COMMIT_INTERVAL`]
+    /// passes.
+    ///
+    /// A write with only final commits does not wait for or change this value.
+    /// The value lives only in memory, so a restarted coordinator can make an
+    /// incremental commit on its first poll.
+    last_incremental_commit: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[async_trait]
@@ -583,6 +649,7 @@ impl CompactorEventHandler {
         stats: Arc<CompactionStats>,
         system_clock: Arc<dyn SystemClock>,
         recorder: MetricsRecorderHelper,
+        expected_epoch: Option<u64>,
     ) -> Result<Self, SlateDBError> {
         let state_writer = CompactorStateWriter::new(
             manifest_store,
@@ -590,6 +657,7 @@ impl CompactorEventHandler {
             system_clock.clone(),
             options.as_ref(),
             rand.clone(),
+            expected_epoch,
         )
         .await?;
         let compactor_epoch = state_writer.state.manifest().value.compactor_epoch;
@@ -604,6 +672,7 @@ impl CompactorEventHandler {
             recorder,
             prev_claimed: HashSet::new(),
             worker_heartbeat_gauges: HashMap::new(),
+            last_incremental_commit: None,
         })
     }
 
@@ -706,8 +775,12 @@ impl CompactorEventHandler {
     ) -> Option<u64> {
         let tree = db_state.tree_for_segment(compaction.spec().segment())?;
 
-        let views_by_id: HashMap<Ulid, &SsTableView> =
-            tree.l0.iter().map(|view| (view.id, view)).collect();
+        let l0_bytes: u64 = compaction
+            .get_l0_sst_views(db_state)
+            .ok()?
+            .iter()
+            .map(SsTableView::estimate_visible_size)
+            .sum();
         let srs_by_id: HashMap<u32, &SortedRun> =
             tree.compacted.iter().map(|sr| (sr.id, sr)).collect();
 
@@ -715,12 +788,9 @@ impl CompactorEventHandler {
             .spec()
             .sources()
             .iter()
-            .try_fold(0, |total, source| {
-                let source_bytes = match source {
-                    SourceId::SstView(id) => views_by_id.get(id)?.estimate_size(),
-                    SourceId::SortedRun(id) => srs_by_id.get(id)?.estimate_size(),
-                };
-                Some(total + source_bytes)
+            .filter_map(SourceId::maybe_unwrap_sorted_run)
+            .try_fold(l0_bytes, |total, id| {
+                Some(total + srs_by_id.get(&id)?.estimate_visible_size())
             })
     }
 
@@ -846,44 +916,73 @@ impl CompactorEventHandler {
         }
     }
 
-    /// Commits any compactions in the `Compacted` state to the manifest.
+    /// Commits finished jobs and any incremental progress due on this poll.
     ///
     /// `Compacted` is the distributed intermediate state written by a worker after it
     /// finishes execution. The coordinator is solely responsible for transitioning
     /// `Compacted → Completed` (or `Compacted → Failed`) by writing the manifest first
     /// and then updating `.compactions`. See RFC-0025 §Manifest Commit Protocol.
+    /// The `Running` jobs that [`Self::jobs_due_for_incremental_commit`] returns commit
+    /// their durable progress in the same manifest write.
     ///
     /// Recovery: on coordinator restart, `Compacted` entries are left intact in
-    /// `.compactions`. The first call to this method after startup retries the manifest
-    /// write. `validate_compaction` will fail if the sources are already absent (meaning
-    /// the manifest was written before the crash), in which case the entry is marked
-    /// `Failed` even though the compaction may have actually succeeded. This is preferred
-    /// over trying to detect success after the fact because any heuristic (e.g. checking
-    /// whether the destination SR is present in the manifest) is fragile: the destination
-    /// SR id may coincide with a source SR id (e.g. `[L0:1, SR:1] -> SR:1`), so the
-    /// destination SR can exist both before and after the compaction runs and its presence
-    /// alone does not confirm the compaction's output was committed. Marking `Failed` is
-    /// safe in both crash scenarios:
-    /// - Crash before manifest write: sources are still present, so the scheduler
-    ///   re-compacts them on the next tick.
-    /// - Crash after manifest write: sources are already absent and the manifest is
-    ///   already in the correct post-compaction state, so marking `Failed` has no
-    ///   effect on correctness.
+    /// `.compactions`, and the first call to this method after startup handles them.
+    /// If [`Self::final_commit_is_applied`] finds the final commit of a job in the
+    /// manifest, the entry becomes `Completed` without another manifest write.
+    /// Otherwise, this method retries the final commit. See
+    /// [`Self::final_commit_is_applied`] for the jobs that the check covers and for
+    /// the result of a retry after the final manifest write.
     async fn commit_compacted_entries(&mut self) -> Result<(), SlateDBError> {
-        let compacted = self
+        let finished_jobs = self
             .state()
             .compactions_with_status(&[CompactionStatus::Compacted])
             .cloned()
             .collect::<Vec<_>>();
-
-        if compacted.is_empty() {
+        let incremental_jobs = self.jobs_due_for_incremental_commit();
+        if finished_jobs.is_empty() && incremental_jobs.is_empty() {
             return Ok(());
         }
 
+        let final_changed = self.apply_final_commits(&finished_jobs);
+        // Collect the inputs before the incremental commits change the views of the
+        // input runs to count the released bytes. Collect them after the final commits,
+        // so the count leaves out input runs that a final commit removed.
+        let incremental_inputs = self.incremental_input_ssts(&incremental_jobs);
+        let incremental_changed = self.apply_incremental_commits(&incremental_jobs);
+        self.log_compaction_state();
+
+        if final_changed || incremental_changed {
+            self.state_writer.write_manifest_safely().await?;
+            self.stats
+                .incremental_released_bytes
+                .increment(self.released_bytes(&incremental_inputs));
+            if incremental_changed {
+                self.last_incremental_commit = Some(self.system_clock.now());
+            }
+        }
+        // Each `Compacted` entry is now `Completed` or `Failed`.
+        if !finished_jobs.is_empty() {
+            self.state_writer.write_compactions_safely().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Applies the final commit of each `Compacted` job in `jobs` to the in-memory
+    /// manifest, and marks each entry `Completed` or `Failed`.
+    ///
+    /// Returns whether the manifest changed. The caller writes the manifest and
+    /// `.compactions`.
+    fn apply_final_commits(&mut self, jobs: &[Compaction]) -> bool {
         let mut manifest_changed = false;
-        for compaction in compacted {
+        for compaction in jobs {
             let id = compaction.id();
-            match self.validate_compaction(&compaction) {
+            if self.final_commit_is_applied(compaction) {
+                self.state_mut()
+                    .update_compaction(&id, |c| c.set_status(CompactionStatus::Completed));
+                continue;
+            }
+            match self.validate_compaction(compaction) {
                 Ok(()) => {
                     let destination = compaction
                         .spec()
@@ -914,17 +1013,162 @@ impl CompactorEventHandler {
                 }
             }
         }
+        manifest_changed
+    }
 
-        self.log_compaction_state();
-        if manifest_changed {
-            self.state_writer.write_state_safely().await?;
-        } else {
-            // Validation failures only change `.compactions`. Avoid creating a
-            // checkpoint and writing an unchanged manifest.
-            self.state_writer.write_compactions_safely().await?;
+    /// Returns the running jobs that can commit incremental progress now.
+    ///
+    /// A running job can commit incremental progress only when:
+    /// - It is not a drain, because a drain produces no output.
+    /// - It has no L0 inputs. L0 inputs leave the manifest only in the
+    ///   final commit, which keeps the L0 watermark logic unchanged.
+    /// - Its destination is one of its input runs, because incremental output
+    ///   goes into that run.
+    /// - It has a context, which holds the range plan and stored output.
+    ///
+    /// The list is empty when
+    /// [`CompactorOptions::enable_experimental_incremental_compaction`] is false or
+    /// when less than `INCREMENTAL_COMMIT_INTERVAL` passed since the last incremental
+    /// commit.
+    fn jobs_due_for_incremental_commit(&self) -> Vec<Compaction> {
+        let due = self.options.enable_experimental_incremental_compaction
+            && self.last_incremental_commit.is_none_or(|last| {
+                (self.system_clock.now() - last)
+                    .to_std()
+                    .unwrap_or_default()
+                    >= INCREMENTAL_COMMIT_INTERVAL
+            });
+        if !due {
+            return Vec::new();
         }
+        self.state()
+            .compactions_with_status(&[CompactionStatus::Running])
+            .filter(|job| {
+                !job.spec().is_drain()
+                    && !job.spec().has_l0_sources()
+                    && job.spec().reuses_input_run()
+                    && job.ctx().is_some()
+            })
+            .cloned()
+            .collect()
+    }
 
-        Ok(())
+    /// Returns the estimated size of each SST in the input runs of `jobs`, by SST ID.
+    /// The recorded output SSTs of `jobs` are not included.
+    fn incremental_input_ssts(&self, jobs: &[Compaction]) -> HashMap<SsTableId, u64> {
+        let mut inputs = HashMap::new();
+        for job in jobs {
+            let output_ids: HashSet<SsTableId> = job
+                .subcompactions()
+                .iter()
+                .flat_map(|sub| sub.output_ssts().iter().map(|sst| sst.id))
+                .collect();
+            for run in job.get_sorted_runs(self.state().db_state()) {
+                inputs.extend(
+                    run.sst_views()
+                        .iter()
+                        .filter(|view| !output_ids.contains(&view.sst.id))
+                        .map(|view| (view.sst.id, view.sst.estimate_size())),
+                );
+            }
+        }
+        inputs
+    }
+
+    /// Returns the total estimated size of the SSTs in `ssts` that no view in the
+    /// in-memory manifest uses anymore.
+    ///
+    /// `ssts` maps the ID of each SST to its estimated size in bytes. The caller
+    /// gets it before the input runs are changed by the incremental commit.
+    ///
+    /// This method is called after a successful manifest write. The in-memory
+    /// manifest is then the written manifest.
+    fn released_bytes(&self, ssts: &HashMap<SsTableId, u64>) -> u64 {
+        if ssts.is_empty() {
+            return 0;
+        }
+        let retained: HashSet<SsTableId> = self
+            .state()
+            .db_state()
+            .all_sst_views()
+            .map(|view| view.sst.id)
+            .collect();
+        ssts.iter()
+            .filter(|(id, _)| !retained.contains(id))
+            .map(|(_, size)| size)
+            .sum()
+    }
+
+    /// Applies the stored progress of `jobs` to the in-memory manifest.
+    ///
+    /// Skips a job if its segment or an input run is missing from the manifest. This
+    /// happens when another job removed an input run that both jobs share. The skipped
+    /// job keeps running, and its final commit fails validation and marks it `Failed`.
+    ///
+    /// Returns whether the manifest changed. The caller writes the manifest.
+    fn apply_incremental_commits(&mut self, jobs: &[Compaction]) -> bool {
+        let mut changed = false;
+        for job in jobs {
+            let progress = IncrementalProgress::from_compaction(job, &self.rand);
+            match self
+                .state_writer
+                .state
+                .apply_incremental_progress_to_manifest(job, &progress, &self.rand)
+            {
+                Ok(job_changed) => changed |= job_changed,
+                Err(e) => warn!(
+                    "skipped incremental commit, job inputs are missing [id={}, error={e:?}]",
+                    job.id()
+                ),
+            }
+        }
+        changed
+    }
+
+    /// Returns whether the manifest already holds the final commit of `job`.
+    ///
+    /// This happens when the coordinator stops after the final manifest write but
+    /// before it records `Completed`. Then [`Self::apply_final_commits`] marks the
+    /// entry `Completed` without another manifest write.
+    ///
+    /// The check applies only to a `Compacted` compaction job whose inputs are all
+    /// sorted runs and whose destination is one of those runs. All other input runs
+    /// must be gone, and the destination run must hold exactly the output SSTs of the
+    /// job, in order. The destination run alone proves nothing, because it keeps the
+    /// ID of an input run (for example, `[SR:1, SR:2] -> SR:1`).
+    ///
+    /// For other jobs, such as jobs with L0 inputs, this method returns `false`, and
+    /// the caller retries the final commit. If the manifest write happened before the
+    /// stop, the sources are already absent, `validate_compaction` fails, and the entry
+    /// becomes `Failed` even though the compaction succeeded. This is safe, because
+    /// the manifest already holds the result of the compaction.
+    fn final_commit_is_applied(&self, job: &Compaction) -> bool {
+        let spec = job.spec();
+        if job.status() != CompactionStatus::Compacted
+            || spec.has_l0_sources()
+            || !spec.reuses_input_run()
+        {
+            return false;
+        }
+        let Some(tree) = self.state().db_state().tree_for_segment(spec.segment()) else {
+            return false;
+        };
+        let destination = spec.destination().expect("sorted-run destination");
+        let Some(output) = tree.compacted.iter().find(|run| run.id == destination) else {
+            return false;
+        };
+        // A final commit removes the other inputs and leaves only the full output.
+        // Checking the views also handles jobs with only one input run.
+        let other_inputs_removed = spec.sources().iter().all(|source| {
+            let id = source.unwrap_sorted_run();
+            id == destination || tree.compacted.iter().all(|run| run.id != id)
+        });
+        let output_matches = output
+            .sst_views()
+            .iter()
+            .cloned()
+            .eq(job.output_ssts().into_iter().map(SsTableView::identity));
+        other_inputs_removed && output_matches
     }
 
     /// Validates a Submitted compaction against the current manifest before starting it.
@@ -990,7 +1234,8 @@ impl CompactorEventHandler {
             );
             return Err(SlateDBError::InvalidCompaction);
         };
-        let l0_view_ids = tree.l0.iter().map(|view| view.id).collect::<HashSet<_>>();
+        // Reject missing or ambiguous L0 sources before execution and before commit.
+        compaction.get_l0_sst_views(db_state)?;
         let sr_ids = tree
             .compacted
             .iter()
@@ -998,7 +1243,7 @@ impl CompactorEventHandler {
             .collect::<HashSet<_>>();
 
         if let Some(missing) = spec.sources().iter().find(|source| match source {
-            SourceId::SstView(id) => !l0_view_ids.contains(id),
+            SourceId::SstView(_) => false,
             SourceId::SortedRun(id) => !sr_ids.contains(id),
         }) {
             debug!("compaction source missing from db state: {:?}", missing);
@@ -1170,10 +1415,20 @@ impl CompactorEventHandler {
 
     /// Requests new compactions from the scheduler, validates them, and adds them to the
     /// state up to the the max concurrency limit. This method does not actually start
-    /// the compactions; that is done in [`CompactorEventHandler::maybe_start_compactions`].
+    /// the compactions; they become claimable in
+    /// [`CompactorEventHandler::maybe_validate_submitted_compactions`].
+    ///
+    /// The capacity subtraction saturates because the running count can exceed
+    /// the limit. An operator can lower `max_concurrent_compactions` and restart
+    /// while jobs run: restart leaves `Running` entries alone, and
+    /// `reclaim_stale_workers` only reclaims the ones whose worker stopped
+    /// heartbeating. A scheduling tick must not panic on that state.
     async fn maybe_schedule_compactions(&mut self) -> Result<(), SlateDBError> {
         let running_compaction_count = self.running_compaction_count();
-        let available_capacity = self.options.max_concurrent_compactions - running_compaction_count;
+        let available_capacity = self
+            .options
+            .max_concurrent_compactions
+            .saturating_sub(running_compaction_count);
 
         if available_capacity == 0 {
             debug!(
@@ -1266,8 +1521,32 @@ impl CompactorEventHandler {
                     .finish_compaction(compaction.id(), output_sr);
                 manifest_changed = true;
             } else {
+                // Promotion is the coordinator's last chance to apply
+                // `max_concurrent_compactions`: once an entry is `Scheduled`, any
+                // worker can claim it without consulting the coordinator. A
+                // `Scheduled` entry is therefore already spoken for and counts
+                // against the limit alongside `Running`. Leave the entry
+                // `Submitted` when the limit is full.
+                let claimed_compaction_count = self
+                    .state()
+                    .active_compactions()
+                    .filter(|c| c.scheduled() || c.running())
+                    .count();
+                if claimed_compaction_count >= self.options.max_concurrent_compactions {
+                    debug!(
+                        "skipping compaction promotion since at capacity [claimed_compactions={}, max_concurrent_compactions={}, compaction={:?}]",
+                        claimed_compaction_count,
+                        self.options.max_concurrent_compactions,
+                        compaction
+                    );
+                    continue;
+                }
+                // A job can come back here with its context because a reclaim
+                // moves it to Scheduled, and a restart moves it to Submitted.
+                // We keep the context so the next worker resumes the job and
+                // does not redo its stored output because incremental progress
+                // has been made already.
                 self.state_mut().update_compaction(&compaction.id(), |c| {
-                    c.clear_ctx();
                     c.set_status(CompactionStatus::Scheduled)
                 });
             }
@@ -1330,7 +1609,7 @@ impl CompactorEventHandler {
     fn running_compaction_count(&self) -> usize {
         self.state()
             .active_compactions()
-            .filter(|c| c.status() == CompactionStatus::Running)
+            .filter(|c| c.running())
             .count()
     }
 }
@@ -1358,6 +1637,7 @@ pub mod stats {
     pub const SSTS_WRITTEN: &str = compactor_stat_name!("ssts_written");
     pub const JOBS_CLAIMED: &str = compactor_stat_name!("jobs_claimed");
     pub const JOBS_RECLAIMED: &str = compactor_stat_name!("jobs_reclaimed");
+    pub const INCREMENTAL_RELEASED_BYTES: &str = compactor_stat_name!("incremental_released_bytes");
     pub const WORKER_LAST_HEARTBEAT_MS: &str = compactor_stat_name!("worker_last_heartbeat_ms");
     /// Label key carrying a worker's id on per-worker metrics.
     pub const WORKER_ID_LABEL: &str = "worker_id";
@@ -1393,6 +1673,8 @@ pub mod stats {
         pub(crate) jobs_claimed: Arc<dyn CounterFn>,
         /// Stale jobs the coordinator reset `Running → Submitted`.
         pub(crate) jobs_reclaimed: Arc<dyn CounterFn>,
+        /// Estimated bytes of the input SSTs that incremental commits released.
+        pub(crate) incremental_released_bytes: Arc<dyn CounterFn>,
     }
 
     impl CompactionStats {
@@ -1402,6 +1684,12 @@ pub mod stats {
                 last_compaction_ts: recorder.gauge(LAST_COMPACTION_TS_SEC).register(),
                 jobs_claimed: recorder.counter(JOBS_CLAIMED).register(),
                 jobs_reclaimed: recorder.counter(JOBS_RECLAIMED).register(),
+                incremental_released_bytes: recorder
+                    .counter(INCREMENTAL_RELEASED_BYTES)
+                    .description(
+                        "Estimated bytes of the input SSTs that incremental compaction commits released",
+                    )
+                    .register(),
                 total_bytes_being_compacted: recorder.gauge(TOTAL_BYTES_BEING_COMPACTED).register(),
                 total_throughput: recorder.gauge(TOTAL_THROUGHPUT_BYTES_PER_SEC).register(),
                 merge_operator_compact_operands: recorder
@@ -1476,6 +1764,7 @@ pub mod stats {
 mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::future::Future;
+    use std::ops::Bound::{Excluded, Included};
     use std::ops::Range;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
@@ -1484,7 +1773,7 @@ mod tests {
     use object_store::path::Path;
     use object_store::ObjectStore;
     use parking_lot::Mutex;
-    use rand::RngCore;
+    use rand::Rng;
     use rstest::rstest;
     use slatedb_common::MockSystemClock;
     use ulid::Ulid;
@@ -1492,6 +1781,7 @@ mod tests {
     use super::*;
     use crate::batch::WriteBatch;
     use crate::block_cache_policy::BlockCachePolicy;
+    use crate::bytes_range::BytesRange;
     use crate::compaction_worker::WorkerMessage;
     use crate::compactions_store::{FenceableCompactions, StoredCompactions};
     use crate::compactor::stats::CompactionStats;
@@ -1514,11 +1804,11 @@ mod tests {
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::iter::RowEntryIterator;
-    use crate::manifest::store::{ManifestStore, StoredManifest};
+    use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::{LsmTreeState, Manifest, ManifestCore, Segment, VersionedManifest};
     use crate::merge_operator::{MergeOperator, MergeOperatorError};
-    use crate::object_stores::ObjectStores;
     use crate::proptest_util::rng;
+    use crate::read_trace::ReadTrace;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::{
@@ -1667,6 +1957,139 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_compactor_run_honors_expected_epoch() {
+        let os = Arc::new(InMemory::new());
+        let (manifest_store, _, _) = build_test_stores(os.clone());
+        let clock = Arc::new(DefaultSystemClock::new());
+        let initial = StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            clock.clone(),
+        )
+        .await
+        .unwrap();
+        let _owner =
+            FenceableManifest::init_compactor(initial, Duration::from_secs(5), clock, None)
+                .await
+                .unwrap();
+        let before = manifest_store.read_latest_manifest().await.unwrap();
+        let compactor = CompactorBuilder::new(PATH, os)
+            .with_expected_epoch(0)
+            .build();
+
+        let error = tokio::time::timeout(Duration::from_secs(5), compactor.run())
+            .await
+            .unwrap()
+            .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            crate::ErrorKind::Closed(crate::CloseReason::Fenced)
+        );
+        assert_eq!(manifest_store.read_latest_manifest().await.unwrap(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(feature = "zstd")]
+    async fn test_standalone_compactor_worker_applies_worker_sst_options() {
+        use crate::config::CompressionCodec;
+
+        // given: L0s written without compression or filters.
+        let os = Arc::new(InMemory::new());
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(db_options(None))
+            .build()
+            .await
+            .unwrap();
+        for i in 0..4u8 {
+            db.put(&[b'a' + i; 16], &[b'b' + i; 48]).await.unwrap();
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        let (manifest_store, _, _) = build_test_stores(os.clone());
+        let l0s = get_db_state(manifest_store.clone()).await.tree.l0.clone();
+        assert!(!l0s.is_empty());
+        for l0 in &l0s {
+            assert_eq!(l0.sst.info.compression_codec, None);
+            assert_eq!(l0.sst.info.filter_len, 0);
+        }
+
+        // when: a standalone compactor's in-process worker compacts them.
+        let compactor = CompactorBuilder::new(PATH, os.clone())
+            .with_options(CompactorOptions {
+                scheduler_options: SizeTieredCompactionSchedulerOptions {
+                    min_compaction_sources: 1,
+                    max_compaction_sources: 999,
+                    include_size_threshold: 4.0,
+                    sorted_run_consolidation_threshold: 0,
+                }
+                .into(),
+                worker: Some(CompactionWorkerOptions {
+                    compactions_poll_interval: Duration::from_millis(100),
+                    compression_codec: Some(CompressionCodec::Zstd),
+                    min_filter_keys: 1,
+                    ..CompactionWorkerOptions::default()
+                }),
+                ..compactor_options()
+            })
+            .build();
+        compactor.start().await.unwrap();
+        let db_state = run_for(Duration::from_secs(10), || async {
+            let db_state = get_db_state(manifest_store.clone()).await;
+            (db_state.tree.l0.is_empty() && !db_state.tree.compacted.is_empty()).then_some(db_state)
+        })
+        .await
+        .expect("db was not compacted");
+        compactor.stop().await.unwrap();
+        db.close().await.unwrap();
+
+        // then: the worker wrote with its own compression and filter settings.
+        for view in db_state.tree.compacted.iter().flat_map(|sr| sr.sst_views()) {
+            assert_eq!(
+                view.sst.info.compression_codec,
+                Some(CompressionCodec::Zstd)
+            );
+            assert!(view.sst.info.filter_len > 0);
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "zstd")]
+    async fn test_compactor_start_rejects_aligned_compressed_worker_before_fencing() {
+        use crate::config::CompressionCodec;
+
+        let os = Arc::new(InMemory::new());
+        let (manifest_store, _, _) = build_test_stores(os.clone());
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        let before = manifest_store.read_latest_manifest().await.unwrap();
+        let compactor = CompactorBuilder::new(PATH, os)
+            .with_options(CompactorOptions {
+                worker: Some(CompactionWorkerOptions {
+                    compression_codec: Some(CompressionCodec::Zstd),
+                    ..CompactionWorkerOptions::default()
+                }),
+                ..compactor_options()
+            })
+            .with_sst_block_alignment(true)
+            .build();
+
+        let error = compactor.run().await.unwrap_err();
+
+        assert_eq!(error.kind(), crate::ErrorKind::Invalid);
+        // The compactor epoch was not claimed.
+        assert_eq!(manifest_store.read_latest_manifest().await.unwrap(), before);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_compactor_compacts_l0() {
         // given:
@@ -1680,6 +2103,7 @@ mod tests {
             min_compaction_sources: 1,
             max_compaction_sources: 999,
             include_size_threshold: 4.0,
+            sorted_run_consolidation_threshold: 0,
         }
         .into();
         options
@@ -1833,7 +2257,7 @@ mod tests {
             // One data block per entry, so a data range selects a subset.
             .with_sst_block_size(SstBlockSize::Other(1))
             .with_system_clock(system_clock.clone())
-            .with_db_cache(cache.clone())
+            .with_db_cache(cache.clone(), 0)
             .with_block_cache_policy(policy)
             .build()
             .await
@@ -1869,7 +2293,16 @@ mod tests {
         let info = &view.sst.info;
 
         let (_, _, table_store) = build_test_stores(os);
-        let index = table_store.read_index(&view.sst, false).await.unwrap();
+        let index = table_store
+            .read_index(
+                &view.sst,
+                false,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
+            .await
+            .unwrap();
         let block_metas = index.borrow().block_meta();
         assert_eq!(block_metas.len(), 4);
 
@@ -2012,6 +2445,7 @@ mod tests {
             min_compaction_sources: 2,
             max_compaction_sources: 999,
             include_size_threshold: 4.0,
+            sorted_run_consolidation_threshold: 0,
         }
         .into();
         let compactor_opts = options
@@ -2195,6 +2629,7 @@ mod tests {
             min_compaction_sources: 2,
             max_compaction_sources: 999,
             include_size_threshold: 4.0,
+            sorted_run_consolidation_threshold: 0,
         }
         .into();
         let compactor_opts = options
@@ -2452,7 +2887,7 @@ mod tests {
         db.put(&[b'b'; 16], &[b'a'; 32]).await.unwrap();
 
         // Create a snapshot after first flush. This protects seq >= 1
-        let _snapshot = db.snapshot().await.unwrap();
+        let _snapshot = db.snapshot().unwrap();
         db.flush().await.unwrap();
 
         // Compact L0 to L1
@@ -3565,6 +4000,7 @@ mod tests {
             min_compaction_sources: 2,
             max_compaction_sources: 2,
             include_size_threshold: 4.0,
+            sorted_run_consolidation_threshold: 0,
         }
         .into();
         let mut options = db_options(Some(compactor_options()));
@@ -3680,6 +4116,7 @@ mod tests {
             min_compaction_sources: 2,
             max_compaction_sources: 2,
             include_size_threshold: 4.0,
+            sorted_run_consolidation_threshold: 0,
         }
         .into();
         let mut options = db_options(Some(compactor_options()));
@@ -3860,7 +4297,7 @@ mod tests {
     #[test]
     fn test_calculate_estimated_source_bytes_uses_target_segment_tree() {
         let segment_l0 = SsTableView::identity(SsTableHandle::new(
-            SsTableId::Compacted(Ulid::new()),
+            SsTableId::from(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo {
                 first_entry: Some(Bytes::from_static(b"seg/a")),
@@ -3870,7 +4307,7 @@ mod tests {
             },
         ));
         let segment_sr_view = SsTableView::identity(SsTableHandle::new(
-            SsTableId::Compacted(Ulid::new()),
+            SsTableId::from(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo {
                 first_entry: Some(Bytes::from_static(b"seg/m")),
@@ -3903,9 +4340,51 @@ mod tests {
             ),
         );
 
-        let expected = segment_l0.estimate_size() + segment_sr.estimate_size();
+        let expected = segment_l0.estimate_visible_size() + segment_sr.estimate_visible_size();
         let actual = CompactorEventHandler::calculate_estimated_source_bytes(&compaction, &core);
         assert_eq!(actual, Some(expected));
+    }
+
+    #[test]
+    fn test_calculate_estimated_source_bytes_uses_visible_size_for_borrowed_views() {
+        let raw_size = 1_000_000u64;
+        let l0_view = SsTableView::identity(SsTableHandle::new(
+            SsTableId::new(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo {
+                first_entry: Some(Bytes::from_static(b"seg/a")),
+                last_entry: Some(Bytes::from_static(b"seg/z")),
+                index_offset: raw_size,
+                ..SsTableInfo::default()
+            },
+        ))
+        .with_visible_range(BytesRange::new(
+            Included(Bytes::from_static(b"seg/a")),
+            Excluded(Bytes::from_static(b"seg/m")),
+        ));
+
+        let mut core = ManifestCore::new();
+        core.segments = vec![Segment {
+            prefix: Bytes::from_static(b"seg"),
+            tree: Arc::new(LsmTreeState {
+                l0: VecDeque::from(vec![l0_view.clone()]),
+                ..LsmTreeState::default()
+            }),
+        }];
+
+        let compaction = Compaction::new(
+            Ulid::new(),
+            CompactionSpec::for_segment(
+                Bytes::from_static(b"seg"),
+                vec![SourceId::SstView(l0_view.id)],
+                9,
+            ),
+        );
+
+        let expected = l0_view.estimate_visible_size();
+        let actual = CompactorEventHandler::calculate_estimated_source_bytes(&compaction, &core);
+        assert_eq!(actual, Some(expected));
+        assert!(expected < raw_size);
     }
 
     #[test]
@@ -3922,6 +4401,37 @@ mod tests {
         );
 
         assert_eq!(actual, None);
+    }
+
+    #[rstest::rstest]
+    #[case::ambiguous_view(true)]
+    #[case::repeated_source(false)]
+    fn test_calculate_estimated_source_bytes_rejects_duplicate_l0_ids(
+        #[case] duplicate_view: bool,
+    ) {
+        let view = SsTableView::identity(SsTableHandle::new(
+            SsTableId::new(Ulid::new()),
+            SST_FORMAT_VERSION_LATEST,
+            SsTableInfo {
+                index_offset: 100,
+                ..SsTableInfo::default()
+            },
+        ));
+        let mut core = ManifestCore::new();
+        let tree = Arc::make_mut(&mut core.tree);
+        tree.l0.push_back(view.clone());
+        let mut sources = vec![SourceId::SstView(view.id)];
+        if duplicate_view {
+            tree.l0.push_back(view);
+        } else {
+            sources.push(SourceId::SstView(view.id));
+        }
+        let compaction = Compaction::new(Ulid::new(), CompactionSpec::new(sources, 1));
+
+        assert_eq!(
+            CompactorEventHandler::calculate_estimated_source_bytes(&compaction, &core),
+            None
+        );
     }
 
     #[tokio::test]
@@ -4164,12 +4674,12 @@ mod tests {
             ..SsTableInfo::default()
         };
         let l0_view_newest: SsTableView = SsTableView::identity(SsTableHandle::new(
-            SsTableId::Compacted(Ulid::new()),
+            SsTableId::from(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             l0_info.clone(),
         ));
         let l0_view_oldest: SsTableView = SsTableView::identity(SsTableHandle::new(
-            SsTableId::Compacted(Ulid::new()),
+            SsTableId::from(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             l0_info.clone(),
         ));
@@ -4179,7 +4689,7 @@ mod tests {
             SortedRun::new(
                 2,
                 [SsTableView::identity(SsTableHandle::new(
-                    SsTableId::Compacted(Ulid::new()),
+                    SsTableId::from(Ulid::new()),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
                 ))],
@@ -4187,7 +4697,7 @@ mod tests {
             SortedRun::new(
                 1,
                 [SsTableView::identity(SsTableHandle::new(
-                    SsTableId::Compacted(Ulid::new()),
+                    SsTableId::from(Ulid::new()),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
                 ))],
@@ -4268,12 +4778,12 @@ mod tests {
             ..SsTableInfo::default()
         };
         let l0_view_first: SsTableView = SsTableView::identity(SsTableHandle::new(
-            SsTableId::Compacted(Ulid::from_parts(1, 0)),
+            SsTableId::from(Ulid::from_parts(1, 0)),
             SST_FORMAT_VERSION_LATEST,
             l0_info.clone(),
         ));
         let l0_view_second: SsTableView = SsTableView::identity(SsTableHandle::new(
-            SsTableId::Compacted(Ulid::from_parts(2, 0)),
+            SsTableId::from(Ulid::from_parts(2, 0)),
             SST_FORMAT_VERSION_LATEST,
             l0_info,
         ));
@@ -4282,7 +4792,7 @@ mod tests {
             SortedRun::new(
                 5,
                 [SsTableView::identity(SsTableHandle::new(
-                    SsTableId::Compacted(Ulid::from_parts(10, 0)),
+                    SsTableId::from(Ulid::from_parts(10, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info.clone(),
                 ))],
@@ -4290,7 +4800,7 @@ mod tests {
             SortedRun::new(
                 2,
                 [SsTableView::identity(SsTableHandle::new(
-                    SsTableId::Compacted(Ulid::from_parts(11, 0)),
+                    SsTableId::from(Ulid::from_parts(11, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     sr_info,
                 ))],
@@ -4326,12 +4836,12 @@ mod tests {
         };
         Arc::make_mut(&mut core.tree).l0 = VecDeque::from(vec![
             SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(Ulid::from_parts(1, 0)),
+                SsTableId::from(Ulid::from_parts(1, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 l0_info.clone(),
             )),
             SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(Ulid::from_parts(2, 0)),
+                SsTableId::from(Ulid::from_parts(2, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 l0_info,
             )),
@@ -4379,7 +4889,7 @@ mod tests {
                     SortedRun::new(
                         7,
                         [SsTableView::identity(SsTableHandle::new(
-                            SsTableId::Compacted(Ulid::from_parts(70, 0)),
+                            SsTableId::from(Ulid::from_parts(70, 0)),
                             SST_FORMAT_VERSION_LATEST,
                             sr_info.clone(),
                         ))],
@@ -4387,7 +4897,7 @@ mod tests {
                     SortedRun::new(
                         3,
                         [SsTableView::identity(SsTableHandle::new(
-                            SsTableId::Compacted(Ulid::from_parts(30, 0)),
+                            SsTableId::from(Ulid::from_parts(30, 0)),
                             SST_FORMAT_VERSION_LATEST,
                             sr_info,
                         ))],
@@ -4434,7 +4944,7 @@ mod tests {
         Arc::make_mut(&mut core.tree).compacted = vec![SortedRun::new(
             9,
             [SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(Ulid::from_parts(90, 0)),
+                SsTableId::from(Ulid::from_parts(90, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 sr_info,
             ))],
@@ -4470,7 +4980,7 @@ mod tests {
         Arc::make_mut(&mut core.tree).compacted = vec![SortedRun::new(
             4,
             [SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(Ulid::from_parts(40, 0)),
+                SsTableId::from(Ulid::from_parts(40, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 sr_info,
             ))],
@@ -4509,7 +5019,7 @@ mod tests {
             SortedRun::new(
                 8,
                 [SsTableView::identity(SsTableHandle::new(
-                    SsTableId::Compacted(Ulid::from_parts(80, 0)),
+                    SsTableId::from(Ulid::from_parts(80, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     info.clone(),
                 ))],
@@ -4517,7 +5027,7 @@ mod tests {
             SortedRun::new(
                 4,
                 [SsTableView::identity(SsTableHandle::new(
-                    SsTableId::Compacted(Ulid::from_parts(40, 0)),
+                    SsTableId::from(Ulid::from_parts(40, 0)),
                     SST_FORMAT_VERSION_LATEST,
                     info.clone(),
                 ))],
@@ -4534,7 +5044,7 @@ mod tests {
                     compacted: vec![SortedRun::new(
                         3,
                         [SsTableView::identity(SsTableHandle::new(
-                            SsTableId::Compacted(Ulid::from_parts(30, 0)),
+                            SsTableId::from(Ulid::from_parts(30, 0)),
                             SST_FORMAT_VERSION_LATEST,
                             info.clone(),
                         ))],
@@ -4551,7 +5061,7 @@ mod tests {
                         SortedRun::new(
                             9,
                             [SsTableView::identity(SsTableHandle::new(
-                                SsTableId::Compacted(Ulid::from_parts(90, 0)),
+                                SsTableId::from(Ulid::from_parts(90, 0)),
                                 SST_FORMAT_VERSION_LATEST,
                                 info.clone(),
                             ))],
@@ -4559,7 +5069,7 @@ mod tests {
                         SortedRun::new(
                             6,
                             [SsTableView::identity(SsTableHandle::new(
-                                SsTableId::Compacted(Ulid::from_parts(60, 0)),
+                                SsTableId::from(Ulid::from_parts(60, 0)),
                                 SST_FORMAT_VERSION_LATEST,
                                 info,
                             ))],
@@ -4610,7 +5120,7 @@ mod tests {
         Arc::make_mut(&mut core.tree).compacted = vec![SortedRun::new(
             5,
             [SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(Ulid::from_parts(50, 0)),
+                SsTableId::from(Ulid::from_parts(50, 0)),
                 SST_FORMAT_VERSION_LATEST,
                 info.clone(),
             ))],
@@ -4624,7 +5134,7 @@ mod tests {
                     last_compacted_l0_sst_view_id: None,
                     last_compacted_l0_sst_id: None,
                     l0: VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
-                        SsTableId::Compacted(Ulid::from_parts(1, 0)),
+                        SsTableId::from(Ulid::from_parts(1, 0)),
                         SST_FORMAT_VERSION_LATEST,
                         info,
                     ))]),
@@ -4733,6 +5243,7 @@ mod tests {
                 compactor_stats.clone(),
                 Arc::new(DefaultSystemClock::new()),
                 MetricsRecorderHelper::noop(),
+                None,
             )
             .await
             .unwrap();
@@ -4805,6 +5316,7 @@ mod tests {
                 compactor_stats.clone(),
                 system_clock.clone(),
                 recorder.clone(),
+                None,
             )
             .await
             .unwrap();
@@ -4883,7 +5395,7 @@ mod tests {
             let scheduled = self.get_scheduled_compactions().await;
             for compaction in scheduled {
                 let destination = compaction.spec().destination().expect("tiered spec");
-                let l0_sst_views = compaction.get_l0_sst_views(db_state);
+                let l0_sst_views = compaction.get_l0_sst_views(db_state).unwrap();
                 let sorted_runs = compaction.get_sorted_runs(db_state);
                 let is_dest_last_run = match db_state.tree_for_segment(compaction.spec().segment())
                 {
@@ -4896,6 +5408,7 @@ mod tests {
                 let args = StartCompactionJobArgs {
                     id: compaction.id(),
                     compaction_id: compaction.id(),
+                    segment: compaction.spec().segment().clone(),
                     destination,
                     l0_sst_views,
                     sorted_runs,
@@ -4988,14 +5501,7 @@ mod tests {
         let db_state = fixture.latest_db_state().await;
         assert_eq!(db_state.tree.l0.len(), 1);
         assert_eq!(db_state.tree.compacted.len(), 1);
-        let l0_id = db_state
-            .tree
-            .l0
-            .front()
-            .unwrap()
-            .sst
-            .id
-            .unwrap_compacted_id();
+        let l0_id = db_state.tree.l0.front().unwrap().sst.id.value();
         let compacted_l0s: Vec<Ulid> = db_state
             .tree
             .compacted
@@ -5003,7 +5509,7 @@ mod tests {
             .unwrap()
             .sst_views()
             .iter()
-            .map(|view| view.sst.id.unwrap_compacted_id())
+            .map(|view| view.sst.id.value())
             .collect();
         assert!(!compacted_l0s.contains(&l0_id));
         assert_eq!(
@@ -5151,6 +5657,224 @@ mod tests {
                 .expect("missing stored compaction")
                 .status(),
             CompactionStatus::Scheduled
+        );
+    }
+
+    /// Installs two committed sorted runs and submits one compaction against
+    /// each through the external path that `Admin::submit_compaction` uses. The
+    /// two specs share no source and each destination is its own source, so
+    /// neither the parallel L0 rule nor the destination overwrite rule rejects
+    /// them. Capacity is the only thing that holds the second spec back.
+    async fn submit_two_independent_external_compactions(
+        fixture: &mut CompactorEventHandlerTestFixture,
+    ) {
+        let rand = Arc::new(DbRand::default());
+        let clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
+        for source in [1u32, 2u32] {
+            Compactor::submit(
+                CompactionSpec::new(vec![SourceId::SortedRun(source)], source),
+                fixture.compactions_store.clone(),
+                rand.clone(),
+                clock.clone(),
+            )
+            .await
+            .expect("failed to submit compaction");
+        }
+
+        fixture.handler.state_writer.refresh().await.unwrap();
+
+        let core = &mut fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core;
+        Arc::make_mut(&mut core.tree).compacted = vec![
+            SortedRun::new(1, [bounded_sst_view(1, b"a", b"b")]),
+            SortedRun::new(2, [bounded_sst_view(2, b"y", b"z")]),
+        ];
+    }
+
+    fn ids_with_status(
+        fixture: &CompactorEventHandlerTestFixture,
+        status: CompactionStatus,
+    ) -> Vec<Ulid> {
+        fixture
+            .handler
+            .state()
+            .compactions_with_status(&[status])
+            .map(|c| c.id())
+            .collect()
+    }
+
+    /// Externally submitted compactions must respect `max_concurrent_compactions`.
+    /// The coordinator owns this decision: a worker claims any `Scheduled` entry
+    /// without asking, so promotion is the only place the limit can apply.
+    #[tokio::test]
+    async fn test_maybe_validate_submitted_compactions_respects_capacity() {
+        // The fixture defaults to a capacity of 1.
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        submit_two_independent_external_compactions(&mut fixture).await;
+
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
+
+        let scheduled = ids_with_status(&fixture, CompactionStatus::Scheduled);
+        assert_eq!(
+            scheduled.len(),
+            1,
+            "expected one claimable compaction, got {:?}",
+            scheduled
+        );
+    }
+
+    /// Capacity enforcement must delay an over-capacity submission, not discard
+    /// it. The entry stays `Submitted` and a later tick promotes it once the
+    /// first job leaves the limit.
+    #[tokio::test]
+    async fn test_maybe_validate_submitted_compactions_defers_over_capacity_submission() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        submit_two_independent_external_compactions(&mut fixture).await;
+
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
+
+        let scheduled = ids_with_status(&fixture, CompactionStatus::Scheduled);
+        let deferred = ids_with_status(&fixture, CompactionStatus::Submitted);
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(deferred.len(), 1, "the second submission must not be lost");
+        assert!(
+            ids_with_status(&fixture, CompactionStatus::Failed).is_empty(),
+            "a deferred submission must not be failed"
+        );
+
+        // The claimable compaction finishes and frees the slot.
+        fixture
+            .handler
+            .state_mut()
+            .update_compaction(&scheduled[0], |c| c.set_status(CompactionStatus::Completed));
+
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ids_with_status(&fixture, CompactionStatus::Scheduled),
+            deferred,
+            "the deferred submission must be promoted once capacity frees"
+        );
+    }
+
+    /// A scheduling tick must not panic when more compactions are `Running` than
+    /// the limit allows. An operator reaches this state by lowering
+    /// `max_concurrent_compactions` and restarting while jobs run, because
+    /// restart preserves `Running` entries whose workers still heartbeat.
+    #[tokio::test]
+    async fn test_maybe_schedule_compactions_does_not_underflow_over_capacity() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        for (index, source) in [1u32, 2u32].iter().enumerate() {
+            fixture
+                .handler
+                .state_mut()
+                .add_compaction(
+                    Compaction::new(
+                        Ulid::from_parts(index as u64 + 1, 0),
+                        CompactionSpec::new(vec![SourceId::SortedRun(*source)], *source),
+                    )
+                    .with_status(CompactionStatus::Running),
+                )
+                .expect("failed to add compaction");
+        }
+        assert!(
+            fixture.handler.running_compaction_count()
+                > fixture.handler.options.max_concurrent_compactions
+        );
+
+        fixture.handler.maybe_schedule_compactions().await.unwrap();
+    }
+
+    /// A drain spec must complete even when the limit is full. Drain specs change
+    /// the manifest in the coordinator and never hold a worker slot, so the
+    /// capacity check must not delay them.
+    #[tokio::test]
+    async fn test_maybe_validate_submitted_compactions_exempts_drain_at_capacity() {
+        use crate::manifest::{LsmTreeState, Segment};
+
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+
+        // Fill the limit of 1 with a claimed compaction.
+        fixture
+            .handler
+            .state_mut()
+            .add_compaction(
+                Compaction::new(
+                    Ulid::from_parts(1, 0),
+                    CompactionSpec::new(vec![SourceId::SortedRun(1)], 1),
+                )
+                .with_status(CompactionStatus::Running),
+            )
+            .expect("failed to add compaction");
+
+        // A segment whose only L0 the drain spec retires.
+        let prefix = Bytes::from_static(b"seg/");
+        let l0 = Ulid::from_parts(2, 0);
+        fixture
+            .handler
+            .state_writer
+            .state
+            .manifest_mut_for_test()
+            .value
+            .core
+            .segments = vec![Segment {
+            prefix: prefix.clone(),
+            tree: Arc::new(LsmTreeState {
+                last_compacted_l0_sst_view_id: None,
+                last_compacted_l0_sst_id: None,
+                l0: VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
+                    SsTableId::from(l0),
+                    SST_FORMAT_VERSION_LATEST,
+                    SsTableInfo::default(),
+                ))]),
+                compacted: Vec::new(),
+            }),
+        }];
+
+        let drain_id = Ulid::from_parts(3, 0);
+        fixture
+            .handler
+            .state_mut()
+            .add_compaction(Compaction::new(
+                drain_id,
+                CompactionSpec::drain_segment(prefix, vec![SourceId::SstView(l0)]),
+            ))
+            .expect("failed to add compaction");
+
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fixture
+                .handler
+                .state()
+                .compactions()
+                .value
+                .get(&drain_id)
+                .expect("missing drain compaction")
+                .status(),
+            CompactionStatus::Completed,
+            "a drain spec must not be held back by the concurrency limit"
         );
     }
 
@@ -5574,6 +6298,7 @@ mod tests {
             compactor_stats,
             system_clock,
             recorder,
+            None,
         )
         .await
         .unwrap();
@@ -5715,6 +6440,7 @@ mod tests {
             min_compaction_sources: 1,
             max_compaction_sources: 999,
             include_size_threshold: 4.0,
+            sorted_run_consolidation_threshold: 0,
         }
         .into();
         let mut options = db_options(Some(compactor_options()));
@@ -5768,6 +6494,33 @@ mod tests {
             .validate_compaction(&Compaction::new(Ulid::new(), c))
             .unwrap_err();
         assert!(matches!(err, SlateDBError::InvalidCompaction));
+    }
+
+    #[tokio::test]
+    async fn test_union_duplicate_l0_source_rejected_before_execution_and_commit() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        fixture.write_l0().await;
+        fixture.handler.handle_ticker().await.unwrap();
+        let spec = fixture.build_l0_compaction().await;
+        let manifest = fixture.handler.state_mut().manifest_mut_for_test();
+        let tree = Arc::make_mut(&mut manifest.value.core.tree);
+        tree.l0.push_back(tree.l0[0].clone());
+
+        // The spec names the ID only once, but two views carry that ID.
+        for status in [CompactionStatus::Submitted, CompactionStatus::Compacted] {
+            let compaction = Compaction::new(Ulid::new(), spec.clone()).with_status(status);
+            assert!(matches!(
+                fixture.handler.validate_compaction(&compaction),
+                Err(SlateDBError::InvalidCompaction)
+            ));
+            assert!(compaction
+                .get_l0_sst_views(fixture.handler.state().db_state())
+                .is_err());
+            assert!(compaction
+                .trivial_move_output(fixture.handler.state().db_state())
+                .is_none());
+        }
+        fixture.db.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -5840,7 +6593,7 @@ mod tests {
         let l0_view = Ulid::from_parts(1, 0);
         let make_view = |id: Ulid| {
             SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(id),
+                SsTableId::from(id),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo::default(),
             ))
@@ -5885,7 +6638,7 @@ mod tests {
         let l0_view = Ulid::from_parts(1, 0);
         let make_view = |id: Ulid| {
             SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(id),
+                SsTableId::from(id),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo::default(),
             ))
@@ -5929,7 +6682,7 @@ mod tests {
         let l0_view = Ulid::from_parts(1, 0);
         let make_view = |id: Ulid| {
             SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(id),
+                SsTableId::from(id),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo::default(),
             ))
@@ -6042,7 +6795,7 @@ mod tests {
                 last_compacted_l0_sst_view_id: None,
                 last_compacted_l0_sst_id: None,
                 l0: VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
-                    SsTableId::Compacted(l0_view_id),
+                    SsTableId::from(l0_view_id),
                     SST_FORMAT_VERSION_LATEST,
                     SsTableInfo::default(),
                 ))]),
@@ -6223,7 +6976,7 @@ mod tests {
         let l0_1 = Ulid::from_parts(1, 0);
         let make_view = |id: Ulid| {
             SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(id),
+                SsTableId::from(id),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo::default(),
             ))
@@ -6306,7 +7059,7 @@ mod tests {
         let manifest_store = Arc::new(ManifestStore::new(&Path::from(PATH), os.clone()));
         let compactions_store = Arc::new(CompactionsStore::new(&Path::from(PATH), os.clone()));
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(os.clone(), None),
+            os.clone(),
             sst_format,
             Path::from(PATH),
             None,
@@ -6480,7 +7233,7 @@ mod tests {
     // SsTableView::identity can derive a non-empty effective range.
     fn fake_output_sst() -> SsTableHandle {
         SsTableHandle::new(
-            SsTableId::Compacted(Ulid::new()),
+            SsTableId::from(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo {
                 first_entry: Some(Bytes::from_static(b"a")),
@@ -6499,6 +7252,700 @@ mod tests {
         Compaction::new(id, spec)
             .with_status(CompactionStatus::Compacted)
             .with_output_ssts(output)
+    }
+
+    async fn seed_incremental_job(fixture: &mut CompactorEventHandlerTestFixture) -> Compaction {
+        use crate::bytes_range::BytesRange;
+        use crate::compactor_state::CompactionContext;
+        use crate::subcompaction::Subcompaction;
+        let mut input = fake_output_sst();
+        input.info.last_entry = Some(Bytes::from_static(b"g"));
+        input.info.index_offset = 100;
+        input.info.index_len = 20;
+        let mut tail = fake_output_sst();
+        tail.info.first_entry = Some(Bytes::from_static(b"m"));
+        tail.info.last_entry = Some(Bytes::from_static(b"z"));
+        let mut output = fake_output_sst();
+        output.info.last_entry = Some(Bytes::from_static(b"m"));
+        let job = Compaction::new(
+            Ulid::from_parts(1, 0),
+            CompactionSpec::new(vec![SourceId::SortedRun(2), SourceId::SortedRun(1)], 1),
+        )
+        .with_status(CompactionStatus::Running)
+        .with_ctx(Some(CompactionContext::new(
+            vec![Subcompaction::new(BytesRange::unbounded()).with_output_ssts(vec![output])],
+            Some(42),
+        )));
+        Arc::make_mut(
+            &mut fixture
+                .handler
+                .state_mut()
+                .manifest_mut_for_test()
+                .value
+                .core
+                .tree,
+        )
+        .compacted = vec![
+            SortedRun::new(2, [SsTableView::identity(input)]),
+            SortedRun::new(1, [SsTableView::identity(tail)]),
+        ];
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(job.clone());
+        fixture
+            .handler
+            .state_writer
+            .write_state_safely()
+            .await
+            .unwrap();
+        job
+    }
+
+    fn enable_incremental_compaction(fixture: &mut CompactorEventHandlerTestFixture) {
+        Arc::make_mut(&mut fixture.handler.options).enable_experimental_incremental_compaction =
+            true;
+    }
+
+    fn incremental_released_bytes(fixture: &CompactorEventHandlerTestFixture) -> i64 {
+        slatedb_common::metrics::lookup_metric(
+            &fixture.test_recorder,
+            stats::INCREMENTAL_RELEASED_BYTES,
+        )
+        .expect("incremental released bytes metric")
+    }
+
+    #[tokio::test]
+    async fn incremental_commit_writes_checkpoint_and_final_commit_does_not_wait() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        enable_incremental_compaction(&mut fixture);
+        let job = seed_incremental_job(&mut fixture).await;
+        let before = fixture.manifest_store.read_latest_manifest().await.unwrap();
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        let incremental_manifest = fixture.manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(incremental_manifest.id(), before.id() + 2);
+        assert_eq!(incremental_released_bytes(&fixture), 120);
+        assert_eq!(
+            incremental_manifest
+                .core()
+                .checkpoints
+                .last()
+                .unwrap()
+                .manifest_id,
+            before.id() + 1
+        );
+        assert!(incremental_manifest.core().tree.compacted[0]
+            .sst_views()
+            .is_empty());
+        assert_eq!(
+            fixture
+                .handler
+                .state()
+                .compactions()
+                .value
+                .get(&job.id())
+                .unwrap()
+                .status(),
+            CompactionStatus::Running
+        );
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        assert_eq!(
+            fixture
+                .manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .id(),
+            incremental_manifest.id()
+        );
+        let finished = job
+            .clone()
+            .with_status(CompactionStatus::Compacted)
+            .with_output_ssts(job.subcompactions()[0].output_ssts().clone());
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(finished);
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        let final_manifest = fixture.manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(final_manifest.id(), incremental_manifest.id() + 2);
+        assert_eq!(final_manifest.core().tree.compacted.len(), 1);
+        assert_eq!(incremental_released_bytes(&fixture), 120);
+    }
+
+    #[tokio::test]
+    async fn incremental_interval_tracks_successful_commits() {
+        let clock = Arc::new(MockSystemClock::new());
+        clock.set(1_000);
+        let options = Arc::new(CompactorOptions {
+            enable_experimental_incremental_compaction: true,
+            ..CompactorOptions::default()
+        });
+        let mut fixture =
+            CompactorEventHandlerTestFixture::new_with_clock(clock.clone(), options).await;
+        let job = seed_incremental_job(&mut fixture).await;
+        let without_progress =
+            Compaction::new(job.id(), job.spec().clone()).with_status(CompactionStatus::Running);
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(without_progress);
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        assert!(fixture.handler.last_incremental_commit.is_none());
+
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(job.clone());
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        let first_commit = fixture
+            .manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .id();
+        assert_eq!(fixture.handler.last_incremental_commit, Some(clock.now()));
+
+        let mut ctx = job.ctx().unwrap().clone();
+        ctx.mark_completed(0);
+        fixture
+            .handler
+            .state_mut()
+            .update_compaction(&job.id(), |job| job.set_ctx(Some(ctx)));
+        clock.set(60_999);
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        assert_eq!(
+            fixture
+                .manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .id(),
+            first_commit
+        );
+        clock.set(61_000);
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        let second_commit = fixture
+            .manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .id();
+        assert_eq!(second_commit, first_commit + 2);
+        let committed_at = fixture.handler.last_incremental_commit;
+
+        clock.set(121_000);
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        assert_eq!(
+            fixture
+                .manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .id(),
+            second_commit
+        );
+        assert_eq!(fixture.handler.last_incremental_commit, committed_at);
+    }
+
+    #[tokio::test]
+    async fn revalidation_preserves_incremental_context() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let job = seed_incremental_job(&mut fixture).await;
+        enable_incremental_compaction(&mut fixture);
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        fixture
+            .handler
+            .state_mut()
+            .update_compaction(&job.id(), |c| c.set_status(CompactionStatus::Submitted));
+        fixture
+            .handler
+            .maybe_validate_submitted_compactions()
+            .await
+            .unwrap();
+        let restored = fixture
+            .handler
+            .state()
+            .compactions()
+            .value
+            .get(&job.id())
+            .unwrap();
+        assert_eq!(restored.status(), CompactionStatus::Scheduled);
+        assert_eq!(restored.ctx(), job.ctx());
+    }
+
+    #[tokio::test]
+    async fn incremental_commit_keeps_progress_when_no_physical_file_is_released() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        enable_incremental_compaction(&mut fixture);
+        let job = seed_incremental_job(&mut fixture).await;
+        let duplicate = fixture.handler.state().db_state().tree.compacted[0].sst_views()[0].clone();
+        Arc::make_mut(
+            &mut fixture
+                .handler
+                .state_mut()
+                .manifest_mut_for_test()
+                .value
+                .core
+                .tree,
+        )
+        .compacted
+        .push(SortedRun::new(0, [duplicate]));
+        fixture
+            .handler
+            .state_writer
+            .write_manifest_safely()
+            .await
+            .unwrap();
+        let before = fixture.manifest_store.read_latest_manifest().await.unwrap();
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        assert_eq!(
+            fixture
+                .manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .id(),
+            before.id() + 2
+        );
+        assert_ne!(fixture.handler.state().db_state(), before.core());
+        assert!(fixture.handler.last_incremental_commit.is_some());
+        assert_eq!(incremental_released_bytes(&fixture), 0);
+        assert_eq!(
+            fixture
+                .handler
+                .state()
+                .compactions()
+                .value
+                .get(&job.id())
+                .unwrap()
+                .ctx(),
+            job.ctx()
+        );
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn recovery_recognizes_a_committed_final_manifest(#[case] empty_output: bool) {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let job = seed_incremental_job(&mut fixture).await;
+        let output = if empty_output {
+            vec![]
+        } else {
+            job.subcompactions()[0].output_ssts().clone()
+        };
+        fixture.handler.state_mut().insert_compaction_for_test(
+            job.clone()
+                .with_status(CompactionStatus::Compacted)
+                .with_output_ssts(output.clone()),
+        );
+        fixture
+            .handler
+            .state_writer
+            .write_compactions_safely()
+            .await
+            .unwrap();
+        fixture.handler.state_mut().finish_compaction(
+            job.id(),
+            SortedRun::new(1, output.into_iter().map(SsTableView::identity)),
+        );
+        fixture
+            .handler
+            .state_writer
+            .write_manifest_safely()
+            .await
+            .unwrap();
+        fixture.handler.state_writer = CompactorStateWriter::new(
+            fixture.manifest_store.clone(),
+            fixture.compactions_store.clone(),
+            fixture.handler.system_clock.clone(),
+            &fixture.handler.options,
+            fixture.handler.rand.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        let before = fixture
+            .manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .id();
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        assert_eq!(
+            fixture
+                .manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .id(),
+            before
+        );
+        let saved = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap();
+        assert_eq!(
+            saved.compactions.get(&job.id()).unwrap().status(),
+            CompactionStatus::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_requires_full_output_for_a_single_input_run() {
+        use crate::bytes_range::BytesRange;
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let seeded = seed_incremental_job(&mut fixture).await;
+        let output = seeded.subcompactions()[0].output_ssts()[0].clone();
+        let job = Compaction::new(
+            seeded.id(),
+            CompactionSpec::new(vec![SourceId::SortedRun(1)], 1),
+        )
+        .with_status(CompactionStatus::Compacted)
+        .with_output_ssts(vec![output.clone()]);
+        assert!(!fixture.handler.final_commit_is_applied(&job));
+
+        let projected = SsTableView::identity(output.clone())
+            .with_visible_range(BytesRange::from_slice(..b"m".as_slice()));
+        let tree = Arc::make_mut(
+            &mut fixture
+                .handler
+                .state_mut()
+                .manifest_mut_for_test()
+                .value
+                .core
+                .tree,
+        );
+        tree.compacted = vec![SortedRun::new(1, [projected])];
+        assert!(!fixture.handler.final_commit_is_applied(&job));
+
+        let tree = Arc::make_mut(
+            &mut fixture
+                .handler
+                .state_mut()
+                .manifest_mut_for_test()
+                .value
+                .core
+                .tree,
+        );
+        tree.compacted = vec![SortedRun::new(1, [SsTableView::identity(output)])];
+        assert!(fixture.handler.final_commit_is_applied(&job));
+    }
+
+    #[tokio::test]
+    async fn destination_run_accepts_incremental_progress() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let mut job = seed_incremental_job(&mut fixture).await;
+        job = Compaction::new(
+            job.id(),
+            CompactionSpec::new(job.spec().sources().to_vec(), 1),
+        )
+        .with_status(CompactionStatus::Running)
+        .with_ctx(job.ctx().cloned());
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(job.clone());
+        enable_incremental_compaction(&mut fixture);
+        let before = fixture
+            .manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .id();
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        assert_eq!(
+            fixture
+                .manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .id(),
+            before + 2
+        );
+        fixture.handler.state_mut().insert_compaction_for_test(
+            job.clone()
+                .with_status(CompactionStatus::Compacted)
+                .with_output_ssts(job.subcompactions()[0].output_ssts().clone()),
+        );
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        assert_eq!(
+            fixture
+                .manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .core()
+                .tree
+                .compacted[0]
+                .id,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_batch_commits_incremental_progress_without_an_sst_release() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let job = seed_incremental_job(&mut fixture).await;
+        let mut input = fake_output_sst();
+        input.info.last_entry = Some(Bytes::from_static(b"z"));
+        let tree = Arc::make_mut(
+            &mut fixture
+                .handler
+                .state_mut()
+                .manifest_mut_for_test()
+                .value
+                .core
+                .tree,
+        );
+        tree.compacted[0] = SortedRun::new(2, [SsTableView::identity(input)]);
+        tree.compacted.push(SortedRun::new(0, []));
+        let finished = Compaction::new(
+            Ulid::from_parts(2, 0),
+            CompactionSpec::new(vec![SourceId::SortedRun(0)], 0),
+        )
+        .with_status(CompactionStatus::Compacted)
+        .with_output_ssts(vec![fake_output_sst()]);
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(finished);
+        fixture
+            .handler
+            .state_writer
+            .write_state_safely()
+            .await
+            .unwrap();
+        enable_incremental_compaction(&mut fixture);
+        let before = fixture.manifest_store.read_latest_manifest().await.unwrap();
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        let after = fixture.manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(after.id(), before.id() + 2);
+        assert_eq!(
+            after.core().checkpoints.len(),
+            before.core().checkpoints.len() + 1
+        );
+        let retained = after
+            .core()
+            .all_sst_views()
+            .map(|view| view.sst.id)
+            .collect::<HashSet<_>>();
+        assert!(before
+            .core()
+            .all_sst_views()
+            .all(|view| retained.contains(&view.sst.id)));
+        assert_eq!(
+            after
+                .core()
+                .tree
+                .compacted
+                .iter()
+                .map(|run| run.id)
+                .collect::<Vec<_>>(),
+            vec![2, 1, 0]
+        );
+        assert_eq!(incremental_released_bytes(&fixture), 0);
+        assert_eq!(
+            fixture
+                .handler
+                .state()
+                .compactions()
+                .value
+                .get(&job.id())
+                .unwrap()
+                .status(),
+            CompactionStatus::Running
+        );
+    }
+
+    #[tokio::test]
+    async fn incremental_commit_skips_job_with_missing_input_runs() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        let job = seed_incremental_job(&mut fixture).await;
+        // The final commit of `finished` removes both input runs of `job`.
+        Arc::make_mut(
+            &mut fixture
+                .handler
+                .state_mut()
+                .manifest_mut_for_test()
+                .value
+                .core
+                .tree,
+        )
+        .compacted
+        .push(SortedRun::new(0, []));
+        let finished = Compaction::new(
+            Ulid::from_parts(2, 0),
+            CompactionSpec::new(
+                vec![
+                    SourceId::SortedRun(2),
+                    SourceId::SortedRun(1),
+                    SourceId::SortedRun(0),
+                ],
+                0,
+            ),
+        )
+        .with_status(CompactionStatus::Compacted)
+        .with_output_ssts(vec![fake_output_sst()]);
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(finished.clone());
+        fixture
+            .handler
+            .state_writer
+            .write_state_safely()
+            .await
+            .unwrap();
+        enable_incremental_compaction(&mut fixture);
+
+        fixture.handler.commit_compacted_entries().await.unwrap();
+
+        let manifest = fixture.manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(
+            manifest
+                .core()
+                .tree
+                .compacted
+                .iter()
+                .map(|run| run.id)
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+        let stored = fixture
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        assert_eq!(
+            stored.get(&finished.id()).unwrap().status(),
+            CompactionStatus::Completed
+        );
+        assert_eq!(
+            stored.get(&job.id()).unwrap().status(),
+            CompactionStatus::Running
+        );
+        assert!(fixture.handler.last_incremental_commit.is_none());
+        assert_eq!(incremental_released_bytes(&fixture), 0);
+    }
+
+    #[tokio::test]
+    async fn mixed_batch_counts_released_bytes_only_for_incremental_inputs() {
+        // given: an incremental job that releases a 120-byte input, and a finished job
+        // whose final commit releases a 999-byte input
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        enable_incremental_compaction(&mut fixture);
+        seed_incremental_job(&mut fixture).await;
+        let mut final_input = fake_output_sst();
+        final_input.info.index_offset = 999;
+        Arc::make_mut(
+            &mut fixture
+                .handler
+                .state_mut()
+                .manifest_mut_for_test()
+                .value
+                .core
+                .tree,
+        )
+        .compacted
+        .push(SortedRun::new(0, [SsTableView::identity(final_input)]));
+        let finished = Compaction::new(
+            Ulid::from_parts(2, 0),
+            CompactionSpec::new(vec![SourceId::SortedRun(0)], 0),
+        )
+        .with_status(CompactionStatus::Compacted);
+        fixture
+            .handler
+            .state_mut()
+            .insert_compaction_for_test(finished);
+        fixture
+            .handler
+            .state_writer
+            .write_state_safely()
+            .await
+            .unwrap();
+        let before = fixture
+            .manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .id();
+
+        // when: both commits go into one manifest write
+        fixture.handler.commit_compacted_entries().await.unwrap();
+
+        // then: the metric counts only the input of the incremental job
+        assert_eq!(
+            fixture
+                .manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .id(),
+            before + 2
+        );
+        assert_eq!(incremental_released_bytes(&fixture), 120);
+    }
+
+    #[tokio::test]
+    async fn incremental_commit_does_not_count_an_input_that_the_writer_still_uses() {
+        // given: an incremental job that releases its input, and a writer that adds an
+        // L0 view of the same SST to the remote manifest
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        enable_incremental_compaction(&mut fixture);
+        seed_incremental_job(&mut fixture).await;
+        let input = fixture.handler.state().db_state().tree.compacted[0].sst_views()[0].clone();
+        let mut writer = StoredManifest::load(
+            fixture.manifest_store.clone(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        let mut dirty = writer.prepare_dirty().unwrap();
+        Arc::make_mut(&mut dirty.value.core.tree)
+            .l0
+            .push_front(input.clone());
+        writer.update(dirty).await.unwrap();
+
+        // when: the coordinator commits the incremental progress
+        fixture.handler.commit_compacted_entries().await.unwrap();
+
+        // then: the written manifest keeps the L0 view, so the SST is not released
+        let after = fixture.manifest_store.read_latest_manifest().await.unwrap();
+        assert!(after.core().tree.compacted[0].sst_views().is_empty());
+        assert!(after
+            .core()
+            .tree
+            .l0
+            .iter()
+            .any(|view| view.sst.id == input.sst.id));
+        assert_eq!(incremental_released_bytes(&fixture), 0);
+    }
+
+    #[tokio::test]
+    async fn incremental_commits_are_disabled_by_default() {
+        let mut fixture = CompactorEventHandlerTestFixture::new().await;
+        seed_incremental_job(&mut fixture).await;
+        let before = fixture
+            .manifest_store
+            .read_latest_manifest()
+            .await
+            .unwrap()
+            .id();
+        fixture.handler.commit_compacted_entries().await.unwrap();
+        assert_eq!(
+            fixture
+                .manifest_store
+                .read_latest_manifest()
+                .await
+                .unwrap()
+                .id(),
+            before
+        );
     }
 
     #[tokio::test]

@@ -16,12 +16,13 @@ use futures::stream::BoxStream;
 use futures::{stream, StreamExt};
 use object_store::path::Path;
 use object_store::{
-    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions as OS_PutOptions, PutPayload, PutResult, RenameOptions,
+    CopyOptions, GetOptions, GetRange, GetResult, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore, PutMultipartOptions, PutOptions as OS_PutOptions, PutPayload, PutResult,
+    RenameOptions,
 };
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt};
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::ops::{Bound, RangeBounds};
@@ -33,12 +34,15 @@ use std::thread;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer;
 use ulid::Ulid;
 
 pub(crate) fn bounded_sst_view(id: u64, first: &'static [u8], last: &'static [u8]) -> SsTableView {
     SsTableView::identity(SsTableHandle::new(
-        SsTableId::Compacted(Ulid::from_parts(id, 0)),
+        SsTableId::from(Ulid::from_parts(id, 0)),
         SST_FORMAT_VERSION_LATEST,
         SsTableInfo {
             first_entry: Some(Bytes::from_static(first)),
@@ -80,6 +84,132 @@ pub(crate) async fn assert_next<T: RowEntryIterator>(iterator: &mut T, expected_
 pub(crate) fn assert_kv(kv: &KeyValue, key: &[u8], val: &[u8]) {
     assert_eq!(kv.key, key);
     assert_eq!(kv.value, val);
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecordedSpan {
+    id: tracing::Id,
+    pub(crate) name: String,
+    pub(crate) level: String,
+    pub(crate) parent_name: Option<String>,
+    pub(crate) fields: HashMap<String, String>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct SpanRecorder {
+    span_name: Option<&'static str>,
+    spans: Arc<std::sync::Mutex<Vec<RecordedSpan>>>,
+}
+
+impl SpanRecorder {
+    pub(crate) fn for_name(span_name: &'static str) -> Self {
+        Self {
+            span_name: Some(span_name),
+            spans: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    pub(crate) fn spans(&self) -> Vec<RecordedSpan> {
+        self.spans
+            .lock()
+            .expect("The span recorder lock is poisoned.")
+            .clone()
+    }
+
+    pub(crate) fn only_span(&self) -> RecordedSpan {
+        let spans = self.spans();
+        assert_eq!(
+            spans.len(),
+            1,
+            "The recorder must contain one matching span."
+        );
+        spans[0].clone()
+    }
+}
+
+struct SpanFieldRecorder<'a> {
+    fields: &'a mut HashMap<String, String>,
+}
+
+impl tracing::field::Visit for SpanFieldRecorder<'_> {
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+        self.fields
+            .insert(field.name().to_string(), format!("{value:?}"));
+    }
+}
+
+impl<S> Layer<S> for SpanRecorder
+where
+    S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::Id,
+        ctx: Context<'_, S>,
+    ) {
+        if self
+            .span_name
+            .is_some_and(|span_name| attrs.metadata().name() != span_name)
+        {
+            return;
+        }
+        let mut fields = HashMap::new();
+        attrs.record(&mut SpanFieldRecorder {
+            fields: &mut fields,
+        });
+
+        let explicit_parent = attrs.parent().and_then(|id| ctx.span(id));
+        let contextual_parent = ctx.current_span().id().and_then(|id| ctx.span(id));
+        let parent_name = explicit_parent
+            .or(contextual_parent)
+            .map(|span| span.metadata().name().to_string());
+
+        self.spans
+            .lock()
+            .expect("The span recorder lock is poisoned.")
+            .push(RecordedSpan {
+                id: id.clone(),
+                name: attrs.metadata().name().to_string(),
+                level: attrs.metadata().level().to_string(),
+                parent_name,
+                fields,
+            });
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::Id,
+        values: &tracing::span::Record<'_>,
+        _ctx: Context<'_, S>,
+    ) {
+        let mut fields = HashMap::new();
+        values.record(&mut SpanFieldRecorder {
+            fields: &mut fields,
+        });
+        let mut spans = self
+            .spans
+            .lock()
+            .expect("The span recorder lock is poisoned.");
+        if let Some(span) = spans.iter_mut().find(|span| span.id == *id) {
+            span.fields.extend(fields);
+        }
+    }
 }
 
 pub(crate) struct TestIterator {
@@ -428,7 +558,7 @@ pub(crate) async fn write_ssts(
     }
 
     let mut output_ssts = Vec::new();
-    let mut writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+    let mut writer = table_store.table_writer(SsTableId::from(Ulid::new()), Some(Bytes::new()));
     let mut bytes_written = 0usize;
 
     for (index, entry) in entries.iter().cloned().enumerate() {
@@ -437,18 +567,18 @@ pub(crate) async fn write_ssts(
         }
 
         if bytes_written > max_sst_size {
-            output_ssts.push(writer.close().await.unwrap());
+            output_ssts.push(writer.close().await.unwrap().0);
             bytes_written = 0;
 
             if index + 1 < entries.len() {
-                writer = table_store.table_writer(SsTableId::Compacted(Ulid::new()));
+                writer = table_store.table_writer(SsTableId::from(Ulid::new()), Some(Bytes::new()));
             } else {
                 return output_ssts;
             }
         }
     }
 
-    output_ssts.push(writer.close().await.unwrap());
+    output_ssts.push(writer.close().await.unwrap().0);
     output_ssts
 }
 
@@ -573,6 +703,8 @@ pub(crate) struct FlakyObjectStore {
     // get_range: truncate response body to this many bytes on first N attempts (0 = no truncation)
     truncate_get_range_bytes: AtomicUsize,
     truncate_get_range_count: AtomicUsize,
+    // Get: return NotFound on the next N GETs
+    fail_first_get_not_found: AtomicUsize,
 }
 
 impl FlakyObjectStore {
@@ -598,7 +730,12 @@ impl FlakyObjectStore {
             get_range_attempts: AtomicUsize::new(0),
             truncate_get_range_bytes: AtomicUsize::new(0),
             truncate_get_range_count: AtomicUsize::new(0),
+            fail_first_get_not_found: AtomicUsize::new(0),
         }
+    }
+
+    pub(crate) fn with_get_not_found_failures(&self, n: usize) {
+        self.fail_first_get_not_found.store(n, Ordering::SeqCst);
     }
 
     pub(crate) fn with_put_precondition_always(self) -> Self {
@@ -726,6 +863,25 @@ impl ObjectStore for FlakyObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if self
+            .fail_first_get_not_found
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                if v > 0 {
+                    Some(v - 1)
+                } else {
+                    None
+                }
+            })
+            .is_ok()
+        {
+            return Err(object_store::Error::NotFound {
+                path: location.to_string(),
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "injected not-found (deleted between LIST and GET)",
+                )),
+            });
+        }
         if options.head {
             self.head_attempts.fetch_add(1, Ordering::SeqCst);
             if self
@@ -1085,7 +1241,7 @@ impl Gate {
 /// Each ObjectStore method has its own [`Gate`] that can be independently closed,
 /// released, and configured to inject errors. Gates default to **open** (pass-through).
 ///
-/// # Usage pattern (mirrors `single_flight.rs` tests)
+/// # Usage pattern (mirrors `slatedb_common::single_flight` tests)
 /// ```ignore
 /// let inner = Arc::new(InMemory::new());
 /// let gated = Arc::new(GatedObjectStore::new(inner));
@@ -1113,12 +1269,16 @@ pub(crate) struct GatedObjectStore {
     pub(crate) head_gate: Gate,
     pub(crate) put_opts_gate: Gate,
     pub(crate) put_multipart_opts_gate: Gate,
+    pub(crate) multipart_created_gate: Arc<Gate>,
+    pub(crate) multipart_put_part_gate: Arc<Gate>,
+    pub(crate) multipart_complete_gate: Arc<Gate>,
     pub(crate) copy_gate: Gate,
     pub(crate) rename_gate: Gate,
     /// Gates each path emitted by `delete_stream`. Per-item gating preserves
     /// the pre-0.13 single-call `delete` semantics now that callers go through
     /// `ObjectStoreExt::delete`, which fans out into `delete_stream`.
     pub(crate) delete_stream_gate: Arc<Gate>,
+    pub(crate) multipart_aborts: Arc<AtomicUsize>,
 }
 
 impl GatedObjectStore {
@@ -1129,10 +1289,44 @@ impl GatedObjectStore {
             head_gate: Gate::default(),
             put_opts_gate: Gate::default(),
             put_multipart_opts_gate: Gate::default(),
+            multipart_created_gate: Arc::new(Gate::default()),
+            multipart_put_part_gate: Arc::new(Gate::default()),
+            multipart_complete_gate: Arc::new(Gate::default()),
             copy_gate: Gate::default(),
             rename_gate: Gate::default(),
             delete_stream_gate: Arc::new(Gate::default()),
+            multipart_aborts: Arc::new(AtomicUsize::new(0)),
         }
+    }
+}
+
+#[derive(Debug)]
+struct AbortCountingUpload {
+    inner: Box<dyn MultipartUpload>,
+    aborts: Arc<AtomicUsize>,
+    put_part_gate: Arc<Gate>,
+    complete_gate: Arc<Gate>,
+}
+
+#[async_trait]
+impl MultipartUpload for AbortCountingUpload {
+    fn put_part(&mut self, data: PutPayload) -> object_store::UploadPart {
+        let put_part = self.inner.put_part(data);
+        let gate = Arc::clone(&self.put_part_gate);
+        Box::pin(async move {
+            gate.wait().await?;
+            put_part.await
+        })
+    }
+
+    async fn complete(&mut self) -> object_store::Result<PutResult> {
+        self.complete_gate.wait().await?;
+        self.inner.complete().await
+    }
+
+    async fn abort(&mut self) -> object_store::Result<()> {
+        self.aborts.fetch_add(1, Ordering::SeqCst);
+        self.inner.abort().await
     }
 }
 
@@ -1173,7 +1367,14 @@ impl ObjectStore for GatedObjectStore {
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         self.put_multipart_opts_gate.wait().await?;
-        self.inner.put_multipart_opts(location, opts).await
+        let inner = self.inner.put_multipart_opts(location, opts).await?;
+        self.multipart_created_gate.wait().await?;
+        Ok(Box::new(AbortCountingUpload {
+            inner,
+            aborts: Arc::clone(&self.multipart_aborts),
+            put_part_gate: Arc::clone(&self.multipart_put_part_gate),
+            complete_gate: Arc::clone(&self.multipart_complete_gate),
+        }))
     }
 
     fn delete_stream(
@@ -1228,6 +1429,19 @@ impl ObjectStore for GatedObjectStore {
     ) -> object_store::Result<()> {
         self.rename_gate.wait().await?;
         self.inner.rename_opts(from, to, options).await
+    }
+}
+
+pub(crate) struct IdentityBlockTransformer;
+
+#[async_trait]
+impl crate::format::sst::BlockTransformer for IdentityBlockTransformer {
+    async fn encode(&self, data: Bytes) -> Result<Bytes, crate::Error> {
+        Ok(data)
+    }
+
+    async fn decode(&self, data: Bytes) -> Result<Bytes, crate::Error> {
+        Ok(data)
     }
 }
 
@@ -1581,17 +1795,21 @@ mod tests {
 pub(crate) enum RecordedCall {
     Get {
         head: bool,
+        range: Option<GetRange>,
         kind: Option<TableStoreKind>,
         sst_type: Option<SstType>,
         retry: Option<RetryReason>,
+        segment: Option<Bytes>,
     },
     Put {
         kind: Option<TableStoreKind>,
         sst_type: Option<SstType>,
+        segment: Option<Bytes>,
     },
     PutMultipart {
         kind: Option<TableStoreKind>,
         sst_type: Option<SstType>,
+        segment: Option<Bytes>,
     },
 }
 
@@ -1650,6 +1868,34 @@ impl RecordingObjectStore {
             .collect()
     }
 
+    pub(crate) fn get_segments(&self, head: bool) -> Vec<Option<Bytes>> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::Get {
+                    head: h, segment, ..
+                } if *h == head => Some(segment.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn recorded_get_ranges(&self, head: bool) -> Vec<Option<GetRange>> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|call| match call {
+                RecordedCall::Get {
+                    head: is_head,
+                    range,
+                    ..
+                } if *is_head == head => Some(range.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub(crate) fn write_kinds(&self) -> Vec<Option<TableStoreKind>> {
         self.calls
             .lock()
@@ -1674,6 +1920,19 @@ impl RecordingObjectStore {
             })
             .collect()
     }
+
+    pub(crate) fn write_segments(&self) -> Vec<Option<Bytes>> {
+        self.calls
+            .lock()
+            .iter()
+            .filter_map(|c| match c {
+                RecordedCall::Put { segment, .. } | RecordedCall::PutMultipart { segment, .. } => {
+                    Some(segment.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 impl fmt::Display for RecordingObjectStore {
@@ -1692,9 +1951,11 @@ impl ObjectStore for RecordingObjectStore {
         let tag = ObjectStoreCallTag::from_extensions(&options.extensions);
         self.calls.lock().push(RecordedCall::Get {
             head: options.head,
-            kind: tag.map(|t| t.kind),
-            sst_type: tag.map(|t| t.sst_type),
-            retry: tag.and_then(|t| t.retry),
+            range: options.range.clone(),
+            kind: tag.as_ref().map(|t| t.kind),
+            sst_type: tag.as_ref().map(|t| t.sst_type),
+            retry: tag.as_ref().and_then(|t| t.retry),
+            segment: tag.as_ref().and_then(|t| t.segment.clone()),
         });
         self.inner.get_opts(location, options).await
     }
@@ -1707,8 +1968,9 @@ impl ObjectStore for RecordingObjectStore {
     ) -> object_store::Result<PutResult> {
         let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
         self.calls.lock().push(RecordedCall::Put {
-            kind: tag.map(|t| t.kind),
-            sst_type: tag.map(|t| t.sst_type),
+            kind: tag.as_ref().map(|t| t.kind),
+            sst_type: tag.as_ref().map(|t| t.sst_type),
+            segment: tag.as_ref().and_then(|t| t.segment.clone()),
         });
         self.inner.put_opts(location, payload, opts).await
     }
@@ -1720,8 +1982,9 @@ impl ObjectStore for RecordingObjectStore {
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
         let tag = ObjectStoreCallTag::from_extensions(&opts.extensions);
         self.calls.lock().push(RecordedCall::PutMultipart {
-            kind: tag.map(|t| t.kind),
-            sst_type: tag.map(|t| t.sst_type),
+            kind: tag.as_ref().map(|t| t.kind),
+            sst_type: tag.as_ref().map(|t| t.sst_type),
+            segment: tag.as_ref().and_then(|t| t.segment.clone()),
         });
         self.inner.put_multipart_opts(location, opts).await
     }

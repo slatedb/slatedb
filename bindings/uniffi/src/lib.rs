@@ -1,10 +1,14 @@
 mod admin;
+mod block_transformer;
 mod builder;
+mod cancellation;
+mod clock;
 mod config;
 mod db;
 mod db_cache;
 mod db_reader;
 mod db_snapshot;
+mod db_status_subscription;
 mod db_transaction;
 mod error;
 mod filter_policy;
@@ -13,6 +17,7 @@ mod logging;
 mod merge_operator;
 mod metrics;
 mod object_store;
+mod object_store_builder;
 mod runtime;
 mod settings;
 mod types;
@@ -22,18 +27,23 @@ mod write_batch;
 mod write_handle;
 
 pub use admin::Admin;
+pub use block_transformer::BlockTransformer;
 pub use builder::{AdminBuilder, CloneBuilder, DbBuilder, DbReaderBuilder};
+pub use cancellation::CancellationToken;
+pub use clock::SystemClock;
 pub use config::{
-    CloseOptions, DurabilityLevel, FlushOptions, FlushType, GarbageCollectorDirectoryOptions,
-    GarbageCollectorOptions, GarbageCollectorScheduleOptions, IsolationLevel, IterationOrder,
-    MergeOptions, PutOptions, ReadOptions, ReaderMode, ReaderOptions, ScanOptions, SstBlockSize,
-    Ttl, WriteOptions,
+    CloseOptions, CompactionWorkerOptions, CompactorOptions, DurabilityLevel, FlushOptions,
+    FlushType, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+    GarbageCollectorScheduleOptions, IsolationLevel, IterationOrder, MergeOptions,
+    ObjectStoreCacheOptions, PreloadLevel, PutOptions, ReadOptions, ReaderMode, ReaderOptions,
+    ScanOptions, SstBlockSize, TracingOptions, Ttl, WriteOptions,
 };
 pub use db::Db;
 pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
+pub use db_status_subscription::DbStatusSubscription;
 pub use db_transaction::DbTransaction;
-pub use error::{CloseReason, Error, MergeOperatorCallbackError};
+pub use error::{BlockTransformerCallbackError, CloseReason, Error, MergeOperatorCallbackError};
 pub use filter_policy::{
     BloomFilterOptions, FilterContext, FilterPolicy, PrefixExtractor, PrefixTarget,
 };
@@ -45,6 +55,7 @@ pub use metrics::{
     MetricValue, MetricsRecorder, UpDownCounter,
 };
 pub use object_store::ObjectStore;
+pub use object_store_builder::{ObjectStoreBuilder, ObjectStoreType};
 pub use settings::Settings;
 pub use types::{
     CacheTarget, Checkpoint, CloneSourceSpec, Compaction, CompactionSpec, CompactionStatus,

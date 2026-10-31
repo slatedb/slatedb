@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::BufMut;
+use bytes::{BufMut, Bytes};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use log::{error, info};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
-use rand::RngCore;
+use rand::Rng;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use ulid::Ulid;
@@ -27,7 +27,6 @@ use crate::db_state::{SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::format::sst::SsTableFormat;
 use crate::manifest::store::{ManifestStore, StoredManifest};
-use crate::object_stores::ObjectStores;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::types::RowEntry;
 use crate::types::ValueDeletable;
@@ -58,7 +57,7 @@ impl CompactionExecuteBench {
     }
 
     fn sst_id(id: u32) -> SsTableId {
-        SsTableId::Compacted(Ulid::from((id as u64, id as u64)))
+        SsTableId::from(Ulid::from((id as u64, id as u64)))
     }
 
     pub async fn run_load(
@@ -74,7 +73,7 @@ impl CompactionExecuteBench {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(self.object_store.clone(), None),
+            self.object_store.clone(),
             sst_format,
             self.path.clone(),
             None,
@@ -169,7 +168,8 @@ impl CompactionExecuteBench {
         suffix.put_u32(i);
         let mut key_gen =
             OrderedBytesGenerator::new_with_suffix(suffix.as_ref(), key_start.as_slice());
-        let mut sst_writer = table_store.table_writer(CompactionExecuteBench::sst_id(i));
+        let mut sst_writer =
+            table_store.table_writer(CompactionExecuteBench::sst_id(i), Some(Bytes::new()));
         for _ in 0..num_keys {
             let mut val = vec![0u8; val_bytes];
             rand.rng().fill_bytes(val.as_mut_slice());
@@ -177,7 +177,7 @@ impl CompactionExecuteBench {
             let row_entry = RowEntry::new(key, ValueDeletable::Value(val.into()), 0, None, None);
             sst_writer.add(row_entry).await?;
         }
-        let sst = sst_writer.close().await?;
+        let (sst, _) = sst_writer.close().await?;
         let elapsed_ms = system_clock
             .now()
             .signed_duration_since(start)
@@ -235,7 +235,7 @@ impl CompactionExecuteBench {
             }
             let table_store_clone = table_store.clone();
             let jh = tokio::spawn(async move {
-                match table_store_clone.open_sst(&id).await {
+                match table_store_clone.open_sst(&id, Some(Bytes::new())).await {
                     Ok(h) => Ok((id, h)),
                     Err(err) => Err(err),
                 }
@@ -265,6 +265,7 @@ impl CompactionExecuteBench {
         Ok(StartCompactionJobArgs {
             id,
             compaction_id,
+            segment: Bytes::new(),
             destination: 0,
             l0_sst_views: sst_views,
             sorted_runs: vec![],
@@ -305,6 +306,7 @@ impl CompactionExecuteBench {
         StartCompactionJobArgs {
             id: rand.rng().gen_ulid(system_clock.as_ref()),
             compaction_id: job.id(),
+            segment: spec.segment().clone(),
             destination: 0,
             l0_sst_views: vec![],
             sorted_runs: srs,
@@ -327,7 +329,7 @@ impl CompactionExecuteBench {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(self.object_store.clone(), None),
+            self.object_store.clone(),
             sst_format,
             self.path.clone(),
             None,
@@ -418,13 +420,7 @@ impl CompactionExecuteBench {
         Ok(())
     }
 
-    #[allow(clippy::panic)]
     fn sst_path(id: &SsTableId, root_path: &Path) -> Path {
-        match id {
-            SsTableId::Compacted(ulid) => {
-                Path::from(format!("{}/compacted/{}.sst", root_path, ulid.to_string()))
-            }
-            _ => panic!("invalid sst type"),
-        }
+        Path::from(format!("{}/compacted/{}.sst", root_path, id.value()))
     }
 }

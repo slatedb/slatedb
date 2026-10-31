@@ -10,8 +10,10 @@ use ulid::Ulid;
 
 use crate::db_state::{SortedRun, SsTableHandle, SsTableView};
 use crate::error::SlateDBError;
+use crate::incremental_progress::IncrementalProgress;
 use crate::manifest::{Manifest, ManifestCore};
-use crate::subcompaction::Subcompaction;
+use crate::subcompaction::{Subcompaction, SubcompactionStatus};
+use slatedb_common::DbRand;
 use slatedb_txn_obj::DirtyObject;
 
 /// Identifier for a compaction input source.
@@ -181,6 +183,12 @@ impl CompactionSpec {
     /// Returns true if this is a [`CompactionSpec::DrainSegment`] spec.
     pub fn is_drain(&self) -> bool {
         matches!(self, CompactionSpec::DrainSegment(_))
+    }
+
+    /// Returns whether this job reuses an input run as its destination.
+    pub(crate) fn reuses_input_run(&self) -> bool {
+        self.destination()
+            .is_some_and(|id| self.sources().contains(&SourceId::SortedRun(id)))
     }
 
     /// Returns true if any of the compaction sources are L0 SST views.
@@ -391,6 +399,13 @@ impl CompactionContext {
             .set_output_ssts(output_ssts);
     }
 
+    pub(crate) fn mark_completed(&mut self, subcompaction: usize) {
+        let subcompaction = &mut self.subcompactions[subcompaction];
+        *subcompaction = subcompaction
+            .clone()
+            .with_status(SubcompactionStatus::Completed);
+    }
+
     /// Returns the subcompactions of this compaction, if any.
     pub fn subcompactions(&self) -> &Vec<Subcompaction> {
         &self.subcompactions
@@ -415,6 +430,17 @@ impl CompactionContext {
             .iter()
             .zip(updated.subcompactions.iter())
         {
+            assert!(
+                !prev.completed() || next.completed(),
+                "completed subcompactions must remain complete"
+            );
+            if prev.completed() {
+                assert_eq!(
+                    prev.output_ssts().len(),
+                    next.output_ssts().len(),
+                    "completed subcompaction output SSTs must not change"
+                );
+            }
             assert_eq!(
                 prev.range(),
                 next.range(),
@@ -510,21 +536,60 @@ impl Compaction {
     /// Returns all L0 SSTable sources for this compaction. Sources are looked
     /// up from the spec's target segment tree (root tree for an empty
     /// segment).
+    /// Returns an error if a source is missing, ambiguous, or repeated.
     ///
     /// ## Arguments
     /// - `db_state`: The current core DB state from the manifest.
-    pub(crate) fn get_l0_sst_views(&self, db_state: &ManifestCore) -> Vec<SsTableView> {
+    pub(crate) fn get_l0_sst_views(
+        &self,
+        db_state: &ManifestCore,
+    ) -> Result<Vec<SsTableView>, SlateDBError> {
         let Some(tree) = db_state.tree_for_segment(self.spec.segment()) else {
-            return Vec::new();
+            debug!(
+                "compaction target segment missing [compaction_id={}, segment={:?}]",
+                self.id,
+                self.spec.segment()
+            );
+            return Err(SlateDBError::InvalidCompaction);
         };
-        let sst_views_by_id: HashMap<Ulid, &SsTableView> =
-            tree.l0.iter().map(|view| (view.id, view)).collect();
+        let mut sst_views_by_id = HashMap::new();
+        for view in &tree.l0 {
+            // None marks an ID shared by multiple views.
+            sst_views_by_id
+                .entry(view.id)
+                .and_modify(|entry| *entry = None)
+                .or_insert(Some(view));
+        }
 
+        let mut sources_seen = HashSet::new();
         self.spec
             .sources()
             .iter()
             .filter_map(|s| s.maybe_unwrap_sst_view())
-            .filter_map(|ulid| sst_views_by_id.get(&ulid).map(|t| (*t).clone()))
+            .map(|id| {
+                if !sources_seen.insert(id) {
+                    debug!(
+                        "compaction L0 source repeated [compaction_id={}, view_id={}]",
+                        self.id, id
+                    );
+                    return Err(SlateDBError::InvalidCompaction);
+                }
+                match sst_views_by_id.get(&id) {
+                    Some(Some(view)) => Ok((*view).clone()),
+                    invalid => {
+                        let reason = if invalid.is_some() {
+                            "ambiguous"
+                        } else {
+                            "missing"
+                        };
+                        debug!(
+                            "compaction L0 source {} [compaction_id={}, view_id={}]",
+                            reason, self.id, id
+                        );
+                        Err(SlateDBError::InvalidCompaction)
+                    }
+                }
+            })
             .collect()
     }
 
@@ -532,7 +597,7 @@ impl Compaction {
     /// key ranges. Reusing the views avoids reading or rewriting SST data.
     pub(crate) fn trivial_move_output(&self, db_state: &ManifestCore) -> Option<SortedRun> {
         let destination = self.spec.destination()?;
-        let mut sst_views = self.get_l0_sst_views(db_state);
+        let mut sst_views = self.get_l0_sst_views(db_state).ok()?;
         sst_views.extend(
             self.get_sorted_runs(db_state)
                 .iter()
@@ -580,6 +645,16 @@ impl Compaction {
     /// Returns the current status of this compaction.
     pub fn status(&self) -> CompactionStatus {
         self.status
+    }
+
+    /// Returns whether a worker can claim this compaction but has not yet.
+    pub(crate) fn scheduled(&self) -> bool {
+        matches!(self.status, CompactionStatus::Scheduled)
+    }
+
+    /// Returns whether a worker has claimed this compaction and is executing it.
+    pub(crate) fn running(&self) -> bool {
+        matches!(self.status, CompactionStatus::Running)
     }
 
     /// Returns all output SSTs produced by this compaction.
@@ -648,17 +723,14 @@ impl Display for Compaction {
         }
         // TODO: fix me by implementing Display for CompactionJob
         if !self.subcompactions().is_empty() {
-            // Subcompactions carry no status, so report how many ranges have
-            // produced output so far rather than a completion count.
-            let with_output = self
+            let completed = self
                 .subcompactions()
                 .iter()
-                .filter(|s| !s.output_ssts().is_empty())
+                .filter(|s| s.completed())
                 .count();
             write!(
                 f,
-                " [{}/{} subcompactions with output]",
-                with_output,
+                " [{completed}/{} subcompactions completed]",
                 self.subcompactions().len()
             )?;
         }
@@ -1009,6 +1081,28 @@ impl CompactorState {
         self.manifest = remote_manifest;
     }
 
+    /// Applies `progress` of `job` to the in-memory manifest.
+    ///
+    /// [`IncrementalProgress::apply_to_manifest_core`] describes how the views
+    /// change. This method also removes parent SST IDs that no view uses anymore
+    /// from `external_dbs`.
+    ///
+    /// Returns whether the manifest changed. The caller writes the manifest. If this
+    /// method returns an error, the manifest does not change.
+    pub(crate) fn apply_incremental_progress_to_manifest(
+        &mut self,
+        job: &Compaction,
+        progress: &IncrementalProgress,
+        rand: &DbRand,
+    ) -> Result<bool, SlateDBError> {
+        let mut core = self.db_state().clone();
+        progress.apply_to_manifest_core(&mut core, job.spec(), rand)?;
+        let changed = &core != self.db_state();
+        self.manifest.value.core = core;
+        self.manifest.value.prune_external_sst_ids();
+        Ok(changed)
+    }
+
     /// Registers a newly proposed compaction in the compactor's local state.
     ///
     /// Only enforces invariants about *conflicts across in-flight compactions* — checks
@@ -1110,10 +1204,7 @@ impl CompactorState {
                 .chain(std::iter::once(&SourceId::SortedRun(dst)))
                 .filter_map(|id| id.maybe_unwrap_sorted_run())
                 .collect();
-            let first_source = *spec
-                .sources()
-                .first()
-                .expect("illegal: empty compaction spec");
+            assert!(!spec.sources().is_empty(), "illegal: empty compaction spec");
 
             let Some(tree) = db_state.tree_for_segment_mut(&segment) else {
                 error!(
@@ -1150,16 +1241,19 @@ impl CompactorState {
                 new_compacted.push(output_sr);
             }
             Self::assert_compacted_srs_in_id_order(&new_compacted);
-            if let Some(view_id) = first_source.maybe_unwrap_sst_view() {
-                // if there are l0s, the newest must be the first entry in sources.
-                // TODO: validate that this is the case
+            // The watermark covers this L0 and all older L0s. Walk from
+            // oldest to newest and stop at the first uncompacted L0 so the
+            // writer does not discard it when merging.
+            let newest_compacted_l0 = tree
+                .l0
+                .iter()
+                .rev()
+                .take_while(|v| compaction_l0s.contains(&v.id))
+                .last()
+                .map(|v| (v.id, v.sst.id.value()));
+            if let Some((view_id, sst_id)) = newest_compacted_l0 {
                 tree.last_compacted_l0_sst_view_id = Some(view_id);
-                // Resolve the SST ID from the view before it's removed from l0.
-                tree.last_compacted_l0_sst_id = tree
-                    .l0
-                    .iter()
-                    .find(|v| v.id == view_id)
-                    .map(|v| v.sst.id.unwrap_compacted_id());
+                tree.last_compacted_l0_sst_id = Some(sst_id);
             }
             tree.l0 = new_l0;
             tree.compacted = new_compacted;
@@ -1242,7 +1336,7 @@ impl CompactorState {
             .cloned()
         {
             tree.last_compacted_l0_sst_view_id = Some(view.id);
-            tree.last_compacted_l0_sst_id = Some(view.sst.id.unwrap_compacted_id());
+            tree.last_compacted_l0_sst_id = Some(view.sst.id.value());
         }
 
         tree.l0.retain(|view| !drained_l0_ids.contains(&view.id));
@@ -1297,7 +1391,7 @@ mod tests {
 
     fn test_subcompaction_sst(first_key: &[u8]) -> SsTableHandle {
         SsTableHandle::new(
-            SsTableId::Compacted(Ulid::new()),
+            SsTableId::from(Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo {
                 first_entry: Some(Bytes::copy_from_slice(first_key)),
@@ -1312,6 +1406,40 @@ mod tests {
             CompactionSpec::new(vec![SourceId::SortedRun(1)], 1),
         )
         .with_ctx(Some(CompactionContext::new(subcompactions, Some(0))))
+    }
+
+    #[test]
+    #[should_panic(expected = "completed subcompactions must remain complete")]
+    fn test_subcompaction_completion_cannot_revert() {
+        let completed = CompactionContext::new(
+            vec![Subcompaction::new(BytesRange::unbounded())
+                .with_status(SubcompactionStatus::Completed)],
+            Some(42),
+        );
+        let incomplete =
+            CompactionContext::new(vec![Subcompaction::new(BytesRange::unbounded())], Some(42));
+        completed.validate_update(&incomplete);
+    }
+
+    #[test]
+    #[should_panic(expected = "completed subcompaction output SSTs must not change")]
+    fn test_should_panic_when_completed_subcompaction_output_ssts_change() {
+        // given: a completed subcompaction that recorded output SST "a"
+        let range = BytesRange::unbounded();
+        let sst = test_subcompaction_sst(b"a");
+        let mut compaction =
+            test_compaction_with_subcompactions(vec![Subcompaction::new(range.clone())
+                .with_output_ssts(vec![sst.clone()])
+                .with_status(SubcompactionStatus::Completed)]);
+
+        // when/then: adding an output SST to the completed range panics, even
+        // though the new list starts with the old list
+        set_test_subcompactions(
+            &mut compaction,
+            vec![Subcompaction::new(range)
+                .with_output_ssts(vec![sst, test_subcompaction_sst(b"m")])
+                .with_status(SubcompactionStatus::Completed)],
+        );
     }
 
     #[test]
@@ -1396,6 +1524,19 @@ mod tests {
 
         // then: the extended output SSTs are accepted
         assert_eq!(compaction.subcompactions()[0].output_ssts().len(), 2);
+    }
+
+    #[test]
+    fn test_display_counts_completed_subcompactions() {
+        let compaction = test_compaction_with_subcompactions(vec![
+            Subcompaction::new(BytesRange::from_slice(..b"m".as_slice()))
+                .with_status(SubcompactionStatus::Completed),
+            Subcompaction::new(BytesRange::from_slice(b"m".as_slice()..))
+                .with_output_ssts(vec![test_subcompaction_sst(b"m")]),
+        ]);
+        assert!(compaction
+            .to_string()
+            .ends_with(" [1/2 subcompactions completed]"));
     }
 
     #[test]
@@ -1755,6 +1896,147 @@ mod tests {
         assert_eq!(expected_ids, found_ids);
     }
 
+    /// The watermark must name the newest absorbed L0, whatever order the spec
+    /// lists its L0 sources in.
+    #[test]
+    fn test_finish_compaction_watermark_is_newest_l0_when_sources_reversed() {
+        // given:
+        let rt = build_runtime();
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
+        let l0 = state.db_state().tree.l0.clone();
+        assert!(l0.len() >= 2, "fixture must seed at least two L0 SSTs");
+        let newest = l0.front().unwrap().clone();
+        let reversed: VecDeque<SsTableView> = l0.iter().rev().cloned().collect();
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = build_l0_compaction(&reversed, 0);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        // when:
+        let sr = SortedRun::new(0, l0.iter().cloned());
+        state.finish_compaction(compaction_id, sr);
+
+        // then:
+        let tree = &state.db_state().tree;
+        assert_eq!(tree.last_compacted_l0_sst_view_id, Some(newest.id));
+        assert_eq!(tree.last_compacted_l0_sst_id, Some(newest.sst.id.value()));
+    }
+
+    /// A watermark naming anything but the newest absorbed L0 cuts the writer's
+    /// L0 list too early, leaving compacted L0s that count against `l0_max_ssts`.
+    #[test]
+    fn test_finish_compaction_merge_retains_no_absorbed_l0_when_sources_reversed() {
+        // given:
+        let rt = build_runtime();
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
+        let writer_tree = state.db_state().tree.as_ref().clone();
+        let l0 = writer_tree.l0.clone();
+        assert!(l0.len() >= 2, "fixture must seed at least two L0 SSTs");
+        let absorbed: HashSet<Ulid> = l0.iter().map(|view| view.id).collect();
+        let reversed: VecDeque<SsTableView> = l0.iter().rev().cloned().collect();
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = build_l0_compaction(&reversed, 0);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        // when:
+        let sr = SortedRun::new(0, l0.iter().cloned());
+        state.finish_compaction(compaction_id, sr);
+        let compactor_tree = state.db_state().tree.as_ref().clone();
+        let merged = writer_tree.merge_from_compactor(&compactor_tree);
+
+        // then:
+        let retained: Vec<Ulid> = merged
+            .l0
+            .iter()
+            .map(|view| view.id)
+            .filter(|id| absorbed.contains(id))
+            .collect();
+        assert!(
+            retained.is_empty(),
+            "writer retained absorbed L0 views: {:?}",
+            retained
+        );
+    }
+
+    /// A spec naming a non-contiguous set of L0s must not advance the watermark
+    /// past an L0 it never compacted, or the writer's merge drops live data.
+    #[test]
+    fn test_finish_compaction_keeps_uncompacted_l0_when_sources_non_contiguous() {
+        // given:
+        let rt = build_runtime();
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
+        let writer_tree = state.db_state().tree.as_ref().clone();
+        let l0 = writer_tree.l0.clone();
+        assert!(l0.len() >= 3, "fixture must seed at least three L0 SSTs");
+        // `l0` is newest-first. Name the oldest and the third-oldest, leaving
+        // the second-oldest uncompacted between them.
+        let oldest = l0[l0.len() - 1].clone();
+        let skipped = l0[l0.len() - 2].clone();
+        let third_oldest = l0[l0.len() - 3].clone();
+        let sources = VecDeque::from(vec![oldest.clone(), third_oldest.clone()]);
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = build_l0_compaction(&sources, 0);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        // when:
+        let sr = SortedRun::new(0, sources.iter().cloned());
+        state.finish_compaction(compaction_id, sr);
+        let compactor_tree = state.db_state().tree.as_ref().clone();
+        let merged = writer_tree.merge_from_compactor(&compactor_tree);
+
+        // then:
+        assert_eq!(
+            compactor_tree.last_compacted_l0_sst_view_id,
+            Some(oldest.id),
+            "watermark must stop at the gap"
+        );
+        assert!(
+            merged.l0.iter().any(|view| view.id == skipped.id),
+            "dropped an L0 that was never compacted"
+        );
+    }
+
+    /// A spec that leaves the oldest L0 uncompacted must not advance the
+    /// watermark at all. A single cut point cannot say "these middle L0s are
+    /// gone", so trimming on one would drop the older L0s that are still live.
+    #[test]
+    fn test_finish_compaction_keeps_oldest_l0_when_sources_exclude_it() {
+        // given:
+        let rt = build_runtime();
+        let (_, _, mut state, system_clock, rand) = build_test_state(rt.handle());
+        let writer_tree = state.db_state().tree.as_ref().clone();
+        let l0 = writer_tree.l0.clone();
+        assert!(l0.len() >= 3, "fixture must seed at least three L0 SSTs");
+        // `l0` is newest-first. Compact the second- and third-oldest, listed
+        // newest-first, leaving the oldest L0 out of the spec.
+        let oldest = l0[l0.len() - 1].clone();
+        let second_oldest = l0[l0.len() - 2].clone();
+        let third_oldest = l0[l0.len() - 3].clone();
+        let sources = VecDeque::from(vec![third_oldest.clone(), second_oldest.clone()]);
+        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
+        let spec = build_l0_compaction(&sources, 0);
+        state
+            .add_compaction(Compaction::new(compaction_id, spec))
+            .expect("failed to add compaction");
+
+        // when:
+        let sr = SortedRun::new(0, sources.iter().cloned());
+        state.finish_compaction(compaction_id, sr);
+        let compactor_tree = state.db_state().tree.as_ref().clone();
+        let merged = writer_tree.merge_from_compactor(&compactor_tree);
+
+        // then:
+        assert!(
+            merged.l0.iter().any(|view| view.id == oldest.id),
+            "dropped the oldest L0, which this compaction never absorbed"
+        );
+    }
+
     #[test]
     fn test_finish_compaction_prunes_external_sst_ids() {
         use crate::manifest::ExternalDb;
@@ -1768,7 +2050,7 @@ mod tests {
         // compacted sorted run and remain live) and a stale ID that was never in the
         // manifest (simulating a parent SST already compacted away on a prior cycle).
         let live_id = before_compaction.tree.l0.front().unwrap().sst.id;
-        let stale_id = SsTableId::Compacted(Ulid::new());
+        let stale_id = SsTableId::from(Ulid::new());
         state.manifest.value.external_dbs = vec![
             ExternalDb {
                 path: "/parent/db".to_string(),
@@ -1854,14 +2136,14 @@ mod tests {
             .tree
             .l0
             .iter()
-            .map(|t| t.sst.id.unwrap_compacted_id())
+            .map(|t| t.sst.id.value())
             .collect();
         let merged_l0s: Vec<Ulid> = state
             .db_state()
             .tree
             .l0
             .iter()
-            .map(|h| h.sst.id.unwrap_compacted_id())
+            .map(|h| h.sst.id.value())
             .collect();
         assert_eq!(expected_merged_l0s, merged_l0s);
     }
@@ -1871,7 +2153,7 @@ mod tests {
         let manifest = new_dirty_manifest();
         let compactions = new_dirty_compactions(manifest.value.compactor_epoch);
         let mut state = CompactorState::new(manifest, compactions);
-        let stale_id = SsTableId::Compacted(Ulid::new());
+        let stale_id = SsTableId::from(Ulid::new());
         let mut remote = new_dirty_manifest();
         remote.value.external_dbs = vec![crate::manifest::ExternalDb {
             path: "/parent/db".to_string(),
@@ -1920,28 +2202,12 @@ mod tests {
 
         // then:
         let db_state = state.db_state();
-        let mut expected_merged_l0s: VecDeque<Ulid> = original_l0s
-            .iter()
-            .map(|h| h.sst.id.unwrap_compacted_id())
-            .collect();
+        let mut expected_merged_l0s: VecDeque<Ulid> =
+            original_l0s.iter().map(|h| h.sst.id.value()).collect();
         expected_merged_l0s.pop_back();
-        let new_l0 = sm
-            .manifest()
-            .core
-            .tree
-            .l0
-            .front()
-            .unwrap()
-            .sst
-            .id
-            .unwrap_compacted_id();
+        let new_l0 = sm.manifest().core.tree.l0.front().unwrap().sst.id.value();
         expected_merged_l0s.push_front(new_l0);
-        let merged_l0: VecDeque<Ulid> = db_state
-            .tree
-            .l0
-            .iter()
-            .map(|h| h.sst.id.unwrap_compacted_id())
-            .collect();
+        let merged_l0: VecDeque<Ulid> = db_state.tree.l0.iter().map(|h| h.sst.id.value()).collect();
         assert_eq!(merged_l0, expected_merged_l0s);
         assert_eq!(
             compacted_to_description(&db_state.tree.compacted),
@@ -1985,23 +2251,9 @@ mod tests {
         // then:
         let db_state = state.db_state();
         let mut expected_merged_l0s = VecDeque::new();
-        let new_l0 = sm
-            .manifest()
-            .core
-            .tree
-            .l0
-            .front()
-            .unwrap()
-            .sst
-            .id
-            .unwrap_compacted_id();
+        let new_l0 = sm.manifest().core.tree.l0.front().unwrap().sst.id.value();
         expected_merged_l0s.push_front(new_l0);
-        let merged_l0: VecDeque<Ulid> = db_state
-            .tree
-            .l0
-            .iter()
-            .map(|h| h.sst.id.unwrap_compacted_id())
-            .collect();
+        let merged_l0: VecDeque<Ulid> = db_state.tree.l0.iter().map(|h| h.sst.id.value()).collect();
         assert_eq!(merged_l0, expected_merged_l0s);
     }
 
@@ -2034,7 +2286,7 @@ mod tests {
         fn view(seq: u64) -> SsTableView {
             let ulid = Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(ulid),
+                SsTableId::from(ulid),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo::default(),
             ))
@@ -2103,7 +2355,7 @@ mod tests {
         fn view(seq: u64) -> SsTableView {
             let ulid = Ulid::from_parts(seq, 0);
             SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(ulid),
+                SsTableId::from(ulid),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo::default(),
             ))
@@ -2567,7 +2819,7 @@ mod tests {
     fn drain_test_view(seed: u64) -> SsTableView {
         let ulid = Ulid::from_parts(seed, 0);
         SsTableView::identity(SsTableHandle::new(
-            SsTableId::Compacted(ulid),
+            SsTableId::from(ulid),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo::default(),
         ))
@@ -2668,7 +2920,10 @@ mod tests {
 
     fn build_db(os: Arc<dyn ObjectStore>, tokio_handle: &Handle) -> Db {
         let opts = Settings {
-            l0_sst_size_bytes: 256,
+            // The two seeded puts must land in one L0 SST, so this sits
+            // between the estimated size of a one entry and a two entry
+            // memtable.
+            l0_sst_size_bytes: 300,
             // make sure to run with the compactor disabled. The tests will explicitly
             // manage compaction execution and assert the associated state mutations.
             compactor_options: None,

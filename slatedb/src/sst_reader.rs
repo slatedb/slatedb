@@ -47,6 +47,7 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use ulid::Ulid;
@@ -58,8 +59,8 @@ use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo};
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::sst::{BlockTransformer, SsTableFormat};
 use crate::iter::IterationOrder;
-use crate::object_stores::ObjectStores;
 use crate::partitioned_keyspace::{partition_point, RangePartitionedKeySpace};
+use crate::read_trace::ReadTrace;
 use crate::sst_stats::SstStats;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::types::RowEntry;
@@ -92,7 +93,7 @@ impl SstReader {
             ..SsTableFormat::default()
         };
         let table_store = Arc::new(TableStore::new(
-            ObjectStores::new(object_store, None),
+            object_store,
             sst_format,
             root_path.into(),
             cache,
@@ -111,7 +112,10 @@ impl SstReader {
     /// Returns an error if the SST file does not exist (e.g. it was GC'd)
     /// or if there is an issue reading from object storage.
     pub async fn open(&self, id: Ulid) -> Result<SstFile, crate::Error> {
-        let handle = self.table_store.open_sst(&SsTableId::Compacted(id)).await?;
+        let handle = self
+            .table_store
+            .open_sst(&SsTableId::from(id), Some(Bytes::new()))
+            .await?;
         Ok(SstFile {
             id,
             handle,
@@ -121,18 +125,8 @@ impl SstReader {
 
     /// Creates an `SstFile` from an existing `SsTableHandle` (no I/O needed).
     ///
-    /// ## Errors
-    ///
-    /// Returns an error if the handle is not a compacted SST (e.g. a WAL SST).
     pub fn open_with_handle(&self, handle: SsTableHandle) -> Result<SstFile, crate::Error> {
-        let id = match handle.id {
-            SsTableId::Compacted(ulid) => ulid,
-            SsTableId::Wal(_) => {
-                return Err(crate::Error::invalid(
-                    "SstReader only supports compacted SSTs, not WAL SSTs".to_string(),
-                ));
-            }
-        };
+        let id = handle.id.value();
         Ok(SstFile {
             id,
             handle,
@@ -235,7 +229,7 @@ impl SstFile {
     pub async fn metadata(&self) -> Result<IdentifiedObjectMetadata<Ulid>, crate::Error> {
         let metadata = self
             .table_store
-            .metadata(&self.handle.id)
+            .metadata(&self.handle.id, Some(Bytes::new()))
             .await
             .map_err(crate::Error::from)?;
         Ok(IdentifiedObjectMetadata::new(self.id, metadata))
@@ -251,7 +245,7 @@ impl SstFile {
     /// Returns an error if there is an issue reading from object storage.
     pub async fn stats(&self) -> Result<Option<SstStats>, crate::Error> {
         self.table_store
-            .read_stats(&self.handle, true)
+            .read_stats(&self.handle, true, Some(Bytes::new()))
             .await
             .map_err(Into::into)
     }
@@ -268,7 +262,16 @@ impl SstFile {
     ///
     /// Returns an error if there is an issue reading from object storage.
     pub async fn index(&self) -> Result<SstIndex, crate::Error> {
-        let inner = self.table_store.read_index(&self.handle, true).await?;
+        let inner = self
+            .table_store
+            .read_index(
+                &self.handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
+            .await?;
         Ok(SstIndex { inner })
     }
 
@@ -285,7 +288,16 @@ impl SstFile {
     /// Returns an error if `block` is out of range for this SST, or if there
     /// is an issue reading or decoding the block.
     pub async fn read_block(&self, block: usize) -> Result<Vec<RowEntry>, crate::Error> {
-        let index = self.table_store.read_index(&self.handle, true).await?;
+        let index = self
+            .table_store
+            .read_index(
+                &self.handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
+            .await?;
         let num_blocks = index.borrow().block_meta().len();
         if block >= num_blocks {
             return Err(crate::Error::invalid(format!(
@@ -294,7 +306,15 @@ impl SstFile {
         }
         let mut blocks = self
             .table_store
-            .read_blocks_using_index(&self.handle, index, block..block + 1, true)
+            .read_blocks_using_index(
+                &self.handle,
+                index,
+                block..block + 1,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
             .await?;
         let block = blocks
             .pop_front()
@@ -379,10 +399,7 @@ mod tests {
             "expected at least one L0 SST"
         );
         let view = &manifest.manifest.core.tree.l0[0];
-        let sst_file = reader
-            .open(view.sst.id.unwrap_compacted_id())
-            .await
-            .unwrap();
+        let sst_file = reader.open(view.sst.id.value()).await.unwrap();
 
         let info = sst_file.info();
         assert!(info.first_entry.is_some());
@@ -397,7 +414,7 @@ mod tests {
         let view = &manifest.manifest.core.tree.l0[0];
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
 
-        assert_eq!(sst_file.id(), view.sst.id.unwrap_compacted_id());
+        assert_eq!(sst_file.id(), view.sst.id.value());
         assert_eq!(sst_file.info(), &view.sst.info);
     }
 
@@ -574,22 +591,12 @@ mod tests {
         let sst_file = reader.open_with_handle(view.sst.clone()).unwrap();
         let metadata = sst_file.metadata().await.unwrap();
 
-        assert_eq!(metadata.id, view.sst.id.unwrap_compacted_id());
+        assert_eq!(metadata.id, view.sst.id.value());
         assert!(metadata.metadata.size > 0);
         assert_eq!(
             metadata.metadata.location,
             PathResolver::from_root(path).sst_path(&view.sst.id)
         );
-    }
-
-    #[tokio::test]
-    async fn test_open_with_wal_handle_returns_error() {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let reader = SstReader::new("/test", store, None, None);
-
-        let wal_handle = SsTableHandle::new(SsTableId::Wal(42), 0, SsTableInfo::default());
-        let result = reader.open_with_handle(wal_handle);
-        assert!(result.is_err());
     }
 
     #[tokio::test]

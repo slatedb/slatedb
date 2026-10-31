@@ -18,6 +18,7 @@ use crate::db_common::extract_segment_prefix;
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::prefix_extractor::PrefixExtractor;
+use crate::read_trace::ReadTrace;
 use crate::seq_tracker::{SequenceTracker, TrackedSeq};
 use crate::types::RowEntry;
 use crate::utils::{WatchableOnceCell, WatchableOnceCellReader};
@@ -194,6 +195,9 @@ pub(crate) struct MemTableIteratorInner<T: RangeBounds<SequencedKey>> {
     /// in seq-ascending order. Pushing them onto this stack and popping gives
     /// seq-descending order, which is what the merge iterator needs for dedup.
     descending_stack: Vec<RowEntry>,
+    read_trace: ReadTrace,
+    /// End bound of the original range, kept for `seek` because `Range` does not expose it.
+    end_bound: Bound<SequencedKey>,
 }
 pub(crate) type MemTableIterator = MemTableIteratorInner<KVTableInternalKeyRange>;
 
@@ -208,21 +212,51 @@ impl RowEntryIterator for MemTableIterator {
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        loop {
-            let front = self.borrow_item().clone();
-            if front.is_some_and(|record| record.key < next_key) {
-                self.next_sync();
+        // DbIterator::seek rejects descending scans before it reaches the memtable.
+        match self.borrow_ordering() {
+            IterationOrder::Ascending => {
+                self.seek_ascending(next_key);
                 // Keep in-memory seeking cooperative.
                 tokio::task::coop::consume_budget().await;
-            } else {
-                return Ok(());
+                Ok(())
             }
+            IterationOrder::Descending => Err(SlateDBError::SeekNotSupportedForDescendingScan),
         }
     }
 }
 
 impl MemTableIterator {
+    /// Moves to the first entry with a key at or after `next_key` in O(log n).
+    ///
+    /// A crossbeam `Range` searches the skiplist only on its first `next()`, so this
+    /// replaces `inner` with a new range starting at `next_key`.
+    fn seek_ascending(&mut self, next_key: &[u8]) {
+        // Do not move backwards or revive an exhausted iterator.
+        if self
+            .borrow_item()
+            .as_ref()
+            .is_none_or(|record| record.key >= next_key)
+        {
+            return;
+        }
+        // u64::MAX starts at the newest version; see `KVTableInternalKeyRange::from`.
+        let range = KVTableInternalKeyRange {
+            start_bound: Bound::Included(SequencedKey::new(
+                Bytes::copy_from_slice(next_key),
+                u64::MAX,
+            )),
+            end_bound: self.borrow_end_bound().clone(),
+        };
+        self.with_mut(|fields| {
+            *fields.inner = fields.map.range(range);
+            *fields.item = None;
+        });
+        self.next_sync();
+    }
+
     pub(crate) fn next_sync(&mut self) -> Option<RowEntry> {
+        let span = self.borrow_read_trace().new_memtable_span();
+        let _guard = span.enter();
         match self.borrow_ordering() {
             IterationOrder::Ascending => self.next_ascending(),
             IterationOrder::Descending => self.next_descending(),
@@ -500,21 +534,25 @@ impl KVTable {
     }
 
     pub(crate) fn range_ascending<T: RangeBounds<Bytes>>(&self, range: T) -> MemTableIterator {
-        self.range(range, IterationOrder::Ascending)
+        self.range(range, IterationOrder::Ascending, ReadTrace::none())
     }
 
     pub(crate) fn range<T: RangeBounds<Bytes>>(
         &self,
         range: T,
         ordering: IterationOrder,
+        read_trace: ReadTrace,
     ) -> MemTableIterator {
         let internal_range = KVTableInternalKeyRange::from(range);
+        let end_bound = internal_range.end_bound.clone();
         let mut iterator = MemTableIteratorInnerBuilder {
             map: self.map.clone(),
             inner_builder: |map| map.range(internal_range),
             ordering,
             item: None,
             descending_stack: Vec::new(),
+            read_trace,
+            end_bound,
         }
         .build();
         iterator.next_sync();
@@ -860,7 +898,10 @@ mod tests {
             .run(
                 &(arbitrary::nonempty_range(10), arbitrary::iteration_order()),
                 |(range, ordering)| {
-                    let mut kv_iter = kv_table.table.range(range.clone(), ordering);
+                    let mut kv_iter =
+                        kv_table
+                            .table
+                            .range(range.clone(), ordering, ReadTrace::none());
 
                     runtime.block_on(test_utils::assert_ranged_kv_scan(
                         &sample_table,
@@ -1076,7 +1117,9 @@ mod tests {
         table.put(RowEntry::new_value(b"bbbb", b"new", 2));
         table.put(RowEntry::new_value(b"cccc", b"v3", 3));
 
-        let mut iter = table.table().range(.., IterationOrder::Descending);
+        let mut iter = table
+            .table()
+            .range(.., IterationOrder::Descending, ReadTrace::none());
 
         // In descending order, for key "bbbb" the newest version (seq 2) must
         // come before the older version (seq 1) so that dedup works correctly.
@@ -1090,5 +1133,142 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    fn seek_test_table() -> WritableKVTable {
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"abc111", b"value1", 1));
+        table.put(RowEntry::new_value(b"abc222", b"value2", 2));
+        table.put(RowEntry::new_value(b"abc333", b"old", 3));
+        table.put(RowEntry::new_value(b"abc333", b"new", 4));
+        table.put(RowEntry::new_value(b"abc444", b"value4", 5));
+        table.put(RowEntry::new_value(b"abc555", b"value5", 6));
+        table
+    }
+
+    #[rstest]
+    #[case::existing_key(b"abc333".as_slice())]
+    #[case::between_keys(b"abc332".as_slice())]
+    #[tokio::test]
+    async fn test_memtable_seek_lands_on_highest_seq(#[case] next_key: &[u8]) {
+        let table = seek_test_table();
+        let mut iter = table.table().iter();
+
+        iter.seek(next_key).await.unwrap();
+
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"abc333", b"new", 4),
+                RowEntry::new_value(b"abc333", b"old", 3),
+                RowEntry::new_value(b"abc444", b"value4", 5),
+                RowEntry::new_value(b"abc555", b"value5", 6),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_memtable_seek_to_current_key_keeps_remaining_versions() {
+        let table = seek_test_table();
+        let mut iter = table.table().iter();
+        iter.seek(b"abc333").await.unwrap();
+        assert_eq!(
+            iter.next().await.unwrap(),
+            Some(RowEntry::new_value(b"abc333", b"new", 4))
+        );
+
+        // The front entry is the older version of the same key, so seek does nothing.
+        iter.seek(b"abc333").await.unwrap();
+
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"abc333", b"old", 3),
+                RowEntry::new_value(b"abc444", b"value4", 5),
+                RowEntry::new_value(b"abc555", b"value5", 6),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_memtable_seek_before_current_position_is_noop() {
+        let table = seek_test_table();
+        let mut iter = table.table().iter();
+        iter.seek(b"abc444").await.unwrap();
+
+        iter.seek(b"abc222").await.unwrap();
+
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"abc444", b"value4", 5),
+                RowEntry::new_value(b"abc555", b"value5", 6),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_memtable_seek_past_range_end_exhausts() {
+        let table = seek_test_table();
+        let mut iter = table
+            .table()
+            .range_ascending(BytesRange::from(..Bytes::from_static(b"abc444")));
+
+        iter.seek(b"abc999").await.unwrap();
+
+        assert_eq!(iter.next().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_memtable_seek_after_exhausted_is_noop() {
+        let table = seek_test_table();
+        let mut iter = table
+            .table()
+            .range_ascending(BytesRange::from(..Bytes::from_static(b"abc333")));
+        iter.seek(b"abc333").await.unwrap();
+        assert_eq!(iter.next().await.unwrap(), None);
+
+        // A rebuilt range must not bring back entries that the iterator skipped.
+        iter.seek(b"abc000").await.unwrap();
+
+        assert_eq!(iter.next().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_memtable_seek_keeps_end_bound() {
+        let table = seek_test_table();
+        let mut iter = table
+            .table()
+            .range_ascending(BytesRange::from(..=Bytes::from_static(b"abc333")));
+
+        iter.seek(b"abc222").await.unwrap();
+
+        assert_iterator(
+            &mut iter,
+            vec![
+                RowEntry::new_value(b"abc222", b"value2", 2),
+                RowEntry::new_value(b"abc333", b"new", 4),
+                RowEntry::new_value(b"abc333", b"old", 3),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_memtable_descending_seek_is_not_supported() {
+        let table = seek_test_table();
+        let mut iter = table
+            .table()
+            .range(.., IterationOrder::Descending, ReadTrace::new(None));
+
+        let result = iter.seek(b"abc333").await;
+
+        assert!(matches!(
+            result,
+            Err(SlateDBError::SeekNotSupportedForDescendingScan)
+        ));
     }
 }

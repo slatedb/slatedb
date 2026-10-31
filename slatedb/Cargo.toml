@@ -43,6 +43,7 @@ serde_json = { workspace = true }
 siphasher = { workspace = true }
 smallvec = { workspace = true }
 slatedb-common = { workspace = true, features = ["serde"] }
+slatedb-mirror = { workspace = true }
 slatedb-txn-obj = { workspace = true }
 snap = { workspace = true, optional = true }
 thiserror = { workspace = true }
@@ -144,6 +145,7 @@ harness = false
 [[bench]]
 name = "scan_prefix_bench"
 harness = false
+required-features = ["foyer"]
 
 [[bench]]
 name = "scan_prefix_large_sorted_run_bench"
@@ -163,5 +165,13 @@ required-features = ["bench-internal"]
 name = "db_transaction"
 harness = false
 
+[[bench]]
+name = "memtable_seek"
+harness = false
+
 [lints]
 workspace = true
+
+[[test]]
+name = "foyer_cache_flush"
+required-features = ["foyer"]

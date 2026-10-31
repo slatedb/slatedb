@@ -1,9 +1,11 @@
 # SlateDB Governance
 
-Anyone is welcome to contribute to SlateDB by [creating pull requests](CONTRIBUTING.md)
-or taking part in discussions about features, e.g. in [GitHub issues](https://github.com/slatedb/slatedb/issues).
-
 This document defines who has authority to do what on the SlateDB open-source project.
+
+Anyone is welcome to participate in SlateDB by opening
+[GitHub issues](https://github.com/slatedb/slatedb/issues) or taking part in
+[Discord](https://discord.gg/mHYmGy5MgA) discussions. You must become a contributor to
+submit pull requests.
 
 While a formal assignment of authority is necessary as a fallback mechanism, it is
 not the way decisions regarding SlateDB are usually made, or expected to be made.
@@ -14,11 +16,31 @@ formal role. This almost always works.
 
 # SlateDB Roles
 
-There are two formal roles in SlateDB:
+There are three formal roles in SlateDB:
 
+* __SlateDB Contributors__ have the right to submit pull requests to SlateDB repositories.
 * __SlateDB Committers__ have the right to merge pull requests into SlateDB repositories,
   publish releases, and approve requests for comments (RFCs).
 * __The SlateDB Board__ has final authority over all decisions made on the project.
+
+# SlateDB Contributors
+
+A __SlateDB Contributor__ is able to submit pull requests to SlateDB repositories under
+[https://github.com/slatedb](https://github.com/slatedb). Contributors must follow the
+[CLEAN_SLATE.md](CLEAN_SLATE.md) style guide and the [CONTRIBUTING.md](CONTRIBUTING.md)
+contributor's guide.
+
+To become a SlateDB contributor, you must demonstrate high-quality interactions in the
+community, including:
+
+- Opening issues that are well-researched and clearly written.
+- Demonstrating constructive AI usage and avoiding slop bombs.
+- Participating in SlateDB's Discord and GitHub communities a constructive and respectful
+  manner.
+
+When a sufficient trust is built through participating in the SlateDB community in this way,
+any current SlateDB committer can add you as a `Read`-role collaborator on the SlateDB GitHub
+repository.
 
 # SlateDB Committers
 

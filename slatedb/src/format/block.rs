@@ -60,16 +60,25 @@ impl Block {
         + SIZEOF_U16 // number of offsets in the block
     }
 
-    /// estimate the size of Blocks encoded in SST
-    pub(crate) fn estimate_encoded_size(
+    /// Estimates the bytes the blocks occupy in an SST.
+    ///
+    /// With `block_alignment` on, each block pads up to a whole `block_size`
+    /// unit, and a block whose entries do not fit the capacity pads past one.
+    pub(crate) fn estimate_size_in_sst(
         entry_num: usize,
         entries_size_encoded: usize,
         number_of_blocks: usize,
+        block_size: usize,
+        block_alignment: bool,
     ) -> usize {
-        let mut ans = entries_size_encoded;
-        ans += OFFSET_SIZE * entry_num;
-        ans += CHECKSUM_SIZE * number_of_blocks;
-        ans
+        let encoded_size =
+            entries_size_encoded + OFFSET_SIZE * entry_num + CHECKSUM_SIZE * number_of_blocks;
+        if !block_alignment {
+            return encoded_size;
+        }
+        // Block boundaries are unknown here, so pad the average block.
+        let average_block_size = encoded_size.div_ceil(number_of_blocks.max(1));
+        number_of_blocks * average_block_size.next_multiple_of(block_size)
     }
 }
 
@@ -401,15 +410,15 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_encoded_size() {
+    fn test_estimate_size_in_sst() {
         // Test with zero entries and blocks
-        assert_eq!(Block::estimate_encoded_size(0, 0, 0), 0);
+        assert_eq!(Block::estimate_size_in_sst(0, 0, 0, 4096, false), 0);
 
         // Test with one entry and one block
         let entry_size = 100;
         let expected_size = entry_size + 2 + 4; // entry_size + offset + checksum
         assert_eq!(
-            Block::estimate_encoded_size(1, entry_size, 1),
+            Block::estimate_size_in_sst(1, entry_size, 1, 4096, false),
             expected_size
         );
 
@@ -418,7 +427,7 @@ mod tests {
         let total_entry_size = entry_size * num_entries;
         let expected_size = total_entry_size + (2 * num_entries) + 4; // entries + offsets + checksum
         assert_eq!(
-            Block::estimate_encoded_size(num_entries, total_entry_size, 1),
+            Block::estimate_size_in_sst(num_entries, total_entry_size, 1, 4096, false),
             expected_size
         );
 
@@ -426,8 +435,18 @@ mod tests {
         let num_blocks = 3;
         let expected_size = total_entry_size + (2 * num_entries) + (4 * num_blocks);
         assert_eq!(
-            Block::estimate_encoded_size(num_entries, total_entry_size, num_blocks),
+            Block::estimate_size_in_sst(num_entries, total_entry_size, num_blocks, 4096, false),
             expected_size
+        );
+
+        // With alignment on, each block pads up to a whole block size.
+        let num_blocks = 4;
+        let total_entry_size = 100 * num_blocks;
+        let unpadded =
+            Block::estimate_size_in_sst(num_blocks, total_entry_size, num_blocks, 64, false);
+        assert_eq!(
+            Block::estimate_size_in_sst(num_blocks, total_entry_size, num_blocks, 64, true),
+            num_blocks * unpadded.div_ceil(num_blocks).next_multiple_of(64)
         );
 
         // Test with large numbers（assume 20GB and every block 4kb with 200 entries）
@@ -437,7 +456,13 @@ mod tests {
         let num_blocks = usize::div_ceil(large_entry_size, block_size);
         let expected_size = large_entry_size + (2 * num_entries) + (4 * num_blocks);
         assert_eq!(
-            Block::estimate_encoded_size(num_entries, large_entry_size, num_blocks),
+            Block::estimate_size_in_sst(
+                num_entries,
+                large_entry_size,
+                num_blocks,
+                block_size,
+                false
+            ),
             expected_size
         );
     }

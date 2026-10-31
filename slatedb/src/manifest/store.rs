@@ -5,6 +5,7 @@ use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestTransactionalObjectVersionMissing, ManifestMissing,
 };
 use crate::flatbuffer_types::FlatBufferManifestCodec;
+use crate::manifest::invariants::manifest_invariants;
 use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
 use log::debug;
 use object_store::path::Path;
@@ -14,7 +15,8 @@ use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_txn_obj::object_store::ObjectStoreSequencedStorageProtocol;
 use slatedb_txn_obj::{
     DirtyObject, FenceableTransactionalObject, MonotonicId, SequencedStorageProtocol,
-    SimpleTransactionalObject, TransactionalObject, TransactionalStorageProtocol,
+    SimpleTransactionalObject, TransactionalObject, TransactionalObjectError,
+    TransactionalStorageProtocol,
 };
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
@@ -35,35 +37,74 @@ impl FenceableManifest {
         stored_manifest: StoredManifest,
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
+        expected_epoch: Option<u64>,
     ) -> Result<Self, SlateDBError> {
-        let clock = system_clock.clone();
-        // Initialize generic fenceable record using writer epoch
-        let fr = FenceableTransactionalObject::init(
-            stored_manifest.inner,
+        Self::init(
+            stored_manifest,
             manifest_update_timeout,
             system_clock,
+            expected_epoch,
             |m: &Manifest| m.writer_epoch,
             |m: &mut Manifest, e: u64| m.writer_epoch = e,
         )
-        .await?;
-        Ok(Self { inner: fr, clock })
+        .await
     }
 
     pub(crate) async fn init_compactor(
         stored_manifest: StoredManifest,
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
+        expected_epoch: Option<u64>,
     ) -> Result<Self, SlateDBError> {
-        let clock = system_clock.clone();
-        let fr = FenceableTransactionalObject::init(
-            stored_manifest.inner,
+        Self::init(
+            stored_manifest,
             manifest_update_timeout,
             system_clock,
+            expected_epoch,
             |m: &Manifest| m.compactor_epoch,
             |m: &mut Manifest, e: u64| m.compactor_epoch = e,
         )
-        .await?;
-        Ok(Self { inner: fr, clock })
+        .await
+    }
+
+    /// Uses a fixed claim for an observed epoch, or the default retry loop.
+    async fn init(
+        stored_manifest: StoredManifest,
+        manifest_update_timeout: Duration,
+        system_clock: Arc<dyn SystemClock>,
+        expected_epoch: Option<u64>,
+        get_epoch: fn(&Manifest) -> u64,
+        set_epoch: fn(&mut Manifest, u64),
+    ) -> Result<Self, SlateDBError> {
+        let clock = system_clock.clone();
+        let inner = match expected_epoch {
+            Some(expected_epoch) => {
+                let epoch = expected_epoch
+                    .checked_add(1)
+                    .ok_or(SlateDBError::InvalidTransactionalObjectState)?;
+                FenceableTransactionalObject::init_with_epoch(
+                    stored_manifest.inner,
+                    manifest_update_timeout,
+                    system_clock,
+                    epoch,
+                    true,
+                    get_epoch,
+                    set_epoch,
+                )
+                .await?
+            }
+            None => {
+                FenceableTransactionalObject::init(
+                    stored_manifest.inner,
+                    manifest_update_timeout,
+                    system_clock,
+                    get_epoch,
+                    set_epoch,
+                )
+                .await?
+            }
+        };
+        Ok(Self { inner, clock })
     }
 
     pub(crate) fn manifest(&self) -> (u64, &Manifest) {
@@ -89,21 +130,28 @@ impl FenceableManifest {
         Ok(self.inner.update(dirty).await?)
     }
 
-    pub(crate) fn new_checkpoint(
+    pub(crate) fn new_checkpoint_in(
         &self,
+        db_state: &ManifestCore,
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        Self::make_new_checkpoint(self.clock.clone(), &self.inner, checkpoint_id, options)
+        Self::make_new_checkpoint(
+            self.clock.clone(),
+            &self.inner,
+            db_state,
+            checkpoint_id,
+            options,
+        )
     }
 
     fn make_new_checkpoint(
         clock: Arc<dyn SystemClock>,
         inner: &FenceableTransactionalObject<Manifest>,
+        db_state: &ManifestCore,
         checkpoint_id: Uuid,
         options: &CheckpointOptions,
     ) -> Result<Checkpoint, SlateDBError> {
-        let db_state = &inner.object().core;
         let manifest_id = match options.source {
             Some(source_checkpoint_id) => {
                 let Some(source_checkpoint) = db_state.find_checkpoint(source_checkpoint_id) else {
@@ -134,7 +182,13 @@ impl FenceableManifest {
     ) -> Result<Checkpoint, SlateDBError> {
         let clock = self.clock.clone();
         self.maybe_apply_update(|fm| {
-            let checkpoint = Self::make_new_checkpoint(clock.clone(), fm, checkpoint_id, options)?;
+            let checkpoint = Self::make_new_checkpoint(
+                clock.clone(),
+                fm,
+                &fm.object().core,
+                checkpoint_id,
+                options,
+            )?;
             let mut dirty = fm.prepare_dirty()?;
             dirty.value.core.checkpoints.push(checkpoint);
             Ok(Some(dirty))
@@ -175,6 +229,13 @@ pub(crate) struct StoredManifest {
 }
 
 impl StoredManifest {
+    fn new(inner: SimpleTransactionalObject<Manifest>, clock: Arc<dyn SystemClock>) -> Self {
+        Self {
+            inner: inner.with_invariants(manifest_invariants()),
+            clock,
+        }
+    }
+
     async fn init(
         store: Arc<ManifestStore>,
         manifest: Manifest,
@@ -187,7 +248,7 @@ impl StoredManifest {
             manifest.clone(),
         )
         .await?;
-        Ok(Self { inner, clock })
+        Ok(Self::new(inner, clock))
     }
 
     /// Create the initial manifest for a new database.
@@ -222,7 +283,7 @@ impl StoredManifest {
         else {
             return Ok(None);
         };
-        Ok(Some(Self { inner, clock }))
+        Ok(Some(Self::new(inner, clock)))
     }
 
     /// Load the current manifest from the supplied manifest store. If successful,
@@ -232,11 +293,9 @@ impl StoredManifest {
         store: Arc<ManifestStore>,
         clock: Arc<dyn SystemClock>,
     ) -> Result<Self, SlateDBError> {
-        SimpleTransactionalObject::<Manifest>::try_load(Arc::clone(&store.inner)
-            as Arc<dyn TransactionalStorageProtocol<Manifest, MonotonicId>>)
-        .await?
-        .map(|inner| Self { inner, clock })
-        .ok_or(LatestTransactionalObjectVersionMissing)
+        Self::try_load(store, clock)
+            .await?
+            .ok_or(LatestTransactionalObjectVersionMissing)
     }
 
     #[allow(dead_code)]
@@ -460,7 +519,19 @@ impl ManifestStore {
     }
 
     pub(crate) async fn advance_boundary(&self, id: u64) -> Result<(), SlateDBError> {
-        Ok(self.inner.advance(MonotonicId::new(id)).await?)
+        match self.inner.advance(MonotonicId::new(id)).await {
+            Err(TransactionalObjectError::ObjectStoreError(error))
+                if matches!(&error, object_store::Error::NotImplemented { .. }) =>
+            {
+                log::warn!(
+                    "The object store does not support manifest GC boundary updates. \
+                     Set GarbageCollectorOptions::boundary_files_enabled = false to allow manifest garbage collection. \
+                     [error={error}]"
+                );
+                Err(error.into())
+            }
+            result => result.map_err(SlateDBError::from),
+        }
     }
 
     /// Delete a manifest from the object store.
@@ -588,7 +659,7 @@ mod tests {
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
     use crate::retrying_object_store::RetryingObjectStore;
-    use crate::test_utils::FlakyObjectStore;
+    use crate::test_utils::{bounded_sst_view, FlakyObjectStore, RecordingObjectStore};
     use chrono::Timelike;
     use object_store::memory::InMemory;
     use object_store::path::Path;
@@ -600,6 +671,70 @@ mod tests {
     use std::time::Duration;
 
     const ROOT: &str = "/root/path";
+
+    fn new_recording_manifest_store() -> (Arc<ManifestStore>, Arc<RecordingObjectStore>) {
+        let object_store = Arc::new(RecordingObjectStore::new(Arc::new(InMemory::new())));
+        let store = Arc::new(ManifestStore::new(&Path::from(ROOT), object_store.clone()));
+        (store, object_store)
+    }
+
+    #[tokio::test]
+    async fn test_expected_writer_epoch_rejects_competing_writer() {
+        let (store, object_store) = new_recording_manifest_store();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let stale =
+            StoredManifest::create_new_db(store.clone(), ManifestCore::new(), clock.clone())
+                .await
+                .unwrap();
+        let current = StoredManifest::load(store.clone(), clock.clone())
+            .await
+            .unwrap();
+        let mut winner =
+            FenceableManifest::init_writer(current, Duration::from_secs(5), clock.clone(), None)
+                .await
+                .unwrap();
+        let before = store.read_latest_manifest().await.unwrap();
+        object_store.clear();
+
+        let result =
+            FenceableManifest::init_writer(stale, Duration::from_secs(5), clock, Some(0)).await;
+
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
+        assert_eq!(object_store.write_kinds().len(), 1);
+        assert_eq!(store.read_latest_manifest().await.unwrap(), before);
+        winner.refresh().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_expected_writer_epoch_tolerates_compactor_change() {
+        let (store, object_store) = new_recording_manifest_store();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let stale =
+            StoredManifest::create_new_db(store.clone(), ManifestCore::new(), clock.clone())
+                .await
+                .unwrap();
+        let current = StoredManifest::load(store.clone(), clock.clone())
+            .await
+            .unwrap();
+        let mut compactor =
+            FenceableManifest::init_compactor(current, Duration::from_secs(5), clock.clone(), None)
+                .await
+                .unwrap();
+        let before = store.read_latest_manifest().await.unwrap();
+        object_store.clear();
+
+        let writer = FenceableManifest::init_writer(stale, Duration::from_secs(5), clock, Some(0))
+            .await
+            .unwrap();
+
+        assert_eq!(object_store.write_kinds().len(), 2);
+        let after = store.read_latest_manifest().await.unwrap();
+        assert_eq!(after.id(), before.id() + 1);
+        assert_eq!(after.writer_epoch(), before.writer_epoch() + 1);
+        assert_eq!(after.compactor_epoch(), before.compactor_epoch());
+        assert_eq!(writer.local_epoch(), after.writer_epoch());
+        compactor.refresh().await.unwrap();
+    }
 
     #[tokio::test]
     async fn test_should_fail_write_on_version_conflict() {
@@ -641,6 +776,39 @@ mod tests {
         let version = ms.read_latest_manifest().await.unwrap().id;
 
         assert_eq!(version, 2);
+    }
+
+    #[tokio::test]
+    async fn test_should_enforce_manifest_invariants_after_create() {
+        let ms = new_memory_manifest_store();
+        let mut sm = StoredManifest::create_new_db(
+            ms.clone(),
+            core_with_l0(100),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+
+        assert_l0_invariant_rejects_update(&mut sm).await;
+        assert_eq!(ms.read_latest_manifest().await.unwrap().id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_should_enforce_manifest_invariants_after_load() {
+        let ms = new_memory_manifest_store();
+        StoredManifest::create_new_db(
+            ms.clone(),
+            core_with_l0(100),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        let mut sm = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
+            .await
+            .unwrap();
+
+        assert_l0_invariant_rejects_update(&mut sm).await;
+        assert_eq!(ms.read_latest_manifest().await.unwrap().id, 1);
     }
 
     #[tokio::test]
@@ -721,7 +889,7 @@ mod tests {
             let sm = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
-            FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()))
+            FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()), None)
                 .await
                 .unwrap();
             let manifest = ms.read_latest_manifest().await.unwrap();
@@ -742,14 +910,14 @@ mod tests {
         .unwrap();
         let timeout = Duration::from_secs(300);
         let mut writer1 =
-            FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()))
+            FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()), None)
                 .await
                 .unwrap();
         let sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
             .await
             .unwrap();
 
-        FenceableManifest::init_writer(sm2, timeout, Arc::new(DefaultSystemClock::new()))
+        FenceableManifest::init_writer(sm2, timeout, Arc::new(DefaultSystemClock::new()), None)
             .await
             .unwrap();
 
@@ -773,9 +941,14 @@ mod tests {
             let sm = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
-            FenceableManifest::init_compactor(sm, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+            FenceableManifest::init_compactor(
+                sm,
+                timeout,
+                Arc::new(DefaultSystemClock::new()),
+                None,
+            )
+            .await
+            .unwrap();
             let manifest = ms.read_latest_manifest().await.unwrap();
             assert_eq!(manifest.manifest.compactor_epoch, i);
         }
@@ -793,15 +966,19 @@ mod tests {
         .await
         .unwrap();
         let timeout = Duration::from_secs(300);
-        let mut compactor1 =
-            FenceableManifest::init_compactor(sm, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+        let mut compactor1 = FenceableManifest::init_compactor(
+            sm,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            None,
+        )
+        .await
+        .unwrap();
         let sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
             .await
             .unwrap();
 
-        FenceableManifest::init_compactor(sm2, timeout, Arc::new(DefaultSystemClock::new()))
+        FenceableManifest::init_compactor(sm2, timeout, Arc::new(DefaultSystemClock::new()), None)
             .await
             .unwrap();
 
@@ -842,17 +1019,25 @@ mod tests {
         .await
         .unwrap();
         let timeout = Duration::from_secs(300);
-        let mut compactor1 =
-            FenceableManifest::init_compactor(sm, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+        let mut compactor1 = FenceableManifest::init_compactor(
+            sm,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            None,
+        )
+        .await
+        .unwrap();
         let sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
             .await
             .unwrap();
-        let mut compactor2 =
-            FenceableManifest::init_compactor(sm2, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+        let mut compactor2 = FenceableManifest::init_compactor(
+            sm2,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            None,
+        )
+        .await
+        .unwrap();
 
         let result = compactor1
             .write_checkpoint(uuid::Uuid::new_v4(), &CheckpointOptions::default())
@@ -874,14 +1059,14 @@ mod tests {
         .unwrap();
         let timeout = Duration::from_secs(300);
         let mut fm1 =
-            FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()))
+            FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()), None)
                 .await
                 .unwrap();
         let sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
             .await
             .unwrap();
         let mut fm2 =
-            FenceableManifest::init_writer(sm2, timeout, Arc::new(DefaultSystemClock::new()))
+            FenceableManifest::init_writer(sm2, timeout, Arc::new(DefaultSystemClock::new()), None)
                 .await
                 .unwrap();
 
@@ -1057,6 +1242,31 @@ mod tests {
     fn new_memory_manifest_store() -> Arc<ManifestStore> {
         let os = Arc::new(InMemory::new());
         Arc::new(ManifestStore::new(&Path::from(ROOT), os))
+    }
+
+    fn core_with_l0(timestamp_ms: u64) -> ManifestCore {
+        let mut core = ManifestCore::new();
+        Arc::make_mut(&mut core.tree)
+            .l0
+            .push_front(bounded_sst_view(timestamp_ms, b"a", b"z"));
+        core
+    }
+
+    async fn assert_l0_invariant_rejects_update(sm: &mut StoredManifest) {
+        let mut dirty = sm.prepare_dirty().unwrap();
+        Arc::make_mut(&mut dirty.value.core.tree)
+            .l0
+            .push_front(bounded_sst_view(50, b"a", b"z"));
+
+        let result = sm.update(dirty).await;
+
+        assert!(matches!(
+            result,
+            Err(SlateDBError::InvalidClockTick {
+                last_tick: 100,
+                next_tick: 50
+            })
+        ));
     }
 
     fn new_checkpoint(manifest_id: u64) -> Checkpoint {
@@ -1443,17 +1653,25 @@ mod tests {
             .unwrap();
         let timeout = Duration::from_secs(300);
 
-        let mut fm_b =
-            FenceableManifest::init_writer(sm_b, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+        let mut fm_b = FenceableManifest::init_writer(
+            sm_b,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(1, fm_b.inner.local_epoch());
 
         // The last writer always wins
-        let mut fm_a =
-            FenceableManifest::init_writer(sm_a, timeout, Arc::new(DefaultSystemClock::new()))
-                .await
-                .unwrap();
+        let mut fm_a = FenceableManifest::init_writer(
+            sm_a,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(2, fm_a.inner.local_epoch());
 
         assert!(matches!(

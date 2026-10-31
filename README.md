@@ -140,10 +140,6 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 - [x] Change data capture (CDC) ([#249](https://github.com/slatedb/slatedb/issues/249))
 - [x] Database split/merge ([RFC](https://github.com/slatedb/slatedb/blob/main/rfcs/0004-checkpoints.md#manifest-projection-and-union))
 
-## Projects
-
-Check out [CONTRIBUTING.md](CONTRIBUTING.md) for fun (and useful) projects to work on.
-
 ## Release Schedule
 
 SlateDB follows Semantic Versioning. We release new versions approximately every 2 months at the end of each even month (February, April, and so on). We guarantee forward/backward compatibility for storage formats between adjacent versions, but we do not currently guarantee API compatibility at this time (we reserve the right to break compile-time API compatibility).
@@ -152,6 +148,9 @@ SlateDB follows Semantic Versioning. We release new versions approximately every
 
 See who's using SlateDB.
 
+- [4og.io](https://4og.io)
+- [Atomix](https://www.atomix.com)
+- [Cloudmersive](https://cloudmersive.com)
 - [Dropbox](https://www.dropbox.com)
 - [Embucket](https://www.embucket.com)
 - [Gadget](https://gadget.dev)
@@ -159,18 +158,21 @@ See who's using SlateDB.
 - [HelixDB](https://github.com/HelixDB/helix-db)
 - [Malstrom](https://github.com/MalstromDevelopers/malstrom)
 - [Massive](https://massive.com)
+- [Mav9](https://mav9.com)
 - [Merklemap](https://merklemap.com)
 - [OpenData](https://www.opendata.dev)
 - [Prisma](https://www.prisma.io)
 - [Responsive](https://responsive.dev)
 - [s2-lite](https://github.com/s2-streamstore/s2)
-- [SQLync](https://sqlync.com)
 - [Storrito](https://storrito.com)
 - [Taquba](https://github.com/micllam/taquba)
+- [Tasklet](https://tasklet.ai)
 - [Tensorlake](https://www.tensorlake.ai)
+- [Triplox](https://github.com/fiv0/triplox)
 - [Volga](https://github.com/volga-project/volga)
 - [WombatKV](https://github.com/Venkat2811/wombatkv)
 - [ZeroFS](https://zerofs.net)
+- [LixRay](https://lixray.com)
 
 ## Talks
 

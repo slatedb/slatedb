@@ -522,7 +522,7 @@ func TestDbLifecycleAndStatus(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSplitCache: %v", err)
 		}
-		if err := builder.WithDbCache(dbCache); err != nil {
+		if err := builder.WithDbCache(dbCache, 0); err != nil {
 			t.Fatalf("WithMergeOperator(): %v", err)
 		}
 	})
@@ -1339,6 +1339,56 @@ func TestDbReaderPointReads(t *testing.T) {
 	}
 }
 
+func TestDbReaderDbCacheConfiguration(t *testing.T) {
+	store := newMemoryStore(t)
+	dbHandle := openTestDB(t, store, nil)
+
+	if _, err := dbHandle.db.Put([]byte("cached"), []byte("value")); err != nil {
+		t.Fatalf("Put(cached): %v", err)
+	}
+	if err := dbHandle.db.FlushWithOptions(slatedb.FlushOptions{FlushType: slatedb.FlushTypeMemTable}); err != nil {
+		t.Fatalf("FlushWithOptions(MemTable): %v", err)
+	}
+
+	sharedCache, err := slatedb.DbCacheNewMokaCache(slatedb.MokaCacheOptions{MaxCapacity: 1024 * 1024})
+	if err != nil {
+		t.Fatalf("NewMokaCache: %v", err)
+	}
+	defer sharedCache.Destroy()
+
+	withSharedCache := func(t *testing.T, builder *slatedb.DbReaderBuilder) {
+		t.Helper()
+		if err := builder.WithDbCache(sharedCache, 0); err != nil {
+			t.Fatalf("DbReaderBuilder.WithDbCache(): %v", err)
+		}
+	}
+	firstReader := openTestReader(t, store, withSharedCache)
+	secondReader := openTestReader(t, store, withSharedCache)
+	for name, handle := range map[string]*testReader{"first": firstReader, "second": secondReader} {
+		value, err := handle.reader.Get([]byte("cached"))
+		if err != nil {
+			t.Fatalf("%s DbReader.Get(cached): %v", name, err)
+		}
+		if value == nil || !bytes.Equal(*value, []byte("value")) {
+			t.Fatalf("%s DbReader.Get(cached): got %v, want %q", name, value, "value")
+		}
+	}
+
+	uncachedReader := openTestReader(t, store, func(t *testing.T, builder *slatedb.DbReaderBuilder) {
+		t.Helper()
+		if err := builder.WithDbCacheDisabled(); err != nil {
+			t.Fatalf("DbReaderBuilder.WithDbCacheDisabled(): %v", err)
+		}
+	})
+	value, err := uncachedReader.reader.Get([]byte("cached"))
+	if err != nil {
+		t.Fatalf("uncached DbReader.Get(cached): %v", err)
+	}
+	if value == nil || !bytes.Equal(*value, []byte("value")) {
+		t.Fatalf("uncached DbReader.Get(cached): got %v, want %q", value, "value")
+	}
+}
+
 func TestDbReaderScanVariants(t *testing.T) {
 	store := newMemoryStore(t)
 	dbHandle := openTestDB(t, store, nil)
@@ -1880,8 +1930,9 @@ func TestAdminQueries(t *testing.T) {
 	if latestManifest.LastL0Seq < 3 {
 		t.Fatalf("ReadManifest(nil): LastL0Seq = %d, want at least 3", latestManifest.LastL0Seq)
 	}
-	if latestManifest.WalObjectStoreUri == nil {
-		t.Fatal("ReadManifest(nil): WalObjectStoreUri = nil, want value for configured WAL store")
+	// ManifestV2 is now written universally and never persists wal_object_store_uri
+	if latestManifest.WalObjectStoreUri != nil {
+		t.Fatalf("ReadManifest(nil): WalObjectStoreUri = %v, want nil (dropped by ManifestV2)", *latestManifest.WalObjectStoreUri)
 	}
 
 	firstManifest, err := admin.ReadManifest(uint64Ptr(manifests[0].Id))
@@ -2117,6 +2168,104 @@ func TestAdminClone(t *testing.T) {
 		if !bytes.Equal(*got, want) {
 			t.Fatalf("Get(k%d): got %q, want %q", i, *got, want)
 		}
+	}
+}
+
+func TestAdminDeleteDb(t *testing.T) {
+	store := newMemoryStore(t)
+
+	parentPath := "admin-delete-parent"
+	parentBuilder := slatedb.NewDbBuilder(parentPath, store)
+	parent, err := parentBuilder.Build()
+	parentBuilder.Destroy()
+	if err != nil {
+		t.Fatalf("Build() parent: %v", err)
+	}
+	if _, err := parent.Put([]byte("key"), []byte("value")); err != nil {
+		t.Fatalf("Put(key): %v", err)
+	}
+	if err := parent.Flush(); err != nil {
+		t.Fatalf("Flush(): %v", err)
+	}
+	if err := parent.Shutdown(); err != nil {
+		t.Fatalf("Shutdown() parent: %v", err)
+	}
+	parent.Destroy()
+
+	openAdmin := func(path string) *slatedb.Admin {
+		builder := slatedb.NewAdminBuilder(path, store)
+		defer builder.Destroy()
+		admin, err := builder.Build()
+		if err != nil {
+			t.Fatalf("AdminBuilder.Build(%s): %v", path, err)
+		}
+		t.Cleanup(admin.Destroy)
+		return admin
+	}
+	parentAdmin := openAdmin(parentPath)
+	cloneAdmin := openAdmin("admin-delete-clone")
+
+	cloneBuilder, err := cloneAdmin.CreateCloneBuilderFromSource(slatedb.CloneSourceSpec{Path: parentPath})
+	if err != nil {
+		t.Fatalf("CreateCloneBuilderFromSource(): %v", err)
+	}
+	defer cloneBuilder.Destroy()
+	if err := cloneBuilder.Build(); err != nil {
+		t.Fatalf("CloneBuilder.Build(): %v", err)
+	}
+
+	manifest, err := cloneAdmin.ReadManifest(nil)
+	if err != nil || manifest == nil || len(manifest.ExternalDbs) != 1 || manifest.ExternalDbs[0].FinalCheckpointId == nil {
+		t.Fatalf("ReadManifest() of the clone: %+v, %v; want one external db with a final checkpoint", manifest, err)
+	}
+	pin := *manifest.ExternalDbs[0].FinalCheckpointId
+	pinned := func() bool {
+		checkpoints, err := parentAdmin.ListCheckpoints(nil)
+		if err != nil {
+			t.Fatalf("ListCheckpoints(): %v", err)
+		}
+		for _, checkpoint := range checkpoints {
+			if checkpoint.Id == pin {
+				return true
+			}
+		}
+		return false
+	}
+	if !pinned() {
+		t.Fatalf("the parent does not list the clone's checkpoint %s", pin)
+	}
+
+	listed, err := cloneAdmin.DeleteDb(false)
+	if err != nil {
+		t.Fatalf("DeleteDb(false): %v", err)
+	}
+	if len(listed) == 0 {
+		t.Fatalf("DeleteDb(false): listed no paths")
+	}
+	if !pinned() {
+		t.Fatalf("a dry run released the clone's checkpoint %s", pin)
+	}
+
+	deleted, err := cloneAdmin.DeleteDb(true)
+	if err != nil {
+		t.Fatalf("DeleteDb(true): %v", err)
+	}
+	if len(deleted) < len(listed) {
+		t.Fatalf("DeleteDb(true): deleted %d paths, the dry run listed %d", len(deleted), len(listed))
+	}
+	if pinned() {
+		t.Fatalf("the parent still lists the deleted clone's checkpoint %s", pin)
+	}
+
+	remaining, err := cloneAdmin.DeleteDb(false)
+	if err != nil {
+		t.Fatalf("DeleteDb(false) after delete: %v", err)
+	}
+	if len(remaining) != 0 {
+		t.Fatalf("DeleteDb(false) after delete: %d paths remain: %v", len(remaining), remaining)
+	}
+	if _, err := cloneAdmin.DeleteDb(true); err != nil {
+		t.Fatalf("second DeleteDb(true): %v", err)
 	}
 }
 

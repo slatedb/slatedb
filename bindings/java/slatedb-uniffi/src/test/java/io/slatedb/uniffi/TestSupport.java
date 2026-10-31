@@ -346,7 +346,7 @@ final class TestSupport {
     }
 
     static ReadOptions readOptions() {
-        return new ReadOptions(DurabilityLevel.MEMORY, false, true, null);
+        return new ReadOptions(DurabilityLevel.MEMORY, false, true, null, null);
     }
 
     static ScanOptions scanOptions(long readAheadBytes, boolean cacheBlocks, long maxFetchTasks) {
@@ -357,11 +357,12 @@ final class TestSupport {
                 cacheBlocks,
                 maxFetchTasks,
                 null,
+                null,
                 null);
     }
 
     static ReaderOptions readerOptions(boolean skipWalReplay) {
-        return new ReaderOptions(100L, 1000L, 64L * 1024 * 1024, skipWalReplay, null);
+        return new ReaderOptions(100L, 1000L, 64L * 1024 * 1024, skipWalReplay, null, null);
     }
 
     private static Throwable unwrap(Throwable thrown) {

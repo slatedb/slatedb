@@ -15,10 +15,16 @@ use object_store::{
     ListResult, MultipartUpload, ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions,
     PutOptions, PutPayload, PutResult, RenameOptions,
 };
+use rand::RngExt;
 
 use crate::utils::IdGenerator;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::DbRand;
+
+const MIN_RETRY_DELAY: Duration = Duration::from_millis(100);
+/// Also caps the L0 uploader's retry backoff, so a long `manifest_poll_interval`
+/// does not stretch upload retries with it.
+pub(crate) const MAX_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Metadata key used to store the ULID for put operations.
 /// This is used to verify if a failed put actually succeeded.
@@ -80,8 +86,10 @@ impl RetryingObjectStore {
     #[inline]
     fn retry_builder(&self) -> ExponentialBuilder {
         let builder = ExponentialBuilder::default()
-            .with_min_delay(Duration::from_millis(100))
-            .with_max_delay(Duration::from_secs(1));
+            .with_min_delay(MIN_RETRY_DELAY)
+            .with_max_delay(MAX_RETRY_DELAY)
+            .with_jitter()
+            .with_jitter_seed(self.rand.rng().random());
         match self.max_retries {
             Some(max_retries) => builder.with_max_times(max_retries as usize),
             None => builder.without_max_times(),
@@ -104,16 +112,8 @@ impl RetryingObjectStore {
     }
 
     #[inline]
-    fn should_retry(err: &object_store::Error) -> bool {
-        let retry = !matches!(
-            err,
-            object_store::Error::AlreadyExists { .. }
-                | object_store::Error::Precondition { .. }
-                | object_store::Error::NotModified { .. }
-                | object_store::Error::NotFound { .. }
-                | object_store::Error::NotImplemented { .. }
-                | object_store::Error::NotSupported { .. }
-        );
+    pub(crate) fn should_retry(err: &object_store::Error) -> bool {
+        let retry = slatedb_common::retry::should_retry(err);
         if !retry {
             debug!("not retrying object store operation [error={:?}]", err);
         }
@@ -188,6 +188,73 @@ impl RetryingObjectStore {
 impl std::fmt::Display for RetryingObjectStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "RetryingObjectStore({})", self.inner)
+    }
+}
+
+#[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+#[derive(Debug)]
+struct RetryingObjectStorePolicy {
+    clock: Arc<dyn SystemClock>,
+    rand: Arc<DbRand>,
+    max_retries: Option<u32>,
+}
+
+#[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+#[async_trait]
+impl object_store::retry::RetryPolicy for RetryingObjectStorePolicy {
+    async fn retry(&self, context: object_store::retry::RetryContext) -> bool {
+        self.retry_failure(context.failure, context.attempt).await
+    }
+}
+
+#[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+impl RetryingObjectStorePolicy {
+    async fn retry_failure(
+        &self,
+        failure: object_store::retry::RetryFailure,
+        attempt: usize,
+    ) -> bool {
+        use object_store::retry::RetryFailure;
+
+        // These statuses map to the errors excluded by `should_retry`.
+        // TODO: Use `RetryingObjectStore::should_retry` directly when
+        // `object_store::retry::RetryContext` includes the actual `Error`.
+        if matches!(failure, RetryFailure::Status(status)
+            if matches!(status.as_u16(), 304 | 404 | 409 | 412))
+        {
+            debug!("not retrying multipart part upload [failure={:?}]", failure);
+            return false;
+        }
+        if self
+            .max_retries
+            .is_some_and(|max_retries| attempt > max_retries as usize)
+        {
+            return false;
+        }
+
+        let delay = self.retry_delay(attempt);
+        info!(
+            "retrying multipart part upload [failure={:?}, attempt={}, duration={:?}]",
+            failure, attempt, delay
+        );
+        self.clock.sleep(delay).await;
+        true
+    }
+
+    /// The sleep before retry `attempt`: the exponential base (doubling from
+    /// [`MIN_RETRY_DELAY`], capped at [`MAX_RETRY_DELAY`]) plus up to 100%
+    /// jitter, the same shape as `RetryingObjectStore::retry_builder`, so parts
+    /// that fail together don't retry together.
+    fn retry_delay(&self, attempt: usize) -> Duration {
+        // Stop doubling at the cap so a large attempt count does not loop long.
+        let mut base = MIN_RETRY_DELAY;
+        for _ in 1..attempt {
+            if base >= MAX_RETRY_DELAY {
+                break;
+            }
+            base = (base * 2).min(MAX_RETRY_DELAY);
+        }
+        self.rand.rng().random_range(base..=base * 2)
     }
 }
 
@@ -266,7 +333,7 @@ impl ObjectStore for RetryingObjectStore {
 
             if options_range.is_none() {
                 // No range requested — don't buffer the body. The buffer size
-                // can't be validated wihtout buffering.
+                // can't be validated without buffering.
                 return Ok(result);
             }
 
@@ -385,6 +452,13 @@ impl ObjectStore for RetryingObjectStore {
         location: &Path,
         opts: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        #[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+        let opts = opts.with_retry_policy(Arc::new(RetryingObjectStorePolicy {
+            clock: Arc::clone(&self.clock),
+            rand: Arc::clone(&self.rand),
+            max_retries: self.max_retries,
+        }));
+
         let put_id = self.rand.rng().gen_ulid(self.clock.as_ref()).to_string();
         let opts_with_id = PutMultipartOptions {
             attributes: Self::with_put_id(opts.attributes.clone(), &put_id),
@@ -571,14 +645,17 @@ impl ObjectStore for RetryingObjectStore {
 mod tests {
     use super::RetryingObjectStore;
     use crate::test_utils::{ExtensionMarker, ExtensionObjectStore, FlakyObjectStore};
+    use backon::BackoffBuilder;
     use bytes::Bytes;
     use futures::TryStreamExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::{GetOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload};
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::retry::NonRetryable;
     use slatedb_common::DbRand;
     use slatedb_common::MockSystemClock;
+    use slatedb_mirror::MirrorError;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -630,6 +707,72 @@ mod tests {
             .expect("put should succeed");
 
         assert!(result.extensions.get::<ExtensionMarker>().is_some());
+    }
+
+    #[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+    #[tokio::test]
+    async fn test_multipart_retry_delays_use_system_clock() {
+        use super::RetryingObjectStorePolicy;
+        use futures::FutureExt;
+        use object_store::client::HttpErrorKind;
+        use object_store::retry::RetryFailure;
+
+        let clock = Arc::new(MockSystemClock::new());
+        let policy = RetryingObjectStorePolicy {
+            clock: clock.clone(),
+            rand: test_rand(),
+            max_retries: None,
+        };
+
+        // Each retry sleeps its exponential base plus up to 100% jitter, on
+        // the configured clock: never wakes before the base, always by 2x.
+        for (attempt, base_ms) in [
+            (1, 100),
+            (2, 200),
+            (3, 400),
+            (4, 800),
+            (5, 1000),
+            (usize::MAX, 1000),
+        ] {
+            let mut retry = Box::pin(
+                policy.retry_failure(RetryFailure::Transport(HttpErrorKind::Timeout), attempt),
+            );
+            assert!(retry.as_mut().now_or_never().is_none());
+            clock.advance(Duration::from_millis(base_ms - 1)).await;
+            assert!(retry.as_mut().now_or_never().is_none());
+            clock.advance(Duration::from_millis(base_ms + 1)).await;
+            assert_eq!(retry.now_or_never(), Some(true));
+        }
+    }
+
+    #[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+    #[rstest::rstest]
+    #[case(None, usize::MAX, true)]
+    #[case(Some(0), 1, false)]
+    #[case(Some(2), 1, true)]
+    #[case(Some(2), 2, true)]
+    #[case(Some(2), 3, false)]
+    #[tokio::test(start_paused = true)]
+    async fn test_multipart_retry_limit(
+        #[case] max_retries: Option<u32>,
+        #[case] attempt: usize,
+        #[case] expected_retry: bool,
+    ) {
+        use super::RetryingObjectStorePolicy;
+        use object_store::client::HttpErrorKind;
+        use object_store::retry::RetryFailure;
+
+        let policy = RetryingObjectStorePolicy {
+            clock: test_clock(),
+            rand: test_rand(),
+            max_retries,
+        };
+        assert_eq!(
+            policy
+                .retry_failure(RetryFailure::Transport(HttpErrorKind::Timeout), attempt)
+                .await,
+            expected_retry
+        );
     }
 
     #[tokio::test]
@@ -687,12 +830,13 @@ mod tests {
         assert_eq!(flaky.put_attempts(), 1);
         assert!(!handle.is_finished());
 
+        // The first retry waits MIN_RETRY_DELAY (100 ms) plus up to 100% jitter.
         clock.advance(Duration::from_millis(99)).await;
         tokio::task::yield_now().await;
         assert_eq!(flaky.put_attempts(), 1);
         assert!(!handle.is_finished());
 
-        clock.advance(Duration::from_millis(1)).await;
+        clock.advance(Duration::from_millis(101)).await;
 
         let result = handle.await.unwrap();
         assert!(
@@ -703,6 +847,67 @@ mod tests {
 
         let got = retrying.get(&path).await.unwrap();
         assert_eq!(got.bytes().await.unwrap(), Bytes::from_static(b"hello"));
+    }
+
+    /// Retry delays are jittered within `[d, 2d]` of the exponential schedule,
+    /// so concurrent retriers spread out; a given `DbRand` seed reproduces the
+    /// same schedule.
+    #[test]
+    fn test_retry_backoff_is_jittered_and_seeded() {
+        let store = |seed| {
+            RetryingObjectStore::new(
+                Arc::new(InMemory::new()),
+                Arc::new(DbRand::new(seed)),
+                test_clock(),
+                None,
+            )
+        };
+        let schedule = |s: &RetryingObjectStore| -> Vec<Duration> {
+            s.retry_builder().build().take(8).collect()
+        };
+
+        let a = schedule(&store(1));
+        let unjittered = [100, 200, 400, 800, 1000, 1000, 1000, 1000].map(Duration::from_millis);
+        for (delay, base) in a.iter().zip(unjittered) {
+            assert!(
+                *delay >= base && *delay <= base * 2,
+                "{delay:?} not in [{base:?}, {:?}]",
+                base * 2
+            );
+        }
+        assert_ne!(a, unjittered.to_vec(), "delays must be jittered");
+        assert_ne!(a, schedule(&store(2)), "different seeds spread retries");
+        assert_eq!(a, schedule(&store(1)), "a seed reproduces its schedule");
+    }
+
+    /// Multipart part retries are jittered the same way: within `[d, 2d]` of
+    /// the exponential schedule, different across seeds, reproducible for one.
+    #[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+    #[test]
+    fn test_multipart_retry_delay_is_jittered_and_seeded() {
+        use super::RetryingObjectStorePolicy;
+
+        let policy = |seed| RetryingObjectStorePolicy {
+            clock: test_clock(),
+            rand: Arc::new(DbRand::new(seed)),
+            max_retries: None,
+        };
+        let schedule = |p: &RetryingObjectStorePolicy| -> Vec<Duration> {
+            (1..=8).map(|attempt| p.retry_delay(attempt)).collect()
+        };
+
+        let a = schedule(&policy(1));
+        let unjittered = [100, 200, 400, 800, 1000, 1000, 1000, 1000].map(Duration::from_millis);
+        for (delay, base) in a.iter().zip(unjittered) {
+            assert!(
+                *delay >= base && *delay <= base * 2,
+                "{delay:?} not in [{base:?}, {:?}]",
+                base * 2
+            );
+        }
+        assert_ne!(a, unjittered.to_vec(), "delays must be jittered");
+        assert_ne!(a, schedule(&policy(2)), "different seeds spread retries");
+        assert_eq!(a, schedule(&policy(1)), "a seed reproduces its schedule");
     }
 
     #[tokio::test]
@@ -779,6 +984,112 @@ mod tests {
             e => panic!("unexpected error: {e:?}"),
         }
         assert_eq!(failing.put_attempts(), 1);
+    }
+
+    #[test]
+    fn test_should_not_retry_mirror_errors() {
+        let generic = object_store::Error::Generic {
+            store: "S3",
+            source: Box::new(std::io::Error::other("timeout")),
+        };
+        assert!(RetryingObjectStore::should_retry(&generic));
+
+        let write_committed = object_store::Error::from(MirrorError::WriteCommitted {
+            path: Path::from("manifest/00000000000000000001.manifest"),
+            source: Box::new(std::io::Error::other("disk full")),
+        });
+        assert!(!RetryingObjectStore::should_retry(&write_committed));
+
+        let not_local = object_store::Error::from(MirrorError::NotLocal {
+            path: Path::from("compacted/01K.sst"),
+        });
+        assert!(!RetryingObjectStore::should_retry(&not_local));
+    }
+
+    #[test]
+    fn test_should_not_retry_tagged_store_errors() {
+        let err = object_store::Error::Generic {
+            store: "test",
+            source: Box::new(std::io::Error::other(NonRetryable(Box::new(
+                std::io::Error::other("write already committed"),
+            )))),
+        };
+        assert!(!RetryingObjectStore::should_retry(&err));
+    }
+
+    #[tokio::test]
+    async fn test_put_opts_preserves_committed_mirror_failure() {
+        use object_store::PutMultipartOptions;
+        use slatedb_mirror::{
+            MirrorHandle, MirrorPolicy, MultipartRoute, ObjectStoreMirror, ReadRoute, WriteRoute,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Default)]
+        struct FailingObserver {
+            attempts: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl MirrorPolicy for FailingObserver {
+            fn read_route(&self, _: &Path, _: &GetOptions) -> object_store::Result<ReadRoute> {
+                Ok(ReadRoute::Remote)
+            }
+
+            fn put_route(&self, _: &Path, _: &PutOptions) -> object_store::Result<WriteRoute> {
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                Ok(WriteRoute::Observe)
+            }
+
+            fn put_multipart_route(
+                &self,
+                _: &Path,
+                _: &PutMultipartOptions,
+            ) -> object_store::Result<MultipartRoute> {
+                Ok(MultipartRoute::Remote)
+            }
+
+            async fn observe(
+                &self,
+                _: &Path,
+                _: &Bytes,
+                _: &MirrorHandle,
+            ) -> object_store::Result<()> {
+                Err(object_store::Error::Generic {
+                    store: "test",
+                    source: "observer failed".into(),
+                })
+            }
+        }
+
+        let remote = Arc::new(InMemory::new());
+        let policy = Arc::new(FailingObserver::default());
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = ObjectStoreMirror::builder(dir.path(), remote.clone(), policy.clone())
+            .with_remote_scan_interval(None)
+            .build()
+            .await
+            .unwrap();
+        let retrying = RetryingObjectStore::new(mirror, test_rand(), test_clock(), Some(2));
+        let path = Path::from("manifest/00000000000000000001.manifest");
+        let err = retrying
+            .put_opts(
+                &path,
+                PutPayload::from_bytes(Bytes::from_static(b"manifest")),
+                PutOptions::from(PutMode::Create),
+            )
+            .await
+            .expect_err("the committed write must preserve the observer failure");
+
+        assert!(matches!(
+            MirrorError::find(&err),
+            Some(MirrorError::WriteCommitted { .. })
+        ));
+        assert_eq!(policy.attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            remote.get(&path).await.unwrap().bytes().await.unwrap(),
+            Bytes::from_static(b"manifest")
+        );
     }
 
     #[tokio::test]

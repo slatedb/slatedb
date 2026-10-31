@@ -184,7 +184,7 @@ pub(crate) mod arbitrary {
 #[cfg(test)]
 pub(crate) mod rng {
     use proptest::test_runner::{RngAlgorithm, TestRng};
-    use rand::Rng;
+    use rand::RngExt;
 
     pub(crate) fn new_test_rng(seed: Option<[u8; 32]>) -> TestRng {
         let seed = seed.unwrap_or_else(|| {
@@ -212,7 +212,7 @@ pub(crate) mod sample {
     use proptest::test_runner::TestRng;
     use rand::distr::uniform::SampleRange;
     use rand::prelude::SliceRandom;
-    use rand::Rng;
+    use rand::RngExt;
     use std::cmp::max;
     use std::collections::BTreeMap;
     use std::ops::Bound::{Excluded, Included, Unbounded};

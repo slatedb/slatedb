@@ -1,3 +1,4 @@
+use std::ops::Bound;
 use std::sync::Arc;
 
 use bytes::{BufMut, Bytes};
@@ -42,6 +43,24 @@ pub trait FilterPolicy: Send + Sync {
     /// This is a hint used by the SST builder to reserve buffer space before
     /// the filter is built. It does not need to be exact.
     fn estimate_size(&self, num_keys: usize) -> usize;
+
+    /// Whether filters from this policy can answer [`FilterTarget::Range`]
+    /// queries.
+    ///
+    /// A plain range scan reads an SST's filters only when some registered
+    /// policy says yes here. Defaults to `false`, so a policy that indexes
+    /// keys alone, such as a bloom filter, costs a range scan nothing.
+    fn supports_range_queries(&self) -> bool {
+        false
+    }
+
+    /// Whether this policy can answer a prefix query. A prefix scan reads an
+    /// SST's filters only when some registered policy answers `true`; a
+    /// policy that hashes whole keys cannot narrow a prefix, so fetching its
+    /// filter for one would cost an object read and prune nothing.
+    fn supports_prefix_queries(&self) -> bool {
+        true
+    }
 }
 
 /// Accumulator for entries during SST construction that produces a [`Filter`].
@@ -83,8 +102,8 @@ pub trait Filter: Send + Sync {
 /// A membership query passed to [`Filter::might_match`].
 #[derive(Clone, Debug)]
 pub struct FilterQuery {
-    /// The target of this query (a specific key or a prefix).
-    pub target: PrefixTarget,
+    /// The target of this query (a specific key, a prefix, or a range).
+    pub target: FilterTarget,
     /// Opaque, caller-supplied context forwarded from
     /// [`crate::config::ScanOptions::filter_context`] or
     /// [`crate::config::ReadOptions::filter_context`].
@@ -96,11 +115,37 @@ pub struct FilterQuery {
     pub context: Option<FilterContext>,
 }
 
+/// The target of a filter query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterTarget {
+    /// Tests whether a specific key might exist in the SST.
+    Point(Bytes),
+    /// Tests whether any key with the given prefix might exist in the SST.
+    Prefix(Bytes),
+    /// Tests whether any key within the given bounds might exist in the SST.
+    Range {
+        lower: Bound<Bytes>,
+        upper: Bound<Bytes>,
+    },
+}
+
+impl FilterTarget {
+    /// The equivalent [`PrefixTarget`], or `None` for a target a
+    /// [`PrefixExtractor`] cannot describe.
+    pub fn as_prefix_target(&self) -> Option<PrefixTarget> {
+        match self {
+            Self::Point(key) => Some(PrefixTarget::Point(key.clone())),
+            Self::Prefix(prefix) => Some(PrefixTarget::Prefix(prefix.clone())),
+            Self::Range { .. } => None,
+        }
+    }
+}
+
 impl FilterQuery {
     /// Creates a point-lookup query for the given key.
     pub fn point(key: Bytes) -> Self {
         Self {
-            target: PrefixTarget::Point(key),
+            target: FilterTarget::Point(key),
             context: None,
         }
     }
@@ -108,7 +153,15 @@ impl FilterQuery {
     /// Creates a prefix-scan query for the given prefix.
     pub fn prefix(prefix: Bytes) -> Self {
         Self {
-            target: PrefixTarget::Prefix(prefix),
+            target: FilterTarget::Prefix(prefix),
+            context: None,
+        }
+    }
+
+    /// Creates a range-scan query over the given bounds.
+    pub fn range(lower: Bound<Bytes>, upper: Bound<Bytes>) -> Self {
+        Self {
+            target: FilterTarget::Range { lower, upper },
             context: None,
         }
     }
@@ -279,6 +332,10 @@ impl FilterPolicy for BloomFilterPolicy {
     fn estimate_size(&self, num_keys: usize) -> usize {
         let num_keys = u32::try_from(num_keys).expect("num_keys should fit in u32");
         BloomFilter::estimate_encoded_size(num_keys, self.bits_per_key)
+    }
+
+    fn supports_prefix_queries(&self) -> bool {
+        self.prefix_extractor.is_some()
     }
 }
 
@@ -980,5 +1037,28 @@ mod tests {
             }
             other => panic!("expected Inline variant, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn a_whole_key_bloom_policy_answers_no_prefix_query() {
+        let whole = BloomFilterPolicy::new(10);
+        assert!(!whole.supports_prefix_queries());
+        assert!(!whole.supports_range_queries());
+        #[derive(Debug)]
+        struct Three;
+        impl PrefixExtractor for Three {
+            fn name(&self) -> &str {
+                "three"
+            }
+            fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
+                let bytes = match target {
+                    PrefixTarget::Point(k) => k.as_ref(),
+                    PrefixTarget::Prefix(p) => p.as_ref(),
+                };
+                (bytes.len() >= 3).then_some(3)
+            }
+        }
+        let fixed = BloomFilterPolicy::new(10).with_prefix_extractor(Arc::new(Three));
+        assert!(fixed.supports_prefix_queries());
     }
 }

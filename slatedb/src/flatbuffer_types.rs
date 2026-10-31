@@ -19,7 +19,7 @@ use crate::compactor_state::{
 };
 use crate::db_state::{self, FilterFormat, SsTableInfo, SsTableInfoCodec, SstType};
 use crate::db_state::{SsTableHandle, SsTableView};
-use crate::subcompaction::Subcompaction as CompactorSubcompaction;
+use crate::subcompaction::{Subcompaction as CompactorSubcompaction, SubcompactionStatus};
 
 #[path = "./generated/root_generated.rs"]
 #[allow(warnings, clippy::disallowed_macros, clippy::disallowed_types, clippy::disallowed_methods, unreachable_pub)]
@@ -34,7 +34,6 @@ pub(crate) use root_generated::{
 
 use crate::config::CompressionCodec;
 use crate::db_state::SsTableId;
-use crate::db_state::SsTableId::Compacted;
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::root_generated::{
     BoundType, Checkpoint, CheckpointArgs, CheckpointMetadata, CompactedSsTable,
@@ -42,12 +41,17 @@ use crate::flatbuffer_types::root_generated::{
     CompactedSsTableViewArgs, Compaction as FbCompaction, CompactionArgs as FbCompactionArgs,
     CompactionContext as FbCompactionContext, CompactionSpec as FbCompactionSpec,
     CompactionStatus as FbCompactionStatus, CompactionsV1, CompactionsV1Args, CompressionFormat,
-    DrainSegmentSpec, DrainSegmentSpecArgs, ManifestV1Args, Segment as FbSegment,
-    SegmentArgs as FbSegmentArgs, SortedRun as FbSortedRunV1, SortedRunArgs as FbSortedRunV1Args,
+    DrainSegmentSpec, DrainSegmentSpecArgs, Segment as FbSegment, SegmentArgs as FbSegmentArgs,
     SortedRunV2, SortedRunV2Args, SstType as FbSstType, Subcompaction as FbSubcompaction,
-    SubcompactionArgs as FbSubcompactionArgs, TieredCompactionContext as FbTieredCompactionContext,
+    SubcompactionArgs as FbSubcompactionArgs, SubcompactionStatus as FbSubcompactionStatus,
+    TieredCompactionContext as FbTieredCompactionContext,
     TieredCompactionContextArgs as FbTieredCompactionContextArgs, TieredCompactionSpec,
     TieredCompactionSpecArgs, Ulid as FbUlid, UlidArgs as FbUlidArgs, Uuid, UuidArgs,
+};
+// V1-only manifest encoder types; only test fixtures build V1 manifests
+#[cfg(test)]
+use crate::flatbuffer_types::root_generated::{
+    ManifestV1Args, SortedRun as FbSortedRunV1, SortedRunArgs as FbSortedRunV1Args,
 };
 use crate::format::sst::SST_FORMAT_VERSION;
 use crate::manifest::{ExternalDb, LsmTreeState, Manifest, ManifestCore, Segment};
@@ -170,16 +174,10 @@ pub(crate) struct FlatBufferManifestCodec {}
 
 impl ObjectCodec<Manifest> for FlatBufferManifestCodec {
     fn encode(&self, manifest: &Manifest) -> Bytes {
-        // RFC-0024 lazy V2 bump: the V1 schema has no `segments` or
-        // `segment_extractor_name` fields, so writing segmented state
-        // through the V1 encoder would silently drop it. Pick V2 the
-        // moment any segmented state is present; databases that never
-        // configure an extractor keep writing V1.
-        if Self::requires_v2(manifest) {
-            Self::create_from_manifest(manifest)
-        } else {
-            Self::create_from_manifest_v1(manifest)
-        }
+        // RFC-0004 Phase 2 of the manifest V1->V2 rollout: write V2
+        // universally, read V1+V2. V1 read support (and the V1 encoder,
+        // retained below for tests) stays until no V1 manifests remain
+        Self::create_from_manifest(manifest)
     }
 
     fn decode(&self, bytes: &Bytes) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
@@ -253,7 +251,7 @@ impl FlatBufferManifestCodec {
                 .format_version()
                 .unwrap_or(ORIGINAL_SST_FORMAT_VERSION);
             let sst_info = FlatBufferSsTableInfoCodec::sst_info(&man_sst.info());
-            let handle = SsTableHandle::new(Compacted(sst_ulid), format_version, sst_info);
+            let handle = SsTableHandle::new(SsTableId::from(sst_ulid), format_version, sst_info);
             let l0_sst = SsTableView::new_projected(
                 sst_ulid,
                 handle,
@@ -270,7 +268,7 @@ impl FlatBufferManifestCodec {
                     .format_version()
                     .unwrap_or(ORIGINAL_SST_FORMAT_VERSION);
                 let info = FlatBufferSsTableInfoCodec::sst_info(&manifest_sst.info());
-                let handle = SsTableHandle::new(Compacted(sst_ulid), format_version, info);
+                let handle = SsTableHandle::new(SsTableId::from(sst_ulid), format_version, info);
                 ssts.push(SsTableView::new_projected(
                     sst_ulid,
                     handle,
@@ -316,7 +314,11 @@ impl FlatBufferManifestCodec {
                         final_checkpoint_id: db
                             .final_checkpoint_id()
                             .map(|id| Self::decode_uuid(id)),
-                        sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
+                        sst_ids: db
+                            .sst_ids()
+                            .iter()
+                            .map(|id| SsTableId::from(id.ulid()))
+                            .collect(),
                     })
                     .collect()
             })
@@ -436,7 +438,11 @@ impl FlatBufferManifestCodec {
                         final_checkpoint_id: db
                             .final_checkpoint_id()
                             .map(|id| Self::decode_uuid(id)),
-                        sst_ids: db.sst_ids().iter().map(|id| Compacted(id.ulid())).collect(),
+                        sst_ids: db
+                            .sst_ids()
+                            .iter()
+                            .map(|id| SsTableId::from(id.ulid()))
+                            .collect(),
                     })
                     .collect()
             })
@@ -523,6 +529,10 @@ impl FlatBufferManifestCodec {
         })
     }
 
+    /// Retained for tests that construct V1 manifest fixtures to verify
+    /// decode-side backward compatibility; production code always writes
+    /// V2 (see [`FlatBufferManifestCodec::encode`]).
+    #[cfg(test)]
     pub(crate) fn create_from_manifest_v1(manifest: &Manifest) -> Bytes {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
@@ -533,12 +543,6 @@ impl FlatBufferManifestCodec {
         let builder = FlatBufferBuilder::new();
         let mut db_fb_builder = DbFlatBufferBuilder::new(builder);
         db_fb_builder.create_manifest(manifest)
-    }
-
-    /// Whether `manifest` carries state that V1 cannot represent:
-    /// a configured segment extractor, or any named segment.
-    fn requires_v2(manifest: &Manifest) -> bool {
-        manifest.core.segment_extractor_name.is_some() || !manifest.core.segments.is_empty()
     }
 }
 
@@ -611,7 +615,8 @@ impl FlatBufferCompactionsCodec {
             FbCompactionContext::NONE => None,
             FbCompactionContext::TieredCompactionContext => compaction
                 .ctx_as_tiered_compaction_context()
-                .map(Self::compaction_context),
+                .map(Self::compaction_context)
+                .transpose()?,
             _ => {
                 warn!(
                     "unknown compaction context type: {:?}",
@@ -637,21 +642,40 @@ impl FlatBufferCompactionsCodec {
             .with_ctx(ctx))
     }
 
-    fn compaction_context(ctx: FbTieredCompactionContext) -> CompactorCompactionContext {
+    fn compaction_context(
+        ctx: FbTieredCompactionContext,
+    ) -> Result<CompactorCompactionContext, SlateDBError> {
         let subcompactions = ctx
             .subcompactions()
-            .map(|subs| subs.iter().map(Self::subcompaction).collect())
+            .map(|subs| {
+                subs.iter()
+                    .map(Self::subcompaction)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
             .unwrap_or_default();
-        CompactorCompactionContext::new(subcompactions, Some(ctx.retention_min_seq()))
+        Ok(CompactorCompactionContext::new(
+            subcompactions,
+            Some(ctx.retention_min_seq()),
+        ))
     }
 
-    fn subcompaction(subcompaction: FbSubcompaction) -> CompactorSubcompaction {
+    fn subcompaction(
+        subcompaction: FbSubcompaction,
+    ) -> Result<CompactorSubcompaction, SlateDBError> {
         let range = FlatBufferManifestCodec::decode_bytes_range(subcompaction.range());
         let output_ssts = subcompaction
             .output_ssts()
             .map(|ssts| ssts.iter().map(Self::compacted_sst).collect())
             .unwrap_or_default();
-        CompactorSubcompaction::new(range).with_output_ssts(output_ssts)
+        let status = match subcompaction.status() {
+            FbSubcompactionStatus::InProgress => SubcompactionStatus::InProgress,
+            FbSubcompactionStatus::Completed => SubcompactionStatus::Completed,
+            _ => return Err(SlateDBError::InvalidCompaction),
+        };
+        Ok(CompactorSubcompaction::new(range)
+            .with_output_ssts(output_ssts)
+            .with_status(status))
     }
 
     fn worker_spec(
@@ -725,7 +749,7 @@ impl FlatBufferCompactionsCodec {
     }
 
     fn compacted_sst(compacted_sst: CompactedSsTable) -> SsTableHandle {
-        let id = Compacted(compacted_sst.id().ulid());
+        let id = SsTableId::from(compacted_sst.id().ulid());
         let format_version = compacted_sst
             .format_version()
             .unwrap_or(ORIGINAL_SST_FORMAT_VERSION);
@@ -734,7 +758,7 @@ impl FlatBufferCompactionsCodec {
     }
 
     fn compacted_sst_v2(compacted_sst: CompactedSsTableV2) -> SsTableHandle {
-        let id = Compacted(compacted_sst.id().ulid());
+        let id = SsTableId::from(compacted_sst.id().ulid());
         let format_version = compacted_sst
             .format_version()
             .unwrap_or(ORIGINAL_SST_FORMAT_VERSION);
@@ -818,7 +842,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         I: Iterator<Item = &'a SsTableId>,
     {
         let sst_ids: Vec<WIPOffset<FbUlid>> = sst_ids
-            .map(|id| id.unwrap_compacted_id())
+            .map(|id| id.value())
             .map(|id| self.add_compacted_sst_id(&id))
             .collect();
         self.builder.create_vector(sst_ids.as_ref())
@@ -833,12 +857,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
     }
 
     fn add_compacted_sst(&mut self, handle: &SsTableHandle) -> WIPOffset<CompactedSsTable<'b>> {
-        let ulid = match handle.id {
-            SsTableId::Wal(_) => {
-                unreachable!("cannot pass WAL SST handle to create compacted sst")
-            }
-            Compacted(ulid) => ulid,
-        };
+        let ulid = handle.id.value();
         let compacted_sst_id = self.add_compacted_sst_id(&ulid);
         let compacted_sst_info = self.add_sst_info(&handle.info);
         CompactedSsTable::create(
@@ -864,16 +883,14 @@ impl<'b> DbFlatBufferBuilder<'b> {
         self.builder.create_vector(compacted_ssts.as_ref())
     }
 
+    /// V1-only; only test fixtures construct V1 manifests now that
+    /// `encode()` writes V2 universally (see [`FlatBufferManifestCodec::encode`]).
+    #[cfg(test)]
     fn add_compacted_sst_from_view(
         &mut self,
         view: &SsTableView,
     ) -> WIPOffset<CompactedSsTable<'b>> {
-        let ulid = match view.sst.id {
-            SsTableId::Wal(_) => {
-                unreachable!("cannot pass WAL SST handle to create compacted sst from view")
-            }
-            Compacted(ulid) => ulid,
-        };
+        let ulid = view.sst.id.value();
         let compacted_sst_id = self.add_compacted_sst_id(&ulid);
         let compacted_sst_info = self.add_sst_info(&view.sst.info);
         let visible_range = view.visible_range.as_ref().map(|r| self.add_bytes_range(r));
@@ -892,12 +909,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         &mut self,
         handle: &SsTableHandle,
     ) -> WIPOffset<CompactedSsTableV2<'b>> {
-        let ulid = match handle.id {
-            SsTableId::Wal(_) => {
-                unreachable!("cannot pass WAL SST handle to create compacted sst v2")
-            }
-            Compacted(ulid) => ulid,
-        };
+        let ulid = handle.id.value();
         let compacted_sst_id = self.add_compacted_sst_id(&ulid);
         let compacted_sst_info = self.add_sst_info(&handle.info);
         CompactedSsTableV2::create(
@@ -914,12 +926,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         &mut self,
         view: &SsTableView,
     ) -> WIPOffset<CompactedSsTableView<'b>> {
-        let ulid = match view.sst.id {
-            SsTableId::Wal(_) => {
-                unreachable!("cannot pass WAL SST handle to create compacted sst view")
-            }
-            Compacted(ulid) => ulid,
-        };
+        let ulid = view.sst.id.value();
         let sst_id = self.add_compacted_sst_id(&ulid);
         let visible_range = view.visible_range.as_ref().map(|r| self.add_bytes_range(r));
         let id = Some(self.add_ulid(&view.id));
@@ -1011,6 +1018,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         self.builder.create_vector(segment_offsets.as_ref())
     }
 
+    #[cfg(test)]
     fn add_sorted_run_v1(
         &mut self,
         sorted_run: &db_state::SortedRun,
@@ -1030,6 +1038,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         )
     }
 
+    #[cfg(test)]
     fn add_sorted_runs_v1(
         &mut self,
         sorted_runs: &[db_state::SortedRun],
@@ -1148,6 +1157,10 @@ impl<'b> DbFlatBufferBuilder<'b> {
             &FbSubcompactionArgs {
                 range: Some(range),
                 output_ssts,
+                status: match subcompaction.status() {
+                    SubcompactionStatus::InProgress => FbSubcompactionStatus::InProgress,
+                    SubcompactionStatus::Completed => FbSubcompactionStatus::Completed,
+                },
             },
         )
     }
@@ -1279,15 +1292,11 @@ impl<'b> DbFlatBufferBuilder<'b> {
             std::collections::BTreeMap::new();
         for tree in core.trees() {
             for view in tree.l0.iter() {
-                if let Compacted(ulid) = view.sst.id {
-                    unique_ssts.entry(ulid).or_insert(&view.sst);
-                }
+                unique_ssts.entry(view.sst.id.value()).or_insert(&view.sst);
             }
             for sr in tree.compacted.iter() {
                 for view in sr.sst_views() {
-                    if let Compacted(ulid) = view.sst.id {
-                        unique_ssts.entry(ulid).or_insert(&view.sst);
-                    }
+                    unique_ssts.entry(view.sst.id.value()).or_insert(&view.sst);
                 }
             }
         }
@@ -1361,6 +1370,7 @@ impl<'b> DbFlatBufferBuilder<'b> {
         bytes.into()
     }
 
+    #[cfg(test)]
     fn create_manifest_v1(&mut self, manifest: &Manifest) -> Bytes {
         let core = &manifest.core;
 
@@ -1622,15 +1632,15 @@ mod tests {
                 source_checkpoint_id: uuid::Uuid::new_v4(),
                 final_checkpoint_id: Some(uuid::Uuid::new_v4()),
                 sst_ids: vec![
-                    SsTableId::Compacted(ulid::Ulid::new()),
-                    SsTableId::Compacted(ulid::Ulid::new()),
+                    SsTableId::from(ulid::Ulid::new()),
+                    SsTableId::from(ulid::Ulid::new()),
                 ],
             },
             ExternalDb {
                 path: "/path/to/external/second".to_string(),
                 source_checkpoint_id: uuid::Uuid::new_v4(),
                 final_checkpoint_id: Some(uuid::Uuid::new_v4()),
-                sst_ids: vec![SsTableId::Compacted(ulid::Ulid::new())],
+                sst_ids: vec![SsTableId::from(ulid::Ulid::new())],
             },
         ];
         let codec = FlatBufferManifestCodec {};
@@ -1652,7 +1662,7 @@ mod tests {
             SsTableView::new_projected(
                 ulid,
                 SsTableHandle::new(
-                    SsTableId::Compacted(ulid),
+                    SsTableId::from(ulid),
                     SST_FORMAT_VERSION_LATEST,
                     SsTableInfo {
                         first_entry: Some(Bytes::copy_from_slice(first_entry)),
@@ -1702,7 +1712,7 @@ mod tests {
         fn new_sst_view(index: u64) -> SsTableView {
             let ulid = ulid::Ulid::from_parts(index, u128::from(index * 17));
             SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(ulid),
+                SsTableId::from(ulid),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::from(format!("first-{index:03}"))),
@@ -1822,10 +1832,14 @@ mod tests {
         let v1_bytes = bytes.freeze();
         codec.decode(&v1_bytes).expect("Should decode V1 manifest");
 
-        // Test encode/decode round-trip (currently writes V1 for forward compatibility)
+        // Test encode/decode round-trip (writes V2 universally, per RFC-0004
+        // Phase 2 of the manifest V1->V2 rollout)
         let manifest = Manifest::initial(ManifestCore::new());
         let encoded = codec.encode(&manifest);
-        assert_eq!(u16::from_be_bytes([encoded[0], encoded[1]]), 1);
+        assert_eq!(
+            u16::from_be_bytes([encoded[0], encoded[1]]),
+            MANIFEST_FORMAT_VERSION
+        );
         codec
             .decode(&encoded)
             .expect("Should decode manifest round-trip");
@@ -1894,7 +1908,7 @@ mod tests {
             SsTableView::new_projected(
                 ulid,
                 SsTableHandle::new(
-                    SsTableId::Compacted(ulid),
+                    SsTableId::from(ulid),
                     SST_FORMAT_VERSION_LATEST,
                     SsTableInfo {
                         first_entry: Some(Bytes::from_static(b"a")),
@@ -1987,7 +2001,7 @@ mod tests {
     fn test_should_encode_decode_compactions() {
         fn new_output_sst(first_key: &[u8]) -> SsTableHandle {
             SsTableHandle::new(
-                SsTableId::Compacted(ulid::Ulid::new()),
+                SsTableId::from(ulid::Ulid::new()),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::copy_from_slice(first_key)),
@@ -2072,10 +2086,44 @@ mod tests {
     }
 
     #[test]
+    fn subcompaction_status_defaults_to_in_progress_and_rejects_unknown_values() {
+        use super::{
+            DbFlatBufferBuilder, FbSubcompaction, FbSubcompactionStatus, SubcompactionStatus,
+        };
+        use flatbuffers::FlatBufferBuilder;
+
+        for (encoded_status, expected) in [
+            (None, Some(SubcompactionStatus::InProgress)),
+            (
+                Some(FbSubcompactionStatus::Completed),
+                Some(SubcompactionStatus::Completed),
+            ),
+            (Some(FbSubcompactionStatus(42)), None),
+        ] {
+            let mut builder = DbFlatBufferBuilder::new(FlatBufferBuilder::new());
+            let range = builder.add_bytes_range(&BytesRange::unbounded());
+            let mut sub = root_generated::SubcompactionBuilder::new(&mut builder.builder);
+            sub.add_range(range);
+            if let Some(status) = encoded_status {
+                sub.add_status(status);
+            }
+            let sub = sub.finish();
+            builder.builder.finish(sub, None);
+            let encoded =
+                flatbuffers::root::<FbSubcompaction>(builder.builder.finished_data()).unwrap();
+            let decoded = FlatBufferCompactionsCodec::subcompaction(encoded);
+            match expected {
+                Some(status) => assert_eq!(decoded.unwrap().status(), status),
+                None => assert!(matches!(decoded, Err(SlateDBError::InvalidCompaction))),
+            }
+        }
+    }
+
+    #[test]
     fn test_should_encode_decode_compaction_with_subcompactions() {
         fn new_output_sst(first_key: &[u8]) -> SsTableHandle {
             SsTableHandle::new(
-                SsTableId::Compacted(ulid::Ulid::new()),
+                SsTableId::from(ulid::Ulid::new()),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::copy_from_slice(first_key)),
@@ -2097,11 +2145,13 @@ mod tests {
                 std::ops::Bound::Included(Bytes::from_static(b"g")),
                 std::ops::Bound::Excluded(Bytes::from_static(b"q")),
             ))
-            .with_output_ssts(vec![new_output_sst(b"g")]),
+            .with_output_ssts(vec![new_output_sst(b"g")])
+            .with_status(crate::subcompaction::SubcompactionStatus::Completed),
             Subcompaction::new(BytesRange::new(
                 std::ops::Bound::Included(Bytes::from_static(b"q")),
                 std::ops::Bound::Unbounded,
-            )),
+            ))
+            .with_status(crate::subcompaction::SubcompactionStatus::Completed),
         ];
         let compaction = Compaction::new(
             ulid::Ulid::new(),
@@ -2302,7 +2352,7 @@ mod tests {
         let mut manifest = Manifest::initial(ManifestCore::new());
         Arc::make_mut(&mut manifest.core.tree).l0 =
             VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(ulid::Ulid::new()),
+                SsTableId::from(ulid::Ulid::new()),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::from_static(b"l0key")),
@@ -2312,7 +2362,7 @@ mod tests {
         Arc::make_mut(&mut manifest.core.tree).compacted = vec![SortedRun::new(
             1,
             [SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(ulid::Ulid::new()),
+                SsTableId::from(ulid::Ulid::new()),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::from_static(b"srkey")),
@@ -2449,7 +2499,7 @@ mod tests {
     fn test_should_encode_decode_compaction_output_sst_with_version_set() {
         // given: a compaction with one output SST
         let output_sst = SsTableHandle::new(
-            SsTableId::Compacted(ulid::Ulid::new()),
+            SsTableId::from(ulid::Ulid::new()),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo {
                 first_entry: Some(Bytes::from_static(b"key1")),
@@ -2743,7 +2793,7 @@ mod tests {
             SsTableView::new_projected(
                 ulid,
                 SsTableHandle::new(
-                    SsTableId::Compacted(ulid),
+                    SsTableId::from(ulid),
                     SST_FORMAT_VERSION_LATEST,
                     SsTableInfo {
                         first_entry: Some(Bytes::copy_from_slice(first_entry)),
@@ -2778,7 +2828,7 @@ mod tests {
         Arc::make_mut(&mut manifest.core.tree).last_compacted_l0_sst_view_id =
             Some(manifest.core.tree.l0[0].id);
         Arc::make_mut(&mut manifest.core.tree).last_compacted_l0_sst_id =
-            Some(manifest.core.tree.l0[0].sst.id.unwrap_compacted_id());
+            Some(manifest.core.tree.l0[0].sst.id.value());
         manifest.writer_epoch = 42;
         manifest.compactor_epoch = 7;
         manifest.core.next_wal_sst_id = 10;
@@ -2806,8 +2856,8 @@ mod tests {
             source_checkpoint_id: uuid::Uuid::new_v4(),
             final_checkpoint_id: Some(uuid::Uuid::new_v4()),
             sst_ids: vec![
-                SsTableId::Compacted(ulid::Ulid::new()),
-                SsTableId::Compacted(ulid::Ulid::new()),
+                SsTableId::from(ulid::Ulid::new()),
+                SsTableId::from(ulid::Ulid::new()),
             ],
         }];
 
@@ -2827,7 +2877,7 @@ mod tests {
         let mut manifest = Manifest::initial(ManifestCore::new());
         Arc::make_mut(&mut manifest.core.tree).l0 =
             VecDeque::from(vec![SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(ulid::Ulid::new()),
+                SsTableId::from(ulid::Ulid::new()),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::from_static(b"l0key")),
@@ -2837,7 +2887,7 @@ mod tests {
         Arc::make_mut(&mut manifest.core.tree).compacted = vec![SortedRun::new(
             1,
             [SsTableView::identity(SsTableHandle::new(
-                SsTableId::Compacted(ulid::Ulid::new()),
+                SsTableId::from(ulid::Ulid::new()),
                 SST_FORMAT_VERSION_LATEST,
                 SsTableInfo {
                     first_entry: Some(Bytes::from_static(b"srkey")),

@@ -37,7 +37,7 @@ use crate::{DbReadOps, DbTransactionOps};
 ///
 /// #     let object_store = Arc::new(InMemory::new());
 /// #     let db = Db::open("path/to/db", object_store).await?;
-/// let txn = db.begin(IsolationLevel::Snapshot).await?;
+/// let txn = db.begin(IsolationLevel::Snapshot)?;
 ///
 /// // Read operations
 /// let value = txn.get(b"key").await?;
@@ -402,7 +402,7 @@ impl DbTransaction {
     ///
     /// # let object_store = Arc::new(InMemory::new());
     /// # let db = Db::open("test_path", object_store).await?;
-    /// let txn = db.begin(IsolationLevel::Snapshot).await?;
+    /// let txn = db.begin(IsolationLevel::Snapshot)?;
     /// txn.mark_read([b"key1", b"key2", b"key3"])?;
     /// # Ok(())
     /// # }
@@ -451,7 +451,7 @@ impl DbTransaction {
     ///
     /// # let object_store = Arc::new(InMemory::new());
     /// # let db = Db::open("test_path", object_store).await?;
-    /// let txn = db.begin(IsolationLevel::Snapshot).await?;
+    /// let txn = db.begin(IsolationLevel::Snapshot)?;
     /// txn.put(b"counter", b"1")?;
     /// txn.unmark_write([b"counter"])?;
     /// txn.put(b"counter", b"2")?;
@@ -816,7 +816,7 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin transaction
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
 
         // Put data from others
         db.put(b"k2", b"v2").await.unwrap();
@@ -839,10 +839,7 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin transaction
-        let txn = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
 
         // Write within transaction
         txn.put(b"k1", b"v2").unwrap();
@@ -865,11 +862,11 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin first transaction
-        let txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn1 = db.begin(IsolationLevel::Snapshot).unwrap();
         txn1.put(b"k1", b"v2").unwrap();
 
         // Begin second transaction
-        let txn2 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn2 = db.begin(IsolationLevel::Snapshot).unwrap();
         txn2.put(b"k1", b"v3").unwrap();
 
         // Commit first transaction - should succeed
@@ -890,7 +887,7 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Begin first transaction
-        let txn1 = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn1 = db.begin(IsolationLevel::Snapshot).unwrap();
         txn1.put(b"k1", b"v2").unwrap();
 
         // DB put on the same key
@@ -912,18 +909,12 @@ mod tests {
         db.put(b"k2", b"v2.1").await.unwrap();
 
         // Begin first transaction
-        let txn1 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn1 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
         txn1.put(b"k1", b"v2").unwrap();
         txn1.put(b"k2", b"v2.2").unwrap();
 
         // Begin second transaction
-        let txn2 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn2 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
         let val2 = txn2.get(b"k2").await.unwrap();
         assert_eq!(val2, Some(Bytes::from_static(b"v2.1")));
         txn2.put(b"k3", b"v3").unwrap();
@@ -948,16 +939,10 @@ mod tests {
         db.put(b"k3", b"v3").await.unwrap();
 
         // Begin first transaction
-        let txn1 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn1 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
 
         // Begin second transaction
-        let txn2 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn2 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
 
         // Transaction 2 scans k2..k3
         {
@@ -997,14 +982,8 @@ mod tests {
         db.put(b"~outside_both_ranges", b"v").await.unwrap();
         db.flush().await.unwrap();
 
-        let txn1 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
-        let txn2 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn1 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
+        let txn2 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
 
         // T1 scans [a..m); empty.
         {
@@ -1044,10 +1023,7 @@ mod tests {
         db.put(b"k_mid", b"seed").await.unwrap();
         db.flush().await.unwrap();
 
-        let txn1 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn1 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
 
         // Scan [k_aaa..k_zzz); only k_mid is in range, so the yielded bbox
         // collapses to (k_mid, k_mid) under the old tracker.
@@ -1082,10 +1058,7 @@ mod tests {
         db.delete(b"k_deleted").await.unwrap();
         db.flush().await.unwrap();
 
-        let txn1 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn1 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
 
         {
             let mut iter = txn1.scan(&b"k_a"[..]..&b"k_z"[..]).await.unwrap();
@@ -1116,10 +1089,7 @@ mod tests {
         db.put(b"sentinel", b"x").await.unwrap();
         db.flush().await.unwrap();
 
-        let txn1 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn1 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
 
         {
             let mut iter = txn1.scan_prefix(b"users/", ..).await.unwrap();
@@ -1147,10 +1117,7 @@ mod tests {
 
         // A write under the prefix but before the subrange start is not a
         // conflict: the tracked range starts at users/m, not users/.
-        let txn1 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn1 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
         {
             let mut iter = txn1
                 .scan_prefix(b"users/", b"m".as_slice()..)
@@ -1168,10 +1135,7 @@ mod tests {
 
         // A write inside the subrange is a phantom even though the scan never
         // yielded it.
-        let txn2 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn2 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
         {
             let mut iter = txn2
                 .scan_prefix(b"users/", b"m".as_slice()..)
@@ -1207,7 +1171,7 @@ mod tests {
         fail_parallel::cfg(fp_registry.clone(), "write-wal-sst-io-error", "pause").unwrap();
 
         // Begin a transaction and write a key
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         txn.put(b"k", b"v").unwrap();
 
         // Commits return without waiting for durability.
@@ -1278,7 +1242,7 @@ mod tests {
             db.put(key, value).await.unwrap();
         }
 
-        let mut txn_opt = Some(db.begin(isolation_level).await.unwrap());
+        let mut txn_opt = Some(db.begin(isolation_level).unwrap());
 
         let mut results = Vec::new();
         for operation in operations.iter() {
@@ -1773,7 +1737,7 @@ mod tests {
         db.put(b"k3", b"v3").await.unwrap();
 
         // Begin transaction
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
 
         // Test 1: Scan created before put should NOT see the new key or updated value for an existing key
         {
@@ -1837,10 +1801,7 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Test 1: Transaction using mark_read() should conflict
-        let txn1 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn1 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
         txn1.mark_read([b"k1"]).unwrap();
 
         // Another transaction modifies k1
@@ -1858,10 +1819,7 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
 
         // Test 2: Transaction using get() should also conflict (same behavior)
-        let txn2 = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn2 = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
         let _ = txn2.get(b"k1").await.unwrap();
 
         // Another transaction modifies k1
@@ -1887,10 +1845,7 @@ mod tests {
         db.put(b"k2", b"v2").await.unwrap();
         db.put(b"k3", b"v3").await.unwrap();
 
-        let txn = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let txn = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
 
         // Mark multiple keys at once
         txn.mark_read([b"k1", b"k2", b"k3"]).unwrap();
@@ -1917,7 +1872,7 @@ mod tests {
 
         db.put(b"k1", b"v1").await.unwrap();
 
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         txn.put(b"k1", b"v2").unwrap();
         txn.unmark_write([b"k1"]).unwrap();
 
@@ -1943,7 +1898,7 @@ mod tests {
         db.put(b"k1", b"v1").await.unwrap();
         db.put(b"k2", b"v2").await.unwrap();
 
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         txn.put(b"k1", b"v1_txn").unwrap();
         txn.put(b"k2", b"v2_txn").unwrap();
         txn.unmark_write([b"k1"]).unwrap();
@@ -1966,13 +1921,10 @@ mod tests {
 
         db.put(b"k1", b"v1").await.unwrap();
 
-        let reader_txn = db
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await
-            .unwrap();
+        let reader_txn = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
         let _ = reader_txn.get(b"k1").await.unwrap();
 
-        let writer_txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let writer_txn = db.begin(IsolationLevel::Snapshot).unwrap();
         writer_txn.put(b"k1", b"v2").unwrap();
         writer_txn.unmark_write([b"k1"]).unwrap();
         writer_txn.commit().await.unwrap();
@@ -2008,10 +1960,7 @@ mod tests {
                 let barrier = barrier.clone();
                 handles.push(tokio::spawn(async move {
                     barrier.wait().await;
-                    let txn = db
-                        .begin(IsolationLevel::SerializableSnapshot)
-                        .await
-                        .unwrap();
+                    let txn = db.begin(IsolationLevel::SerializableSnapshot).unwrap();
                     txn.merge(b"counter", MERGE_INCREMENT).unwrap();
                     txn.unmark_write([b"counter"]).unwrap();
                     txn.commit().await.unwrap();
@@ -2035,7 +1984,7 @@ mod tests {
             .await
             .unwrap();
 
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         let err = txn
             .merge_with_options(b"counter", 1u64.to_le_bytes(), &MergeOptions::default())
             .unwrap_err();
@@ -2058,7 +2007,7 @@ mod tests {
         .await
         .unwrap();
 
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         txn.merge_with_options(
             b"counter",
             1u64.to_le_bytes(),
@@ -2133,7 +2082,7 @@ mod tests {
 
         // Basic put
         clock.set(100);
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         txn.put(b"key1", b"value1").unwrap();
         let handle = txn
             .commit_with_options(&WriteOptions {
@@ -2147,7 +2096,7 @@ mod tests {
 
         // Put with options (TTL)
         clock.set(200);
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         let put_opts = PutOptions {
             ttl: crate::config::Ttl::ExpireAfterMillis(1000),
         };
@@ -2164,7 +2113,7 @@ mod tests {
 
         // Delete
         clock.set(300);
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         txn.delete(b"key1").unwrap();
         let handle = txn
             .commit_with_options(&WriteOptions {
@@ -2184,7 +2133,7 @@ mod tests {
             .await
             .unwrap();
 
-        let txn = db.begin(IsolationLevel::Snapshot).await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
         let result = txn
             .commit_with_options(&WriteOptions {
                 ..Default::default()

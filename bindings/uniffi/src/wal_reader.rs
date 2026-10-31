@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use object_store::path::Path;
 use slatedb::wal::WalReader as _;
 use tokio::sync::Mutex;
 
@@ -10,21 +11,21 @@ use crate::types::RowEntry;
 /// Options controlling how the native SlateDB WAL reader fetches WAL SSTs.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct SlateDbWalReaderOptions {
-    /// Number of WAL SSTs to preload.
-    #[uniffi(default = 4)]
-    pub sst_batch_size: u64,
-    /// Number of concurrent fetch tasks per WAL SST.
-    #[uniffi(default = 2)]
+    /// Shared soft limit on bytes buffered across WAL SSTs.
+    #[uniffi(default = 134217728)]
+    pub max_buffered_bytes: u64,
+    /// Shared limit on concurrent WAL SST fetch tasks.
+    #[uniffi(default = 128)]
     pub max_fetch_tasks: u64,
-    /// Number of bytes to read ahead from each WAL SST.
-    #[uniffi(default = 1048576)]
+    /// Target number of bytes in each WAL SST fetch.
+    #[uniffi(default = 4194304)]
     pub read_ahead_bytes: u64,
 }
 
 impl Default for SlateDbWalReaderOptions {
     fn default() -> Self {
         Self {
-            sst_batch_size: 4,
+            max_buffered_bytes: 4 * 1024,
             max_fetch_tasks: 2,
             read_ahead_bytes: 1024 * 1024,
         }
@@ -36,14 +37,14 @@ impl TryFrom<SlateDbWalReaderOptions> for slatedb::wal::SlateDbWalReaderOptions 
 
     fn try_from(options: SlateDbWalReaderOptions) -> Result<Self, Self::Error> {
         Ok(Self {
-            sst_batch_size: positive_usize(options.sst_batch_size, "sst_batch_size")?,
+            max_buffered_bytes: positive_usize(options.max_buffered_bytes, "max_buffered_bytes")?,
             max_fetch_tasks: positive_usize(options.max_fetch_tasks, "max_fetch_tasks")?,
             read_ahead_bytes: positive_usize(options.read_ahead_bytes, "read_ahead_bytes")?,
         })
     }
 }
 
-fn positive_usize(value: u64, field: &'static str) -> Result<usize, Error> {
+pub(crate) fn positive_usize(value: u64, field: &'static str) -> Result<usize, Error> {
     if value == 0 {
         return Err(Error::Invalid {
             message: format!("{field} must be greater than zero"),
@@ -110,7 +111,7 @@ impl SlateDbWalReader {
         options: SlateDbWalReaderOptions,
     ) -> Result<Arc<Self>, Error> {
         let options = options.try_into()?;
-        let path = slatedb::object_store::path::Path::from(path);
+        let path = Path::from(path);
         let mut builder = slatedb::wal::SlateDbWalReaderBuilder::new()
             .with_object_store(Arc::clone(&object_store.inner))
             .with_path(path)
@@ -191,7 +192,7 @@ mod tests {
     #[test]
     fn rejects_zero_reader_options() {
         let options = SlateDbWalReaderOptions {
-            sst_batch_size: 0,
+            max_buffered_bytes: 0,
             ..SlateDbWalReaderOptions::default()
         };
         assert!(matches!(

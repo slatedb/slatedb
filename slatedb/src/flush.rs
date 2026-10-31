@@ -1,164 +1,269 @@
 use crate::db::DbInner;
-use crate::db_state;
-use crate::db_state::SsTableHandle;
+use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
+#[cfg(test)]
 use crate::format::sst::EncodedSsTable;
 use crate::iter::RowEntryIterator;
 use crate::mem_table::KVTable;
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorRequiredIterator};
 use crate::oracle::Oracle;
+use crate::read_trace::ReadTrace;
 use crate::reader::DbStateReader;
 use crate::retention_iterator::RetentionIterator;
+use crate::retrying_object_store::RetryingObjectStore;
+use crate::tablestore::EncodedSsTableWriter;
 use bytes::Bytes;
+use log::warn;
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::task::{JoinError, JoinSet};
+use tokio_util::sync::CancellationToken;
+use ulid::Ulid;
 
-/// One encoded-but-not-yet-uploaded SST from a memtable flush, tagged with
-/// the segment it belongs to (RFC-0024). Mirrors the shape of post-upload
-/// [`crate::memtable_flusher::uploader::SegmentedSstHandle`].
-pub(crate) struct EncodedSegmentSst {
+/// Best-effort cleanup after a writer fails partway through.
+///
+/// Tells object storage to discard any part of this SST already
+/// uploaded. If the abort call itself fails, only logs a warning. The
+/// caller returns its original error either way.
+async fn abort_writer(writer: &mut EncodedSsTableWriter) {
+    if let Err(e) = writer.abort().await {
+        warn!("failed to abort sst writer after error [error={:?}]", e);
+    }
+}
+
+/// One uploaded SST from a memtable flush, tagged with the segment it
+/// belongs to (RFC-0024). An empty `prefix` denotes the compatibility-encoded
+/// `prefix=""` segment whose state lives in the manifest's top-level tree.
+#[derive(Clone)]
+pub(crate) struct SegmentedSstHandle {
     pub(crate) prefix: Bytes,
-    pub(crate) encoded: EncodedSsTable,
+    pub(crate) sst_handle: SsTableHandle,
+    pub(crate) encoded_bytes: u64,
+}
+
+// `BufWriter` wraps an `object_store::Error` inside `std::io::Error` through
+// `AsyncWrite`. Find the original error before applying the shared retry rule.
+// Without this step, `NotSupported` can retry forever.
+pub(crate) fn should_retry_upload_error(error: &SlateDBError) -> bool {
+    match error {
+        SlateDBError::ObjectStoreError(error) => RetryingObjectStore::should_retry(error),
+        SlateDBError::IoError(error) => {
+            let Some(source) = error.get_ref() else {
+                return true;
+            };
+            let mut source: Option<&(dyn std::error::Error + 'static)> = Some(source);
+            while let Some(error) = source {
+                if let Some(error) = error.downcast_ref::<object_store::Error>() {
+                    return RetryingObjectStore::should_retry(error);
+                }
+                if let Some(error) = error.downcast_ref::<Arc<object_store::Error>>() {
+                    return RetryingObjectStore::should_retry(error);
+                }
+                source = error.source();
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Owns the close tasks for one flush attempt. Dropping it cancels those tasks.
+struct PendingSstUploads {
+    slots: Arc<Semaphore>,
+    tasks: JoinSet<Result<SegmentedSstHandle, SlateDBError>>,
+    cancel: CancellationToken,
+    uploaded: Vec<SegmentedSstHandle>,
+}
+
+impl PendingSstUploads {
+    fn new(slots: &Arc<Semaphore>) -> Self {
+        Self {
+            slots: Arc::clone(slots),
+            tasks: JoinSet::new(),
+            cancel: CancellationToken::new(),
+            uploaded: Vec::new(),
+        }
+    }
+
+    fn collect(
+        &mut self,
+        result: Result<Result<SegmentedSstHandle, SlateDBError>, JoinError>,
+    ) -> Result<(), SlateDBError> {
+        let sst = result.map_err(|error| {
+            if error.is_cancelled() {
+                SlateDBError::BackgroundTaskCancelled(format!("l0_sst_close: {error}"))
+            } else {
+                SlateDBError::BackgroundTaskPanic(format!("l0_sst_close: {error}"))
+            }
+        })??;
+        self.uploaded.push(sst);
+        Ok(())
+    }
+
+    fn collect_ready(&mut self) -> Result<(), SlateDBError> {
+        while let Some(result) = self.tasks.try_join_next() {
+            self.collect(result)?;
+        }
+        Ok(())
+    }
+
+    async fn acquire(&mut self) -> Result<OwnedSemaphorePermit, SlateDBError> {
+        let acquire = Arc::clone(&self.slots).acquire_owned();
+        tokio::pin!(acquire);
+        loop {
+            tokio::select! {
+                biased;
+                Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
+                    self.collect(result)?;
+                }
+                permit = &mut acquire => {
+                    return permit.map_err(|_| SlateDBError::InvalidDBState);
+                }
+            }
+        }
+    }
+
+    fn close(&mut self, prefix: Bytes, writer: EncodedSsTableWriter, permit: OwnedSemaphorePermit) {
+        let cancel = self.cancel.clone();
+        let close = async move {
+            // Keep the slot until the writer finishes, including its cache writes.
+            let _permit = permit;
+            let (sst_handle, encoded_bytes) = writer.close_unless_cancelled(&cancel).await?;
+            Ok(SegmentedSstHandle {
+                prefix,
+                sst_handle,
+                encoded_bytes,
+            })
+        };
+        self.tasks
+            .spawn(crate::utils::with_optional_subscriber(close));
+    }
+
+    async fn finish(
+        mut self,
+        mut result: Result<(), SlateDBError>,
+    ) -> Result<Vec<SegmentedSstHandle>, SlateDBError> {
+        let is_fatal = |result: &Result<(), SlateDBError>| {
+            result
+                .as_ref()
+                .is_err_and(|error| !should_retry_upload_error(error))
+        };
+        loop {
+            if is_fatal(&result) {
+                // A fatal error forbids retries. Cancel siblings that can otherwise
+                // retry forever, and await cancellation to release their upload slots.
+                self.cancel.cancel();
+            }
+            // Settle every upload before retrying with the same SST ids.
+            let Some(upload) = self.tasks.join_next().await else {
+                break;
+            };
+            if let Err(error) = self.collect(upload) {
+                // A fatal error takes precedence over an earlier retryable error.
+                if result.is_ok() || (!is_fatal(&result) && !should_retry_upload_error(&error)) {
+                    result = Err(error);
+                }
+            }
+        }
+        result?;
+        self.uploaded.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+        Ok(self.uploaded)
+    }
 }
 
 impl DbInner {
-    /// Build a single SST from an immutable memtable, ignoring any segment
-    /// extractor. Returns `None` when the post-retention iterator yields
-    /// zero entries — callers that want a real blob (e.g. the WAL fence)
-    /// should construct one explicitly rather than relying on this path.
-    /// For L0 flushes use [`Self::build_imm_ssts`] instead, which routes
-    /// entries through segment-aware builders.
-    async fn build_imm_sst(
+    /// Stream one SST per segment that retains entries from this memtable.
+    /// Without a segment extractor, all entries belong to the empty prefix.
+    ///
+    /// Each writer holds a shared upload slot from creation through completion.
+    /// At a segment boundary, its close runs in the background while the next
+    /// segment starts if a slot is available. Blocks stream as they are built.
+    /// Small SSTs stay buffered until close, and large SSTs use multipart uploads.
+    ///
+    /// On error, abort the active writer. Before retrying, settle all close tasks.
+    /// On fatal errors, cancel and await the close tasks instead.
+    /// Completed SSTs stay uploaded. Results are sorted by segment prefix.
+    pub(crate) async fn stream_imm_ssts(
         &self,
         imm_table: Arc<KVTable>,
-    ) -> Result<Option<EncodedSsTable>, SlateDBError> {
-        let mut sst_builder = self.table_store.table_builder();
-        let mut iter = self.iter_imm_table(imm_table).await?;
-        let mut any = false;
-        while let Some(entry) = iter.next().await? {
-            sst_builder.add(entry).await?;
-            any = true;
-            // Keep cached flush work cooperative.
-            tokio::task::coop::consume_budget().await;
-        }
-        if !any {
-            return Ok(None);
-        }
-        Ok(Some(sst_builder.build().await?))
-    }
-
-    /// Build one or more L0 SSTs from a single immutable memtable, grouping
-    /// entries by the segment prefix derived from the configured extractor.
-    ///
-    /// Returns one `(prefix, EncodedSsTable)` per segment that received at
-    /// least one post-retention entry, sorted ascending by `prefix`. The
-    /// memtable iterator yields keys in sorted order and segments own
-    /// disjoint key intervals, so all entries for a given prefix arrive
-    /// consecutively — the implementation streams one open builder at a
-    /// time, finalizing on prefix transitions.
-    ///
-    /// The touched-segment set is read from
-    /// [`KVTable::touched_segments`], populated by the write and
-    /// WAL-replay paths. A non-empty memtable with an empty set is
-    /// an invariant violation surfaced as `InvalidDBState`.
-    ///
-    /// If retention prunes every entry the result is an empty Vec
-    /// — per-memtable progress in the manifest (`last_l0_seq`,
-    /// `replay_after_wal_id`) advances independently of whether any
-    /// SST landed.
-    pub(crate) async fn build_imm_ssts(
-        &self,
-        imm_table: Arc<KVTable>,
-    ) -> Result<Vec<EncodedSegmentSst>, SlateDBError> {
-        if self.segment_extractor.is_none() {
-            return Ok(self
-                .build_imm_sst(imm_table)
-                .await?
-                .into_iter()
-                .map(|encoded| EncodedSegmentSst {
-                    prefix: Bytes::new(),
-                    encoded,
-                })
-                .collect());
-        }
-        let touched = imm_table.touched_segments();
-        if touched.is_empty() {
-            // An empty memtable is fine; a non-empty memtable with
-            // no recorded prefixes is an invariant violation.
-            if imm_table.is_empty() {
-                return Ok(Vec::new());
+        min_retention_seq: Option<u64>,
+        segment_sst_ids: &BTreeMap<Bytes, Ulid>,
+        upload_slots: &Arc<Semaphore>,
+    ) -> Result<Vec<SegmentedSstHandle>, SlateDBError> {
+        let touched = if self.segment_extractor.is_none() {
+            std::collections::BTreeSet::from([Bytes::new()])
+        } else {
+            let touched = imm_table.touched_segments();
+            if touched.is_empty() && !imm_table.is_empty() {
+                return Err(SlateDBError::InvalidDBState);
             }
-            return Err(SlateDBError::InvalidDBState);
-        }
-        self.build_imm_segment_ssts(imm_table, touched).await
-    }
-
-    /// Sorted-merge walk over the precomputed touched-segment set.
-    /// Both inputs are sorted (`BTreeSet` iter is ascending; the
-    /// memtable yields keys in order). For each entry, advance the
-    /// segment cursor until `entry.key.starts_with(current_prefix)`
-    /// holds, then add to that segment's builder. Finalizes builders
-    /// only when entries actually landed in them, so post-retention
-    /// pruning that empties a segment yields no SST for it.
-    async fn build_imm_segment_ssts(
-        &self,
-        imm_table: Arc<KVTable>,
-        touched_segments: std::collections::BTreeSet<Bytes>,
-    ) -> Result<Vec<EncodedSegmentSst>, SlateDBError> {
-        let mut entries = self.iter_imm_table(imm_table).await?;
-        let mut seg_iter = touched_segments.into_iter();
-        let mut current_prefix = seg_iter
-            .next()
-            .expect("touched_segments non-empty in this branch");
-        let mut current_builder = self.table_store.table_builder();
-        let mut current_has_entry = false;
-        let mut out: Vec<EncodedSegmentSst> = Vec::new();
-        while let Some(entry) = entries.next().await? {
-            // Advance the segment cursor until the entry fits the
-            // current prefix. The validation contract guarantees a
-            // match; an exhausted iterator means the extractor's
-            // output diverges from the recorded set.
-            while !entry.key.starts_with(current_prefix.as_ref()) {
-                if current_has_entry {
-                    out.push(EncodedSegmentSst {
-                        prefix: current_prefix,
-                        encoded: current_builder.build().await?,
-                    });
+            touched
+        };
+        let mut prefixes = touched.into_iter();
+        let Some(mut prefix) = prefixes.next() else {
+            return Ok(Vec::new());
+        };
+        let mut entries = self.iter_imm_table(imm_table, min_retention_seq).await?;
+        let mut uploads = PendingSstUploads::new(upload_slots);
+        let mut active: Option<(EncodedSsTableWriter, OwnedSemaphorePermit)> = None;
+        let result = async {
+            while let Some(entry) = entries.next().await? {
+                while !entry.key.starts_with(prefix.as_ref()) {
+                    if let Some((writer, permit)) = active.take() {
+                        uploads.close(prefix.clone(), writer, permit);
+                    }
+                    prefix = prefixes.next().ok_or(SlateDBError::InvalidDBState)?;
                 }
-                current_prefix = seg_iter.next().expect(
-                    "entry key has no matching prefix in touched_segments — \
-                         extractor output inconsistent with recorded set",
-                );
-                current_builder = self.table_store.table_builder();
-                current_has_entry = false;
+                if active.is_none() {
+                    let id = segment_sst_ids
+                        .get(&prefix)
+                        .copied()
+                        .ok_or(SlateDBError::InvalidDBState)?;
+                    let permit = uploads.acquire().await?;
+                    active = Some((
+                        self.table_store
+                            .table_writer(SsTableId::from(id), Some(prefix.clone())),
+                        permit,
+                    ));
+                }
+                let finished_block = active.as_mut().expect("active writer").0.add(entry).await?;
+                if finished_block.is_some() {
+                    uploads.collect_ready()?;
+                }
+                tokio::task::coop::consume_budget().await;
             }
-            current_builder.add(entry).await?;
-            current_has_entry = true;
-            // Keep cached flush work cooperative.
-            tokio::task::coop::consume_budget().await;
+            if let Some((writer, permit)) = active.take() {
+                uploads.close(prefix, writer, permit);
+            }
+            Ok(())
         }
-        if current_has_entry {
-            out.push(EncodedSegmentSst {
-                prefix: current_prefix,
-                encoded: current_builder.build().await?,
-            });
+        .await;
+        if let Some((mut writer, _permit)) = active {
+            abort_writer(&mut writer).await;
         }
-        Ok(out)
+        uploads.finish(result).await
     }
 
     /// Write `encoded_sst` to object storage at `id` and advance the
     /// monotonic durable tick from `imm_table`.
+    #[cfg(test)]
     pub(crate) async fn upload_sst(
         &self,
-        id: &db_state::SsTableId,
+        id: &SsTableId,
         encoded_sst: &EncodedSsTable,
+        segment: Bytes,
     ) -> Result<SsTableHandle, SlateDBError> {
-        let handle = self.table_store.write_sst(id, encoded_sst).await?;
+        let handle = self
+            .table_store
+            .write_sst(id, encoded_sst, Some(segment))
+            .await?;
         Ok(handle)
     }
 
     /// Test helper: build L0 SSTs from `imm_table` via the segment-aware
-    /// path ([`Self::build_imm_ssts`]) and upload each one with a freshly
-    /// allocated [`db_state::SsTableId::Compacted`]. Returns the resulting
+    /// path ([`Self::stream_imm_ssts`]) and upload each one with a freshly
+    /// allocated [`db_state::SsTableId`]. Returns the resulting
     /// handles in the same order as the segments. Without an extractor the
     /// result is at most one handle; an empty Vec means retention pruned
     /// every entry.
@@ -171,43 +276,90 @@ impl DbInner {
         // Tests that construct an `imm_table` outside the write path
         // must call `KVTable::record_touched_segments` themselves
         // before dispatching here.
-        let built = self.build_imm_ssts(imm_table.clone()).await?;
-        let mut handles = Vec::with_capacity(built.len());
-        for sst in built {
-            let id = db_state::SsTableId::Compacted(
-                self.rand.rng().gen_ulid(self.system_clock.as_ref()),
-            );
-            let handle = self.upload_sst(&id, &sst.encoded).await?;
-            handles.push(handle);
+        let mut prefixes = imm_table.touched_segments();
+        if prefixes.is_empty() {
+            prefixes.insert(Bytes::new());
         }
-        Ok(handles)
+        let segment_sst_ids: BTreeMap<Bytes, Ulid> = prefixes
+            .into_iter()
+            .map(|p| (p, self.rand.rng().gen_ulid(self.system_clock.as_ref())))
+            .collect();
+        let min_retention_seq = self.compute_min_retention_seq();
+        let segments = self
+            .stream_imm_ssts(
+                imm_table,
+                min_retention_seq,
+                &segment_sst_ids,
+                &Arc::new(Semaphore::new(self.settings.l0_flush_parallelism)),
+            )
+            .await?;
+        Ok(segments.into_iter().map(|s| s.sst_handle).collect())
     }
 
-    async fn iter_imm_table(
-        &self,
-        imm_table: Arc<KVTable>,
-    ) -> Result<RetentionIterator<Box<dyn RowEntryIterator>>, SlateDBError> {
-        let state = self.state.read().view();
+    /// Compute the retention boundary for this flush.
+    ///
+    /// The boundary is the lowest sequence number this flush must keep
+    /// a version for. It is the minimum of three values: the durable
+    /// watermark, the oldest open snapshot's sequence, and the oldest
+    /// open transaction's sequence.
+    ///
+    /// Remote readers (`DurabilityLevel::Remote`) cap visibility at the
+    /// durable watermark, so at least one version at or below the
+    /// boundary must survive for each key. Otherwise a remote reader
+    /// skips a newer non-durable version and falls back to an even
+    /// older value.
+    ///
+    /// The read is not atomic. A snapshot or transaction may open or
+    /// close between the reads of the three inputs. Taking the minimum
+    /// still yields a safe boundary, so the race is acceptable.
+    ///
+    /// Flushes of a memtable use [`DbInner::compute_flush_retention_seq`].
+    #[cfg(test)]
+    pub(crate) fn compute_min_retention_seq(&self) -> Option<u64> {
+        self.min_retention_seq_above(self.oracle.last_remote_persisted_seq())
+    }
 
-        // Compute retention boundary using the minimum active sequences from active snapshots AND
-        // active transactions AND durable watermark. This does not need to be atomic as even if a
-        // new snapshot is created/dropped or a new transaction is created/dropped between reading
-        // both snapshot_manager and txn_manager we will always have the min so any race here is
-        // acceptable.
-        //
-        // Remote readers (DurabilityLevel::Remote) cap visibility at last_remote_persisted_seq,
-        // so we must retain at least one version at or below that boundary for each key.
-        // Otherwise, if we only keep a newer non-durable version, remote readers would skip
-        // it and incorrectly fall back to an even older value.
+    /// Compute the retention boundary for a memtable ending at `last_seq`.
+    ///
+    /// With the WAL enabled, the L0 is published only after the WAL is
+    /// durable through `last_seq` (#1255). A [`crate::DbReader`] also raises
+    /// its durable watermark to the manifest's `last_l0_seq`. A reader
+    /// cannot therefore see this L0 with a durable watermark below `last_seq`.
+    /// Use the greater of `last_seq` and the current durable watermark as
+    /// the durable input to the boundary.
+    ///
+    /// Without the WAL, use the current durable watermark. In either case,
+    /// an open snapshot or transaction may lower the boundary.
+    ///
+    /// Compute the boundary once per upload and reuse it across retries so
+    /// each attempt retains the same entries.
+    pub(crate) fn compute_flush_retention_seq(&self, last_seq: u64) -> Option<u64> {
         let durable_seq = self.oracle.last_remote_persisted_seq();
-        let min_retention_seq = [
+        if self.wal_enabled {
+            self.min_retention_seq_above(durable_seq.max(last_seq))
+        } else {
+            self.min_retention_seq_above(durable_seq)
+        }
+    }
+
+    /// The retention boundary with `durable_seq` as its durable input.
+    fn min_retention_seq_above(&self, durable_seq: u64) -> Option<u64> {
+        [
             Some(durable_seq),
             self.snapshot_manager.min_active_seq(),
             self.txn_manager.min_active_seq(),
         ]
         .into_iter()
         .flatten()
-        .min();
+        .min()
+    }
+
+    async fn iter_imm_table(
+        &self,
+        imm_table: Arc<KVTable>,
+        min_retention_seq: Option<u64>,
+    ) -> Result<RetentionIterator<Box<dyn RowEntryIterator>>, SlateDBError> {
+        let state = self.state.read().view();
 
         let merge_iter = if let Some(merge_operator) = self.flush_merge_operator.clone() {
             Box::new(MergeOperatorIterator::new(
@@ -215,6 +367,7 @@ impl DbInner {
                 imm_table.iter(),
                 false,
                 min_retention_seq,
+                ReadTrace::none(),
             ))
         } else {
             Box::new(MergeOperatorRequiredIterator::new(imm_table.iter()))
@@ -240,13 +393,14 @@ impl DbInner {
 mod tests {
     use crate::block_iterator::BlockIteratorLatest;
     use crate::db::Db;
-    use crate::db_state::{SsTableHandle, SsTableId};
+    use crate::db_state::SsTableHandle;
     use crate::error::SlateDBError;
     use crate::error::SlateDBError::MergeOperatorMissing;
     use crate::iter::RowEntryIterator;
     use crate::mem_table::WritableKVTable;
     use crate::merge_operator::{MERGE_OPERATOR_FLUSH_PATH, MERGE_OPERATOR_READ_PATH};
     use crate::object_store::memory::InMemory;
+    use crate::read_trace::ReadTrace;
     use crate::test_utils::{
         lookup_merge_operator_operands, FixedThreeBytePrefixExtractor, StringConcatMergeOperator,
     };
@@ -254,8 +408,29 @@ mod tests {
     use bytes::Bytes;
     use rstest::rstest;
     use slatedb_common::metrics::test_recorder_helper;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
+    use tokio::sync::Semaphore;
     use ulid::Ulid;
+
+    #[tokio::test]
+    async fn should_report_a_cancelled_close_task_as_cancelled_not_panicked() {
+        let slots = Arc::new(Semaphore::new(1));
+        let mut uploads = super::PendingSstUploads::new(&slots);
+        uploads.tasks.spawn(std::future::pending());
+        uploads.tasks.abort_all();
+
+        let joined = uploads.tasks.join_next().await.unwrap();
+
+        assert!(matches!(
+            uploads.collect(joined),
+            Err(SlateDBError::BackgroundTaskCancelled(_))
+        ));
+    }
+
+    fn preallocate_ids(prefixes: impl IntoIterator<Item = Bytes>) -> BTreeMap<Bytes, Ulid> {
+        prefixes.into_iter().map(|p| (p, Ulid::new())).collect()
+    }
 
     async fn setup_test_db_with_merge_operator() -> Db {
         setup_test_db(true).await
@@ -284,14 +459,20 @@ mod tests {
         let index = db
             .inner
             .table_store
-            .read_index(sst_handle, true)
+            .read_index(
+                sst_handle,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
             .await
             .unwrap();
         let block_count = index.borrow().block_meta().len();
         let blocks = db
             .inner
             .table_store
-            .read_blocks(sst_handle, 0..block_count)
+            .read_blocks(sst_handle, 0..block_count, Some(Bytes::new()))
             .await
             .unwrap();
         let mut found_entries = Vec::new();
@@ -697,6 +878,96 @@ mod tests {
         db.close().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn stream_imm_ssts_reuses_a_pinned_retention_boundary() {
+        let db = setup_test_db_with_merge_operator().await;
+        db.inner.oracle.advance_durable_seq(4);
+
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
+        table.put(RowEntry::new_value(&Bytes::from("key"), b"value2", 2));
+        table.put(RowEntry::new_value(&Bytes::from("key"), b"value3", 3));
+        table.put(RowEntry::new_value(&Bytes::from("key"), b"value4", 4));
+
+        let pinned = db.inner.compute_min_retention_seq();
+        assert_eq!(pinned, Some(4));
+
+        // Opening a snapshot lowers the live boundary. A flush that reuses
+        // its pinned boundary must ignore this change.
+        let (_, snapshot_seq) = db.inner.snapshot_manager.new_snapshot(Some(1));
+        assert_eq!(snapshot_seq, 1);
+        assert_eq!(db.inner.compute_min_retention_seq(), Some(1));
+
+        for _ in 0..2 {
+            let ids = preallocate_ids([Bytes::new()]);
+            let segments = db
+                .inner
+                .stream_imm_ssts(
+                    table.table().clone(),
+                    pinned,
+                    &ids,
+                    &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+                )
+                .await
+                .unwrap();
+            let handle = segments.into_iter().next().unwrap().sst_handle;
+            verify_sst(
+                &db,
+                &handle,
+                &[(
+                    Bytes::from("key"),
+                    4,
+                    ValueDeletable::Value(Bytes::from("value4")),
+                )],
+            )
+            .await;
+        }
+
+        // Streaming with the live boundary (1) keeps every version.
+        let live = db.inner.compute_min_retention_seq();
+        let ids = preallocate_ids([Bytes::new()]);
+        let segments = db
+            .inner
+            .stream_imm_ssts(
+                table.table().clone(),
+                live,
+                &ids,
+                &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+            )
+            .await
+            .unwrap();
+        let handle = segments.into_iter().next().unwrap().sst_handle;
+        verify_sst(
+            &db,
+            &handle,
+            &[
+                (
+                    Bytes::from("key"),
+                    4,
+                    ValueDeletable::Value(Bytes::from("value4")),
+                ),
+                (
+                    Bytes::from("key"),
+                    3,
+                    ValueDeletable::Value(Bytes::from("value3")),
+                ),
+                (
+                    Bytes::from("key"),
+                    2,
+                    ValueDeletable::Value(Bytes::from("value2")),
+                ),
+                (
+                    Bytes::from("key"),
+                    1,
+                    ValueDeletable::Value(Bytes::from("value1")),
+                ),
+            ],
+        )
+        .await;
+
+        db.close().await.unwrap();
+    }
+
     async fn setup_test_db_with_extractor(
         path: &str,
         extractor: Arc<dyn crate::prefix_extractor::PrefixExtractor>,
@@ -710,16 +981,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_imm_ssts_without_extractor_emits_single_empty_prefix() {
+    async fn stream_imm_ssts_without_extractor_emits_single_empty_prefix() {
         let db = setup_test_db_without_merge_operator().await;
         db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(b"k1", b"v1", 1));
         table.put(RowEntry::new_value(b"k2", b"v2", 2));
+        let segment_sst_ids = preallocate_ids([Bytes::new()]);
 
         let ssts = db
             .inner
-            .build_imm_ssts(table.table().clone())
+            .stream_imm_ssts(
+                table.table().clone(),
+                None,
+                &segment_sst_ids,
+                &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+            )
             .await
             .unwrap();
 
@@ -729,21 +1006,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_imm_ssts_with_extractor_yields_empty_vec_when_no_entries() {
+    async fn stream_imm_ssts_with_extractor_yields_empty_vec_when_no_entries() {
         // With an extractor configured, an empty memtable produces no
-        // entries and therefore opens no builders — the result is an
+        // entries and therefore opens no writers — the result is an
         // empty Vec.
         let db = setup_test_db_with_extractor(
-            "/tmp/test_build_imm_ssts_empty",
+            "/tmp/test_stream_imm_ssts_empty",
             Arc::new(FixedThreeBytePrefixExtractor),
         )
         .await;
         db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
+        let segment_sst_ids = preallocate_ids([]);
 
         let ssts = db
             .inner
-            .build_imm_ssts(table.table().clone())
+            .stream_imm_ssts(
+                table.table().clone(),
+                None,
+                &segment_sst_ids,
+                &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+            )
             .await
             .unwrap();
 
@@ -752,17 +1035,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_imm_ssts_without_extractor_yields_empty_vec_when_no_entries() {
+    async fn stream_imm_ssts_without_extractor_yields_empty_vec_when_no_entries() {
         // Without an extractor configured, an empty memtable also yields
         // an empty Vec — symmetric with the extractor case. Manifest
         // progress (last_l0_seq, replay frontier) advances independently.
         let db = setup_test_db_without_merge_operator().await;
         db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
+        let segment_sst_ids = preallocate_ids([Bytes::new()]);
 
         let ssts = db
             .inner
-            .build_imm_ssts(table.table().clone())
+            .stream_imm_ssts(
+                table.table().clone(),
+                None,
+                &segment_sst_ids,
+                &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+            )
             .await
             .unwrap();
 
@@ -771,9 +1060,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_imm_ssts_with_extractor_groups_by_prefix() {
+    async fn stream_imm_ssts_with_extractor_groups_by_prefix() {
         let db = setup_test_db_with_extractor(
-            "/tmp/test_build_imm_ssts_groups",
+            "/tmp/test_stream_imm_ssts_groups",
             Arc::new(FixedThreeBytePrefixExtractor),
         )
         .await;
@@ -793,17 +1082,27 @@ mod tests {
             Bytes::from_static(b"bbb"),
             Bytes::from_static(b"ccc"),
         ]));
+        let segment_sst_ids = preallocate_ids([
+            Bytes::from_static(b"aaa"),
+            Bytes::from_static(b"bbb"),
+            Bytes::from_static(b"ccc"),
+        ]);
 
         let ssts = db
             .inner
-            .build_imm_ssts(table.table().clone())
+            .stream_imm_ssts(
+                table.table().clone(),
+                None,
+                &segment_sst_ids,
+                &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+            )
             .await
             .unwrap();
 
         let prefixes: Vec<&[u8]> = ssts.iter().map(|s| s.prefix.as_ref()).collect();
         assert_eq!(prefixes, vec![&b"aaa"[..], &b"bbb"[..], &b"ccc"[..]]);
 
-        // Upload each SST and verify it carries exactly its prefix's entries.
+        // Each SST is already uploaded; verify it carries exactly its prefix's entries.
         let expected: Vec<Vec<(Bytes, u64, ValueDeletable)>> = vec![
             vec![
                 (
@@ -836,17 +1135,15 @@ mod tests {
             ],
         ];
         for (sst, entries) in ssts.into_iter().zip(expected.into_iter()) {
-            let id = SsTableId::Compacted(Ulid::new());
-            let handle = db.inner.upload_sst(&id, &sst.encoded).await.unwrap();
-            verify_sst(&db, &handle, &entries).await;
+            verify_sst(&db, &sst.sst_handle, &entries).await;
         }
         db.close().await.unwrap();
     }
 
     #[tokio::test]
-    async fn build_imm_ssts_with_extractor_single_segment_yields_one() {
+    async fn stream_imm_ssts_with_extractor_single_segment_yields_one() {
         let db = setup_test_db_with_extractor(
-            "/tmp/test_build_imm_ssts_single",
+            "/tmp/test_stream_imm_ssts_single",
             Arc::new(FixedThreeBytePrefixExtractor),
         )
         .await;
@@ -857,10 +1154,16 @@ mod tests {
         table.record_touched_segments(std::collections::BTreeSet::from([Bytes::from_static(
             b"aaa",
         )]));
+        let segment_sst_ids = preallocate_ids([Bytes::from_static(b"aaa")]);
 
         let ssts = db
             .inner
-            .build_imm_ssts(table.table().clone())
+            .stream_imm_ssts(
+                table.table().clone(),
+                None,
+                &segment_sst_ids,
+                &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+            )
             .await
             .unwrap();
 
@@ -869,14 +1172,14 @@ mod tests {
         db.close().await.unwrap();
     }
 
-    /// `build_imm_ssts` rejects the invariant violation where an
+    /// `stream_imm_ssts` rejects the invariant violation where an
     /// extractor is configured but the memtable has entries with no
     /// recorded prefix set — surfacing what would otherwise be a
     /// silent inconsistency.
     #[tokio::test]
-    async fn build_imm_ssts_rejects_missing_touched_segments() {
+    async fn stream_imm_ssts_rejects_missing_touched_segments() {
         let db = setup_test_db_with_extractor(
-            "/tmp/test_build_imm_ssts_invariant",
+            "/tmp/test_stream_imm_ssts_invariant",
             Arc::new(FixedThreeBytePrefixExtractor),
         )
         .await;
@@ -884,8 +1187,18 @@ mod tests {
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(b"aaa-1", b"v1", 1));
         // Deliberately do NOT call record_touched_segments.
+        let segment_sst_ids = preallocate_ids([]);
 
-        let err = match db.inner.build_imm_ssts(table.table().clone()).await {
+        let err = match db
+            .inner
+            .stream_imm_ssts(
+                table.table().clone(),
+                None,
+                &segment_sst_ids,
+                &Arc::new(Semaphore::new(db.inner.settings.l0_flush_parallelism)),
+            )
+            .await
+        {
             Ok(_) => panic!("expected InvalidDBState for missing touched_segments"),
             Err(e) => e,
         };

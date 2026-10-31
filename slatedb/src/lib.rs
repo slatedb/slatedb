@@ -36,7 +36,7 @@ pub use batch::WriteBatch;
 pub use block_cache_policy::BlockCachePolicy;
 pub use bytes_range::ByteRangeBounds;
 pub use cached_object_store::stats as cached_object_store_stats;
-pub use checkpoint::{Checkpoint, CheckpointCreateResult};
+pub use checkpoint::{Checkpoint, CheckpointCreateResult, CheckpointHandle};
 #[cfg(feature = "compaction_filters")]
 pub use compaction_filter::{
     CompactionFilter, CompactionFilterDecision, CompactionFilterError, CompactionFilterSupplier,
@@ -58,6 +58,7 @@ pub use error::{CloseReason, Error, ErrorKind};
 pub use filter::BloomFilter;
 pub use filter_policy::{
     BloomFilterPolicy, Filter, FilterBuilder, FilterContext, FilterPolicy, FilterQuery,
+    FilterTarget,
 };
 pub use format::sst::BlockTransformer;
 pub use garbage_collector::stats as garbage_collector_stats;
@@ -140,13 +141,13 @@ mod flatbuffer_types;
 mod flush;
 mod format;
 mod garbage_collector;
+mod incremental_progress;
 mod instrumented_object_store;
 mod iter;
 mod mem_table;
 mod memtable_flusher;
 mod merge_iterator;
 mod merge_operator;
-mod object_stores;
 mod ops;
 mod oracle;
 mod partitioned_keyspace;
@@ -154,17 +155,19 @@ mod paths;
 mod peeking_iterator;
 #[cfg(test)]
 mod proptest_util;
+mod read_trace;
 mod reader;
 mod retention_iterator;
 mod retrying_object_store;
 mod segment_iterator;
-mod single_flight;
 mod snapshot_manager;
 mod sorted_run_iterator;
 mod sst_builder;
+mod sst_io;
 mod sst_iter;
 mod sst_reader;
 mod sst_stats;
+mod sst_upload;
 mod subcompaction;
 mod tablestore;
 #[cfg(test)]

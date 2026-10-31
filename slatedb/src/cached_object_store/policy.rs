@@ -149,11 +149,9 @@ mod tests {
         sst_type: SstType,
         retry: Option<RetryReason>,
     ) -> ObjectStoreCallTag {
-        ObjectStoreCallTag {
-            kind,
-            sst_type,
-            retry,
-        }
+        let mut tag = ObjectStoreCallTag::new(kind, sst_type);
+        tag.retry = retry;
+        tag
     }
 
     #[rstest]

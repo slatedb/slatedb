@@ -183,7 +183,7 @@ fn newest_l0_dt(manifest: &Manifest) -> DateTime<Utc> {
             if !tree.l0.is_empty() {
                 tree.l0
                     .iter()
-                    .map(|view| DateTime::<Utc>::from(view.sst.id.unwrap_compacted_id().datetime()))
+                    .map(|view| DateTime::<Utc>::from(view.sst.id.value().datetime()))
                     .max()
             } else {
                 tree.last_compacted_l0_sst_view_id
@@ -244,9 +244,7 @@ impl GcTask for CompactedGcTask {
             .await?
             .into_iter()
             // Filter out SSTs that were more recently created than the cutoff_dt
-            .filter(|sst| {
-                DateTime::<Utc>::from(sst.id.unwrap_compacted_id().datetime()) < cutoff_dt
-            })
+            .filter(|sst| DateTime::<Utc>::from(sst.id.value().datetime()) < cutoff_dt)
             // Filter out SSTs that are active in the manifest (including actively checkpointed SSTs)
             .filter(|sst| !active_ssts.contains(&sst.id))
             .collect::<Vec<_>>();
@@ -279,7 +277,6 @@ mod tests {
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::StoredManifest;
     use crate::manifest::{LsmTreeState, Manifest, ManifestCore, Segment};
-    use crate::object_stores::ObjectStores;
     use crate::tablestore::TableStoreKind;
     use crate::test_utils::build_test_sst;
     use bytes::Bytes;
@@ -293,10 +290,9 @@ mod tests {
     async fn test_compacted_gc_respects_min_age_cutoff() {
         // Object stores and table store
         let main_store = Arc::new(InMemory::new());
-        let object_stores = ObjectStores::new(main_store.clone(), None);
         let format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
-            object_stores,
+            main_store.clone(),
             format.clone(),
             Path::from("/root"),
             None,
@@ -333,24 +329,24 @@ mod tests {
         stored_compactions.update(compactions_dirty).await.unwrap();
 
         // Three SSTs with distinct ULID timestamps
-        let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0));
-        let id_within_min_age = SsTableId::Compacted(ulid::Ulid::from_parts(7_000, 0));
-        let id_active_recent = SsTableId::Compacted(ulid::Ulid::from_parts(8_000, 0));
+        let id_to_delete = SsTableId::from(ulid::Ulid::from_parts(1_000, 0));
+        let id_within_min_age = SsTableId::from(ulid::Ulid::from_parts(7_000, 0));
+        let id_active_recent = SsTableId::from(ulid::Ulid::from_parts(8_000, 0));
 
         let sst_to_delete = build_test_sst(&format, 1).await;
         let sst_within_min_age = build_test_sst(&format, 1).await;
         let sst_active_recent = build_test_sst(&format, 1).await;
 
         table_store
-            .write_sst(&id_to_delete, &sst_to_delete)
+            .write_sst(&id_to_delete, &sst_to_delete, Some(Bytes::new()))
             .await
             .unwrap();
         table_store
-            .write_sst(&id_within_min_age, &sst_within_min_age)
+            .write_sst(&id_within_min_age, &sst_within_min_age, Some(Bytes::new()))
             .await
             .unwrap();
         let active_handle = table_store
-            .write_sst(&id_active_recent, &sst_active_recent)
+            .write_sst(&id_active_recent, &sst_active_recent, Some(Bytes::new()))
             .await
             .unwrap();
 
@@ -400,10 +396,9 @@ mod tests {
     async fn test_compacted_gc_respects_manifest_most_recent_sst() {
         // Object stores and table store
         let main_store = Arc::new(InMemory::new());
-        let object_stores = ObjectStores::new(main_store.clone(), None);
         let format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
-            object_stores,
+            main_store.clone(),
             format.clone(),
             Path::from("/root"),
             None,
@@ -440,23 +435,26 @@ mod tests {
         stored_compactions.update(compactions_dirty).await.unwrap();
 
         // Three SSTs with distinct ULID timestamps
-        let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0));
-        let id_manifest = SsTableId::Compacted(ulid::Ulid::from_parts(3_000, 0));
-        let id_newer = SsTableId::Compacted(ulid::Ulid::from_parts(4_000, 0));
+        let id_to_delete = SsTableId::from(ulid::Ulid::from_parts(1_000, 0));
+        let id_manifest = SsTableId::from(ulid::Ulid::from_parts(3_000, 0));
+        let id_newer = SsTableId::from(ulid::Ulid::from_parts(4_000, 0));
 
         let sst_to_delete = build_test_sst(&format, 1).await;
         let sst_manifest = build_test_sst(&format, 1).await;
         let sst_newer = build_test_sst(&format, 1).await;
 
         table_store
-            .write_sst(&id_to_delete, &sst_to_delete)
+            .write_sst(&id_to_delete, &sst_to_delete, Some(Bytes::new()))
             .await
             .unwrap();
         let manifest_handle = table_store
-            .write_sst(&id_manifest, &sst_manifest)
+            .write_sst(&id_manifest, &sst_manifest, Some(Bytes::new()))
             .await
             .unwrap();
-        table_store.write_sst(&id_newer, &sst_newer).await.unwrap();
+        table_store
+            .write_sst(&id_newer, &sst_newer, Some(Bytes::new()))
+            .await
+            .unwrap();
 
         // Mark id_manifest as the only active SST in the manifest so that
         // most_recent_sst_dt is 3_000ms, which becomes the cutoff.
@@ -506,10 +504,9 @@ mod tests {
     async fn test_compacted_gc_respects_compaction_barrier() {
         // Object stores and table store
         let main_store = Arc::new(InMemory::new());
-        let object_stores = ObjectStores::new(main_store.clone(), None);
         let format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
-            object_stores,
+            main_store.clone(),
             format.clone(),
             Path::from("/root"),
             None,
@@ -533,22 +530,22 @@ mod tests {
         let compactor_epoch = stored_manifest.manifest().compactor_epoch;
 
         // Three SSTs with distinct ULID timestamps
-        let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0)); // job 1
-        let id_barrier = SsTableId::Compacted(ulid::Ulid::from_parts(2_000, 0)); // job 2
-        let id_to_newer = SsTableId::Compacted(ulid::Ulid::from_parts(3_000, 0)); // job 2, too
+        let id_to_delete = SsTableId::from(ulid::Ulid::from_parts(1_000, 0)); // job 1
+        let id_barrier = SsTableId::from(ulid::Ulid::from_parts(2_000, 0)); // job 2
+        let id_to_newer = SsTableId::from(ulid::Ulid::from_parts(3_000, 0)); // job 2, too
         let sst_to_delete = build_test_sst(&format, 1).await;
         let sst_barrier = build_test_sst(&format, 1).await;
         let sst_to_newer = build_test_sst(&format, 1).await;
         table_store
-            .write_sst(&id_to_delete, &sst_to_delete)
+            .write_sst(&id_to_delete, &sst_to_delete, Some(Bytes::new()))
             .await
             .unwrap();
         table_store
-            .write_sst(&id_barrier, &sst_barrier)
+            .write_sst(&id_barrier, &sst_barrier, Some(Bytes::new()))
             .await
             .unwrap();
         let active_handle = table_store
-            .write_sst(&id_to_newer, &sst_to_newer)
+            .write_sst(&id_to_newer, &sst_to_newer, Some(Bytes::new()))
             .await
             .unwrap();
 
@@ -611,10 +608,9 @@ mod tests {
     #[tokio::test]
     async fn test_compacted_gc_skips_running_compaction_output_without_watermark() {
         let main_store = Arc::new(InMemory::new());
-        let object_stores = ObjectStores::new(main_store.clone(), None);
         let format = SsTableFormat::default();
         let table_store = Arc::new(TableStore::new(
-            object_stores,
+            main_store.clone(),
             format.clone(),
             Path::from("/root"),
             None,
@@ -645,9 +641,13 @@ mod tests {
         .unwrap();
 
         // Newest L0 in the manifest has a later timestamp (9_000ms).
-        let l0_id = SsTableId::Compacted(ulid::Ulid::from_parts(9_000, 0));
+        let l0_id = SsTableId::from(ulid::Ulid::from_parts(9_000, 0));
         let l0_handle = table_store
-            .write_sst(&l0_id, &build_test_sst(&format, 1).await)
+            .write_sst(
+                &l0_id,
+                &build_test_sst(&format, 1).await,
+                Some(Bytes::new()),
+            )
             .await
             .unwrap();
         let mut dirty_manifest = stored_manifest.prepare_dirty().unwrap();
@@ -658,9 +658,13 @@ mod tests {
 
         // Simulate a compaction that starts after GC reads compaction state, writes an
         // output SST (6_000ms), but hasn't updated the manifest yet.
-        let compaction_output_id = SsTableId::Compacted(ulid::Ulid::from_parts(6_000, 0));
+        let compaction_output_id = SsTableId::from(ulid::Ulid::from_parts(6_000, 0));
         table_store
-            .write_sst(&compaction_output_id, &build_test_sst(&format, 1).await)
+            .write_sst(
+                &compaction_output_id,
+                &build_test_sst(&format, 1).await,
+                Some(Bytes::new()),
+            )
             .await
             .unwrap();
 
@@ -706,7 +710,7 @@ mod tests {
     fn view_at(seq: u64) -> SsTableView {
         let id = ulid_at(seq);
         SsTableView::identity(SsTableHandle::new(
-            SsTableId::Compacted(id),
+            SsTableId::from(id),
             SST_FORMAT_VERSION_LATEST,
             SsTableInfo::default(),
         ))
@@ -871,7 +875,7 @@ mod tests {
         let format = SsTableFormat::default();
         // The GC store deletes through the cache; the Main store caches on write.
         let gc_table_store = Arc::new(TableStore::new(
-            ObjectStores::new(cached_store.clone(), None),
+            cached_store.clone(),
             format.clone(),
             Path::from("/root"),
             None,
@@ -879,7 +883,7 @@ mod tests {
             BlockCachePolicy::default(),
         ));
         let main_table_store = Arc::new(TableStore::new(
-            ObjectStores::new(cached_store.clone(), None),
+            cached_store.clone(),
             format.clone(),
             Path::from("/root"),
             None,
@@ -888,10 +892,10 @@ mod tests {
         ));
 
         // Written through the Main store so cache_on_flush admits it.
-        let id_to_delete = SsTableId::Compacted(ulid::Ulid::from_parts(1_000, 0));
+        let id_to_delete = SsTableId::from(ulid::Ulid::from_parts(1_000, 0));
         let sst = build_test_sst(&format, 1).await;
         main_table_store
-            .write_sst(&id_to_delete, &sst)
+            .write_sst(&id_to_delete, &sst, Some(Bytes::new()))
             .await
             .unwrap();
 
