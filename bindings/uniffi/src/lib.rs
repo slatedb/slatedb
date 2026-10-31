@@ -60,9 +60,10 @@ pub use settings::Settings;
 pub use types::{
     CacheTarget, Checkpoint, CloneSourceSpec, Compaction, CompactionSpec, CompactionStatus,
     CompactorStateView, CompressionCodec, DbStatus, ExternalDb, FilterFormat,
-    IdentifiedObjectMetadata, KeyRange, KeyValue, ObjectMetadata, RowEntry, RowEntryKind, Segment,
-    SegmentPrefix, SortedRun, SourceId, SsTableHandle, SsTableId, SsTableInfo, SsTableView,
-    SstType, VersionedCompactions, VersionedManifest,
+    IdentifiedObjectMetadata, KeyRange, KeyValue, ManifestSyncOutcome, ManifestTransfer,
+    ObjectMetadata, RowEntry, RowEntryKind, Segment, SegmentPrefix, SortedRun, SourceId,
+    SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType, VersionedCompactions,
+    VersionedManifest,
 };
 pub use wal_reader::{SlateDbWalIterator, SlateDbWalReader, SlateDbWalReaderOptions, WalRows};
 pub use write_batch::WriteBatch;

@@ -299,8 +299,9 @@ impl FlatBufferManifestCodec {
             })
             .collect();
         let sequence_tracker = match manifest.sequence_tracker() {
-            Some(bytes) => SequenceTracker::from_bytes(bytes.bytes())
-                .expect("Invalid encoding of sequence tracker in manifest."),
+            Some(bytes) => SequenceTracker::from_bytes(bytes.bytes()).map_err(|err| {
+                format!("invalid encoding of sequence tracker in manifest: {err}")
+            })?,
             None => SequenceTracker::new(),
         };
         let external_dbs = manifest
@@ -423,8 +424,9 @@ impl FlatBufferManifestCodec {
             })
             .collect();
         let sequence_tracker = match manifest.sequence_tracker() {
-            Some(bytes) => SequenceTracker::from_bytes(bytes.bytes())
-                .expect("Invalid encoding of sequence tracker in manifest."),
+            Some(bytes) => SequenceTracker::from_bytes(bytes.bytes()).map_err(|err| {
+                format!("invalid encoding of sequence tracker in manifest: {err}")
+            })?,
             None => SequenceTracker::new(),
         };
         let external_dbs = manifest

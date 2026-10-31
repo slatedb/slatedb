@@ -330,4 +330,48 @@ class SlateDbReaderTest {
             }
         }
     }
+
+    @Test
+    void readerSyncManifest() throws Exception {
+        try (ObjectStore store = TestSupport.newMemoryStore();
+                TestSupport.ManagedDb dbHandle = TestSupport.openDb(store)) {
+            Db db = dbHandle.db();
+            TestSupport.await(db.put(TestSupport.bytes("key"), TestSupport.bytes("initial")));
+            TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+
+            // A manual reader has no poller, so only a sync or a refresh moves it forward.
+            try (TestSupport.ManagedReader readerHandle = TestSupport.openReader(
+                    store, builder -> builder.withReaderMode(new ReaderMode.Manual()))) {
+                DbReader reader = readerHandle.reader();
+                TestSupport.await(db.put(TestSupport.bytes("key"), TestSupport.bytes("updated")));
+                TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+                ManifestTransfer manifest = db.durableManifest();
+                assertEquals(manifest.id(), db.status().durableManifestId());
+                assertArrayEquals(
+                        TestSupport.bytes("initial"),
+                        TestSupport.await(reader.get(TestSupport.bytes("key"))));
+
+                assertEquals(ManifestSyncOutcome.APPLIED, reader.syncManifest(manifest));
+                assertArrayEquals(
+                        TestSupport.bytes("updated"),
+                        TestSupport.await(reader.get(TestSupport.bytes("key"))));
+                assertEquals(ManifestSyncOutcome.STALE, reader.syncManifest(manifest));
+
+                TestSupport.expectFailure(
+                        Error.Invalid.class,
+                        () -> reader.syncManifest(
+                                new ManifestTransfer(manifest.id() + 1, TestSupport.bytes("bad"))));
+
+                TestSupport.await(db.put(TestSupport.bytes("key"), TestSupport.bytes("refreshed")));
+                TestSupport.await(db.flushWithOptions(new FlushOptions(FlushType.MEM_TABLE)));
+                assertArrayEquals(
+                        TestSupport.bytes("updated"),
+                        TestSupport.await(reader.get(TestSupport.bytes("key"))));
+                TestSupport.await(reader.refresh());
+                assertArrayEquals(
+                        TestSupport.bytes("refreshed"),
+                        TestSupport.await(reader.get(TestSupport.bytes("key"))));
+            }
+        }
+    }
 }

@@ -23,6 +23,8 @@ from slatedb.uniffi import (
     FlushOptions,
     FlushType,
     KeyRange,
+    ManifestSyncOutcome,
+    ManifestTransfer,
     MokaCacheOptions,
     ReaderMode,
 )
@@ -372,3 +374,35 @@ async def test_reader_db_cache_disabled() -> None:
         ) as reader:
             assert await reader.get(b"uncached") == b"value"
             assert await reader.get(b"missing") is None
+
+
+@pytest.mark.asyncio
+async def test_reader_sync_manifest() -> None:
+    store = new_memory_store()
+
+    async with open_db(store) as db:
+        await db.put(b"key", b"initial")
+        await db.flush_with_options(FlushOptions(flush_type=FlushType.MEM_TABLE))
+        # A manual reader has no poller, so only a sync or a refresh moves it forward.
+        async with open_reader(
+            store,
+            configure=lambda builder: builder.with_reader_mode(ReaderMode.MANUAL()),
+        ) as reader:
+            await db.put(b"key", b"updated")
+            await db.flush_with_options(FlushOptions(flush_type=FlushType.MEM_TABLE))
+            manifest = db.durable_manifest()
+            assert db.status().durable_manifest_id == manifest.id
+            assert await reader.get(b"key") == b"initial"
+
+            assert reader.sync_manifest(manifest) == ManifestSyncOutcome.APPLIED
+            assert await reader.get(b"key") == b"updated"
+            assert reader.sync_manifest(manifest) == ManifestSyncOutcome.STALE
+
+            with pytest.raises(Error.Invalid):
+                reader.sync_manifest(ManifestTransfer(id=manifest.id + 1, bytes=b"bad"))
+
+            await db.put(b"key", b"refreshed")
+            await db.flush_with_options(FlushOptions(flush_type=FlushType.MEM_TABLE))
+            assert await reader.get(b"key") == b"updated"
+            await reader.refresh()
+            assert await reader.get(b"key") == b"refreshed"

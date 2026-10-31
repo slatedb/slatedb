@@ -1114,6 +1114,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_db_delete(uint64_t ptr, RustBuffer key
 uint64_t uniffi_slatedb_uniffi_fn_method_db_delete_with_options(uint64_t ptr, RustBuffer key, RustBuffer options
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_DURABLE_MANIFEST
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_DURABLE_MANIFEST
+RustBuffer uniffi_slatedb_uniffi_fn_method_db_durable_manifest(uint64_t ptr, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_EVICT_CACHED_SST
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_EVICT_CACHED_SST
 uint64_t uniffi_slatedb_uniffi_fn_method_db_evict_cached_sst(uint64_t ptr, RustBuffer sst_id
@@ -1299,6 +1304,11 @@ uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_get_key_value_with_options(uin
 uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_get_with_options(uint64_t ptr, RustBuffer key, RustBuffer options
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_REFRESH
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_REFRESH
+uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_refresh(uint64_t ptr
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SCAN
 uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_scan(uint64_t ptr, RustBuffer range
@@ -1332,6 +1342,11 @@ RustBuffer uniffi_slatedb_uniffi_fn_method_dbreader_status(uint64_t ptr, RustCal
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SUBSCRIBE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SUBSCRIBE
 uint64_t uniffi_slatedb_uniffi_fn_method_dbreader_subscribe(uint64_t ptr, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SYNC_MANIFEST
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_SYNC_MANIFEST
+RustBuffer uniffi_slatedb_uniffi_fn_method_dbreader_sync_manifest(uint64_t ptr, RustBuffer manifest, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DBREADER_WARM_SST
@@ -2706,6 +2721,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_db_delete_with_options(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_DURABLE_MANIFEST
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_DURABLE_MANIFEST
+uint16_t uniffi_slatedb_uniffi_checksum_method_db_durable_manifest(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_EVICT_CACHED_SST
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_EVICT_CACHED_SST
 uint16_t uniffi_slatedb_uniffi_checksum_method_db_evict_cached_sst(void
@@ -2886,6 +2907,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_get_with_options(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_REFRESH
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_REFRESH
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_refresh(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_SCAN
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_SCAN
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_scan(void
@@ -2925,6 +2952,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_status(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_SUBSCRIBE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_SUBSCRIBE
 uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_subscribe(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_SYNC_MANIFEST
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DBREADER_SYNC_MANIFEST
+uint16_t uniffi_slatedb_uniffi_checksum_method_dbreader_sync_manifest(void
     
 );
 #endif
