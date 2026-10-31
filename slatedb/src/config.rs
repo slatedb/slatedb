@@ -1454,6 +1454,15 @@ pub struct CompactionWorkerOptions {
     /// Optional metrics reporting level for standalone compaction workers.
     /// Defaults to [`MetricLevel::default`] when unset.
     pub metric_level: Option<MetricLevel>,
+
+    /// Controls wrapper-level retries for standalone compaction workers'
+    /// object-store operations. Defaults to unbounded retries.
+    ///
+    /// Ignored for the embedded worker configured via
+    /// [`CompactorOptions::worker`], which reuses the object store (and retry
+    /// limit) of the compactor or DB hosting it.
+    #[serde(default)]
+    pub object_store_max_retries: Option<u32>,
 }
 
 /// Default options for the compaction worker.
@@ -1471,6 +1480,7 @@ impl Default for CompactionWorkerOptions {
             min_filter_keys: 1000,
             compression_codec: None,
             metric_level: None,
+            object_store_max_retries: None,
         }
     }
 }

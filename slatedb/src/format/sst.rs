@@ -287,6 +287,24 @@ pub(crate) fn block_capacity(
     }
 }
 
+/// Rejects an SST writer configuration that pads blocks to the block size
+/// ([`SsTableFormat::block_alignment`]) while also compressing them.
+///
+/// Every builder that writes SSTs calls this on its own settings before doing
+/// any I/O: `DbBuilder::build`, `CompactionWorkerBuilder::build`, and
+/// `Compactor::start` for its in-process worker.
+pub(crate) fn validate_block_alignment(
+    block_alignment: bool,
+    compression_codec: Option<CompressionCodec>,
+) -> Result<(), SlateDBError> {
+    if block_alignment && compression_codec.is_some() {
+        return Err(SlateDBError::InvalidConfiguration(
+            "sst_block_alignment cannot be combined with compression_codec".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Builder for encoding a single SST block with compression and transformation.
 pub(crate) struct EncodedSsTableBlockBuilder {
     /// builder for data blocks
@@ -1321,6 +1339,18 @@ mod tests {
         assert!(matches!(
             encoded_len_for_index(over_u32, over_u32 + 4096),
             Err(SlateDBError::InvalidDBState)
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "zstd")]
+    fn test_validate_block_alignment_rejects_alignment_with_compression() {
+        assert!(validate_block_alignment(false, None).is_ok());
+        assert!(validate_block_alignment(true, None).is_ok());
+        assert!(validate_block_alignment(false, Some(CompressionCodec::Zstd)).is_ok());
+        assert!(matches!(
+            validate_block_alignment(true, Some(CompressionCodec::Zstd)),
+            Err(SlateDBError::InvalidConfiguration(_))
         ));
     }
 
