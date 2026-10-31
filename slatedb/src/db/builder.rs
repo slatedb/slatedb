@@ -146,7 +146,7 @@ use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::fence::{WriterFenceResult, WriterFencer};
 use crate::filter_policy::{BloomFilterPolicy, FilterPolicy};
-use crate::format::sst::{BlockTransformer, SsTableFormat};
+use crate::format::sst::{validate_block_alignment, BlockTransformer, SsTableFormat};
 use crate::garbage_collector::GC_TASK_NAME;
 use crate::garbage_collector::{GarbageCollector, GcFilter};
 use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
@@ -499,12 +499,7 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Builds and opens the database.
     pub async fn build(self) -> Result<Db, crate::Error> {
         self.settings.validate()?;
-        if self.sst_block_alignment && self.settings.compression_codec.is_some() {
-            return Err(SlateDBError::InvalidConfiguration(
-                "sst_block_alignment cannot be combined with compression_codec".into(),
-            )
-            .into());
-        }
+        validate_block_alignment(self.sst_block_alignment, self.settings.compression_codec)?;
 
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
@@ -1700,12 +1695,7 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
     }
 
     pub async fn build(self) -> Result<CompactionWorker, crate::Error> {
-        if self.sst_block_alignment && self.options.compression_codec.is_some() {
-            return Err(SlateDBError::InvalidConfiguration(
-                "sst_block_alignment cannot be combined with compression_codec".into(),
-            )
-            .into());
-        }
+        validate_block_alignment(self.sst_block_alignment, self.options.compression_codec)?;
         let path: Path = self.path.into();
         let recorder = MetricsRecorderHelper::new(
             self.metrics_recorder,

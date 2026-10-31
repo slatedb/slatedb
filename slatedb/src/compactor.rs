@@ -81,7 +81,7 @@ use crate::db_state::{SortedRun, SsTableId, SsTableView};
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::{Error, SlateDBError};
-use crate::format::sst::SsTableFormat;
+use crate::format::sst::{validate_block_alignment, SsTableFormat};
 use crate::incremental_progress::IncrementalProgress;
 use crate::manifest::store::ManifestStore;
 use crate::manifest::{LsmTreeState, ManifestCore};
@@ -405,12 +405,10 @@ impl Compactor {
         // compactor epoch, so a bad configuration does not fence a running
         // compactor.
         if let Some(worker_options) = &self.options.worker {
-            if self.sst_format.block_alignment && worker_options.compression_codec.is_some() {
-                return Err(SlateDBError::InvalidConfiguration(
-                    "sst_block_alignment cannot be combined with compression_codec".into(),
-                )
-                .into());
-            }
+            validate_block_alignment(
+                self.sst_format.block_alignment,
+                worker_options.compression_codec,
+            )?;
         }
         let (_tx, rx) = async_channel::unbounded::<CompactorMessage>();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
