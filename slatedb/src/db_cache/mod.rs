@@ -604,14 +604,14 @@ impl DbCache for SplitCache {
         match &value.item {
             CachedItem::Block(_) => {
                 if let Some(ref cache) = self.block_cache {
-                    cache.insert(key, value.clamp_allocated_size()).await;
+                    cache.insert(key, value).await;
                 } else {
                     trace!("no block cache available for insertion");
                 }
             }
             CachedItem::SsTableIndex(_) | CachedItem::Filters(_) | CachedItem::SstStats(_) => {
                 if let Some(ref cache) = self.meta_cache {
-                    cache.insert(key, value.clamp_allocated_size()).await;
+                    cache.insert(key, value).await;
                 } else {
                     trace!("no meta cache available for insertion");
                 }
@@ -909,7 +909,9 @@ impl DbCache for DbCacheWrapper {
 
     async fn insert(&self, key: CachedKey, value: CachedEntry) {
         let scoped_key = self.scoped_key(&key);
-        self.cache.insert(scoped_key, value).await;
+        self.cache
+            .insert(scoped_key, value.clamp_allocated_size())
+            .await;
     }
 
     #[allow(dead_code)]
@@ -936,7 +938,10 @@ impl DbCache for DbCacheWrapper {
         loader: CacheLoader,
     ) -> Result<CacheFetch, crate::Error> {
         let scoped_key = self.scoped_key(&key);
-        let result = self.cache.fetch_block(scoped_key, loader).await;
+        let result = self
+            .cache
+            .fetch_block(scoped_key, clamping_loader(loader))
+            .await;
         self.record_fetch_outcome("block", &result);
         result
     }
@@ -947,7 +952,10 @@ impl DbCache for DbCacheWrapper {
         loader: CacheLoader,
     ) -> Result<CacheFetch, crate::Error> {
         let scoped_key = self.scoped_key(&key);
-        let result = self.cache.fetch_index(scoped_key, loader).await;
+        let result = self
+            .cache
+            .fetch_index(scoped_key, clamping_loader(loader))
+            .await;
         self.record_fetch_outcome("index", &result);
         result
     }
@@ -958,7 +966,10 @@ impl DbCache for DbCacheWrapper {
         loader: CacheLoader,
     ) -> Result<CacheFetch, crate::Error> {
         let scoped_key = self.scoped_key(&key);
-        let result = self.cache.fetch_filter(scoped_key, loader).await;
+        let result = self
+            .cache
+            .fetch_filter(scoped_key, clamping_loader(loader))
+            .await;
         self.record_fetch_outcome("filter", &result);
         result
     }
@@ -969,7 +980,10 @@ impl DbCache for DbCacheWrapper {
         loader: CacheLoader,
     ) -> Result<CacheFetch, crate::Error> {
         let scoped_key = self.scoped_key(&key);
-        let result = self.cache.fetch_stats(scoped_key, loader).await;
+        let result = self
+            .cache
+            .fetch_stats(scoped_key, clamping_loader(loader))
+            .await;
         self.record_fetch_outcome("stats", &result);
         result
     }
@@ -1092,6 +1106,10 @@ fn instrumented_loader(loader: CacheLoader) -> (CacheLoader, LoaderRan) {
         loader()
     });
     (wrapped, LoaderRan(flag))
+}
+
+fn clamping_loader(loader: CacheLoader) -> CacheLoader {
+    Box::new(move || Box::pin(async move { Ok(loader().await?.clamp_allocated_size()) }))
 }
 
 pub mod stats {
@@ -1676,6 +1694,52 @@ mod tests {
 
     #[rstest]
     #[tokio::test]
+    async fn test_should_clamp_entries_to_custom_cache(
+        custom_cache: (DbCacheWrapper, Arc<DefaultMetricsRecorder>),
+        sst_format: SsTableFormat,
+        #[future(awt)] sst: EncodedSsTable,
+    ) {
+        let (cache, _registry) = custom_cache;
+        // given:
+        let bytes = sst.remaining_as_bytes();
+        let index = Arc::new(sst_format.read_index_raw(&sst.info, &bytes).await.unwrap());
+        let key = CachedKey::from((SST_ID, 12345u64));
+        cache
+            .insert(key.clone(), CachedEntry::with_sst_index(index.clone()))
+            .await;
+
+        // when:
+        let cached = cache.get_index(&key).await.unwrap().unwrap();
+
+        // then:
+        assert_index_clamped(index.as_ref(), cached.sst_index().unwrap().as_ref());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_should_clamp_fetched_entries_to_custom_cache(
+        custom_cache: (DbCacheWrapper, Arc<DefaultMetricsRecorder>),
+        sst_format: SsTableFormat,
+        #[future(awt)] sst: EncodedSsTable,
+    ) {
+        let (cache, _registry) = custom_cache;
+        // given:
+        let bytes = sst.remaining_as_bytes();
+        let index = Arc::new(sst_format.read_index_raw(&sst.info, &bytes).await.unwrap());
+        let key = CachedKey::from((SST_ID, 12345u64));
+        let entry = CachedEntry::with_sst_index(index.clone());
+        let loader: CacheLoader = Box::new(move || Box::pin(async move { Ok(entry) }));
+        cache.fetch_index(key.clone(), loader).await.unwrap();
+
+        // when:
+        let cached = cache.get_index(&key).await.unwrap().unwrap();
+
+        // then:
+        assert_index_clamped(index.as_ref(), cached.sst_index().unwrap().as_ref());
+    }
+
+    #[rstest]
+    #[tokio::test]
     async fn test_should_count_index_misses(cache: (DbCacheWrapper, Arc<DefaultMetricsRecorder>)) {
         let (cache, registry) = cache;
         // given:
@@ -2072,6 +2136,19 @@ mod tests {
 
         let wrapper = DbCacheWrapper::new(
             Arc::new(cache),
+            &helper,
+            Arc::new(DefaultSystemClock::default()),
+            1,
+        );
+        (wrapper, recorder)
+    }
+
+    #[fixture]
+    fn custom_cache() -> (DbCacheWrapper, Arc<DefaultMetricsRecorder>) {
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let helper = MetricsRecorderHelper::new(recorder.clone(), MetricLevel::default());
+        let wrapper = DbCacheWrapper::new(
+            Arc::new(TestCache::new()),
             &helper,
             Arc::new(DefaultSystemClock::default()),
             1,
