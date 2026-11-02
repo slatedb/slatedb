@@ -238,9 +238,10 @@ Steps 1 through 4 apply to each job.
 5. Add a checkpoint that references the manifest version being replaced.
 6. Write the checkpoint and run changes in one manifest CAS.
 
-When an input view splits, one retained piece keeps its ID and the other
-pieces receive fresh view IDs. Unchanged views keep their IDs. Step 1 of the
-[example](#example-of-incremental-commits) shows this split for A2 and B1.
+When an input view narrows or splits, each retained piece receives a fresh view
+ID. A clipped output view also receives a fresh view ID each time the
+coordinator rebuilds it. Unchanged views keep their IDs. Step 1 of the
+[example](#example-of-incremental-commits) shows A1 narrow and A2 and B1 split.
 
 On a CAS conflict, the coordinator refreshes metadata objects and rebuilds
 from the current manifest and durable job state.

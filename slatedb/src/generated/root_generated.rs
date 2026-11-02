@@ -658,6 +658,91 @@ impl flatbuffers::SimpleToVerifyInSlice for CompactionContext {}
 pub struct CompactionContextUnionTableOffset {}
 
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MIN_SUBCOMPACTION_STATUS: i8 = 0;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+pub const ENUM_MAX_SUBCOMPACTION_STATUS: i8 = 1;
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
+#[allow(non_camel_case_types)]
+pub const ENUM_VALUES_SUBCOMPACTION_STATUS: [SubcompactionStatus; 2] = [
+  SubcompactionStatus::InProgress,
+  SubcompactionStatus::Completed,
+];
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[repr(transparent)]
+pub struct SubcompactionStatus(pub i8);
+#[allow(non_upper_case_globals)]
+impl SubcompactionStatus {
+  pub const InProgress: Self = Self(0);
+  pub const Completed: Self = Self(1);
+
+  pub const ENUM_MIN: i8 = 0;
+  pub const ENUM_MAX: i8 = 1;
+  pub const ENUM_VALUES: &'static [Self] = &[
+    Self::InProgress,
+    Self::Completed,
+  ];
+  /// Returns the variant's name or "" if unknown.
+  pub fn variant_name(self) -> Option<&'static str> {
+    match self {
+      Self::InProgress => Some("InProgress"),
+      Self::Completed => Some("Completed"),
+      _ => None,
+    }
+  }
+}
+impl core::fmt::Debug for SubcompactionStatus {
+  fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+    if let Some(name) = self.variant_name() {
+      f.write_str(name)
+    } else {
+      f.write_fmt(format_args!("<UNKNOWN {:?}>", self.0))
+    }
+  }
+}
+impl<'a> flatbuffers::Follow<'a> for SubcompactionStatus {
+  type Inner = Self;
+  #[inline]
+  unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+    let b = flatbuffers::read_scalar_at::<i8>(buf, loc);
+    Self(b)
+  }
+}
+
+impl flatbuffers::Push for SubcompactionStatus {
+    type Output = SubcompactionStatus;
+    #[inline]
+    unsafe fn push(&self, dst: &mut [u8], _written_len: usize) {
+        flatbuffers::emplace_scalar::<i8>(dst, self.0);
+    }
+}
+
+impl flatbuffers::EndianScalar for SubcompactionStatus {
+  type Scalar = i8;
+  #[inline]
+  fn to_little_endian(self) -> i8 {
+    self.0.to_le()
+  }
+  #[inline]
+  #[allow(clippy::wrong_self_convention)]
+  fn from_little_endian(v: i8) -> Self {
+    let b = i8::from_le(v);
+    Self(b)
+  }
+}
+
+impl<'a> flatbuffers::Verifiable for SubcompactionStatus {
+  #[inline]
+  fn run_verifier(
+    v: &mut flatbuffers::Verifier, pos: usize
+  ) -> Result<(), flatbuffers::InvalidFlatbuffer> {
+    use self::flatbuffers::Verifiable;
+    i8::run_verifier(v, pos)
+  }
+}
+
+impl flatbuffers::SimpleToVerifyInSlice for SubcompactionStatus {}
+#[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MIN_CHECKPOINT_METADATA: u8 = 0;
 #[deprecated(since = "2.0.0", note = "Use associated constants instead. This will no longer be generated in 2021.")]
 pub const ENUM_MAX_CHECKPOINT_METADATA: u8 = 1;
@@ -3502,6 +3587,7 @@ impl<'a> flatbuffers::Follow<'a> for Subcompaction<'a> {
 impl<'a> Subcompaction<'a> {
   pub const VT_RANGE: flatbuffers::VOffsetT = 4;
   pub const VT_OUTPUT_SSTS: flatbuffers::VOffsetT = 6;
+  pub const VT_STATUS: flatbuffers::VOffsetT = 8;
 
   #[inline]
   pub unsafe fn init_from_table(table: flatbuffers::Table<'a>) -> Self {
@@ -3515,6 +3601,7 @@ impl<'a> Subcompaction<'a> {
     let mut builder = SubcompactionBuilder::new(_fbb);
     if let Some(x) = args.output_ssts { builder.add_output_ssts(x); }
     if let Some(x) = args.range { builder.add_range(x); }
+    builder.add_status(args.status);
     builder.finish()
   }
 
@@ -3533,6 +3620,13 @@ impl<'a> Subcompaction<'a> {
     // which contains a valid value in this slot
     unsafe { self._tab.get::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>(Subcompaction::VT_OUTPUT_SSTS, None)}
   }
+  #[inline]
+  pub fn status(&self) -> SubcompactionStatus {
+    // Safety:
+    // Created from valid Table for this object
+    // which contains a valid value in this slot
+    unsafe { self._tab.get::<SubcompactionStatus>(Subcompaction::VT_STATUS, Some(SubcompactionStatus::InProgress)).unwrap()}
+  }
 }
 
 impl flatbuffers::Verifiable for Subcompaction<'_> {
@@ -3544,6 +3638,7 @@ impl flatbuffers::Verifiable for Subcompaction<'_> {
     v.visit_table(pos)?
      .visit_field::<flatbuffers::ForwardsUOffset<BytesRange>>("range", Self::VT_RANGE, true)?
      .visit_field::<flatbuffers::ForwardsUOffset<flatbuffers::Vector<'_, flatbuffers::ForwardsUOffset<CompactedSsTable>>>>("output_ssts", Self::VT_OUTPUT_SSTS, false)?
+     .visit_field::<SubcompactionStatus>("status", Self::VT_STATUS, false)?
      .finish();
     Ok(())
   }
@@ -3551,6 +3646,7 @@ impl flatbuffers::Verifiable for Subcompaction<'_> {
 pub struct SubcompactionArgs<'a> {
     pub range: Option<flatbuffers::WIPOffset<BytesRange<'a>>>,
     pub output_ssts: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<CompactedSsTable<'a>>>>>,
+    pub status: SubcompactionStatus,
 }
 impl<'a> Default for SubcompactionArgs<'a> {
   #[inline]
@@ -3558,6 +3654,7 @@ impl<'a> Default for SubcompactionArgs<'a> {
     SubcompactionArgs {
       range: None, // required field
       output_ssts: None,
+      status: SubcompactionStatus::InProgress,
     }
   }
 }
@@ -3574,6 +3671,10 @@ impl<'a: 'b, 'b, A: flatbuffers::Allocator + 'a> SubcompactionBuilder<'a, 'b, A>
   #[inline]
   pub fn add_output_ssts(&mut self, output_ssts: flatbuffers::WIPOffset<flatbuffers::Vector<'b , flatbuffers::ForwardsUOffset<CompactedSsTable<'b >>>>) {
     self.fbb_.push_slot_always::<flatbuffers::WIPOffset<_>>(Subcompaction::VT_OUTPUT_SSTS, output_ssts);
+  }
+  #[inline]
+  pub fn add_status(&mut self, status: SubcompactionStatus) {
+    self.fbb_.push_slot::<SubcompactionStatus>(Subcompaction::VT_STATUS, status, SubcompactionStatus::InProgress);
   }
   #[inline]
   pub fn new(_fbb: &'b mut flatbuffers::FlatBufferBuilder<'a, A>) -> SubcompactionBuilder<'a, 'b, A> {
@@ -3596,6 +3697,7 @@ impl core::fmt::Debug for Subcompaction<'_> {
     let mut ds = f.debug_struct("Subcompaction");
       ds.field("range", &self.range());
       ds.field("output_ssts", &self.output_ssts());
+      ds.field("status", &self.status());
       ds.finish()
   }
 }

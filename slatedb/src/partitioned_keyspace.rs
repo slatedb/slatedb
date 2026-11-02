@@ -89,6 +89,32 @@ pub(crate) fn partitions_covering_range<T: RangePartitionedKeySpace>(
     start: Bound<&[u8]>,
     end: Bound<&[u8]>,
 ) -> Range<usize> {
+    match (start, end) {
+        (Bound::Included(s), Bound::Included(e)) if s == e => partitions_covering_key(keyspace, s),
+        _ => partitions_covering_bounds(keyspace, start, end),
+    }
+}
+
+/// [`partitions_covering_range`] for the point range `[key, key]`, with one binary search
+/// instead of two.
+///
+/// The partitions whose first key equals `key` sit directly before the partition point, so
+/// stepping back over them (normally none) finds where the general path's start search lands.
+fn partitions_covering_key<T: RangePartitionedKeySpace>(keyspace: &T, key: &[u8]) -> Range<usize> {
+    let end = partition_point(keyspace, |first_key| first_key <= key);
+    let mut first_equal = end;
+    while first_equal > 0 && keyspace.partition_first_key(first_equal - 1) == key {
+        first_equal -= 1;
+    }
+    // The partition before the first one starting at `key` may still end with `key`.
+    first_equal.saturating_sub(1)..end
+}
+
+fn partitions_covering_bounds<T: RangePartitionedKeySpace>(
+    keyspace: &T,
+    start: Bound<&[u8]>,
+    end: Bound<&[u8]>,
+) -> Range<usize> {
     let start_idx = match start {
         Bound::Included(k) | Bound::Excluded(k) => {
             first_partition_including_or_after_key(keyspace, k)
@@ -113,9 +139,36 @@ pub(crate) fn partitions_covering_range<T: RangePartitionedKeySpace>(
 mod tests {
     use crate::partitioned_keyspace::{
         first_partition_including_key, last_partition_including_key, partition_point,
+        partitions_covering_bounds, partitions_covering_key, partitions_covering_range,
         RangePartitionedKeySpace,
     };
+    use proptest::collection::vec;
+    use proptest::{prop_assert_eq, proptest};
     use rstest::rstest;
+    use std::ops::Bound::Included;
+
+    #[test]
+    fn test_partitions_covering_key_matches_bounds() {
+        // A two-letter alphabet and short keys make duplicate first keys, and
+        // probes equal to a first key, common. An SST index always has a
+        // block, and the general path indexes partition 0, so keyspaces are
+        // non-empty.
+        let key = || vec(0u8..2, 0..=3);
+        proptest!(|(mut first_keys in vec(key(), 1..=8), probe in key())| {
+            first_keys.sort();
+            let keyspace = TestKeyspace {
+                partitions: first_keys.iter().map(Vec::as_slice).collect(),
+            };
+            let probe = probe.as_slice();
+            let expected =
+                partitions_covering_bounds(&keyspace, Included(probe), Included(probe));
+            prop_assert_eq!(partitions_covering_key(&keyspace, probe), expected.clone());
+            prop_assert_eq!(
+                partitions_covering_range(&keyspace, Included(probe), Included(probe)),
+                expected
+            );
+        });
+    }
 
     #[test]
     fn test_partition_point() {

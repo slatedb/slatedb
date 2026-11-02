@@ -8,6 +8,7 @@ mod db;
 mod db_cache;
 mod db_reader;
 mod db_snapshot;
+mod db_status_subscription;
 mod db_transaction;
 mod error;
 mod filter_policy;
@@ -40,6 +41,7 @@ pub use config::{
 pub use db::Db;
 pub use db_reader::DbReader;
 pub use db_snapshot::DbSnapshot;
+pub use db_status_subscription::DbStatusSubscription;
 pub use db_transaction::DbTransaction;
 pub use error::{BlockTransformerCallbackError, CloseReason, Error, MergeOperatorCallbackError};
 pub use filter_policy::{
