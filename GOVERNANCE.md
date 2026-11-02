@@ -39,8 +39,9 @@ community, including:
   manner.
 
 When a sufficient trust is built through participating in the SlateDB community in this way,
-any current SlateDB committer can add you as a `Read`-role collaborator on the SlateDB GitHub
-repository.
+any current SlateDB committer can add your GitHub handle to
+[.github/VOUCHED.td](.github/VOUCHED.td). A GitHub workflow closes pull requests from authors who
+are not in this file.
 
 # SlateDB Committers
 
