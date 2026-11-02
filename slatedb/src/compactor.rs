@@ -69,6 +69,7 @@ use tokio::runtime::Handle;
 use tracing::instrument;
 use ulid::Ulid;
 
+use crate::block_cache_policy::BlockCachePolicy;
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
 use crate::compaction_worker::CompactionWorkerHandler;
@@ -80,12 +81,16 @@ use crate::db_state::{SortedRun, SsTableId, SsTableView};
 use crate::db_status::ClosedResultWriter;
 use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
 use crate::error::{Error, SlateDBError};
+use crate::format::sst::{validate_block_alignment, SsTableFormat};
 use crate::incremental_progress::IncrementalProgress;
 use crate::manifest::store::ManifestStore;
 use crate::manifest::{LsmTreeState, ManifestCore};
 use crate::merge_operator::MergeOperatorType;
-use crate::tablestore::TableStore;
+use crate::paths::PathResolver;
+use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::{format_bytes_si, IdGenerator};
+use object_store::path::Path;
+use object_store::ObjectStore;
 use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::{GaugeFn, MetricsRecorderHelper};
 use slatedb_common::DbRand;
@@ -311,7 +316,11 @@ pub(crate) enum CompactorMessage {
 pub struct Compactor {
     manifest_store: Arc<ManifestStore>,
     compactions_store: Arc<CompactionsStore>,
-    table_store: Arc<TableStore>,
+    /// Object store, SST format and root path for the in-process worker's
+    /// table store, which `start` builds once it has loaded the manifest.
+    main_object_store: Arc<dyn ObjectStore>,
+    sst_format: SsTableFormat,
+    path: Path,
     options: Arc<CompactorOptions>,
     scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
     expected_epoch: Option<u64>,
@@ -332,7 +341,9 @@ impl Compactor {
     pub(crate) fn new(
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
-        table_store: Arc<TableStore>,
+        main_object_store: Arc<dyn ObjectStore>,
+        sst_format: SsTableFormat,
+        path: Path,
         options: CompactorOptions,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
         expected_epoch: Option<u64>,
@@ -355,7 +366,9 @@ impl Compactor {
         Self {
             manifest_store,
             compactions_store,
-            table_store,
+            main_object_store,
+            sst_format,
+            path,
             options: Arc::new(options),
             scheduler_supplier,
             expected_epoch,
@@ -388,6 +401,15 @@ impl Compactor {
     pub(crate) async fn start(&self) -> Result<(), Error> {
         // The coordinator delegates compaction execution to [`crate::compaction_worker::CompactionWorker`]
         // either spawned in this process (set `worker: Some`) or running standalone (set `worker: None`).
+        // Validate the in-process worker's options before claiming the
+        // compactor epoch, so a bad configuration does not fence a running
+        // compactor.
+        if let Some(worker_options) = &self.options.worker {
+            validate_block_alignment(
+                self.sst_format.block_alignment,
+                worker_options.compression_codec,
+            )?;
+        }
         let (_tx, rx) = async_channel::unbounded::<CompactorMessage>();
         let scheduler = Arc::from(self.scheduler_supplier.compaction_scheduler(&self.options));
         let handler = CompactorEventHandler::new(
@@ -402,24 +424,41 @@ impl Compactor {
             self.expected_epoch,
         )
         .await?;
-        self.task_executor
-            .add_handler(
-                COMPACTOR_TASK_NAME.to_string(),
-                Box::new(handler),
-                rx,
-                &Handle::current(),
-            )
-            .map_err(Error::from)?;
 
         // Spawn an in-process worker if configured. The worker runs under its
         // own cancellation token; Compactor::stop and run() are responsible for
-        // shutting it down alongside the coordinator.
-        if let Some(worker_options) = self.options.worker.clone() {
+        // shutting it down alongside the coordinator. Handlers only start in
+        // monitor_on, so registering the worker before the coordinator does not
+        // change startup order; it lets the worker read the handler's manifest
+        // before the handler moves into the executor.
+        if let Some(worker_options) = &self.options.worker {
+            // Resolve SSTs the database borrows from others (clones/unions)
+            // using the manifest the handler just loaded. The external_dbs list
+            // is only written when the clone or union manifest is created and
+            // only shrinks afterwards, so this snapshot covers every SST a
+            // later job can reference.
+            let external_ssts = handler.state().manifest().value.external_ssts();
+            // Match the format CompactionWorkerBuilder::build gives a
+            // standalone worker.
+            let sst_format = SsTableFormat {
+                min_filter_keys: worker_options.min_filter_keys,
+                compression_codec: worker_options.compression_codec,
+                ..self.sst_format.clone()
+            };
+            let table_store = Arc::new(TableStore::new_with_fp_registry(
+                self.main_object_store.clone(),
+                sst_format,
+                PathResolver::new_with_external_ssts(self.path.clone(), external_ssts),
+                self.fp_registry.clone(),
+                None,
+                TableStoreKind::Compactor,
+                BlockCachePolicy::default(),
+            ));
             let (worker_handler, worker_rx) = CompactionWorkerHandler::build_worker_handler(
                 self.manifest_store.clone(),
                 self.compactions_store.clone(),
-                self.table_store.clone(),
-                Arc::new(worker_options),
+                table_store,
+                Arc::new(worker_options.clone()),
                 self.compactor_runtime.clone(),
                 self.rand.clone(),
                 self.stats.clone(),
@@ -439,6 +478,15 @@ impl Compactor {
                 )
                 .map_err(Error::from)?;
         }
+
+        self.task_executor
+            .add_handler(
+                COMPACTOR_TASK_NAME.to_string(),
+                Box::new(handler),
+                rx,
+                &Handle::current(),
+            )
+            .map_err(Error::from)?;
 
         self.task_executor.monitor_on(&Handle::current())?;
         Ok(())
@@ -1907,6 +1955,106 @@ mod tests {
             error.kind(),
             crate::ErrorKind::Closed(crate::CloseReason::Fenced)
         );
+        assert_eq!(manifest_store.read_latest_manifest().await.unwrap(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(feature = "zstd")]
+    async fn test_standalone_compactor_worker_applies_worker_sst_options() {
+        use crate::config::CompressionCodec;
+
+        // given: L0s written without compression or filters.
+        let os = Arc::new(InMemory::new());
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(db_options(None))
+            .build()
+            .await
+            .unwrap();
+        for i in 0..4u8 {
+            db.put(&[b'a' + i; 16], &[b'b' + i; 48]).await.unwrap();
+        }
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        let (manifest_store, _, _) = build_test_stores(os.clone());
+        let l0s = get_db_state(manifest_store.clone()).await.tree.l0.clone();
+        assert!(!l0s.is_empty());
+        for l0 in &l0s {
+            assert_eq!(l0.sst.info.compression_codec, None);
+            assert_eq!(l0.sst.info.filter_len, 0);
+        }
+
+        // when: a standalone compactor's in-process worker compacts them.
+        let compactor = CompactorBuilder::new(PATH, os.clone())
+            .with_options(CompactorOptions {
+                scheduler_options: SizeTieredCompactionSchedulerOptions {
+                    min_compaction_sources: 1,
+                    max_compaction_sources: 999,
+                    include_size_threshold: 4.0,
+                    sorted_run_consolidation_threshold: 0,
+                }
+                .into(),
+                worker: Some(CompactionWorkerOptions {
+                    compactions_poll_interval: Duration::from_millis(100),
+                    compression_codec: Some(CompressionCodec::Zstd),
+                    min_filter_keys: 1,
+                    ..CompactionWorkerOptions::default()
+                }),
+                ..compactor_options()
+            })
+            .build();
+        compactor.start().await.unwrap();
+        let db_state = run_for(Duration::from_secs(10), || async {
+            let db_state = get_db_state(manifest_store.clone()).await;
+            (db_state.tree.l0.is_empty() && !db_state.tree.compacted.is_empty()).then_some(db_state)
+        })
+        .await
+        .expect("db was not compacted");
+        compactor.stop().await.unwrap();
+        db.close().await.unwrap();
+
+        // then: the worker wrote with its own compression and filter settings.
+        for view in db_state.tree.compacted.iter().flat_map(|sr| sr.sst_views()) {
+            assert_eq!(
+                view.sst.info.compression_codec,
+                Some(CompressionCodec::Zstd)
+            );
+            assert!(view.sst.info.filter_len > 0);
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "zstd")]
+    async fn test_compactor_start_rejects_aligned_compressed_worker_before_fencing() {
+        use crate::config::CompressionCodec;
+
+        let os = Arc::new(InMemory::new());
+        let (manifest_store, _, _) = build_test_stores(os.clone());
+        StoredManifest::create_new_db(
+            manifest_store.clone(),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        let before = manifest_store.read_latest_manifest().await.unwrap();
+        let compactor = CompactorBuilder::new(PATH, os)
+            .with_options(CompactorOptions {
+                worker: Some(CompactionWorkerOptions {
+                    compression_codec: Some(CompressionCodec::Zstd),
+                    ..CompactionWorkerOptions::default()
+                }),
+                ..compactor_options()
+            })
+            .with_sst_block_alignment(true)
+            .build();
+
+        let error = compactor.run().await.unwrap_err();
+
+        assert_eq!(error.kind(), crate::ErrorKind::Invalid);
+        // The compactor epoch was not claimed.
         assert_eq!(manifest_store.read_latest_manifest().await.unwrap(), before);
     }
 
