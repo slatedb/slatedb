@@ -59,24 +59,19 @@ type SegmentPredicate = dyn Fn(&VersionedManifest, &[u8]) -> bool + Send + Sync;
 
 /// A [`MirrorPolicy`] that mirrors the compacted SSTs of one SlateDB database.
 ///
-/// The policy serves the database root of the first manifest or `.compactions`
-/// object that it reads or writes. It rejects these objects of other roots.
-/// SSTs of other databases that the manifest references (for example, after a
-/// clone) are mirrored.
+/// The policy serves one database. It records the root of that database from
+/// the first manifest or `.compactions` object that it reads or writes. After
+/// that, a read or write of a manifest or `.compactions` object under another
+/// root fails, because the policy tracks the manifests of one database only.
+/// This check does not apply to SSTs. The policy also mirrors the SSTs that
+/// the manifest references under other roots, for example the SSTs of the
+/// parent database after a clone.
 ///
-/// Creating a clone and detaching a clone from its parent change the manifest
-/// of the parent database, so they fail through this policy. Run them on the
-/// wrapped store.
-///
-/// For a [`DbReader`](crate::DbReader), set
-/// [`DbReaderOptions::manifest_poll_interval`](crate::config::DbReaderOptions::manifest_poll_interval)
-/// shorter than
-/// [`CompactorOptions::checkpoint_lifetime`](crate::config::CompactorOptions::checkpoint_lifetime).
-/// A reader that falls further behind can read a manifest whose SSTs the
-/// garbage collector already deleted. The download fails, so the reader keeps
-/// its older manifest. But the policy already processed the newer manifest and
-/// evicted SSTs that the older one uses, so reads of those SSTs fail with
-/// `NotLocal`.
+/// The policy does not support cloning. Creating a clone and detaching a clone
+/// from its parent both read and write the manifest of the parent database,
+/// and the policy rejects that manifest because it is under another root. Use
+/// the wrapped store to create clones and to run the garbage collector of a
+/// clone, which does the detach.
 ///
 /// ```no_run
 /// # use std::sync::Arc;
@@ -178,15 +173,25 @@ impl MirrorPolicy for SlateDbMirrorPolicy {
 
     fn put_multipart_route(
         &self,
-        _path: &Path,
+        path: &Path,
         options: &PutMultipartOptions,
     ) -> object_store::Result<MultipartRoute> {
-        // SlateDB uploads large SSTs in parts, but it writes each manifest with
-        // one PUT. So only the SST rule of `put_route` applies here.
-        Ok(match self.mirrored_sst_tag(&options.extensions) {
-            Some(_) => MultipartRoute::Mirror,
-            None => MultipartRoute::Remote,
-        })
+        // SlateDB uploads large SSTs in parts. A mirrored SST is written to
+        // object storage and to local disk, as in `put_route`.
+        if self.mirrored_sst_tag(&options.extensions).is_some() {
+            return Ok(MultipartRoute::Mirror);
+        }
+
+        // SlateDB writes each manifest and `.compactions` object with one PUT.
+        // A multipart upload of one of them would skip `observe`, so it fails.
+        if manifest_or_compactions_root(path).is_some() {
+            let message =
+                format!("multipart upload of a manifest or `.compactions` object. path=`{path}`");
+            debug_assert!(false, "{message}");
+            return Err(policy_error(message));
+        }
+        // All other objects are written to object storage only.
+        Ok(MultipartRoute::Remote)
     }
 
     /// Processes a manifest or `.compactions` object that SlateDB read or
@@ -206,7 +211,9 @@ impl MirrorPolicy for SlateDbMirrorPolicy {
         if let Some((root, _)) = parse_compactions_path(path) {
             return self.observe_compactions(&root, bytes, mirror).await;
         }
-        Ok(())
+        let message = format!("observe of an object that has no `Observe` route. path=`{path}`");
+        debug_assert!(false, "{message}");
+        Err(policy_error(message))
     }
 
     async fn run(self: Arc<Self>, mirror: MirrorHandle) {
@@ -281,6 +288,10 @@ impl SlateDbMirrorPolicy {
             let checkpoints = self
                 .checkpoint_paths(mirror, root, &versioned_manifest, &manifest_paths)
                 .await?;
+
+            // Keep the SSTs that are already local. `fetch` skips them after
+            // earlier operations on the same path finish. A `contains` check
+            // here could see a local copy that a queued eviction then removes.
             let to_download: HashSet<Path> = self
                 .selected_ssts(&versioned_manifest, &manifest_paths)
                 .cloned()
@@ -357,18 +368,25 @@ impl SlateDbMirrorPolicy {
             .decode(bytes)
             .map_err(|source| MirrorError::Policy { source })?;
         let resolver = PathResolver::from_root(root.clone());
+        // Before the first manifest, the predicate cannot run, so download the
+        // resume SSTs in every segment. The worker reads a manifest before it
+        // resumes. If that manifest selects the segment, the resume reads the
+        // SST from local disk and fails with `NotLocal` if it is missing.
+        let before_first_manifest = self.state.lock().newest.is_none();
         let resume_ssts = compactions
             .iter()
             .filter(|compaction| {
                 compaction.scheduled()
-                    && self.mirrors_segment(Some(compaction.spec().segment().as_ref()))
+                    && (before_first_manifest
+                        || self.mirrors_segment(Some(compaction.spec().segment().as_ref())))
             })
             .flat_map(|compaction| compaction.subcompactions())
             .filter_map(|subcompaction| subcompaction.output_ssts().last())
             .map(|sst| resolver.sst_path(&sst.id));
-        // A failed download fails only the resumed compaction, with
-        // `NotLocal`. An error from `observe` fails a write of `.compactions`
-        // and closes the compactor, so log the error instead.
+        // Log a failed download instead of returning it. A returned error
+        // fails the write of `.compactions` and closes the compactor. With the
+        // log, only the resume attempt fails, with `NotLocal`, and the next
+        // `.compactions` read or write downloads the SST again.
         if let Err(err) = mirror.fetch(resume_ssts).await {
             warn!("failed to download the output of a compaction to resume [error={err}]");
         }
@@ -728,6 +746,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use object_store::memory::InMemory;
     use object_store::{ObjectStore, UpdateVersion};
+    use rstest::rstest;
     use slatedb_mirror::ObjectStoreMirror;
     use ulid::Ulid;
     use uuid::Uuid;
@@ -962,6 +981,42 @@ mod tests {
                 .unwrap(),
             MultipartRoute::Mirror
         );
+        assert_eq!(
+            policy
+                .put_multipart_route(&sst(1), &PutMultipartOptions::default())
+                .unwrap(),
+            MultipartRoute::Remote
+        );
+    }
+
+    /// Panics in debug builds and fails in release builds.
+    #[rstest]
+    #[case::manifest(manifest_file(1))]
+    #[case::compactions(compactions_file(1))]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "multipart upload of a manifest or `.compactions` object")
+    )]
+    fn test_reject_multipart_upload_of_observed_object(#[case] path: Path) {
+        let policy = SlateDbMirrorPolicy::builder().build();
+        assert!(policy
+            .put_multipart_route(&path, &PutMultipartOptions::default())
+            .is_err());
+    }
+
+    /// Panics in debug builds and fails in release builds.
+    #[tokio::test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "observe of an object that has no `Observe` route")
+    )]
+    async fn test_reject_observe_of_other_object() {
+        let fixture = Fixture::new(0, SlateDbMirrorPolicy::builder()).await;
+        assert!(fixture
+            .policy
+            .observe(&sst(1), &Bytes::new(), &fixture.mirror.handle())
+            .await
+            .is_err());
     }
 
     #[test]
@@ -1117,24 +1172,27 @@ mod tests {
         assert_eq!(fixture.read_route(tag(Some(b"s"))), ReadRoute::Local);
     }
 
+    /// A compaction in the root segment with one range that has `ssts` as
+    /// output.
+    fn compaction_with_output(n: u64, status: CompactionStatus, ssts: &[u64]) -> Compaction {
+        let range = Subcompaction::new(BytesRange::unbounded())
+            .with_output_ssts(ssts.iter().map(|n| handle(*n)).collect());
+        Compaction::new(
+            Ulid::from_parts(n, 0),
+            CompactionSpec::for_segment(Bytes::new(), vec![], 0),
+        )
+        .with_status(status)
+        .with_ctx(Some(CompactionContext::new(vec![range], None)))
+    }
+
     #[tokio::test]
     async fn test_observe_compactions_downloads_resume_output() {
         let fixture = Fixture::new(3, SlateDbMirrorPolicy::builder()).await;
-        let with_output = |n, status, ssts: &[u64]| {
-            let range = Subcompaction::new(BytesRange::unbounded())
-                .with_output_ssts(ssts.iter().map(|n| handle(*n)).collect());
-            Compaction::new(
-                Ulid::from_parts(n, 0),
-                CompactionSpec::for_segment(Bytes::new(), vec![], 0),
-            )
-            .with_status(status)
-            .with_ctx(Some(CompactionContext::new(vec![range], None)))
-        };
         // The coordinator took compaction 1 back from a stopped worker. A live
         // worker runs compaction 2.
         let compactions = Compactions::new(0).with_compactions(vec![
-            with_output(1, CompactionStatus::Scheduled, &[1, 2]),
-            with_output(2, CompactionStatus::Running, &[3]),
+            compaction_with_output(1, CompactionStatus::Scheduled, &[1, 2]),
+            compaction_with_output(2, CompactionStatus::Running, &[3]),
         ]);
 
         fixture
@@ -1149,6 +1207,36 @@ mod tests {
         // A resume reads only the last output SST of each range.
         assert!(fixture.contains(2));
         assert!(!fixture.contains(1) && !fixture.contains(3));
+    }
+
+    #[tokio::test]
+    async fn test_observe_compactions_before_first_manifest() {
+        let builder =
+            SlateDbMirrorPolicy::builder().with_segment_predicate(|_, segment| segment != b"cold");
+        let fixture = Fixture::new(1, builder).await;
+        let compactions = Compactions::new(0).with_compactions(vec![compaction_with_output(
+            1,
+            CompactionStatus::Scheduled,
+            &[1],
+        )]);
+
+        // A standalone worker reads `.compactions` before any manifest.
+        fixture
+            .policy
+            .observe(
+                &compactions_file(1),
+                &FlatBufferCompactionsCodec {}.encode(&compactions),
+                &fixture.mirror.handle(),
+            )
+            .await
+            .unwrap();
+        assert!(fixture.contains(1));
+
+        // The manifest that the worker reads next selects the segment, so the
+        // resume reads the local copy.
+        fixture.observe(1, &manifest(&[], &[])).await.unwrap();
+        assert_eq!(fixture.read_route(tag(Some(b""))), ReadRoute::Local);
+        assert!(fixture.contains(1));
     }
 
     #[tokio::test]

@@ -28,10 +28,11 @@ mirroring, cache warming, and garbage collection. It guarantees all compacted
 SST reads are from local files and all writes are durable to object storage
 before returning success.
 
-Each `SlateDbMirrorPolicy` serves one database root. The root is detected from
-the first `.manifest` or `.compactions` read or write. Subsequent operations on
-these objects for a different root are rejected. External SSTs referenced by the database remain
-supported and may reside under other roots.
+Each `SlateDbMirrorPolicy` serves one database. The policy records the root of
+that database from the first `.manifest` or `.compactions` object that it reads
+or writes. After that, the policy rejects a read or write of a `.manifest` or
+`.compactions` object under another root, because it tracks the manifests of
+one database only.
 
 ## Motivation
 
@@ -647,6 +648,7 @@ error instead of `Mirror` for a `PutMode::Update` write:
 | Call | Route |
 |---|---|
 | GET or PUT of `*.manifest` or `*.compactions` | `Observe` (error if the database root doesn't match) |
+| Multipart upload of `*.manifest` or `*.compactions` | Error, because a multipart upload has no `Observe` route |
 | Tagged compacted SST in a selected segment, with `tag.retry.is_some()` | `Refetch` |
 | Tagged compacted SST in a selected segment | `Local` for reads, `Mirror` for writes |
 | Everything else (untagged, WAL, unselected segments) | `Remote` |
@@ -664,7 +666,8 @@ The policy keeps this state behind a mutex:
 
 `retained` only controls eviction. It doesn't cause anything to be downloaded,
 and an SST in `retained` isn't necessarily on disk. Downloads happen only through
-`fetch`.
+`fetch`. Each `observe` call builds its own `to_download` set: the SST paths
+that it passes to `fetch`. The policy does not keep `to_download` in its state.
 
 In short, a newer manifest sets `retained` to its own SSTs plus those of its
 active checkpoints, fetches its own SSTs, and evicts anything no longer
@@ -679,8 +682,8 @@ SSTs are still retained. That second path is how checkpoint readers get warmed.
    the cached manifests of `M`'s active checkpoints and note which ones aren't
    cached. Release the lock.
 3. If `M` is newer, read the uncached checkpoint manifests through
-   `mirror.remote()` so the reads don't loop back into `observe`. Then build
-   `to_download`: `M`'s SSTs, counting only selected segments.
+   `mirror.remote()` so the reads don't loop back into `observe`. Then set
+   `to_download` to `M`'s SSTs in selected segments.
 4. Take the lock.
 5. If `M` is still newer than the newest processed manifest:
    1. Add the checkpoint manifests read in step 3 to the cache.
@@ -696,6 +699,14 @@ SSTs are still retained. That second path is how checkpoint readers get warmed.
 7. Release the lock.
 8. Call `mirror.fetch(to_download)` and await it. Paths that are already local are
    skipped.
+
+`observe` for a `.compactions` object follows the same pattern, with fewer
+steps. It takes the last output SST of each range of each `Scheduled`
+compaction in a selected segment. It awaits `mirror.fetch` for these SSTs
+before the caller gets the object. This makes sure that a worker that resumes
+a compaction finds these SSTs locally, even when a worker on another node
+wrote them. It does not change `retained` and evicts nothing. If the download fails, the policy logs the error and does not return
+it.
 
 The SSTs in a manifest are every SST returned by `ManifestCore::all_sst_views()`.
 This includes L0 and compacted SSTs in the root tree and all named segments.
@@ -812,7 +823,7 @@ For `.compactions` entries, reads, and writes, the predicate receives the last m
 
 Selected reads are routed to the local mirror, and unselected reads to the wrapped object store. Selected writes are written locally and remotely. Unselected writes go directly to the wrapped object store. Only SSTs in selected segments are retained, so an SST whose segment stops being selected is evicted on the next manifest transition. If a later manifest selects it again, the mirror's [ordering](#ordering) cancels the pending eviction or fetches the SST again.
 
-When a predicate is set, a call with no segment and every call before the first manifest are unselected, because the predicate needs both. If the predicate starts to select a segment that already has SSTs, reads of those SSTs can return `NotLocal` until the next manifest downloads them.
+When a predicate is set, a call with no segment and every call before the first manifest are unselected, because the predicate needs both. One exception: `observe` for a `.compactions` object before the first manifest downloads the output that a worker resumes from in every segment. The worker reads a manifest before it resumes, and that manifest can select the segment. If the predicate starts to select a segment that already has SSTs, reads of those SSTs can return `NotLocal` until the next manifest downloads them.
 
 #### Compactor Checkpoint Retention
 
@@ -1152,7 +1163,8 @@ There is, however, an open question around the CPU cost of computing the MD5 pre
   An older manifest downloads its retained SSTs without the predicate, so its
   downloads match the routes, which use the newest manifest. `.compactions`
   reads and writes go through `Observe`, which downloads the output SSTs that
-  a worker reads to resume a compaction.
+  a worker reads to resume a compaction. A multipart upload of a manifest or
+  `.compactions` object fails.
 - Local object files now end in `.obj`, so every object name can be
   mirrored. Names ending in `.meta` or `.<digits>` no longer collide with
   metadata or temporary files.
