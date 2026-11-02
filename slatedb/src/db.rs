@@ -12023,7 +12023,7 @@ mod tests {
                     break;
                 }
             }
-            CachedEntry::with_block(Arc::new(builder.build().unwrap()))
+            CachedEntry::with_block(&builder.build().unwrap())
         }
 
         async fn open_shared_cache(path: &std::path::Path) -> Arc<dyn DbCache> {

@@ -43,11 +43,6 @@ impl SstStats {
         size_of::<Self>() + self.block_stats.len() * size_of::<BlockStats>()
     }
 
-    /// Returns a clone.
-    pub(crate) fn clamp_allocated_size(&self) -> Self {
-        self.clone()
-    }
-
     /// Encode stats to bytes via FlatBuffers.
     pub(crate) fn encode(&self) -> Bytes {
         let mut builder = FlatBufferBuilder::new();
