@@ -32,6 +32,11 @@ use slatedb_common::metrics::{
 
 /// An [`ObjectStore`] wrapper that caches object parts on local disk.
 ///
+/// `CachedObjectStore` is deprecated. It is being replaced by the local object
+/// mirror, [`ObjectStoreMirror`](slatedb_mirror::ObjectStoreMirror). If you
+/// need tiered caching, use
+/// [`FoyerHybridCache`](crate::db_cache::foyer_hybrid::FoyerHybridCache).
+///
 /// The cache splits each object into fixed-size parts and stores them under a
 /// root folder.
 ///
@@ -53,6 +58,10 @@ use slatedb_common::metrics::{
 ///     .await?;
 /// let db = Db::builder(path, cache).build().await?;
 /// ```
+#[deprecated(
+    since = "0.18.0",
+    note = "`CachedObjectStore` is being replaced by the local object mirror, `slatedb_mirror::ObjectStoreMirror`. If you need tiered caching, use `slatedb::db_cache::foyer_hybrid::FoyerHybridCache`."
+)]
 #[derive(Debug, Clone)]
 pub struct CachedObjectStore {
     object_store: Arc<dyn ObjectStore>,

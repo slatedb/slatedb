@@ -45,6 +45,7 @@ use std::time::Duration;
 use crate::batch::WriteBatch;
 use crate::batch_write::{BatchWriterMessage, WriteBatchRequest, WRITE_BATCH_TASK_NAME};
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
+#[allow(deprecated)] // `CachedObjectStore` is deprecated.
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{
@@ -540,6 +541,7 @@ impl DbInner {
         Ok(())
     }
 
+    #[allow(deprecated)] // `CachedObjectStore` is deprecated.
     async fn preload_cache(
         &self,
         cached_obj_store: &CachedObjectStore,
@@ -12119,6 +12121,7 @@ mod tests {
         );
     }
 
+    #[allow(deprecated)] // `CachedObjectStore` is deprecated.
     mod object_store_cache {
         use super::*;
         use crate::cached_object_store::stats::{PART_ACCESS_COUNT, PART_HIT_COUNT};
@@ -12485,6 +12488,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[allow(deprecated)] // `CachedObjectStore` is deprecated.
         async fn test_db_records_read_calls_into_cached_object_store() {
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let mut opts = test_db_options(0, 1024, None);
