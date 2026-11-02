@@ -213,7 +213,7 @@ impl TableStore {
             cache
                 .insert(
                     (sst_table_id, block.offset).into(),
-                    CachedEntry::with_block(Arc::clone(&block.block)),
+                    CachedEntry::with_block(&block.block),
                 )
                 .await;
         }
@@ -221,7 +221,7 @@ impl TableStore {
             cache
                 .insert(
                     (sst_table_id, encoded_sst.info.index_offset).into(),
-                    CachedEntry::with_sst_index(Arc::new(encoded_sst.index.clone())),
+                    CachedEntry::with_sst_index(&encoded_sst.index),
                 )
                 .await;
         }
@@ -229,7 +229,7 @@ impl TableStore {
             cache
                 .insert(
                     (sst_table_id, encoded_sst.info.filter_offset).into(),
-                    CachedEntry::with_filters(encoded_sst.filters.clone()),
+                    CachedEntry::with_filters(&encoded_sst.filters),
                 )
                 .await;
         }
@@ -276,7 +276,7 @@ impl TableStore {
             .into();
 
         cache
-            .insert(cache_key, CachedEntry::with_filters(decoded.clone()))
+            .insert(cache_key, CachedEntry::with_filters(&decoded))
             .await;
         decoded
     }
@@ -629,7 +629,7 @@ impl TableStore {
                                 .read_filters(&info, &obj)
                                 .await
                                 .map_err(|e| e.with_path(&obj.path))?;
-                            Ok(Some(CachedEntry::with_filters(filters)))
+                            Ok(Some(CachedEntry::with_filters(&filters)))
                         }
                         CacheTarget::Stats => {
                             let stats = sst_format
@@ -643,7 +643,7 @@ impl TableStore {
                                 .read_index(&info, &obj)
                                 .await
                                 .map_err(|e| e.with_path(&obj.path))?;
-                            Ok(Some(CachedEntry::with_sst_index(Arc::new(index))))
+                            Ok(Some(CachedEntry::with_sst_index(&index)))
                         }
                         CacheTarget::Data(_) => {
                             unreachable!("data blocks use block_loader, not read_loader")
@@ -689,7 +689,7 @@ impl TableStore {
                         .map_err(|e| e.with_path(&obj.path))
                 })
                 .await?;
-                Ok(CachedEntry::with_block(Arc::new(block)))
+                Ok(CachedEntry::with_block(&block))
             })
         })
     }
@@ -954,7 +954,7 @@ impl TableStore {
         if let Some(cache) = self.cache_for_reads() {
             if !blocks_to_cache.is_empty() {
                 join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
-                    cache.insert((id, offset).into(), CachedEntry::with_block(block))
+                    cache.insert((id, offset).into(), CachedEntry::with_block(&block))
                 }))
                 .await;
             }
@@ -1296,7 +1296,7 @@ impl EncodedSsTableWriter {
                 cache
                     .insert(
                         (self.id, block.offset).into(),
-                        CachedEntry::with_block(block.block),
+                        CachedEntry::with_block(&block.block),
                     )
                     .await;
             }
