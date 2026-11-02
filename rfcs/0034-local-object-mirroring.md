@@ -190,6 +190,9 @@ impl MirrorHandle {
     pub fn contains(&self, path: &Path) -> bool;
     /// The wrapped store. Calls made here skip the policy.
     pub fn remote(&self) -> &Arc<dyn ObjectStore>;
+    /// Reads the whole object from the wrapped store. The read skips the
+    /// policy and does not make a local copy.
+    pub async fn get_remote(&self, path: &Path) -> Result<Bytes>;
 }
 
 impl ObjectStoreMirror {
@@ -257,8 +260,8 @@ impl SlateDbMirrorPolicyBuilder {
     /// seconds.
     pub fn with_compactions_poll_interval(self, interval: Option<Duration>) -> Self;
 
-    /// Sets the clock used for the `.compactions` polls and for retry backoff.
-    /// The default uses Tokio's clock.
+    /// Sets the clock used for the `.compactions` polls. The default uses
+    /// Tokio's clock.
     pub fn with_system_clock(self, clock: Arc<dyn SystemClock>) -> Self;
 
     pub fn build(self) -> Arc<SlateDbMirrorPolicy>;
@@ -681,8 +684,9 @@ SSTs are still retained. That second path is how checkpoint readers get warmed.
    manifest (or none has been processed yet). If it is, take references to
    the cached manifests of `M`'s active checkpoints and note which ones aren't
    cached. Release the lock.
-3. If `M` is newer, read the uncached checkpoint manifests through
-   `mirror.remote()` so the reads don't loop back into `observe`. Then set
+3. If `M` is newer, read the uncached checkpoint manifests with
+   `mirror.get_remote()`. These reads retry transient errors and don't loop
+   back into `observe`. Then set
    `to_download` to `M`'s SSTs in selected segments.
 4. Take the lock.
 5. If `M` is still newer than the newest processed manifest:

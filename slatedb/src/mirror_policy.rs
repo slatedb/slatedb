@@ -14,19 +14,16 @@
 //! An optional segment predicate limits the mirror to some segments.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use log::warn;
 use object_store::path::{Path, DELIMITER};
-use object_store::{
-    Extensions, GetOptions, ObjectStoreExt, PutMode, PutMultipartOptions, PutOptions,
-};
+use object_store::{Extensions, GetOptions, PutMode, PutMultipartOptions, PutOptions};
 use parking_lot::Mutex;
 use slatedb_common::clock::{DefaultSystemClock, SystemClock};
-use slatedb_common::DbRand;
 use slatedb_mirror::{
     MirrorError, MirrorHandle, MirrorPolicy, MultipartRoute, ReadRoute, WriteRoute,
 };
@@ -38,7 +35,6 @@ use crate::flatbuffer_types::{FlatBufferCompactionsCodec, FlatBufferManifestCode
 use crate::manifest::{Manifest, VersionedManifest};
 use crate::object_store_tag::{ObjectStoreCallTag, SstType};
 use crate::paths::PathResolver;
-use crate::retrying_object_store::RetryingObjectStore;
 
 /// The `store` name on the errors that the policy returns from a route.
 const POLICY_STORE_NAME: &str = "SlateDbMirrorPolicy";
@@ -97,11 +93,6 @@ pub struct SlateDbMirrorPolicy {
     segment_predicate: Option<Box<SegmentPredicate>>,
     compactions_poll_interval: Option<Duration>,
     system_clock: Arc<dyn SystemClock>,
-    rand: Arc<DbRand>,
-    /// The wrapped store with retries, for reads of checkpoint manifests. The
-    /// first read sets it, because only a `MirrorHandle` gives the wrapped
-    /// store.
-    remote: OnceLock<RetryingObjectStore>,
 }
 
 impl SlateDbMirrorPolicy {
@@ -498,17 +489,9 @@ impl SlateDbMirrorPolicy {
     ) -> object_store::Result<ManifestSstPaths> {
         // A failed `observe` on a manifest write closes the database, so retry
         // transient errors here.
-        let remote = self.remote.get_or_init(|| {
-            RetryingObjectStore::new(
-                Arc::clone(mirror.remote()),
-                Arc::clone(&self.rand),
-                Arc::clone(&self.system_clock),
-                None,
-            )
-        });
         let path = manifest_path(root, manifest_id);
-        let bytes = match remote.get(&path).await {
-            Ok(result) => result.bytes().await?,
+        let bytes = match mirror.get_remote(&path).await {
+            Ok(bytes) => bytes,
             Err(object_store::Error::NotFound { .. }) => {
                 warn!("checkpoint manifest is missing, not retaining its SSTs [path={path}]");
                 return Ok(ManifestSstPaths::default());
@@ -591,8 +574,8 @@ impl SlateDbMirrorPolicyBuilder {
         self
     }
 
-    /// Sets the clock for the compaction state polls and for retry backoff.
-    /// The default uses Tokio's clock.
+    /// Sets the clock for the compaction state polls. The default uses Tokio's
+    /// clock.
     pub fn with_system_clock(mut self, system_clock: Arc<dyn SystemClock>) -> Self {
         self.system_clock = system_clock;
         self
@@ -606,8 +589,6 @@ impl SlateDbMirrorPolicyBuilder {
             segment_predicate: self.segment_predicate,
             compactions_poll_interval: self.compactions_poll_interval,
             system_clock: self.system_clock,
-            rand: Arc::new(DbRand::default()),
-            remote: OnceLock::new(),
         })
     }
 }
@@ -745,7 +726,7 @@ mod tests {
 
     use chrono::{DateTime, Utc};
     use object_store::memory::InMemory;
-    use object_store::{ObjectStore, UpdateVersion};
+    use object_store::{ObjectStore, ObjectStoreExt, UpdateVersion};
     use rstest::rstest;
     use slatedb_mirror::ObjectStoreMirror;
     use ulid::Ulid;
