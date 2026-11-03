@@ -885,7 +885,7 @@ impl DbReader {
     }
 
     /// Preload the disk cache from the current manifest state.
-    #[allow(deprecated)] // `CachedObjectStore` is deprecated.
+    #[allow(deprecated)] // `CachedObjectStore` and its options are deprecated.
     pub(crate) async fn preload_cache(
         &self,
         cached_obj_store: &CachedObjectStore,

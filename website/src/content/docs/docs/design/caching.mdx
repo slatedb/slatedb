@@ -17,6 +17,14 @@ You can replace the cache with [`DbBuilder::with_db_cache`](https://docs.rs/slat
 
 ## Object-Store Cache
 
+:::caution
+`CachedObjectStore` and `ObjectStoreCacheOptions` are deprecated. The local object mirror,
+[`ObjectStoreMirror`](https://docs.rs/slatedb-mirror/latest/slatedb_mirror/struct.ObjectStoreMirror.html)
+with [`SlateDbMirrorPolicy`](https://docs.rs/slatedb/latest/slatedb/struct.SlateDbMirrorPolicy.html),
+replaces them. If you need tiered caching, use
+[`FoyerHybridCache`](https://docs.rs/slatedb/latest/slatedb/db_cache/foyer_hybrid/struct.FoyerHybridCache.html).
+:::
+
 [`CachedObjectStore`](https://docs.rs/slatedb/latest/slatedb/cached_object_store/struct.CachedObjectStore.html) is a second cache layer for raw object-store bytes. It splits each object into fixed-size parts, stores those parts under a local root folder, and can serve later `GET` and `HEAD` requests from those local files when the needed parts are already present.
 
 There are two ways to enable it. The first is configuration: set [`root_folder`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html#structfield.root_folder) in [`ObjectStoreCacheOptions`](https://docs.rs/slatedb/latest/slatedb/config/struct.ObjectStoreCacheOptions.html), and SlateDB builds the cache from those options and wraps the object store you passed to the builder in it. This is the only way to enable the cache from a settings file.

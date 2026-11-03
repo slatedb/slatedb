@@ -2220,6 +2220,7 @@ mod tests {
         db.close().await.unwrap();
     }
 
+    #[allow(deprecated)] // `object_store_cache_options` is deprecated.
     fn test_db_options(
         min_filter_keys: u32,
         l0_sst_size_bytes: usize,

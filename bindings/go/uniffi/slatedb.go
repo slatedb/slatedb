@@ -1844,7 +1844,7 @@ func uniffiCheckChecksums() {
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_settings_set()
 		})
-		if checksum != 16989 {
+		if checksum != 6264 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_settings_set: UniFFI API checksum mismatch")
 		}
@@ -9425,8 +9425,7 @@ type SettingsInterface interface {
 	// Sets a settings field by dotted path using a JSON literal value.
 	//
 	// `key` identifies the field to update. Use `.` to address nested objects,
-	// for example `compactor_options.max_sst_size` or
-	// `object_store_cache_options.root_folder`.
+	// for example `compactor_options.max_sst_size`.
 	//
 	// `value_json` must be a valid JSON literal matching the target field's
 	// expected type. That means strings must be quoted JSON strings, numbers
@@ -9444,7 +9443,6 @@ type SettingsInterface interface {
 	// - `set("default_ttl_millis", "42")`
 	// - `set("default_ttl_millis", "null")`
 	// - `set("compactor_options.max_sst_size", "33554432")`
-	// - `set("object_store_cache_options.root_folder", "\"/tmp/slatedb-cache\"")`
 	Set(key string, valueJson string) error
 	// Serializes the current settings value to a JSON string.
 	ToJsonString() (string, error)
@@ -9530,8 +9528,7 @@ func SettingsLoad() (*Settings, error) {
 // Sets a settings field by dotted path using a JSON literal value.
 //
 // `key` identifies the field to update. Use `.` to address nested objects,
-// for example `compactor_options.max_sst_size` or
-// `object_store_cache_options.root_folder`.
+// for example `compactor_options.max_sst_size`.
 //
 // `value_json` must be a valid JSON literal matching the target field's
 // expected type. That means strings must be quoted JSON strings, numbers
@@ -9549,7 +9546,6 @@ func SettingsLoad() (*Settings, error) {
 // - `set("default_ttl_millis", "42")`
 // - `set("default_ttl_millis", "null")`
 // - `set("compactor_options.max_sst_size", "33554432")`
-// - `set("object_store_cache_options.root_folder", "\"/tmp/slatedb-cache\"")`
 func (_self *Settings) Set(key string, valueJson string) error {
 	_pointer := _self.ffiObject.incrementPointer("*Settings")
 	defer _self.ffiObject.decrementPointer()
@@ -12120,6 +12116,8 @@ func (_ FfiDestroyerObjectMetadata) Destroy(value ObjectMetadata) {
 
 // The on-disk object-store cache of one reader. Every default is the
 // engine's; `root_folder` `None` disables the cache.
+//
+// Deprecated: the engine is replacing this cache with a local object mirror.
 type ObjectStoreCacheOptions struct {
 	// Directory the cached parts are written under. `None` disables the
 	// cache and every other field is ignored.
@@ -12329,6 +12327,9 @@ type ReaderOptions struct {
 	// up after `n` retries and surfaces the underlying error.
 	ObjectStoreMaxRetries *uint32
 	// The reader's object-store cache. `None` is the engine's default.
+	//
+	// Deprecated: the engine is replacing this cache with a local object
+	// mirror.
 	ObjectStoreCacheOptions *ObjectStoreCacheOptions
 }
 
@@ -14651,6 +14652,8 @@ func (_ FfiDestroyerPrefixTarget) Destroy(value PrefixTarget) {
 
 // Which SSTs a reader loads into its disk cache at startup, up to
 // `max_cache_size_bytes`.
+//
+// Deprecated: the engine is replacing this cache with a local object mirror.
 type PreloadLevel uint
 
 const (
