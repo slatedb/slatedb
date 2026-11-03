@@ -202,7 +202,7 @@ fn default_true() -> bool {
 
 /// Enum representing different levels of cache preloading on startup
 #[deprecated(
-    since = "0.19.0",
+    since = "0.18.1",
     note = "Configures `CachedObjectStore`, which is being replaced by the local object mirror, `slatedb_mirror::ObjectStoreMirror`. If you need tiered caching, use `slatedb::db_cache::foyer_hybrid::FoyerHybridCache`."
 )]
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
@@ -813,7 +813,7 @@ pub struct Settings {
     /// [`CachedObjectStore`](crate::cached_object_store::CachedObjectStore)
     /// built from these options.
     #[deprecated(
-        since = "0.19.0",
+        since = "0.18.1",
         note = "Configures `CachedObjectStore`, which is being replaced by the local object mirror, `slatedb_mirror::ObjectStoreMirror`. If you need tiered caching, use `slatedb::db_cache::foyer_hybrid::FoyerHybridCache`."
     )]
     pub object_store_cache_options: ObjectStoreCacheOptions,
@@ -1148,7 +1148,7 @@ pub struct DbReaderOptions {
     /// will wrap its object store in a `CachedObjectStore` backed by the
     /// local filesystem, mirroring the behaviour of `Db`.
     #[deprecated(
-        since = "0.19.0",
+        since = "0.18.1",
         note = "Configures `CachedObjectStore`, which is being replaced by the local object mirror, `slatedb_mirror::ObjectStoreMirror`. If you need tiered caching, use `slatedb::db_cache::foyer_hybrid::FoyerHybridCache`."
     )]
     pub object_store_cache_options: ObjectStoreCacheOptions,
@@ -1815,7 +1815,7 @@ impl Default for GarbageCollectorOptions {
 /// The local cache default uses file system as storage, it can also be extended to use other
 /// like RocksDB, Redis, etc. in the future.
 #[deprecated(
-    since = "0.19.0",
+    since = "0.18.1",
     note = "Configures `CachedObjectStore`, which is being replaced by the local object mirror, `slatedb_mirror::ObjectStoreMirror`. If you need tiered caching, use `slatedb::db_cache::foyer_hybrid::FoyerHybridCache`."
 )]
 #[derive(Clone, Debug, Deserialize, Serialize)]
