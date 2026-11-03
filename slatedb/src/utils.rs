@@ -2,6 +2,7 @@ use crate::block_iterator::BlockIterator;
 use crate::block_iterator_v2::BlockIteratorV2;
 #[allow(deprecated)] // `CachedObjectStore` is deprecated.
 use crate::cached_object_store::CachedObjectStore;
+#[allow(deprecated)] // `PreloadLevel` is deprecated.
 use crate::config::PreloadLevel;
 use crate::db_state::SortedRun;
 use crate::db_state::SsTableHandle;
@@ -730,7 +731,7 @@ pub(crate) fn varint_len(mut value: u32) -> usize {
 }
 
 /// Preload SST files into the disk cache based on the configured [`PreloadLevel`].
-#[allow(deprecated)] // `CachedObjectStore` is deprecated.
+#[allow(deprecated)] // `CachedObjectStore` and `PreloadLevel` are deprecated.
 pub(crate) async fn preload_cache_from_manifest(
     core: &ManifestCore,
     cached_obj_store: &CachedObjectStore,

@@ -78,8 +78,7 @@ impl Settings {
     /// Sets a settings field by dotted path using a JSON literal value.
     ///
     /// `key` identifies the field to update. Use `.` to address nested objects,
-    /// for example `compactor_options.max_sst_size` or
-    /// `object_store_cache_options.root_folder`.
+    /// for example `compactor_options.max_sst_size`.
     ///
     /// `value_json` must be a valid JSON literal matching the target field's
     /// expected type. That means strings must be quoted JSON strings, numbers
@@ -97,7 +96,6 @@ impl Settings {
     /// - `set("default_ttl_millis", "42")`
     /// - `set("default_ttl_millis", "null")`
     /// - `set("compactor_options.max_sst_size", "33554432")`
-    /// - `set("object_store_cache_options.root_folder", "\"/tmp/slatedb-cache\"")`
     pub fn set(&self, key: String, value_json: String) -> Result<(), Error> {
         let mut guard = self.inner.lock();
         let mut settings_json = serde_json::to_value(&*guard)
