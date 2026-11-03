@@ -179,7 +179,7 @@ impl SlateDbWalWriter {
                     .compare_exchange(last, flush_epoch, Ordering::Relaxed, Ordering::Relaxed)
                     .is_ok()
             {
-                self.send_flush_request(None)?;
+                self.send_flush_request()?;
             }
         }
 
@@ -191,14 +191,11 @@ impl SlateDbWalWriter {
     }
 
     /// Send a flush request to the background flush worker.
-    fn send_flush_request(
-        &self,
-        result_tx: Option<oneshot::Sender<Result<(), WalError>>>,
-    ) -> Result<(), WalError> {
+    fn send_flush_request(&self) -> Result<(), WalError> {
         self.stats.flush_requests.increment(1);
         self.inner
             .read()
-            .send_flush_msg(WalFlushWork::Flush { result_tx })
+            .send_flush_msg(WalFlushWork::FreezeAndFlush)
     }
 }
 
@@ -236,9 +233,7 @@ impl WalWriter for SlateDbWalWriter {
             let mut inner = self.inner.write();
             inner.check_exited()?;
             let wal_id = inner.freeze_current_wal();
-            inner.send_flush_msg(WalFlushWork::Flush {
-                result_tx: Some(result_tx),
-            })?;
+            inner.send_flush_msg(WalFlushWork::FlushFrozen { result_tx })?;
             wal_id
         };
         self.stats.flush_requests.increment(1);
@@ -460,11 +455,13 @@ impl WalBufferIterator {
 }
 
 enum WalFlushWork {
-    Flush {
-        /// `None` means the handler freezes the current WAL before flushing.
-        /// `Some` means the handler doesn't freeze it; the caller must freeze the
-        /// current WAL first if it wants it included in the flush.
-        result_tx: Option<oneshot::Sender<Result<(), WalError>>>,
+    /// Freeze the current WAL, then flush all frozen WALs. Sent by the ticker and
+    /// when the current WAL exceeds its size limit.
+    FreezeAndFlush,
+    /// Flush the already-frozen WALs without freezing the current one. The caller
+    /// must freeze the current WAL first if it wants it included in the flush.
+    FlushFrozen {
+        result_tx: oneshot::Sender<Result<(), WalError>>,
     },
     Subscribe {
         listener: wal::WalStatusListener,
@@ -474,7 +471,8 @@ enum WalFlushWork {
 impl Debug for WalFlushWork {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            WalFlushWork::Flush { .. } => f.write_str("Flush"),
+            WalFlushWork::FreezeAndFlush => f.write_str("FreezeAndFlush"),
+            WalFlushWork::FlushFrozen { .. } => f.write_str("FlushFrozen"),
             WalFlushWork::Subscribe { .. } => f.write_str("Subscribe"),
         }
     }
@@ -558,7 +556,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
         if let Some(max_flush_interval) = self.max_flush_interval {
             return vec![MessageTickerDef::new(
                 max_flush_interval,
-                Box::new(|| WalFlushWork::Flush { result_tx: None }),
+                Box::new(|| WalFlushWork::FreezeAndFlush),
             )];
         }
         vec![]
@@ -566,11 +564,10 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 
     async fn handle(&mut self, message: WalFlushWork) -> Result<(), SlateDBError> {
         match message {
-            WalFlushWork::Flush { result_tx } => {
-                let result = self.do_flush(result_tx.is_none()).await;
-                if let Some(result_tx) = result_tx {
-                    let _ = result_tx.send(result.clone().map_err(WalError::from));
-                }
+            WalFlushWork::FreezeAndFlush => self.do_flush(true).await,
+            WalFlushWork::FlushFrozen { result_tx } => {
+                let result = self.do_flush(false).await;
+                let _ = result_tx.send(result.clone().map_err(WalError::from));
                 Ok(result?)
             }
             WalFlushWork::Subscribe { listener } => {
@@ -602,10 +599,9 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
         // drain remaining messages
         while let Some(msg) = messages.next().await {
             match msg {
-                WalFlushWork::Flush { result_tx } => {
-                    if let Some(result_tx) = result_tx {
-                        let _ = result_tx.send(Err(error.clone()));
-                    }
+                WalFlushWork::FreezeAndFlush => {}
+                WalFlushWork::FlushFrozen { result_tx } => {
+                    let _ = result_tx.send(Err(error.clone()));
                 }
                 WalFlushWork::Subscribe { listener } => {
                     (*listener)(WalEvent::WalClosed(final_status.clone()))
