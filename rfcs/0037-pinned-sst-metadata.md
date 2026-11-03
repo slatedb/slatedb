@@ -54,8 +54,11 @@ writer fills it when it creates the SST, and a read fills it when it retrieves
 the metadata through today's path. Later reads use the handle directly and
 never consult `DbCache`. For point lookups, a pinned filter is checked before
 the per-SST iterator is built, so an SST that cannot contain the key costs a
-few hash probes and nothing else. The default, `MetadataPinning::None`, leaves
-today's behavior unchanged.
+few hash probes and nothing else. The compactor takes the same option through
+`CompactorOptions` and pins the indexes it reads. A second option on
+`BlockCachePolicy` decides whether a pin fill goes through `DbCache` or reads
+the object store directly. The defaults, `MetadataPinning::None` and reads
+through the cache, leave today's behavior unchanged.
 
 ## Motivation
 
@@ -126,6 +129,7 @@ has no counterpart to either pinning mode. This RFC adds both.
 - Offer RocksDB's two pinning modes, L0 only and all SSTs, with matching
   semantics.
 - Remove the `DbCache` lookup from reads of pinned filters and indexes.
+- Give the compactor the same option for the indexes it reads.
 - Skip iterator construction for filter-negative SSTs in point lookups.
 - Keep results and read tracing identical to the unpinned path.
 - Keep filter-positive counts identical to the unpinned path. Filter-negative
@@ -144,8 +148,9 @@ has no counterpart to either pinning mode. This RFC adds both.
 - Reducing per-SST iterator setup cost for filter-positive SSTs.
 - Pinning stats blocks.
 - Pinning filters and indexes separately.
-- Loading metadata only to pin it. The pin is filled from data that is already
-  in memory.
+- Loading metadata only to pin it. In this change the pin is filled from data
+  that is already in memory. A prefetch is sketched in
+  [Follow-up work](#follow-up-work).
 - A byte limit on pinned memory. See [Memory](#memory) and
   [Open Questions](#open-questions).
 
@@ -191,12 +196,44 @@ pub enum MetadataPinning {
 }
 ```
 
-Exposed as `Settings::metadata_pinning` and `DbReaderOptions::metadata_pinning`.
-The enum is new, so it is `#[non_exhaustive]` from the start. A later mode,
-for example a size limit like RocksDB's `kFlushedAndSimilar` heuristic, is
-then not a breaking change. The writer option reaches the language bindings
-through `Settings`. The reader option needs a binding change. See
+Exposed as `Settings::metadata_pinning`, `DbReaderOptions::metadata_pinning`,
+and `CompactorOptions::metadata_pinning`. The enum is new, so it is
+`#[non_exhaustive]` from the start. A later mode, for example a size limit
+like RocksDB's `kFlushedAndSimilar` heuristic, is then not a breaking change.
+The writer and compactor options reach the language bindings through
+`Settings`. The reader option needs a binding change. See
 [Impact Analysis](#impact-analysis).
+
+The compactor option selects the SSTs whose index the compactor keeps between
+its own reads. The compactor reads no filters, so its filter cells stay empty
+unless the compactor wrote the SST. `L0` buys little in the compactor, because
+an L0 SST is an input to one compaction. `All` is the useful mode there, and
+in a standalone compactor it pins every index in the tree inside that process.
+The compactor option does not change what the writer pins. See
+[Compaction](#compaction).
+
+A read-side option lives on `BlockCachePolicy`
+([RFC 0031](0031-block-cache-policy.md)), next to its write-side targets:
+
+```rust
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MetadataReads {
+    /// A pin fill reads through `DbCache`, as every metadata read does today.
+    #[default]
+    Through,
+    /// A pin fill reads the object store directly and inserts nothing.
+    Bypass,
+}
+
+impl BlockCachePolicy {
+    pub fn with_metadata_reads(self, reads: MetadataReads) -> Self;
+}
+```
+
+`MetadataReads` applies only to reads that fill a slot. A read of an unpinned
+SST goes through the cache in both settings. See
+[Interaction with the block cache](#interaction-with-the-block-cache) for the
+pairing of the two options.
 
 - Filters and indexes are pinned together, as in RocksDB. Every candidate SST
   needs its filter, and the filter-positive ones then need their index.
@@ -287,8 +324,9 @@ pub(crate) enum PinLevel {
 
 The mode lives in a `MetadataPinner` on `TableStore`. The pinner decides which
 level a fresh slot is given at, creates slots, and owns the pinned metrics. The
-table stores of the compactor and the garbage collector use a pinner that pins
-nothing.
+writer's and the reader's table stores build their pinner from their own
+option, and the compactor's table store builds it from `CompactorOptions`.
+The garbage collector's table store uses a pinner that pins nothing.
 
 ```rust
 /// Decides which SSTs get a slot and carries slots across manifest installs.
@@ -327,12 +365,15 @@ index of a selected SST are already in memory:
 - When the writer creates an L0 SST. The memtable flusher builds the filters
   and the index in memory to write the SST. `EncodedSsTable` holds both, and
   `TableStore::write_sst` takes it and returns the handle, so the handle enters
-  the state with its slot already filled. Only the main table store does
-  this. The compactor's table store writes sorted-run SSTs and gives them no
-  slot.
+  the state with its slot already filled. The compactor's table store does
+  the same for a sorted-run SST when its own mode selects sorted runs, and the
+  slot lives in the compactor's state. The writer receives that SST from the
+  manifest without a slot. A hand-off of the compactor's slot to an in-process
+  writer is [follow-up work](#follow-up-work).
 - When a read retrieves them. `TableStore::read_filters` and
   `TableStore::read_index` store the value they return in the slot, whether it
-  came from `DbCache` or from the object store.
+  came from `DbCache` or from the object store. With `MetadataReads::Bypass`,
+  a read that fills a slot skips the cache on both the lookup and the insert.
 
 Sorted-run SSTs are compaction outputs, written by the compactor process. With
 `MetadataPinning::All`, a reader or writer pins them on its first read of each.
@@ -474,7 +515,10 @@ As in RocksDB, pinned memory is proportional to live SSTs and has no eviction:
 Snapshots, transactions, and checkpoints that hold older state keep the handles
 of retired SSTs alive, and with them their slots. A long-lived snapshot
 therefore extends pinned memory past compaction. The `pinned_sst_count`
-metric counts these SSTs until the snapshot is released.
+metric counts these SSTs until the snapshot is released. `DbStatus` holds the
+current manifest and so holds every live handle. A caller that keeps a
+`DbStatus` keeps its pins alive in the same way, and the `DbStatus` doc
+comment says so.
 
 There is no byte limit on pinned memory. SlateDB has no byte accounting outside
 the cache layer. `MetadataPinning::L0` with trivial moves off is the bounded
@@ -486,29 +530,49 @@ in production, and must watch the `pinned_sst_metadata_bytes` gauge after. See
 
 ### Interaction with the block cache
 
-Pinned entries are not read through `DbCache`. The pin is filled by the
-existing read path, so cache population, including a hybrid disk tier, behaves
-as it does today. Any copy already in the cache (for example, inserted on write
-by the `BlockCachePolicy` of RFC 0031) stops receiving hits and is evicted by
-the cache's normal policy, so long-term capacity is not double-counted. Until
-that eviction, the cache and the slot hold two copies.
+Pinned entries are not read through `DbCache`. With `MetadataReads::Through`,
+the default, the pin is filled by the existing read path, so cache population,
+including a hybrid disk tier, behaves as it does today. Any copy already in
+the cache (for example, inserted on write by the `BlockCachePolicy` of RFC
+0031) stops receiving hits and is evicted by the cache's normal policy, so
+long-term capacity is not double-counted. Until that eviction, the cache and
+the slot hold two copies.
 
-SlateDB now has three configuration points that shape where filters and
+Under `MetadataPinning::All`, every live SST's filter and index are read once
+into its slot. After that, the cache copy serves nothing in that process until
+it is evicted. The copy still has two uses. A hybrid disk tier serves the
+first fill after a restart from local disk instead of the object store. And
+under `MetadataPinning::L0`, every lookup still reads the sorted-run SSTs
+through the cache. So the pinning mode does not turn the meta cache off.
+`MetadataReads::Bypass` is the explicit way to take metadata out of the cache.
+
+SlateDB then has four configuration points that shape where filters and
 indexes live. Each answers a different question:
 
 - `SplitCache` with a `meta_cache` decides whether data blocks can evict
   metadata from the cache. Use it when filters and indexes must stay cached
   but the lookup cost is acceptable.
-- `BlockCachePolicy` ([RFC 0031](0031-block-cache-policy.md)) decides which
-  entries are inserted into the cache at all.
+- The write-side targets of `BlockCachePolicy`
+  ([RFC 0031](0031-block-cache-policy.md)) decide which entries a flush or a
+  compaction inserts into the cache.
+- `MetadataReads` on `BlockCachePolicy` decides whether a pin fill goes
+  through the cache.
 - `MetadataPinning` decides which SSTs skip the cache for their filters and
   indexes.
 
-`MetadataPinning::All` pairs well with a `BlockCachePolicy` that does not
-insert filters and indexes into the cache. The first read of each SST then
-goes to the object store and fills the slot directly, and the cache holds only
-data blocks. `MetadataPinning::L0` pairs well with any policy, because the
-writer fills L0 slots on flush and the reader fills them on first read.
+The recommended pairing for `MetadataPinning::All` is explicit and couples no
+defaults:
+
+1. `MetadataPinning::All` on the writer, the reader, and the compactor.
+2. `BlockCachePolicy` with `MetadataReads::Bypass` and with no `Index` or
+   `Filters` in the flush targets or the compaction output targets.
+3. A `SplitCache` with no `meta_cache`, because nothing reads or inserts
+   metadata any more.
+
+The first read of each SST then goes to the object store and fills the slot
+directly, and the cache holds only data blocks. `MetadataPinning::L0` pairs
+well with any policy, because the writer fills L0 slots on flush and the
+reader fills them on first read.
 
 ### Sizing
 
@@ -521,6 +585,56 @@ The real figure depends on the key sizes, the block size, and the filter
 configuration, so measure it with the `pinned_sst_metadata_bytes` gauge on a
 representative database before you enable `MetadataPinning::All` on a large
 one.
+
+### Follow-up work
+
+Two extensions came out of review. Both build on the slot and `carry_pins`
+without changing them, and both are left out of this change to keep it small.
+
+**Hand-off from compactor writes to an in-process writer.** When the compactor
+runs inside the writer, it builds the filters and the index of each output SST
+in memory and drops them after the write. The writer then reads them again on
+first use, from the meta cache that the compaction output targets filled. A
+hand-off keeps the compactor's copy instead. The writer's and the compactor's
+table stores share one `MetadataPinner`, and the pinner gains a bounded
+hand-off map from `SsTableId` to slot:
+
+1. The compactor offers the filled slot of each output SST when it writes it.
+2. The writer's `carry_pins` takes a matching offer before it makes a fresh
+   slot.
+3. The compactor drops its offers one writer refresh after the compaction
+   finishes or fails.
+
+A writer that misses the window gets an empty slot, which the first read
+fills. The map holds at most the output of the compactions in flight plus one
+refresh, and the compaction owns its entries, so it needs no weak references
+and no pruning. The hand-off replaces the meta cache insert of compaction
+output when pinning is on, and removes the second copy of the data. It does
+nothing for a standalone compactor, whose output the writer still fetches on
+first read.
+
+**Prefetch on manifest install.** Today a new SST is pinned on its first
+read, so a reader, or a writer with a standalone compactor, pays one object
+store read per new SST after each manifest refresh. A `PinFill` setting on the
+pinner gives that a shape:
+
+```rust
+pub enum PinFill {
+    /// Fill a slot when a read retrieves its value. The default.
+    Lazy,
+    /// Fill the slots of newly selected SSTs when a manifest is installed,
+    /// with at most `max_concurrent` object store reads at once.
+    OnInstall { max_concurrent: usize },
+}
+```
+
+An `OnInstall` fill reads the object store directly into the slot, with
+`MetadataReads::Bypass` semantics, and never blocks the install. The bound is
+the open point, and `MAX_PLANNING_INDEX_READS` in `subcompaction.rs` is the
+existing precedent for one. A reader that uses the mirror downloads each new
+SST on install, so its prefetch reads local disk. A standalone compactor has
+the same first-read cost on its inputs, and the same fill applies to it. See
+[Open Questions](#open-questions).
 
 ## Impact Analysis
 
@@ -574,10 +688,25 @@ older state and extends pinned memory in the same way as a snapshot.
 - [ ] Distributed compaction
 - [ ] Compactions format
 
-The compactor is unchanged. Its table store uses a pinner that pins nothing,
-and its state is built without `carry_pins`, so its handles never have a slot.
-Its index reads go through `DbCache` as they do today. The compactor reads no
-filters and does not receive the `MetadataPinning` option.
+The compactor never reads through `DbCache`. `TableStore::cache_for_reads`
+returns nothing for the compactor's table store, and the standalone compactor
+has no cache at all. Every compactor index read is an object store read. The
+in-process compactor holds the cache only to insert its output, which the
+default `BlockCachePolicy` does for the index and the filters.
+
+The compactor reads the index of each input SST at two points per compaction:
+once when it plans subcompactions, and once in the merge iterator of each
+subcompaction. It reads no filters. A sorted-run SST is an input to several
+compactions over its life, so its index is read twice per compaction.
+
+With `CompactorOptions::metadata_pinning`, the compactor's table store builds
+its pinner from that option, and `CompactorState` calls `carry_pins` when it
+is created and when it merges a remote manifest, as the writer and the reader
+do. The planning read and the merge read then fill the index cell, and a later
+compaction that takes the same SST as input reuses it. This cuts the index
+reads of a sorted-run SST from two per compaction to one per lifetime. The
+compactor's slots live in its own state. The writer still receives compaction
+output without a slot. See [Follow-up work](#follow-up-work) for the hand-off.
 
 ### Storage Engine Internals
 
@@ -593,10 +722,12 @@ filters and does not receive the `MetadataPinning` option.
 - [x] Language bindings (Go/Python/etc)
 - [x] Observability (metrics/logging/tracing)
 
-The writer option reaches the bindings through `Settings`, which they pass as
-JSON. The reader option needs a binding change: the UniFFI `ReaderOptions`
-gains an optional `metadata_pinning` field and a `MetadataPinning` enum, and
-the generated Go package is regenerated.
+The writer and compactor options reach the bindings through `Settings`, which
+they pass as JSON. The reader option needs a binding change: the UniFFI
+`ReaderOptions` gains an optional `metadata_pinning` field and a
+`MetadataPinning` enum, and the generated Go package is regenerated.
+`MetadataReads` lives on `BlockCachePolicy`, which the bindings do not expose
+today.
 
 ## Operations
 
@@ -653,6 +784,11 @@ the generated Go package is regenerated.
   - The first read of a selected SST fills the slot, and the second read uses
     it after every other copy is removed from the cache.
   - `pinned_filters` returns nothing for an SST without a filter.
+  - The compactor's table store fills an index slot on its first read and
+    reads no object for the index on its second read, and `CompactorState`
+    carries slots across a remote manifest merge.
+  - With `MetadataReads::Bypass`, a pin fill inserts nothing into the cache,
+    and a read of an unpinned SST still goes through the cache.
 - Differential tests: randomized write, flush and compaction sequences run
   against a writer in a random mode, with a live compactor and trivial moves
   on or off, and a `BTreeMap` model. The writer, and a reader in each of
@@ -671,12 +807,16 @@ the generated Go package is regenerated.
 ## Rollout
 
 - Milestones / phases: one change delivers the pin slot, `carry_pins`, fill
-  on flush and on read, all three modes, the filter check before iterator
-  construction, and the docs. Both modes are opt-in, so there is nothing to
-  stage.
-- Feature flags / opt-in: the option defaults to `None`.
-- Docs updates: document the option, the RocksDB mapping, the three
-  configuration points, and the sizing formulas.
+  on flush and on read, all three modes on the writer, the reader, and the
+  compactor, `MetadataReads`, the filter check before iterator construction,
+  and the docs. Both modes are opt-in, so there is nothing to stage. The
+  hand-off and the prefetch in [Follow-up work](#follow-up-work) are
+  separate changes.
+- Feature flags / opt-in: the pinning option defaults to `None` and
+  `MetadataReads` defaults to `Through`.
+- Docs updates: document the options, the RocksDB mapping, the four
+  configuration points and the recommended pairing for `All`, the sizing
+  formulas, and the `DbStatus` lifetime.
 
 ## Alternatives
 
@@ -716,8 +856,8 @@ scope.
 selected SST when it enters the state, as RocksDB does when it opens a table
 reader. This makes the first read of a new SST pinned, but it issues
 object-store requests only to pin, and nothing bounds the parallelism of such
-loads today. The RFC fills pins only from data that is already in memory. See
-Open Questions.
+loads today. This change fills pins only from data that is already in memory.
+The prefetch in [Follow-up work](#follow-up-work) adds the bound.
 
 **Dropping the pin of a trivially moved SST in `MetadataPinning::L0`.** This
 would keep the L0 mode bounded by the L0 size with trivial moves on. The RFC
@@ -736,7 +876,16 @@ consults every L0 SST, and every lookup consults one SST per sorted run.
 **A persistent registry of slots.** Keep a map from `SsTableId` to a weak
 reference to each slot on the `TableStore`, and consult it on every install.
 Both install paths already hold the prior state, so a diff against it does the
-same work with no weak references, no pruning, and no owner.
+same work with no weak references, no pruning, and no owner. The hand-off in
+[Follow-up work](#follow-up-work) is not this registry: the compaction owns
+its entries and drops them on a fixed schedule, so the map is bounded by the
+compactions in flight.
+
+**Turning the meta cache off under `MetadataPinning::All`.** Let the pinning
+mode decide that metadata is never cached. This couples two settings and
+loses the hybrid disk tier, which serves the first fill after a restart.
+`MetadataReads::Bypass` makes the same choice explicit, and leaves the cache
+to serve `L0` mode and restarts.
 
 **RocksDB-style table cache of open table readers.** Moves all per-SST state,
 including parsed footers, into a bounded table-reader cache. That is a larger
@@ -751,9 +900,10 @@ future work.
 ## Open Questions
 
 - Should manifest installs prefetch the metadata of newly live selected SSTs,
-  as RocksDB's table opens do? Nothing bounds the parallelism of such loads
-  today. A prefetch needs a bound, and the value of that bound needs
-  discussion before it is added.
+  as RocksDB's table opens do? [Follow-up work](#follow-up-work) sketches a
+  `PinFill::OnInstall { max_concurrent }` setting. The value of the bound,
+  and whether it is a fixed number or derived from the number of new SSTs,
+  needs discussion before it is added.
 - Should `MetadataPinning` gain a capped mode, so that a database can pin
   more than L0 without pinning everything? Two shapes are possible. A
   size-tiered mode, like RocksDB's `kFlushedAndSimilar`, pins every SST below
