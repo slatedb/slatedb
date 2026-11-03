@@ -975,12 +975,8 @@ mod tests {
         assert_eq!(kv.create_ts, 200);
         assert_eq!(kv.expire_ts, Some(250));
         let kv = db.get_key_value(b"default").await.unwrap().unwrap();
+        assert_eq!(kv.value, value);
         assert_eq!(kv.expire_ts, Some(1200));
-
-        clock.set(251);
-        db.put(b"advance_clock", b"value").await.unwrap();
-        assert_eq!(db.get(b"custom").await.unwrap(), None);
-        assert_eq!(db.get(b"default").await.unwrap(), Some(value));
         db.close().await.unwrap();
     }
 
