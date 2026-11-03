@@ -260,6 +260,13 @@ pub(crate) struct PinnedSstMetadata {
     filters: std::sync::OnceLock<Arc<[NamedFilter]>>,
     index: std::sync::OnceLock<Arc<SsTableIndexOwned>>,
 }
+
+/// The level an SST was in when it received its slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PinLevel {
+    L0,
+    SortedRun,
+}
 ```
 
 - `SsTableView` holds its handle by value and is cloned freely. Every clone
@@ -282,6 +289,34 @@ The mode lives in a `MetadataPinner` on `TableStore`. The pinner decides which
 level a fresh slot is given at, creates slots, and owns the pinned metrics. The
 table stores of the compactor and the garbage collector use a pinner that pins
 nothing.
+
+```rust
+/// Decides which SSTs get a slot and carries slots across manifest installs.
+#[derive(Clone)]
+pub(crate) struct MetadataPinner {
+    mode: MetadataPinning,
+    /// The pinned metrics. Each slot holds a reference and updates them
+    /// when it is filled and when it is dropped.
+    stats: Arc<PinStats>,
+}
+
+impl MetadataPinner {
+    pub(crate) fn new(mode: MetadataPinning, recorder: &MetricsRecorderHelper) -> Self;
+    /// A pinner that pins nothing.
+    pub(crate) fn disabled() -> Self;
+    /// Whether the mode pins SSTs that enter the state at `level`.
+    pub(crate) fn selects(&self, level: PinLevel) -> bool;
+    /// A fresh, empty slot for an SST that enters the state at `level`, or
+    /// `None` when the mode does not pin that level.
+    pub(crate) fn new_pin(&self, level: PinLevel) -> Option<Arc<PinnedSstMetadata>>;
+    /// Gives every handle in `next` its slot. See
+    /// [Carrying pins across manifest updates](#carrying-pins-across-manifest-updates).
+    pub(crate) fn carry_pins(&self, prev: Option<&ManifestCore>, next: &mut ManifestCore);
+}
+```
+
+`selects` maps the mode to a level: `None` selects nothing, `L0` selects
+`PinLevel::L0`, and `All` selects both levels.
 
 ### When pins are filled
 
