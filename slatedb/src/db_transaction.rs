@@ -380,6 +380,36 @@ impl DbTransaction {
         Ok(())
     }
 
+    /// Put a key-value pair into the transaction using owned [`Bytes`].
+    /// This avoids the buffer copies that [`Self::put`] performs.
+    /// The write stays buffered in the transaction's write batch until commit.
+    ///
+    /// # Panics
+    /// - If the key is empty.
+    /// - If the key or value size is larger than `u32::MAX`.
+    pub fn put_bytes(&self, key: Bytes, value: Bytes) -> Result<(), crate::Error> {
+        self.put_bytes_with_options(key, value, &PutOptions::default())
+    }
+
+    /// Put a key-value pair into the transaction using owned [`Bytes`] with custom options.
+    /// See [`Self::put_bytes`] for the buffer ownership behavior.
+    /// The write stays buffered in the transaction's write batch until commit.
+    ///
+    /// # Panics
+    /// - If the key is empty.
+    /// - If the key or value size is larger than `u32::MAX`.
+    pub fn put_bytes_with_options(
+        &self,
+        key: Bytes,
+        value: Bytes,
+        options: &PutOptions,
+    ) -> Result<(), crate::Error> {
+        self.write_batch
+            .write()
+            .put_bytes_with_options(key, value, options);
+        Ok(())
+    }
+
     /// Mark keys as read for conflict detection.
     ///
     /// This method explicitly tracks read operations for conflict detection. When keys are
@@ -850,6 +880,159 @@ mod tests {
 
         // Commit transaction
         txn.commit().await.unwrap();
+    }
+
+    #[rstest]
+    #[case::default_options(false)]
+    #[case::custom_options(true)]
+    #[tokio::test]
+    async fn test_txn_put_bytes_shares_buffers(#[case] with_options: bool) {
+        let db = crate::Db::open("test_db", Arc::new(InMemory::new()))
+            .await
+            .unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
+        let key = Bytes::from(b"owned_key".to_vec());
+        let value = Bytes::from(b"owned_value".to_vec());
+
+        if with_options {
+            txn.put_bytes_with_options(key.clone(), value.clone(), &PutOptions::default())
+                .unwrap();
+        } else {
+            txn.put_bytes(key.clone(), value.clone()).unwrap();
+        }
+
+        let kv = txn.get_key_value(&key).await.unwrap().unwrap();
+        assert_eq!(kv.key, key);
+        assert_eq!(kv.value, value);
+        assert_eq!(kv.key.as_ptr(), key.as_ptr());
+        assert_eq!(kv.value.as_ptr(), value.as_ptr());
+        txn.rollback();
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_txn_put_bytes_visibility_and_overwrite() {
+        let db = crate::Db::open("test_db", Arc::new(InMemory::new()))
+            .await
+            .unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
+        let key = Bytes::from_static(b"key");
+        let value = Bytes::from_static(b"value");
+
+        txn.put(&key, b"initial").unwrap();
+        txn.put_bytes(key.clone(), value.clone()).unwrap();
+        assert_eq!(txn.get(&key).await.unwrap(), Some(value.clone()));
+        assert_eq!(db.get(&key).await.unwrap(), None);
+
+        txn.delete(&key).unwrap();
+        assert_eq!(txn.get(&key).await.unwrap(), None);
+        txn.put_bytes_with_options(key.clone(), Bytes::new(), &PutOptions::default())
+            .unwrap();
+        assert_eq!(txn.get(&key).await.unwrap(), Some(Bytes::new()));
+        txn.put_bytes_with_options(key.clone(), value.clone(), &PutOptions::default())
+            .unwrap();
+        assert_eq!(txn.get(&key).await.unwrap(), Some(value.clone()));
+        assert_eq!(db.get(&key).await.unwrap(), None);
+
+        txn.commit().await.unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), Some(value));
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_txn_put_bytes_with_options_ttl() {
+        use crate::config::Ttl;
+        use slatedb_common::clock::MockSystemClock;
+
+        let clock = Arc::new(MockSystemClock::new());
+        let mut settings = test_db_options(0, 1024, None);
+        settings.default_ttl_millis = Some(1000);
+        let db = crate::Db::builder("test_db", Arc::new(InMemory::new()))
+            .with_settings(settings)
+            .with_system_clock(clock.clone())
+            .build()
+            .await
+            .unwrap();
+        clock.set(100);
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
+        let value = Bytes::from_static(b"value");
+        txn.put_bytes(Bytes::from_static(b"default"), value.clone())
+            .unwrap();
+        txn.put_bytes_with_options(
+            Bytes::from_static(b"custom"),
+            value.clone(),
+            &PutOptions {
+                ttl: Ttl::ExpireAfterMillis(50),
+            },
+        )
+        .unwrap();
+
+        clock.set(200);
+        assert_eq!(txn.get(b"custom").await.unwrap(), Some(value.clone()));
+        txn.commit().await.unwrap();
+        let kv = db.get_key_value(b"custom").await.unwrap().unwrap();
+        assert_eq!(kv.value, value);
+        assert_eq!(kv.create_ts, 200);
+        assert_eq!(kv.expire_ts, Some(250));
+        let kv = db.get_key_value(b"default").await.unwrap().unwrap();
+        assert_eq!(kv.value, value);
+        assert_eq!(kv.expire_ts, Some(1200));
+        db.close().await.unwrap();
+    }
+
+    #[rstest]
+    #[case::si(IsolationLevel::Snapshot)]
+    #[case::ssi(IsolationLevel::SerializableSnapshot)]
+    #[tokio::test]
+    async fn test_txn_put_bytes_commit_conflict(#[case] isolation_level: IsolationLevel) {
+        let db = crate::Db::open("test_db", Arc::new(InMemory::new()))
+            .await
+            .unwrap();
+        let txn1 = db.begin(isolation_level).unwrap();
+        let txn2 = db.begin(isolation_level).unwrap();
+        let key = Bytes::from_static(b"key");
+        let value = Bytes::from_static(b"first");
+        txn1.put_bytes(key.clone(), value.clone()).unwrap();
+        txn2.put_bytes_with_options(
+            key.clone(),
+            Bytes::from_static(b"second"),
+            &PutOptions::default(),
+        )
+        .unwrap();
+
+        txn1.commit().await.unwrap();
+        let err = txn2.commit().await.unwrap_err();
+        assert_eq!(err.kind(), crate::ErrorKind::Transaction);
+        assert_eq!(db.get(&key).await.unwrap(), Some(value));
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_txn_put_bytes_rollback() {
+        let db = crate::Db::open("test_db", Arc::new(InMemory::new()))
+            .await
+            .unwrap();
+        db.put(b"existing", b"original").await.unwrap();
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
+        let value = Bytes::from_static(b"new_value");
+        txn.put_bytes(Bytes::from_static(b"existing"), value.clone())
+            .unwrap();
+        txn.put_bytes_with_options(
+            Bytes::from_static(b"new_key"),
+            value.clone(),
+            &PutOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(txn.get(b"existing").await.unwrap(), Some(value.clone()));
+        assert_eq!(txn.get(b"new_key").await.unwrap(), Some(value));
+
+        txn.rollback();
+        assert_eq!(
+            db.get(b"existing").await.unwrap(),
+            Some(Bytes::from_static(b"original"))
+        );
+        assert_eq!(db.get(b"new_key").await.unwrap(), None);
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
