@@ -12258,6 +12258,11 @@ type ReadOptions struct {
 	// Whether fetched data blocks should be inserted into the block cache.
 	// SST metadata is cached independently.
 	CacheBlocks bool
+	// How many SSTs or sorted runs a lookup reads at the same time once the
+	// key is not in the newest one. 1 reads them one after another; higher
+	// values lower latency at the cost of extra reads on a hit. 0 is treated
+	// as 1.
+	MaxConcurrentSources uint32
 	// Optional context forwarded to custom filter policies; ignored by
 	// built-in filters.
 	FilterContext *FilterContext
@@ -12269,6 +12274,7 @@ func (r *ReadOptions) Destroy() {
 	FfiDestroyerDurabilityLevel{}.Destroy(r.DurabilityFilter)
 	FfiDestroyerBool{}.Destroy(r.Dirty)
 	FfiDestroyerBool{}.Destroy(r.CacheBlocks)
+	FfiDestroyerUint32{}.Destroy(r.MaxConcurrentSources)
 	FfiDestroyerOptionalFilterContext{}.Destroy(r.FilterContext)
 	FfiDestroyerOptionalTracingOptions{}.Destroy(r.TracingOptions)
 }
@@ -12286,6 +12292,7 @@ func (c FfiConverterReadOptions) Read(reader io.Reader) ReadOptions {
 		FfiConverterDurabilityLevelINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
 		FfiConverterBoolINSTANCE.Read(reader),
+		FfiConverterUint32INSTANCE.Read(reader),
 		FfiConverterOptionalFilterContextINSTANCE.Read(reader),
 		FfiConverterOptionalTracingOptionsINSTANCE.Read(reader),
 	}
@@ -12303,6 +12310,7 @@ func (c FfiConverterReadOptions) Write(writer io.Writer, value ReadOptions) {
 	FfiConverterDurabilityLevelINSTANCE.Write(writer, value.DurabilityFilter)
 	FfiConverterBoolINSTANCE.Write(writer, value.Dirty)
 	FfiConverterBoolINSTANCE.Write(writer, value.CacheBlocks)
+	FfiConverterUint32INSTANCE.Write(writer, value.MaxConcurrentSources)
 	FfiConverterOptionalFilterContextINSTANCE.Write(writer, value.FilterContext)
 	FfiConverterOptionalTracingOptionsINSTANCE.Write(writer, value.TracingOptions)
 }
