@@ -173,16 +173,21 @@ impl Default for ReadOptions {
     }
 }
 
-impl From<ReadOptions> for slatedb::config::ReadOptions {
-    fn from(value: ReadOptions) -> Self {
-        slatedb::config::ReadOptions {
+impl TryFrom<ReadOptions> for slatedb::config::ReadOptions {
+    type Error = Error;
+
+    fn try_from(value: ReadOptions) -> Result<Self, Self::Error> {
+        Ok(slatedb::config::ReadOptions {
             durability_filter: value.durability_filter.into(),
             dirty: value.dirty,
             cache_blocks: value.cache_blocks,
-            max_concurrent_sources: value.max_concurrent_sources as usize,
+            max_concurrent_sources: usize_field(
+                value.max_concurrent_sources.into(),
+                "max_concurrent_sources",
+            )?,
             filter_context: value.filter_context.map(Into::into),
             tracing_options: value.tracing_options.map(Into::into),
-        }
+        })
     }
 }
 
