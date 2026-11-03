@@ -309,15 +309,16 @@ pub struct ReadOptions {
     /// Whether fetched data blocks should be cached. SST indexes, filters,
     /// and stats are cached independently of this setting.
     pub cache_blocks: bool,
-    /// How many SSTs or sorted runs a lookup reads at the same time once the
-    /// key is not in the newest one. The default is 1, which reads them one
-    /// after another, so a lookup reads nothing past the source that holds
-    /// its key.
+    /// Defines how many concurrent sources to read after the first.
+    /// We always read at least one source when looking for a key.
+    /// If that source doesn't contain the key, we can optimistically
+    /// read up to `max_concurrent_sources` in parallel to try and find
+    /// the key. This lowers time to first byte at the cost of more API
+    /// calls and bandwidth usage (since you might find the key in
+    /// source 2, but would fetch source 3, 4, and 5 if you had
+    /// concurrent sources set to 4).
     ///
-    /// Higher values lower the latency of lookups that pass through several
-    /// sources. When the key turns up in one source, reads already started for
-    /// older sources still finish, so a hit can cost up to `max_concurrent_sources - 1`
-    /// extra sources' filter, index and block reads. 0 is treated as 1.
+    /// Defaults to 1--serial fetching. Zero is also treatd as 1.
     pub max_concurrent_sources: usize,
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters. See [`FilterContext`].
