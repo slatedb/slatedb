@@ -145,6 +145,12 @@ pub struct ReadOptions {
     /// Whether fetched data blocks should be inserted into the block cache.
     /// SST metadata is cached independently.
     pub cache_blocks: bool,
+    /// How many SSTs or sorted runs a lookup reads at the same time once the
+    /// key is not in the newest one. 1 reads them one after another; higher
+    /// values lower latency at the cost of extra reads on a hit. 0 is treated
+    /// as 1.
+    #[uniffi(default = 1)]
+    pub max_concurrent_sources: u32,
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters.
     #[uniffi(default = None)]
@@ -160,6 +166,7 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            max_concurrent_sources: 1,
             filter_context: None,
             tracing_options: None,
         }
@@ -172,6 +179,7 @@ impl From<ReadOptions> for slatedb::config::ReadOptions {
             durability_filter: value.durability_filter.into(),
             dirty: value.dirty,
             cache_blocks: value.cache_blocks,
+            max_concurrent_sources: value.max_concurrent_sources as usize,
             filter_context: value.filter_context.map(Into::into),
             tracing_options: value.tracing_options.map(Into::into),
         }

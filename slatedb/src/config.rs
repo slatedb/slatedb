@@ -309,6 +309,16 @@ pub struct ReadOptions {
     /// Whether fetched data blocks should be cached. SST indexes, filters,
     /// and stats are cached independently of this setting.
     pub cache_blocks: bool,
+    /// How many SSTs or sorted runs a lookup reads at the same time once the
+    /// key is not in the newest one. The default is 1, which reads them one
+    /// after another, so a lookup reads nothing past the source that holds
+    /// its key.
+    ///
+    /// Higher values lower the latency of lookups that pass through several
+    /// sources. When the key turns up in one source, reads already started for
+    /// older sources still finish, so a hit can cost up to `max_concurrent_sources - 1`
+    /// extra sources' filter, index and block reads. 0 is treated as 1.
+    pub max_concurrent_sources: usize,
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters. See [`FilterContext`].
     pub filter_context: Option<FilterContext>,
@@ -322,6 +332,7 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            max_concurrent_sources: 1,
             filter_context: None,
             tracing_options: None,
         }
@@ -347,6 +358,13 @@ impl ReadOptions {
     pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
         Self {
             cache_blocks,
+            ..self
+        }
+    }
+
+    pub fn with_max_concurrent_sources(self, max_concurrent_sources: usize) -> Self {
+        Self {
+            max_concurrent_sources,
             ..self
         }
     }
@@ -2175,6 +2193,17 @@ object_store_cache_options:
     fn test_default_tracing_options_are_none() {
         assert!(ReadOptions::default().tracing_options.is_none());
         assert!(ScanOptions::default().tracing_options.is_none());
+    }
+
+    #[test]
+    fn test_read_options_max_concurrent_sources() {
+        assert_eq!(ReadOptions::default().max_concurrent_sources, 1);
+        assert_eq!(
+            ReadOptions::default()
+                .with_max_concurrent_sources(4)
+                .max_concurrent_sources,
+            4
+        );
     }
 
     #[test]
