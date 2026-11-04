@@ -39,7 +39,8 @@ pub(crate) struct SegmentScanContext {
     /// Point lookups stop at the first source that has the key. With a value
     /// above 1, sources older than the hit may already be in flight, so it
     /// also changes how much gets read (i.e. extra object store API calls).
-    /// Gets use `ReadOptions::max_concurrent_sources`.
+    /// Gets use `ReadOptions::max_concurrent_sources`. Single-key scans are
+    /// point lookups too and use 1.
     pub(crate) max_parallel: usize,
     /// Stats for point-query SSTs (optional — propagated from
     /// `ReadOptions`).

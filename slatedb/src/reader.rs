@@ -22,8 +22,9 @@ use std::sync::Arc;
 use tracing::Instrument;
 
 /// How many L0 SSTs or sorted runs a range scan opens at the same time.
-/// Scans open every overlapping source regardless, so this only affects how
-/// fast they start, not how much they read.
+/// Range scans open every overlapping source regardless, so this only affects
+/// how fast they start, not how much they read. Single-key scans take the
+/// point-lookup path and stop at the first hit, so they read one at a time.
 const SCAN_MAX_CONCURRENT_SOURCES: usize = 4;
 
 pub(crate) trait DbStateReader {
@@ -355,6 +356,14 @@ impl Reader {
             segment: None,
         };
 
+        // A single-key scan stops at the first source holding the key, so
+        // reading ahead would fetch older sources it never uses.
+        let max_concurrent_sources = if range.as_point().is_some() {
+            1
+        } else {
+            SCAN_MAX_CONCURRENT_SOURCES
+        };
+
         let IteratorSources {
             write_batch_iter,
             mem_iters,
@@ -366,7 +375,7 @@ impl Reader {
                 ctx.write_batch_iter,
                 &sst_iter_options,
                 None,
-                SCAN_MAX_CONCURRENT_SOURCES,
+                max_concurrent_sources,
                 max_seq,
                 read_trace.clone(),
             )
@@ -2775,24 +2784,12 @@ mod tests {
         }
     }
 
-    /// Four L0s. The newest spans the key but does not hold it, and the
-    /// second newest holds it. The lookup must start reading at most
-    /// `ReadOptions::max_concurrent_sources` older sources while the hit is in flight.
-    #[rstest]
-    #[case::default(None)]
-    #[case::zero(Some(0))]
-    #[case::four(Some(4))]
-    #[tokio::test]
-    async fn should_read_at_most_max_concurrent_sources(
-        #[case] max_concurrent_sources: Option<usize>,
-    ) -> Result<(), SlateDBError> {
-        let options = match max_concurrent_sources {
-            Some(n) => ReadOptions::default().with_max_concurrent_sources(n),
-            None => ReadOptions::default(),
-        }
-        .with_dirty(true);
-        let parallel = options.max_concurrent_sources > 1;
-        let store = Arc::new(HoldSstReadsStore::new());
+    /// Four L0s holding `k`. The newest spans `k` but does not hold it, and
+    /// the second newest holds it. Reads of the second newest are held until
+    /// released. Returns the L0 SST ids, newest first.
+    async fn setup_held_l0s(
+        store: &Arc<HoldSstReadsStore>,
+    ) -> Result<(TestDbState, Vec<String>), SlateDBError> {
         let mut test_db_state = TestDbState::with_object_store(store.clone()).await;
         test_db_state
             .add_to_l0(vec![TestEntry::value(b"k", b"v1", 1).to_row_entry()])
@@ -2819,6 +2816,27 @@ mod tests {
             .collect();
         *store.held.lock() = Some(l0[1].clone());
         store.reads.lock().clear();
+        Ok((test_db_state, l0))
+    }
+
+    /// The lookup must start reading at most
+    /// `ReadOptions::max_concurrent_sources` older sources while the hit is in flight.
+    #[rstest]
+    #[case::default(None)]
+    #[case::zero(Some(0))]
+    #[case::four(Some(4))]
+    #[tokio::test]
+    async fn should_read_at_most_max_concurrent_sources(
+        #[case] max_concurrent_sources: Option<usize>,
+    ) -> Result<(), SlateDBError> {
+        let options = match max_concurrent_sources {
+            Some(n) => ReadOptions::default().with_max_concurrent_sources(n),
+            None => ReadOptions::default(),
+        }
+        .with_dirty(true);
+        let parallel = options.max_concurrent_sources > 1;
+        let store = Arc::new(HoldSstReadsStore::new());
+        let (test_db_state, l0) = setup_held_l0s(&store).await?;
 
         let reader = build_reader(
             &test_db_state,
@@ -2848,6 +2866,52 @@ mod tests {
         } else {
             l0[..2].iter().cloned().collect()
         };
+        assert_eq!(store.read_ssts(), expected);
+        Ok(())
+    }
+
+    /// A `k..=k` scan takes the point-lookup path, so it must not read ahead
+    /// into older sources while the hit is in flight.
+    #[tokio::test]
+    async fn should_not_read_ahead_on_single_key_scan() -> Result<(), SlateDBError> {
+        let store = Arc::new(HoldSstReadsStore::new());
+        let (test_db_state, l0) = setup_held_l0s(&store).await?;
+
+        let reader = build_reader(
+            &test_db_state,
+            DbStats::new(&MetricsRecorderHelper::noop()),
+            false,
+        )
+        .await;
+        let scan = async {
+            let mut iter = reader
+                .scan_with_options(
+                    BytesRange::from_slice(b"k".as_ref()..=b"k".as_ref()),
+                    &ScanOptions::default().with_dirty(true),
+                    ScanContext {
+                        db_state: &test_db_state,
+                        write_batch_iter: None,
+                        max_seq: None,
+                        prefix: None,
+                    },
+                )
+                .await?;
+            iter.next()
+                .await
+                .map_err(|e| SlateDBError::from(std::io::Error::other(e)))
+        };
+        let control = async {
+            store.wait_for_read(&l0[1]).await;
+            // Give any lookahead reads a chance to start.
+            for _ in 0..100 {
+                tokio::task::yield_now().await;
+            }
+            store.release();
+        };
+        let (result, ()) = tokio::join!(scan, control);
+
+        assert_eq!(result?.map(|kv| kv.value), Some(Bytes::from_static(b"v3")));
+        let expected: std::collections::BTreeSet<String> = l0[..2].iter().cloned().collect();
         assert_eq!(store.read_ssts(), expected);
         Ok(())
     }
