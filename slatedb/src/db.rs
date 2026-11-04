@@ -3399,6 +3399,60 @@ mod tests {
         db.close().await.unwrap();
     }
 
+    #[rstest::rstest]
+    #[case::ascending(IterationOrder::Ascending)]
+    #[case::descending(IterationOrder::Descending)]
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_reads_versions_across_ssts_of_a_sorted_run(
+        #[case] order: IterationOrder,
+    ) {
+        let db = open_db_with_one_run_per_l0_sst(
+            &format!("/tmp/test_recency_versions_multi_sst_run_{order:?}"),
+            vec![],
+            Arc::new(DefaultMetricsRecorder::new()),
+            Some(4 * 1024),
+        )
+        .await;
+        // About 25 KiB of versions of one key, so the run splits them across
+        // several SSTs. A snapshot after each write keeps every version.
+        let values: Vec<Vec<u8>> = (0..200)
+            .map(|i| format!("{i:03}").into_bytes().repeat(34))
+            .collect();
+        let mut snapshots = Vec::new();
+        db.put(b"aa:a", b"v").await.unwrap();
+        for value in &values {
+            db.put(b"px:a", value).await.unwrap();
+            snapshots.push(db.snapshot().unwrap());
+        }
+        db.put(b"zz:a", b"v").await.unwrap();
+        flush_and_compact(&db, 1).await;
+        let covering_ssts = db.inner.state.read().state().core().tree.compacted[0]
+            .tables_covering_range(BytesRange::from_prefix(b"px:"))
+            .len();
+        assert!(covering_ssts > 1, "covering SSTs: {covering_ssts}");
+
+        // Versions of a key come newest first in both orders.
+        let options = ScanOptions::default().with_order(order);
+        let mut iter = db
+            .scan_prefix_by_recency_with_options(b"px:", &options)
+            .await
+            .unwrap();
+        let mut read = Vec::new();
+        while let Some(entry) = iter.next_entry().await.unwrap() {
+            assert_eq!(entry.key.as_ref(), b"px:a");
+            match entry.value {
+                crate::types::ValueDeletable::Value(v) => read.push(v.to_vec()),
+                other => panic!("expected a value, got {other:?}"),
+            }
+        }
+        let mut expected = values;
+        expected.reverse();
+        assert_eq!(read, expected);
+
+        drop(snapshots);
+        db.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_scan_prefix_by_recency_errors_on_multi_segment_prefix() {
         use crate::manifest::{LsmTreeState, Segment};
