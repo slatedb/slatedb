@@ -1,15 +1,21 @@
 use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
+use crate::db_state::{SortedRun, SsTableView};
+use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::filter_iterator::FilterIterator;
 use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
 use crate::manifest::LsmTreeState;
+use crate::mem_table::KVTable;
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
     MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
 };
-use crate::read_trace::ReadTrace;
+use crate::read_trace::{ReadTrace, SstTraceLevel};
 use crate::segment_iterator::{build_l0_point_iters, build_sr_point_iters, SegmentScanContext};
+use crate::sorted_run_iterator::SortedRunIterator;
+use crate::sst_iter::{SstIterator, SstIteratorOptions, SstTracingContext};
+use crate::tablestore::TableStore;
 use crate::types::{KeyValue, RowEntry, ValueDeletable};
 
 use async_trait::async_trait;
@@ -18,6 +24,7 @@ use futures::stream::{self, BoxStream, StreamExt};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::ops::RangeBounds;
+use std::sync::Arc;
 use tracing::Instrument;
 
 /// [`DbIteratorRangeTracker`] records the *requested* scan range of a
@@ -464,32 +471,30 @@ where
 
 /// See [`crate::Db::scan_prefix_by_recency`] for the full contract.
 pub struct DbRecencyIterator {
-    /// Source iterators ordered from most recent to least recent. The
-    /// front of the deque is the source currently being drained;
-    /// exhausted sources are popped off as the walk proceeds. Each
-    /// source has already been wrapped with the sequence-number filter
-    /// at construction time.
-    iters: VecDeque<Box<dyn RowEntryIterator + 'static>>,
-    /// Whether the current front-of-deque iterator has had `init`
-    /// called. Reset to false whenever the front is popped, so the
-    /// next source's `init` is invoked lazily on the next pull.
-    current_initialized: bool,
-    /// Sticky error. Once any underlying `init` or `next` call fails,
-    /// the error is stashed here and every subsequent `next_entry`
-    /// returns it instead of advancing, since after a failure the
-    /// iterator's underlying state is unsafe to keep using.
+    /// Sources not yet drained, from most recent to least recent.
+    sources: VecDeque<RecencySource>,
+    /// The initialized iterator of the source being drained.
+    current: Option<Box<dyn RowEntryIterator + 'static>>,
+    /// The context used to build the iterator of a source.
+    context: RecencySourceContext,
+    /// Sticky error. Once building a source, or any underlying `init` or
+    /// `next` call, fails, the error is stashed here and every subsequent
+    /// `next_entry` returns it instead of advancing, since after a failure
+    /// the iterator's underlying state is unsafe to keep using.
     invalidated_error: Option<SlateDBError>,
     read_span: tracing::Span,
 }
 
 impl DbRecencyIterator {
     pub(crate) fn new(
-        iters: VecDeque<Box<dyn RowEntryIterator + 'static>>,
+        sources: VecDeque<RecencySource>,
+        context: RecencySourceContext,
         read_span: tracing::Span,
     ) -> Self {
         Self {
-            iters,
-            current_initialized: false,
+            sources,
+            current: None,
+            context,
             invalidated_error: None,
             read_span,
         }
@@ -510,33 +515,115 @@ impl DbRecencyIterator {
         }
 
         loop {
-            let Some(iter) = self.iters.front_mut() else {
-                return Ok(None);
-            };
-
-            if !self.current_initialized {
-                if let Err(e) = iter.init().await {
-                    self.invalidated_error = Some(e.clone());
-                    return Err(e.into());
+            let Some(iter) = &mut self.current else {
+                let Some(source) = self.sources.front() else {
+                    return Ok(None);
+                };
+                match self.context.build_iterator(source).await {
+                    Ok(Some(mut iter)) => {
+                        if let Err(e) = iter.init().await {
+                            return Err(self.invalidate(e));
+                        }
+                        self.current = Some(iter);
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Err(self.invalidate(e)),
                 }
-                self.current_initialized = true;
-            }
+                // The front source leaves the queue only after its iterator is
+                // built and initialized, so a dropped `next_entry` call builds
+                // it again rather than skipping it.
+                self.sources.pop_front();
+                continue;
+            };
 
             let next = iter.next().await;
             // Keep cached iteration cooperative.
             tokio::task::coop::consume_budget().await;
             match next {
                 Ok(Some(entry)) => return Ok(Some(entry)),
-                Ok(None) => {
-                    self.iters.pop_front();
-                    self.current_initialized = false;
-                }
-                Err(e) => {
-                    self.invalidated_error = Some(e.clone());
-                    return Err(e.into());
-                }
+                Ok(None) => self.current = None,
+                Err(e) => return Err(self.invalidate(e)),
             }
         }
+    }
+
+    fn invalidate(&mut self, error: SlateDBError) -> crate::Error {
+        self.invalidated_error = Some(error.clone());
+        error.into()
+    }
+}
+
+/// A source of a recency scan. Its iterator is built only when the walk
+/// reaches it.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum RecencySource {
+    MemTable(Arc<KVTable>),
+    L0(SsTableView),
+    SortedRun(SortedRun),
+}
+
+/// What a recency scan needs to build the iterator of a [`RecencySource`].
+pub(crate) struct RecencySourceContext {
+    pub(crate) table_store: Arc<TableStore>,
+    pub(crate) db_stats: DbStats,
+    pub(crate) range: BytesRange,
+    pub(crate) sst_iter_options: SstIteratorOptions,
+    pub(crate) max_seq: Option<u64>,
+    pub(crate) read_trace: ReadTrace,
+}
+
+impl RecencySourceContext {
+    /// Builds the iterator for `source`, or `None` when the source cannot
+    /// hold a key in the range. The iterator is not yet initialized.
+    async fn build_iterator(
+        &self,
+        source: &RecencySource,
+    ) -> Result<Option<Box<dyn RowEntryIterator + 'static>>, SlateDBError> {
+        let iter: Box<dyn RowEntryIterator + 'static> = match source {
+            RecencySource::MemTable(table) => Box::new(table.range(
+                self.range.clone(),
+                self.sst_iter_options.order,
+                self.read_trace.clone(),
+            )),
+            RecencySource::L0(view) => {
+                let iter = SstIterator::new_owned_with_stats(
+                    self.range.clone(),
+                    view.clone(),
+                    self.table_store.clone(),
+                    self.sst_iter_options.clone(),
+                    Some(SstTracingContext::new(
+                        SstTraceLevel::L0,
+                        self.read_trace.clone(),
+                    )),
+                    Some(self.db_stats.clone()),
+                )?;
+                match iter {
+                    Some(iter) => Box::new(iter),
+                    None => return Ok(None),
+                }
+            }
+            RecencySource::SortedRun(sorted_run) => {
+                let sst_tracing_context = Some(SstTracingContext::new(
+                    SstTraceLevel::SortedRun(sorted_run.id),
+                    self.read_trace.clone(),
+                ));
+                Box::new(
+                    SortedRunIterator::new_owned(
+                        self.range.clone(),
+                        sorted_run.clone(),
+                        self.table_store.clone(),
+                        self.sst_iter_options.clone(),
+                        sst_tracing_context,
+                        Some(self.db_stats.clone()),
+                    )
+                    .await?,
+                )
+            }
+        };
+        Ok(Some(match self.max_seq {
+            Some(max_seq) => Box::new(FilterIterator::new_with_max_seq(iter, Some(max_seq))),
+            None => iter,
+        }))
     }
 }
 

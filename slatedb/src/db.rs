@@ -1200,14 +1200,14 @@ impl Db {
     /// ## Examples
     ///
     /// Pull entries from the freshest source under the prefix and stop.
-    /// Because sources are walked newest-first and lazily initialized, an
-    /// early-return like this only touches the source that holds the
-    /// freshest data. Note that *within* a source the order is set by
-    /// `options.order` (ascending by default), so the first yielded entry
-    /// is the smallest key in the freshest source, not necessarily the
-    /// most recently written key. Across sources the same key may appear
-    /// more than once, so callers that want only the freshest value per
-    /// key should dedupe.
+    /// Because sources are walked newest-first, and each source's iterator is
+    /// built only when the walk reaches it, an early return like this builds
+    /// no iterators for the sources after the first source that holds a
+    /// match. Note that *within* a source the order is set by `options.order`
+    /// (ascending by default), so the first yielded entry is the smallest key
+    /// in the freshest source, not necessarily the most recently written key.
+    /// Across sources the same key may appear more than once, so callers that
+    /// want only the freshest value per key should dedupe.
     ///
     /// ```
     /// use slatedb::{Db, Error};
@@ -2927,6 +2927,51 @@ mod tests {
         assert_eq!(e4.key.as_ref(), b"px:c");
         assert_value(&e4, b"vc");
         assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_resumes_a_source_after_a_dropped_next_entry() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated = Arc::new(GatedObjectStore::new(inner));
+        // No manifest polls during the test, so the only read that reaches
+        // the gate below is the scan's own.
+        let mut settings = test_db_options(0, 64 * 1024, None);
+        settings.manifest_poll_interval = Duration::from_secs(3600);
+        let db = Db::builder("/tmp/test_recency_dropped_next_entry", gated.clone())
+            .with_settings(settings)
+            .with_db_cache_disabled()
+            .build()
+            .await
+            .unwrap();
+
+        // Older L0 SST, then newer L0 SST, each with a version of px:a.
+        // Nothing for the prefix stays in the memtable.
+        for value in [b"old_a", b"new_a"] {
+            db.put(b"px:a", value).await.unwrap();
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        }
+
+        // Hold every read, so starting the newer SST's iterator waits on
+        // the object store. Drop that next_entry call while it waits.
+        let arrivals = gated.get_opts_gate.arrivals();
+        gated.get_opts_gate.close();
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        tokio::select! {
+            _ = iter.next_entry() => panic!("the held read must block next_entry"),
+            _ = gated.get_opts_gate.wait_for_arrivals(arrivals + 1) => {}
+        }
+        gated.get_opts_gate.release();
+
+        // The newer SST must be read again, not skipped.
+        let entry = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(entry.key.as_ref(), b"px:a");
+        assert_value(&entry, b"new_a");
 
         db.close().await.unwrap();
     }
