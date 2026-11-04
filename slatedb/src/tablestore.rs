@@ -42,8 +42,11 @@ use tracing::Instrument;
 
 pub(crate) struct TableStore {
     object_store: Arc<dyn ObjectStore>,
-    sst_format: SsTableFormat,
-    path_resolver: PathResolver,
+    // `sst_format` and `path_resolver` are behind `Arc`s so that building a
+    // cache-miss loader on every cached read is a few refcount bumps rather than
+    // a deep clone plus path formatting.
+    sst_format: Arc<SsTableFormat>,
+    path_resolver: Arc<PathResolver>,
     #[allow(dead_code)]
     fp_registry: Arc<FailPointRegistry>,
     /// In-memory cache for data blocks and SST metadata.
@@ -97,8 +100,8 @@ impl TableStore {
     ) -> Self {
         Self {
             object_store,
-            sst_format,
-            path_resolver,
+            sst_format: Arc::new(sst_format),
+            path_resolver: Arc::new(path_resolver),
             fp_registry,
             cache,
             block_cache_policy,
@@ -210,7 +213,7 @@ impl TableStore {
             cache
                 .insert(
                     (sst_table_id, block.offset).into(),
-                    CachedEntry::with_block(Arc::clone(&block.block)),
+                    CachedEntry::with_block(&block.block),
                 )
                 .await;
         }
@@ -218,7 +221,7 @@ impl TableStore {
             cache
                 .insert(
                     (sst_table_id, encoded_sst.info.index_offset).into(),
-                    CachedEntry::with_sst_index(Arc::new(encoded_sst.index.clone())),
+                    CachedEntry::with_sst_index(&encoded_sst.index),
                 )
                 .await;
         }
@@ -226,7 +229,7 @@ impl TableStore {
             cache
                 .insert(
                     (sst_table_id, encoded_sst.info.filter_offset).into(),
-                    CachedEntry::with_filters(encoded_sst.filters.clone()),
+                    CachedEntry::with_filters(&encoded_sst.filters),
                 )
                 .await;
         }
@@ -273,7 +276,7 @@ impl TableStore {
             .into();
 
         cache
-            .insert(cache_key, CachedEntry::with_filters(decoded.clone()))
+            .insert(cache_key, CachedEntry::with_filters(&decoded))
             .await;
         decoded
     }
@@ -331,8 +334,9 @@ impl TableStore {
         id_range: R,
     ) -> Result<Vec<IdentifiedObjectMetadata<SsTableId>>, SlateDBError> {
         let mut sst_list: Vec<IdentifiedObjectMetadata<SsTableId>> = Vec::new();
-        let compacted_path = self.path_resolver.compacted_path();
-        let mut files_stream = self.object_store.list(Some(&compacted_path));
+        let mut files_stream = self
+            .object_store
+            .list(Some(&self.path_resolver.compacted_dir));
 
         while let Some(file) = files_stream.next().await.transpose()? {
             match self.path_resolver.parse_table_id(&file.location) {
@@ -592,23 +596,25 @@ impl TableStore {
     /// or index). Panics on [`CacheTarget::Data`]: data blocks resolve through
     /// [`Self::block_loader`] because they require a block index lookup.
     ///
-    /// Builds a fresh boxed closure on every call, even when the cache hits and
-    /// the loader is never invoked; revisit if cache-hit allocations show up in
-    /// profiles.
+    /// Called on every cached read, including hits where the loader never runs,
+    /// so it only captures cheap handles; the SST path is resolved inside the
+    /// loader.
     fn read_loader(
         &self,
         handle: &SsTableHandle,
         target: CacheTarget,
         segment: Option<Bytes>,
     ) -> CacheLoader {
+        let id = handle.id;
         let info = handle.info.clone();
         let object_store = self.object_store.clone();
-        let path = self.path(&handle.id);
+        let path_resolver = self.path_resolver.clone();
         let sst_format = self.sst_format.clone();
         let tag =
             ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment);
         Box::new(move || {
             Box::pin(async move {
+                let path = path_resolver.sst_path(&id);
                 // Only the stats arm can produce `None` (stats_len > 0 but no
                 // stats decoded); filters and index always yield an entry.
                 let entry = read_with_validation_retry(tag, async |tag| {
@@ -623,7 +629,7 @@ impl TableStore {
                                 .read_filters(&info, &obj)
                                 .await
                                 .map_err(|e| e.with_path(&obj.path))?;
-                            Ok(Some(CachedEntry::with_filters(filters)))
+                            Ok(Some(CachedEntry::with_filters(&filters)))
                         }
                         CacheTarget::Stats => {
                             let stats = sst_format
@@ -637,7 +643,7 @@ impl TableStore {
                                 .read_index(&info, &obj)
                                 .await
                                 .map_err(|e| e.with_path(&obj.path))?;
-                            Ok(Some(CachedEntry::with_sst_index(Arc::new(index))))
+                            Ok(Some(CachedEntry::with_sst_index(&index)))
                         }
                         CacheTarget::Data(_) => {
                             unreachable!("data blocks use block_loader, not read_loader")
@@ -652,9 +658,8 @@ impl TableStore {
         })
     }
 
-    /// Builds a fresh boxed closure on every call, even when the cache hits and
-    /// the loader is never invoked; revisit if cache-hit allocations show up in
-    /// profiles.
+    /// Like [`Self::read_loader`], this runs on every cached block read, so it
+    /// only captures cheap handles and resolves the SST path inside the loader.
     fn block_loader(
         &self,
         handle: &SsTableHandle,
@@ -662,14 +667,16 @@ impl TableStore {
         block_num: usize,
         segment: Option<Bytes>,
     ) -> CacheLoader {
+        let id = handle.id;
         let info = handle.info.clone();
         let object_store = self.object_store.clone();
-        let path = self.path(&handle.id);
+        let path_resolver = self.path_resolver.clone();
         let sst_format = self.sst_format.clone();
         let tag =
             ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment);
         Box::new(move || {
             Box::pin(async move {
+                let path = path_resolver.sst_path(&id);
                 let block = read_with_validation_retry(tag, async |tag| {
                     let obj = ReadOnlyObject {
                         object_store: object_store.clone(),
@@ -682,7 +689,7 @@ impl TableStore {
                         .map_err(|e| e.with_path(&obj.path))
                 })
                 .await?;
-                Ok(CachedEntry::with_block(Arc::new(block)))
+                Ok(CachedEntry::with_block(&block))
             })
         })
     }
@@ -947,7 +954,7 @@ impl TableStore {
         if let Some(cache) = self.cache_for_reads() {
             if !blocks_to_cache.is_empty() {
                 join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
-                    cache.insert((id, offset).into(), CachedEntry::with_block(block))
+                    cache.insert((id, offset).into(), CachedEntry::with_block(&block))
                 }))
                 .await;
             }
@@ -1289,7 +1296,7 @@ impl EncodedSsTableWriter {
                 cache
                     .insert(
                         (self.id, block.offset).into(),
-                        CachedEntry::with_block(block.block),
+                        CachedEntry::with_block(&block.block),
                     )
                     .await;
             }

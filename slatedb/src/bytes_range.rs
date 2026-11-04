@@ -281,7 +281,6 @@ impl BytesRange {
         !matches!(ByteRangeBounds::start_bound(self), Excluded(_))
     }
 
-    #[cfg(test)]
     pub(crate) fn non_empty(&self) -> bool {
         self.inner.non_empty()
     }

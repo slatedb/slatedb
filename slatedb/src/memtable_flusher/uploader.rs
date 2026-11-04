@@ -191,10 +191,6 @@ impl UploadHandler {
     }
 
     async fn upload_with_retry(&self, job: &UploadJob) -> Result<UploadedMemtable, SlateDBError> {
-        // Read the retention boundary once, before the first attempt
-        // below. Every retry reuses this same value, so every attempt
-        // keeps the same entries.
-        let min_retention_seq = self.db.compute_min_retention_seq();
         let first_seq = job
             .imm_memtable
             .table()
@@ -205,6 +201,10 @@ impl UploadHandler {
             .table()
             .last_seq()
             .expect("flush of l0 with no entries");
+        // Read the retention boundary once, before the first attempt
+        // below. Every retry reuses this same value, so every attempt
+        // keeps the same entries.
+        let min_retention_seq = self.db.compute_flush_retention_seq(last_seq);
 
         let segments = loop {
             match self
@@ -286,6 +286,7 @@ mod tests {
     use crate::iter::RowEntryIterator;
     use crate::manifest::ManifestCore;
     use crate::mem_table::ImmutableMemtable;
+    use crate::oracle::Oracle;
     use crate::paths::PathResolver;
     use crate::retrying_object_store::MAX_RETRY_DELAY;
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
@@ -962,6 +963,136 @@ mod tests {
         );
 
         test.shutdown().await;
+    }
+
+    /// Freezes one memtable holding `entries`, in order, as an upload job.
+    fn upload_job_of(db: &DbInner, entries: &[(&[u8], &[u8], u64)]) -> UploadJob {
+        let imm_memtable = {
+            let mut guard = db.state.write();
+            for (key, value, seq) in entries {
+                guard.memtable().put(RowEntry::new_value(key, value, *seq));
+            }
+            guard.freeze_memtable(0);
+            guard.state().imm_memtable.front().cloned().unwrap()
+        };
+        let segment_sst_ids = preallocate_ids(&imm_memtable);
+        UploadJob::new(imm_memtable, segment_sst_ids)
+    }
+
+    /// Uploads `job` and returns the (key, seq, value) entries of its SST.
+    async fn uploaded_entries(
+        db: &Arc<DbInner>,
+        job: UploadJob,
+    ) -> Vec<(Bytes, u64, ValueDeletable)> {
+        let test = start_test_uploader(db);
+        test.submit(job).unwrap();
+        let msg = timeout(Duration::from_secs(5), test.tracker_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let TrackerMessage::UploadComplete(event) = msg else {
+            panic!("expected UploadComplete");
+        };
+        assert_eq!(event.segments.len(), 1);
+        let segment = &event.segments[0];
+        let sst_view = SsTableView::identity(
+            db.table_store
+                .open_sst(&segment.sst_handle.id, Some(segment.prefix.clone()))
+                .await
+                .unwrap(),
+        );
+        let mut iter = SstIterator::new_owned_initialized(
+            ..,
+            sst_view,
+            Arc::clone(&db.table_store),
+            SstIteratorOptions::default(),
+        )
+        .await
+        .unwrap()
+        .expect("expected non-empty SST");
+        let mut entries = Vec::new();
+        while let Some(entry) = iter.next().await.unwrap() {
+            entries.push((entry.key, entry.seq, entry.value));
+        }
+        test.shutdown().await;
+        entries
+    }
+
+    #[tokio::test]
+    async fn should_drop_versions_shadowed_in_the_memtable_before_its_wal_is_durable() {
+        // The WAL has made nothing durable yet (the durable watermark is 0)
+        // when the memtable is frozen and uploaded. The manifest writer
+        // publishes the L0 only once the WAL is durable through seq 2, so
+        // the shadowed version at seq 1 is never readable from it.
+        let db = setup_db(
+            "/tmp/test_l0_flush_uploader_shadowed_before_wal_durable",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        assert!(db.wal_enabled);
+        assert_eq!(db.oracle.last_remote_persisted_seq(), 0);
+        let job = upload_job_of(&db, &[(b"key", b"value1", 1), (b"key", b"value2", 2)]);
+
+        let entries = uploaded_entries(&db, job).await;
+
+        assert_eq!(
+            entries,
+            vec![(
+                Bytes::from("key"),
+                2,
+                ValueDeletable::Value(Bytes::from("value2"))
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn should_keep_a_shadowed_version_an_open_snapshot_reads() {
+        let db = setup_db(
+            "/tmp/test_l0_flush_uploader_shadowed_snapshot",
+            Arc::new(FailPointRegistry::new()),
+        )
+        .await;
+        let (_, snapshot_seq) = db.snapshot_manager.new_snapshot(Some(1));
+        assert_eq!(snapshot_seq, 1);
+        let job = upload_job_of(&db, &[(b"key", b"value1", 1), (b"key", b"value2", 2)]);
+
+        let entries = uploaded_entries(&db, job).await;
+
+        assert_eq!(
+            entries,
+            vec![
+                (
+                    Bytes::from("key"),
+                    2,
+                    ValueDeletable::Value(Bytes::from("value2"))
+                ),
+                (
+                    Bytes::from("key"),
+                    1,
+                    ValueDeletable::Value(Bytes::from("value1"))
+                ),
+            ]
+        );
+    }
+
+    #[cfg(feature = "wal_disable")]
+    #[tokio::test]
+    async fn should_keep_versions_above_the_durable_watermark_without_a_wal() {
+        let db = setup_db_with_settings(
+            "/tmp/test_l0_flush_uploader_shadowed_no_wal",
+            Arc::new(FailPointRegistry::new()),
+            Settings {
+                wal_enabled: false,
+                ..Settings::default()
+            },
+        )
+        .await;
+        assert!(!db.wal_enabled);
+        let job = upload_job_of(&db, &[(b"key", b"value1", 1), (b"key", b"value2", 2)]);
+
+        let entries = uploaded_entries(&db, job).await;
+
+        assert_eq!(entries.len(), 2);
     }
 
     #[tokio::test]

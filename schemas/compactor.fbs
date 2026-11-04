@@ -116,6 +116,20 @@ table Compaction {
     ctx: CompactionContext;
 }
 
+// Progress of the worker through one subcompaction range. The worker sets
+// Completed after it stores all output for the range. The coordinator can
+// then commit the whole range in an incremental commit (RFC-0035). For an
+// InProgress range, the coordinator commits only the keys before the last
+// output key, because more versions of that key can follow. A retried worker
+// skips Completed ranges. The status never changes from Completed to
+// InProgress.
+enum SubcompactionStatus : byte {
+    // The worker has not finished this range. More output SSTs can follow.
+    InProgress = 0,
+    // The worker stored all output, including an empty result.
+    Completed,
+}
+
 // A compaction over a sub-range of the parent compaction's key space
 // (RFC-0028). Subcompactions are only valid within the context of a parent
 // `Compaction` and let a single logical compaction execute its disjoint
@@ -126,10 +140,11 @@ table Subcompaction {
     // full key space.
     range: BytesRange (required);
 
-    // Output SSTs already produced by this subcompaction. A subcompaction with
-    // output SSTs that cover its full range has completed; on resume, ranges
-    // with no recorded output are re-run from scratch. 
+    // Output SSTs already produced by this subcompaction.
     output_ssts: [CompactedSsTable];
+
+    // Older records without this field read as InProgress.
+    status: SubcompactionStatus;
 }
 
 table CompactionsV1 {

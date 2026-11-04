@@ -43,3 +43,48 @@ to enable them.
 To split data with different read/write profiles into independent LSM trees — each with its own
 compaction policy — and to retire whole key ranges cheaply, see
 [Segmented Compaction](/docs/design/segmented-compaction).
+
+## Incremental compaction
+
+A large compaction can run for a long time. Without incremental compaction, readers keep using the
+input SSTs until the compaction finishes, and garbage collection keeps those SSTs in storage. With
+incremental compaction, the compactor publishes the output that a running compaction already wrote.
+Readers then use that output for its keys. Storage can be freed earlier, and reads of those keys
+search fewer SSTs.
+
+:::caution
+Incremental compaction is experimental. It is not stable yet, and a later release can change or
+remove its option.
+:::
+
+Incremental compaction is disabled by default. Set
+`CompactorOptions::enable_experimental_incremental_compaction` to `true` to enable it:
+
+```rust
+let options = slatedb::config::CompactorOptions {
+    enable_experimental_incremental_compaction: true,
+    ..Default::default()
+};
+```
+
+The compactor publishes this output in incremental commits, at most once a minute. The commit of a
+finished compaction does not wait. Incremental commits apply to compactions that merge sorted runs.
+A compaction with L0 SSTs in its inputs publishes its output only when it finishes.
+
+Each incremental commit is a manifest update. An SST can have several views, and a view limits the
+keys that readers can see in an SST. The commit replaces the input views for the keys that the
+written output covers with views of the output SSTs. The input keys that the output does not cover
+yet stay in the input views.
+
+Before each manifest update, the compactor writes a checkpoint, a reference that keeps an older
+manifest available. Garbage collection deletes an input SST only after no view uses it and the
+checkpoint expires, so reads that started before the commit can still finish.
+`CompactorOptions::checkpoint_lifetime` sets how long the checkpoint lasts.
+
+The counter `slatedb.compactor.incremental_released_bytes` estimates the bytes of the input SSTs
+that incremental commits release. It counts an SST once, after a successful commit removes its last
+view from all trees. A released SST is not deleted yet. It stays until garbage
+collection deletes it, so storage use goes down later than this counter goes up.
+
+If a worker stops, the next worker resumes the compaction from its progress. Key ranges that are
+already complete do not run again.
