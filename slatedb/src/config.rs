@@ -318,7 +318,7 @@ pub struct ReadOptions {
     /// source 2, but would fetch source 3, 4, and 5 if you had
     /// concurrent sources set to 4).
     ///
-    /// Defaults to 1--serial fetching. Zero is also treatd as 1.
+    /// Defaults to 1--serial fetching. Zero is also treated as 1.
     pub max_concurrent_sources: usize,
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters. See [`FilterContext`].
