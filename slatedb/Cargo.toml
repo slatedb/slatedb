@@ -170,6 +170,11 @@ name = "memtable_seek"
 harness = false
 
 [[bench]]
+name = "recency_scan_bench"
+harness = false
+required-features = ["foyer"]
+
+[[bench]]
 name = "sst_block_fetch_bench"
 harness = false
 required-features = ["foyer"]

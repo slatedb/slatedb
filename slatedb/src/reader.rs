@@ -2,17 +2,16 @@ use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions, TracingOptions};
-use crate::db_iter::{apply_filters, DbRecencyIterator};
+use crate::db_iter::{DbRecencyIterator, RecencySource, RecencySourceContext};
 use crate::db_stats::DbStats;
 use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::manifest::{ManifestCore, Segment};
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
-use crate::read_trace::{ReadTrace, SstTraceLevel};
+use crate::read_trace::ReadTrace;
 use crate::segment_iterator::{build_segment_iter, SegmentScanContext};
-use crate::sorted_run_iterator::SortedRunIterator;
-use crate::sst_iter::{SstIterator, SstIteratorOptions, SstTracingContext};
+use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
 use crate::{error::SlateDBError, DbIterator};
@@ -419,14 +418,16 @@ impl Reader {
         let max_seq = self.prepare_max_seq(None, options.durability_filter, options.dirty);
 
         let range = BytesRange::from_prefix(prefix.as_ref());
-        let sst_iter_options = SstIteratorOptions {
+        let mut sst_iter_options = SstIteratorOptions {
             max_fetch_tasks: options.max_fetch_tasks,
             target_bytes_to_fetch: options.read_ahead_bytes,
             cache_blocks: options.cache_blocks,
             cache_metadata: true,
             // Recency scans are designed for early-stop. Eager spawning would
-            // proactively fetch blocks for sources the caller may never reach,
-            // defeating the early-stop savings.
+            // fetch blocks for sources the caller may never reach, defeating
+            // the early-stop savings. Today it only acts in `init`, which the
+            // walk calls lazily only on the sources it reaches, so this is a
+            // safeguard.
             eager_spawn: false,
             order: options.order,
             prefix: Some(prefix),
@@ -449,36 +450,22 @@ impl Reader {
             None => Some(db_state.core().default_segment()),
         };
 
+        // Sources are only listed here. The iterator for each one is built
+        // when the recency walk reaches it, so a walk that stops early never
+        // builds the iterators behind it.
+        let mut sources = VecDeque::new();
+
         // Memtables drain first (newest data, always in memory).
-        let mut all_iters = Self::build_memtable_iters(
-            &range,
-            db_state,
-            sst_iter_options.order,
-            read_trace.clone(),
-        );
+        sources.push_back(RecencySource::MemTable(db_state.memtable()));
+        for memtable in db_state.imm_memtable() {
+            sources.push_back(RecencySource::MemTable(memtable.table()));
+        }
 
         // Single-segment chain: L0 newest-first, then sorted runs newest-first.
-        // SST and SortedRun iterators are constructed without `init`, so the
-        // filter check / index load / first-block fetch only happens when the
-        // recency walk reaches the source.
         if let Some(segment) = segment {
-            let mut segment_options = sst_iter_options.clone();
-            segment_options.segment = Some(segment.prefix.clone());
+            sst_iter_options.segment = Some(segment.prefix.clone());
             for sst in segment.tree.l0.iter().cloned() {
-                let iter = SstIterator::new_owned_with_stats(
-                    range.clone(),
-                    sst,
-                    self.table_store.clone(),
-                    segment_options.clone(),
-                    Some(SstTracingContext::new(
-                        SstTraceLevel::L0,
-                        read_trace.clone(),
-                    )),
-                    Some(self.db_stats.clone()),
-                )?;
-                if let Some(iter) = iter {
-                    all_iters.push(Box::new(iter));
-                }
+                sources.push_back(RecencySource::L0(sst));
             }
             for sr in segment
                 .tree
@@ -487,26 +474,21 @@ impl Reader {
                 .filter(|sr| sr.overlaps_range(&range))
                 .cloned()
             {
-                let sst_tracing_context = Some(SstTracingContext::new(
-                    SstTraceLevel::SortedRun(sr.id),
-                    read_trace.clone(),
-                ));
-                let iter = SortedRunIterator::new_owned(
-                    range.clone(),
-                    sr,
-                    self.table_store.clone(),
-                    segment_options.clone(),
-                    sst_tracing_context,
-                    Some(self.db_stats.clone()),
-                )
-                .await?;
-                all_iters.push(Box::new(iter));
+                sources.push_back(RecencySource::SortedRun(sr));
             }
         }
 
-        let filtered = apply_filters(all_iters, max_seq);
+        let context = RecencySourceContext {
+            table_store: self.table_store.clone(),
+            db_stats: self.db_stats.clone(),
+            range,
+            sst_iter_options,
+            max_seq,
+            read_trace: read_trace.clone(),
+        };
         Ok(DbRecencyIterator::new(
-            VecDeque::from(filtered),
+            sources,
+            context,
             read_trace.read_span(),
         ))
     }
