@@ -1161,13 +1161,13 @@ mod tests {
     /// transient object store error does not stop it.
     #[tokio::test(start_paused = true)]
     async fn test_standalone_worker_retries_transient_object_store_errors() {
-        // given: `.compactions` exists, and the first list of the store fails
+        // given: `.compactions` exists, and the first list after build fails
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from(ROOT);
         StoredCompactions::create(Arc::new(CompactionsStore::new(&path, inner.clone())), 0)
             .await
             .unwrap();
-        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(1, 0));
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0));
         let worker = crate::db::builder::CompactionWorkerBuilder::new(
             path,
             flaky.clone() as Arc<dyn ObjectStore>,
@@ -1175,11 +1175,14 @@ mod tests {
         .build()
         .await
         .unwrap();
+        // `build` lists the manifests, so inject the failure only after it
+        let attempts_after_build = flaky.list_attempts();
+        flaky.fail_next_lists(1);
 
         // when: the first poll loads `.compactions`, which lists the store
         worker.start().unwrap();
         tokio::time::timeout(Duration::from_secs(60), async {
-            while flaky.list_attempts() < 2 {
+            while flaky.list_attempts() < attempts_after_build + 2 {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
@@ -1187,7 +1190,7 @@ mod tests {
         .expect("the worker must list `.compactions` again");
 
         // then: the retry layer listed once more, and the worker still runs
-        assert_eq!(flaky.list_attempts(), 2);
+        assert_eq!(flaky.list_attempts(), attempts_after_build + 2);
         worker
             .stop()
             .await

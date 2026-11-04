@@ -768,6 +768,11 @@ impl FlakyObjectStore {
         self
     }
 
+    /// Fails the next `n` `list` calls, for stores that are already shared.
+    pub(crate) fn fail_next_lists(&self, n: usize) {
+        self.fail_first_list.store(n, Ordering::SeqCst);
+    }
+
     pub(crate) fn with_list_with_offset_failures(
         self,
         fail_times: usize,
