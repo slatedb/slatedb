@@ -69,12 +69,6 @@
 //! max_compaction_sources = "8"
 //! include_size_threshold = "4.0"
 //!
-//! [object_store_cache_options]
-//! root_folder = "/tmp/slatedb-cache"
-//! max_cache_size_bytes = 17179869184
-//! part_size_bytes = 4194304
-//! scan_interval = "3600s"
-//!
 //! [garbage_collector_options.manifest_options]
 //! interval = "300s"
 //! min_age = "86400s"
@@ -122,12 +116,6 @@
 //!    }
 //!  },
 //!  "compression_codec": null,
-//!  "object_store_cache_options": {
-//!    "root_folder": "/tmp/slatedb-cache",
-//!    "max_cache_size_bytes": 17179869184,
-//!    "part_size_bytes": 4194304,
-//!    "scan_interval": "3600s"
-//!  },
 //!  "garbage_collector_options": {
 //!    "manifest_options": {
 //!      "interval": "300s",
@@ -175,11 +163,6 @@
 //!     max_compaction_sources: "8"
 //!     include_size_threshold: "4.0"
 //! compression_codec: null
-//! object_store_cache_options:
-//!   root_folder: /tmp/slatedb-cache
-//!   max_cache_size_bytes: 17179869184
-//!   part_size_bytes: 4194304
-//!   scan_interval: '3600s'
 //! garbage_collector_options:
 //!   manifest_options:
 //!     interval: '300s'
@@ -218,6 +201,10 @@ fn default_true() -> bool {
 }
 
 /// Enum representing different levels of cache preloading on startup
+#[deprecated(
+    since = "0.18.1",
+    note = "Configures `CachedObjectStore`, which is being replaced by the local object mirror, `slatedb_mirror::ObjectStoreMirror`. If you need tiered caching, use `slatedb::db_cache::foyer_hybrid::FoyerHybridCache`."
+)]
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 pub enum PreloadLevel {
     /// Preload only L0 SSTs (most recently written files)
@@ -708,6 +695,9 @@ pub struct CheckpointOptions {
 /// Setting both will result in an error.
 ///
 /// For backward compatibility, DBOptions is a type alias for Settings.
+// `serde_derive` adds `#[allow(deprecated)]` to its impls only when the
+// container has it. They name the deprecated `ObjectStoreCacheOptions`.
+#[allow(deprecated)]
 #[derive(Clone, Deserialize, Serialize)]
 pub struct Settings {
     /// How frequently to flush the write-ahead log to object storage.
@@ -840,11 +830,11 @@ pub struct Settings {
     /// The object store cache options. When `root_folder` is set, the database
     /// wraps its main object store in a
     /// [`CachedObjectStore`](crate::cached_object_store::CachedObjectStore)
-    /// built from these options. To construct and share the cache yourself,
-    /// build one with
-    /// [`CachedObjectStore::builder`](crate::cached_object_store::CachedObjectStore::builder)
-    /// and pass it to [`Db::builder`](crate::Db::builder) instead, leaving
-    /// these options unset.
+    /// built from these options.
+    #[deprecated(
+        since = "0.18.1",
+        note = "Configures `CachedObjectStore`, which is being replaced by the local object mirror, `slatedb_mirror::ObjectStoreMirror`. If you need tiered caching, use `slatedb::db_cache::foyer_hybrid::FoyerHybridCache`."
+    )]
     pub object_store_cache_options: ObjectStoreCacheOptions,
 
     /// Configuration options for the garbage collector.
@@ -884,6 +874,7 @@ pub struct Settings {
 // Implement Debug manually for DbOptions.
 // This is needed because DbOptions contains several boxed trait objects
 // which doesn't implement Debug.
+#[allow(deprecated)] // `object_store_cache_options` is deprecated.
 impl std::fmt::Debug for Settings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut data = f.debug_struct("DbOptions");
@@ -1012,8 +1003,8 @@ impl Settings {
     ///
     /// For example, if the prefix is "SLATEDB_" and there's an environment variable named "SLATEDB_DB_FLUSH_INTERVAL",
     /// it would correspond to the `flush_interval` field within the `Settings` struct.
-    /// If there is an environment variable named "SLATEDB_OBJECT_STORE_CACHE_OPTIONS.ROOT_FOLDER",
-    /// it would correspond to the `root_folder` field within the `ObjectStoreCacheOptions` within `Settings`".
+    /// If there is an environment variable named "SLATEDB_COMPACTOR_OPTIONS.MAX_CONCURRENT_COMPACTIONS",
+    /// it would correspond to the `max_concurrent_compactions` field within the `CompactorOptions` within `Settings`".
     ///
     /// # Arguments
     ///
@@ -1050,8 +1041,8 @@ impl Settings {
     ///
     /// For example, if the prefix is "SLATEDB_" and there's an environment variable named "SLATEDB_DB_FLUSH_INTERVAL",
     /// it would correspond to the `flush_interval` field within the `Settings` struct.
-    /// If there is an environment variable named "SLATEDB_OBJECT_STORE_CACHE_OPTIONS.ROOT_FOLDER",
-    /// it would correspond to the `root_folder` field within the `ObjectStoreCacheOptions` within `Settings`".
+    /// If there is an environment variable named "SLATEDB_COMPACTOR_OPTIONS.MAX_CONCURRENT_COMPACTIONS",
+    /// it would correspond to the `max_concurrent_compactions` field within the `CompactorOptions` within `Settings`".
     ///
     /// # Arguments
     ///
@@ -1122,6 +1113,7 @@ impl Provider for Settings {
     }
 }
 
+#[allow(deprecated)] // `object_store_cache_options` is deprecated.
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -1150,6 +1142,9 @@ impl Default for Settings {
     }
 }
 
+// `serde_derive` adds `#[allow(deprecated)]` to its impls only when the
+// container has it. They name the deprecated `ObjectStoreCacheOptions`.
+#[allow(deprecated)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DbReaderOptions {
     /// How frequently to poll for new manifest files and WAL data. Refreshing the manifest
@@ -1171,6 +1166,10 @@ pub struct DbReaderOptions {
     /// Options for the local disk cache. If `root_folder` is set, the reader
     /// will wrap its object store in a `CachedObjectStore` backed by the
     /// local filesystem, mirroring the behaviour of `Db`.
+    #[deprecated(
+        since = "0.18.1",
+        note = "Configures `CachedObjectStore`, which is being replaced by the local object mirror, `slatedb_mirror::ObjectStoreMirror`. If you need tiered caching, use `slatedb::db_cache::foyer_hybrid::FoyerHybridCache`."
+    )]
     pub object_store_cache_options: ObjectStoreCacheOptions,
 
     /// When true, skip WAL replay entirely, in every reader mode. The reader reads no WAL
@@ -1195,6 +1194,7 @@ pub struct DbReaderOptions {
     pub object_store_max_retries: Option<u32>,
 }
 
+#[allow(deprecated)] // `object_store_cache_options` is deprecated.
 impl Default for DbReaderOptions {
     fn default() -> Self {
         Self {
@@ -1833,6 +1833,10 @@ impl Default for GarbageCollectorOptions {
 ///
 /// The local cache default uses file system as storage, it can also be extended to use other
 /// like RocksDB, Redis, etc. in the future.
+#[deprecated(
+    since = "0.18.1",
+    note = "Configures `CachedObjectStore`, which is being replaced by the local object mirror, `slatedb_mirror::ObjectStoreMirror`. If you need tiered caching, use `slatedb::db_cache::foyer_hybrid::FoyerHybridCache`."
+)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ObjectStoreCacheOptions {
     /// The root folder where the cache files are stored. If not set, the cache will be
@@ -1862,6 +1866,7 @@ pub struct ObjectStoreCacheOptions {
     /// Whether to preload SST files into cache during database startup. When enabled,
     /// the database will load SST files into the cache up to the cache size limit
     /// to warm up the cache for faster access. Default is None (no preloading).
+    #[allow(deprecated)] // `PreloadLevel` is deprecated.
     pub preload_disk_cache_on_startup: Option<PreloadLevel>,
 
     /// Interval to scan the cache directory to rebuild the in-memory map for evictor.
@@ -1880,6 +1885,7 @@ pub struct ObjectStoreCacheOptions {
     pub max_open_file_handles: usize,
 }
 
+#[allow(deprecated)] // `ObjectStoreCacheOptions` is deprecated.
 impl Default for ObjectStoreCacheOptions {
     fn default() -> Self {
         Self {
@@ -1936,6 +1942,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    #[allow(deprecated)] // `object_store_cache_options` is deprecated.
     fn test_db_options_load_from_env() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("SLATEDB_FLUSH_INTERVAL", "1s");
@@ -2053,6 +2060,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // `object_store_cache_options` is deprecated.
     fn test_db_options_load_from_json_file() {
         figment::Jail::expect_with(|jail| {
             jail.create_file(
@@ -2100,6 +2108,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // `object_store_cache_options` is deprecated.
     fn test_db_options_load_from_toml_file() {
         figment::Jail::expect_with(|jail| {
             jail.create_file(
@@ -2126,6 +2135,7 @@ root_folder = "/tmp/slatedb-root"
     }
 
     #[test]
+    #[allow(deprecated)] // `object_store_cache_options` is deprecated.
     fn test_db_options_load_from_yaml_file() {
         figment::Jail::expect_with(|jail| {
             jail.create_file(
@@ -2152,6 +2162,7 @@ object_store_cache_options:
     }
 
     #[test]
+    #[allow(deprecated)] // `object_store_cache_options` is deprecated.
     fn test_db_options_load_with_default_locations() {
         figment::Jail::expect_with(|jail| {
             jail.set_env("SLATEDB_FLUSH_INTERVAL", "1s");

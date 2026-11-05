@@ -118,6 +118,7 @@ use crate::admin::Admin;
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
 use crate::block_cache_policy::BlockCachePolicy;
+#[allow(deprecated)] // `CachedObjectStore` is deprecated.
 use crate::cached_object_store::CachedObjectStore;
 use crate::clone::{SegmentFilterFn, SegmentProjectionFn};
 #[cfg(feature = "compaction_filters")]
@@ -206,9 +207,9 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// Creates a new builder for a database at the given path.
     ///
     /// `main_object_store` may be any [`ObjectStore`], including a wrapper
-    /// like
-    /// [`CachedObjectStore`](crate::cached_object_store::CachedObjectStore)
-    /// built over the raw backend to serve SST reads from a local disk cache.
+    /// like [`ObjectStoreMirror`](slatedb_mirror::ObjectStoreMirror) with a
+    /// [`SlateDbMirrorPolicy`](crate::SlateDbMirrorPolicy), built over the
+    /// raw backend to serve compacted SST reads from local disk.
     pub fn new(path: P, main_object_store: Arc<dyn ObjectStore>) -> Self {
         Self {
             path,
@@ -537,6 +538,7 @@ impl<P: Into<Path>> DbBuilder<P> {
         // [`CachedObjectStore`] passed to [`DbBuilder::new`]: the cache sits
         // under the retry and instrumentation layers, so the same cache
         // instance can be shared with the WAL store, compactor, and GC.
+        #[allow(deprecated)] // `CachedObjectStore` and its options are deprecated.
         let cached_object_store = CachedObjectStore::from_config(
             self.main_object_store.clone(),
             &self.settings.object_store_cache_options,
@@ -2011,6 +2013,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         // Set up the object store with optional caching from the reader
         // options, with the cache under the retry and instrumentation layers,
         // matching a caller-built [`CachedObjectStore`] passed to the reader.
+        #[allow(deprecated)] // `CachedObjectStore` and its options are deprecated.
         let maybe_cached = CachedObjectStore::from_config(
             self.object_store.clone(),
             &self.options.object_store_cache_options,
@@ -2413,6 +2416,7 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(deprecated)] // `CachedObjectStore` is deprecated.
     use crate::cached_object_store::CachedObjectStore;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::config::{
@@ -2775,6 +2779,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)] // `CachedObjectStore` is deprecated.
     async fn test_object_store_cache_does_not_cache_metadata_store_reads() {
         let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -2823,6 +2828,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)] // `object_store_cache_options` is deprecated.
     async fn test_settings_configured_object_store_cache() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("test_settings_configured_object_store_cache");

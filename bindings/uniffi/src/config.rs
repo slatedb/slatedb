@@ -235,6 +235,9 @@ pub struct ReaderOptions {
     #[uniffi(default = None)]
     pub object_store_max_retries: Option<u32>,
     /// The reader's object-store cache. `None` is the engine's default.
+    ///
+    /// Deprecated: the engine is replacing this cache with a local object
+    /// mirror.
     #[uniffi(default = None)]
     pub object_store_cache_options: Option<ObjectStoreCacheOptions>,
 }
@@ -254,6 +257,8 @@ impl Default for ReaderOptions {
 
 /// Which SSTs a reader loads into its disk cache at startup, up to
 /// `max_cache_size_bytes`.
+///
+/// Deprecated: the engine is replacing this cache with a local object mirror.
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
 pub enum PreloadLevel {
     /// The L0 SSTs only, the most recently written.
@@ -262,6 +267,7 @@ pub enum PreloadLevel {
     AllSst,
 }
 
+#[allow(deprecated)] // The engine's `PreloadLevel` is deprecated.
 impl From<PreloadLevel> for slatedb::config::PreloadLevel {
     fn from(value: PreloadLevel) -> Self {
         match value {
@@ -273,6 +279,8 @@ impl From<PreloadLevel> for slatedb::config::PreloadLevel {
 
 /// The on-disk object-store cache of one reader. Every default is the
 /// engine's; `root_folder` `None` disables the cache.
+///
+/// Deprecated: the engine is replacing this cache with a local object mirror.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ObjectStoreCacheOptions {
     /// Directory the cached parts are written under. `None` disables the
@@ -313,6 +321,7 @@ pub struct ObjectStoreCacheOptions {
     pub max_open_file_handles: u64,
 }
 
+#[allow(deprecated)] // The engine's `ObjectStoreCacheOptions` is deprecated.
 impl Default for ObjectStoreCacheOptions {
     fn default() -> Self {
         let engine = slatedb::config::ObjectStoreCacheOptions::default();
@@ -329,6 +338,7 @@ impl Default for ObjectStoreCacheOptions {
     }
 }
 
+#[allow(deprecated)] // The engine's `ObjectStoreCacheOptions` is deprecated.
 impl TryFrom<ObjectStoreCacheOptions> for slatedb::config::ObjectStoreCacheOptions {
     type Error = Error;
 
@@ -359,6 +369,7 @@ impl TryFrom<ObjectStoreCacheOptions> for slatedb::config::ObjectStoreCacheOptio
     }
 }
 
+#[allow(deprecated)] // The engine's `object_store_cache_options` is deprecated.
 impl TryFrom<ReaderOptions> for slatedb::config::DbReaderOptions {
     type Error = Error;
 
@@ -1090,6 +1101,7 @@ impl TryFrom<&CheckpointOptions> for slatedb::config::CheckpointOptions {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // The engine's `ObjectStoreCacheOptions` is deprecated.
 mod reader_options_tests {
     use super::*;
 

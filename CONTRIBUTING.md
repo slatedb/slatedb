@@ -6,7 +6,8 @@ to chat with the developers.
 
 We no longer welcome pull requests from the general public. You must become a SlateDB contributor to
 submit pull requests. See [GOVERNANCE.md](./GOVERNANCE.md) for more information on how to become a
-contributor.
+contributor. A GitHub workflow automatically closes pull requests from authors who are not listed in
+[.github/VOUCHED.td](.github/VOUCHED.td).
 
 If you urgently need a code change, we encourage you to:
 

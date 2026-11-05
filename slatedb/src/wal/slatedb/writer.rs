@@ -179,7 +179,7 @@ impl SlateDbWalWriter {
                     .compare_exchange(last, flush_epoch, Ordering::Relaxed, Ordering::Relaxed)
                     .is_ok()
             {
-                self.send_flush_request(None)?;
+                self.send_flush_request()?;
             }
         }
 
@@ -191,14 +191,11 @@ impl SlateDbWalWriter {
     }
 
     /// Send a flush request to the background flush worker.
-    fn send_flush_request(
-        &self,
-        result_tx: Option<oneshot::Sender<Result<(), WalError>>>,
-    ) -> Result<(), WalError> {
+    fn send_flush_request(&self) -> Result<(), WalError> {
         self.stats.flush_requests.increment(1);
         self.inner
             .read()
-            .send_flush_msg(WalFlushWork::Flush { result_tx })
+            .send_flush_msg(WalFlushWork::FreezeAndFlush)
     }
 }
 
@@ -236,9 +233,7 @@ impl WalWriter for SlateDbWalWriter {
             let mut inner = self.inner.write();
             inner.check_exited()?;
             let wal_id = inner.freeze_current_wal();
-            inner.send_flush_msg(WalFlushWork::Flush {
-                result_tx: Some(result_tx),
-            })?;
+            inner.send_flush_msg(WalFlushWork::FlushFrozen { result_tx })?;
             wal_id
         };
         self.stats.flush_requests.increment(1);
@@ -460,8 +455,13 @@ impl WalBufferIterator {
 }
 
 enum WalFlushWork {
-    Flush {
-        result_tx: Option<oneshot::Sender<Result<(), WalError>>>,
+    /// Freeze the current WAL, then flush all frozen WALs. Sent by the ticker and
+    /// when the current WAL exceeds its size limit.
+    FreezeAndFlush,
+    /// Flush the already-frozen WALs without freezing the current one. The caller
+    /// must freeze the current WAL first if it wants it included in the flush.
+    FlushFrozen {
+        result_tx: oneshot::Sender<Result<(), WalError>>,
     },
     Subscribe {
         listener: wal::WalStatusListener,
@@ -471,7 +471,8 @@ enum WalFlushWork {
 impl Debug for WalFlushWork {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            WalFlushWork::Flush { .. } => f.write_str("Flush"),
+            WalFlushWork::FreezeAndFlush => f.write_str("FreezeAndFlush"),
+            WalFlushWork::FlushFrozen { .. } => f.write_str("FlushFrozen"),
             WalFlushWork::Subscribe { .. } => f.write_str("Subscribe"),
         }
     }
@@ -486,11 +487,14 @@ struct WalFlushHandler {
 }
 
 impl WalFlushHandler {
+    /// Writes all frozen WALs. If `freeze` is set, the current WAL is frozen first.
     #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
-    async fn do_flush(&self) -> Result<(), SlateDBError> {
+    async fn do_flush(&self, freeze: bool) -> Result<(), SlateDBError> {
         let flushing_wals = {
             let mut inner = self.inner.write();
-            inner.freeze_current_wal();
+            if freeze {
+                inner.freeze_current_wal();
+            }
             inner.flushing_wals()
         };
 
@@ -552,7 +556,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
         if let Some(max_flush_interval) = self.max_flush_interval {
             return vec![MessageTickerDef::new(
                 max_flush_interval,
-                Box::new(|| WalFlushWork::Flush { result_tx: None }),
+                Box::new(|| WalFlushWork::FreezeAndFlush),
             )];
         }
         vec![]
@@ -560,14 +564,11 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 
     async fn handle(&mut self, message: WalFlushWork) -> Result<(), SlateDBError> {
         match message {
-            WalFlushWork::Flush { result_tx } => {
-                if let Some(result_tx) = result_tx {
-                    let result = self.do_flush().await;
-                    let _ = result_tx.send(result.clone().map_err(WalError::from));
-                    Ok(result?)
-                } else {
-                    Ok(self.do_flush().await?)
-                }
+            WalFlushWork::FreezeAndFlush => self.do_flush(true).await,
+            WalFlushWork::FlushFrozen { result_tx } => {
+                let result = self.do_flush(false).await;
+                let _ = result_tx.send(result.clone().map_err(WalError::from));
+                Ok(result?)
             }
             WalFlushWork::Subscribe { listener } => {
                 // TODO: support multiple listeners. For now, the db listener is the only one
@@ -598,10 +599,9 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
         // drain remaining messages
         while let Some(msg) = messages.next().await {
             match msg {
-                WalFlushWork::Flush { result_tx } => {
-                    if let Some(result_tx) = result_tx {
-                        let _ = result_tx.send(Err(error.clone()));
-                    }
+                WalFlushWork::FreezeAndFlush => {}
+                WalFlushWork::FlushFrozen { result_tx } => {
+                    let _ = result_tx.send(Err(error.clone()));
                 }
                 WalFlushWork::Subscribe { listener } => {
                     (*listener)(WalEvent::WalClosed(final_status.clone()))
@@ -826,11 +826,11 @@ mod tests {
         Arc<DbStatusManager>,
         Arc<DefaultMetricsRecorder>,
     ) {
-        setup_wal_buffer_with_args(flush_interval, Arc::new(|_status| {})).await
+        setup_wal_buffer_with_args(Some(flush_interval), Arc::new(|_status| {})).await
     }
 
     async fn setup_wal_buffer_with_args(
-        flush_interval: Duration,
+        flush_interval: Option<Duration>,
         listener: wal::WalStatusListener,
     ) -> (
         SlateDbWalWriter,
@@ -859,9 +859,9 @@ mod tests {
             &helper,
             0, // recent_flushed_wal_id
             table_store.clone(),
-            1000,                 // max_wal_bytes_size
-            4096,                 // max_wal_flushes_before_l0_flush
-            Some(flush_interval), // max_flush_interval
+            1000,           // max_wal_bytes_size
+            4096,           // max_wal_flushes_before_l0_flush
+            flush_interval, // max_flush_interval
             task_executor.clone(),
         )
         .await
@@ -935,6 +935,50 @@ mod tests {
         let empty = writer.flush().await.unwrap();
         assert_eq!(empty.wal_id, 2);
         empty.completion.await.unwrap();
+        writer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_flush_writes_only_wals_frozen_by_its_call() {
+        // No ticker: its first tick fires immediately and would freeze the current WAL.
+        let (mut writer, table_store, _, _) =
+            setup_wal_buffer_with_args(None, Arc::new(|_status| {})).await;
+        writer
+            .append(&[make_entry("before", "v1", 1, None)])
+            .await
+            .unwrap();
+        let first = writer.flush().await.unwrap();
+        assert_eq!(first.wal_id, 1);
+        // Appended after flush() froze WAL 1 but before the flush task runs.
+        writer
+            .append(&[make_entry("after", "v2", 2, None)])
+            .await
+            .unwrap();
+        first.completion.await.unwrap();
+
+        // Only WAL 1 was written; seq 2 is still buffered and not durable.
+        let status = writer.status().unwrap();
+        assert_eq!(status.last_flushed_wal_id, 1);
+        assert_eq!(status.last_flushed_seq, Some(1));
+        assert_eq!(status.buffered_wal_entries_count, 1);
+
+        let second = writer.flush().await.unwrap();
+        assert_eq!(second.wal_id, 2);
+        second.completion.await.unwrap();
+        let status = writer.status().unwrap();
+        assert_eq!(status.last_flushed_wal_id, 2);
+        assert_eq!(status.last_flushed_seq, Some(2));
+        assert_eq!(status.buffered_wal_entries_count, 0);
+
+        for (wal_id, key) in [(1, "before"), (2, "after")] {
+            let table = table_store.open_sst(wal_id.into()).await.unwrap();
+            let mut iter =
+                WalSstIterator::new(table, table_store.clone(), WalSstIteratorOptions::default())
+                    .await
+                    .unwrap();
+            assert_eq!(iter.next().await.unwrap().unwrap().key, Bytes::from(key));
+            assert!(iter.next().await.unwrap().is_none());
+        }
         writer.close().await.unwrap();
     }
 
@@ -1066,7 +1110,8 @@ mod tests {
     async fn test_listener_notified_when_flush_task_flushes_wal() {
         // given:
         let (listener, events) = recording_listener();
-        let (mut wal_buffer, _, _, _) = setup_wal_buffer_with_args(Duration::MAX, listener).await;
+        let (mut wal_buffer, _, _, _) =
+            setup_wal_buffer_with_args(Some(Duration::MAX), listener).await;
 
         // when: Append an entry and explicitly flush it, driving the background flush task.
         wal_buffer
