@@ -90,6 +90,7 @@ impl GetIterator {
         }
 
         let sources = if lookahead <= 1 || iters.len() <= 1 {
+            // Avoid queue allocation and polling overhead when initialization cannot overlap.
             stream::iter(iters).then(init_source).boxed()
         } else {
             let mut iters = iters.into_iter();
