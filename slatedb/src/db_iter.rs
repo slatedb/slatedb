@@ -89,17 +89,16 @@ impl GetIterator {
             iter.init().await.map(|()| iter)
         }
 
-        let mut iters = iters.into_iter();
-        let newest = iters.next();
-        let sources = stream::iter(newest)
-            .map(init_source)
-            .buffered(1)
-            .chain(
-                stream::iter(iters)
-                    .map(init_source)
-                    .buffered(lookahead.max(1)),
-            )
-            .boxed();
+        let sources = if lookahead <= 1 || iters.len() <= 1 {
+            stream::iter(iters).then(init_source).boxed()
+        } else {
+            let mut iters = iters.into_iter();
+            let newest = iters.next();
+            stream::iter(newest)
+                .then(init_source)
+                .chain(stream::iter(iters).map(init_source).buffered(lookahead))
+                .boxed()
+        };
 
         Self {
             key,
@@ -808,14 +807,19 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case(0, 4)]
+    #[case(1, 4)]
+    #[case(4, 0)]
+    #[case(4, 1)]
     #[tokio::test]
-    async fn test_get_with_unit_lookahead_probes_one_source_at_a_time() {
-        let (record, iters) = probe_sources(4, &[]);
-        let mut iter = GetIterator::with_lookahead(Bytes::from_static(b"key"), iters, 1);
+    async fn test_get_serial_sources(#[case] sources: usize, #[case] lookahead: usize) {
+        let (record, iters) = probe_sources(sources, &[]);
+        let mut iter = GetIterator::with_lookahead(Bytes::from_static(b"key"), iters, lookahead);
 
         assert_eq!(iter.next().await.unwrap(), None);
-
-        assert_eq!(record.peak.load(Ordering::SeqCst), 1);
+        assert_eq!(record.initialized.lock().len(), sources);
+        assert_eq!(record.peak.load(Ordering::SeqCst), usize::from(sources > 0));
     }
 
     #[rstest]
