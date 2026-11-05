@@ -296,6 +296,19 @@ pub struct ReadOptions {
     /// Whether fetched data blocks should be cached. SST indexes, filters,
     /// and stats are cached independently of this setting.
     pub cache_blocks: bool,
+    /// Defines how many concurrent sources to read after the first.
+    /// The first source is read alone because it's the newest, so it's
+    /// most likely to hold the key (for recent writes).
+    /// We always read at least one source when looking for a key.
+    /// If that source doesn't contain the key, we can optimistically
+    /// read up to `max_concurrent_sources` in parallel to try and find
+    /// the key. This lowers time to first byte at the cost of more API
+    /// calls and bandwidth usage (since you might find the key in
+    /// source 2, but would fetch source 3, 4, and 5 if you had
+    /// concurrent sources set to 4).
+    ///
+    /// Defaults to 1--serial fetching. Zero is also treated as 1.
+    pub max_concurrent_sources: usize,
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters. See [`FilterContext`].
     pub filter_context: Option<FilterContext>,
@@ -309,6 +322,7 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            max_concurrent_sources: 1,
             filter_context: None,
             tracing_options: None,
         }
@@ -334,6 +348,13 @@ impl ReadOptions {
     pub fn with_cache_blocks(self, cache_blocks: bool) -> Self {
         Self {
             cache_blocks,
+            ..self
+        }
+    }
+
+    pub fn with_max_concurrent_sources(self, max_concurrent_sources: usize) -> Self {
+        Self {
+            max_concurrent_sources,
             ..self
         }
     }
@@ -2186,6 +2207,17 @@ object_store_cache_options:
     fn test_default_tracing_options_are_none() {
         assert!(ReadOptions::default().tracing_options.is_none());
         assert!(ScanOptions::default().tracing_options.is_none());
+    }
+
+    #[test]
+    fn test_read_options_max_concurrent_sources() {
+        assert_eq!(ReadOptions::default().max_concurrent_sources, 1);
+        assert_eq!(
+            ReadOptions::default()
+                .with_max_concurrent_sources(4)
+                .max_concurrent_sources,
+            4
+        );
     }
 
     #[test]

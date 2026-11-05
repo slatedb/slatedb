@@ -3539,6 +3539,7 @@ mod tests {
                                         durability_filter: Memory,
                                         dirty: false,
                                         cache_blocks: true,
+                                        max_concurrent_sources: 1,
                                         filter_context: None,
                                         tracing_options: None,
                                     }
