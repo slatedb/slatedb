@@ -136,7 +136,7 @@ impl DbTransaction {
         options: ReadOptions,
     ) -> Result<Option<Vec<u8>>, Error> {
         validate_key(&key)?;
-        let options = options.try_into()?;
+        let options = options.into();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         Ok(tx
@@ -160,7 +160,7 @@ impl DbTransaction {
         options: ReadOptions,
     ) -> Result<Option<KeyValue>, Error> {
         validate_key(&key)?;
-        let options = options.try_into()?;
+        let options = options.into();
         let guard = self.inner.lock().await;
         let tx = guard.as_ref().ok_or(SlateDbError::TransactionCompleted)?;
         Ok(tx
