@@ -297,6 +297,8 @@ pub struct ReadOptions {
     /// and stats are cached independently of this setting.
     pub cache_blocks: bool,
     /// Defines how many concurrent sources to read after the first.
+    /// The first source is read alone because it's the newest, so it's
+    /// most likely to hold the key (for recent writes).
     /// We always read at least one source when looking for a key.
     /// If that source doesn't contain the key, we can optimistically
     /// read up to `max_concurrent_sources` in parallel to try and find
