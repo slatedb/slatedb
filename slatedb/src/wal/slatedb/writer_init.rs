@@ -21,6 +21,7 @@ pub(crate) struct SlateDbWalWriterInitOptions {
     max_wal_bytes_size: usize,
     max_wal_flushes_before_l0_flush: u64,
     max_flush_interval: Option<Duration>,
+    max_unflushed_bytes: usize,
 }
 
 impl From<&Settings> for SlateDbWalWriterInitOptions {
@@ -29,6 +30,7 @@ impl From<&Settings> for SlateDbWalWriterInitOptions {
             max_wal_bytes_size: settings.l0_sst_size_bytes,
             max_wal_flushes_before_l0_flush: settings.max_wal_flushes_before_l0_flush,
             max_flush_interval: settings.flush_interval,
+            max_unflushed_bytes: settings.max_unflushed_bytes,
         }
     }
 }
@@ -40,6 +42,7 @@ pub(crate) struct SlateDbWalWriterInit {
     max_wal_bytes_size: usize,
     max_wal_flushes_before_l0_flush: u64,
     max_flush_interval: Option<Duration>,
+    max_unflushed_bytes: usize,
     empty_wal_id: u64,
     task_executor: Arc<MessageHandlerExecutor>,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -68,6 +71,7 @@ impl SlateDbWalWriterInit {
             max_wal_bytes_size: options.max_wal_bytes_size,
             max_wal_flushes_before_l0_flush: options.max_wal_flushes_before_l0_flush,
             max_flush_interval: options.max_flush_interval,
+            max_unflushed_bytes: options.max_unflushed_bytes,
             empty_wal_id,
             task_executor,
             fp_tx,
@@ -122,7 +126,15 @@ impl wal::WriterInit for SlateDbWalWriterInit {
                 let replay_iterator = SlateDbWalIterator::range(
                     replay_after_wal_id + 1,
                     WalIteratorEndBound::Exclusive(empty_wal_id + 1),
-                    SlateDbWalIteratorOptions::default(),
+                    SlateDbWalIteratorOptions {
+                        max_buffered_bytes: if self.max_unflushed_bytes > 0 {
+                            self.max_unflushed_bytes
+                        } else {
+                            SlateDbWalIteratorOptions::default().max_buffered_bytes
+                        },
+                        sst_batch_size: 16,
+                        ..SlateDbWalIteratorOptions::default()
+                    },
                     self.table_store.clone(),
                 )?;
                 let wal_writer = SlateDbWalWriter::start_new(

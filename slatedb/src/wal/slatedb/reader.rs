@@ -32,6 +32,8 @@ pub struct SlateDbWalReaderOptions {
     /// Each fetch reads enough whole blocks to meet this target or reach the end of the file.
     /// The default is 4 MiB.
     pub read_ahead_bytes: usize,
+    /// The maximum number of WAL SSTs to prefetch concurrently. Defaults to 16.
+    pub sst_batch_size: usize,
 }
 
 impl Default for SlateDbWalReaderOptions {
@@ -40,6 +42,7 @@ impl Default for SlateDbWalReaderOptions {
             max_buffered_bytes: 128 * 1024 * 1024,
             max_fetch_tasks: 128,
             read_ahead_bytes: 4 * 1024 * 1024,
+            sst_batch_size: 16,
         }
     }
 }
@@ -50,6 +53,7 @@ impl From<SlateDbWalReaderOptions> for SlateDbWalIteratorOptions {
             target_bytes_to_fetch: options.read_ahead_bytes,
             max_buffered_bytes: options.max_buffered_bytes,
             max_fetch_tasks: options.max_fetch_tasks,
+            sst_batch_size: options.sst_batch_size,
         }
     }
 }

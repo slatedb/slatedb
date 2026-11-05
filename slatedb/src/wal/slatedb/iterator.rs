@@ -48,6 +48,8 @@ pub(crate) struct SlateDbWalIteratorOptions {
     pub(crate) max_buffered_bytes: usize,
     /// Shared soft limit on in-flight fetch tasks across all WAL SST iterators.
     pub(crate) max_fetch_tasks: usize,
+    /// Maximum number of WAL SSTs to prefetch concurrently.
+    pub(crate) sst_batch_size: usize,
 }
 
 impl Default for SlateDbWalIteratorOptions {
@@ -56,6 +58,7 @@ impl Default for SlateDbWalIteratorOptions {
             target_bytes_to_fetch: 4 * 1024 * 1024,
             max_buffered_bytes: 128 * 1024 * 1024,
             max_fetch_tasks: 128,
+            sst_batch_size: 16,
         }
     }
 }
@@ -237,7 +240,7 @@ impl SlateDbWalIterator {
         options: SlateDbWalIteratorOptions,
         wal_store: Arc<WalTableStore>,
     ) -> Result<Self, SlateDBError> {
-        let preload_limit = options.max_fetch_tasks.max(1);
+        let preload_limit = options.sst_batch_size.max(1);
         let sst_iter_options = WalSstIteratorOptions {
             target_bytes_to_fetch: options.target_bytes_to_fetch,
             fetch_limiter: ResourceLimiter::new(options.max_fetch_tasks),
@@ -620,6 +623,7 @@ mod tests {
                 target_bytes_to_fetch: usize::MAX,
                 max_buffered_bytes: usize::MAX,
                 max_fetch_tasks: 2,
+                ..SlateDbWalIteratorOptions::default()
             },
             Arc::clone(&table_store),
         )
@@ -885,6 +889,7 @@ mod tests {
                 target_bytes_to_fetch: 1,
                 max_buffered_bytes: one_file_buffer_limit,
                 max_fetch_tasks: 2,
+                ..SlateDbWalIteratorOptions::default()
             },
             table_store,
         )
@@ -953,6 +958,37 @@ mod tests {
         let first = iter.next().await.unwrap().unwrap();
 
         assert_eq!(first.last_consumed_wal_file_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_iterator_options_default_and_preload_limit() {
+        let default_options = SlateDbWalIteratorOptions::default();
+        assert_eq!(default_options.sst_batch_size, 16);
+
+        let table_store = test_table_store();
+        let iter = SlateDbWalIterator::range(
+            1,
+            WalIteratorEndBound::Exclusive(10),
+            SlateDbWalIteratorOptions {
+                sst_batch_size: 8,
+                ..SlateDbWalIteratorOptions::default()
+            },
+            table_store,
+        )
+        .unwrap();
+        assert_eq!(iter.preload_limit, 8);
+
+        let reader_options = crate::wal::slatedb::reader::SlateDbWalReaderOptions {
+            max_buffered_bytes: 64 * 1024 * 1024,
+            max_fetch_tasks: 64,
+            read_ahead_bytes: 2 * 1024 * 1024,
+            sst_batch_size: 32,
+        };
+        let converted: SlateDbWalIteratorOptions = reader_options.into();
+        assert_eq!(converted.sst_batch_size, 32);
+        assert_eq!(converted.target_bytes_to_fetch, 2 * 1024 * 1024);
+        assert_eq!(converted.max_buffered_bytes, 64 * 1024 * 1024);
+        assert_eq!(converted.max_fetch_tasks, 64);
     }
 
     fn test_table_store() -> Arc<WalTableStore> {
