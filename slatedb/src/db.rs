@@ -783,7 +783,7 @@ impl Db {
     /// ```
     pub fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
         self.inner.check_closed()?;
-        let snapshot = DbSnapshot::new(self.inner.clone(), None);
+        let snapshot = DbSnapshot::new(self.inner.clone(), None)?;
         Ok(snapshot)
     }
 
@@ -8472,7 +8472,8 @@ mod tests {
 
         db.merge(b"k", b"1").await.unwrap();
         let snapshot = db.snapshot().unwrap();
-        let snapshot_seq = db.inner.oracle.last_committed_seq();
+        // note: for retention, SnapshotManager tracks the lowest sequence_number, which is the remote sequence number
+        let snapshot_seq = snapshot.remote_seq();
         db.flush().await.unwrap();
 
         for operand in [b"2", b"3", b"4", b"5", b"6"] {
@@ -8661,7 +8662,7 @@ mod tests {
         db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         let snapshot = db.snapshot().unwrap();
-        let snapshot_seq = snapshot.seq();
+        let snapshot_seq = snapshot.memory_seq();
 
         db.put(b"key2", b"value2").await.unwrap();
         db.inner.flush_memtables(FlushTarget::All).await.unwrap();
@@ -8725,7 +8726,7 @@ mod tests {
         db.inner.flush_memtables(FlushTarget::All).await.unwrap();
 
         let snapshot = db.snapshot().unwrap();
-        let snapshot_seq = snapshot.seq();
+        let snapshot_seq = snapshot.memory_seq();
 
         assert_eq!(db.inner.txn_manager.min_active_seq(), Some(txn_seq));
         assert_eq!(
