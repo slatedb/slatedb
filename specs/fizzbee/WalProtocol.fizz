@@ -120,6 +120,7 @@ MAX_FENCE_ATTEMPTS_PER_WRITER = 3
 DATA = "d"
 FENCE = "f"
 
+# Set NUM_WRITERS to 4 to reproduce the error in #2225.
 NUM_WRITERS = 3
 NUM_GCS = 2
 
