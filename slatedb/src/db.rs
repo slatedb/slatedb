@@ -459,11 +459,10 @@ impl DbInner {
             .value
             .core
             .replay_after_wal_id;
-        let writer_epoch = self.state.read().state().manifest.value.writer_epoch;
         fail_point!(
             Arc::clone(&self.fp_registry),
             "replay-wal-pause",
-            writer_epoch == 1,
+            self.state.read().state().manifest.value.writer_epoch == 1,
             |_| -> Result<(), SlateDBError> { Ok(()) }
         );
 
@@ -489,10 +488,8 @@ impl DbInner {
                 // the GC has removed this WAL entry. Check the latest manifest's
                 // writer_epoch to see if this client is fenced.
                 Err(SlateDBError::WalTruncated(wal_id)) => {
+                    // Refresh checks the manifest epoch and returns Fenced if it has advanced.
                     self.memtable_flusher.refresh_manifest().await?;
-                    if self.state.read().state().manifest.value.writer_epoch > writer_epoch {
-                        return Err(SlateDBError::Fenced);
-                    }
                     return Err(SlateDBError::WalTruncated(wal_id));
                 }
                 Err(err) => return Err(err),
@@ -533,6 +530,9 @@ impl DbInner {
             self.replay_memtable(current_memtable_wal_id, replayed_table)?;
             current_memtable_wal_id = replayed_table_last_wal_id;
         }
+
+        // Reject a writer that lost its epoch during replay (#2225).
+        self.memtable_flusher.refresh_manifest().await?;
 
         let guard = self.state.read();
         self.status_manager
@@ -7547,8 +7547,7 @@ mod tests {
         //   enters replay_wal. We pause it inside replay_wal.
         // - W2 starts opening: claims writer_epoch=2, writes its own fence WAL
         //   (above W1's), replays, and finishes init.
-        // - W1 unpauses, finishes replay_wal, and returns its Db handle.
-        // - W1 issues a put. This put should fail because W1's next WAL id is taken.
+        // - W1 resumes replay and fails to open because W2 owns a newer epoch.
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_writer_paused_in_replay_wal_race";
         let fp_registry = Arc::new(FailPointRegistry::new());
@@ -7615,26 +7614,15 @@ mod tests {
             2
         );
 
-        // Release W1. It finishes replay_wal and returns a Db handle.
+        // Release W1. The manifest check after replay must reject its stale epoch.
         fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
-        let db1 = w1_handle.await.unwrap().unwrap();
-        assert_eq!(
-            db1.inner.state.read().state().manifest.value.writer_epoch,
-            1
-        );
+        let err = match w1_handle.await.unwrap() {
+            Ok(_) => panic!("expected W1 open to fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), crate::ErrorKind::Closed(CloseReason::Fenced));
 
-        // W1's put should fail because its now fenced
-        let result = db1
-            .put_with_options(
-                b"w1",
-                b"value",
-                &PutOptions::default(),
-                &WriteOptions::default(),
-            )
-            .await;
-        if let Ok(handle) = result {
-            assert!(handle.await_durable().await.is_err());
-        }
+        db2.close().await.unwrap();
     }
 
     async fn wait_for_wal_sst_count(wal_store: &WalTableStore, min_count: usize, context: &str) {
