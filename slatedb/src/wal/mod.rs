@@ -4,6 +4,7 @@ use crate::{CloseReason, ErrorKind, RowEntry, VersionedManifest};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use object_store::path::Path;
+use slatedb_txn_obj::TransactionalObject;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::{Bound, Range, RangeFrom};
@@ -119,6 +120,31 @@ impl WriterManifest {
     /// protocol. SlateDB will call this after calling [`WriterInit::fence_and_init`]
     pub async fn refresh(&mut self) -> Result<(), WalError> {
         self.manifest.refresh().await?;
+        Ok(())
+    }
+
+    /// Moves [`WriterManifest::replay_after_wal_id`] forward to `wal_id` and writes the
+    /// manifest. Implementations of `WriterInit::fence_and_init` can call this after the
+    /// fence write when they know that the WAL above the current boundary holds no rows, for
+    /// example when it holds only WAL fences. Later opens then replay a bounded range
+    /// instead of every WAL written since the last L0 flush.
+    pub(crate) async fn advance_replay_after_wal_id(
+        &mut self,
+        wal_id: u64,
+    ) -> Result<(), WalError> {
+        // A manifest version conflict here (a checkpoint, a compaction or a GC writing the
+        // manifest at the same time) is retryable, so go through the retrying update path
+        // rather than failing the open.
+        self.manifest
+            .maybe_apply_update(|manifest| {
+                if manifest.object().core.replay_after_wal_id >= wal_id {
+                    return Ok(None);
+                }
+                let mut dirty = manifest.prepare_dirty()?;
+                dirty.value.core.replay_after_wal_id = wal_id;
+                Ok(Some(dirty))
+            })
+            .await?;
         Ok(())
     }
 }
