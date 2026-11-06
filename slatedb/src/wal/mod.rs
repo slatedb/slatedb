@@ -114,9 +114,9 @@ impl WriterManifest {
         self.manifest().writer_epoch()
     }
 
-    /// Refreshes the current manifest. Implementations of `WriterInit::fence_and_init` can
-    /// use this to detect whether the manifest has been fenced while executing the fencing
-    /// protocol. SlateDB will call this after calling [`WriterInit::fence_and_init`]
+    /// Refreshes the manifest and checks that this writer still owns its epoch.
+    /// [`WriterInit::fence_and_init`] implementations can call this during WAL fencing.
+    /// SlateDB also validates epoch ownership after WAL replay, before opening the database.
     pub async fn refresh(&mut self) -> Result<(), WalError> {
         self.manifest.refresh().await?;
         Ok(())
