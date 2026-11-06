@@ -7649,6 +7649,109 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wal_replay_should_preserve_data_when_gc_slot_is_reused() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/wal_replay_should_preserve_data_when_gc_slot_is_reused";
+        let wal_store = WalTableStore::new(
+            object_store.clone(),
+            SsTableFormat::default(),
+            path,
+            TableStoreKind::Main,
+        );
+
+        // 1. Seed the two committed WALs from issue #2225.
+        for (id, key, value) in [(1, b"k1", b"v1"), (2, b"k2", b"v2")] {
+            let mut builder = wal_store.table_builder();
+            builder
+                .add(RowEntry::new_value(key, value, id))
+                .await
+                .unwrap();
+            wal_store
+                .write_sst(id.into(), &builder.build().await.unwrap())
+                .await
+                .unwrap();
+        }
+
+        // 2. Open a writer, but pause before replay. Freeze time to prevent later manifest polls.
+        let mut settings = test_db_options(0, 1024 * 1024, None);
+        settings.flush_interval = None;
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let replay_pause =
+            fail_parallel::FailGuard::new(fp_registry.clone(), "replay-wal-pause", "pause")
+                .unwrap();
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let opening = tokio::spawn({
+            let object_store = object_store.clone();
+            let settings = settings.clone();
+            let fp_registry = fp_registry.clone();
+            let recorder = recorder.clone();
+            async move {
+                Db::builder(path, object_store)
+                    .with_settings(settings)
+                    .with_system_clock(Arc::new(MockSystemClock::new()))
+                    .with_fp_registry(fp_registry)
+                    .with_metrics_recorder(recorder)
+                    .build()
+                    .await
+            }
+        });
+
+        // 3. Wait for validation and the initial manifest poll. Replay remains paused.
+        while lookup_metric(&recorder, crate::memtable_flusher::MANIFEST_REFRESH_COUNT).unwrap_or(0)
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+
+        // 4. Let a newer writer recover both values and flush them to L0.
+        let current = Db::builder(path, object_store)
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+        current
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        assert!(current.inner.manifest().core().replay_after_wal_id > 1);
+        current.close().await.unwrap();
+
+        // 5. Simulate GC deleting the first data WAL after the flush makes it eligible.
+        wal_store.delete_sst(1.into()).await.unwrap();
+
+        // 6. Simulate a delayed writer creating its fence at the deleted WAL's ID.
+        wal_store.write_wal_fence(1.into()).await.unwrap();
+
+        // 7. Resume the stale writer's replay, which now reads a fence in place of the first value.
+        drop(replay_pause);
+
+        // 8. Require fencing or a complete recovered view before reads can succeed.
+        match opening.await.unwrap() {
+            Err(err) => assert_eq!(err.kind(), crate::ErrorKind::Closed(CloseReason::Fenced)),
+            Ok(stale) => {
+                let observed = (
+                    stale.get(b"k1").await.unwrap(),
+                    stale.get(b"k2").await.unwrap(),
+                );
+                stale
+                    .close_with_options(CloseOptions { flush_type: None })
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    observed,
+                    (
+                        Some(Bytes::from_static(b"v1")),
+                        Some(Bytes::from_static(b"v2"))
+                    ),
+                    "WAL replay must not expose a later value while losing an earlier value"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn wal_replay_not_found_should_be_fenced_when_writer_epoch_advanced() {
         let base_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let gated_store = Arc::new(GatedObjectStore::new(base_store.clone()));
