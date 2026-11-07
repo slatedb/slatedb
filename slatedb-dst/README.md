@@ -170,6 +170,42 @@ fn dst_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Workload operation weights
+
+Set `WorkloadActorOptions::operation_weights` to control the workload mix.
+Weights are relative integers. A zero weight disables an operation; the sum need not be 100.
+The defaults give each enabled operation the same weight and preserve the default seeded sequence.
+The actor ignores the merge weight when no merge operator is configured.
+It returns an error if no enabled operation has a positive weight.
+The weights do not change entries inside write batches.
+
+```rust
+use slatedb_dst::actors::{WorkloadActorOptions, WorkloadOperationWeights};
+
+// Use only puts.
+let puts_only = WorkloadOperationWeights {
+    get: 0,
+    scan: 0,
+    delete: 0,
+    put: 1,
+    merge: 0,
+    write_batch: 0,
+};
+let writer_options = WorkloadActorOptions {
+    operation_weights: puts_only.clone(),
+    ..Default::default()
+};
+
+// Use point reads for 75% of operations and puts for 25%.
+let reader_writer_options = WorkloadActorOptions {
+    operation_weights: WorkloadOperationWeights {
+        get: 3,
+        ..puts_only
+    },
+    ..Default::default()
+};
+```
+
 ### `Harness`
 
 `Harness` is the main entry point.
