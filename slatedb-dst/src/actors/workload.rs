@@ -27,6 +27,8 @@ pub struct WorkloadActorOptions {
     pub max_value_size: usize,
     /// Durability level used by workload read verification.
     pub read_durability: DurabilityLevel,
+    /// Relative weights for selecting each workload operation.
+    pub operation_weights: WorkloadOperationWeights,
 }
 
 impl Default for WorkloadActorOptions {
@@ -36,7 +38,82 @@ impl Default for WorkloadActorOptions {
             min_value_size: 32,
             max_value_size: 256,
             read_durability: DurabilityLevel::Memory,
+            operation_weights: WorkloadOperationWeights::default(),
         }
+    }
+}
+
+/// Relative operation weights. A zero weight disables an operation.
+///
+/// All weights default to one. The actor ignores the merge weight when no merge
+/// operator is configured. At least one enabled operation must have a positive weight.
+/// These weights select whole operations; they do not change entries inside write batches.
+#[derive(Clone, Debug)]
+pub struct WorkloadOperationWeights {
+    /// Weight for point reads.
+    pub get: u32,
+    /// Weight for prefix scans.
+    pub scan: u32,
+    /// Weight for deletes.
+    pub delete: u32,
+    /// Weight for puts.
+    pub put: u32,
+    /// Weight for merges, when a merge operator is configured.
+    pub merge: u32,
+    /// Weight for write batches with random put, delete, and optional merge entries.
+    pub write_batch: u32,
+}
+
+impl Default for WorkloadOperationWeights {
+    fn default() -> Self {
+        Self {
+            get: 1,
+            scan: 1,
+            delete: 1,
+            put: 1,
+            merge: 1,
+            write_batch: 1,
+        }
+    }
+}
+
+impl WorkloadOperationWeights {
+    fn operations(&self, merge_enabled: bool) -> [(WorkloadOperation, u32); 6] {
+        [
+            (WorkloadOperation::Get, self.get),
+            (WorkloadOperation::Scan, self.scan),
+            (WorkloadOperation::Delete, self.delete),
+            (WorkloadOperation::Put, self.put),
+            (
+                WorkloadOperation::Merge,
+                if merge_enabled { self.merge } else { 0 },
+            ),
+            (WorkloadOperation::WriteBatch, self.write_batch),
+        ]
+    }
+
+    fn sample(&self, rand_value: u64, merge_enabled: bool) -> Result<WorkloadOperation, Error> {
+        let operations = self.operations(merge_enabled);
+        let total: u64 = operations
+            .iter()
+            .map(|(_, weight)| u64::from(*weight))
+            .sum();
+        if total == 0 {
+            return Err(Error::invalid(
+                "workload actor has no enabled operation with a positive weight".into(),
+            ));
+        }
+
+        // Keep the operation order and one random draw used by the default workload.
+        let mut ticket = rand_value % total;
+        for (operation, weight) in operations {
+            let weight = u64::from(weight);
+            if ticket < weight {
+                return Ok(operation);
+            }
+            ticket -= weight;
+        }
+        unreachable!("workload operation weights cover every ticket")
     }
 }
 
@@ -102,6 +179,16 @@ impl WorkloadActor {
             options.max_value_size >= WORKLOAD_VALUE_VERSION_SIZE,
             "workload actor max_value_size must be at least {WORKLOAD_VALUE_VERSION_SIZE} bytes"
         );
+        if options
+            .operation_weights
+            .operations(true)
+            .iter()
+            .all(|(_, weight)| *weight == 0)
+        {
+            return Err(Error::invalid(
+                "workload actor needs at least one positive operation weight".into(),
+            ));
+        }
 
         Ok(Self {
             options,
@@ -119,7 +206,7 @@ impl WorkloadActor {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorkloadOperation {
     Get,
     Scan,
@@ -127,29 +214,6 @@ enum WorkloadOperation {
     Put,
     Merge,
     WriteBatch,
-}
-
-impl WorkloadOperation {
-    fn sample(rand_value: u64, merge_enabled: bool) -> Self {
-        if merge_enabled {
-            match rand_value % 6 {
-                0 => Self::Get,
-                1 => Self::Scan,
-                2 => Self::Delete,
-                3 => Self::Put,
-                4 => Self::Merge,
-                _ => Self::WriteBatch,
-            }
-        } else {
-            match rand_value % 5 {
-                0 => Self::Get,
-                1 => Self::Scan,
-                2 => Self::Delete,
-                3 => Self::Put,
-                _ => Self::WriteBatch,
-            }
-        }
-    }
 }
 
 #[async_trait]
@@ -167,7 +231,10 @@ impl Actor for WorkloadActor {
             .get_or_insert_with(|| format!("{}/", ctx.name()))
             .clone();
         let merge_enabled = ctx.merge_operator().is_some();
-        let operation = WorkloadOperation::sample(ctx.rand().rng().next_u64(), merge_enabled);
+        let operation = self
+            .options
+            .operation_weights
+            .sample(ctx.rand().rng().next_u64(), merge_enabled)?;
 
         match operation {
             WorkloadOperation::Get => {
@@ -460,4 +527,247 @@ pub(crate) fn decode_workload_value(value: &[u8]) -> u64 {
         .try_into()
         .expect("workload value version slice has fixed size");
     u64::from_be_bytes(version_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use slatedb::config::Settings;
+    use slatedb::{DbRand, ErrorKind};
+
+    use super::*;
+    use crate::Harness;
+    use WorkloadOperation::{Delete, Get, Merge, Put, Scan, WriteBatch};
+
+    const NO_OPERATIONS: WorkloadOperationWeights = WorkloadOperationWeights {
+        get: 0,
+        scan: 0,
+        delete: 0,
+        put: 0,
+        merge: 0,
+        write_batch: 0,
+    };
+
+    #[test]
+    fn test_default_weights_preserve_operation_sequence() {
+        let weights = WorkloadOperationWeights::default();
+        for seed in [0, 7, u64::MAX] {
+            for (merge_enabled, expected) in [
+                (false, vec![Get, Scan, Delete, Put, WriteBatch]),
+                (true, vec![Get, Scan, Delete, Put, Merge, WriteBatch]),
+            ] {
+                let rand = DbRand::new(seed);
+                for _ in 0..100 {
+                    let value = rand.rng().next_u64();
+                    assert_eq!(
+                        weights.sample(value, merge_enabled).unwrap(),
+                        expected[(value % expected.len() as u64) as usize],
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_operation_weights_select_expected_intervals() {
+        let weights = WorkloadOperationWeights {
+            get: 2,
+            scan: 0,
+            delete: 1,
+            put: 3,
+            merge: 2,
+            write_batch: 1,
+        };
+        for (merge_enabled, expected) in [
+            (false, vec![Get, Get, Delete, Put, Put, Put, WriteBatch]),
+            (
+                true,
+                vec![Get, Get, Delete, Put, Put, Put, Merge, Merge, WriteBatch],
+            ),
+        ] {
+            for value in 0..3 * expected.len() as u64 {
+                assert_eq!(
+                    weights.sample(value, merge_enabled).unwrap(),
+                    expected[(value % expected.len() as u64) as usize],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_put_only_weights_disable_other_operations() {
+        let weights = WorkloadOperationWeights {
+            put: 3,
+            ..NO_OPERATIONS
+        };
+        for merge_enabled in [false, true] {
+            for value in [0, 1, 2, 3, u64::MAX] {
+                assert_eq!(weights.sample(value, merge_enabled).unwrap(), Put);
+            }
+        }
+    }
+
+    #[test]
+    fn test_operation_weight_examples() {
+        const SEED: u64 = 7;
+        const SAMPLES: u64 = 100_000;
+        let examples = [
+            ("puts_only", [0, 0, 0, 1, 0, 0], false),
+            ("read_heavy", [3, 0, 0, 1, 0, 0], false),
+            ("write_heavy", [1, 0, 0, 3, 0, 0], false),
+            ("scan_mix", [6, 2, 1, 1, 0, 0], false),
+            ("default_without_merge", [1, 1, 1, 1, 1, 1], false),
+            ("default_with_merge", [1, 1, 1, 1, 1, 1], true),
+            ("ignored_merge", [3, 0, 0, 1, 100, 0], false),
+        ];
+
+        println!("example,seed,samples,get,scan,delete,put,merge,write_batch");
+        for (name, [get, scan, delete, put, merge, write_batch], merge_enabled) in examples {
+            let weights = WorkloadOperationWeights {
+                get,
+                scan,
+                delete,
+                put,
+                merge,
+                write_batch,
+            };
+            let rand = DbRand::new(SEED);
+            let mut counts = [0u64; 6];
+            for _ in 0..SAMPLES {
+                let index = match weights
+                    .sample(rand.rng().next_u64(), merge_enabled)
+                    .unwrap()
+                {
+                    Get => 0,
+                    Scan => 1,
+                    Delete => 2,
+                    Put => 3,
+                    Merge => 4,
+                    WriteBatch => 5,
+                };
+                counts[index] += 1;
+            }
+
+            let [get, scan, delete, put, merge, write_batch] = counts;
+            println!("{name},{SEED},{SAMPLES},{get},{scan},{delete},{put},{merge},{write_batch}");
+
+            let operations = weights.operations(merge_enabled);
+            let total: u64 = operations
+                .iter()
+                .map(|(_, weight)| u64::from(*weight))
+                .sum();
+            for (count, (_, weight)) in counts.into_iter().zip(operations) {
+                if weight == 0 {
+                    assert_eq!(count, 0, "disabled operation selected in {name}");
+                } else {
+                    let expected = SAMPLES * u64::from(weight) / total;
+                    assert!(
+                        count.abs_diff(expected) < SAMPLES / 100,
+                        "operation count differs from its expected share in {name}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_zero_weights_rejected() {
+        let error = WorkloadActor::new(WorkloadActorOptions {
+            operation_weights: NO_OPERATIONS,
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Invalid);
+    }
+
+    #[test]
+    fn test_merge_only_weights_require_merge_operator() {
+        let actor = WorkloadActor::new(WorkloadActorOptions {
+            operation_weights: WorkloadOperationWeights {
+                merge: 1,
+                ..NO_OPERATIONS
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        let weights = &actor.options.operation_weights;
+        assert_eq!(
+            weights.sample(0, false).unwrap_err().kind(),
+            ErrorKind::Invalid
+        );
+        assert_eq!(weights.sample(u64::MAX, true).unwrap(), Merge);
+    }
+
+    #[test]
+    fn test_maximum_weights_do_not_overflow() {
+        let weights = WorkloadOperationWeights {
+            get: u32::MAX,
+            scan: u32::MAX,
+            delete: u32::MAX,
+            put: u32::MAX,
+            merge: u32::MAX,
+            write_batch: u32::MAX,
+        };
+        let max = u64::from(u32::MAX);
+        for (value, expected) in [
+            (0, Get),
+            (max - 1, Get),
+            (max, Scan),
+            (4 * max, Merge),
+            (6 * max - 1, WriteBatch),
+            (6 * max, Get),
+        ] {
+            assert_eq!(weights.sample(value, true).unwrap(), expected);
+        }
+        assert_eq!(weights.sample(5 * max - 1, false).unwrap(), WriteBatch);
+        assert_eq!(weights.sample(5 * max, false).unwrap(), Get);
+    }
+
+    #[test]
+    fn test_put_only_workload_writes_every_step() -> Result<(), Error> {
+        struct CheckPuts(WorkloadActor);
+
+        #[async_trait]
+        impl Actor for CheckPuts {
+            async fn run(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
+                for version in 1..=10 {
+                    self.0.run(ctx).await?;
+                    let value = ctx
+                        .db()
+                        .get(b"writer/0")
+                        .await?
+                        .expect("put must write a value");
+                    assert_eq!(decode_workload_value(&value), version);
+                }
+                ctx.shutdown_token().cancel();
+                Ok(())
+            }
+        }
+
+        let actor = WorkloadActor::new(WorkloadActorOptions {
+            key_count: 1,
+            operation_weights: WorkloadOperationWeights {
+                put: 1,
+                ..NO_OPERATIONS
+            },
+            ..Default::default()
+        })?;
+
+        Harness::new("put-only", 7, |ctx| async move {
+            let db = slatedb::Db::builder(ctx.path().clone(), ctx.main_object_store())
+                .with_seed(7)
+                .with_system_clock(ctx.system_clock())
+                .with_settings(Settings {
+                    compactor_options: None,
+                    garbage_collector_options: None,
+                    ..Default::default()
+                })
+                .build()
+                .await?;
+            Ok(Arc::new(db))
+        })
+        .actor("writer", CheckPuts(actor))
+        .run()
+    }
 }
