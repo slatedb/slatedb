@@ -64,7 +64,7 @@ jobs:
 
   native-macos:
     name: Build native libraries (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
     needs: verify-version
     steps:
       - uses: actions/checkout@v4
