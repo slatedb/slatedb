@@ -6800,7 +6800,8 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // Two paused uploads block workers; keep others free for manifest refresh.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_should_recover_imm_from_wal() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "pause").unwrap();
