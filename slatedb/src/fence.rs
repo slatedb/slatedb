@@ -84,6 +84,7 @@ impl WriterFencer {
     /// a new `FenceableManifest` with a bumped epoch, and (2) delegating WAL fencing and recovery
     /// to the configured [`WriterInit`]. Returns the fenced manifest, the initialized WAL writer,
     /// and the iterator that must be replayed to recover up to the current epoch.
+    /// The caller must validate epoch ownership after replay, before serving reads or writes.
     pub(crate) async fn fence(
         mut self,
         stored_manifest: StoredManifest,
@@ -116,14 +117,9 @@ impl WriterFencer {
 
         let mut manifest = manifest.into();
         let result = wal_writer_init.fence_and_init(&mut manifest).await?;
-        let mut manifest: FenceableManifest = manifest.into();
-
-        // Refresh validates that we own the latest epoch still.
-        manifest.refresh().await?;
-        fail_point_send!(self.fp_tx, "FinalRefreshManifest");
 
         Ok(WriterFenceResult {
-            manifest,
+            manifest: manifest.into(),
             wal_writer: result.wal_writer,
             replay_iterator: result.replay_iterator,
         })
@@ -530,8 +526,7 @@ mod tests {
         // resume the fencer
         fail_parallel::cfg(h.fp_registry.clone(), case.pause_event, "off").unwrap();
 
-        // validate that its fenced — the fencer's manifest.refresh sees the new db's
-        // bumped epoch and returns Fenced.
+        // The refresh after WAL ID recomputation or a failed fence write detects the newer epoch.
         let result = jh.await.unwrap();
         assert!(
             matches!(result, Err(SlateDBError::Fenced)),
