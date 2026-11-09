@@ -823,7 +823,7 @@ impl Admin {
     /// If the databases use an [`ObjectStoreMirror`](slatedb_mirror::ObjectStoreMirror), build
     /// this admin client with the wrapped store, not with a mirror, otherwise the
     /// write of the clone manifest fails. See
-    /// [`SlateDbMirrorPolicy`](crate::SlateDbMirrorPolicy#clones).
+    /// [`SlateDbMirrorPolicy`](crate::SlateDbMirrorPolicy).
     ///
     /// # Examples
     ///

@@ -57,9 +57,13 @@ type SegmentPredicate = dyn Fn(&VersionedManifest, &[u8]) -> bool + Send + Sync;
 ///
 /// The policy serves one database. It records the root of that database from
 /// the first manifest or `.compactions` object that it reads or writes, and it
-/// tracks the manifests under that root only. Calls for the manifests and
-/// `.compactions` objects of a clone parent go to the wrapped store (see
-/// [Clones](#clones)).
+/// tracks the manifests under that root only.
+///
+/// For a clone, the policy also mirrors the parent SSTs that the clone
+/// references. Calls for the manifests and `.compactions` objects of a parent
+/// go to the wrapped store. The parents are the databases in the
+/// `external_dbs` of the newest manifest. Create a clone with the wrapped
+/// store, not with a mirror. Then open the clone with its own mirror.
 ///
 /// ```no_run
 /// # use std::sync::Arc;
