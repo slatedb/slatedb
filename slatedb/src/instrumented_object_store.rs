@@ -53,6 +53,8 @@ pub(crate) enum ObjectStoreComponent {
     Db,
     /// A read-only database reader.
     Reader,
+    /// Administrative operations.
+    Admin,
     /// The garbage collector.
     Gc,
     /// The compactor.
@@ -64,6 +66,7 @@ impl ObjectStoreComponent {
         match self {
             Self::Db => "db",
             Self::Reader => "reader",
+            Self::Admin => "admin",
             Self::Gc => "gc",
             Self::Compactor => "compactor",
         }
