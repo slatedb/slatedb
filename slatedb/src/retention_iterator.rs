@@ -99,7 +99,8 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
         metrics: Option<&RetentionMetrics>,
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
         let mut filtered_versions = BTreeMap::new();
-        let current_system_ts = system_clock.now().timestamp_millis();
+        let retention_time =
+            retention_timeout.map(|timeout| (timeout, system_clock.now().timestamp_millis()));
         for (_, entry) in versions.into_iter() {
             // filter out any expired entries -- eventually we can consider
             // abstracting this away into generic, pluggable compaction filters
@@ -160,8 +161,8 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
             //
             // Note: We use OR logic below because we keep iterating as long as the entry is within
             // EITHER the time window OR the seq window. We only stop when it's outside BOTH.
-            let continue_retain_by_time = retention_timeout
-                .map(|timeout| {
+            let continue_retain_by_time = retention_time
+                .map(|(timeout, current_system_ts)| {
                     let create_sys_ts = sequence_tracker
                         // Use RoundUp to conservatively estimate creation time. For example:
                         // - If retention window is 10min and current time is 12:00:00
