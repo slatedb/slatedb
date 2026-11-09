@@ -99,6 +99,8 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
         metrics: Option<&RetentionMetrics>,
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
         let mut filtered_versions = BTreeMap::new();
+        // Avoid a clock read for each key when time-based retention is disabled.
+        // TTL checks use compaction_start_ts.
         let retention_time =
             retention_timeout.map(|timeout| (timeout, system_clock.now().timestamp_millis()));
         for (_, entry) in versions.into_iter() {
