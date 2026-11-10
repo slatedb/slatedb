@@ -5196,7 +5196,6 @@ mod tests {
                     stats: compactor_stats.clone(),
                     worker_stats: stats::WorkerStats::new(&recorder, "test-worker"),
                     clock: Arc::new(DefaultSystemClock::new()),
-                    manifest_store: manifest_store.clone(),
                     merge_operator: None,
                     #[cfg(feature = "compaction_filters")]
                     compaction_filter_supplier: None,
@@ -5269,7 +5268,6 @@ mod tests {
                     stats: compactor_stats.clone(),
                     worker_stats: stats::WorkerStats::noop(),
                     clock: system_clock.clone(),
-                    manifest_store: manifest_store.clone(),
                     merge_operator: None,
                     #[cfg(feature = "compaction_filters")]
                     compaction_filter_supplier: None,
