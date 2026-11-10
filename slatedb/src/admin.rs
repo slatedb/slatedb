@@ -1483,6 +1483,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_admin_bounded_max_retries_surfaces_transient_failure() {
+        // With a retry bound, a transient failure that outlasts it is surfaced
+        // rather than retried forever.
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(5, 0));
+        let path = Path::from("/tmp/test_admin_bounded_max_retries_surfaces_transient_failure");
+        let admin = AdminBuilder::new(path, flaky.clone())
+            .with_object_store_max_retries(2)
+            .build();
+
+        admin
+            .list_manifests(..)
+            .await
+            .expect_err("bounded retries should exhaust and surface the transient failure");
+
+        // 1 initial attempt + 2 retries = 3 total attempts.
+        assert_eq!(flaky.list_attempts(), 3);
+    }
+
+    #[tokio::test]
     async fn test_admin_create_detached_checkpoint_retries_transient_put() {
         // A transient put failure during checkpoint creation should be retried
         // by the RetryingObjectStore rather than failing the operation.

@@ -1003,6 +1003,14 @@ impl<P: Into<Path>> AdminBuilder<P> {
         self
     }
 
+    /// Sets the maximum number of wrapper-level retries for each of this admin's
+    /// object-store operations, on top of the `object_store` client's own HTTP
+    /// retries. Without it, transient errors are retried indefinitely.
+    pub fn with_object_store_max_retries(mut self, max_retries: u32) -> Self {
+        self.object_store_max_retries = Some(max_retries);
+        self
+    }
+
     /// Sets the compaction filter supplier for the compactor run by this admin.
     ///
     /// When running a standalone compactor via [`Admin::run_compactor`], ensure it is
