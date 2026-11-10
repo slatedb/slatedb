@@ -992,7 +992,6 @@ mod tests {
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::bytes_range::BytesRange;
     use crate::format::sst::SsTableFormat;
-    use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
     use crate::proptest_util::arbitrary;
     use crate::sst_iter::SstView;
@@ -1453,10 +1452,6 @@ mod tests {
             TableStoreKind::Compactor,
             BlockCachePolicy::default(),
         ));
-        let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
-        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
-            .await
-            .unwrap();
         let retention_min_seq = if merge_operator.is_some() {
             None
         } else {
@@ -1665,14 +1660,6 @@ mod tests {
                     root_path.clone(),
                     None,
                     TableStoreKind::Compactor, BlockCachePolicy::default()));
-                let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
-                StoredManifest::create_new_db(
-                    manifest_store.clone(),
-                    ManifestCore::new(),
-                    clock.clone(),
-                )
-                .await
-                .unwrap();
 
                 let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
                     handle,
@@ -1903,10 +1890,6 @@ mod tests {
             TableStoreKind::Compactor,
             BlockCachePolicy::default(),
         ));
-        let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
-        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
-            .await
-            .unwrap();
         let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
         let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
             handle: tokio::runtime::Handle::current(),
@@ -2590,10 +2573,6 @@ mod tests {
             TableStoreKind::Compactor,
             BlockCachePolicy::default(),
         ));
-        let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
-        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
-            .await
-            .unwrap();
 
         let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
             handle,
@@ -2725,10 +2704,6 @@ mod tests {
             TableStoreKind::Compactor,
             BlockCachePolicy::default(),
         ));
-        let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
-        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
-            .await
-            .unwrap();
 
         let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
             handle,

@@ -120,6 +120,17 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
             // Keep versions newer than the minimum snapshot sequence and the first version
             // at or below it. Snapshots need that boundary version when sequences do not match.
             // Keep merge entries until their base value or tombstone is available.
+            //
+            // Example:
+            //   1. Write a = 'v0' (seq=1).
+            //   2. Write a = 'v1' (seq=2).
+            //   3. Write b = 'v2' (seq=3), then create snapshot s1.
+            //   4. Delete a (seq=4).
+            //   5. Compact with retention_min_seq=3.
+            //
+            // Keep the tombstone (seq=4) and 'v1' (seq=2). Drop 'v0' (seq=1).
+            // Snapshot s1 needs 'v1', the first value at or below its sequence.
+            // Without it, s1 would lose the value that existed before the delete.
             let continue_retain_by_seq = retention_min_seq
                 .map(|min_seq| entry_seq > min_seq)
                 .unwrap_or(false);
