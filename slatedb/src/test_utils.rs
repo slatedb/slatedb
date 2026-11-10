@@ -235,7 +235,6 @@ impl TestIterator {
     }
 }
 
-#[async_trait]
 impl RowEntryIterator for TestIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         Ok(())

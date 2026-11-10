@@ -1,24 +1,22 @@
-use async_trait::async_trait;
-
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator, TrackedRowEntryIterator};
 use crate::types::{RowEntry, ValueDeletable};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
 
-struct MergeIteratorHeapEntry<'a> {
+struct MergeIteratorHeapEntry<T> {
     next_kv: RowEntry,
     index: usize,
-    iterator: Box<dyn RowEntryIterator + 'a>,
+    iterator: T,
     order: IterationOrder,
 }
 
-impl<'a> MergeIteratorHeapEntry<'a> {
+impl<T: RowEntryIterator> MergeIteratorHeapEntry<T> {
     /// Seek the iterator and return a new heap entry
     async fn seek(
         mut self,
         next_key: &[u8],
-    ) -> Result<Option<MergeIteratorHeapEntry<'a>>, SlateDBError> {
+    ) -> Result<Option<MergeIteratorHeapEntry<T>>, SlateDBError> {
         if self.next_kv.key >= next_key {
             Ok(Some(self))
         } else {
@@ -37,21 +35,21 @@ impl<'a> MergeIteratorHeapEntry<'a> {
     }
 }
 
-impl Eq for MergeIteratorHeapEntry<'_> {}
+impl<T> Eq for MergeIteratorHeapEntry<T> {}
 
-impl PartialEq<Self> for MergeIteratorHeapEntry<'_> {
+impl<T> PartialEq<Self> for MergeIteratorHeapEntry<T> {
     fn eq(&self, other: &Self) -> bool {
         self.index == other.index && self.next_kv == other.next_kv
     }
 }
 
-impl PartialOrd<Self> for MergeIteratorHeapEntry<'_> {
+impl<T> PartialOrd<Self> for MergeIteratorHeapEntry<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for MergeIteratorHeapEntry<'_> {
+impl<T> Ord for MergeIteratorHeapEntry<T> {
     fn cmp(&self, other: &Self) -> Ordering {
         // Wrapped in Reverse in the BinaryHeap, so the smallest entry here gets
         // popped first. Within a key, always return highest seqnum first.
@@ -67,13 +65,13 @@ impl Ord for MergeIteratorHeapEntry<'_> {
     }
 }
 
-pub(crate) struct MergeIterator<'a> {
+pub(crate) struct MergeIterator<T> {
     /// The current entry popped from the heap.
-    current: Option<MergeIteratorHeapEntry<'a>>,
+    current: Option<MergeIteratorHeapEntry<T>>,
     /// Use a heap to perform merge sort.
-    iterators: BinaryHeap<Reverse<MergeIteratorHeapEntry<'a>>>,
+    iterators: BinaryHeap<Reverse<MergeIteratorHeapEntry<T>>>,
     /// Iterators that have not yet been initialized and seeded.
-    pending_iterators: Vec<(usize, Box<dyn RowEntryIterator + 'a>)>,
+    pending_iterators: Vec<(usize, T)>,
     /// Whether to deduplicate entries of multiple versions with the same key. It's enabled by
     /// default, but it is useful to disable when we want to have some merge logics during
     /// compaction.
@@ -86,14 +84,12 @@ pub(crate) struct MergeIterator<'a> {
     order: IterationOrder,
 }
 
-impl<'a> MergeIterator<'a> {
-    pub(crate) fn new<T: RowEntryIterator + 'a>(
-        iterators: impl IntoIterator<Item = T>,
-    ) -> Result<Self, SlateDBError> {
+impl<T: RowEntryIterator> MergeIterator<T> {
+    pub(crate) fn new(iterators: impl IntoIterator<Item = T>) -> Result<Self, SlateDBError> {
         Self::new_with_order(iterators, IterationOrder::Ascending)
     }
 
-    pub(crate) fn new_with_order<T: RowEntryIterator + 'a>(
+    pub(crate) fn new_with_order(
         iterators: impl IntoIterator<Item = T>,
         order: IterationOrder,
     ) -> Result<Self, SlateDBError> {
@@ -101,13 +97,7 @@ impl<'a> MergeIterator<'a> {
             current: None,
             iterators: BinaryHeap::new(),
             order,
-            pending_iterators: iterators
-                .into_iter()
-                .enumerate()
-                .map(|(index, iterator)| {
-                    (index, Box::new(iterator) as Box<dyn RowEntryIterator + 'a>)
-                })
-                .collect(),
+            pending_iterators: iterators.into_iter().enumerate().collect(),
             dedup: true,
             initialized: false,
             bytes_processed: 0,
@@ -171,8 +161,7 @@ impl<'a> MergeIterator<'a> {
     }
 }
 
-#[async_trait]
-impl RowEntryIterator for MergeIterator<'_> {
+impl<T: RowEntryIterator> RowEntryIterator for MergeIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.initialize().await
     }
@@ -233,7 +222,7 @@ impl RowEntryIterator for MergeIterator<'_> {
     }
 }
 
-impl TrackedRowEntryIterator for MergeIterator<'_> {
+impl<T: RowEntryIterator> TrackedRowEntryIterator for MergeIterator<T> {
     fn bytes_processed(&self) -> u64 {
         self.bytes_processed
     }

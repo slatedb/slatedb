@@ -2,7 +2,6 @@ use crate::compaction_filter::{CompactionFilter, CompactionFilterDecision};
 use crate::error::SlateDBError;
 use crate::iter::{RowEntryIterator, TrackedRowEntryIterator};
 use crate::types::RowEntry;
-use async_trait::async_trait;
 
 /// Iterator that applies a compaction filter to entries during compaction.
 pub(crate) struct CompactionFilterIterator<T: RowEntryIterator> {
@@ -41,7 +40,6 @@ impl<T: RowEntryIterator> CompactionFilterIterator<T> {
     }
 }
 
-#[async_trait]
 impl<T: RowEntryIterator> RowEntryIterator for CompactionFilterIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.inner.init().await
@@ -81,6 +79,7 @@ mod tests {
     use super::*;
     use crate::compaction_filter::CompactionFilterError;
     use crate::types::ValueDeletable;
+    use async_trait::async_trait;
     use bytes::Bytes;
     use std::collections::VecDeque;
 
@@ -96,7 +95,6 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl RowEntryIterator for MockIterator {
         async fn init(&mut self) -> Result<(), SlateDBError> {
             Ok(())

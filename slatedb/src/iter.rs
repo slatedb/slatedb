@@ -1,4 +1,4 @@
-use async_trait::async_trait;
+use std::future::Future;
 
 use crate::error::SlateDBError;
 use crate::types::RowEntry;
@@ -13,14 +13,12 @@ pub enum IterationOrder {
 /// because next will need to be made async to support SSTs, which are loaded over
 /// the network.
 /// See: https://github.com/slatedb/slatedb/issues/12
-
-#[async_trait]
 pub(crate) trait RowEntryIterator: Send + Sync {
     /// Performs any expensive initialization required before regular iteration.
     ///
     /// This method should be idempotent and can be called multiple times, only
     /// the first initialization should perform expensive operations.
-    async fn init(&mut self) -> Result<(), SlateDBError>;
+    fn init(&mut self) -> impl Future<Output = Result<(), SlateDBError>> + Send;
 
     /// Returns the next entry in the iterator, which may be a key-value pair or
     /// a tombstone of a deleted key-value pair.
@@ -32,7 +30,7 @@ pub(crate) trait RowEntryIterator: Send + Sync {
     /// require the caller to explicitly initialize the iterator. This is in order
     /// to ensure that optimizations which eagerly initialize the iterator are not
     /// lost in a refactor and instead would throw errors.
-    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError>;
+    fn next(&mut self) -> impl Future<Output = Result<Option<RowEntry>, SlateDBError>> + Send;
 
     /// Seek to the next (inclusive) key
     ///
@@ -43,7 +41,7 @@ pub(crate) trait RowEntryIterator: Send + Sync {
     /// require the caller to explicitly initialize the iterator. This is in order
     /// to ensure that optimizations which eagerly initialize the iterator are not
     /// lost in a refactor and instead would throw errors.
-    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError>;
+    fn seek(&mut self, next_key: &[u8]) -> impl Future<Output = Result<(), SlateDBError>> + Send;
 }
 
 /// Iterator trait that tracks bytes processed for progress reporting.
@@ -57,39 +55,77 @@ pub(crate) trait TrackedRowEntryIterator: RowEntryIterator {
     fn bytes_processed(&self) -> u64;
 }
 
-#[async_trait]
-impl<'a> RowEntryIterator for Box<dyn RowEntryIterator + 'a> {
-    async fn init(&mut self) -> Result<(), SlateDBError> {
-        self.as_mut().init().await
+/// Defines an enum with one iterator per variant and implements
+/// [`RowEntryIterator`] for it by delegating to the variant. Code that holds one
+/// of several iterator types holds such an enum instead of boxing them, so that
+/// `next` does not box a future per entry. A variant may be `#[cfg(...)]`, such
+/// as one for an iterator that only tests build.
+macro_rules! row_entry_iterator_enum {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident $(<$lt:lifetime>)? {
+            $(
+                $(#[doc = $doc:literal])*
+                $(#[cfg($cfg:meta)])?
+                $variant:ident($ty:ty $(,)?)
+            ),+ $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        $vis enum $name $(<$lt>)? {
+            $(
+                $(#[doc = $doc])*
+                $(#[cfg($cfg)])?
+                $variant($ty)
+            ),+
+        }
+
+        impl $(<$lt>)? $crate::iter::RowEntryIterator for $name $(<$lt>)? {
+            async fn init(&mut self) -> Result<(), $crate::error::SlateDBError> {
+                match self {
+                    $($(#[cfg($cfg)])? Self::$variant(iter) => iter.init().await,)+
+                }
+            }
+
+            async fn next(
+                &mut self,
+            ) -> Result<Option<$crate::types::RowEntry>, $crate::error::SlateDBError> {
+                match self {
+                    $($(#[cfg($cfg)])? Self::$variant(iter) => iter.next().await,)+
+                }
+            }
+
+            async fn seek(&mut self, next_key: &[u8]) -> Result<(), $crate::error::SlateDBError> {
+                match self {
+                    $($(#[cfg($cfg)])? Self::$variant(iter) => iter.seek(next_key).await,)+
+                }
+            }
+        }
+    };
+}
+pub(crate) use row_entry_iterator_enum;
+
+/// A boxed iterator calls the iterator it holds. The type stays concrete, so the
+/// calls are dispatched statically and `next` allocates nothing; the box keeps
+/// large iterators out of the structures that move them, such as the heap of a
+/// merge.
+impl<T: RowEntryIterator> RowEntryIterator for Box<T> {
+    fn init(&mut self) -> impl Future<Output = Result<(), SlateDBError>> + Send {
+        (**self).init()
     }
 
-    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        self.as_mut().next().await
+    fn next(&mut self) -> impl Future<Output = Result<Option<RowEntry>, SlateDBError>> + Send {
+        (**self).next()
     }
 
-    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        self.as_mut().seek(next_key).await
+    fn seek(&mut self, next_key: &[u8]) -> impl Future<Output = Result<(), SlateDBError>> + Send {
+        (**self).seek(next_key)
     }
 }
 
-#[async_trait]
-impl<'a> RowEntryIterator for Box<dyn TrackedRowEntryIterator + 'a> {
-    async fn init(&mut self) -> Result<(), SlateDBError> {
-        self.as_mut().init().await
-    }
-
-    async fn next(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
-        self.as_mut().next().await
-    }
-
-    async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
-        self.as_mut().seek(next_key).await
-    }
-}
-
-impl<'a> TrackedRowEntryIterator for Box<dyn TrackedRowEntryIterator + 'a> {
+impl<T: TrackedRowEntryIterator> TrackedRowEntryIterator for Box<T> {
     fn bytes_processed(&self) -> u64 {
-        self.as_ref().bytes_processed()
+        (**self).bytes_processed()
     }
 }
 
@@ -101,7 +137,6 @@ impl EmptyIterator {
     }
 }
 
-#[async_trait]
 impl RowEntryIterator for EmptyIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         Ok(())

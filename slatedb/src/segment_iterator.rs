@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::try_join;
 use std::collections::VecDeque;
@@ -9,7 +8,8 @@ use crate::db_iter::GetIterator;
 use crate::db_state::{SortedRun, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
+use crate::filter_iterator::FilterIterator;
+use crate::iter::{row_entry_iterator_enum, EmptyIterator, IterationOrder, RowEntryIterator};
 use crate::manifest::{LsmTreeState, Segment};
 use crate::merge_iterator::MergeIterator;
 use crate::read_trace::{ReadTrace, SstTraceLevel};
@@ -65,8 +65,33 @@ impl SegmentScanContext {
 /// tiers. Point lookups skip this entirely and build their own flat
 /// chain via [`crate::db_iter::GetIterator::from_lsm_tree`].
 struct RangeTreeIterators {
-    l0: VecDeque<Box<dyn RowEntryIterator>>,
-    sr: VecDeque<Box<dyn RowEntryIterator>>,
+    l0: VecDeque<SstIterator<'static>>,
+    sr: VecDeque<SortedRunIterator<'static>>,
+}
+
+row_entry_iterator_enum! {
+    enum TreeSource {
+        L0(Box<SstIterator<'static>>),
+        SortedRun(Box<SortedRunIterator<'static>>),
+    }
+}
+
+row_entry_iterator_enum! {
+    enum SegmentChild {
+        Tree(Box<MergeIterator<TreeSource>>),
+        #[cfg(test)]
+        Test(Box<tests::VecIter>),
+    }
+}
+
+row_entry_iterator_enum! {
+    pub(crate) enum SegmentIter {
+        Scan(Box<SegmentMergeIterator>),
+        Get(Box<GetIterator<FilterIterator<SstIterator<'static>>>>),
+        Empty(EmptyIterator),
+        #[cfg(test)]
+        Test(Box<crate::test_utils::TestIterator>),
+    }
 }
 
 impl RangeTreeIterators {
@@ -93,7 +118,7 @@ impl RangeTreeIterators {
 /// initialized iterators wrapped as `Built` via direct field construction.
 enum SegmentIterState {
     Pending(Arc<LsmTreeState>),
-    Built(Box<dyn RowEntryIterator>),
+    Built(SegmentChild),
 }
 
 /// Iterator that walks a sequence of per-segment children in
@@ -134,7 +159,7 @@ enum SegmentIterState {
 /// [`crate::db_iter::GetIterator::from_lsm_tree`] directly. Construction
 /// goes through the [`build_segment_iter`] helper, which dispatches
 /// between the two.
-struct SegmentMergeIterator {
+pub(crate) struct SegmentMergeIterator {
     children: VecDeque<(Bytes, SegmentIterState)>,
     /// Shared inputs for building `Pending` children. `None` is
     /// permitted only when every child is already `Built` (test
@@ -210,9 +235,7 @@ impl SegmentMergeIterator {
     /// (build + init + seek-to-`pending_seek`), so the returned handle
     /// is always ready to serve `next`/`seek` immediately. Returns
     /// `None` only when the chain is exhausted.
-    async fn ensure_front_built(
-        &mut self,
-    ) -> Result<Option<&mut Box<dyn RowEntryIterator>>, SlateDBError> {
+    async fn ensure_front_built(&mut self) -> Result<Option<&mut SegmentChild>, SlateDBError> {
         if matches!(
             self.children.front(),
             Some((_, SegmentIterState::Pending(_)))
@@ -230,12 +253,18 @@ impl SegmentMergeIterator {
                 .expect("Pending children require a SegmentScanContext");
             let context = context.for_segment(&prefix);
             let RangeTreeIterators { l0, sr } = RangeTreeIterators::build(&tree, &context).await?;
-            let iters: VecDeque<Box<dyn RowEntryIterator>> = l0.into_iter().chain(sr).collect();
+            let iters = l0
+                .into_iter()
+                .map(|iter| TreeSource::L0(Box::new(iter)))
+                .chain(
+                    sr.into_iter()
+                        .map(|iter| TreeSource::SortedRun(Box::new(iter))),
+                );
             let merge = MergeIterator::new_with_order(iters, context.sst_iter_options.order)?;
             // Per-segment merge runs with dedup disabled so the outer
             // `max_seq` filter can drop out-of-window entries before any
             // dedup decision is made (see comments in `db_iter::DbIterator::new`).
-            let mut child: Box<dyn RowEntryIterator> = Box::new(merge.with_dedup(false));
+            let mut child = SegmentChild::Tree(Box::new(merge.with_dedup(false)));
             child.init().await?;
             if let Some(seek_key) = self.pending_seek.as_ref() {
                 child.seek(seek_key).await?;
@@ -250,7 +279,6 @@ impl SegmentMergeIterator {
     }
 }
 
-#[async_trait]
 impl RowEntryIterator for SegmentMergeIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         // Setting the flag is the only thing `init` needs to do. The
@@ -315,29 +343,31 @@ pub(crate) fn build_segment_iter(
     segments: &[Segment],
     context: SegmentScanContext,
     max_seq: Option<u64>,
-) -> Result<Box<dyn RowEntryIterator>, SlateDBError> {
+) -> Result<SegmentIter, SlateDBError> {
     if let Some(point_key) = context.range.as_point() {
         match segments.last() {
             Some(segment) => {
                 let context = context.for_segment(&segment.prefix);
-                Ok(Box::new(GetIterator::from_lsm_tree(
+                Ok(SegmentIter::Get(Box::new(GetIterator::from_lsm_tree(
                     point_key.clone(),
                     &segment.tree,
                     &context,
                     max_seq,
-                )?))
+                )?)))
             }
-            None => Ok(Box::new(EmptyIterator::new())),
+            None => Ok(SegmentIter::Empty(EmptyIterator::new())),
         }
     } else {
-        Ok(Box::new(SegmentMergeIterator::new(segments, context)))
+        Ok(SegmentIter::Scan(Box::new(SegmentMergeIterator::new(
+            segments, context,
+        ))))
     }
 }
 
 pub(crate) fn build_l0_point_iters(
     l0: &VecDeque<SsTableView>,
     ctx: &SegmentScanContext,
-) -> Result<VecDeque<Box<dyn RowEntryIterator>>, SlateDBError> {
+) -> Result<VecDeque<SstIterator<'static>>, SlateDBError> {
     let mut iters = VecDeque::new();
     let options = ctx.sst_iter_options.clone();
     for sst in l0.iter().cloned() {
@@ -353,7 +383,7 @@ pub(crate) fn build_l0_point_iters(
             ctx.point_lookup_stats.clone(),
         )?;
         if let Some(iter) = iter {
-            iters.push_back(Box::new(iter) as Box<dyn RowEntryIterator>);
+            iters.push_back(iter);
         }
     }
     Ok(iters)
@@ -363,7 +393,7 @@ pub(crate) fn build_sr_point_iters(
     key: &Bytes,
     compacted: &[SortedRun],
     ctx: &SegmentScanContext,
-) -> Result<VecDeque<Box<dyn RowEntryIterator>>, SlateDBError> {
+) -> Result<VecDeque<SstIterator<'static>>, SlateDBError> {
     let mut iters = VecDeque::new();
     let options = ctx.sst_iter_options.clone();
     for sr in compacted.iter() {
@@ -380,7 +410,7 @@ pub(crate) fn build_sr_point_iters(
                 ctx.point_lookup_stats.clone(),
             )?;
             if let Some(iter) = iter {
-                iters.push_back(Box::new(iter) as Box<dyn RowEntryIterator>);
+                iters.push_back(iter);
             }
         }
     }
@@ -390,7 +420,7 @@ pub(crate) fn build_sr_point_iters(
 async fn build_l0_range_iters(
     l0: &VecDeque<SsTableView>,
     ctx: &SegmentScanContext,
-) -> Result<VecDeque<Box<dyn RowEntryIterator>>, SlateDBError> {
+) -> Result<VecDeque<SstIterator<'static>>, SlateDBError> {
     let table_store = ctx.table_store.clone();
     let range = ctx.range.clone();
     let opts = ctx.sst_iter_options.clone();
@@ -415,7 +445,6 @@ async fn build_l0_range_iters(
                 Some(stats),
             )
             .await
-            .map(|maybe| maybe.map(|i| Box::new(i) as Box<dyn RowEntryIterator>))
         }
     })
     .await
@@ -424,7 +453,7 @@ async fn build_l0_range_iters(
 async fn build_sr_range_iters(
     compacted: &[SortedRun],
     ctx: &SegmentScanContext,
-) -> Result<VecDeque<Box<dyn RowEntryIterator>>, SlateDBError> {
+) -> Result<VecDeque<SortedRunIterator<'static>>, SlateDBError> {
     let range = ctx.range.clone();
     let overlapping: Vec<_> = compacted
         .iter()
@@ -454,7 +483,7 @@ async fn build_sr_range_iters(
                 Some(stats),
             )
             .await
-            .map(|iter| Some(Box::new(iter) as Box<dyn RowEntryIterator>))
+            .map(Some)
         }
     })
     .await
@@ -469,7 +498,7 @@ mod tests {
     /// Vec-backed iterator over fixed RowEntries. `seek` discards
     /// entries on the already-emitted side of `next_key` according to
     /// the configured order.
-    struct VecIter {
+    pub(super) struct VecIter {
         entries: VecDeque<RowEntry>,
         order: IterationOrder,
         initialized: bool,
@@ -485,7 +514,6 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl RowEntryIterator for VecIter {
         async fn init(&mut self) -> Result<(), SlateDBError> {
             self.initialized = true;
@@ -549,7 +577,7 @@ mod tests {
         iter.init().await.unwrap();
         (
             Bytes::copy_from_slice(prefix),
-            SegmentIterState::Built(Box::new(iter)),
+            SegmentIterState::Built(SegmentChild::Test(Box::new(iter))),
         )
     }
 

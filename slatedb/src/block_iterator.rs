@@ -6,7 +6,6 @@ use crate::format::row::SstRowCodecV0;
 use crate::iter::IterationOrder;
 use crate::iter::IterationOrder::Ascending;
 use crate::{error::SlateDBError, iter::RowEntryIterator, types::RowEntry};
-use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
 use IterationOrder::Descending;
 
@@ -109,7 +108,6 @@ pub(crate) struct BlockIterator<B: BlockLike> {
     ordering: IterationOrder,
 }
 
-#[async_trait]
 impl<B: BlockLike> RowEntryIterator for BlockIterator<B> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         Ok(())

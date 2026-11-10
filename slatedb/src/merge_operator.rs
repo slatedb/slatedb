@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use slatedb_common::metrics::CounterFn;
 use thiserror::Error;
@@ -205,7 +204,6 @@ impl<T: RowEntryIterator> MergeOperatorRequiredIterator<T> {
     }
 }
 
-#[async_trait]
 impl<T: RowEntryIterator> RowEntryIterator for MergeOperatorRequiredIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.delegate.init().await
@@ -459,7 +457,6 @@ impl<T: RowEntryIterator> MergeOperatorIterator<T> {
     }
 }
 
-#[async_trait]
 impl<T: RowEntryIterator> RowEntryIterator for MergeOperatorIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.delegate.init().await
@@ -943,7 +940,6 @@ mod tests {
         values: VecDeque<RowEntry>,
     }
 
-    #[async_trait]
     impl RowEntryIterator for MockRowEntryIterator {
         async fn init(&mut self) -> Result<(), SlateDBError> {
             Ok(())

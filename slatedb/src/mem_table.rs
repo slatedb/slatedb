@@ -3,7 +3,6 @@ use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use crossbeam_skiplist::map::Range;
 use crossbeam_skiplist::SkipMap;
@@ -201,7 +200,6 @@ pub(crate) struct MemTableIteratorInner<T: RangeBounds<SequencedKey>> {
 }
 pub(crate) type MemTableIterator = MemTableIteratorInner<KVTableInternalKeyRange>;
 
-#[async_trait]
 impl RowEntryIterator for MemTableIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         Ok(())

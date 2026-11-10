@@ -4,21 +4,22 @@ use crate::db_state::{SortedRun, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::filter_iterator::FilterIterator;
-use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
+use crate::iter::{row_entry_iterator_enum, EmptyIterator, IterationOrder, RowEntryIterator};
 use crate::manifest::LsmTreeState;
-use crate::mem_table::KVTable;
+use crate::mem_table::{KVTable, MemTableIterator};
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
     MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
 };
 use crate::read_trace::{ReadTrace, SstTraceLevel};
-use crate::segment_iterator::{build_l0_point_iters, build_sr_point_iters, SegmentScanContext};
+use crate::segment_iterator::{
+    build_l0_point_iters, build_sr_point_iters, SegmentIter, SegmentScanContext,
+};
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstTracingContext};
 use crate::tablestore::TableStore;
 use crate::types::{KeyValue, RowEntry, ValueDeletable};
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
 use parking_lot::Mutex;
@@ -61,16 +62,15 @@ impl DbIteratorRangeTracker {
 ///
 /// `Mutex` makes this stream `Sync`, as [`RowEntryIterator`] requires.
 /// The code accesses `Mutex` only through `get_mut`, so it never locks.
-type InitializedSources =
-    Mutex<BoxStream<'static, Result<Box<dyn RowEntryIterator + 'static>, SlateDBError>>>;
+type InitializedSources<S> = Mutex<BoxStream<'static, Result<S, SlateDBError>>>;
 
-pub(crate) struct GetIterator {
+pub(crate) struct GetIterator<S> {
     key: Bytes,
-    sources: InitializedSources,
-    current: Option<Box<dyn RowEntryIterator + 'static>>,
+    sources: InitializedSources<S>,
+    current: Option<S>,
 }
 
-impl GetIterator {
+impl<S: RowEntryIterator + 'static> GetIterator<S> {
     /// Builds an ordered stream of initialized sources.
     ///
     /// The stream initializes the first source alone. It initializes at most
@@ -78,14 +78,8 @@ impl GetIterator {
     ///
     /// `init` calls can finish out of order. The stream yields sources in
     /// their original order.
-    fn with_lookahead(
-        key: Bytes,
-        iters: Vec<Box<dyn RowEntryIterator + 'static>>,
-        lookahead: usize,
-    ) -> Self {
-        async fn init_source(
-            mut iter: Box<dyn RowEntryIterator + 'static>,
-        ) -> Result<Box<dyn RowEntryIterator + 'static>, SlateDBError> {
+    fn with_lookahead(key: Bytes, iters: Vec<S>, lookahead: usize) -> Self {
+        async fn init_source<S: RowEntryIterator>(mut iter: S) -> Result<S, SlateDBError> {
             iter.init().await.map(|()| iter)
         }
 
@@ -110,9 +104,9 @@ impl GetIterator {
 
     pub(crate) fn new(
         key: Bytes,
-        write_batch_iter: Box<dyn RowEntryIterator + 'static>,
-        mem_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
-        segment_iter: Box<dyn RowEntryIterator + 'static>,
+        write_batch_iter: S,
+        mem_iters: impl IntoIterator<Item = S>,
+        segment_iter: S,
     ) -> Self {
         let iters = vec![write_batch_iter]
             .into_iter()
@@ -124,7 +118,9 @@ impl GetIterator {
         // No metadata fetches between these sources can overlap.
         Self::with_lookahead(key, iters, 1)
     }
+}
 
+impl GetIterator<FilterIterator<SstIterator<'static>>> {
     /// Build a per-tree `GetIterator` over the L0 + sorted-run iterators
     /// produced by `tree`. The chain stays flat (no `MergeIterator`) so a
     /// bloom-positive hit short-circuits the walk rather than opening every
@@ -159,8 +155,7 @@ impl GetIterator {
     }
 }
 
-#[async_trait]
-impl RowEntryIterator for GetIterator {
+impl<S: RowEntryIterator + 'static> RowEntryIterator for GetIterator<S> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         // GetIterator departs from the normal convention for RowEntryIterator
         // in that it lazily initializes the sources only when necessary - this
@@ -214,15 +209,35 @@ impl RowEntryIterator for GetIterator {
     }
 }
 
+row_entry_iterator_enum! {
+    pub(crate) enum MemSource {
+        Memtable(Box<MemTableIterator>),
+        #[cfg(test)]
+        Test(Box<crate::test_utils::TestIterator>),
+    }
+}
+
+row_entry_iterator_enum! {
+    /// A source of a query, from [`DbIterator::new`]: a point lookup walks
+    /// them, a range scan merges them.
+    enum QuerySource {
+        WriteBatch(Box<WriteBatchIterator>),
+        Empty(EmptyIterator),
+        Memtable(FilterIterator<MemSource>),
+        Memtables(Box<MergeIterator<FilterIterator<MemSource>>>),
+        Segments(FilterIterator<SegmentIter>),
+    }
+}
+
 struct ScanIterator {
-    delegate: Box<dyn RowEntryIterator + 'static>,
+    delegate: MergeIterator<QuerySource>,
 }
 
 impl ScanIterator {
     pub(crate) fn new(
-        write_batch_iter: Box<dyn RowEntryIterator + 'static>,
-        mem_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
-        segment_iter: Box<dyn RowEntryIterator + 'static>,
+        write_batch_iter: QuerySource,
+        mem_iters: impl IntoIterator<Item = FilterIterator<MemSource>>,
+        segment_iter: FilterIterator<SegmentIter>,
         order: IterationOrder,
     ) -> Result<Self, SlateDBError> {
         // Three-arm top-level merge: write batch (transaction-only),
@@ -230,17 +245,16 @@ impl ScanIterator {
         // already merges each segment's L0 + sorted runs internally.
         let iters = vec![
             write_batch_iter,
-            Box::new(MergeIterator::new_with_order(mem_iters, order)?),
-            segment_iter,
+            QuerySource::Memtables(Box::new(MergeIterator::new_with_order(mem_iters, order)?)),
+            QuerySource::Segments(segment_iter),
         ];
 
         Ok(Self {
-            delegate: Box::new(MergeIterator::new_with_order(iters, order)?),
+            delegate: MergeIterator::new_with_order(iters, order)?,
         })
     }
 }
 
-#[async_trait]
 impl RowEntryIterator for ScanIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.delegate.init().await
@@ -255,9 +269,23 @@ impl RowEntryIterator for ScanIterator {
     }
 }
 
+row_entry_iterator_enum! {
+    enum QueryIter {
+        Get(Box<GetIterator<QuerySource>>),
+        Scan(Box<ScanIterator>),
+    }
+}
+
+row_entry_iterator_enum! {
+    enum DbIter {
+        MergeOperatorRequired(MergeOperatorRequiredIterator<QueryIter>),
+        MergeOperator(Box<MergeOperatorIterator<QueryIter>>),
+    }
+}
+
 pub struct DbIterator {
     range: BytesRange,
-    iter: Box<dyn RowEntryIterator + 'static>,
+    iter: DbIter,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
     order: IterationOrder,
@@ -268,8 +296,8 @@ impl DbIterator {
     pub(crate) async fn new(
         range: BytesRange,
         write_batch_iter: Option<WriteBatchIterator>,
-        mem_iters: impl IntoIterator<Item = Box<dyn RowEntryIterator + 'static>>,
-        segment_iter: Box<dyn RowEntryIterator + 'static>,
+        mem_iters: impl IntoIterator<Item = MemSource>,
+        segment_iter: SegmentIter,
         max_seq: Option<u64>,
         merge_operator: Option<MergeOperatorType>,
         order: IterationOrder,
@@ -281,8 +309,8 @@ impl DbIterator {
         // writes made during the transaction. We do not need to apply the max_seq filter to them, because they do
         // not have an real committed sequence number yet.
         let write_batch_iter = write_batch_iter
-            .map(|iter| Box::new(iter) as Box<dyn RowEntryIterator + 'static>)
-            .unwrap_or_else(|| Box::new(EmptyIterator::new()));
+            .map(|iter| QuerySource::WriteBatch(Box::new(iter)))
+            .unwrap_or_else(|| QuerySource::Empty(EmptyIterator::new()));
 
         // Apply the max_seq filter before any deduping merge. The
         // per-segment merge inside `segment_iter` runs with dedup disabled,
@@ -295,26 +323,25 @@ impl DbIterator {
         // filtering after a deduping merge would let seq=110 win and
         // then drop it, losing the correct seq=96 answer. Filter first.
         let mem_iters = apply_filters(mem_iters, max_seq);
-        let segment_iter = Box::new(FilterIterator::new_with_max_seq(segment_iter, max_seq))
-            as Box<dyn RowEntryIterator + 'static>;
+        let segment_iter = FilterIterator::new_with_max_seq(segment_iter, max_seq);
 
-        let mut iter = match range.as_point() {
-            Some(key) => Box::new(GetIterator::new(
+        let iter = match range.as_point() {
+            Some(key) => QueryIter::Get(Box::new(GetIterator::new(
                 key.clone(),
                 write_batch_iter,
-                mem_iters,
-                segment_iter,
-            )) as Box<dyn RowEntryIterator + 'static>,
-            None => Box::new(ScanIterator::new(
+                mem_iters.into_iter().map(QuerySource::Memtable),
+                QuerySource::Segments(segment_iter),
+            ))),
+            None => QueryIter::Scan(Box::new(ScanIterator::new(
                 write_batch_iter,
                 mem_iters,
                 segment_iter,
                 order,
-            )?) as Box<dyn RowEntryIterator + 'static>,
+            )?)),
         };
 
-        if let Some(merge_operator) = merge_operator {
-            iter = Box::new(MergeOperatorIterator::new(
+        let mut iter = if let Some(merge_operator) = merge_operator {
+            DbIter::MergeOperator(Box::new(MergeOperatorIterator::new(
                 merge_operator,
                 iter,
                 true,
@@ -323,13 +350,14 @@ impl DbIterator {
                 // there need to be merged with the entries from the other iterators.
                 None,
                 read_trace,
-            ));
+            )))
         } else {
             // When no merge operator is configured, wrap with iterator that errors on merge operands
-            iter = Box::new(MergeOperatorRequiredIterator::new(iter));
-        }
+            DbIter::MergeOperatorRequired(MergeOperatorRequiredIterator::new(iter))
+        };
 
-        iter.init().instrument(read_span.clone()).await?;
+        // See `next_entry_inner` for why this future is boxed.
+        Box::pin(iter.init()).instrument(read_span.clone()).await?;
 
         Ok(DbIterator {
             range,
@@ -372,7 +400,11 @@ impl DbIterator {
             Err(error)
         } else {
             let result = loop {
-                let next = self.iter.next().await;
+                // The iterators below inline their futures in one another, so
+                // this future nests every layer of the read. Boxing it here, once
+                // per entry, keeps that depth out of the futures of callers, which
+                // would otherwise need a higher `recursion_limit` to compile.
+                let next = Box::pin(self.iter.next()).await;
                 // Keep cached iteration cooperative.
                 tokio::task::coop::consume_budget().await;
                 match next {
@@ -441,7 +473,8 @@ impl DbIterator {
         {
             Err(SlateDBError::SeekKeyLessThanLastReturnedKey.into())
         } else {
-            let result = self.iter.seek(next_key).await;
+            // See `next_entry_inner` for why this future is boxed.
+            let result = Box::pin(self.iter.seek(next_key)).await;
             self.maybe_invalidate(result).map_err(Into::into)
         }
     }
@@ -450,23 +483,14 @@ impl DbIterator {
 pub(crate) fn apply_filters<T>(
     iters: impl IntoIterator<Item = T>,
     max_seq: Option<u64>,
-) -> Vec<Box<dyn RowEntryIterator>>
+) -> Vec<FilterIterator<T>>
 where
     T: RowEntryIterator + 'static,
 {
-    match max_seq {
-        Some(max_seq) => iters
-            .into_iter()
-            .map(|iter| {
-                Box::new(FilterIterator::new_with_max_seq(iter, Some(max_seq)))
-                    as Box<dyn RowEntryIterator + 'static>
-            })
-            .collect(),
-        None => iters
-            .into_iter()
-            .map(|iter| Box::new(iter) as Box<dyn RowEntryIterator + 'static>)
-            .collect(),
-    }
+    iters
+        .into_iter()
+        .map(|iter| FilterIterator::new_with_max_seq(iter, max_seq))
+        .collect()
 }
 
 /// See [`crate::Db::scan_prefix_by_recency`] for the full contract.
@@ -474,7 +498,7 @@ pub struct DbRecencyIterator {
     /// Sources not yet drained, from most recent to least recent.
     sources: VecDeque<RecencySource>,
     /// The initialized iterator of the source being drained.
-    current: Option<Box<dyn RowEntryIterator + 'static>>,
+    current: Option<FilterIterator<RecencyIter>>,
     /// The context used to build the iterator of a source.
     context: RecencySourceContext,
     /// Sticky error. Once building a source, or any underlying `init` or
@@ -547,6 +571,14 @@ impl DbRecencyIterator {
     }
 }
 
+row_entry_iterator_enum! {
+    enum RecencyIter {
+        MemTable(Box<MemTableIterator>),
+        Sst(Box<SstIterator<'static>>),
+        SortedRun(Box<SortedRunIterator<'static>>),
+    }
+}
+
 /// A source of a recency scan. Its iterator is built only when the walk
 /// reaches it.
 #[allow(clippy::large_enum_variant)]
@@ -572,8 +604,8 @@ impl RecencySourceContext {
     async fn build_and_init_iterator(
         &self,
         source: &RecencySource,
-    ) -> Result<Option<Box<dyn RowEntryIterator + 'static>>, SlateDBError> {
-        let iter: Box<dyn RowEntryIterator + 'static> = match source {
+    ) -> Result<Option<FilterIterator<RecencyIter>>, SlateDBError> {
+        let iter = match source {
             RecencySource::MemTable(table) => {
                 let mut iter = table.range(
                     self.range.clone(),
@@ -592,11 +624,11 @@ impl RecencySourceContext {
                     return Ok(None);
                 }
                 iter.init().await?;
-                Box::new(iter)
+                RecencyIter::MemTable(Box::new(iter))
             }
             RecencySource::L0(view) => {
                 match self.open_sst(view.clone(), SstTraceLevel::L0).await? {
-                    Some(iter) => Box::new(iter),
+                    Some(iter) => RecencyIter::Sst(Box::new(iter)),
                     None => return Ok(None),
                 }
             }
@@ -612,18 +644,15 @@ impl RecencySourceContext {
                         return Ok(None);
                     };
                     match self.open_sst(view, trace_level).await? {
-                        Some(iter) => Box::new(iter),
+                        Some(iter) => RecencyIter::Sst(Box::new(iter)),
                         None => return Ok(None),
                     }
                 } else {
-                    self.open_sorted_run(views, trace_level).await?
+                    RecencyIter::SortedRun(self.open_sorted_run(views, trace_level).await?)
                 }
             }
         };
-        Ok(Some(match self.max_seq {
-            Some(max_seq) => Box::new(FilterIterator::new_with_max_seq(iter, Some(max_seq))),
-            None => iter,
-        }))
+        Ok(Some(FilterIterator::new_with_max_seq(iter, self.max_seq)))
     }
 
     /// Opens an initialized iterator over one SST.
@@ -653,7 +682,7 @@ impl RecencySourceContext {
         &self,
         views: VecDeque<SsTableView>,
         trace_level: SstTraceLevel,
-    ) -> Result<Box<dyn RowEntryIterator + 'static>, SlateDBError> {
+    ) -> Result<Box<SortedRunIterator<'static>>, SlateDBError> {
         let mut iter = SortedRunIterator::new_owned_from_tables(
             views,
             self.range.clone(),
@@ -672,14 +701,14 @@ impl RecencySourceContext {
 mod tests {
     use crate::batch::{WriteBatch, WriteBatchIterator};
     use crate::bytes_range::BytesRange;
-    use crate::db_iter::{DbIterator, GetIterator};
+    use crate::db_iter::{DbIterator, GetIterator, MemSource};
     use crate::error::SlateDBError;
-    use crate::iter::{EmptyIterator, IterationOrder, RowEntryIterator};
+    use crate::iter::{row_entry_iterator_enum, EmptyIterator, IterationOrder, RowEntryIterator};
     use crate::merge_operator::MergeOperatorType;
     use crate::read_trace::ReadTrace;
+    use crate::segment_iterator::SegmentIter;
     use crate::test_utils::{StringConcatMergeOperator, TestIterator};
     use crate::types::RowEntry;
-    use async_trait::async_trait;
     use bytes::Bytes;
     use parking_lot::Mutex;
     use rstest::rstest;
@@ -695,6 +724,14 @@ mod tests {
         initialized: Mutex<Vec<usize>>,
     }
 
+    row_entry_iterator_enum! {
+        /// A source of a point lookup in these tests.
+        enum TestSource {
+            Test(TestIterator),
+            Probe(ProbeIterator),
+        }
+    }
+
     /// This source records `init` calls that overlap. The record shows when
     /// probes run at the same time, without object storage.
     struct ProbeIterator {
@@ -703,7 +740,6 @@ mod tests {
         record: Arc<ProbeRecord>,
     }
 
-    #[async_trait]
     impl RowEntryIterator for ProbeIterator {
         async fn init(&mut self) -> Result<(), SlateDBError> {
             self.record.initialized.lock().push(self.id);
@@ -728,20 +764,15 @@ mod tests {
     /// This function creates `sources` probes. The probes in `hits` hold the key.
     /// Each matching probe stores its ID as the value. This value identifies the
     /// selected source.
-    fn probe_sources(
-        sources: usize,
-        hits: &[usize],
-    ) -> (Arc<ProbeRecord>, Vec<Box<dyn RowEntryIterator + 'static>>) {
+    fn probe_sources(sources: usize, hits: &[usize]) -> (Arc<ProbeRecord>, Vec<ProbeIterator>) {
         let record = Arc::new(ProbeRecord::default());
         let iters = (0..sources)
-            .map(|id| {
-                Box::new(ProbeIterator {
-                    id,
-                    entry: hits
-                        .contains(&id)
-                        .then(|| RowEntry::new_value(b"key", id.to_string().as_bytes(), 1)),
-                    record: record.clone(),
-                }) as Box<dyn RowEntryIterator + 'static>
+            .map(|id| ProbeIterator {
+                id,
+                entry: hits
+                    .contains(&id)
+                    .then(|| RowEntry::new_value(b"key", id.to_string().as_bytes(), 1)),
+                record: record.clone(),
             })
             .collect();
         (record, iters)
@@ -837,20 +868,20 @@ mod tests {
         let newer_operand = RowEntry::new_merge(b"key", b"newer", 5);
         let older_operand = RowEntry::new_merge(b"key", b"older", 4);
         let mut base_source = TestIterator::new();
-        let mut sources: Vec<Box<dyn RowEntryIterator>> = Vec::new();
+        let mut sources: Vec<TestSource> = Vec::new();
         if merge {
-            sources.push(Box::new(
+            sources.push(TestSource::Test(
                 TestIterator::new().with_row_entry(newer_operand.clone()),
             ));
             base_source = base_source.with_row_entry(older_operand.clone());
         }
-        sources.push(Box::new(
+        sources.push(TestSource::Test(
             base_source
                 .with_row_entry(base.clone())
                 .with_entry(b"key", b"obsolete", 2),
         ));
         let (record, older_sources) = probe_sources(3, &[0, 1, 2]);
-        sources.extend(older_sources);
+        sources.extend(older_sources.into_iter().map(TestSource::Probe));
         let mut iter = GetIterator::with_lookahead(Bytes::from_static(b"key"), sources, 1);
 
         if merge {
@@ -891,10 +922,12 @@ mod tests {
             BytesRange::from(Bytes::from_static(b"key")..=Bytes::from_static(b"key")),
             None,
             vec![
-                Box::new(newest) as Box<dyn RowEntryIterator>,
-                Box::new(older),
+                MemSource::Test(Box::new(newest)),
+                MemSource::Test(Box::new(older)),
             ],
-            Box::new(TestIterator::new().with_entry(b"key", b"oldest", 1)),
+            SegmentIter::Test(Box::new(
+                TestIterator::new().with_entry(b"key", b"oldest", 1),
+            )),
             Some(5),
             merge.then(|| Arc::new(StringConcatMergeOperator) as MergeOperatorType),
             order,
@@ -917,12 +950,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalidated_iterator() {
-        let mem_iters: VecDeque<Box<dyn RowEntryIterator + 'static>> = VecDeque::new();
+        let mem_iters: VecDeque<MemSource> = VecDeque::new();
         let mut iter = DbIterator::new(
             BytesRange::from(..),
             None,
             mem_iters,
-            Box::new(EmptyIterator::new()),
+            SegmentIter::Empty(EmptyIterator::new()),
             None,
             None,
             IterationOrder::Ascending,
@@ -960,10 +993,10 @@ mod tests {
             BytesRange::from(..),
             None,
             vec![
-                Box::new(mem_iter1) as Box<dyn RowEntryIterator + 'static>,
-                Box::new(mem_iter2) as Box<dyn RowEntryIterator + 'static>,
+                MemSource::Test(Box::new(mem_iter1)),
+                MemSource::Test(Box::new(mem_iter2)),
             ],
-            Box::new(EmptyIterator::new()),
+            SegmentIter::Empty(EmptyIterator::new()),
             Some(100),
             None,
             IterationOrder::Ascending,
@@ -993,8 +1026,8 @@ mod tests {
         let mut iter = DbIterator::new(
             BytesRange::from(..),
             None,
-            vec![Box::new(mem_iter) as Box<dyn RowEntryIterator + 'static>],
-            Box::new(EmptyIterator::new()),
+            vec![MemSource::Test(Box::new(mem_iter))],
+            SegmentIter::Empty(EmptyIterator::new()),
             None,
             None,
             IterationOrder::Ascending,
@@ -1039,12 +1072,12 @@ mod tests {
             WriteBatchIterator::new(&batch, .., IterationOrder::Ascending, u64::MAX, None, None);
 
         // Create DbIterator with WriteBatch
-        let mem_iters: VecDeque<Box<dyn RowEntryIterator + 'static>> = VecDeque::new();
+        let mem_iters: VecDeque<MemSource> = VecDeque::new();
         let mut iter = DbIterator::new(
             BytesRange::from(..),
             Some(wb_iter),
             mem_iters,
-            Box::new(EmptyIterator::new()),
+            SegmentIter::Empty(EmptyIterator::new()),
             None,
             None,
             IterationOrder::Ascending,

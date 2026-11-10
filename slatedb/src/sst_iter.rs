@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{future::BoxFuture, FutureExt};
 use log::error;
@@ -753,7 +752,6 @@ impl<'a> InternalSstIterator<'a> {
     }
 }
 
-#[async_trait]
 impl RowEntryIterator for InternalSstIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.state.is_initialized() {
@@ -930,7 +928,6 @@ impl<'a> FilterIterator<'a> {
     }
 }
 
-#[async_trait]
 impl RowEntryIterator for FilterIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized {
@@ -1211,7 +1208,6 @@ impl<'a> SstIterator<'a> {
     }
 }
 
-#[async_trait]
 impl RowEntryIterator for SstIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         match &mut self.delegate {
@@ -1279,6 +1275,7 @@ mod tests {
     use crate::tablestore::TableStoreKind;
     use crate::test_utils::{assert_kv, SpanRecorder};
     use crate::types::{KeyValue, ValueDeletable};
+    use async_trait::async_trait;
     use object_store::path::Path;
     use object_store::{memory::InMemory, ObjectStore, ObjectStoreExt};
     use rstest::rstest;

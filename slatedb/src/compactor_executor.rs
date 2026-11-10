@@ -20,7 +20,9 @@ use crate::compactor_state::CompactionContext;
 use crate::config::CompactionWorkerOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
-use crate::iter::{IterationOrder, RowEntryIterator, TrackedRowEntryIterator};
+use crate::iter::{
+    row_entry_iterator_enum, IterationOrder, RowEntryIterator, TrackedRowEntryIterator,
+};
 use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
@@ -46,6 +48,50 @@ use crate::utils::{
 use log::{debug, error};
 use tracing::instrument;
 use ulid::Ulid;
+
+row_entry_iterator_enum! {
+    /// The two merges a compaction combines: one over its L0 SSTs, one over its sorted runs.
+    enum CompactionSource<'a> {
+        L0(Box<MergeIterator<Box<SstIterator<'a>>>>),
+        SortedRuns(Box<MergeIterator<Box<SortedRunIterator<'a>>>>),
+    }
+}
+
+row_entry_iterator_enum! {
+    enum CompactionMerge<'a> {
+        MergeOperator(Box<MergeOperatorIterator<MergeIterator<CompactionSource<'a>>>>),
+        MergeOperatorRequired(
+            Box<MergeOperatorRequiredIterator<MergeIterator<CompactionSource<'a>>>>,
+        ),
+    }
+}
+
+impl TrackedRowEntryIterator for CompactionMerge<'_> {
+    fn bytes_processed(&self) -> u64 {
+        match self {
+            Self::MergeOperator(iter) => iter.bytes_processed(),
+            Self::MergeOperatorRequired(iter) => iter.bytes_processed(),
+        }
+    }
+}
+
+row_entry_iterator_enum! {
+    enum CompactionOutput<'a> {
+        Retained(RetentionIterator<CompactionMerge<'a>>),
+        #[cfg(feature = "compaction_filters")]
+        Filtered(CompactionFilterIterator<RetentionIterator<CompactionMerge<'a>>>),
+    }
+}
+
+impl TrackedRowEntryIterator for CompactionOutput<'_> {
+    fn bytes_processed(&self) -> u64 {
+        match self {
+            Self::Retained(iter) => iter.bytes_processed(),
+            #[cfg(feature = "compaction_filters")]
+            Self::Filtered(iter) => iter.bytes_processed(),
+        }
+    }
+}
 
 /// Arguments for starting a compaction job.
 ///
@@ -182,7 +228,6 @@ impl<T: RowEntryIterator> ResumingIterator<T> {
     }
 }
 
-#[async_trait::async_trait]
 impl<T: RowEntryIterator> RowEntryIterator for ResumingIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.iterator.init().await
@@ -333,7 +378,7 @@ impl TokioCompactionExecutorInner {
         &self,
         job_args: &'a SubcompactionArgs,
         sequence_tracker: Arc<SequenceTracker>,
-    ) -> Result<ResumingIterator<Box<dyn TrackedRowEntryIterator + 'a>>, SlateDBError> {
+    ) -> Result<ResumingIterator<CompactionOutput<'a>>, SlateDBError> {
         let retention_min_seq = job_args.retention_min_seq;
         let resume_cursor = match job_args.output_ssts.last() {
             Some(output_sst) => {
@@ -390,22 +435,29 @@ impl TokioCompactionExecutorInner {
         let l0_iters = l0_iters_res?;
         let sr_iters = sr_iters_res?;
 
-        let l0_merge_iter = MergeIterator::new(l0_iters)?.with_dedup(false);
-        let sr_merge_iter = MergeIterator::new(sr_iters)?.with_dedup(false);
+        let l0_merge_iter =
+            MergeIterator::new(l0_iters.into_iter().map(Box::new))?.with_dedup(false);
+        let sr_merge_iter =
+            MergeIterator::new(sr_iters.into_iter().map(Box::new))?.with_dedup(false);
 
-        let merge_iter = MergeIterator::new([l0_merge_iter, sr_merge_iter])?.with_dedup(false);
-        let merge_iter: Box<dyn TrackedRowEntryIterator> =
-            if let Some(merge_operator) = self.merge_operator.clone() {
-                Box::new(MergeOperatorIterator::new(
-                    merge_operator,
-                    merge_iter,
-                    false,
-                    retention_min_seq,
-                    ReadTrace::none(),
-                ))
-            } else {
-                Box::new(MergeOperatorRequiredIterator::new(merge_iter))
-            };
+        let merge_iter = MergeIterator::new([
+            CompactionSource::L0(Box::new(l0_merge_iter)),
+            CompactionSource::SortedRuns(Box::new(sr_merge_iter)),
+        ])?
+        .with_dedup(false);
+        let merge_iter = if let Some(merge_operator) = self.merge_operator.clone() {
+            CompactionMerge::MergeOperator(Box::new(MergeOperatorIterator::new(
+                merge_operator,
+                merge_iter,
+                false,
+                retention_min_seq,
+                ReadTrace::none(),
+            )))
+        } else {
+            CompactionMerge::MergeOperatorRequired(Box::new(MergeOperatorRequiredIterator::new(
+                merge_iter,
+            )))
+        };
 
         let mut retention_iter = RetentionIterator::new(
             merge_iter,
@@ -432,13 +484,15 @@ impl TokioCompactionExecutorInner {
             };
             let filter = supplier.create_compaction_filter(&context).await?;
             let filter_iter = CompactionFilterIterator::new(retention_iter, filter);
-            let boxed: Box<dyn TrackedRowEntryIterator> = Box::new(filter_iter);
-            let resuming_iter = ResumingIterator::new(boxed, resume_cursor).await?;
+            let resuming_iter =
+                ResumingIterator::new(CompactionOutput::Filtered(filter_iter), resume_cursor)
+                    .await?;
             return Ok(resuming_iter);
         }
 
-        let boxed: Box<dyn TrackedRowEntryIterator> = Box::new(retention_iter);
-        let resuming_iter = ResumingIterator::new(boxed, resume_cursor).await?;
+        let resuming_iter =
+            ResumingIterator::new(CompactionOutput::Retained(retention_iter), resume_cursor)
+                .await?;
         Ok(resuming_iter)
     }
 

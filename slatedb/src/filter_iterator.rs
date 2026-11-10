@@ -1,5 +1,3 @@
-use async_trait::async_trait;
-
 use crate::error::SlateDBError;
 use crate::iter::RowEntryIterator;
 use crate::types::RowEntry;
@@ -30,7 +28,6 @@ impl<T: RowEntryIterator> FilterIterator<T> {
     }
 }
 
-#[async_trait]
 impl<T: RowEntryIterator> RowEntryIterator for FilterIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.iterator.init().await

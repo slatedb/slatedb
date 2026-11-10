@@ -6,7 +6,6 @@ use crate::iter::{IterationOrder, RowEntryIterator};
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstTracingContext, SstView};
 use crate::tablestore::TableStore;
 use crate::types::RowEntry;
-use async_trait::async_trait;
 use bytes::Bytes;
 use std::collections::VecDeque;
 use std::ops::{Bound, RangeBounds};
@@ -404,7 +403,6 @@ impl<'a> SortedRunIterator<'a> {
     }
 }
 
-#[async_trait]
 impl RowEntryIterator for SortedRunIterator<'_> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized {

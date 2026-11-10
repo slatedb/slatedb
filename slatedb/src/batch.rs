@@ -7,17 +7,25 @@
 use crate::config::{MergeOptions, PutOptions};
 use crate::db_common::extract_segment_prefix;
 use crate::error::SlateDBError;
-use crate::iter::{IterationOrder, RowEntryIterator};
+use crate::iter::{row_entry_iterator_enum, IterationOrder, RowEntryIterator};
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorType};
 use crate::prefix_extractor::PrefixExtractor;
 use crate::read_trace::ReadTrace;
 use crate::types::{RowEntry, ValueDeletable};
-use async_trait::async_trait;
 use bytes::Bytes;
 use smallvec::{smallvec, SmallVec};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::iter::Peekable;
 use std::ops::RangeBounds;
+
+row_entry_iterator_enum! {
+    /// The iterator of [`WriteBatch::extract_entries`], with merge operands
+    /// merged when the batch has any.
+    enum BatchEntries {
+        Plain(WriteBatchIterator),
+        Merged(Box<MergeOperatorIterator<WriteBatchIterator>>),
+    }
+}
 
 /// A batch of write operations (puts, deletes, and merges). All operations in
 /// the batch are applied atomically to the database. Put and delete operations
@@ -315,27 +323,29 @@ impl WriteBatch {
         extractor: Option<&dyn PrefixExtractor>,
     ) -> Result<(Vec<RowEntry>, BTreeSet<Bytes>, u64), SlateDBError> {
         let mut entries_bytes: u64 = 0;
-        let mut it: Box<dyn RowEntryIterator> = Box::new(WriteBatchIterator::new(
+        let it = WriteBatchIterator::new(
             self,
             ..,
             IterationOrder::Ascending,
             seq,
             Some(now),
             default_ttl_millis,
-        ));
-        if self.has_merge_ops() {
+        );
+        let mut it = if self.has_merge_ops() {
             if let Some(ref merge_operator) = merger {
-                it = Box::new(MergeOperatorIterator::new(
+                BatchEntries::Merged(Box::new(MergeOperatorIterator::new(
                     merge_operator.clone(),
                     it,
                     false,
                     None,
                     ReadTrace::none(),
-                ));
+                )))
             } else {
                 return Err(SlateDBError::MergeOperatorMissing);
             }
-        }
+        } else {
+            BatchEntries::Plain(it)
+        };
 
         let mut entries: Vec<RowEntry> = Vec::new();
         let mut touched_segments: BTreeSet<Bytes> = BTreeSet::new();
@@ -455,7 +465,6 @@ impl WriteBatchIterator {
     }
 }
 
-#[async_trait]
 impl RowEntryIterator for WriteBatchIterator {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         Ok(())

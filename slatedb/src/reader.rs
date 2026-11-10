@@ -2,15 +2,15 @@ use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
 use crate::clock::MonotonicClock;
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions, TracingOptions};
-use crate::db_iter::{DbRecencyIterator, RecencySource, RecencySourceContext};
+use crate::db_iter::{DbRecencyIterator, MemSource, RecencySource, RecencySourceContext};
 use crate::db_stats::DbStats;
-use crate::iter::{IterationOrder, RowEntryIterator};
+use crate::iter::IterationOrder;
 use crate::manifest::{ManifestCore, Segment};
 use crate::mem_table::{ImmutableMemtable, KVTable};
 use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::Oracle;
 use crate::read_trace::ReadTrace;
-use crate::segment_iterator::{build_segment_iter, SegmentScanContext};
+use crate::segment_iterator::{build_segment_iter, SegmentIter, SegmentScanContext};
 use crate::sst_iter::SstIteratorOptions;
 use crate::tablestore::TableStore;
 use crate::types::KeyValue;
@@ -35,12 +35,12 @@ pub(crate) trait DbStateReader {
 
 struct IteratorSources {
     write_batch_iter: Option<WriteBatchIterator>,
-    mem_iters: Vec<Box<dyn RowEntryIterator + 'static>>,
+    mem_iters: Vec<MemSource>,
     /// Single chain over the on-disk LSM state. Each segment's L0 and
     /// sorted-run iterators are merged together inside the chain (see
     /// `SegmentRangeIterator`); the top-level scan path treats the
     /// chain as one merge arm alongside `mem_iters` and `write_batch_iter`.
-    segment_iter: Box<dyn RowEntryIterator + 'static>,
+    segment_iter: SegmentIter,
 }
 
 /// Context for [`Reader::scan_with_options`].
@@ -146,7 +146,7 @@ impl Reader {
         db_state: &(dyn DbStateReader + Sync),
         order: IterationOrder,
         read_trace: ReadTrace,
-    ) -> Vec<Box<dyn RowEntryIterator + 'static>> {
+    ) -> Vec<MemSource> {
         let mut memtables = VecDeque::new();
         memtables.push_back(db_state.memtable());
         for memtable in db_state.imm_memtable() {
@@ -156,8 +156,11 @@ impl Reader {
         memtables
             .iter()
             .map(|table| {
-                Box::new(table.range(range.clone(), order, read_trace.clone()))
-                    as Box<dyn RowEntryIterator + 'static>
+                MemSource::Memtable(Box::new(table.range(
+                    range.clone(),
+                    order,
+                    read_trace.clone(),
+                )))
             })
             .collect()
     }

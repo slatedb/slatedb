@@ -3,8 +3,8 @@ use crate::db_state::{SsTableHandle, SsTableId};
 use crate::error::SlateDBError;
 #[cfg(test)]
 use crate::format::sst::EncodedSsTable;
-use crate::iter::RowEntryIterator;
-use crate::mem_table::KVTable;
+use crate::iter::{row_entry_iterator_enum, RowEntryIterator};
+use crate::mem_table::{KVTable, MemTableIterator};
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorRequiredIterator};
 use crate::oracle::Oracle;
 use crate::read_trace::ReadTrace;
@@ -20,6 +20,15 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 use ulid::Ulid;
+
+row_entry_iterator_enum! {
+    /// The entries of an immutable memtable that a flush writes, with or without
+    /// a merge operator.
+    enum FlushMerge {
+        MergeOperator(Box<MergeOperatorIterator<MemTableIterator>>),
+        MergeOperatorRequired(Box<MergeOperatorRequiredIterator<MemTableIterator>>),
+    }
+}
 
 /// Best-effort cleanup after a writer fails partway through.
 ///
@@ -358,20 +367,21 @@ impl DbInner {
         &self,
         imm_table: Arc<KVTable>,
         min_retention_seq: Option<u64>,
-    ) -> Result<RetentionIterator<Box<dyn RowEntryIterator>>, SlateDBError> {
+    ) -> Result<RetentionIterator<FlushMerge>, SlateDBError> {
         let state = self.state.read().view();
 
         let merge_iter = if let Some(merge_operator) = self.flush_merge_operator.clone() {
-            Box::new(MergeOperatorIterator::new(
+            FlushMerge::MergeOperator(Box::new(MergeOperatorIterator::new(
                 merge_operator,
                 imm_table.iter(),
                 false,
                 min_retention_seq,
                 ReadTrace::none(),
-            ))
+            )))
         } else {
-            Box::new(MergeOperatorRequiredIterator::new(imm_table.iter()))
-                as Box<dyn RowEntryIterator>
+            FlushMerge::MergeOperatorRequired(Box::new(MergeOperatorRequiredIterator::new(
+                imm_table.iter(),
+            )))
         };
         let mut iter = RetentionIterator::new(
             merge_iter,

@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -205,7 +204,6 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
     }
 }
 
-#[async_trait]
 impl<T: RowEntryIterator> RowEntryIterator for RetentionIterator<T> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         self.inner.init().await?;
