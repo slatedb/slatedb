@@ -52,6 +52,15 @@ impl FileHandleCache {
         self.len() == 0
     }
 
+    /// Returns the number of handles the cache can retain.
+    pub fn capacity(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("lock should not be poisoned")
+            .cap()
+            .get()
+    }
+
     /// Look up a cached file handle, or open the file and cache it.
     /// Returns `Ok(None)` if the file does not exist on disk.
     /// The returned `Arc` keeps the file open after its cache entry is evicted.

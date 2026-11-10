@@ -853,6 +853,10 @@ mod tests {
         async fn remove(&self, path: &StdPath) -> std::io::Result<()> {
             self.inner.remove(path).await
         }
+
+        async fn warm(&self, path: &StdPath) -> std::io::Result<()> {
+            self.inner.warm(path).await
+        }
     }
 
     #[derive(Debug)]
