@@ -2,14 +2,11 @@ use async_trait::async_trait;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::error::SlateDBError;
 use crate::iter::{RowEntryIterator, TrackedRowEntryIterator};
-use crate::seq_tracker::{FindOption, SequenceTracker};
 use crate::types::ValueDeletable::Tombstone;
 use crate::types::{RowEntry, ValueDeletable};
-use slatedb_common::clock::SystemClock;
 use slatedb_common::metrics::CounterFn;
 
 /// Counters for expired entries purged by [`RetentionIterator`], split by
@@ -27,17 +24,12 @@ pub(crate) struct RetentionMetrics {
     pub(crate) expired_entries_purged_merge: Arc<dyn CounterFn>,
 }
 
-/// A retention iterator that filters entries based on retention time and handles expired/tombstoned keys.
+/// Filters key versions by snapshot sequence and handles expired entries and tombstones.
 ///
-/// This iterator implements a retention policy by filtering out entries that are older than a specified
-/// retention period. It assumes the upstream iterator provides entries in decreasing order of sequence numbers
-/// (newest first) and groups entries by key to apply retention filtering across all versions of each key.
+/// The upstream iterator must group entries by key, with newer sequence numbers first.
 pub(crate) struct RetentionIterator<T: RowEntryIterator> {
     /// The upstream iterator providing entries in decreasing order of sequence numbers
     inner: T,
-    /// Retention time duration. Entries with create_ts older than (current_time - retention_time)
-    /// will be filtered out (except the latest version)
-    retention_timeout: Option<Duration>,
     /// The min sequence number to retain. It's taken from the minimum sequence number of the
     /// active snapshots.
     retention_min_seq: Option<u64>,
@@ -48,10 +40,6 @@ pub(crate) struct RetentionIterator<T: RowEntryIterator> {
     /// The current timestamp when the compaction started. This is a local timestamp,
     /// and used on handling expired entries.
     compaction_start_ts: i64,
-    /// The system clock used to get the current timestamp. This is used on handling retention.
-    system_clock: Arc<dyn SystemClock>,
-    /// Historical sequence metadata used to translate sequence numbers into wall-clock timestamps.
-    sequence_tracker: Arc<SequenceTracker>,
     /// Optional counters for observing expire_ts-driven decisions. Populated on
     /// the compaction path; `None` on the flush path.
     metrics: Option<RetentionMetrics>,
@@ -61,22 +49,16 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
     /// Creates a new retention iterator with the specified retention policy
     pub(crate) async fn new(
         inner: T,
-        retention_timeout: Option<Duration>,
         retention_min_seq: Option<u64>,
         filter_tombstone: bool,
         compaction_start_ts: i64,
-        system_clock: Arc<dyn SystemClock>,
-        sequence_tracker: Arc<SequenceTracker>,
         metrics: Option<RetentionMetrics>,
     ) -> Result<Self, SlateDBError> {
         Ok(Self {
             inner,
-            retention_timeout,
             retention_min_seq,
             filter_tombstone,
             compaction_start_ts,
-            system_clock,
-            sequence_tracker,
             metrics,
             buffer: RetentionBuffer::new(),
         })
@@ -86,23 +68,17 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
     ///
     /// This function implements the following retention logic:
     ///
-    /// - Filters out older versions that exceed the retention period, but keep the latest version (unless tombstone is filtered out)
-    /// - Transform expired entries into tombstones, and recycle the tombstones in the tail if filter_tombstone is true.
+    /// - Keeps the versions needed by active snapshots and merge operations.
+    /// - Converts expired values to tombstones and drops expired merge entries.
+    /// - Removes trailing tombstones when `filter_tombstone` is true.
     fn apply_retention_filter(
         versions: BTreeMap<Reverse<u64>, RowEntry>,
         compaction_start_ts: i64,
-        system_clock: Arc<dyn SystemClock>,
-        retention_timeout: Option<Duration>,
         retention_min_seq: Option<u64>,
         filter_tombstone: bool,
-        sequence_tracker: Arc<SequenceTracker>,
         metrics: Option<&RetentionMetrics>,
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
         let mut filtered_versions = BTreeMap::new();
-        // Avoid a clock read for each key when time-based retention is disabled.
-        // TTL checks use compaction_start_ts.
-        let retention_time =
-            retention_timeout.map(|timeout| (timeout, system_clock.now().timestamp_millis()));
         for (_, entry) in versions.into_iter() {
             // filter out any expired entries -- eventually we can consider
             // abstracting this away into generic, pluggable compaction filters
@@ -141,53 +117,16 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
             // always keep the entry with latest version.
             filtered_versions.insert(Reverse(entry.seq), entry);
 
-            // For older versions, we keep iterating until we find the first entry outside the retention
-            // window (by both time AND seq). This entry serves as a "boundary value" for snapshot reads.
-            //
-            // Example: Why we need the boundary value
-            //   1. set a = 'v0' (seq=1)
-            //   2. set a = 'v1' (seq=2)
-            //   3. set b = 'v2' (seq=3)
-            //   4. create snapshot s1 (captures seq=3, so min_retention_seq=3)
-            //   5. delete a (seq=4, creates tombstone)
-            //   6. run compaction (with retention_min_seq=3)
-            //
-            // For key 'a', the compaction will see:
-            //   - tombstone (seq=4) -> KEEP (latest version, AND seq > min_seq)
-            //   - 'v1' (seq=2) -> KEEP (boundary: first entry with seq <= min_seq)
-            //   - 'v0' (seq=1) -> DROP (older than boundary)
-            //
-            // The boundary value (seq=2) is crucial: if snapshot s1 reads key 'a', it needs to find
-            // a version at or before seq=3. Without keeping seq=2, the snapshot would incorrectly
-            // see the tombstone (seq=4) which didn't exist when the snapshot was created.
-            //
-            // Note: We use OR logic below because we keep iterating as long as the entry is within
-            // EITHER the time window OR the seq window. We only stop when it's outside BOTH.
-            let continue_retain_by_time = retention_time
-                .map(|(timeout, current_system_ts)| {
-                    let create_sys_ts = sequence_tracker
-                        // Use RoundUp to conservatively estimate creation time. For example:
-                        // - If retention window is 10min and current time is 12:00:00
-                        // - And sequence tracker has timestamps at 11:49:30 and 11:50:30
-                        // - RoundUp will use 11:50:30 (later timestamp) to avoid over-aggressive filtering
-                        .find_ts(entry_seq, FindOption::RoundUp)
-                        .map(|ts| ts.timestamp_millis())
-                        // if the sequence number is greater than the last recorded sequence
-                        // number we just assume that it was produced now (so it effectively
-                        // should be kept in the filtered results)
-                        .unwrap_or(current_system_ts);
-                    create_sys_ts + (timeout.as_millis() as i64) > current_system_ts
-                })
-                .unwrap_or(false);
+            // Keep versions newer than the minimum snapshot sequence and the first version
+            // at or below it. Snapshots need that boundary version when sequences do not match.
+            // Keep merge entries until their base value or tombstone is available.
             let continue_retain_by_seq = retention_min_seq
                 .map(|min_seq| entry_seq > min_seq)
                 .unwrap_or(false);
 
-            let continue_retain = continue_retain_by_time || continue_retain_by_seq || is_merge;
+            let continue_retain = continue_retain_by_seq || is_merge;
             if !continue_retain {
-                // if we find the first non-merge entry that's neither in retention window by time
-                // nor by seq we should break the loop to filter out the earlier versions of the
-                // same key.
+                // Drop versions older than the boundary value.
                 break;
             }
         }
@@ -254,19 +193,14 @@ impl<T: RowEntryIterator> RowEntryIterator for RetentionIterator<T> {
                 RetentionBufferState::NeedProcess => {
                     // Apply retention filtering to collected versions
                     let compaction_start_ts = self.compaction_start_ts;
-                    let retention_timeout = self.retention_timeout;
                     let retention_min_seq = self.retention_min_seq;
-                    let system_clock = self.system_clock.clone();
                     let metrics = self.metrics.clone();
                     self.buffer.process_retention(|versions| {
                         Self::apply_retention_filter(
                             versions,
                             compaction_start_ts,
-                            system_clock,
-                            retention_timeout,
                             retention_min_seq,
                             self.filter_tombstone,
-                            self.sequence_tracker.clone(),
                             metrics.as_ref(),
                         )
                     })?;
@@ -445,9 +379,6 @@ mod tests {
     use super::*;
     use crate::types::RowEntry;
     use rstest::rstest;
-
-    #[cfg(feature = "test-util")]
-    use crate::seq_tracker::TrackedSeq;
 
     struct RetentionBufferTestCase {
         name: &'static str,
@@ -646,9 +577,7 @@ mod tests {
     struct RetentionIteratorTestCase {
         name: &'static str,
         input_entries: Vec<RowEntry>,
-        retention_timeout: Option<Duration>,
         retention_min_seq: Option<u64>,
-        system_clock_ts: i64,
         compaction_start_ts: i64,
         expected_entries: Vec<RowEntry>,
         filter_tombstone: bool,
@@ -659,21 +588,17 @@ mod tests {
     #[case(RetentionIteratorTestCase {
         name: "empty_iterator",
         input_entries: vec![],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_min_seq: None,
-        system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![],
         filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
-        name: "single_entry_within_retention",
+        name: "single_entry_kept",
         input_entries: vec![
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950), // 50 seconds ago
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950),
         ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_min_seq: None,
-        system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950)
@@ -681,29 +606,25 @@ mod tests {
         filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
-        name: "single_entry_outside_retention",
+        name: "single_old_entry_kept",
         input_entries: vec![
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 seconds ago
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500),
         ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_min_seq: None,
-        system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(500),
         ],
         filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
-        name: "multiple_versions_same_key_within_retention",
+        name: "retain_all_versions_for_snapshot",
         input_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950), // Latest
-            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900), // Within retention
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
         ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_min_seq: None,
-        system_clock_ts: 1000,
+        retention_min_seq: Some(0),
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
@@ -713,37 +634,17 @@ mod tests {
         filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
-        name: "multiple_versions_same_key_mixed_retention",
-        input_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950), // Latest (always kept)
-            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // Outside retention
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
-        ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_min_seq: None,
-        system_clock_ts: 1000,
-        compaction_start_ts: 1000,
-        expected_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
-            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
-        ],
-        filter_tombstone: false,
-    })]
-    #[case(RetentionIteratorTestCase {
-        name: "tombstone_entries",
+        name: "tombstone_retains_snapshot_versions",
         input_entries: vec![
             RowEntry::new_tombstone(b"key1", 3).with_create_ts(950), // Latest
-            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // Outside retention
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500),
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
         ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_min_seq: None,
-        system_clock_ts: 1000,
+        retention_min_seq: Some(0),
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_tombstone(b"key1", 3).with_create_ts(950),
-            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(500),
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
         ],
         filter_tombstone: false,
@@ -752,51 +653,29 @@ mod tests {
         name: "merge_entries",
         input_entries: vec![
             RowEntry::new_merge(b"key1", b"merge3", 3).with_create_ts(950), // Latest
-            RowEntry::new_merge(b"key1", b"merge2", 2).with_create_ts(500), // Outside retention
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850), // Within retention
+            RowEntry::new_merge(b"key1", b"merge2", 2).with_create_ts(500),
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
         ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_min_seq: None,
-        system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_merge(b"key1", b"merge3", 3).with_create_ts(950),
-            RowEntry::new_merge(b"key1", b"merge2", 2).with_create_ts(500), // 500 + 3600 = 4100 >= 1000, so kept
+            RowEntry::new_merge(b"key1", b"merge2", 2).with_create_ts(500),
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
         ],
         filter_tombstone: false,
     })]
     #[case(RetentionIteratorTestCase {
-        name: "zero_retention_time",
+        name: "keep_latest_without_snapshot",
         input_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Current time
-            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(999),  // 1 second ago
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(998), // 2 seconds ago
+            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000),
+            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(999),
+            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(998),
         ],
-        retention_timeout: Some(Duration::from_secs(0)), // No retention
         retention_min_seq: None,
-        system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(1000), // Latest always kept
-        ],
-        filter_tombstone: false,
-    })]
-    #[case(RetentionIteratorTestCase {
-        name: "very_long_retention_time",
-        input_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(100), // Very old
-            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(50),  // Very old
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(10),  // Very old
-        ],
-        retention_timeout: Some(Duration::from_secs(1000)), // Very long retention
-        retention_min_seq: None,
-        system_clock_ts: 1000,
-        compaction_start_ts: 1000,
-        expected_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(100),
-            RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(50),
-            RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(10),
         ],
         filter_tombstone: false,
     })]
@@ -806,9 +685,7 @@ mod tests {
         input_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950).with_expire_ts(900), // Expired
         ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_min_seq: None,
-        system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_tombstone(b"key1", 1).with_create_ts(950), // Converted to tombstone
@@ -820,9 +697,7 @@ mod tests {
         input_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950).with_expire_ts(1100), // Not expired
         ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_min_seq: None,
-        system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950).with_expire_ts(1100), // Kept as is
@@ -836,9 +711,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900).with_expire_ts(950), // Expired
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850).with_expire_ts(1200), // Not expired
         ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_min_seq: None,
-        system_clock_ts: 1000,
+        retention_min_seq: Some(0),
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950).with_expire_ts(1100), // Not expired
@@ -852,9 +725,7 @@ mod tests {
         input_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950).with_expire_ts(1000), // Expired (equal)
         ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_min_seq: None,
-        system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_tombstone(b"key1", 1).with_create_ts(950), // Converted to tombstone
@@ -865,36 +736,16 @@ mod tests {
     #[case(RetentionIteratorTestCase {
         name: "retention_min_seq_basic",
         input_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // seq > retention_min_seq
-            RowEntry::new_value(b"key1", b"value2", 20).with_create_ts(900), // seq <= retention_min_seq
-            RowEntry::new_value(b"key1", b"value1", 10).with_create_ts(850), // seq <= retention_min_seq
+            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950),
+            RowEntry::new_value(b"key1", b"value2", 20).with_create_ts(900),
+            RowEntry::new_value(b"key1", b"value1", 10).with_create_ts(850),
         ],
-        retention_timeout: None,
         retention_min_seq: Some(25),
-        system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // Kept (latest in retention window)
+            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950),
             RowEntry::new_value(b"key1", b"value2", 20).with_create_ts(900), // Kept (boundary value for snapshots)
             // value1 filtered out because it's older than the boundary
-        ],
-        filter_tombstone: false,
-    })]
-    #[case(RetentionIteratorTestCase {
-        name: "retention_min_seq_with_timeout",
-        input_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // seq > retention_min_seq, within timeout
-            RowEntry::new_value(b"key1", b"value2", 20).with_create_ts(900), // seq > retention_min_seq, within timeout
-            RowEntry::new_value(b"key1", b"value1", 10).with_create_ts(850), // seq <= retention_min_seq, within timeout
-        ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_min_seq: Some(25),
-        system_clock_ts: 1000,
-        compaction_start_ts: 1000,
-        expected_entries: vec![
-            RowEntry::new_value(b"key1", b"value3", 30).with_create_ts(950), // Kept (latest)
-            RowEntry::new_value(b"key1", b"value2", 20).with_create_ts(900), // Kept (within retention window)
-            RowEntry::new_value(b"key1", b"value1", 10).with_create_ts(850), // Kept (within timeout window)
         ],
         filter_tombstone: false,
     })]
@@ -904,9 +755,7 @@ mod tests {
         input_entries: vec![
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(950).with_expire_ts(900), // Expired
         ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
         retention_min_seq: None,
-        system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
             // Tombstone filtered out, so no entries remain
@@ -920,9 +769,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900), // Middle value
             RowEntry::new_tombstone(b"key1", 1).with_create_ts(850), // Tombstone at end (oldest)
         ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_min_seq: None,
-        system_clock_ts: 1000,
+        retention_min_seq: Some(0),
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950),
@@ -938,9 +785,7 @@ mod tests {
             RowEntry::new_tombstone(b"key1", 2).with_create_ts(900), // Second tombstone
             RowEntry::new_tombstone(b"key1", 1).with_create_ts(850), // Third tombstone
         ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_min_seq: None,
-        system_clock_ts: 1000,
+        retention_min_seq: Some(0),
         compaction_start_ts: 1000,
         expected_entries: vec![
             // All tombstones filtered out, so no entries remain
@@ -954,13 +799,12 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900).with_expire_ts(950), // Expired
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850).with_expire_ts(1200), // Not expired
         ],
-        retention_timeout: Some(Duration::from_secs(3600)), // 1 hour
-        retention_min_seq: None,
-        system_clock_ts: 1000,
+        retention_min_seq: Some(0),
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value3", 3).with_create_ts(950).with_expire_ts(1100), // Not expired
-            RowEntry::new_tombstone(b"key1", 2).with_create_ts(900), // Expired变成tombstone，且不会被移除
+            // Keep the tombstone between retained values.
+            RowEntry::new_tombstone(b"key1", 2).with_create_ts(900),
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850).with_expire_ts(1200), // Not expired
         ],
         filter_tombstone: true, // tombstone is not in the tail, so not filtered out
@@ -972,9 +816,7 @@ mod tests {
             RowEntry::new_merge(b"key1", b"value2", 2).with_create_ts(900).with_expire_ts(950), // Expired
             RowEntry::new_merge(b"key1", b"value1", 1).with_create_ts(850).with_expire_ts(1200), // Not expired
         ],
-        retention_timeout: Some(Duration::ZERO),
         retention_min_seq: None,
-        system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_merge(b"key1", b"value3", 3).with_create_ts(950).with_expire_ts(1100), // Not expired
@@ -991,9 +833,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
         ],
-        retention_timeout: Some(Duration::ZERO),
         retention_min_seq: None,
-        system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_merge(b"key1", b"value5", 5).with_create_ts(1050),
@@ -1012,9 +852,7 @@ mod tests {
             RowEntry::new_value(b"key1", b"value2", 2).with_create_ts(900),
             RowEntry::new_value(b"key1", b"value1", 1).with_create_ts(850),
         ],
-        retention_timeout: Some(Duration::ZERO),
         retention_min_seq: Some(4),
-        system_clock_ts: 1000,
         compaction_start_ts: 1000,
         expected_entries: vec![
             RowEntry::new_value(b"key1", b"value5", 5).with_create_ts(1050),
@@ -1028,23 +866,18 @@ mod tests {
     #[cfg(feature = "test-util")]
     fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
         use crate::test_utils::TestIterator;
-        use slatedb_common::clock::MockSystemClock;
 
-        // Test the apply_retention_filter function directly since TestIterator doesn't support create_ts
+        // Test filtering directly to preserve each entry's timestamps.
         let mut versions = BTreeMap::new();
         for entry in test_case.input_entries.iter() {
             versions.insert(Reverse(entry.seq), entry.clone());
         }
 
-        let system_clock = Arc::new(MockSystemClock::with_time(test_case.system_clock_ts));
         let filtered_versions = RetentionIterator::<TestIterator>::apply_retention_filter(
             versions,
             test_case.compaction_start_ts,
-            system_clock,
-            test_case.retention_timeout,
             test_case.retention_min_seq,
             test_case.filter_tombstone,
-            Arc::new(SequenceTracker::new()),
             None,
         );
 
@@ -1091,89 +924,12 @@ mod tests {
                 "Test case '{}': Entry {} create timestamp mismatch",
                 test_case.name, i
             );
+            assert_eq!(
+                actual.expire_ts, expected.expire_ts,
+                "Test case '{}': Entry {} expiry timestamp mismatch",
+                test_case.name, i
+            );
         }
-    }
-
-    #[cfg(feature = "test-util")]
-    #[rstest]
-    #[case("exact_match", vec![(5, 1_000)], 5, 1_500, 700)]
-    #[case("before_first_rounds_up", vec![(10, 2_000)], 7, 2_100, 400)]
-    #[case(
-        "between_entries_rounds_up",
-        vec![(5, 1_000), (15, 2_000)],
-        11,
-        2_400,
-        500
-    )]
-    #[case(
-        "after_last_defaults_to_now",
-        vec![(5, 1_000)],
-        20,
-        1_500,
-        100
-    )]
-    #[case("no_tracker_defaults_to_now", vec![], 8, 2_000, 0)]
-    fn test_retention_uses_sequence_tracker_timestamp(
-        #[case] _name: &str,
-        #[case] tracker_points: Vec<(u64, i64)>,
-        #[case] entry_seq: u64,
-        #[case] clock_now: i64,
-        #[case] timeout_ms: u64,
-    ) {
-        use crate::test_utils::TestIterator;
-        use chrono::TimeZone;
-        use slatedb_common::clock::MockSystemClock;
-
-        let mut sorted_points = tracker_points;
-        sorted_points.sort_by_key(|(seq, _)| *seq);
-
-        let mut tracker = SequenceTracker::new();
-        for (seq, ts) in &sorted_points {
-            let ts = chrono::Utc.timestamp_millis_opt(*ts).unwrap();
-            tracker.insert(TrackedSeq { seq: *seq, ts });
-        }
-        let tracker = Arc::new(tracker);
-
-        let system_clock = Arc::new(MockSystemClock::with_time(clock_now));
-        let latest_seq = entry_seq + 10;
-        let mut versions = BTreeMap::new();
-        versions.insert(
-            Reverse(latest_seq),
-            RowEntry::new_value(b"k", b"new", latest_seq).with_create_ts(clock_now),
-        );
-        let target_entry = RowEntry::new_value(b"k", b"old", entry_seq);
-        versions.insert(Reverse(entry_seq), target_entry);
-
-        let timeout = if timeout_ms == 0 {
-            Duration::from_millis(0)
-        } else {
-            Duration::from_millis(timeout_ms)
-        };
-
-        let filtered = RetentionIterator::<TestIterator>::apply_retention_filter(
-            versions,
-            0,
-            system_clock,
-            Some(timeout),
-            None,
-            false,
-            tracker,
-            None,
-        );
-
-        let derived_ts = sorted_points
-            .iter()
-            .find_map(|(seq, ts)| if *seq >= entry_seq { Some(*ts) } else { None })
-            .unwrap_or(clock_now);
-        let expected_keep_by_logic =
-            (derived_ts as i128 + timeout.as_millis() as i128) > clock_now as i128;
-
-        let actual_keep = filtered.contains_key(&Reverse(entry_seq));
-        assert_eq!(
-            actual_keep, expected_keep_by_logic,
-            "{:?}[{}@{} Now({})]",
-            filtered, entry_seq, derived_ts, clock_now
-        );
     }
 
     #[cfg(feature = "test-util")]
@@ -1183,7 +939,6 @@ mod tests {
             ENTRY_TYPE_LABEL, ENTRY_TYPE_MERGE, ENTRY_TYPE_VALUE, EXPIRED_ENTRIES_PURGED,
         };
         use crate::test_utils::TestIterator;
-        use slatedb_common::clock::MockSystemClock;
         use slatedb_common::metrics::{
             lookup_metric_with_labels, test_recorder_helper, DefaultMetricsRecorder,
         };
@@ -1230,11 +985,8 @@ mod tests {
             let filtered = RetentionIterator::<TestIterator>::apply_retention_filter(
                 versions,
                 1_000,
-                Arc::new(MockSystemClock::with_time(1_000)),
-                None,
                 None,
                 false,
-                Arc::new(SequenceTracker::new()),
                 Some(&metrics),
             );
 
@@ -1263,11 +1015,8 @@ mod tests {
             let filtered = RetentionIterator::<TestIterator>::apply_retention_filter(
                 versions,
                 1_000,
-                Arc::new(MockSystemClock::with_time(1_000)),
-                None,
                 None,
                 false,
-                Arc::new(SequenceTracker::new()),
                 Some(&metrics),
             );
 
@@ -1286,11 +1035,8 @@ mod tests {
             let filtered = RetentionIterator::<TestIterator>::apply_retention_filter(
                 versions,
                 1_000,
-                Arc::new(MockSystemClock::with_time(1_000)),
-                None,
                 None,
                 false,
-                Arc::new(SequenceTracker::new()),
                 Some(&metrics),
             );
 
@@ -1308,14 +1054,7 @@ mod tests {
             versions.insert(Reverse(value_entry.seq), value_entry);
 
             let filtered = RetentionIterator::<TestIterator>::apply_retention_filter(
-                versions,
-                1_000,
-                Arc::new(MockSystemClock::with_time(1_000)),
-                None,
-                None,
-                false,
-                Arc::new(SequenceTracker::new()),
-                None,
+                versions, 1_000, None, false, None,
             );
 
             // merge dropped, value kept as tombstone
