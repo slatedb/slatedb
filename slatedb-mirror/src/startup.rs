@@ -115,6 +115,26 @@ pub(crate) async fn recover(vfs: &dyn Vfs, root: &StdPath) -> Result<Recovered, 
     Ok(Recovered { entries, prefixes })
 }
 
+/// Opens the data files of the recovered local copies ahead of their first
+/// reads, newest first. A VFS that keeps a bounded number of files open keeps
+/// the newest ones, which are the likeliest to be read soon.
+pub(crate) async fn warm(vfs: &dyn Vfs, root: &StdPath, entries: &HashMap<Path, Arc<LocalObject>>) {
+    let mut objects: Vec<_> = entries.values().collect();
+    objects.sort_by(|a, b| b.meta.last_modified.cmp(&a.meta.last_modified));
+    stream::iter(objects)
+        .for_each_concurrent(IO_CONCURRENCY, |object| async move {
+            let path = root.join(LocalName::new(&object.meta.location).object_file_name);
+            if let Err(err) = vfs.warm(&path).await {
+                warn!(
+                    "failed to warm mirror file [path={}, error={}]",
+                    path.display(),
+                    err
+                );
+            }
+        })
+        .await;
+}
+
 /// Checks one data/`.meta` pair found by [`recover`].
 ///
 /// `data` is the data file's name, `size` is its length on disk, and `bytes`
