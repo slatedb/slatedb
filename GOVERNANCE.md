@@ -40,8 +40,9 @@ community, including:
 
 When a sufficient trust is built through participating in the SlateDB community in this way,
 any current SlateDB committer can add your GitHub handle to
-[.github/VOUCHED.td](.github/VOUCHED.td). A GitHub workflow closes pull requests from authors who
-are not in this file.
+[.github/VOUCHED.td](.github/VOUCHED.td) (either via pull request, or by commenting `vouch` or
+`vouch @handle` on a GitHub issue). A GitHub workflow closes pull requests from authors who are
+not in this file.
 
 # SlateDB Committers
 
@@ -80,7 +81,6 @@ SlateDB's board members are:
 * Chris Riccomini (criccomini) - leader
 * Li Yazhou (flaneur2020)
 
-Board votes must be conducted on a Github issue, Github pull request, or Discord post. Votes
-are represented as -1 and +1, with '-1' meaning 'no' and '+1' meaning 'yes.' Voting must be open
+Board votes must be conducted on a Github issue, Github pull request, or Discord post. Votes are represented as -1 and +1, with '-1' meaning 'no' and '+1' meaning 'yes.' Voting must be open
 for at least 1 week or until all members have voted, whichever comes first. A vote passes if a
 majority of the votes placed are in favor. On a tie, the leader of the board has a double vote.
