@@ -5168,11 +5168,14 @@ mod tests {
             let compactor_options = Arc::new(compactor_options());
             let worker_options = Arc::new(CompactionWorkerOptions::default());
             let options = db_options(None);
+            // Share a clock so output SST timestamps cannot precede their compaction job timestamps.
+            let system_clock = Arc::new(DefaultSystemClock::new());
 
             let os = Arc::new(InMemory::new());
             let (manifest_store, compactions_store, table_store) = build_test_stores(os.clone());
             let db = Db::builder(PATH, os.clone())
                 .with_settings(options.clone())
+                .with_system_clock(system_clock.clone())
                 .build()
                 .await
                 .unwrap();
@@ -5195,7 +5198,7 @@ mod tests {
                     rand: rand.clone(),
                     stats: compactor_stats.clone(),
                     worker_stats: stats::WorkerStats::new(&recorder, "test-worker"),
-                    clock: Arc::new(DefaultSystemClock::new()),
+                    clock: system_clock.clone(),
                     merge_operator: None,
                     #[cfg(feature = "compaction_filters")]
                     compaction_filter_supplier: None,
@@ -5208,16 +5211,15 @@ mod tests {
                 scheduler.clone(),
                 rand.clone(),
                 compactor_stats.clone(),
-                Arc::new(DefaultSystemClock::new()),
+                system_clock.clone(),
                 MetricsRecorderHelper::noop(),
                 None,
             )
             .await
             .unwrap();
-            let manifest =
-                StoredManifest::load(manifest_store.clone(), Arc::new(DefaultSystemClock::new()))
-                    .await
-                    .unwrap();
+            let manifest = StoredManifest::load(manifest_store.clone(), system_clock)
+                .await
+                .unwrap();
             Self {
                 manifest,
                 manifest_store,
