@@ -51,8 +51,60 @@ pub(crate) struct BencherArgs {
 #[derive(Subcommand, Clone)]
 pub(crate) enum BencherCommands {
     Db(BenchmarkDbArgs),
+    Scan(BenchmarkScanArgs),
     Compaction(BenchmarkCompactionArgs),
     Transaction(BenchmarkTransactionArgs),
+}
+
+#[derive(Args, Clone)]
+#[command(about = "Benchmark forward range scans from random keys.")]
+pub(crate) struct BenchmarkScanArgs {
+    #[clap(flatten)]
+    pub(crate) db_args: DbArgs,
+
+    #[arg(long, help = "Stop starting scans after this many seconds.")]
+    pub(crate) duration: Option<u32>,
+
+    #[arg(long, help = "The total number of scans across all workers.")]
+    pub(crate) num_scans: Option<u64>,
+
+    #[arg(
+        long,
+        help = "The number of concurrent workers.",
+        default_value_t = 4,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub(crate) concurrency: u32,
+
+    #[arg(
+        long,
+        help = "The length of each random start key.",
+        default_value_t = 16,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub(crate) key_len: u32,
+
+    #[arg(
+        long,
+        help = "The maximum number of rows to read per scan.",
+        default_value_t = 100,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub(crate) scan_length: u64,
+
+    #[arg(
+        long,
+        help = "The target bytes per SST fetch. A value of 1 reads one block.",
+        default_value_t = 1
+    )]
+    pub(crate) read_ahead_bytes: usize,
+
+    #[arg(
+        long,
+        help = "The random seed for scan start keys.",
+        default_value_t = 42
+    )]
+    pub(crate) seed: u64,
 }
 
 #[derive(Args, Clone)]
