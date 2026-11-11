@@ -530,13 +530,19 @@ already been retried.
 
 `observe` failures are handled by call type:
 
-- **Reads.** The error goes to the caller. Nothing was committed, so a caller
-  that retries the read runs `observe` again.
-- **Writes.** The mirror returns `WriteCommitted`. The object is durable, but
-  the policy's follow-up work didn't finish, so the caller has to treat the
-  write as having happened. SlateDB treats it as fatal: `Db` and the compactor
-  close with a `Data` error, the same as local disk errors. On reopen, the
-  manifest is read again and `observe` runs again.
+- **Reads.** The mirror returns `MirrorError::Policy`, with the policy's error
+  as its source. This error can come from a different object than the one
+  that the caller read. For example, `observe` of a manifest fails with
+  `NotFound` when an SST that the manifest references is missing. If the
+  mirror returned that `NotFound` unchanged, the caller would think that the
+  manifest is missing. `Policy` is not retryable, because the mirror already
+  retried the remote calls in `observe`. Nothing was written, so the caller
+  can safely read the object again, and that read runs `observe` again.
+- **Writes.** The mirror returns `MirrorError::WriteCommitted`. The object is
+  durable, but the policy's follow-up work didn't finish, so the caller has to
+  treat the write as having happened. SlateDB treats it as fatal: `Db` and the
+  compactor close with a `Data` error, the same as local disk errors. On reopen,
+  the manifest is read again and `observe` runs again.
 
 ### Ordering
 
@@ -1158,6 +1164,9 @@ There is, however, an open question around the CPU cost of computing the MD5 pre
 
 ## Updates
 
+- An `observe` error on a read becomes `MirrorError::Policy`. Before, the
+  mirror returned it unchanged, so a missing SST looked like a missing
+  manifest ([#2255](https://github.com/slatedb/slatedb/issues/2255)).
 - Aligned with the `SlateDbMirrorPolicy` implementation. The segment
   predicate receives a `VersionedManifest` instead of `ManifestCore`, which is
   crate-private. Added `with_compactions_poll_interval` and
