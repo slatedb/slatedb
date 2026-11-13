@@ -18,6 +18,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{DeterministicVfs, Operation, StreamDirection, Toxic, ToxicKind};
 
+const KIB_1: usize = 1024;
 const KIB_8: usize = 8 * 1024;
 const MIB_1: usize = 1024 * 1024;
 const MIB_500: usize = 500 * MIB_1;
@@ -154,6 +155,33 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
         checkpoint_lifetime: CompactorOptions::default().checkpoint_lifetime,
         worker_heartbeat_timeout,
         object_store_max_retries: None,
+    }
+}
+
+/// Enables incremental compaction in `options` and changes the settings that
+/// make incremental commits happen in a short run:
+///
+/// - The worker rolls small output SSTs, so a running compaction stores
+///   output before it finishes.
+/// - The worker heartbeats often. A heartbeat publishes the stored output to
+///   `.compactions`, and the coordinator commits only published output.
+/// - The coordinator polls often, so it sees a running compaction with
+///   published output.
+pub fn enable_incremental_compaction(options: &mut CompactorOptions, rng: &mut impl Rng) {
+    const MAX_INTERVAL: Duration = Duration::from_millis(20);
+    let mut interval = || rng.random_range(Duration::from_millis(1)..=MAX_INTERVAL);
+    options.enable_experimental_incremental_compaction = true;
+    options.poll_interval = interval();
+    options.commit_compacted_interval = interval();
+    if let Some(worker) = options.worker.as_mut() {
+        worker.heartbeat_interval = interval();
+        worker.compactions_poll_interval = interval();
+        worker.max_sst_size = rng.random_range(KIB_1..=KIB_8);
+        // Derive the timeout as `build_settings_compactor` does.
+        let max_worker_heartbeat = worker
+            .heartbeat_interval
+            .max(worker.compactions_poll_interval);
+        options.worker_heartbeat_timeout = max_worker_heartbeat * rng.random_range(3..=10);
     }
 }
 
