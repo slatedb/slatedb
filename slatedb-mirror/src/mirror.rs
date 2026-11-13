@@ -566,8 +566,8 @@ impl ObjectStoreMirrorBuilder {
     }
 
     /// Validates the configuration, acquires the cache-directory lock, cleans
-    /// invalid local entries, warms the remaining local copies, and spawns the
-    /// remote scan and `MirrorPolicy::run`.
+    /// invalid local entries, and spawns the warm of the remaining local
+    /// copies, the remote scan, and `MirrorPolicy::run`.
     pub async fn build(self) -> object_store::Result<Arc<ObjectStoreMirror>> {
         let invalid = |message: &str| -> object_store::Error {
             MirrorError::InvalidConfig {
@@ -594,7 +594,6 @@ impl ObjectStoreMirrorBuilder {
             .await
             .map_err(local_error)?;
         let recovered = recover(self.vfs.as_ref(), &self.local_dir).await?;
-        warm(self.vfs.as_ref(), &self.local_dir, &recovered.entries).await;
 
         let inner = Arc::new(Inner::new(
             self.local_dir,
@@ -608,6 +607,11 @@ impl ObjectStoreMirrorBuilder {
             recovered.prefixes,
             self.download_concurrency,
             lock,
+        ));
+        inner.spawn(warm(
+            Arc::clone(&inner.vfs),
+            inner.root.clone(),
+            &inner.entries.lock(),
         ));
         if let Some(interval) = self.remote_scan_interval {
             inner.spawn(scan::run(Arc::clone(&inner), interval));
@@ -1732,8 +1736,8 @@ mod tests {
             .iter()
             .map(|path| root.join(data_file(path)))
             .collect();
-        let warmed: BTreeSet<_> = vfs.warmed.lock().iter().cloned().collect();
-        assert_eq!(warmed, expected);
+        // The warm runs in the background after `build` returns.
+        eventually(|| vfs.warmed.lock().iter().cloned().collect::<BTreeSet<_>>() == expected).await;
     }
 
     #[tokio::test]
