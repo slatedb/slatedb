@@ -26,6 +26,8 @@ internal path dependency rather than from crates.io.
   compactor, shutdown, and bank-transfer/auditor actors
 - `DeterministicLocalFilesystem`: filesystem-backed `ObjectStore` with stable
   metadata, in-memory attribute preservation, and deterministic listing behavior
+- `DeterministicVfs`: in-memory `Vfs` for the RFC 0034 local mirror, because
+  `StdVfs` runs its calls on Tokio's blocking pool
 - `FailingObjectStore`: harness-installed `ObjectStore` wrapper that injects
   deterministic latency, bandwidth, reset-peer, slow-close, and synthetic HTTP
   failures
