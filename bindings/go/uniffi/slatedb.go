@@ -11172,6 +11172,10 @@ func (_ FfiDestroyerCompactorStateView) Destroy(value CompactorStateView) {
 type DbStatus struct {
 	// Highest durable sequence number observed by this handle.
 	DurableSeq uint64
+	// Highest committed sequence number: every write that a read can see
+	// without requiring durability is at or below it. Never less than
+	// `durable_seq`; a reader reports its durable sequence number.
+	CommittedSeq uint64
 	// Present once the handle has been closed.
 	CloseReason *CloseReason
 	// All segment prefixes (RFC-0024) as of this snapshot: those in the
@@ -11183,6 +11187,7 @@ type DbStatus struct {
 
 func (r *DbStatus) Destroy() {
 	FfiDestroyerUint64{}.Destroy(r.DurableSeq)
+	FfiDestroyerUint64{}.Destroy(r.CommittedSeq)
 	FfiDestroyerOptionalCloseReason{}.Destroy(r.CloseReason)
 	FfiDestroyerSequenceSegmentPrefix{}.Destroy(r.Segments)
 }
@@ -11197,6 +11202,7 @@ func (c FfiConverterDbStatus) Lift(rb RustBufferI) DbStatus {
 
 func (c FfiConverterDbStatus) Read(reader io.Reader) DbStatus {
 	return DbStatus{
+		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterOptionalCloseReasonINSTANCE.Read(reader),
 		FfiConverterSequenceSegmentPrefixINSTANCE.Read(reader),
@@ -11213,6 +11219,7 @@ func (c FfiConverterDbStatus) LowerExternal(value DbStatus) ExternalCRustBuffer 
 
 func (c FfiConverterDbStatus) Write(writer io.Writer, value DbStatus) {
 	FfiConverterUint64INSTANCE.Write(writer, value.DurableSeq)
+	FfiConverterUint64INSTANCE.Write(writer, value.CommittedSeq)
 	FfiConverterOptionalCloseReasonINSTANCE.Write(writer, value.CloseReason)
 	FfiConverterSequenceSegmentPrefixINSTANCE.Write(writer, value.Segments)
 }
