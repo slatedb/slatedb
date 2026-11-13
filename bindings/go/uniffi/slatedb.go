@@ -13099,6 +13099,8 @@ type VersionedManifest struct {
 	L0 []SsTableView
 	// Current compacted sorted runs (root `prefix=""` tree).
 	Compacted []SortedRun
+	// Segment extractor identity persisted at the first open.
+	SegmentExtractorName *string
 	// Per-segment LSM state for named (non-empty-prefix) segments.
 	Segments []Segment
 	// Next WAL SST ID to assign.
@@ -13127,6 +13129,7 @@ func (r *VersionedManifest) Destroy() {
 	FfiDestroyerOptionalString{}.Destroy(r.LastCompactedL0SstId)
 	FfiDestroyerSequenceSsTableView{}.Destroy(r.L0)
 	FfiDestroyerSequenceSortedRun{}.Destroy(r.Compacted)
+	FfiDestroyerOptionalString{}.Destroy(r.SegmentExtractorName)
 	FfiDestroyerSequenceSegment{}.Destroy(r.Segments)
 	FfiDestroyerUint64{}.Destroy(r.NextWalSstId)
 	FfiDestroyerUint64{}.Destroy(r.ReplayAfterWalId)
@@ -13156,6 +13159,7 @@ func (c FfiConverterVersionedManifest) Read(reader io.Reader) VersionedManifest 
 		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterSequenceSsTableViewINSTANCE.Read(reader),
 		FfiConverterSequenceSortedRunINSTANCE.Read(reader),
+		FfiConverterOptionalStringINSTANCE.Read(reader),
 		FfiConverterSequenceSegmentINSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterUint64INSTANCE.Read(reader),
@@ -13185,6 +13189,7 @@ func (c FfiConverterVersionedManifest) Write(writer io.Writer, value VersionedMa
 	FfiConverterOptionalStringINSTANCE.Write(writer, value.LastCompactedL0SstId)
 	FfiConverterSequenceSsTableViewINSTANCE.Write(writer, value.L0)
 	FfiConverterSequenceSortedRunINSTANCE.Write(writer, value.Compacted)
+	FfiConverterOptionalStringINSTANCE.Write(writer, value.SegmentExtractorName)
 	FfiConverterSequenceSegmentINSTANCE.Write(writer, value.Segments)
 	FfiConverterUint64INSTANCE.Write(writer, value.NextWalSstId)
 	FfiConverterUint64INSTANCE.Write(writer, value.ReplayAfterWalId)
