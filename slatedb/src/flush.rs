@@ -8,7 +8,6 @@ use crate::mem_table::KVTable;
 use crate::merge_operator::{MergeOperatorIterator, MergeOperatorRequiredIterator};
 use crate::oracle::Oracle;
 use crate::read_trace::ReadTrace;
-use crate::reader::DbStateReader;
 use crate::retention_iterator::RetentionIterator;
 use crate::retrying_object_store::RetryingObjectStore;
 use crate::tablestore::EncodedSsTableWriter;
@@ -359,8 +358,6 @@ impl DbInner {
         imm_table: Arc<KVTable>,
         min_retention_seq: Option<u64>,
     ) -> Result<RetentionIterator<Box<dyn RowEntryIterator>>, SlateDBError> {
-        let state = self.state.read().view();
-
         let merge_iter = if let Some(merge_operator) = self.flush_merge_operator.clone() {
             Box::new(MergeOperatorIterator::new(
                 merge_operator,
@@ -375,12 +372,9 @@ impl DbInner {
         };
         let mut iter = RetentionIterator::new(
             merge_iter,
-            None,
             min_retention_seq,
             false,
             imm_table.last_tick(),
-            self.system_clock.clone(),
-            Arc::new(state.core().sequence_tracker.clone()),
             None,
         )
         .await?;
