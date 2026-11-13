@@ -46,8 +46,8 @@ pub const DEFAULT_DOWNLOAD_CONCURRENCY: usize = 8;
 /// The default for [`ObjectStoreMirrorBuilder::with_remote_scan_interval`].
 pub const DEFAULT_REMOTE_SCAN_INTERVAL: Duration = Duration::from_secs(600);
 
-/// Wraps a route error from the policy in `MirrorError::Policy`, unless it's
-/// already a mirror error.
+/// Wraps a route error or a read's `observe` error from the policy in
+/// `MirrorError::Policy`, unless it's already a mirror error.
 fn policy_error(err: object_store::Error) -> object_store::Error {
     if MirrorError::find(&err).is_some() {
         err
@@ -258,10 +258,14 @@ impl ObjectStoreMirror {
             Some(range) => range.as_range(bytes.len() as u64).map_err(range_error)?,
             None => 0..bytes.len() as u64,
         };
+        // An `observe` error can be about another object that `observe`
+        // fetched. Wrap it, so that an error like `NotFound` is not read as a
+        // missing `location`.
         inner
             .policy
             .observe(location, &bytes, &self.handle())
-            .await?;
+            .await
+            .map_err(policy_error)?;
         Ok(GetResult {
             payload: bytes_payload(bytes.slice(range.start as usize..range.end as usize)),
             meta,
@@ -1412,10 +1416,27 @@ mod tests {
         ));
         assert!(fixture.store.head(&manifest).await.is_ok());
 
-        // Reads return the policy's error unchanged.
+        // Reads wrap the policy's error.
         let err = fixture.mirror.get(&manifest).await.unwrap_err();
-        assert!(MirrorError::find(&err).is_none());
-        assert!(err.to_string().contains("observe failed"));
+        assert!(matches!(mirror_error(&err), MirrorError::Policy { .. }));
+        assert!(format!("{err:?}").contains("observe failed"));
+    }
+
+    #[tokio::test]
+    async fn should_not_report_missing_object_as_missing_observed_read() {
+        let fixture = Fixture::new().await;
+        fixture
+            .put_remote(MANIFEST, b"db/compacted/01A.sst\n")
+            .await;
+
+        let err = fixture.mirror.get(&Path::from(MANIFEST)).await.unwrap_err();
+        let MirrorError::Policy { source } = mirror_error(&err) else {
+            panic!("expected MirrorError::Policy, got {err:?}");
+        };
+        assert!(matches!(
+            source.downcast_ref::<object_store::Error>(),
+            Some(object_store::Error::NotFound { path, .. }) if path.contains(SST)
+        ));
     }
 
     #[tokio::test]
