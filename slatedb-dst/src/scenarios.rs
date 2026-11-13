@@ -14,10 +14,14 @@
 //! the clock differently, or executes different deterministic branches for the
 //! same seed, one of those post-run checks will diverge.
 //!
-//! Variants are configured by the fields of [`DeterministicScenario`] —
-//! e.g. enabling RFC-0024 segmentation by supplying a
-//! [`slatedb::PrefixExtractor`], in which case each workload actor's
-//! `{name}/N` keys route to a distinct segment.
+//! Each run also turns these features on or off at random with the seeded RNG.
+//! The seeds then cover all feature combinations, without one scenario for
+//! each combination:
+//! - RFC-0024 segmentation with [`FirstDelimiterPrefixExtractor`], so each
+//!   workload actor's `{name}/N` keys route to a distinct segment
+//! - incremental compaction, with the settings of
+//!   [`enable_incremental_compaction`] that make incremental commits likely
+//! - RFC-0034 local mirrors in front of the main object store
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,9 +30,9 @@ use chrono::{DateTime, Utc};
 use log::{error, info};
 use object_store::path::Path;
 use object_store::ObjectStore;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use slatedb::config::DurabilityLevel;
-use slatedb::{Db, DbRand, PrefixExtractor};
+use slatedb::{Db, DbRand};
 use slatedb_common::clock::{MockSystemClock, SystemClock};
 use tempfile::TempDir;
 use tracing::instrument;
@@ -37,8 +41,11 @@ use crate::actors::{
     CompactorActor, CompactorActorOptions, FlusherActor, ShutdownActor, WorkloadActor,
     WorkloadActorOptions, WorkloadMergeOperator,
 };
-use crate::utils::{build_settings, build_settings_compactor, build_toxic, dst_seeds};
-use crate::{DeterministicLocalFilesystem, Harness};
+use crate::utils::{
+    build_mirror_options, build_settings, build_settings_compactor, build_toxic, dst_seeds,
+    enable_incremental_compaction,
+};
+use crate::{DeterministicLocalFilesystem, FirstDelimiterPrefixExtractor, Harness};
 
 type ScenarioError = Box<dyn std::error::Error + Send + Sync>;
 type ScenarioResult<T> = Result<T, ScenarioError>;
@@ -52,6 +59,7 @@ type ScenarioResult<T> = Result<T, ScenarioError>;
 /// leave the harness in the same observable state (next root RNG value +
 /// current mock-clock time); a divergence indicates a non-deterministic
 /// code path in the harness or SlateDB.
+#[derive(Clone)]
 pub struct DeterministicScenario {
     /// Logical name used for the harness label and tempdir path prefix.
     pub name: &'static str,
@@ -61,10 +69,6 @@ pub struct DeterministicScenario {
     /// Mock-clock deadline (ms since the unix epoch) at which the
     /// shutdown actor cancels the simulation.
     pub shutdown_at_ms: i64,
-    /// Optional segment extractor. When `Some`, the scenario configures
-    /// the harness and `DbBuilder` for RFC-0024 segmentation; when
-    /// `None`, the scenario runs the unsegmented configuration.
-    pub segment_extractor: Option<Arc<dyn PrefixExtractor>>,
 }
 
 impl DeterministicScenario {
@@ -78,12 +82,7 @@ impl DeterministicScenario {
     /// against one another. The seed and core index are logged so a failing
     /// or panicking worker gives a direct reproduction handle.
     pub fn run(self) -> ScenarioResult<()> {
-        let DeterministicScenario {
-            name,
-            simulations,
-            shutdown_at_ms,
-            segment_extractor,
-        } = self;
+        let name = self.name;
         let num_cores = std::thread::available_parallelism()
             .map(|p| p.get())
             .unwrap_or(1);
@@ -94,20 +93,11 @@ impl DeterministicScenario {
             .enumerate()
             .map(|(core, seed)| {
                 info!("dst {name} seed [core={core}, seed={seed}]");
-                let extractor = segment_extractor.clone();
+                let scenario = self.clone();
                 (
                     core,
                     seed,
-                    std::thread::spawn(move || {
-                        run_seed_is_deterministic(
-                            name,
-                            core,
-                            seed,
-                            simulations,
-                            shutdown_at_ms,
-                            extractor,
-                        )
-                    }),
+                    std::thread::spawn(move || run_seed_is_deterministic(&scenario, core, seed)),
                 )
             })
             .collect::<Vec<_>>();
@@ -134,19 +124,16 @@ impl DeterministicScenario {
 /// same values. `core` is diagnostic context only; it identifies which
 /// worker thread owned the seed when reporting assertion failures.
 fn run_seed_is_deterministic(
-    name: &'static str,
+    scenario: &DeterministicScenario,
     core: usize,
     seed: u64,
-    simulations: u32,
-    shutdown_at_ms: i64,
-    segment_extractor: Option<Arc<dyn PrefixExtractor>>,
 ) -> ScenarioResult<()> {
+    let name = scenario.name;
     let mut expected_u64: Option<u64> = None;
     let mut expected_time: Option<DateTime<Utc>> = None;
 
-    for simulation_count in 0..simulations {
-        let (next_u64, next_time) =
-            run_seed_once(name, seed, shutdown_at_ms, segment_extractor.clone())?;
+    for simulation_count in 0..scenario.simulations {
+        let (next_u64, next_time) = run_seed_once(scenario, seed)?;
 
         if let Some(expected_u64) = expected_u64 {
             assert_eq!(
@@ -179,13 +166,12 @@ fn run_seed_is_deterministic(
 /// the simulation. Returning the next root RNG value and current mock-clock
 /// time gives callers a compact fingerprint of the deterministic execution
 /// path.
-#[instrument(level = "debug", skip_all, fields(scenario = name, seed = seed))]
+#[instrument(level = "debug", skip_all, fields(scenario = scenario.name, seed = seed))]
 fn run_seed_once(
-    name: &'static str,
+    scenario: &DeterministicScenario,
     seed: u64,
-    shutdown_at_ms: i64,
-    segment_extractor: Option<Arc<dyn PrefixExtractor>>,
 ) -> ScenarioResult<(u64, DateTime<Utc>)> {
+    let name = scenario.name;
     let tempdir = TempDir::new()?;
     let main_dir = tempdir.path().join("main");
     let wal_dir = tempdir.path().join("wal");
@@ -193,6 +179,15 @@ fn run_seed_once(
     std::fs::create_dir_all(&wal_dir)?;
 
     let rand = Arc::new(DbRand::new(seed));
+    let (segments, incremental_compaction, mirror) = {
+        let mut rng = rand.rng();
+        (
+            rng.random_bool(0.5),
+            rng.random_bool(0.5),
+            rng.random_bool(0.5),
+        )
+    };
+    info!("dst {name} features [seed={seed}, segments={segments}, incremental_compaction={incremental_compaction}, mirror={mirror}]");
     let system_clock = Arc::new(MockSystemClock::new());
     let main_store: Arc<dyn ObjectStore> =
         Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?);
@@ -202,7 +197,13 @@ fn run_seed_once(
         read_durability: DurabilityLevel::Remote,
         ..WorkloadActorOptions::default()
     };
-    let compactor_options = build_settings_compactor(&mut *rand.rng());
+    let mut compactor_options = build_settings_compactor(&mut *rand.rng());
+    if incremental_compaction {
+        enable_incremental_compaction(&mut compactor_options, &mut *rand.rng());
+    } else {
+        compactor_options.enable_experimental_incremental_compaction = false;
+    }
+    let mirror_options = mirror.then(|| build_mirror_options(&mut *rand.rng()));
     let mut harness = Harness::new(name, seed, move |ctx| async move {
         let failures = ctx.failure_controller();
         for index in 0..10 {
@@ -243,8 +244,14 @@ fn run_seed_once(
     .with_wal_object_store(wal_store)
     .with_merge_operator(Arc::new(WorkloadMergeOperator));
 
-    if let Some(extractor) = segment_extractor {
-        harness = harness.with_segment_extractor(extractor);
+    if segments {
+        harness = harness.with_segment_extractor(Arc::new(FirstDelimiterPrefixExtractor));
+    }
+    if let Some(options) = mirror_options {
+        harness = harness.with_mirror_fn(move |name, store, clock| {
+            let options = options.clone();
+            async move { options.build(name, store, clock).await }
+        });
     }
 
     let harness = harness
@@ -260,7 +267,7 @@ fn run_seed_once(
                 compactor_options,
             })?,
         )
-        .actor("shutdown", ShutdownActor::new(shutdown_at_ms)?);
+        .actor("shutdown", ShutdownActor::new(scenario.shutdown_at_ms)?);
 
     harness.run()?;
 

@@ -436,7 +436,8 @@ RUSTFLAGS="--cfg dst --cfg tokio_unstable" \
 cargo test -p slatedb-dst --test determinism
 ```
 
-The scenario tests (`determinism`, `segments`) run one OS thread per listed
-seed; the `bank` test runs the listed seeds serially. The variable applies to
+The `determinism` test runs one OS thread per listed seed. The seed also picks
+the features of the run, such as the mirror. The `bank` test runs the listed
+seeds serially. The variable applies to
 every DST test in the invocation, so target one test binary with
 `--test <name>` when reproducing a single failure.

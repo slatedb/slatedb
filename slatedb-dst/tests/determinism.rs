@@ -14,6 +14,9 @@
 //! If either the harness or SlateDB consumes randomness differently, advances
 //! the clock differently, or executes different deterministic branches for the
 //! same seed, one of those post-run checks will diverge.
+//!
+//! Each seed turns segmentation, incremental compaction, and the local mirror
+//! on or off at random. See [`DeterministicScenario`].
 #![cfg(dst)]
 
 use rstest::rstest;
@@ -23,7 +26,7 @@ type TestError = Box<dyn std::error::Error + Send + Sync>;
 type TestResult<T> = Result<T, TestError>;
 
 #[rstest]
-#[cfg_attr(not(slow), case::regular(4, 200))]
+#[cfg_attr(not(slow), case::regular(4, 1000))]
 #[cfg_attr(slow, case::slow(2, 4_000_000))]
 fn test_dst_is_deterministic(
     #[case] simulations: u32,
@@ -33,7 +36,6 @@ fn test_dst_is_deterministic(
         name: "determinism",
         simulations,
         shutdown_at_ms,
-        segment_extractor: None,
     }
     .run()
 }
