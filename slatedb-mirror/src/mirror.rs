@@ -36,7 +36,7 @@ use crate::layout::{LocalName, LocalObject, LOCK_FILE};
 use crate::multipart::{self, committed};
 use crate::ordering::OpKind;
 use crate::retry::Retry;
-use crate::startup::recover;
+use crate::startup::{recover, warm};
 use crate::{scan, MirrorError, MirrorHandle, MirrorPolicy, MultipartRoute, ReadRoute, WriteRoute};
 use slatedb_common::vfs::{StdVfs, Vfs};
 
@@ -570,8 +570,8 @@ impl ObjectStoreMirrorBuilder {
     }
 
     /// Validates the configuration, acquires the cache-directory lock, cleans
-    /// invalid local entries, and spawns the remote scan and
-    /// `MirrorPolicy::run`.
+    /// invalid local entries, and spawns the warm of the remaining local
+    /// copies, the remote scan, and `MirrorPolicy::run`.
     pub async fn build(self) -> object_store::Result<Arc<ObjectStoreMirror>> {
         let invalid = |message: &str| -> object_store::Error {
             MirrorError::InvalidConfig {
@@ -611,6 +611,11 @@ impl ObjectStoreMirrorBuilder {
             recovered.prefixes,
             self.download_concurrency,
             lock,
+        ));
+        inner.spawn(warm(
+            Arc::clone(&inner.vfs),
+            inner.root.clone(),
+            &inner.entries.lock(),
         ));
         if let Some(interval) = self.remote_scan_interval {
             inner.spawn(scan::run(Arc::clone(&inner), interval));
@@ -856,6 +861,10 @@ mod tests {
 
         async fn remove(&self, path: &StdPath) -> std::io::Result<()> {
             self.inner.remove(path).await
+        }
+
+        async fn warm(&self, path: &StdPath) -> std::io::Result<bool> {
+            self.inner.warm(path).await
         }
     }
 
@@ -1658,6 +1667,98 @@ mod tests {
             "persisted"
         );
         assert_eq!(store.gets.load(Ordering::SeqCst), 0);
+    }
+
+    /// A [`StdVfs`] that records the files it warms.
+    #[derive(Debug, Default)]
+    struct WarmRecordingVfs {
+        inner: StdVfs,
+        warmed: Mutex<Vec<PathBuf>>,
+    }
+
+    #[async_trait]
+    impl Vfs for WarmRecordingVfs {
+        async fn create_dir_all(&self, path: &StdPath) -> std::io::Result<()> {
+            self.inner.create_dir_all(path).await
+        }
+        async fn lock(&self, path: &StdPath) -> std::io::Result<Box<dyn VfsLock>> {
+            self.inner.lock(path).await
+        }
+        async fn list(&self, dir: &StdPath) -> std::io::Result<Vec<VfsEntry>> {
+            self.inner.list(dir).await
+        }
+        async fn read_range(
+            &self,
+            path: &StdPath,
+            range: std::ops::Range<u64>,
+        ) -> std::io::Result<Bytes> {
+            self.inner.read_range(path, range).await
+        }
+        async fn read(&self, path: &StdPath) -> std::io::Result<Bytes> {
+            self.inner.read(path).await
+        }
+        async fn create(&self, path: &StdPath) -> std::io::Result<Box<dyn VfsWriter>> {
+            self.inner.create(path).await
+        }
+        async fn rename(&self, from: &StdPath, to: &StdPath) -> std::io::Result<()> {
+            self.inner.rename(from, to).await
+        }
+        async fn remove(&self, path: &StdPath) -> std::io::Result<()> {
+            self.inner.remove(path).await
+        }
+        async fn warm(&self, path: &StdPath) -> std::io::Result<bool> {
+            self.warmed.lock().push(path.to_path_buf());
+            self.inner.warm(path).await
+        }
+    }
+
+    #[tokio::test]
+    async fn should_warm_recovered_local_copies_after_restart() {
+        let fixture = Fixture::new().await;
+        eventually(|| fixture.policy.run_started.load(Ordering::SeqCst)).await;
+        for path in [SST, SST2] {
+            fixture
+                .mirror
+                .put(&Path::from(path), PutPayload::from_static(b"persisted"))
+                .await
+                .unwrap();
+        }
+        let Fixture {
+            _dir,
+            root,
+            store,
+            policy,
+            mirror,
+        } = fixture;
+        drop(mirror);
+        eventually(|| policy.run_stopped.load(Ordering::SeqCst)).await;
+
+        let vfs = Arc::new(WarmRecordingVfs::default());
+        let mut reopened = None;
+        for _ in 0..100 {
+            let built = ObjectStoreMirror::builder(
+                &root,
+                Arc::clone(&store) as Arc<dyn ObjectStore>,
+                Arc::clone(&policy) as Arc<dyn MirrorPolicy>,
+            )
+            .with_vfs(Arc::clone(&vfs) as Arc<dyn Vfs>)
+            .with_remote_scan_interval(None)
+            .build()
+            .await;
+            if let Ok(mirror) = built {
+                reopened = Some(mirror);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let _mirror = reopened.expect("mirror reopened");
+
+        let expected: BTreeSet<_> = [SST, SST2]
+            .iter()
+            .map(|path| root.join(data_file(path)))
+            .collect();
+        // The warm runs in the background after `build` returns.
+        eventually(|| vfs.warmed.lock().iter().cloned().collect::<BTreeSet<_>>() == expected).await;
     }
 
     #[tokio::test]

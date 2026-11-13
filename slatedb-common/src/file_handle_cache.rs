@@ -52,6 +52,15 @@ impl FileHandleCache {
         self.len() == 0
     }
 
+    /// Returns the number of handles the cache can retain.
+    pub fn capacity(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("lock should not be poisoned")
+            .cap()
+            .get()
+    }
+
     /// Look up a cached file handle, or open the file and cache it.
     /// Returns `Ok(None)` if the file does not exist on disk.
     /// The returned `Arc` keeps the file open after its cache entry is evicted.
@@ -74,18 +83,38 @@ impl FileHandleCache {
         &self,
         path: &std::path::Path,
     ) -> Result<Arc<std::fs::File>, std::io::Error> {
-        let mut cache = self.inner.lock().expect("lock should not be poisoned");
-        if let Some(handle) = cache.get(path) {
-            if Self::is_valid(handle, path) {
-                return Ok(handle.clone());
+        // Copy the handle out of the cache, so that `is_valid` runs without the
+        // lock. Every lookup waits for a syscall that runs with the lock held.
+        let cached = self
+            .inner
+            .lock()
+            .expect("lock should not be poisoned")
+            .get(path)
+            .cloned();
+        if let Some(handle) = cached {
+            if Self::is_valid(&handle, path) {
+                return Ok(handle);
             }
-            // Stale entry — remove it so we reopen below.
-            cache.pop(path);
+            // Stale entry, so remove it and open the path again below.
+            self.inner
+                .lock()
+                .expect("lock should not be poisoned")
+                .pop(path);
         }
 
+        // Open the file without the lock, for the same reason. An `open` can
+        // take tens of microseconds.
+        //
+        // A delete or a replace can run between this `open` and the `push`
+        // below. Then the cache keeps a handle to an unlinked file. On Unix,
+        // the next hit finds that the file is unlinked and opens the path again.
+        // If two threads open the same path, the second `push` replaces the
+        // first.
         let handle = Arc::new(std::fs::File::open(path)?);
-
-        cache.push(path.to_path_buf(), handle.clone());
+        self.inner
+            .lock()
+            .expect("lock should not be poisoned")
+            .push(path.to_path_buf(), handle.clone());
         Ok(handle)
     }
 
