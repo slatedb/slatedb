@@ -859,7 +859,7 @@ mod tests {
             self.inner.remove(path).await
         }
 
-        async fn warm(&self, path: &StdPath) -> std::io::Result<()> {
+        async fn warm(&self, path: &StdPath) -> std::io::Result<bool> {
             self.inner.warm(path).await
         }
     }
@@ -1685,7 +1685,7 @@ mod tests {
         async fn remove(&self, path: &StdPath) -> std::io::Result<()> {
             self.inner.remove(path).await
         }
-        async fn warm(&self, path: &StdPath) -> std::io::Result<()> {
+        async fn warm(&self, path: &StdPath) -> std::io::Result<bool> {
             self.warmed.lock().push(path.to_path_buf());
             self.inner.warm(path).await
         }

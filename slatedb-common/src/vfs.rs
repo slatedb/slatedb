@@ -62,9 +62,10 @@ pub trait Vfs: Debug + Send + Sync + 'static {
     /// doesn't exist.
     async fn remove(&self, path: &Path) -> io::Result<()>;
 
-    /// Prepares `path` for reads that are likely to come soon. Implementations
-    /// that don't need a warmup return `Ok(())`.
-    async fn warm(&self, path: &Path) -> io::Result<()>;
+    /// Prepares `path` for reads that are likely to come soon. Returns `false`
+    /// if the VFS takes no more files to warm, so the caller can stop.
+    /// Implementations that don't need a warmup return `Ok(false)`.
+    async fn warm(&self, path: &Path) -> io::Result<bool>;
 }
 
 /// Writes a file created by [`Vfs::create`], in order.
@@ -221,10 +222,10 @@ impl Vfs for StdVfs {
         .await?
     }
 
-    async fn warm(&self, path: &Path) -> io::Result<()> {
+    async fn warm(&self, path: &Path) -> io::Result<bool> {
         // A full cache would evict a handle that a read opened.
         if self.file_handle_cache.len() >= self.file_handle_cache.capacity() {
-            return Ok(());
+            return Ok(false);
         }
         let path = path.to_path_buf();
         let file_handle_cache = self.file_handle_cache.clone();
@@ -233,10 +234,10 @@ impl Vfs for StdVfs {
         // worker.
         #[allow(clippy::disallowed_methods)]
         tokio::task::spawn_blocking(move || match file_handle_cache.try_get_or_open(&path) {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(true),
             // The file can be removed after the caller chose to warm it. Then
             // no read comes for it, so there is nothing to prepare.
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(true),
             Err(err) => Err(err),
         })
         .await?
@@ -306,11 +307,11 @@ mod tests {
             std::fs::write(&path, name).unwrap();
             path
         });
-        for path in &paths {
-            vfs.warm(path).await.unwrap();
-        }
+        assert!(vfs.warm(&dir.path().join("missing")).await.unwrap());
+        assert!(vfs.warm(&paths[0]).await.unwrap());
+        assert!(vfs.warm(&paths[1]).await.unwrap());
+        assert!(!vfs.warm(&paths[2]).await.unwrap());
         assert_eq!(vfs.file_handle_cache.len(), 2);
-        vfs.warm(&dir.path().join("missing")).await.unwrap();
         assert_eq!(vfs.read_range(&paths[2], 0..1).await.unwrap(), "c");
     }
 

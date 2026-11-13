@@ -119,7 +119,7 @@ pub(crate) async fn recover(vfs: &dyn Vfs, root: &StdPath) -> Result<Recovered, 
 /// Returns a future that opens the data files of the recovered local copies
 /// ahead of their first reads, newest first. A VFS that keeps a bounded number
 /// of files open keeps the newest ones, which are the likeliest to be read
-/// soon.
+/// soon. Stops once the VFS takes no more files.
 pub(crate) fn warm(
     vfs: Arc<dyn Vfs>,
     root: PathBuf,
@@ -128,19 +128,24 @@ pub(crate) fn warm(
     let mut objects: Vec<_> = entries.values().cloned().collect();
     async move {
         objects.sort_by(|a, b| b.meta.last_modified.cmp(&a.meta.last_modified));
-        let (vfs, root) = (vfs.as_ref(), root.as_path());
-        stream::iter(objects)
-            .for_each_concurrent(IO_CONCURRENCY, |object| async move {
-                let path = root.join(LocalName::new(&object.meta.location).object_file_name);
-                if let Err(err) = vfs.warm(&path).await {
-                    warn!(
-                        "failed to warm mirror file [path={}, error={}]",
-                        path.display(),
-                        err
-                    );
-                }
-            })
-            .await;
+        let vfs = vfs.as_ref();
+        let paths = objects
+            .into_iter()
+            .map(|object| root.join(LocalName::new(&object.meta.location).object_file_name));
+        let mut warms = stream::iter(paths)
+            .map(|path| async move { (vfs.warm(&path).await, path) })
+            .buffer_unordered(IO_CONCURRENCY);
+        while let Some((result, path)) = warms.next().await {
+            match result {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(err) => warn!(
+                    "failed to warm mirror file [path={}, error={}]",
+                    path.display(),
+                    err
+                ),
+            }
+        }
     }
 }
 
