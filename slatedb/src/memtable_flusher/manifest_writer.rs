@@ -1262,7 +1262,7 @@ mod tests {
     use crate::checkpoint::{
         CheckpointHandle, CheckpointLifecycle, CheckpointRequest, CheckpointResult,
     };
-    use crate::config::{CheckpointOptions, Settings};
+    use crate::config::{CheckpointOptions, EpochClaim, Settings};
     use crate::db::DbInner;
     use crate::db_status::{ClosedResultWriter, DbStatusManager};
     use crate::error::SlateDBError;
@@ -1703,7 +1703,7 @@ mod tests {
             stored_manifest,
             Duration::from_secs(300),
             Arc::new(DefaultSystemClock::new()),
-            None,
+            EpochClaim::Increment,
         )
         .await
         .unwrap();
@@ -1729,7 +1729,7 @@ mod tests {
             stored_manifest,
             Duration::from_secs(300),
             Arc::new(DefaultSystemClock::new()),
-            None,
+            EpochClaim::Increment,
         )
         .await
         .unwrap()
