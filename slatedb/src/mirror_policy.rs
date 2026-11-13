@@ -770,7 +770,7 @@ mod tests {
     use crate::manifest::{ExternalDb, LsmTreeState, ManifestCore, Segment};
     use crate::object_store_tag::TableStoreKind;
     use crate::subcompaction::Subcompaction;
-    use crate::{CloneSourceSpec, Db, DbReader, DbReaderMode};
+    use crate::{CloneSourceSpec, Db, DbReader, DbReaderMode, ErrorKind};
 
     const ROOT: &str = "db";
 
@@ -1436,6 +1436,47 @@ mod tests {
 
         reader.close().await.unwrap();
         db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_read_manifest_fails_when_sst_is_missing_remotely() {
+        let remote: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(ROOT, Arc::clone(&remote))
+            .build()
+            .await
+            .unwrap();
+        db.put(b"a", b"1").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+        let ssts = latest_ssts(&remote, ROOT).await;
+        for sst in &ssts {
+            remote.delete(sst).await.unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = ObjectStoreMirror::builder(
+            dir.path(),
+            Arc::clone(&remote),
+            SlateDbMirrorPolicy::builder().build(),
+        )
+        .with_remote_scan_interval(None)
+        .build()
+        .await
+        .unwrap();
+        let admin = Admin::builder(ROOT, mirror as Arc<dyn ObjectStore>).build();
+        // Before #2255 was fixed, the reader took the missing SST for a
+        // missing manifest and listed the manifests again without a limit.
+        let err = tokio::time::timeout(Duration::from_secs(10), admin.read_manifest(None))
+            .await
+            .expect("read_manifest did not return")
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Data);
+        let err = format!("{err:?}");
+        assert!(ssts.iter().any(|sst| err.contains(sst.as_ref())), "{err}");
     }
 
     #[tokio::test]
