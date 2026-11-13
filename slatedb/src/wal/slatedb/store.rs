@@ -487,10 +487,13 @@ impl WalTableStore {
     /// from the manifest, or the highest already-replayed WAL id). Passing 0
     /// scans the entire WAL id space.
     ///
-    /// Two phases:
-    ///   1. Parallel exponential probe at offsets `2^0, 2^1, ..., 2^k` from
-    ///      `start_after`. One RTT per round of 8 exponents. Brackets the
-    ///      frontier between two adjacent powers of two.
+    /// First probe `start_after + 1` alone, so an empty tail costs one HEAD.
+    /// When it exists, that result is reused and the search continues:
+    ///   1. Parallel exponential probes at offsets `2^1, 2^2, ..., 2^k` from
+    ///      `start_after`. One RTT per round of up to 8 exponents; the first
+    ///      round has seven. Brackets the frontier between two adjacent
+    ///      powers of two. A non-empty tail pays one extra RTT for the first
+    ///      probe.
     ///   2. Sequential binary search inside the bracketed range to find the
     ///      exact frontier.
     ///
@@ -508,7 +511,16 @@ impl WalTableStore {
         const ROUND_SIZE: u32 = 8;
         const MAX_EXP: u32 = 48;
 
-        let mut lo_offset = None;
+        // An idle tail is the common case for a reader's poll: one HEAD
+        // answers it. Contiguity means a missing `start_after + 1` implies
+        // every higher id is missing too.
+        let next_path = self.path(WalFileId::from(start_after.value() + 1));
+        if !wal_object_exists(&self.object_store, &next_path).await? {
+            return Ok(start_after);
+        }
+
+        // Offset 1 is known to exist; probe the remaining powers of two.
+        let mut lo_offset: u64 = 1;
         let mut hi_offset = None;
         let mut next_exp = 0;
 
@@ -517,7 +529,7 @@ impl WalTableStore {
                 return Err(SlateDBError::InvalidDBState);
             }
             let end_exp = (next_exp + ROUND_SIZE).min(MAX_EXP);
-            let exps: Vec<u32> = (next_exp..end_exp).collect();
+            let exps: Vec<u32> = (next_exp.max(1)..end_exp).collect();
             let probes = exps.iter().map(|&exp| {
                 let offset = 1u64 << exp;
                 let path = self.path(WalFileId::from(start_after.value() + offset));
@@ -529,7 +541,7 @@ impl WalTableStore {
             for (exp, result) in exps.iter().zip(results) {
                 let offset = 1u64 << exp;
                 if result? {
-                    lo_offset = Some(offset);
+                    lo_offset = offset;
                 } else {
                     hi_offset = Some(offset);
                     break;
@@ -539,9 +551,7 @@ impl WalTableStore {
         }
 
         let hi = hi_offset.expect("loop exits only after finding an upper bound");
-        let Some(lo) = lo_offset else {
-            return Ok(start_after);
-        };
+        let lo = lo_offset;
 
         let mut left = lo + 1;
         let mut right = hi;
@@ -867,6 +877,36 @@ mod tests {
                 .value(),
             start_after + n_above
         );
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn empty_tail_costs_one_head(#[values(0, 1, 100)] start_after: u64) {
+        let recording = Arc::new(RecordingObjectStore::new(Arc::new(InMemory::new())));
+        let object_store: Arc<dyn ObjectStore> = recording.clone();
+        let store = WalTableStore::new(
+            object_store.clone(),
+            SsTableFormat::default(),
+            Path::from("empty-tail-wal-store"),
+            TableStoreKind::Main,
+        );
+        for wal_id in 1..=start_after {
+            object_store
+                .put(&store.path(wal_id.into()), Bytes::new().into())
+                .await
+                .unwrap();
+        }
+        recording.clear();
+
+        assert_eq!(
+            store
+                .last_seen_wal_id(start_after.into())
+                .await
+                .unwrap()
+                .value(),
+            start_after
+        );
+        assert_eq!(recording.get_kinds(true).len(), 1);
     }
 
     #[tokio::test]
