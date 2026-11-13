@@ -10,6 +10,7 @@
 pub mod actors;
 mod clocked_object_store;
 mod deterministic_local_filesystem;
+mod deterministic_vfs;
 pub mod failing_object_store;
 mod harness;
 mod prefix_extractor;
@@ -18,6 +19,7 @@ mod scenarios;
 pub mod utils;
 
 pub use self::deterministic_local_filesystem::DeterministicLocalFilesystem;
+pub use self::deterministic_vfs::DeterministicVfs;
 pub use self::failing_object_store::{
     FailingObjectStore, FailingObjectStoreController, HttpFailBefore, HttpStatusError, Operation,
     StreamDirection, Toxic, ToxicKind,

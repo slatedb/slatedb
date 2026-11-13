@@ -1,19 +1,24 @@
+use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Once;
+use std::sync::{Arc, Once};
 use std::time::Duration;
 
+use object_store::ObjectStore;
 use rand::{Rng, RngExt};
 use slatedb::config::{
     CompactionWorkerOptions, CompactorOptions, CompressionCodec, DbReaderOptions, DurabilityLevel,
     GarbageCollectorDirectoryOptions, GarbageCollectorOptions, GarbageCollectorScheduleOptions,
     ScanOptions, SizeTieredCompactionSchedulerOptions,
 };
-use slatedb::{DbRand, IterationOrder, Settings};
+use slatedb::{DbRand, IterationOrder, Settings, SlateDbMirrorPolicy};
+use slatedb_common::clock::SystemClock;
+use slatedb_mirror::{ObjectStoreMirror, Vfs};
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
-use crate::{Operation, StreamDirection, Toxic, ToxicKind};
+use crate::{DeterministicVfs, Operation, StreamDirection, Toxic, ToxicKind};
 
+const KIB_1: usize = 1024;
 const KIB_8: usize = 8 * 1024;
 const MIB_1: usize = 1024 * 1024;
 const MIB_500: usize = 500 * MIB_1;
@@ -150,6 +155,93 @@ pub fn build_settings_compactor(rng: &mut impl Rng) -> CompactorOptions {
         checkpoint_lifetime: CompactorOptions::default().checkpoint_lifetime,
         worker_heartbeat_timeout,
         object_store_max_retries: None,
+    }
+}
+
+/// Enables incremental compaction in `options` and changes the settings that
+/// make incremental commits happen in a short run:
+///
+/// - The worker rolls small output SSTs, so a running compaction stores
+///   output before it finishes.
+/// - The worker heartbeats often. A heartbeat publishes the stored output to
+///   `.compactions`, and the coordinator commits only published output.
+/// - The coordinator polls often, so it sees a running compaction with
+///   published output.
+pub fn enable_incremental_compaction(options: &mut CompactorOptions, rng: &mut impl Rng) {
+    const MAX_INTERVAL: Duration = Duration::from_millis(20);
+    let mut interval = || rng.random_range(Duration::from_millis(1)..=MAX_INTERVAL);
+    options.enable_experimental_incremental_compaction = true;
+    options.poll_interval = interval();
+    options.commit_compacted_interval = interval();
+    if let Some(worker) = options.worker.as_mut() {
+        worker.heartbeat_interval = interval();
+        worker.compactions_poll_interval = interval();
+        worker.max_sst_size = rng.random_range(KIB_1..=KIB_8);
+        // Derive the timeout as `build_settings_compactor` does.
+        let max_worker_heartbeat = worker
+            .heartbeat_interval
+            .max(worker.compactions_poll_interval);
+        options.worker_heartbeat_timeout = max_worker_heartbeat * rng.random_range(3..=10);
+    }
+}
+
+/// Options for the local mirrors of a DST scenario. Pass
+/// [`MirrorOptions::build`] to [`crate::Harness::with_mirror_fn`].
+#[derive(Clone, Debug)]
+pub struct MirrorOptions {
+    /// The local filesystem of the mirrors. It must be deterministic, for
+    /// example [`crate::DeterministicVfs`].
+    pub vfs: Arc<dyn Vfs>,
+    /// The directory in `vfs` that holds one subdirectory for each mirror.
+    pub local_dir: PathBuf,
+    /// The maximum number of concurrent downloads.
+    pub download_concurrency: usize,
+    /// The interval of the remote scan. `None` disables the scan.
+    pub remote_scan_interval: Option<Duration>,
+    /// How often the policy reads `.compactions` to prefetch compaction
+    /// output. `None` disables the prefetch.
+    pub compactions_poll_interval: Option<Duration>,
+}
+
+impl MirrorOptions {
+    /// Builds a mirror over `remote` with a [`SlateDbMirrorPolicy`]. The mirror
+    /// keeps its files in the `name` subdirectory of `local_dir`.
+    pub async fn build(
+        &self,
+        name: &str,
+        remote: Arc<dyn ObjectStore>,
+        system_clock: Arc<dyn SystemClock>,
+    ) -> Arc<dyn ObjectStore> {
+        let policy = SlateDbMirrorPolicy::builder()
+            .with_compactions_poll_interval(self.compactions_poll_interval)
+            .with_system_clock(Arc::clone(&system_clock))
+            .build();
+        ObjectStoreMirror::builder(self.local_dir.join(name), remote, policy)
+            .with_vfs(Arc::clone(&self.vfs))
+            .with_system_clock(system_clock)
+            .with_download_concurrency(self.download_concurrency)
+            .with_remote_scan_interval(self.remote_scan_interval)
+            .build()
+            .await
+            .expect("failed to build dst mirror")
+    }
+}
+
+/// Builds randomized deterministic options for a local mirror in front of the
+/// main object store. The mirror keeps its files in a [`DeterministicVfs`].
+pub fn build_mirror_options(rng: &mut impl Rng) -> MirrorOptions {
+    let remote_scan_interval = rng
+        .random_bool(0.8)
+        .then(|| rng.random_range(Duration::from_millis(10)..Duration::from_secs(60)));
+    let compactions_poll_interval = rng
+        .random_bool(0.8)
+        .then(|| rng.random_range(Duration::from_millis(1)..Duration::from_secs(5)));
+    MirrorOptions {
+        vfs: Arc::new(DeterministicVfs::new()),
+        local_dir: PathBuf::from("/mirror"),
+        download_concurrency: rng.random_range(1..=16),
+        remote_scan_interval,
+        compactions_poll_interval,
     }
 }
 

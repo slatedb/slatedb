@@ -31,6 +31,12 @@ use crate::failing_object_store::{FailingObjectStore, FailingObjectStoreControll
 
 type DbFactoryFuture = Pin<Box<dyn Future<Output = Result<Arc<Db>, Error>> + Send + 'static>>;
 type StartupFactory = Box<dyn FnOnce(StartupCtx) -> DbFactoryFuture + Send + 'static>;
+type MirrorFuture = Pin<Box<dyn Future<Output = Arc<dyn ObjectStore>> + Send + 'static>>;
+type MirrorFn = Box<
+    dyn Fn(&'static str, Arc<dyn ObjectStore>, Arc<dyn SystemClock>) -> MirrorFuture
+        + Send
+        + 'static,
+>;
 
 #[async_trait]
 pub trait Actor: Send + 'static {
@@ -142,6 +148,12 @@ impl ActorCtx {
         self.shared.startup_ctx.main_object_store()
     }
 
+    /// Returns the main object store for standalone compactors. See
+    /// [`StartupCtx::compactor_object_store`].
+    pub fn compactor_object_store(&self) -> Arc<dyn ObjectStore> {
+        self.shared.startup_ctx.compactor_object_store()
+    }
+
     /// Returns the wrapped WAL object store, if one was configured.
     ///
     /// ## Returns
@@ -213,6 +225,7 @@ impl ActorCtx {
 pub struct StartupCtx {
     path: Path,
     main_object_store: Arc<dyn ObjectStore>,
+    compactor_object_store: Arc<dyn ObjectStore>,
     wal_object_store: Option<Arc<dyn ObjectStore>>,
     system_clock: Arc<dyn SystemClock>,
     fp_registry: Arc<FailPointRegistry>,
@@ -238,6 +251,19 @@ impl StartupCtx {
     ///   deterministic fault-injection and clock behavior.
     pub fn main_object_store(&self) -> Arc<dyn ObjectStore> {
         Arc::clone(&self.main_object_store)
+    }
+
+    /// Returns the main object store for standalone compactors.
+    ///
+    /// With [`Harness::with_mirror_fn`], standalone compactors share a second
+    /// mirror, as if they ran on another node. Then each mirror downloads the
+    /// SSTs that the other side writes. Without a mirror, this is the main
+    /// object store.
+    ///
+    /// ## Returns
+    /// - `Arc<dyn ObjectStore>`: The object store for standalone compactors.
+    pub fn compactor_object_store(&self) -> Arc<dyn ObjectStore> {
+        Arc::clone(&self.compactor_object_store)
     }
 
     /// Returns the wrapped WAL object store for database startup, if present.
@@ -392,6 +418,7 @@ pub struct Harness {
     clock_advance_ms: RangeInclusive<u64>,
     merge_operator: Option<Arc<dyn MergeOperator + Send + Sync>>,
     segment_extractor: Option<Arc<dyn PrefixExtractor>>,
+    mirror_fn: Option<MirrorFn>,
     startup_factory: StartupFactory,
     actors: Vec<ActorRegistration>,
 }
@@ -424,6 +451,7 @@ impl Harness {
             clock_advance_ms: 1..=5,
             merge_operator: None,
             segment_extractor: None,
+            mirror_fn: None,
             startup_factory: Box::new(move |ctx| Box::pin(factory(ctx))),
             actors: Vec::new(),
         }
@@ -557,6 +585,30 @@ impl Harness {
         self
     }
 
+    /// Puts local mirrors (RFC 0034) in front of the main object store.
+    ///
+    /// The harness calls `mirror_fn` twice: with `"db"` and then `"compactor"`,
+    /// each time with the fault-injecting main store and the harness clock. The
+    /// returned stores replace the main store for the database and for standalone
+    /// compactors. See [`StartupCtx::compactor_object_store`].
+    ///
+    /// ## Arguments
+    /// - `mirror_fn`: Builds a mirror from a name, the store to wrap, and the
+    ///   harness clock.
+    ///
+    /// ## Returns
+    /// - `Harness`: The updated harness builder.
+    pub fn with_mirror_fn<F, Fut>(mut self, mirror_fn: F) -> Self
+    where
+        F: Fn(&'static str, Arc<dyn ObjectStore>, Arc<dyn SystemClock>) -> Fut + Send + 'static,
+        Fut: Future<Output = Arc<dyn ObjectStore>> + Send + 'static,
+    {
+        self.mirror_fn = Some(Box::new(move |name, store, clock| {
+            Box::pin(mirror_fn(name, store, clock))
+        }));
+        self
+    }
+
     /// Registers one actor task under a unique logical name.
     ///
     /// ## Arguments
@@ -627,6 +679,7 @@ impl Harness {
             clock_advance_ms,
             merge_operator,
             segment_extractor,
+            mirror_fn,
             startup_factory,
             actors,
         } = self;
@@ -655,6 +708,13 @@ impl Harness {
             failing_main_object_store,
             system_clock.clone(),
         ));
+        let (main_object_store, compactor_object_store) = match mirror_fn {
+            Some(mirror_fn) => (
+                mirror_fn("db", main_object_store.clone(), system_clock.clone()).await,
+                mirror_fn("compactor", main_object_store, system_clock.clone()).await,
+            ),
+            None => (main_object_store.clone(), main_object_store),
+        };
         let wal_object_store = wal_object_store.map(|store| {
             let failing_wal_object_store: Arc<dyn ObjectStore> = Arc::new(FailingObjectStore::new(
                 store.clone(),
@@ -669,7 +729,8 @@ impl Harness {
 
         let startup_ctx = StartupCtx {
             path: path.clone(),
-            main_object_store: Arc::clone(&main_object_store),
+            main_object_store,
+            compactor_object_store,
             wal_object_store: wal_object_store.clone(),
             system_clock: Arc::clone(&system_clock),
             fp_registry: Arc::clone(&fp_registry),
