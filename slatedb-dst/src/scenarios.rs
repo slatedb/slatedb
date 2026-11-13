@@ -22,6 +22,9 @@
 //! - incremental compaction, with the settings of
 //!   [`enable_incremental_compaction`] that make incremental commits likely
 //! - RFC-0034 local mirrors in front of the main object store
+//!
+//! Each run also draws how long a standalone compactor lives before a new one
+//! fences it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -179,15 +182,19 @@ fn run_seed_once(
     std::fs::create_dir_all(&wal_dir)?;
 
     let rand = Arc::new(DbRand::new(seed));
-    let (segments, incremental_compaction, mirror) = {
+    let (segments, incremental_compaction, mirror, compactor_lifetime) = {
         let mut rng = rand.rng();
         (
             rng.random_bool(0.5),
             rng.random_bool(0.5),
             rng.random_bool(0.5),
+            // Log-uniform from 25 ms to about 410 s. Short lives cover fencing
+            // and job resume. Lives over 60 s let one compactor make several
+            // incremental commits, which are 60 s apart.
+            Duration::from_millis(25 << rng.random_range(0..=14)),
         )
     };
-    info!("dst {name} features [seed={seed}, segments={segments}, incremental_compaction={incremental_compaction}, mirror={mirror}]");
+    info!("dst {name} features [seed={seed}, segments={segments}, incremental_compaction={incremental_compaction}, mirror={mirror}, compactor_lifetime={compactor_lifetime:?}]");
     let system_clock = Arc::new(MockSystemClock::new());
     let main_store: Arc<dyn ObjectStore> =
         Arc::new(DeterministicLocalFilesystem::new_with_prefix(&main_dir)?);
@@ -263,7 +270,7 @@ fn run_seed_once(
         .actor(
             "compactor",
             CompactorActor::new(CompactorActorOptions {
-                restart_interval: Duration::from_millis(25),
+                restart_interval: compactor_lifetime,
                 compactor_options,
             })?,
         )
