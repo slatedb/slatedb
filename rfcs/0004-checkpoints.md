@@ -770,10 +770,14 @@ The union process works as follows:
      well. The old ID is kept in `CompactedSsTableV2` as `original_id` and in `external_db.sst_ids` to allow path 
      resolution 
    - L0 SST views are copied from the source databases (preserving the order within each source database)
-   - Sorted runs are copied from the source manifests preserving their relative order within each source manifest. Their
-     IDs are regenerated to maintain uniqueness. As an optimization, similarly sized SRs can be merged together to 
-     reduce LSM height and metadata size; only SRs from different manifests can be merged because they are guaranteed to
-     be non-overlapping.
+   - Sorted runs are copied from the source manifests. Each source keeps the relative order of its own sorted runs.
+     The union can mix the sorted runs from different sources. This is safe because step 2 guarantees that the
+     sources have no common keys. `UnionRunOrder` sets the order. The default is `Concat`, which copies all sorted runs
+     of one source before the sorted runs of the next source. The order applies to each LSM tree separately: the root
+     tree and each segment. After the order is chosen, the sorted run IDs are regenerated to keep them unique. See
+     [Sorted run order](#sorted-run-order). An optional optimization is to merge similarly sized sorted runs.
+     This reduces the number of sorted runs and the size of the manifest. Only runs from different sources can merge,
+     because their key ranges do not overlap.
 4. `last_l0_seq` is set to the maximum of `last_l0_seq` across all input manifests. This ensures that the
    new database's writer assigns sequence numbers higher than any existing data. Without this, new writes
    could receive sequence numbers that collide with those in the carried-over SSTs, breaking snapshot
@@ -787,6 +791,106 @@ The union process works as follows:
    and maintain checkpoints on the source databases to prevent their SSTs from being garbage collected.
    Owned SST IDs are those in the source manifest that are not already tracked by its own `external_dbs`
    (i.e., SSTs physically stored under the source's path).
+
+##### Sorted run order
+
+The size-tiered compaction scheduler chooses groups of sorted runs to merge, based on their sizes.
+[RFC 0002](./0002-compaction.md#compaction-scheduler-1) gives the first design of the compaction scheduler.
+The [compaction documentation](https://slatedb.io/docs/design/compaction/) and
+[`size_tiered_compaction.rs`](https://github.com/slatedb/slatedb/blob/main/slatedb/src/size_tiered_compaction.rs)
+give the current rules of the size-tiered scheduler.
+It considers runs from newest to oldest.
+It adds the next run if its size is at most `include_size_threshold` times the smallest run already in the group.
+A group needs at least `min_compaction_sources` runs.
+After a projection, each new database keeps part of each source run and compacts its data independently.
+With `Concat`, we place all sorted runs from one source before those from the next.
+This can put a small run next to a much larger one and prevent the compactor from merging them.
+The union then keeps its `external_dbs` references to the source databases.
+
+The client sets the order with `CloneBuilder::with_union_run_order`. `UnionRunOrder` has these variants:
+
+- `Concat`: all runs of the first source, then all runs of the second source, and so on. This is the default.
+- `BandInterleave`: make groups of runs of similar size from different sources.
+
+These rules apply to `BandInterleave`.
+For each source, the next available run is its newest run that we still need to add.
+Each step takes one run, so each source keeps its original run order.
+The union looks only at the next available run of each source.
+It never skips a run to reach an older run of the same source.
+After a run is added, the next run of the same source becomes a candidate, so a group can contain more than one
+run from the same source.
+If two runs tie, take the run from the source that comes first in key order (step 1).
+
+`BandInterleave` uses two values: `threshold` and `max_group_len`. The client does not set them.
+`CloneBuilder` calculates them from the options of the size-tiered scheduler.
+The client gives these options with `CloneBuilder::with_compactor_options`.
+Thus the union and the scheduler use the same size rule.
+The compactor options do not select the order.
+The client must select `BandInterleave` with `with_union_run_order`.
+The union code gets only the two values. It does not read the compactor options.
+The scheduler does not read the two values.
+
+- `threshold` is equal to `include_size_threshold`. Step 1 of the algorithm uses it.
+- `max_group_len` is the maximum number of runs in a group.
+  It is equal to the larger of `min_compaction_sources` and `max_compaction_sources - 1`.
+
+`max_group_len` is less than `max_compaction_sources` because of a limit in `BackpressureChecker`.
+`BackpressureChecker` does not start an L0 compaction if the scheduler group that starts at the first sorted run
+has `max_compaction_sources` runs or more.
+Then L0 compactions wait until the compaction of that group is completed, and L0 flushes can stop.
+A shorter first group decreases this risk.
+The risk is still there, because one scheduler group can contain runs from two union groups.
+If `min_compaction_sources` is equal to `max_compaction_sources`, `max_group_len` is equal to `min_compaction_sources`.
+Then the scheduler can compact each group, but the risk does not decrease.
+
+The calculation has these rules:
+
+- If the client does not give compactor options, `CloneBuilder` uses the default options of the size-tiered
+  scheduler.
+- If a calculated value is not usable, `CloneBuilder` selects `Concat` and writes a warning to the log.
+  The API documentation gives the limits.
+- `CompactorOptions` does not name the scheduler. The calculation is correct only for the size-tiered scheduler,
+  which is the default scheduler.
+- `CloneBuilder` reads the compactor options one time, when the clone starts.
+  The first stored manifest keeps the order. If the compactor options change later, the order does not change.
+
+`BandInterleave` works as follows:
+
+1. Let `m` be the size of the smallest run already in the current group.
+   A source's next available run fits if its size is at most `threshold * m`.
+2. If the group has fewer than `max_group_len` runs and at least one run fits, add a fitting run.
+   If any fitting run is at least as large as `m`, choose the smallest of those runs.
+   This keeps `m` unchanged.
+   If every fitting run is smaller than `m`, choose the largest one.
+   This lowers `m` as little as possible.
+   Update `m` to the size of the smallest run in the group.
+3. Otherwise, start a new group.
+   For each source's next available run, do a trial pass: start a group with that run, then apply steps 1 and 2
+   until no run fits. The trial pass does not change the result. It is the only look-ahead of the union.
+   Start with the run that gives the longest trial group.
+   If two runs give the same group length, choose the smaller run.
+   Set `m` to the size of the chosen run.
+
+Example: each source has three sorted runs, newest first, with sizes in MB. The scheduler uses its default options,
+so `threshold` is 4 and `max_group_len` is 7.
+
+```
+source A:        20   5   1
+source B:       150  30   2
+Concat:          20   5   1 150  30   2   -> longest group: 20 5 1 (3 runs)
+BandInterleave: 150  30  20   5   2   1   -> all 6 runs form one group
+```
+
+The run order changes only the order of the sorted run entries in the new manifest.
+The union does not read, write, or copy SSTs when it changes the run order.
+Each sorted run moves as a whole, with the same SST views and the same `visible_range` on each view.
+Thus a sorted run never contains views from two sources, and reads and projections of each run do not change.
+
+The order has these limits:
+
+- Reordering cannot change a large difference in size between consecutive runs from the same source.
+- After a union, the compactor can merge more data, so it can write more data for a while.
+- Reordering does not make the scheduler rewrite a large oldest run on its own.
 
 ##### Merging SST
 SST views coming from different databases might refer to the same SSTs (but have different `visible_range`s). It might 
