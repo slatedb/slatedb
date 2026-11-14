@@ -114,7 +114,7 @@ use object_store::ObjectStore;
 use rand::Rng;
 use tokio::runtime::Handle;
 
-use crate::admin::Admin;
+use crate::admin::{Admin, AdminWal};
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
 use crate::block_cache_policy::BlockCachePolicy;
@@ -938,6 +938,7 @@ pub struct AdminBuilder<P: Into<Path>> {
     wal_admin: Option<Arc<dyn WalAdmin>>,
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
+    metrics_recorder: Arc<dyn MetricsRecorder>,
     object_store_max_retries: Option<u32>,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
@@ -955,12 +956,22 @@ impl<P: Into<Path>> AdminBuilder<P> {
             wal_admin: None,
             system_clock: Arc::new(DefaultSystemClock::new()),
             rand: Arc::new(DbRand::default()),
+            metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             object_store_max_retries: None,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
             merge_operator: None,
             block_transformer: None,
         }
+    }
+
+    /// Sets the metrics recorder for admin requests and delegated maintenance tasks.
+    ///
+    /// Direct requests use the `admin` component label. GC and compactor requests
+    /// use their own component labels. The default recorder discards all metrics.
+    pub fn with_metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
+        self.metrics_recorder = recorder;
+        self
     }
 
     /// Sets the system clock to use for administrative functions.
@@ -1020,36 +1031,46 @@ impl<P: Into<Path>> AdminBuilder<P> {
 
     /// Builds and returns an Admin instance.
     pub fn build(self) -> Admin {
-        // Store the raw object stores here. Admin wraps them in a
-        // `RetryingObjectStore` per-operation (see `Admin::retrying_store`)
-        // rather than at build time, because several admin operations delegate
-        // to sub-builders (compactor/GC) that add their own retry layer, and
-        // wrapping here would double-wrap them.
-        let main_object_store = self.main_object_store;
-        let wal_object_store = self
-            .wal_object_store
-            .clone()
-            .unwrap_or_else(|| main_object_store.clone());
-        let wal_admin = self.wal_admin.unwrap_or_else(|| {
-            let retrying_object_store = Arc::new(RetryingObjectStore::new(
-                wal_object_store.clone(),
+        // Keep raw stores for delegated tasks, which add their own wrappers.
+        let recorder =
+            MetricsRecorderHelper::new(self.metrics_recorder.clone(), Default::default());
+        let retrying_main_object_store = instrumented_retrying_object_store(
+            self.main_object_store.clone(),
+            &recorder,
+            ObjectStoreComponent::Admin,
+            ObjectStoreType::Main,
+            self.rand.clone(),
+            self.system_clock.clone(),
+            self.object_store_max_retries,
+        );
+        let wal = if let Some(admin) = self.wal_admin {
+            AdminWal::Custom(admin)
+        } else {
+            let store = instrumented_retrying_object_store(
+                self.wal_object_store
+                    .clone()
+                    .unwrap_or_else(|| self.main_object_store.clone()),
+                &recorder,
+                ObjectStoreComponent::Admin,
+                ObjectStoreType::Wal,
                 self.rand.clone(),
                 self.system_clock.clone(),
                 self.object_store_max_retries,
-            ));
-            Arc::new(SlateDbWalAdmin::new(
-                retrying_object_store,
+            );
+            AdminWal::BuiltIn(Arc::new(SlateDbWalAdmin::new(
+                store,
                 Arc::new(FailPointRegistry::new()),
-            ))
-        });
+            )))
+        };
         Admin {
             path: self.path.into(),
-            main_object_store,
+            main_object_store: self.main_object_store,
             wal_object_store: self.wal_object_store,
-            wal_admin,
+            wal,
+            retrying_main_object_store,
             system_clock: self.system_clock,
             rand: self.rand,
-            object_store_max_retries: self.object_store_max_retries,
+            metrics_recorder: self.metrics_recorder,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: self.compaction_filter_supplier,
             merge_operator: self.merge_operator,
