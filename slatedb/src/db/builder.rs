@@ -136,7 +136,7 @@ use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
 use crate::config::{CompactionWorkerOptions, CompactorOptions};
-use crate::config::{Settings, SstBlockSize};
+use crate::config::{EpochClaim, Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::SplitCache;
@@ -200,7 +200,7 @@ pub struct DbBuilder<P: Into<Path>> {
     metrics_recorder: Arc<dyn MetricsRecorder>,
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     wal_writer_init: Option<Box<dyn wal::WriterInit>>,
-    expected_epoch: Option<u64>,
+    epoch_claim: EpochClaim,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -233,18 +233,16 @@ impl<P: Into<Path>> DbBuilder<P> {
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             segment_extractor: None,
             wal_writer_init: None,
-            expected_epoch: None,
+            epoch_claim: EpochClaim::default(),
         }
     }
 
-    /// Attempts to claim writer epoch `expected_epoch + 1`.
+    /// Sets how the writer claims its epoch when it opens the database.
     ///
-    /// If a different writer epoch is observed, opening fails with
-    /// [`crate::CloseReason::Fenced`]. Compactor epoch changes are tolerated.
-    /// Without this option, opening retries claims against newer writers.
-    /// `expected_epoch` must be less than `u64::MAX`.
-    pub fn with_expected_epoch(mut self, expected_epoch: u64) -> Self {
-        self.expected_epoch = Some(expected_epoch);
+    /// The default is [`EpochClaim::Increment`]. If the claim fails, opening fails with
+    /// [`crate::CloseReason::Fenced`]. Compactor epoch changes do not cause a claim to fail.
+    pub fn with_epoch_claim(mut self, epoch_claim: EpochClaim) -> Self {
+        self.epoch_claim = epoch_claim;
         self
     }
 
@@ -705,7 +703,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             manifest,
             replay_iterator,
             mut wal_writer,
-        } = fencer.fence(stored_manifest, self.expected_epoch).await?;
+        } = fencer.fence(stored_manifest, self.epoch_claim).await?;
         let (wal_writer, wal_observer) = if DbInner::wal_enabled_in_options(&self.settings) {
             let wal_observer = wal_writer.observer();
             (Some(wal_writer), wal_observer)
@@ -2420,7 +2418,8 @@ mod tests {
     use crate::cached_object_store::CachedObjectStore;
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::config::{
-        CompactionWorkerOptions, CompactorOptions, GarbageCollectorOptions, MetricLevel, Settings,
+        CompactionWorkerOptions, CompactorOptions, EpochClaim, GarbageCollectorOptions,
+        MetricLevel, Settings,
     };
     use crate::error::ErrorKind;
     use crate::garbage_collector::stats::GC_COUNT;
@@ -2501,7 +2500,7 @@ mod tests {
     #[tokio::test]
     async fn test_expected_writer_epoch_returns_closed_fenced() {
         let result = crate::Db::builder("epoch-mismatch", Arc::new(InMemory::new()))
-            .with_expected_epoch(1)
+            .with_epoch_claim(EpochClaim::ExpectCurrent(1))
             .build()
             .await;
 
@@ -2509,6 +2508,97 @@ mod tests {
             result,
             Err(error) if error.kind() == ErrorKind::Closed(crate::CloseReason::Fenced)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_assigned_writer_epoch_fences_writers_with_lower_epochs() {
+        let path = "test_assigned_writer_epoch_fences_writers_with_lower_epochs";
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = ManifestStore::new(&Path::from(path), object_store.clone());
+        let open = |epoch: u64| {
+            crate::Db::builder(path, object_store.clone())
+                .with_epoch_claim(EpochClaim::AssignIfGreater(epoch))
+                .build()
+        };
+
+        // The assigned epoch can skip values.
+        let db1 = open(7).await.unwrap();
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(manifest.writer_epoch(), 7);
+        db1.put(b"k1", b"v1")
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+
+        // A claim fails if the epoch is not greater than the stored epoch.
+        for epoch in [3, 7] {
+            let result = open(epoch).await;
+            assert!(matches!(
+                result,
+                Err(error) if error.kind() == ErrorKind::Closed(crate::CloseReason::Fenced)
+            ));
+        }
+        db1.put(b"k2", b"v2")
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+
+        // A greater epoch fences the current writer.
+        let db2 = open(9).await.unwrap();
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(manifest.writer_epoch(), 9);
+        let result = match db1.put(b"k3", b"v3").await {
+            Ok(handle) => handle.await_durable().await,
+            Err(error) => Err(error),
+        };
+        assert_eq!(
+            result.unwrap_err().kind(),
+            ErrorKind::Closed(crate::CloseReason::Fenced)
+        );
+        assert_eq!(db2.get(b"k1").await.unwrap().as_deref(), Some(&b"v1"[..]));
+        assert_eq!(db2.get(b"k2").await.unwrap().as_deref(), Some(&b"v2"[..]));
+        db2.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_failed_writer_epoch_claim_does_not_init_wal_writer() {
+        let path = "test_failed_writer_epoch_claim_does_not_init_wal_writer";
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::builder(path, object_store.clone())
+            .with_epoch_claim(EpochClaim::AssignIfGreater(7))
+            .build()
+            .await
+            .unwrap();
+
+        // A writer that does not own the epoch must not fence the WAL.
+        for epoch in [0, 3, 7] {
+            let called = Arc::new(AtomicBool::new(false));
+            let result = crate::Db::builder(path, object_store.clone())
+                .with_epoch_claim(EpochClaim::AssignIfGreater(epoch))
+                .with_wal_writer(Box::new(RecordingWriterInit {
+                    called: Arc::clone(&called),
+                }))
+                .build()
+                .await;
+            assert!(matches!(
+                result,
+                Err(error) if error.kind() == ErrorKind::Closed(crate::CloseReason::Fenced)
+            ));
+            assert!(!called.load(Ordering::Relaxed));
+        }
+
+        // The failed claims do not fence the current writer.
+        db.put(b"k1", b"v1")
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+        db.close().await.unwrap();
     }
 
     #[tokio::test]

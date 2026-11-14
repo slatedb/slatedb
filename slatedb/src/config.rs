@@ -494,6 +494,32 @@ pub enum FlushType {
     Wal,
 }
 
+/// How a writer claims its epoch when it opens a database.
+///
+/// The writer with the highest epoch owns the database. A successful claim fences every
+/// writer with a lower epoch. A failed claim returns [`crate::CloseReason::Fenced`].
+///
+/// An open can fail after its claim succeeds. The stored epoch then has the claimed value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EpochClaim {
+    /// Claim the stored epoch plus one. If another writer claims an epoch first, read the
+    /// new stored epoch and try again.
+    #[default]
+    Increment,
+    /// Claim epoch `n + 1` for the given `n`. The claim fails if the stored epoch is not `n`.
+    /// `n` must be less than `u64::MAX`.
+    ExpectCurrent(u64),
+    /// Claim the given epoch. The claim fails if the stored epoch is greater than or equal
+    /// to the given epoch.
+    ///
+    /// Use this variant when an external coordinator issues increasing tokens and the writer
+    /// epoch must match the token.
+    ///
+    /// The epoch must be at least 1, because a new database stores epoch 0. Do not claim
+    /// `u64::MAX`. No greater epoch exists, so no later writer can open the database.
+    AssignIfGreater(u64),
+}
+
 #[derive(Clone)]
 pub struct FlushOptions {
     /// The type of flush to perform.

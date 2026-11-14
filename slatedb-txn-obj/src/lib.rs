@@ -285,6 +285,8 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
     /// ## Errors
     /// - [`TransactionalObjectError::ObjectUpdateTimeout`] if an update attempt
     ///   cannot complete within `object_update_timeout`.
+    /// - [`TransactionalObjectError::InvalidObjectState`] if the stored epoch is
+    ///   `u64::MAX`. No greater epoch exists.
     /// - Propagates any other [`TransactionalObjectError`] from refresh/update
     ///   operations.
     pub async fn init(
@@ -302,7 +304,9 @@ impl<T: Clone + Send + Sync> FenceableTransactionalObject<T, MonotonicId> {
             },
             async {
                 loop {
-                    let local_epoch = get_epoch(delegate.object()) + 1;
+                    let local_epoch = get_epoch(delegate.object())
+                        .checked_add(1)
+                        .ok_or(TransactionalObjectError::InvalidObjectState)?;
                     let mut new_val = delegate.object().clone();
                     set_epoch(&mut new_val, local_epoch);
                     let mut dirty = delegate.prepare_dirty()?;
@@ -1386,6 +1390,36 @@ mod tests {
 
         // B can refresh
         assert!(fb.refresh().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_fenceable_record_init_rejects_max_stored_epoch() {
+        let store = new_store();
+        let sr = SimpleTransactionalObject::<TestVal>::init(
+            Arc::clone(&store) as Arc<dyn TransactionalStorageProtocol<TestVal, MonotonicId>>,
+            TestVal {
+                epoch: u64::MAX,
+                payload: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let result = FenceableTransactionalObject::init(
+            sr,
+            TokioDuration::from_secs(5),
+            Arc::new(DefaultSystemClock::new()),
+            |v: &TestVal| v.epoch,
+            |v: &mut TestVal, e: u64| v.epoch = e,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(TransactionalObjectError::InvalidObjectState)
+        ));
+        let (_, stored) = store.try_read_latest().await.unwrap().unwrap();
+        assert_eq!(u64::MAX, stored.epoch);
     }
 
     #[tokio::test]
