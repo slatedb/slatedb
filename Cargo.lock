@@ -3261,7 +3261,6 @@ dependencies = [
  "futures",
  "insta",
  "log",
- "lru",
  "lz4_flex",
  "moka",
  "object_store",

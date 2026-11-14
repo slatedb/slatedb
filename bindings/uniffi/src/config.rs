@@ -243,18 +243,16 @@ impl Default for ReaderOptions {
     }
 }
 
-impl TryFrom<ReaderOptions> for slatedb::config::DbReaderOptions {
-    type Error = Error;
-
-    fn try_from(value: ReaderOptions) -> Result<Self, Error> {
-        Ok(slatedb::config::DbReaderOptions {
+impl From<ReaderOptions> for slatedb::config::DbReaderOptions {
+    fn from(value: ReaderOptions) -> Self {
+        slatedb::config::DbReaderOptions {
             manifest_poll_interval: Duration::from_millis(value.manifest_poll_interval_ms),
             checkpoint_lifetime: Duration::from_millis(value.checkpoint_lifetime_ms),
             max_memtable_bytes: value.max_memtable_bytes,
             skip_wal_replay: value.skip_wal_replay,
             object_store_max_retries: value.object_store_max_retries,
             ..Default::default()
-        })
+        }
     }
 }
 
@@ -831,7 +829,7 @@ mod tests {
 
     #[test]
     fn reader_object_store_max_retries_defaults_to_unbounded() {
-        let reader: slatedb::config::DbReaderOptions = ReaderOptions::default().try_into().unwrap();
+        let reader: slatedb::config::DbReaderOptions = ReaderOptions::default().into();
 
         assert_eq!(reader.object_store_max_retries, None);
     }
@@ -842,8 +840,7 @@ mod tests {
             object_store_max_retries: Some(5),
             ..ReaderOptions::default()
         }
-        .try_into()
-        .unwrap();
+        .into();
 
         assert_eq!(reader.object_store_max_retries, Some(5));
     }
