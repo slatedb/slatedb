@@ -13328,7 +13328,7 @@ type BlockTransformerCallbackError struct {
 	err error
 }
 
-// Convience method to turn *BlockTransformerCallbackError into error
+// Convenience method to turn *BlockTransformerCallbackError into error
 // Avoiding treating nil pointer as non nil error interface
 func (err *BlockTransformerCallbackError) AsError() error {
 	if err == nil {
@@ -13780,7 +13780,7 @@ type Error struct {
 	err error
 }
 
-// Convience method to turn *Error into error
+// Convenience method to turn *Error into error
 // Avoiding treating nil pointer as non nil error interface
 func (err *Error) AsError() error {
 	if err == nil {
@@ -14360,7 +14360,7 @@ type MergeOperatorCallbackError struct {
 	err error
 }
 
-// Convience method to turn *MergeOperatorCallbackError into error
+// Convenience method to turn *MergeOperatorCallbackError into error
 // Avoiding treating nil pointer as non nil error interface
 func (err *MergeOperatorCallbackError) AsError() error {
 	if err == nil {
