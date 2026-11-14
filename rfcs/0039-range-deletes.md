@@ -28,8 +28,9 @@ Authors:
 This RFC adds `delete_range` to SlateDB. One write deletes every key in a range.
 
 The design adds a range tombstone: a start key, an end key, and a sequence number. The WAL and
-memtable store it as a new entry kind. SSTs store it in a separate range tombstone block. Reads
-check that block. Compaction drops covered entries, and later drops the tombstone.
+memtable store it as a new entry kind. SSTs store it in the SST index, as non-overlapping
+fragments. Reads already load the index, so they get the tombstones with no extra fetch.
+Compaction drops covered entries, and later drops the tombstone.
 
 ## Motivation
 
@@ -60,7 +61,8 @@ Typical uses: drop a table or tenant stored as a key prefix, and truncate a log 
 RocksDB supports `DeleteRange(begin, end)` with an exclusive end. Three points guide this RFC.
 
 - **Separate storage.** RocksDB does not mix range tombstones with point keys. It writes them to a
-  meta block in each SST.
+  meta block in each SST. This RFC stores them in the SST index instead (see
+  [Alternatives](#alternatives)).
 - **Raw entries, fragmented in memory.** A block entry is the begin key plus seq, with the end key
   as the value. The reader splits overlapping tombstones into non-overlapping fragments when it
   loads the block. A binary search then finds the covering fragment. The block is a normal
@@ -126,48 +128,59 @@ A covering tombstone ends a merge chain. It acts like a point tombstone.
 3. Each memtable keeps a list of range tombstones next to its skiplist. Few tombstones are
    expected, so an append-only list is enough. Reads on the active memtable scan the list. When
    the memtable becomes immutable, it fragments the list for faster reads.
-4. Flush writes the tombstones to the new SST block as raw entries. It merges tombstones that
-   have the same seq and overlap or touch. It widens `first_entry` and `last_entry` to cover the
-   tombstones, and it sets the tombstone summary fields in `SsTableInfo` (see
+4. Flush merges tombstones that have the same seq and overlap or touch. It fragments the result
+   and writes the fragments to the SST index. It widens `first_entry` and `last_entry` to cover
+   the tombstones, and it sets the tombstone summary fields in `SsTableInfo` (see
    [SST format](#sst-format)).
 
 ### SST format
 
-New SST layout:
+The SST layout does not change. The index gets a list of range tombstone fragments:
 
 ```
-data blocks | filter | index | range tombstones | stats | SsTableInfo | footer
+table RangeTombstoneFragment {
+    start: [ubyte] (required);
+    end: [ubyte];               // absent means +infinity
+    seqs: [ulong] (required);   // descending, not empty
+}
+
+table SsTableIndex {
+    block_meta: [BlockMeta] (required);
+    range_tombstones: [RangeTombstoneFragment];  // absent when the SST has no tombstones
+}
 ```
 
-The block is another kind of index, so it sits right after the index. One read can fetch both.
-The offsets in `SsTableInfo` make the order a performance choice, not a correctness rule.
+The writer fragments the tombstones. Fragments sort by start key and do not overlap. A fragment
+lists the seq of every tombstone that covers it. For example, `[a,z)@5` and `[f,k)@8` become
+`[a,f)@5`, `[f,k)@8,5`, and `[k,z)@5`. The flush or compaction that writes the SST holds all its
+tombstones in memory, so fragmenting costs little.
 
-The block uses the existing block format and row codec, with a new row kind, `RangeTombstone`:
+Why the index:
 
-- key: the start key
-- seq: the tombstone seq
-- value: the end key. An empty value means +infinity. An end key is never empty.
+- `get` loads the index to find the data block, and a scan loads it when it opens an SST. The
+  tombstones come in the same read and the same cache entry. They need no second fetch or cache
+  lookup, and they cannot be evicted apart from the index.
+- Readers binary-search the fragments in place, as they do `block_meta`. No load-time pass and no
+  separate cached structure is needed.
 
-Entries sort by start key, then by seq descending. The reader loads the whole block and fragments
-the entries in memory. It caches the result with the same policy as the index. A fragment is
-`{start, end, seqs}`. A lookup is one binary search plus a scan of a short `seqs` list.
-Compaction keeps entries mostly disjoint, so the load-time pass is close to O(n). Readers must
-stay correct when entries overlap.
+A lookup is one binary search plus a scan of a short `seqs` list. Compaction keeps fragments
+mostly to one seq (see [Compaction](#compaction)).
+
+Tombstones add to the index size, and so to its cache weight. Few tombstones are expected. See
+[Future Work](#future-work) for SSTs with many tombstones.
 
 `SsTableInfo` gets optional fields. SSTs without tombstones omit them.
 
 ```
-range_tombstones_offset: ulong;
-range_tombstones_len: ulong;      // absent or 0 when the SST has no tombstones
-range_tombstone_min_key: [ubyte]; // smallest start key of any tombstone
+range_tombstone_min_key: [ubyte]; // smallest start key; absent when the SST has no tombstones
 range_tombstone_max_key: [ubyte]; // largest end key
 range_tombstone_max_seq: ulong;   // largest tombstone seq
 ```
 
 When an SST has tombstones, an absent `range_tombstone_max_key` means +infinity.
 
-The manifest holds `SsTableInfo`, so readers can skip the block without a fetch (see
-[Read path](#read-path)). `SstStats` gets a `num_range_deletes` counter.
+The manifest holds `SsTableInfo`, so readers can skip the index fetch when a filter rules out
+the key (see [Read path](#read-path)). `SstStats` gets a `num_range_deletes` counter.
 
 **Bounds.** `first_entry` and `last_entry` cover both point entries and tombstones. Sorted-run
 lookups, L0 pruning, and scan pruning use these fields. With point-only bounds, a tombstone
@@ -186,10 +199,11 @@ outside the point keys would be invisible, and a tombstone-only SST would have n
 **Tombstone-only SSTs.** An SST with no data blocks is well-defined:
 
 ```
-filter (absent) | index (empty) | range tombstones | stats | SsTableInfo | footer
+filter (absent) | index (tombstones only) | stats | SsTableInfo | footer
 ```
 
-- The index holds an empty `block_meta` list. Lookups and iterators find no point entries.
+- The index holds an empty `block_meta` list and the tombstone fragments. Lookups and iterators
+  find no point entries.
 - `filter_len` is 0, which already means "no filter".
 - Stats report zero puts, deletes, and merges.
 
@@ -209,8 +223,10 @@ This relies on layer order. Within a tree, every write in a newer layer has a hi
 every write in an older layer. Memtables flush in seq order, and compactions merge only
 consecutive sources. Point lookups already rely on this order for each key.
 
-SSTs without tombstones cost one absent-field check. For an SST with tombstones, the reader can
-skip the block fetch using the summary fields in `SsTableInfo`:
+SSTs without tombstones cost one absent-field check. When the reader loads an SST's index for
+the point lookup, it gets the tombstones at no extra cost. A fetch only for tombstones occurs
+when the filter rules out the key. The reader can skip that fetch using the summary fields in
+`SsTableInfo`:
 
 - `key` is outside `[range_tombstone_min_key, range_tombstone_max_key)`.
 - The SST holds the point entry that matched, and that entry's seq is above
@@ -222,10 +238,10 @@ skip the block fetch using the summary fields in `SsTableInfo`:
    transaction's own `WriteBatch` if any, memtables, L0 SSTs, and sorted runs. The active
    memtable fragments a copy of its list when the scan starts. Later tombstones have higher
    seqs, so the scan cannot see them.
-2. A sorted run loads an SST's tombstone block when the scan's current key enters that SST's
-   key range. Compaction clips tombstones to the SST that owns them, so the run needs no other
-   SST. The block sits after the index, so one read can fetch both.
-3. An L0 SST loads its block when the scan reaches its tombstone min key. Skip any SST whose
+2. A sorted run gets an SST's tombstones from its index when the scan's current key enters that
+   SST's key range. Compaction clips tombstones to the SST that owns them, so the run needs no
+   other SST.
+3. An L0 SST gets its tombstones from its index when the scan opens it. Skip any SST whose
    tombstone bounds do not intersect the scan range.
 4. Each source keeps a cursor into its fragments. The cursor follows the scan's current key, not
    the source's point iterator. A run's point iterator can leave an SST, or skip a
@@ -429,8 +445,8 @@ the `read_ranges` check does today.
 
 - **Writes:** O(1) per range delete in the WAL and memtable. With segments, flush writes one
   piece per spanned segment (see [Segments](#segments)).
-- **Point reads:** one binary search per SST that has tombstones. The manifest lets the reader
-  skip most block fetches (see [Read path](#read-path)).
+- **Point reads:** one binary search per SST that has tombstones. The tombstones come with the
+  index, so they add no fetch in the common case (see [Read path](#read-path)).
 - **Scans:** O(log n) per seek, O(1) amortized per entry.
 - **Compaction:** space returns in proportion to the covered data. Long-lived snapshots can pin
   many small tombstones. This raises read cost.
@@ -445,7 +461,8 @@ the `read_ranges` check does today.
 
 ### Compatibility
 
-- **On disk:** new optional `SsTableInfo` fields, a new tombstone block, and a new row kind.
+- **On disk:** new optional `SsTableInfo` fields, a new optional index field, and a new row
+  kind.
 - **Why the SST version is not enough.** Old processes check an SST's format version only when
   they open a data block or read the SST footer. They read `SsTableInfo`, the filter, and the
   index from the manifest copy without a check. So an old reader skips a tombstone-only SST, or
@@ -470,7 +487,7 @@ the `read_ranges` check does today.
 
 ## Testing
 
-- Unit: fragmentation, covering-seq lookup, SST block codec, WAL codec, merge rules with and
+- Unit: fragmentation, covering-seq lookup, SST index codec, WAL codec, merge rules with and
   without snapshots, clipping at SST, view, and subcompaction bounds, summary-field skip rules.
 - Integration: `get` and `scan` across all layers; snapshots, checkpoints, clones, transactions;
   merge operands; reopen and WAL replay.
@@ -492,6 +509,11 @@ Docs: update API docs and the SST format docs.
 ## Alternatives
 
 - **Scan and delete per key (status quo).** Not atomic. O(n) cost.
+- **Separate tombstone block, as in RocksDB.** The SST stores raw tombstone entries in their own
+  block, and the reader fragments them at load time. A large tombstone set does not grow the
+  index. But a read needs a second fetch and a second cache entry. Placing the block next to the
+  index allows one read for both, but it needs a new loader, and the two cache entries can still
+  be evicted apart. Few tombstones are expected, so the index is the better default.
 - **Range row inline in key order.** The row sits at `start` and carries `end`. `get(k)` cannot
   find a tombstone that starts before `k`, which can sit in an earlier block or SST. Bloom
   filters do not help. A scan that starts inside the range never visits `start`. Repeating the
@@ -513,9 +535,11 @@ Docs: update API docs and the SST format docs.
 ## Future Work
 
 - **Inline small tombstone sets.** The summary fields are a union. A small set of tombstones in
-  the manifest would avoid the block fetch, but it would grow the manifest.
-- **Pre-fragmented or partitioned blocks.** Raw entries need a full block load. A pre-fragmented
-  block allows partial reads if tombstone counts grow large.
+  the manifest would avoid the index fetch when a filter rules out the key, but it would grow the
+  manifest.
+- **Spill large tombstone sets.** Many tombstones in one SST grow its index. Above a size limit,
+  the writer could move the fragments to a separate block, or partition them. The index would
+  then point to that block.
 - **Sorted-run-level tombstones.** A wide tombstone repeats in every SST of a run. The manifest
   could hold it once per run instead.
 - **Per-SST seq ranges.** `min_seq` and `max_seq` in `SsTableInfo` would let other features skip
@@ -556,3 +580,4 @@ Docs: update API docs and the SST format docs.
 ## Updates
 
 - 2026-11-12: Initial draft.
+- 2026-11-14: Store tombstone fragments in the SST index, not in a separate block.
