@@ -263,7 +263,6 @@ impl CompactionWorkerHandler {
                 stats: stats.clone(),
                 worker_stats,
                 clock: system_clock.clone(),
-                manifest_store: manifest_store.clone(),
                 merge_operator: merge_operator.clone(),
                 #[cfg(feature = "compaction_filters")]
                 compaction_filter_supplier: compaction_filter_supplier.clone(),
@@ -1387,7 +1386,6 @@ mod tests {
                 },
                 worker_stats: WorkerStats::noop(),
                 clock: clock.clone(),
-                manifest_store: manifest_store.clone(),
                 merge_operator: None,
                 #[cfg(feature = "compaction_filters")]
                 compaction_filter_supplier: None,

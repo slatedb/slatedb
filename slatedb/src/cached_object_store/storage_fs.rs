@@ -124,9 +124,9 @@ impl FsCacheEntry {
         // blocking task adds overhead, so its better to just batch all the calls into a single
         // blocking task.
         // see https://github.com/slatedb/slatedb/pull/1342
-        let invalidate_path = path.clone();
+        let file_handle_cache = self.file_handle_cache.clone();
         #[allow(clippy::disallowed_methods)]
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> object_store::Result<()> {
             let tmp_path = tmp_path.as_path();
             // ensure the parent folder exists
             if let Some(folder_path) = tmp_path.parent() {
@@ -147,15 +147,16 @@ impl FsCacheEntry {
             // observes a partially written part. If a crash leaves a renamed but
             // not yet flushed part that reads back corrupt, block validation
             // fails on read, the retried GET will override the cached entry.
-            std::fs::rename(tmp_path, path).map_err(wrap_io_err)
+            std::fs::rename(tmp_path, &path).map_err(wrap_io_err)?;
+
+            // The rename replaced the file at `path`, so a cached handle now
+            // points to the old (unlinked) inode. Invalidate it in this task, so
+            // that a cancelled caller cannot skip the invalidation.
+            file_handle_cache.invalidate(&path);
+            Ok(())
         })
         .await?
         .map_err(wrap_io_err)?;
-
-        // The rename replaced the file at `path`, so any previously cached
-        // handle now points to the old (unlinked) inode. Invalidate it so
-        // the next read opens the new file.
-        self.file_handle_cache.invalidate(&invalidate_path);
 
         Ok(())
     }
