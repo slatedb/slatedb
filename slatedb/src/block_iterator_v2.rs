@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 
 use crate::block_iterator::BlockLike;
 use crate::error::SlateDBError;
-use crate::format::row_codec_v2::SstRowCodecV2;
+use crate::format::row_codec_v2::{SstRowHeaderV2, SstRowTailV2};
 use crate::iter::IterationOrder;
 use crate::iter::RowEntryIterator;
 use crate::types::RowEntry;
@@ -14,7 +14,8 @@ struct AscendingState<B: BlockLike> {
     current_restart_idx: usize,
     offset_in_block: usize,
     entries_since_restart: usize,
-    current_key: Bytes,
+    /// Buffer for full keys, reused for each row.
+    current_key: Vec<u8>,
     exhausted: bool,
 }
 
@@ -34,9 +35,9 @@ impl<B: BlockLike> BlockIteratorV2<B> {
         match ordering {
             IterationOrder::Ascending => {
                 let initial_key = if block.offsets().is_empty() {
-                    Bytes::new()
+                    Vec::new()
                 } else {
-                    Self::decode_first_key_at_restart(&block, 0)
+                    Self::decode_first_key_at_restart(&block, 0).to_vec()
                 };
 
                 BlockIteratorV2 {
@@ -68,13 +69,11 @@ impl<B: BlockLike> BlockIteratorV2<B> {
         }
     }
 
-    fn decode_first_key_at_restart(block: &B, restart_idx: usize) -> Bytes {
+    fn decode_first_key_at_restart(block: &B, restart_idx: usize) -> &[u8] {
         let restart_offset = block.offsets()[restart_idx] as usize;
-        let mut data = block.data().slice(restart_offset..);
-        let codec = SstRowCodecV2::new();
-        let (shared_bytes, key_suffix) = codec.decode_key_only(&mut data);
-        assert_eq!(shared_bytes, 0, "restart point should have shared_bytes=0");
-        key_suffix
+        let header = SstRowHeaderV2::decode(block.data(), restart_offset);
+        assert_eq!(header.shared, 0, "restart point should have shared_bytes=0");
+        header.key_suffix(block.data())
     }
 }
 
@@ -88,40 +87,45 @@ impl<B: BlockLike> AscendingState<B> {
         self.current_restart_idx = restart_idx;
         self.offset_in_block = self.block.offsets()[restart_idx] as usize;
         self.entries_since_restart = 0;
-        self.current_key = BlockIteratorV2::decode_first_key_at_restart(&self.block, restart_idx);
+        self.current_key.clear();
+        self.current_key
+            .extend_from_slice(BlockIteratorV2::decode_first_key_at_restart(
+                &self.block,
+                restart_idx,
+            ));
         self.exhausted = false;
     }
 
-    fn decode_entry_at_current_offset(&self) -> Result<(RowEntry, usize), SlateDBError> {
-        let mut data = self.block.data().slice(self.offset_in_block..);
-        let codec = SstRowCodecV2::new();
-        let entry = codec.decode(&mut data)?;
-        let bytes_consumed = self.block.data().len() - self.offset_in_block - data.len();
-        let new_offset = self.offset_in_block + bytes_consumed;
-        let full_key = entry.restore_full_key(&self.current_key);
+    /// Decodes the row at the current offset, and sets `current_key`.
+    fn decode_entry_at_current_offset(&mut self) -> Result<(RowEntry, usize), SlateDBError> {
+        let header = self.decode_key_at_offset(self.offset_in_block);
+        let (tail, new_offset) = SstRowTailV2::decode(self.block.data(), &header)?;
 
         Ok((
             RowEntry::new(
-                full_key,
-                entry.value,
-                entry.seq,
-                entry.create_ts,
-                entry.expire_ts,
+                Bytes::copy_from_slice(&self.current_key),
+                tail.value,
+                tail.seq,
+                tail.create_ts,
+                tail.expire_ts,
             ),
             new_offset,
         ))
     }
 
-    fn decode_key_at_offset(&self, offset: usize, prev_key: &[u8]) -> Bytes {
-        let mut data = self.block.data().slice(offset..);
-        let codec = SstRowCodecV2::new();
-        let (shared_bytes, key_suffix) = codec.decode_key_only(&mut data);
-        let shared = shared_bytes as usize;
+    /// Rebuilds the key of the row at `offset` in `current_key`, and returns
+    /// the row header.
+    fn decode_key_at_offset(&mut self, offset: usize) -> SstRowHeaderV2 {
+        let data = self.block.data();
+        let header = SstRowHeaderV2::decode(data, offset);
 
-        let mut full_key = BytesMut::with_capacity(shared + key_suffix.len());
-        full_key.extend_from_slice(&prev_key[..shared]);
-        full_key.extend_from_slice(&key_suffix);
-        full_key.freeze()
+        assert!(
+            header.shared <= self.current_key.len(),
+            "shared_bytes is longer than the previous key"
+        );
+        self.current_key.truncate(header.shared);
+        self.current_key.extend_from_slice(header.key_suffix(data));
+        header
     }
 
     fn is_empty(&self) -> bool {
@@ -144,7 +148,7 @@ impl<B: BlockLike> AscendingState<B> {
             let mid = low + (high - low) / 2;
             let restart_key = BlockIteratorV2::decode_first_key_at_restart(&self.block, mid);
 
-            if restart_key.as_ref() < target {
+            if restart_key < target {
                 low = mid + 1;
             } else {
                 high = mid;
@@ -165,13 +169,6 @@ impl<B: BlockLike> AscendingState<B> {
 
         let low = self.binary_search_restarts(target);
 
-        if low < restarts.len() {
-            let restart_key = BlockIteratorV2::decode_first_key_at_restart(&self.block, low);
-            if restart_key.as_ref() == target {
-                return low.saturating_sub(1);
-            }
-        }
-
         low.saturating_sub(1)
     }
 
@@ -189,13 +186,13 @@ impl<B: BlockLike> AscendingState<B> {
 
         if low < restarts.len() {
             let restart_key = BlockIteratorV2::decode_first_key_at_restart(&self.block, low);
-            if restart_key.as_ref() == target {
+            if restart_key == target {
                 // Scan forward to find the last restart with the same first key.
                 let mut last = low;
                 while last + 1 < restarts.len() {
                     let next_key =
                         BlockIteratorV2::decode_first_key_at_restart(&self.block, last + 1);
-                    if next_key.as_ref() != target {
+                    if next_key != target {
                         break;
                     }
                     last += 1;
@@ -215,12 +212,8 @@ impl<B: BlockLike> AscendingState<B> {
             .unwrap_or_else(|| self.block.data().len())
     }
 
-    fn advance_past_current_entry(&mut self) -> Result<(), SlateDBError> {
-        let mut data = self.block.data().slice(self.offset_in_block..);
-        let codec = SstRowCodecV2::new();
-        codec.decode(&mut data)?;
-        let bytes_consumed = self.block.data().len() - self.offset_in_block - data.len();
-        self.offset_in_block += bytes_consumed;
+    fn advance_past_current_entry(&mut self, header: &SstRowHeaderV2) -> Result<(), SlateDBError> {
+        self.offset_in_block = SstRowTailV2::next_row_offset(self.block.data(), header)?;
         self.entries_since_restart += 1;
         Ok(())
     }
@@ -241,8 +234,6 @@ impl<B: BlockLike> RowEntryIterator for BlockIteratorV2<B> {
 
                 let (entry, new_offset) = state.decode_entry_at_current_offset()?;
 
-                // Update current key before advancing
-                state.current_key = entry.key.clone();
                 state.offset_in_block = new_offset;
                 state.entries_since_restart += 1;
 
@@ -280,28 +271,24 @@ impl<B: BlockLike> RowEntryIterator for BlockIteratorV2<B> {
                 for restart_idx in start_restart_idx..state.block.offsets().len() {
                     state.seek_to_restart(restart_idx);
 
-                    if state.exhausted || state.current_key.as_ref() >= next_key {
+                    if state.exhausted || state.current_key.as_slice() >= next_key {
                         return Ok(());
                     }
 
                     // Scan entries within this restart region
                     let region_end = state.restart_region_end(restart_idx);
-                    let mut prev_key = state.current_key.clone();
 
                     while state.offset_in_block < region_end
                         && state.offset_in_block < state.block.data().len()
                     {
-                        let current_key =
-                            state.decode_key_at_offset(state.offset_in_block, &prev_key);
+                        let header = state.decode_key_at_offset(state.offset_in_block);
 
-                        if current_key.as_ref() >= next_key {
-                            state.current_key = prev_key;
+                        // Leave the found key in `current_key`. `next` rebuilds the same key.
+                        if state.current_key.as_slice() >= next_key {
                             return Ok(());
                         }
 
-                        state.advance_past_current_entry()?;
-                        prev_key = current_key;
-                        state.current_key = prev_key.clone();
+                        state.advance_past_current_entry(&header)?;
                     }
                 }
 
@@ -332,9 +319,9 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
     pub(crate) fn new(block: B) -> Self {
         let num_restarts = block.offsets().len();
         let initial_key = if num_restarts == 0 {
-            Bytes::new()
+            Vec::new()
         } else {
-            BlockIteratorV2::decode_first_key_at_restart(&block, 0)
+            BlockIteratorV2::decode_first_key_at_restart(&block, 0).to_vec()
         };
 
         DescendingBlockIteratorV2 {
@@ -367,7 +354,6 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
 
         while self.ascending.offset_in_block < region_end && !self.ascending.is_empty() {
             let (entry, new_offset) = self.ascending.decode_entry_at_current_offset()?;
-            self.ascending.current_key = entry.key.clone();
             self.ascending.offset_in_block = new_offset;
             self.ascending.entries_since_restart += 1;
             self.cached_entries.push(entry);
@@ -537,6 +523,100 @@ pub mod benches {
                     std::hint::black_box(entry);
                 }
             });
+        });
+    }
+
+    /// Which keys the seek bench looks for.
+    #[cfg(feature = "bench-internal")]
+    #[derive(Clone, Copy, Debug)]
+    pub enum SeekTarget {
+        /// Keys that are in the block.
+        Present,
+        /// Random keys that are not in the block.
+        Absent,
+    }
+
+    /// Measure only the seek inside one data block.
+    ///
+    /// The bench builds the block and the iterator one time. Each call of the
+    /// closure seeks the same iterator to the next target and does not call
+    /// `next`. A seek does not depend on the position before it. The targets
+    /// come in a fixed random order.
+    #[allow(clippy::panic)]
+    pub fn block_seek_v2_bench<F>(
+        config: BlockIteratorV2BenchConfig,
+        order: crate::iter::IterationOrder,
+        target: SeekTarget,
+        mut run_bench: F,
+    ) where
+        F: FnMut(&mut dyn FnMut()),
+    {
+        use crate::format::sst::BlockBuilder;
+        use crate::iter::RowEntryIterator;
+        use crate::types::{RowEntry, ValueDeletable};
+        use futures::executor::block_on;
+        use rand::seq::SliceRandom;
+        use rand::Rng;
+
+        const SEED: u64 = 0x51A7_EDBB_E4C4;
+
+        let rand = slatedb_common::DbRand::new(SEED);
+        let mut rng = rand.rng();
+        let mut pool: Vec<(Bytes, Bytes)> = (0..config.num_entries)
+            .map(|_| {
+                let mut key = vec![0u8; config.key_size];
+                rng.fill_bytes(&mut key);
+                let mut value = vec![0u8; config.value_size];
+                rng.fill_bytes(&mut value);
+                (Bytes::from(key), Bytes::from(value))
+            })
+            .collect();
+        pool.sort_by(|a, b| a.0.cmp(&b.0));
+        pool.dedup_by(|a, b| a.0 == b.0);
+
+        let mut builder = BlockBuilder::new_v2(config.block_size);
+        let mut keys = Vec::new();
+        for (seq, (key, value)) in pool.into_iter().enumerate() {
+            let entry = RowEntry::new(
+                key.clone(),
+                ValueDeletable::Value(value),
+                seq as u64 + 1,
+                None,
+                None,
+            );
+            match builder.add(entry) {
+                Ok(true) => keys.push(key),
+                Ok(false) => break,
+                Err(e) => panic!("failed to add entry: {e:?}"),
+            }
+        }
+        let block = builder.build().expect("failed to build block");
+        assert!(!keys.is_empty(), "the block has no rows");
+
+        let rand = slatedb_common::DbRand::new(SEED ^ 0xFFFF);
+        let mut rng = rand.rng();
+        let mut targets: Vec<Bytes> = match target {
+            SeekTarget::Present => keys.clone(),
+            SeekTarget::Absent => (0..keys.len())
+                .map(|_| loop {
+                    let mut key = vec![0u8; config.key_size];
+                    rng.fill_bytes(&mut key);
+                    let key = Bytes::from(key);
+                    if keys.binary_search(&key).is_err() {
+                        break key;
+                    }
+                })
+                .collect(),
+        };
+        targets.shuffle(&mut rng);
+
+        let mut iter = BlockIteratorV2::new(&block, order);
+        let mut next_target = 0;
+        run_bench(&mut || {
+            let target = &targets[next_target];
+            next_target = (next_target + 1) % targets.len();
+            block_on(iter.seek(target)).expect("seek error");
+            std::hint::black_box(&iter);
         });
     }
 }

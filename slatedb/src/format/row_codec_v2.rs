@@ -116,6 +116,106 @@ impl SstRowEntryV2 {
     }
 }
 
+/// The header of a V2 row, as positions in the block data.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SstRowHeaderV2 {
+    /// The number of leading bytes that the key shares with the key before it.
+    pub shared: usize,
+    /// The start of the key suffix.
+    key_start: usize,
+    /// The end of the key suffix, which is also the start of the value.
+    key_end: usize,
+    /// The end of the value.
+    value_end: usize,
+}
+
+impl SstRowHeaderV2 {
+    /// Decode the row header at `offset` in `data`, without copies or
+    /// allocations.
+    pub(crate) fn decode(data: &[u8], offset: usize) -> Self {
+        let mut buf = &data[offset..];
+        let shared = decode_varint(&mut buf) as usize;
+        let unshared = decode_varint(&mut buf) as usize;
+        let value_len = decode_varint(&mut buf) as usize;
+        let key_start = data.len() - buf.len();
+        let key_end = key_start + unshared;
+        Self {
+            shared,
+            key_start,
+            key_end,
+            value_end: key_end + value_len,
+        }
+    }
+
+    /// The key suffix of the row, as a slice of `data`.
+    pub(crate) fn key_suffix<'a>(&self, data: &'a [u8]) -> &'a [u8] {
+        &data[self.key_start..self.key_end]
+    }
+}
+
+/// The fields of a V2 row after the key.
+#[derive(Debug, Clone)]
+pub(crate) struct SstRowTailV2 {
+    pub seq: u64,
+    pub expire_ts: Option<i64>,
+    pub create_ts: Option<i64>,
+    pub value: ValueDeletable,
+}
+
+impl SstRowTailV2 {
+    /// Returns the offset where the next row starts. `header` is the header of
+    /// the current row.
+    pub(crate) fn next_row_offset(
+        data: &[u8],
+        header: &SstRowHeaderV2,
+    ) -> Result<usize, SlateDBError> {
+        let flags_offset = header.value_end + 8;
+        let flags = SstRowCodecV2::new().decode_flags(data[flags_offset])?;
+        let mut end = flags_offset + 1;
+        if flags.contains(RowFlags::HAS_EXPIRE_TS) {
+            end += 8;
+        }
+        if flags.contains(RowFlags::HAS_CREATE_TS) {
+            end += 8;
+        }
+        Ok(end)
+    }
+
+    /// Decode the part of a row after the key.
+    ///
+    /// The value is a slice of `data`, not a copy. Returns the decoded fields
+    /// and the offset of the next row.
+    pub(crate) fn decode(
+        data: &Bytes,
+        header: &SstRowHeaderV2,
+    ) -> Result<(Self, usize), SlateDBError> {
+        let value = data.slice(header.key_end..header.value_end);
+        let mut buf = &data[header.value_end..];
+        let seq = buf.get_u64();
+        let flags = SstRowCodecV2::new().decode_flags(buf.get_u8())?;
+        let expire_ts = flags
+            .contains(RowFlags::HAS_EXPIRE_TS)
+            .then(|| buf.get_i64());
+        let create_ts = flags
+            .contains(RowFlags::HAS_CREATE_TS)
+            .then(|| buf.get_i64());
+        let value = if flags.contains(RowFlags::TOMBSTONE) {
+            ValueDeletable::Tombstone
+        } else if flags.contains(RowFlags::MERGE_OPERAND) {
+            ValueDeletable::Merge(value)
+        } else {
+            ValueDeletable::Value(value)
+        };
+        let tail = Self {
+            seq,
+            expire_ts,
+            create_ts,
+            value,
+        };
+        Ok((tail, data.len() - buf.len()))
+    }
+}
+
 pub(crate) struct SstRowCodecV2;
 
 impl SstRowCodecV2 {
