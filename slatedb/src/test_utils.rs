@@ -20,7 +20,7 @@ use object_store::{
     ObjectStore, PutMultipartOptions, PutOptions as OS_PutOptions, PutPayload, PutResult,
     RenameOptions,
 };
-use rand::{Rng, RngExt};
+use rand::Rng;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
@@ -259,12 +259,6 @@ impl RowEntryIterator for TestIterator {
         }
         Ok(())
     }
-}
-
-pub(crate) fn gen_rand_bytes(n: usize) -> Bytes {
-    let mut rng = rand::rng();
-    let random_bytes: Vec<u8> = (0..n).map(|_| rng.random::<u8>()).collect();
-    Bytes::from(random_bytes)
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -140,8 +140,8 @@ impl WalFileHandle {
 ///
 /// WALs continue to use the shared SST format and builders. This type owns only
 /// WAL object-store operations and deliberately has no `DbCache` integration.
-/// Its object store may be a [`CachedObjectStore`](crate::cached_object_store::CachedObjectStore);
-/// WAL calls carry [`SstType::Wal`] so that wrapper can apply its WAL policy.
+/// Its object store may be a caching wrapper. WAL calls carry
+/// [`SstType::Wal`] so that the wrapper can apply its WAL policy.
 pub(crate) struct WalTableStore {
     object_store: Arc<dyn ObjectStore>,
     sst_format: SsTableFormat,

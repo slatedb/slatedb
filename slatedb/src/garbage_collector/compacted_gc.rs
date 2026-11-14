@@ -268,10 +268,6 @@ impl GcTask for CompactedGcTask {
 mod tests {
     use super::*;
     use crate::block_cache_policy::BlockCachePolicy;
-    use crate::cached_object_store::policy::CachePutConfig;
-    use crate::cached_object_store::stats::CachedObjectStoreStats;
-    #[allow(deprecated)] // `CachedObjectStore` is deprecated.
-    use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
@@ -283,7 +279,6 @@ mod tests {
     use bytes::Bytes;
     use object_store::{memory::InMemory, path::Path};
     use slatedb_common::clock::DefaultSystemClock;
-    use slatedb_common::DbRand;
     use std::collections::{BTreeMap, VecDeque};
     use std::time::Duration;
 
@@ -840,106 +835,5 @@ mod tests {
     fn test_newest_l0_dt_unix_epoch_when_no_trees_contribute() {
         let manifest = manifest_with(LsmTreeState::default(), vec![]);
         assert_eq!(newest_l0_dt(&manifest), DateTime::<Utc>::UNIX_EPOCH);
-    }
-
-    #[tokio::test]
-    #[allow(deprecated)] // `CachedObjectStore` is deprecated.
-    async fn test_compacted_gc_evicts_deleted_sst_from_object_store_cache() {
-        let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
-        let main_store = Arc::new(InMemory::new());
-        let cache_stats = Arc::new(CachedObjectStoreStats::new(&recorder));
-        let temp_dir = tempfile::Builder::new()
-            .prefix("gc_cache_evict_test_")
-            .tempdir()
-            .unwrap();
-        let part_size = 1024;
-        let cache_storage = Arc::new(FsCacheStorage::new(
-            temp_dir.keep(),
-            None,
-            None,
-            cache_stats.clone(),
-            Arc::new(DefaultSystemClock::new()),
-            Arc::new(DbRand::default()),
-            1000,
-        ));
-        let cached_store = CachedObjectStore::new(
-            main_store.clone(),
-            cache_storage,
-            part_size,
-            CachePutConfig {
-                cache_on_flush: true,
-                cache_on_compaction: false,
-            },
-            cache_stats,
-        )
-        .unwrap();
-
-        let format = SsTableFormat::default();
-        // The GC store deletes through the cache; the Main store caches on write.
-        let gc_table_store = Arc::new(TableStore::new(
-            cached_store.clone(),
-            format.clone(),
-            Path::from("/root"),
-            None,
-            TableStoreKind::GC,
-            BlockCachePolicy::default(),
-        ));
-        let main_table_store = Arc::new(TableStore::new(
-            cached_store.clone(),
-            format.clone(),
-            Path::from("/root"),
-            None,
-            TableStoreKind::Main,
-            BlockCachePolicy::default(),
-        ));
-
-        // Written through the Main store so cache_on_flush admits it.
-        let id_to_delete = SsTableId::from(ulid::Ulid::from_parts(1_000, 0));
-        let sst = build_test_sst(&format, 1).await;
-        main_table_store
-            .write_sst(&id_to_delete, &sst, Some(Bytes::new()))
-            .await
-            .unwrap();
-
-        let location = gc_table_store
-            .list_compacted_ssts(..)
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|m| m.id == id_to_delete)
-            .expect("sst to delete should be listed")
-            .metadata
-            .location;
-        let entry = cached_store.cache_storage.entry(&location, part_size);
-        assert!(
-            !entry.cached_parts().await.unwrap().is_empty(),
-            "sst should be cached before delete"
-        );
-
-        // Call GC deletion directly, no need to test the decision here.
-        let manifest_store = Arc::new(ManifestStore::new(&Path::from("/root"), main_store.clone()));
-        let compactions_store = Arc::new(CompactionsStore::new(
-            &Path::from("/root"),
-            main_store.clone(),
-        ));
-        let task = CompactedGcTask::new(
-            manifest_store,
-            compactions_store,
-            gc_table_store.clone(),
-            Arc::new(GcStats::new(&recorder)),
-            GarbageCollectorDirectoryOptions {
-                interval: None,
-                min_age: Duration::from_secs(5),
-                dry_run: false,
-            },
-            None,
-        );
-        task.maybe_delete_compacted_ssts(vec![id_to_delete]).await;
-
-        let entry = cached_store.cache_storage.entry(&location, part_size);
-        assert!(
-            entry.cached_parts().await.unwrap().is_empty(),
-            "sst should be evicted after delete"
-        );
     }
 }

@@ -1,8 +1,7 @@
 //! Instruments object-store operations with recorder-backed metrics.
 //!
 //! The wrapper sits beneath `RetryingObjectStore` so each retry attempt is
-//! counted separately. When used beneath `CachedObjectStore`, cache hits that
-//! never reach the remote store are not counted.
+//! counted separately.
 //!
 //! Every metric is tagged with two independent label dimensions:
 //!
@@ -17,10 +16,10 @@
 //! dimensions lets operators slice metrics by either axis.
 //!
 //! Note: if the wrapped `ObjectStore` is itself a wrapper like
-//! `CachedObjectStore`, the metrics count the calls into that wrapper, not
-//! the traffic it generates against the underlying store. A cache hit is
-//! counted as one request, and requests the cache makes internally to fill a
-//! miss are not counted at all.
+//! `slatedb_mirror::ObjectStoreMirror`, the metrics count the calls into that
+//! wrapper, not the traffic it generates against the underlying store. A local
+//! hit is counted as one request, and requests the wrapper makes internally to
+//! fill a miss are not counted at all.
 
 // `Instant` is intentionally used here for monotonic elapsed-time measurement.
 // SlateDB's clock abstraction is for wall-clock timestamps, not request timing.

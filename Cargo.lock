@@ -1018,16 +1018,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "filetime"
-version = "0.2.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
-dependencies = [
- "cfg-if",
- "libc",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3265,7 +3255,6 @@ dependencies = [
  "duration-str",
  "fail-parallel",
  "figment",
- "filetime",
  "flatbuffers",
  "flate2",
  "foyer",
@@ -3301,7 +3290,6 @@ dependencies = [
  "ulid",
  "url",
  "uuid",
- "walkdir",
  "zstd 0.14.3",
 ]
 
@@ -3448,7 +3436,6 @@ dependencies = [
  "tracing-subscriber",
  "ulid",
  "uniffi",
- "uniffi_meta",
  "url",
  "uuid",
 ]

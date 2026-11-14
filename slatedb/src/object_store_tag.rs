@@ -2,10 +2,9 @@
 //! an SST (through its internal TableStore component).
 //!
 //! This module is the contract between SlateDB and a caching
-//! [`ObjectStore`](object_store::ObjectStore) wrapper, whether the bundled
-//! [`CachedObjectStore`](crate::cached_object_store::CachedObjectStore) or an
-//! external implementation passed to
-//! [`Db::builder`](crate::Db::builder) as the object store.
+//! [`ObjectStore`](object_store::ObjectStore) wrapper passed to
+//! [`Db::builder`](crate::Db::builder) as the object store, for example an
+//! `ObjectStoreMirror` with a [`SlateDbMirrorPolicy`](crate::SlateDbMirrorPolicy).
 //!
 //! SlateDB inserts an [`ObjectStoreCallTag`] into the
 //! [`object_store::Extensions`] of every `GetOptions`, `PutOptions`, and
