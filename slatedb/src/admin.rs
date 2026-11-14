@@ -14,7 +14,6 @@ use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::manifest::VersionedManifest;
 use slatedb_common::clock::SystemClock;
 
-use crate::retrying_object_store::RetryingObjectStore;
 use crate::seq_tracker::FindOption;
 use crate::utils::IdGenerator;
 use crate::utils::ObjectStoreType;
@@ -24,6 +23,7 @@ use futures::StreamExt;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
 use rand::Rng;
+use slatedb_common::metrics::MetricsRecorder;
 use slatedb_common::DbRand;
 use std::env;
 use std::env::VarError;
@@ -38,8 +38,23 @@ use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
 use crate::merge_operator::MergeOperatorType;
+use crate::wal::slatedb::admin::SlateDbWalAdmin;
 use crate::wal::WalAdmin;
 use slatedb_txn_obj::TransactionalObject;
+
+pub(crate) enum AdminWal {
+    BuiltIn(Arc<SlateDbWalAdmin>),
+    Custom(Arc<dyn WalAdmin>),
+}
+
+impl AdminWal {
+    fn admin(&self) -> Arc<dyn WalAdmin> {
+        match self {
+            Self::BuiltIn(admin) => admin.clone(),
+            Self::Custom(admin) => admin.clone(),
+        }
+    }
+}
 
 /// An Admin struct for SlateDB administration operations.
 ///
@@ -58,14 +73,14 @@ pub struct Admin {
     pub(crate) system_clock: Arc<dyn SystemClock>,
     /// The random number generator to use for randomness.
     pub(crate) rand: Arc<DbRand>,
-    /// The retry policy applied to admin object-store operations.
-    pub(crate) object_store_max_retries: Option<u32>,
+    pub(crate) metrics_recorder: Arc<dyn MetricsRecorder>,
     #[cfg(feature = "compaction_filters")]
     pub(crate) compaction_filter_supplier:
         Option<Arc<dyn crate::compaction_filter::CompactionFilterSupplier>>,
     pub(crate) merge_operator: Option<MergeOperatorType>,
     pub(crate) block_transformer: Option<Arc<dyn BlockTransformer>>,
-    pub(crate) wal_admin: Arc<dyn WalAdmin>,
+    pub(crate) wal: AdminWal,
+    pub(crate) retrying_main_object_store: Arc<dyn ObjectStore>,
 }
 
 impl Admin {
@@ -298,16 +313,7 @@ impl Admin {
     /// * `gc_opts`: The garbage collector options.
     ///
     pub async fn run_gc_once(&self, gc_opts: GarbageCollectorOptions) -> Result<(), crate::Error> {
-        let gc = GarbageCollectorBuilder::new(
-            self.path.clone(),
-            self.object_store(ObjectStoreType::Main).clone(),
-        )
-        .with_system_clock(self.system_clock.clone())
-        .with_wal_gc(self.wal_admin.garbage_collector(&self.path))
-        .with_wal_object_store(self.object_store(ObjectStoreType::Wal).clone())
-        .with_options(gc_opts)
-        .with_seed(self.rand.rng().next_u64())
-        .build();
+        let gc = self.garbage_collector_builder(gc_opts).build();
         gc.run_gc_once().await;
         Ok(())
     }
@@ -332,16 +338,7 @@ impl Admin {
         cancellation_token: CancellationToken,
         gc_opts: GarbageCollectorOptions,
     ) -> Result<(), crate::Error> {
-        let gc = GarbageCollectorBuilder::new(
-            self.path.clone(),
-            self.object_store(ObjectStoreType::Main).clone(),
-        )
-        .with_system_clock(self.system_clock.clone())
-        .with_wal_gc(self.wal_admin.garbage_collector(&self.path))
-        .with_wal_object_store(self.object_store(ObjectStoreType::Wal).clone())
-        .with_options(gc_opts)
-        .with_seed(self.rand.rng().next_u64())
-        .build();
+        let gc = self.garbage_collector_builder(gc_opts).build();
 
         gc.start()?;
 
@@ -351,6 +348,25 @@ impl Admin {
                 gc.stop().await
             }
         }
+    }
+
+    fn garbage_collector_builder(
+        &self,
+        options: GarbageCollectorOptions,
+    ) -> GarbageCollectorBuilder<Path> {
+        let mut builder = GarbageCollectorBuilder::new(
+            self.path.clone(),
+            self.object_store(ObjectStoreType::Main).clone(),
+        )
+        .with_system_clock(self.system_clock.clone())
+        .with_wal_object_store(self.object_store(ObjectStoreType::Wal).clone())
+        .with_metrics_recorder(self.metrics_recorder.clone())
+        .with_options(options)
+        .with_seed(self.rand.rng().next_u64());
+        if let AdminWal::Custom(admin) = &self.wal {
+            builder = builder.with_wal_gc(admin.garbage_collector(&self.path));
+        }
+        builder
     }
 
     /// Run the compactor in the foreground until the provided cancellation token is cancelled.
@@ -448,6 +464,7 @@ impl Admin {
             self.object_store(ObjectStoreType::Main).clone(),
         )
         .with_options(options)
+        .with_metrics_recorder(self.metrics_recorder.clone())
         .with_system_clock(self.system_clock.clone())
         .with_seed(self.rand.rng().next_u64());
 
@@ -479,6 +496,7 @@ impl Admin {
             self.object_store(ObjectStoreType::Main).clone(),
         )
         .with_options(options)
+        .with_metrics_recorder(self.metrics_recorder.clone())
         .with_system_clock(self.system_clock.clone())
         .with_seed(self.rand.rng().next_u64());
 
@@ -626,7 +644,7 @@ impl Admin {
     /// refused, so a fat-fingered `--path` can't wipe an unrelated directory.
     /// Idempotent.
     pub async fn delete_db(&self, confirm: bool) -> Result<Vec<String>, crate::Error> {
-        let main = self.retrying_store(ObjectStoreType::Main);
+        let main = self.retrying_main_object_store.clone();
 
         if !confirm {
             return self.list_prefix(&main).await;
@@ -660,7 +678,7 @@ impl Admin {
                 };
                 let parent_store = Arc::new(ManifestStore::new(
                     &Path::from(external_db.path.as_str()),
-                    self.retrying_store(ObjectStoreType::Main),
+                    self.retrying_main_object_store.clone(),
                 ));
                 let mut parent =
                     match StoredManifest::load(parent_store, self.system_clock.clone()).await {
@@ -684,7 +702,8 @@ impl Admin {
         // between leaves the marker to prove a rerun should finish.
         let mut deleted = self.delete_prefix(&main, Some(&marker)).await?;
         deleted.extend(
-            self.wal_admin
+            self.wal
+                .admin()
                 .delete_wal(&self.path, false)
                 .await
                 .map_err(SlateDBError::from)?,
@@ -700,7 +719,8 @@ impl Admin {
         // track the dry run paths in a set since the WAL and db may overlap
         let mut paths = paths.iter().map(Path::to_string).collect::<BTreeSet<_>>();
         let wal_paths = self
-            .wal_admin
+            .wal
+            .admin()
             .delete_wal(&self.path, true)
             .await
             .map_err(SlateDBError::from)?;
@@ -772,21 +792,6 @@ impl Admin {
         Ok(manifest.core().sequence_tracker.find_seq(ts, opt))
     }
 
-    /// Wraps the configured object store of the given type in a
-    /// [`RetryingObjectStore`] so that admin operations retry transient object
-    /// store failures with exponential backoff. Retrying is safe here because
-    /// `RetryingObjectStore` verifies conditional puts via a ULID written to
-    /// object metadata, so an ambiguous failure after a successful write is
-    /// detected rather than surfaced as a spurious error.
-    fn retrying_store(&self, store_type: ObjectStoreType) -> Arc<dyn ObjectStore> {
-        Arc::new(RetryingObjectStore::new(
-            self.object_store(store_type).clone(),
-            self.rand.clone(),
-            self.system_clock.clone(),
-            self.object_store_max_retries,
-        ))
-    }
-
     fn object_store(&self, store_type: ObjectStoreType) -> &Arc<dyn ObjectStore> {
         match store_type {
             ObjectStoreType::Main => &self.main_object_store,
@@ -798,11 +803,11 @@ impl Admin {
     }
 
     fn manifest_store(&self) -> ManifestStore {
-        ManifestStore::new(&self.path, self.retrying_store(ObjectStoreType::Main))
+        ManifestStore::new(&self.path, self.retrying_main_object_store.clone())
     }
 
     fn compactions_store(&self) -> CompactionsStore {
-        CompactionsStore::new(&self.path, self.retrying_store(ObjectStoreType::Main))
+        CompactionsStore::new(&self.path, self.retrying_main_object_store.clone())
     }
 
     /// Clone a database using a builder pattern. If no db already exists at the specified path,
@@ -854,9 +859,9 @@ impl Admin {
         CloneBuilder::new(
             self.path.clone(),
             source,
-            self.retrying_store(ObjectStoreType::Main),
+            self.retrying_main_object_store.clone(),
         )
-        .with_wal_admin(self.wal_admin.clone())
+        .with_wal_admin(self.wal.admin())
     }
 
     /// Creates a new builder for an admin client at the given path.
@@ -1027,17 +1032,200 @@ mod tests {
     use crate::config::{
         CheckpointOptions, CompactionWorkerOptions, CompactorOptions, GarbageCollectorOptions,
     };
+    use crate::instrumented_object_store::stats::{
+        ERROR_COUNT, REQUEST_COUNT, REQUEST_DURATION_SECONDS,
+    };
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
     use crate::test_utils::{FlakyObjectStore, StringConcatMergeOperator};
     use crate::ErrorKind;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, ObjectStoreExt};
     use slatedb_common::clock::DefaultSystemClock;
+    use slatedb_common::metrics::{lookup_metric_with_labels, DefaultMetricsRecorder, MetricValue};
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
     use ulid::Ulid;
+
+    fn store_labels<'a>(
+        component: &'a str,
+        store: &'a str,
+        api: &'a str,
+    ) -> [(&'a str, &'a str); 4] {
+        let op = match api {
+            "put" => "put",
+            "delete" => "delete",
+            _ => "get",
+        };
+        [
+            ("component", component),
+            ("store_type", store),
+            ("op", op),
+            ("api", api),
+        ]
+    }
+
+    fn request_count(
+        recorder: &DefaultMetricsRecorder,
+        component: &str,
+        store: &str,
+        api: &str,
+    ) -> Option<i64> {
+        lookup_metric_with_labels(
+            recorder,
+            REQUEST_COUNT,
+            &store_labels(component, store, api),
+        )
+    }
+
+    #[rstest::rstest]
+    #[case::shared_store(false)]
+    #[case::separate_wal_store(true)]
+    #[tokio::test]
+    async fn test_admin_delete_records_main_and_wal_requests(#[case] separate_wal: bool) {
+        let main: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let wal = if separate_wal {
+            Arc::new(InMemory::new()) as Arc<dyn ObjectStore>
+        } else {
+            main.clone()
+        };
+        let path = Path::from("admin_metrics");
+        StoredManifest::create_new_db(
+            Arc::new(ManifestStore::new(&path, main.clone())),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        let wal_path = path.clone().join("wal").join("00000000000000000001.sst");
+        wal.put(&wal_path, "wal".into()).await.unwrap();
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let mut builder = AdminBuilder::new(path, main).with_metrics_recorder(recorder.clone());
+        if separate_wal {
+            builder = builder.with_wal_object_store(wal.clone());
+        }
+        let admin = builder.build();
+
+        assert!(admin.read_manifest(Some(1)).await.unwrap().is_some());
+        assert_eq!(request_count(&recorder, "admin", "main", "get"), Some(1));
+        assert!(admin
+            .delete_db(false)
+            .await
+            .unwrap()
+            .contains(&wal_path.to_string()));
+        assert!(wal.head(&wal_path).await.is_ok());
+        assert!(admin
+            .delete_db(true)
+            .await
+            .unwrap()
+            .contains(&wal_path.to_string()));
+        assert!(matches!(
+            wal.head(&wal_path).await,
+            Err(object_store::Error::NotFound { .. })
+        ));
+        assert_eq!(request_count(&recorder, "admin", "wal", "list"), Some(2));
+        assert_eq!(
+            request_count(&recorder, "admin", "wal", "delete"),
+            Some(i64::from(separate_wal))
+        );
+        assert!(request_count(&recorder, "admin", "main", "delete").unwrap() > 0);
+    }
+
+    #[rstest::rstest]
+    #[case::gc("gc", false)]
+    #[case::custom_wal_gc("custom_wal_gc", false)]
+    #[case::custom_wal_gc_with_fences("custom_wal_gc", true)]
+    #[case::compactor("compactor", false)]
+    #[case::worker("worker", false)]
+    #[tokio::test(start_paused = true)]
+    async fn test_admin_delegates_request_metrics(
+        #[case] task: &str,
+        #[case] collect_fences: bool,
+    ) {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("admin_delegated_metrics");
+        StoredManifest::create_new_db(
+            Arc::new(ManifestStore::new(&path, inner.clone())),
+            ManifestCore::new(),
+            Arc::new(DefaultSystemClock::new()),
+        )
+        .await
+        .unwrap();
+        StoredCompactions::create(Arc::new(CompactionsStore::new(&path, inner.clone())), 0)
+            .await
+            .unwrap();
+        let main = Arc::new(FlakyObjectStore::new(inner, 0));
+        let wal = Arc::new(FlakyObjectStore::new(Arc::new(InMemory::new()), 0));
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let custom_wal = Arc::new(FlakyObjectStore::new(Arc::new(InMemory::new()), 0));
+        let mut builder = AdminBuilder::new(path, main.clone())
+            .with_wal_object_store(wal.clone())
+            .with_metrics_recorder(recorder.clone());
+        if task == "custom_wal_gc" {
+            builder =
+                builder.with_wal_admin(Arc::new(crate::wal::slatedb::admin::SlateDbWalAdmin::new(
+                    custom_wal.clone(),
+                    Arc::new(fail_parallel::FailPointRegistry::new()),
+                )));
+        }
+        let admin = builder.build();
+        let token = CancellationToken::new();
+        token.cancel();
+        let mut gc_options = GarbageCollectorOptions::default();
+        if !collect_fences {
+            gc_options.wal_fence_options = None;
+        }
+        match task {
+            "gc" | "custom_wal_gc" => admin.run_gc_once(gc_options).await.unwrap(),
+            "compactor" => admin
+                .run_compactor_with_options(
+                    token,
+                    CompactorOptions {
+                        worker: None,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap(),
+            "worker" => admin.run_compaction_worker(token).await.unwrap(),
+            _ => unreachable!(),
+        }
+
+        let component = if task.ends_with("gc") {
+            "gc"
+        } else {
+            "compactor"
+        };
+        assert!(main.list_attempts() + main.list_with_offset_attempts() > 0);
+        for (store, attempts, offset_attempts) in [
+            (
+                "main",
+                main.list_attempts(),
+                main.list_with_offset_attempts(),
+            ),
+            ("wal", wal.list_attempts(), wal.list_with_offset_attempts()),
+        ] {
+            for (api, expected) in [("list", attempts), ("list_with_offset", offset_attempts)] {
+                assert_eq!(
+                    request_count(&recorder, component, store, api).unwrap_or(0),
+                    expected as i64
+                );
+                assert_eq!(
+                    request_count(&recorder, "admin", store, api).unwrap_or(0),
+                    0
+                );
+            }
+        }
+        if task == "gc" {
+            assert!(wal.list_attempts() + wal.list_with_offset_attempts() > 0);
+        }
+        if task == "custom_wal_gc" {
+            assert!(custom_wal.list_attempts() + custom_wal.list_with_offset_attempts() > 0);
+            let built_in_wal_reads = wal.list_attempts() + wal.list_with_offset_attempts();
+            assert_eq!(built_in_wal_reads > 0, collect_fences);
+        }
+    }
 
     #[test]
     fn test_load_object_store_from_env() {
@@ -1278,7 +1466,10 @@ mod tests {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(1, 0));
         let path = Path::from("/tmp/test_admin_list_manifests_retries_transient_failure");
-        let admin = AdminBuilder::new(path, flaky.clone()).build();
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let admin = AdminBuilder::new(path, flaky.clone())
+            .with_metrics_recorder(recorder.clone())
+            .build();
 
         let manifests = admin
             .list_manifests(..)
@@ -1288,6 +1479,7 @@ mod tests {
         assert!(manifests.is_empty());
         // 1 transient failure + 1 successful retry.
         assert_eq!(flaky.list_attempts(), 2);
+        assert_eq!(request_count(&recorder, "admin", "main", "list"), Some(2));
     }
 
     #[tokio::test]
@@ -1302,7 +1494,10 @@ mod tests {
 
         // Fail the first put_opts, which the retrying store should transparently retry.
         let flaky = Arc::new(FlakyObjectStore::new(inner, 1));
-        let admin = AdminBuilder::new(path, flaky.clone()).build();
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let admin = AdminBuilder::new(path, flaky.clone())
+            .with_metrics_recorder(recorder.clone())
+            .build();
 
         admin
             .create_detached_checkpoint(&CheckpointOptions::default())
@@ -1310,6 +1505,21 @@ mod tests {
             .expect("checkpoint should succeed after retrying the transient put");
 
         assert!(flaky.put_attempts() >= 2);
+        let labels = store_labels("admin", "main", "put");
+        assert_eq!(
+            request_count(&recorder, "admin", "main", "put"),
+            Some(flaky.put_attempts() as i64),
+        );
+        assert_eq!(
+            lookup_metric_with_labels(&recorder, ERROR_COUNT, &labels),
+            Some(1)
+        );
+        let snapshot = recorder.snapshot();
+        let latency = snapshot
+            .by_name_and_labels(REQUEST_DURATION_SECONDS, &labels)
+            .unwrap();
+        assert!(matches!(latency.value, MetricValue::Histogram { count, .. }
+            if count == flaky.put_attempts() as u64));
     }
 
     #[tokio::test]
