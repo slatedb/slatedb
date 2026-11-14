@@ -114,7 +114,7 @@ use object_store::ObjectStore;
 use rand::Rng;
 use tokio::runtime::Handle;
 
-use crate::admin::Admin;
+use crate::admin::{Admin, AdminWal};
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
 use crate::block_cache_policy::BlockCachePolicy;
@@ -1043,8 +1043,9 @@ impl<P: Into<Path>> AdminBuilder<P> {
             self.system_clock.clone(),
             self.object_store_max_retries,
         );
-        let custom_wal_admin = self.wal_admin.is_some();
-        let wal_admin = self.wal_admin.unwrap_or_else(|| {
+        let wal = if let Some(admin) = self.wal_admin {
+            AdminWal::Custom(admin)
+        } else {
             let store = instrumented_retrying_object_store(
                 self.wal_object_store
                     .clone()
@@ -1056,17 +1057,16 @@ impl<P: Into<Path>> AdminBuilder<P> {
                 self.system_clock.clone(),
                 self.object_store_max_retries,
             );
-            Arc::new(SlateDbWalAdmin::new(
+            AdminWal::BuiltIn(Arc::new(SlateDbWalAdmin::new(
                 store,
                 Arc::new(FailPointRegistry::new()),
-            ))
-        });
+            )))
+        };
         Admin {
             path: self.path.into(),
             main_object_store: self.main_object_store,
             wal_object_store: self.wal_object_store,
-            wal_admin,
-            custom_wal_admin,
+            wal,
             retrying_main_object_store,
             system_clock: self.system_clock,
             rand: self.rand,

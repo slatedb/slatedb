@@ -38,8 +38,23 @@ use uuid::Uuid;
 
 pub use crate::db::builder::AdminBuilder;
 use crate::merge_operator::MergeOperatorType;
+use crate::wal::slatedb::admin::SlateDbWalAdmin;
 use crate::wal::WalAdmin;
 use slatedb_txn_obj::TransactionalObject;
+
+pub(crate) enum AdminWal {
+    BuiltIn(Arc<SlateDbWalAdmin>),
+    Custom(Arc<dyn WalAdmin>),
+}
+
+impl AdminWal {
+    fn admin(&self) -> Arc<dyn WalAdmin> {
+        match self {
+            Self::BuiltIn(admin) => admin.clone(),
+            Self::Custom(admin) => admin.clone(),
+        }
+    }
+}
 
 /// An Admin struct for SlateDB administration operations.
 ///
@@ -64,9 +79,7 @@ pub struct Admin {
         Option<Arc<dyn crate::compaction_filter::CompactionFilterSupplier>>,
     pub(crate) merge_operator: Option<MergeOperatorType>,
     pub(crate) block_transformer: Option<Arc<dyn BlockTransformer>>,
-    pub(crate) wal_admin: Arc<dyn WalAdmin>,
-    /// Custom WAL implementations provide their own garbage collector.
-    pub(crate) custom_wal_admin: bool,
+    pub(crate) wal: AdminWal,
     pub(crate) retrying_main_object_store: Arc<dyn ObjectStore>,
 }
 
@@ -350,8 +363,8 @@ impl Admin {
         .with_metrics_recorder(self.metrics_recorder.clone())
         .with_options(options)
         .with_seed(self.rand.rng().next_u64());
-        if self.custom_wal_admin {
-            builder = builder.with_wal_gc(self.wal_admin.garbage_collector(&self.path));
+        if let AdminWal::Custom(admin) = &self.wal {
+            builder = builder.with_wal_gc(admin.garbage_collector(&self.path));
         }
         builder
     }
@@ -689,7 +702,8 @@ impl Admin {
         // between leaves the marker to prove a rerun should finish.
         let mut deleted = self.delete_prefix(&main, Some(&marker)).await?;
         deleted.extend(
-            self.wal_admin
+            self.wal
+                .admin()
                 .delete_wal(&self.path, false)
                 .await
                 .map_err(SlateDBError::from)?,
@@ -705,7 +719,8 @@ impl Admin {
         // track the dry run paths in a set since the WAL and db may overlap
         let mut paths = paths.iter().map(Path::to_string).collect::<BTreeSet<_>>();
         let wal_paths = self
-            .wal_admin
+            .wal
+            .admin()
             .delete_wal(&self.path, true)
             .await
             .map_err(SlateDBError::from)?;
@@ -846,7 +861,7 @@ impl Admin {
             source,
             self.retrying_main_object_store.clone(),
         )
-        .with_wal_admin(self.wal_admin.clone())
+        .with_wal_admin(self.wal.admin())
     }
 
     /// Creates a new builder for an admin client at the given path.
@@ -1118,12 +1133,16 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::gc("gc")]
-    #[case::custom_wal_gc("custom_wal_gc")]
-    #[case::compactor("compactor")]
-    #[case::worker("worker")]
+    #[case::gc("gc", false)]
+    #[case::custom_wal_gc("custom_wal_gc", false)]
+    #[case::custom_wal_gc_with_fences("custom_wal_gc", true)]
+    #[case::compactor("compactor", false)]
+    #[case::worker("worker", false)]
     #[tokio::test(start_paused = true)]
-    async fn test_admin_delegates_request_metrics(#[case] task: &str) {
+    async fn test_admin_delegates_request_metrics(
+        #[case] task: &str,
+        #[case] collect_fences: bool,
+    ) {
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("admin_delegated_metrics");
         StoredManifest::create_new_db(
@@ -1154,8 +1173,7 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel();
         let mut gc_options = GarbageCollectorOptions::default();
-        if task == "custom_wal_gc" {
-            // Isolate the custom WAL collector from the separate built-in fence collector.
+        if !collect_fences {
             gc_options.wal_fence_options = None;
         }
         match task {
@@ -1204,7 +1222,8 @@ mod tests {
         }
         if task == "custom_wal_gc" {
             assert!(custom_wal.list_attempts() + custom_wal.list_with_offset_attempts() > 0);
-            assert_eq!(wal.list_attempts() + wal.list_with_offset_attempts(), 0);
+            let built_in_wal_reads = wal.list_attempts() + wal.list_with_offset_attempts();
+            assert_eq!(built_in_wal_reads > 0, collect_fences);
         }
     }
 
