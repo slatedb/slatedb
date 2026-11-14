@@ -1,7 +1,6 @@
 # SlateDB Benchmarking Tool
 
-Bencher is a tool for benchmarking SlateDB. The tool currently has two
-subcommands: `db` and `compaction`.
+Bencher measures SlateDB database operations, range scans, compaction, and transactions.
 
 ## `db` Subcommand
 
@@ -95,6 +94,52 @@ Replace `20_1.dat` and the labels with the benchmark configuration you want to
 plot.
 
 The script also has a `SLATEDB_BENCH_CLEAN` environment variable which can be set to `true` to clean up the test data in object storage after each benchmark.
+
+## `scan` Subcommand
+
+The `scan` subcommand measures forward scans from random start keys in an existing database.
+It follows the seek-and-read workload of [RocksDB's `db_bench seekrandom`][rocksdb-bench].
+Each scan reads up to `--scan-length` rows, or stops at the end of the database.
+`--read-ahead-bytes` sets the target bytes per SST fetch. A value of 1 fetches one block.
+The row limit serves the role of RocksDB's `--seek_nexts`.
+Fetch sizing follows the purpose of RocksDB's `--readahead_size`.
+
+Use the same `--seed`, `--key-len`, and `--num-scans` to repeat the same start keys.
+Start keys contain random bytes. Match `--key-len` to the keys used by the `db` subcommand.
+The scan number determines each start key, so worker scheduling does not change the workload.
+
+The following example writes SST data once, then scans the same database with two fetch sizes.
+Set `CLOUD_PROVIDER` and its storage variables first. For local storage, set `CLOUD_PROVIDER=local`
+and set `LOCAL_PATH` to an existing directory.
+
+```bash
+cargo build --release -p slatedb-bencher
+BENCHER=target/release/bencher
+
+"$BENCHER" --path scan-benchmark db --no-compactor \
+  --put-percentage 100 --num-rows 50000 --key-count 50000 \
+  --key-len 16 --val-len 1024 --concurrency 1
+
+for bytes in 1 65536; do
+  "$BENCHER" --path scan-benchmark scan --num-scans 1000 \
+    --scan-length 1000 --read-ahead-bytes "$bytes" \
+    --seed 42 --key-len 16 --concurrency 1
+done
+```
+
+The summary reports completed scans, returned rows, and key plus value bytes.
+It also reports scans per second, rows per second, and MiB per second.
+Empty scans count as completed scans. Rows beyond the end of the database do not count.
+Rates include iterator creation and reading, and exclude database open and close.
+Progress reports show averages since the scan workload started.
+
+Use `--duration` to stop starting scans after a given number of seconds.
+If both limits are set, the first limit stops new scans. Active scans finish.
+The default duration is 60 seconds when neither limit is set.
+The scan workload disables the embedded compactor and uses the shared cache options.
+Without cache size options, scans use no block or metadata cache. The OS can cache local file reads.
+
+[rocksdb-bench]: https://github.com/facebook/rocksdb/blob/dd7bd17/tools/db_bench_tool.cc
 
 ## `compaction` Subcommand
 

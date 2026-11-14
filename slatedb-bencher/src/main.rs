@@ -2,8 +2,8 @@
 
 use crate::args::BencherArgs;
 use args::{
-    BencherCommands, BenchmarkCompactionArgs, BenchmarkDbArgs, BenchmarkTransactionArgs,
-    CompactionSubcommands, KeyGeneratorSupplier,
+    BencherCommands, BenchmarkCompactionArgs, BenchmarkDbArgs, BenchmarkScanArgs,
+    BenchmarkTransactionArgs, CompactionSubcommands, KeyGeneratorSupplier,
 };
 use bytes::Bytes;
 use clap::Parser;
@@ -30,6 +30,7 @@ use transactions::TransactionBench;
 
 mod args;
 pub mod db;
+mod scan;
 pub mod stats;
 pub mod system_monitor;
 pub mod transactions;
@@ -57,17 +58,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         create_cleanup_lock(object_store.clone(), &path).await?;
     }
 
-    match args.command {
+    let benchmark_result = match args.command {
         BencherCommands::Db(subcommand_args) => {
             exec_benchmark_db(path.clone(), object_store.clone(), subcommand_args).await;
+            Ok(())
+        }
+        BencherCommands::Scan(subcommand_args) => {
+            exec_benchmark_scan(path.clone(), object_store.clone(), subcommand_args).await
         }
         BencherCommands::Compaction(subcommand_args) => {
             exec_benchmark_compaction(path.clone(), object_store.clone(), subcommand_args).await;
+            Ok(())
         }
         BencherCommands::Transaction(subcommand_args) => {
             exec_benchmark_transaction(path.clone(), object_store.clone(), subcommand_args).await;
+            Ok(())
         }
-    }
+    };
 
     monitor.stop();
 
@@ -75,6 +82,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
         cleanup_data(object_store, &path).await?;
     }
 
+    benchmark_result
+}
+
+async fn exec_benchmark_scan(
+    path: Path,
+    object_store: Arc<dyn ObjectStore>,
+    args: BenchmarkScanArgs,
+) -> Result<(), Box<dyn Error>> {
+    let (mut config, memory_cache) = args.db_args.config()?;
+    config.compactor_options = None;
+    let mut builder = Db::builder(path, object_store).with_settings(config);
+    if let Some(cache) = memory_cache {
+        builder = builder.with_db_cache(cache, 0);
+    }
+    let db = Arc::new(builder.build().await?);
+    let result = scan::run(db.clone(), args).await;
+    let close_result = db.close().await;
+    result?;
+    close_result?;
     Ok(())
 }
 
