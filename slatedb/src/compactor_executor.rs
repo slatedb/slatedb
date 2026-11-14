@@ -21,7 +21,6 @@ use crate::config::CompactionWorkerOptions;
 use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableView};
 use crate::error::SlateDBError;
 use crate::iter::{IterationOrder, RowEntryIterator, TrackedRowEntryIterator};
-use crate::manifest::store::{ManifestStore, StoredManifest};
 use crate::merge_iterator::MergeIterator;
 use crate::merge_operator::{
     instrument_merge_operator, MergeOperatorIterator, MergeOperatorRequiredIterator,
@@ -30,7 +29,6 @@ use crate::merge_operator::{
 use crate::peeking_iterator::PeekingIterator;
 use crate::read_trace::ReadTrace;
 use crate::retention_iterator::RetentionIterator;
-use crate::seq_tracker::SequenceTracker;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions};
 use crate::subcompaction::{plan_subcompaction_ranges, Subcompaction};
@@ -228,7 +226,6 @@ pub(crate) struct TokioCompactionExecutorOptions {
     pub stats: Arc<CompactionStats>,
     pub worker_stats: WorkerStats,
     pub clock: Arc<dyn SystemClock>,
-    pub manifest_store: Arc<ManifestStore>,
     pub merge_operator: Option<MergeOperatorType>,
     #[cfg(feature = "compaction_filters")]
     pub compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
@@ -260,7 +257,6 @@ impl TokioCompactionExecutor {
                 worker_stats: opts.worker_stats,
                 clock: opts.clock,
                 is_stopped: AtomicBool::new(false),
-                manifest_store: opts.manifest_store,
                 merge_operator,
                 #[cfg(feature = "compaction_filters")]
                 compaction_filter_supplier: opts.compaction_filter_supplier,
@@ -314,7 +310,6 @@ pub(crate) struct TokioCompactionExecutorInner {
     worker_stats: WorkerStats,
     clock: Arc<dyn SystemClock>,
     is_stopped: AtomicBool,
-    manifest_store: Arc<ManifestStore>,
     merge_operator: Option<MergeOperatorType>,
     #[cfg(feature = "compaction_filters")]
     compaction_filter_supplier: Option<Arc<dyn CompactionFilterSupplier>>,
@@ -326,13 +321,10 @@ impl TokioCompactionExecutorInner {
     ///
     /// `output_ssts` are the output SSTs already written by a previous attempt of
     /// this (sub)compaction; the returned iterator is positioned just past the last
-    /// entry they contain. `sequence_tracker` is the manifest's sequence tracker,
-    /// loaded once per job so concurrent subcompactions don't each re-read the
-    /// manifest.
+    /// entry they contain.
     async fn load_iterators<'a>(
         &self,
         job_args: &'a SubcompactionArgs,
-        sequence_tracker: Arc<SequenceTracker>,
     ) -> Result<ResumingIterator<Box<dyn TrackedRowEntryIterator + 'a>>, SlateDBError> {
         let retention_min_seq = job_args.retention_min_seq;
         let resume_cursor = match job_args.output_ssts.last() {
@@ -409,12 +401,9 @@ impl TokioCompactionExecutorInner {
 
         let mut retention_iter = RetentionIterator::new(
             merge_iter,
-            None,
             retention_min_seq,
             job_args.is_dest_last_run,
             job_args.compaction_clock_tick,
-            self.clock.clone(),
-            sequence_tracker,
             Some(self.stats.retention_metrics()),
         )
         .await?;
@@ -545,24 +534,9 @@ impl TokioCompactionExecutorInner {
         // ticker while planning is in flight. The executor only reports
         // progress when it has compaction context that may need to be persisted
         // for resume.
-        let (sequence_tracker, planned) = self.load_manifest_and_plan(args).await?;
-
-        self.execute_compaction_job(id, destination, planned, sequence_tracker)
-            .await
-    }
-
-    /// Loads the manifest's shared sequence tracker and plans the job's ranges
-    /// (RFC-0028). Every range shares the one sequence tracker rather than
-    /// re-reading the manifest.
-    async fn load_manifest_and_plan(
-        &self,
-        args: StartCompactionJobArgs,
-    ) -> Result<(Arc<SequenceTracker>, PlannedCompaction), SlateDBError> {
-        let stored_manifest =
-            StoredManifest::load(self.manifest_store.clone(), self.clock.clone()).await?;
-        let sequence_tracker = Arc::new(stored_manifest.db_state().sequence_tracker.clone());
         let planned = self.plan_compaction_job(args).await?;
-        Ok((sequence_tracker, planned))
+
+        self.execute_compaction_job(id, destination, planned).await
     }
 
     /// Plans the subcompaction ranges for a fresh job (RFC-0028).
@@ -607,7 +581,6 @@ impl TokioCompactionExecutorInner {
         id: Ulid,
         destination: u32,
         planned: PlannedCompaction,
-        sequence_tracker: Arc<SequenceTracker>,
     ) -> Result<SortedRun, SlateDBError> {
         let PlannedCompaction {
             mut ctx,
@@ -654,7 +627,6 @@ impl TokioCompactionExecutorInner {
             }
             let this = self.clone();
             let index = args.index;
-            let sequence_tracker = sequence_tracker.clone();
             let event_tx = sub_tx.clone();
             let finished_tx = sub_tx.clone();
             let task = spawn_bg_task(
@@ -683,8 +655,7 @@ impl TokioCompactionExecutorInner {
                             output_ssts: output_ssts.to_vec(),
                         });
                     };
-                    this.run_subcompaction_merge(args, sequence_tracker, &progress)
-                        .await
+                    this.run_subcompaction_merge(args, &progress).await
                 },
             );
             // Wrapping each task in an `AbortOnDropHandle` is what propagates a
@@ -788,10 +759,9 @@ impl TokioCompactionExecutorInner {
     async fn run_subcompaction_merge(
         &self,
         args: SubcompactionArgs,
-        sequence_tracker: Arc<SequenceTracker>,
         progress: &(dyn Fn(u64, &[SsTableHandle]) + Send + Sync),
     ) -> Result<Vec<SsTableHandle>, SlateDBError> {
-        let mut all_iter = self.load_iterators(&args, sequence_tracker).await?;
+        let mut all_iter = self.load_iterators(&args).await?;
         let mut output_ssts = args.output_ssts.clone();
         let mut current_writer = self.table_store.table_writer(
             SsTableId::from(self.rand.rng().gen_ulid(self.clock.as_ref())),
@@ -1482,10 +1452,6 @@ mod tests {
             TableStoreKind::Compactor,
             BlockCachePolicy::default(),
         ));
-        let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
-        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
-            .await
-            .unwrap();
         let retention_min_seq = if merge_operator.is_some() {
             None
         } else {
@@ -1503,7 +1469,6 @@ mod tests {
             },
             worker_stats: WorkerStats::noop(),
             clock,
-            manifest_store,
             merge_operator,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
@@ -1573,18 +1538,9 @@ mod tests {
 
         // Verify the resumed iterator yields all remaining rows, starting immediately
         // after the persisted prefix and continuing in sorted order.
-        let sequence_tracker = {
-            let stored_manifest = StoredManifest::load(
-                executor.inner.manifest_store.clone(),
-                executor.inner.clock.clone(),
-            )
-            .await
-            .unwrap();
-            Arc::new(stored_manifest.db_state().sequence_tracker.clone())
-        };
         let mut iter = executor
             .inner
-            .load_iterators(&subcompaction_args, sequence_tracker)
+            .load_iterators(&subcompaction_args)
             .await
             .unwrap();
         let mut resumed_entries = Vec::new();
@@ -1704,14 +1660,6 @@ mod tests {
                     root_path.clone(),
                     None,
                     TableStoreKind::Compactor, BlockCachePolicy::default()));
-                let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
-                StoredManifest::create_new_db(
-                    manifest_store.clone(),
-                    ManifestCore::new(),
-                    clock.clone(),
-                )
-                .await
-                .unwrap();
 
                 let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
                     handle,
@@ -1725,7 +1673,6 @@ mod tests {
                     },
                     worker_stats: WorkerStats::noop(),
                     clock,
-                    manifest_store,
                     merge_operator,
                     #[cfg(feature = "compaction_filters")]
                     compaction_filter_supplier: None,
@@ -1943,10 +1890,6 @@ mod tests {
             TableStoreKind::Compactor,
             BlockCachePolicy::default(),
         ));
-        let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
-        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
-            .await
-            .unwrap();
         let (tx, rx) = async_channel::unbounded::<WorkerMessage>();
         let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
             handle: tokio::runtime::Handle::current(),
@@ -1963,7 +1906,6 @@ mod tests {
             },
             worker_stats: WorkerStats::noop(),
             clock,
-            manifest_store,
             merge_operator: None,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: filter,
@@ -2631,10 +2573,6 @@ mod tests {
             TableStoreKind::Compactor,
             BlockCachePolicy::default(),
         ));
-        let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
-        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
-            .await
-            .unwrap();
 
         let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
             handle,
@@ -2648,7 +2586,6 @@ mod tests {
             },
             worker_stats: WorkerStats::noop(),
             clock,
-            manifest_store,
             merge_operator: None,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
@@ -2767,10 +2704,6 @@ mod tests {
             TableStoreKind::Compactor,
             BlockCachePolicy::default(),
         ));
-        let manifest_store = Arc::new(ManifestStore::new(&root_path, object_store.clone()));
-        StoredManifest::create_new_db(manifest_store.clone(), ManifestCore::new(), clock.clone())
-            .await
-            .unwrap();
 
         let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
             handle,
@@ -2784,7 +2717,6 @@ mod tests {
             },
             worker_stats: WorkerStats::noop(),
             clock,
-            manifest_store,
             merge_operator: None,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,
@@ -2961,10 +2893,6 @@ mod tests {
                 .await
                 .unwrap();
             let table_store = db.inner.table_store.clone();
-            let manifest_store = Arc::new(ManifestStore::new(
-                &Path::from(self.path.as_str()),
-                os.clone(),
-            ));
 
             let executor = TokioCompactionExecutor::new(TokioCompactionExecutorOptions {
                 handle,
@@ -2978,7 +2906,6 @@ mod tests {
                 },
                 worker_stats: WorkerStats::noop(),
                 clock,
-                manifest_store,
                 merge_operator: self.merge_operator,
                 #[cfg(feature = "compaction_filters")]
                 compaction_filter_supplier: self.compaction_filter_supplier,

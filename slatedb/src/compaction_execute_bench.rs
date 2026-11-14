@@ -353,7 +353,6 @@ impl CompactionExecuteBench {
             stats: stats.clone(),
             worker_stats: WorkerStats::new(&recorder, "bench"),
             clock: self.system_clock.clone(),
-            manifest_store: manifest_store.clone(),
             merge_operator: None,
             #[cfg(feature = "compaction_filters")]
             compaction_filter_supplier: None,

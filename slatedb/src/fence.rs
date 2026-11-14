@@ -147,8 +147,7 @@ mod tests {
     use crate::wal::slatedb::store::{WalFileId, WalTableStore};
     use crate::{CloseReason, Db, ErrorKind, Settings};
     use bytes::Bytes;
-    use fail_parallel::fail_point_channel;
-    use fail_parallel::FailPointRegistry;
+    use fail_parallel::{fail_point_channel, FailGuard, FailPointRegistry};
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
@@ -251,15 +250,15 @@ mod tests {
                 .build()
                 .await
                 .unwrap();
-            // wait for initial manifest poll using "manifest_refresh_count" stat
-            // so the db has settled before the test starts fencing it.
+            // Wait for the replay validation refresh and the first timer poll.
+            // The timer must finish its first poll before the test starts fencing.
             for _ in 0..600 {
-                if lookup_metric(&recorder, MANIFEST_REFRESH_COUNT).unwrap_or(0) > 0 {
+                if lookup_metric(&recorder, MANIFEST_REFRESH_COUNT).unwrap_or(0) >= 2 {
                     return db;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            panic!("manifest writer did not perform initial poll");
+            panic!("manifest writer did not complete both startup refreshes");
         }
 
         async fn db(&self) -> Db {
@@ -337,7 +336,7 @@ mod tests {
                 );
             } else {
                 self.data.insert(k, v);
-                assert!(result.is_ok());
+                assert!(result.is_ok(), "expected write to succeed, got {result:?}");
             }
         }
 
@@ -553,15 +552,15 @@ mod tests {
         // write a wal file
         h.put(&db, 0, false).await;
 
-        // configure the fencer to pause
-        fail_parallel::cfg(h.fp_registry.clone(), case.event, "pause").unwrap();
+        // Release the pause if an assertion fails, so runtime shutdown cannot hang.
+        let pause = FailGuard::new(h.fp_registry.clone(), case.event, "pause").unwrap();
 
         // spawn WriterFencer on another task
         let fencer = h.fencer.take().unwrap();
         let stored_manifest = h.stored_manifest.take().unwrap();
         let jh = tokio::task::spawn(async move { fencer.fence(stored_manifest, None).await });
-        // wait for fencer to load empty wal id and pause
-        h.event_rx.recv().await.unwrap();
+        // Each failpoint sends an event, so wait for the configured pause.
+        while h.event_rx.recv().await.unwrap() != case.event {}
 
         // write 2 new wal files to fenced db (write with await durable twice)
         h.put(&db, 1, case.write_fenced).await;
@@ -593,8 +592,8 @@ mod tests {
             h.run_gc(replay_after_wal_id).await;
         }
 
-        // unpause WriterFencer
-        fail_parallel::cfg(h.fp_registry.clone(), case.event, "off").unwrap();
+        // Resume the fencer.
+        drop(pause);
         // verify it returns successfully
         let mut result = jh.await.unwrap().unwrap();
         // The fencer's stale empty_wal_id was retried above the fenced writer's possibly
