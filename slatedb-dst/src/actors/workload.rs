@@ -27,6 +27,8 @@ pub struct WorkloadActorOptions {
     pub max_value_size: usize,
     /// Durability level used by workload read verification.
     pub read_durability: DurabilityLevel,
+    /// Relative weights for selecting each workload operation.
+    pub operation_weights: WorkloadOperationWeights,
 }
 
 impl Default for WorkloadActorOptions {
@@ -36,7 +38,78 @@ impl Default for WorkloadActorOptions {
             min_value_size: 32,
             max_value_size: 256,
             read_durability: DurabilityLevel::Memory,
+            operation_weights: WorkloadOperationWeights::default(),
         }
+    }
+}
+
+/// Relative operation weights. A zero weight disables an operation.
+///
+/// All weights default to one. The actor ignores the merge weight when no merge
+/// operator is configured. At least one enabled operation must have a positive weight.
+/// These weights select whole operations; they do not change entries inside write batches.
+#[derive(Clone, Debug)]
+pub struct WorkloadOperationWeights {
+    /// Weight for point reads.
+    pub get: u32,
+    /// Weight for prefix scans.
+    pub scan: u32,
+    /// Weight for deletes.
+    pub delete: u32,
+    /// Weight for puts.
+    pub put: u32,
+    /// Weight for merges, when a merge operator is configured.
+    pub merge: u32,
+    /// Weight for write batches with random put, delete, and optional merge entries.
+    pub write_batch: u32,
+}
+
+impl Default for WorkloadOperationWeights {
+    fn default() -> Self {
+        Self {
+            get: 1,
+            scan: 1,
+            delete: 1,
+            put: 1,
+            merge: 1,
+            write_batch: 1,
+        }
+    }
+}
+
+impl WorkloadOperationWeights {
+    fn operations(&self, merge_enabled: bool) -> [(WorkloadOperation, u32); 6] {
+        [
+            (WorkloadOperation::Get, self.get),
+            (WorkloadOperation::Scan, self.scan),
+            (WorkloadOperation::Delete, self.delete),
+            (WorkloadOperation::Put, self.put),
+            (
+                WorkloadOperation::Merge,
+                if merge_enabled { self.merge } else { 0 },
+            ),
+            (WorkloadOperation::WriteBatch, self.write_batch),
+        ]
+    }
+
+    fn sample(&self, rand_value: u64, merge_enabled: bool) -> WorkloadOperation {
+        let operations = self.operations(merge_enabled);
+        let total: u64 = operations
+            .iter()
+            .map(|(_, weight)| u64::from(*weight))
+            .sum();
+        assert!(total > 0, "a merge-only workload requires a merge operator");
+
+        // Keep the operation order and one random draw used by the default workload.
+        let mut ticket = rand_value % total;
+        for (operation, weight) in operations {
+            let weight = u64::from(weight);
+            if ticket < weight {
+                return operation;
+            }
+            ticket -= weight;
+        }
+        unreachable!("workload operation weights cover every ticket")
     }
 }
 
@@ -102,6 +175,14 @@ impl WorkloadActor {
             options.max_value_size >= WORKLOAD_VALUE_VERSION_SIZE,
             "workload actor max_value_size must be at least {WORKLOAD_VALUE_VERSION_SIZE} bytes"
         );
+        assert!(
+            options
+                .operation_weights
+                .operations(true)
+                .iter()
+                .any(|(_, weight)| *weight > 0),
+            "workload actor needs at least one positive operation weight"
+        );
 
         Ok(Self {
             options,
@@ -129,29 +210,6 @@ enum WorkloadOperation {
     WriteBatch,
 }
 
-impl WorkloadOperation {
-    fn sample(rand_value: u64, merge_enabled: bool) -> Self {
-        if merge_enabled {
-            match rand_value % 6 {
-                0 => Self::Get,
-                1 => Self::Scan,
-                2 => Self::Delete,
-                3 => Self::Put,
-                4 => Self::Merge,
-                _ => Self::WriteBatch,
-            }
-        } else {
-            match rand_value % 5 {
-                0 => Self::Get,
-                1 => Self::Scan,
-                2 => Self::Delete,
-                3 => Self::Put,
-                _ => Self::WriteBatch,
-            }
-        }
-    }
-}
-
 #[async_trait]
 impl Actor for WorkloadActor {
     /// Executes one mixed deterministic workload step against the shared
@@ -167,7 +225,10 @@ impl Actor for WorkloadActor {
             .get_or_insert_with(|| format!("{}/", ctx.name()))
             .clone();
         let merge_enabled = ctx.merge_operator().is_some();
-        let operation = WorkloadOperation::sample(ctx.rand().rng().next_u64(), merge_enabled);
+        let operation = self
+            .options
+            .operation_weights
+            .sample(ctx.rand().rng().next_u64(), merge_enabled);
 
         match operation {
             WorkloadOperation::Get => {
