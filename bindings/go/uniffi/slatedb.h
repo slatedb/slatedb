@@ -47,7 +47,7 @@ typedef struct RustCallStatus {
 #define UNIFFI_FFIDEF_RUST_FUTURE_CONTINUATION_CALLBACK
 typedef void (*UniffiRustFutureContinuationCallback)(uint64_t data, int8_t poll_result);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiRustFutureContinuationCallback(
 				UniffiRustFutureContinuationCallback cb, uint64_t data, int8_t poll_result)
@@ -61,7 +61,7 @@ static void call_UniffiRustFutureContinuationCallback(
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_DROPPED_CALLBACK
 typedef void (*UniffiForeignFutureDroppedCallback)(uint64_t handle);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureDroppedCallback(
 				UniffiForeignFutureDroppedCallback cb, uint64_t handle)
@@ -75,7 +75,7 @@ static void call_UniffiForeignFutureDroppedCallback(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_FREE
 typedef void (*UniffiCallbackInterfaceFree)(uint64_t handle);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfaceFree(
 				UniffiCallbackInterfaceFree cb, uint64_t handle)
@@ -89,7 +89,7 @@ static void call_UniffiCallbackInterfaceFree(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLONE
 typedef uint64_t (*UniffiCallbackInterfaceClone)(uint64_t handle);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static uint64_t call_UniffiCallbackInterfaceClone(
 				UniffiCallbackInterfaceClone cb, uint64_t handle)
@@ -119,7 +119,7 @@ typedef struct UniffiForeignFutureResultU8 {
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U8
 typedef void (*UniffiForeignFutureCompleteU8)(uint64_t callback_data, UniffiForeignFutureResultU8 result);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteU8(
 				UniffiForeignFutureCompleteU8 cb, uint64_t callback_data, UniffiForeignFutureResultU8 result)
@@ -141,7 +141,7 @@ typedef struct UniffiForeignFutureResultI8 {
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I8
 typedef void (*UniffiForeignFutureCompleteI8)(uint64_t callback_data, UniffiForeignFutureResultI8 result);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteI8(
 				UniffiForeignFutureCompleteI8 cb, uint64_t callback_data, UniffiForeignFutureResultI8 result)
@@ -163,7 +163,7 @@ typedef struct UniffiForeignFutureResultU16 {
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U16
 typedef void (*UniffiForeignFutureCompleteU16)(uint64_t callback_data, UniffiForeignFutureResultU16 result);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteU16(
 				UniffiForeignFutureCompleteU16 cb, uint64_t callback_data, UniffiForeignFutureResultU16 result)
@@ -185,7 +185,7 @@ typedef struct UniffiForeignFutureResultI16 {
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I16
 typedef void (*UniffiForeignFutureCompleteI16)(uint64_t callback_data, UniffiForeignFutureResultI16 result);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteI16(
 				UniffiForeignFutureCompleteI16 cb, uint64_t callback_data, UniffiForeignFutureResultI16 result)
@@ -207,7 +207,7 @@ typedef struct UniffiForeignFutureResultU32 {
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U32
 typedef void (*UniffiForeignFutureCompleteU32)(uint64_t callback_data, UniffiForeignFutureResultU32 result);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteU32(
 				UniffiForeignFutureCompleteU32 cb, uint64_t callback_data, UniffiForeignFutureResultU32 result)
@@ -229,7 +229,7 @@ typedef struct UniffiForeignFutureResultI32 {
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I32
 typedef void (*UniffiForeignFutureCompleteI32)(uint64_t callback_data, UniffiForeignFutureResultI32 result);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteI32(
 				UniffiForeignFutureCompleteI32 cb, uint64_t callback_data, UniffiForeignFutureResultI32 result)
@@ -251,7 +251,7 @@ typedef struct UniffiForeignFutureResultU64 {
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_U64
 typedef void (*UniffiForeignFutureCompleteU64)(uint64_t callback_data, UniffiForeignFutureResultU64 result);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteU64(
 				UniffiForeignFutureCompleteU64 cb, uint64_t callback_data, UniffiForeignFutureResultU64 result)
@@ -273,7 +273,7 @@ typedef struct UniffiForeignFutureResultI64 {
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_I64
 typedef void (*UniffiForeignFutureCompleteI64)(uint64_t callback_data, UniffiForeignFutureResultI64 result);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteI64(
 				UniffiForeignFutureCompleteI64 cb, uint64_t callback_data, UniffiForeignFutureResultI64 result)
@@ -295,7 +295,7 @@ typedef struct UniffiForeignFutureResultF32 {
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_F32
 typedef void (*UniffiForeignFutureCompleteF32)(uint64_t callback_data, UniffiForeignFutureResultF32 result);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteF32(
 				UniffiForeignFutureCompleteF32 cb, uint64_t callback_data, UniffiForeignFutureResultF32 result)
@@ -317,7 +317,7 @@ typedef struct UniffiForeignFutureResultF64 {
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_F64
 typedef void (*UniffiForeignFutureCompleteF64)(uint64_t callback_data, UniffiForeignFutureResultF64 result);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteF64(
 				UniffiForeignFutureCompleteF64 cb, uint64_t callback_data, UniffiForeignFutureResultF64 result)
@@ -339,7 +339,7 @@ typedef struct UniffiForeignFutureResultRustBuffer {
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_RUST_BUFFER
 typedef void (*UniffiForeignFutureCompleteRustBuffer)(uint64_t callback_data, UniffiForeignFutureResultRustBuffer result);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteRustBuffer(
 				UniffiForeignFutureCompleteRustBuffer cb, uint64_t callback_data, UniffiForeignFutureResultRustBuffer result)
@@ -360,7 +360,7 @@ typedef struct UniffiForeignFutureResultVoid {
 #define UNIFFI_FFIDEF_FOREIGN_FUTURE_COMPLETE_VOID
 typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t callback_data, UniffiForeignFutureResultVoid result);
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiForeignFutureCompleteVoid(
 				UniffiForeignFutureCompleteVoid cb, uint64_t callback_data, UniffiForeignFutureResultVoid result)
@@ -374,7 +374,7 @@ static void call_UniffiForeignFutureCompleteVoid(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_BLOCK_TRANSFORMER_METHOD0
 typedef void (*UniffiCallbackInterfaceBlockTransformerMethod0)(uint64_t uniffi_handle, RustBuffer data, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfaceBlockTransformerMethod0(
 				UniffiCallbackInterfaceBlockTransformerMethod0 cb, uint64_t uniffi_handle, RustBuffer data, RustBuffer* uniffi_out_return, RustCallStatus* callStatus )
@@ -388,7 +388,7 @@ static void call_UniffiCallbackInterfaceBlockTransformerMethod0(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_BLOCK_TRANSFORMER_METHOD1
 typedef void (*UniffiCallbackInterfaceBlockTransformerMethod1)(uint64_t uniffi_handle, RustBuffer data, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfaceBlockTransformerMethod1(
 				UniffiCallbackInterfaceBlockTransformerMethod1 cb, uint64_t uniffi_handle, RustBuffer data, RustBuffer* uniffi_out_return, RustCallStatus* callStatus )
@@ -402,7 +402,7 @@ static void call_UniffiCallbackInterfaceBlockTransformerMethod1(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PREFIX_EXTRACTOR_METHOD0
 typedef void (*UniffiCallbackInterfacePrefixExtractorMethod0)(uint64_t uniffi_handle, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfacePrefixExtractorMethod0(
 				UniffiCallbackInterfacePrefixExtractorMethod0 cb, uint64_t uniffi_handle, RustBuffer* uniffi_out_return, RustCallStatus* callStatus )
@@ -416,7 +416,7 @@ static void call_UniffiCallbackInterfacePrefixExtractorMethod0(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_PREFIX_EXTRACTOR_METHOD1
 typedef void (*UniffiCallbackInterfacePrefixExtractorMethod1)(uint64_t uniffi_handle, RustBuffer target, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfacePrefixExtractorMethod1(
 				UniffiCallbackInterfacePrefixExtractorMethod1 cb, uint64_t uniffi_handle, RustBuffer target, RustBuffer* uniffi_out_return, RustCallStatus* callStatus )
@@ -430,7 +430,7 @@ static void call_UniffiCallbackInterfacePrefixExtractorMethod1(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_LOG_CALLBACK_METHOD0
 typedef void (*UniffiCallbackInterfaceLogCallbackMethod0)(uint64_t uniffi_handle, RustBuffer record, void* uniffi_out_return, RustCallStatus* callStatus );
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfaceLogCallbackMethod0(
 				UniffiCallbackInterfaceLogCallbackMethod0 cb, uint64_t uniffi_handle, RustBuffer record, void* uniffi_out_return, RustCallStatus* callStatus )
@@ -444,7 +444,7 @@ static void call_UniffiCallbackInterfaceLogCallbackMethod0(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_MERGE_OPERATOR_METHOD0
 typedef void (*UniffiCallbackInterfaceMergeOperatorMethod0)(uint64_t uniffi_handle, RustBuffer key, RustBuffer existing_value, RustBuffer operand, RustBuffer* uniffi_out_return, RustCallStatus* callStatus );
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfaceMergeOperatorMethod0(
 				UniffiCallbackInterfaceMergeOperatorMethod0 cb, uint64_t uniffi_handle, RustBuffer key, RustBuffer existing_value, RustBuffer operand, RustBuffer* uniffi_out_return, RustCallStatus* callStatus )
@@ -458,7 +458,7 @@ static void call_UniffiCallbackInterfaceMergeOperatorMethod0(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_COUNTER_METHOD0
 typedef void (*UniffiCallbackInterfaceCounterMethod0)(uint64_t uniffi_handle, uint64_t value, void* uniffi_out_return, RustCallStatus* callStatus );
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfaceCounterMethod0(
 				UniffiCallbackInterfaceCounterMethod0 cb, uint64_t uniffi_handle, uint64_t value, void* uniffi_out_return, RustCallStatus* callStatus )
@@ -472,7 +472,7 @@ static void call_UniffiCallbackInterfaceCounterMethod0(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_GAUGE_METHOD0
 typedef void (*UniffiCallbackInterfaceGaugeMethod0)(uint64_t uniffi_handle, int64_t value, void* uniffi_out_return, RustCallStatus* callStatus );
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfaceGaugeMethod0(
 				UniffiCallbackInterfaceGaugeMethod0 cb, uint64_t uniffi_handle, int64_t value, void* uniffi_out_return, RustCallStatus* callStatus )
@@ -486,7 +486,7 @@ static void call_UniffiCallbackInterfaceGaugeMethod0(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_HISTOGRAM_METHOD0
 typedef void (*UniffiCallbackInterfaceHistogramMethod0)(uint64_t uniffi_handle, double value, void* uniffi_out_return, RustCallStatus* callStatus );
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfaceHistogramMethod0(
 				UniffiCallbackInterfaceHistogramMethod0 cb, uint64_t uniffi_handle, double value, void* uniffi_out_return, RustCallStatus* callStatus )
@@ -500,7 +500,7 @@ static void call_UniffiCallbackInterfaceHistogramMethod0(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_METRICS_RECORDER_METHOD0
 typedef void (*UniffiCallbackInterfaceMetricsRecorderMethod0)(uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus );
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfaceMetricsRecorderMethod0(
 				UniffiCallbackInterfaceMetricsRecorderMethod0 cb, uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus )
@@ -514,7 +514,7 @@ static void call_UniffiCallbackInterfaceMetricsRecorderMethod0(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_METRICS_RECORDER_METHOD1
 typedef void (*UniffiCallbackInterfaceMetricsRecorderMethod1)(uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus );
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfaceMetricsRecorderMethod1(
 				UniffiCallbackInterfaceMetricsRecorderMethod1 cb, uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus )
@@ -528,7 +528,7 @@ static void call_UniffiCallbackInterfaceMetricsRecorderMethod1(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_METRICS_RECORDER_METHOD2
 typedef void (*UniffiCallbackInterfaceMetricsRecorderMethod2)(uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus );
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfaceMetricsRecorderMethod2(
 				UniffiCallbackInterfaceMetricsRecorderMethod2 cb, uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, uint64_t* uniffi_out_return, RustCallStatus* callStatus )
@@ -542,7 +542,7 @@ static void call_UniffiCallbackInterfaceMetricsRecorderMethod2(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_METRICS_RECORDER_METHOD3
 typedef void (*UniffiCallbackInterfaceMetricsRecorderMethod3)(uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, RustBuffer boundaries, uint64_t* uniffi_out_return, RustCallStatus* callStatus );
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfaceMetricsRecorderMethod3(
 				UniffiCallbackInterfaceMetricsRecorderMethod3 cb, uint64_t uniffi_handle, RustBuffer name, RustBuffer description, RustBuffer labels, RustBuffer boundaries, uint64_t* uniffi_out_return, RustCallStatus* callStatus )
@@ -556,7 +556,7 @@ static void call_UniffiCallbackInterfaceMetricsRecorderMethod3(
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_UP_DOWN_COUNTER_METHOD0
 typedef void (*UniffiCallbackInterfaceUpDownCounterMethod0)(uint64_t uniffi_handle, int64_t value, void* uniffi_out_return, RustCallStatus* callStatus );
 
-// Making function static works arround:
+// Making function static workaround:
 // https://github.com/golang/go/issues/11263
 static void call_UniffiCallbackInterfaceUpDownCounterMethod0(
 				UniffiCallbackInterfaceUpDownCounterMethod0 cb, uint64_t uniffi_handle, int64_t value, void* uniffi_out_return, RustCallStatus* callStatus )
@@ -1818,6 +1818,11 @@ uint64_t uniffi_slatedb_uniffi_fn_constructor_objectstore_from_env(RustBuffer en
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_OBJECTSTORE_RESOLVE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_OBJECTSTORE_RESOLVE
 uint64_t uniffi_slatedb_uniffi_fn_constructor_objectstore_resolve(RustBuffer url, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_OBJECTSTORE_RESOLVE_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CONSTRUCTOR_OBJECTSTORE_RESOLVE_WITH_OPTIONS
+uint64_t uniffi_slatedb_uniffi_fn_constructor_objectstore_resolve_with_options(RustBuffer url, RustBuffer options, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_OBJECTSTOREBUILDER
@@ -3429,6 +3434,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_constructor_objectstore_from_env(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_OBJECTSTORE_RESOLVE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_OBJECTSTORE_RESOLVE
 uint16_t uniffi_slatedb_uniffi_checksum_constructor_objectstore_resolve(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_OBJECTSTORE_RESOLVE_WITH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_CONSTRUCTOR_OBJECTSTORE_RESOLVE_WITH_OPTIONS
+uint16_t uniffi_slatedb_uniffi_checksum_constructor_objectstore_resolve_with_options(void
     
 );
 #endif
