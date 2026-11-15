@@ -54,4 +54,6 @@ SlateDB refreshes the checkpoint expiration after half of the configured lifetim
 
 Visibility is narrower than [`Db`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html). A reader does not share a writer's live mutable memtable, so read options cannot expose unflushed writer state. `DbReader` only returns committed data that is already durable in object storage, either through the pinned manifest or through WAL SSTs it replayed itself.
 
-A reader can use a block cache and a local object mirror, the same as [`Db`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html). [Caching](/docs/design/caching) covers those layers.
+A reader can use a block cache and a local object mirror, the same as
+[`Db`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html). [Caching](/docs/design/caching)
+covers those layers.

@@ -177,8 +177,6 @@ these metrics count the calls that SlateDB makes into that wrapper. A read from
 the local copy is counted as one request. The requests that the wrapper sends to
 the remote store are not counted.
 
-These are passed to `register_histogram` as the `boundaries` parameter.
-
 ## Using DefaultMetricsRecorder
 
 `slatedb-common` ships a `DefaultMetricsRecorder` backed by atomics. It's useful

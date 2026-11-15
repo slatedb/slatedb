@@ -69,7 +69,11 @@ object-store layer. If you use the local object mirror, it serves mirrored SSTs 
 
 The defaults reflect the usual access patterns. Point reads default to `cache_blocks = true` because they are more likely to revisit hot data. Scans default to `cache_blocks = false` so a long sequential read does not fill the cache with data blocks that probably will not be reused soon. Scans can still benefit from entries that are already hot. Internal tasks follow the same idea: WAL replay and compaction read SSTs without populating the foreground cache.
 
-Writes fill the block cache as well. [`BlockCachePolicy`](https://docs.rs/slatedb/latest/slatedb/struct.BlockCachePolicy.html) selects which components of an SST are inserted as that SST is written, and you install it with [`DbBuilder::with_block_cache_policy`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_block_cache_policy). The policy applies to the block cache only.
+Writes fill the block cache as well.
+[`BlockCachePolicy`](https://docs.rs/slatedb/latest/slatedb/struct.BlockCachePolicy.html) selects
+which components of an SST are inserted as that SST is written, and you install it with
+[`DbBuilder::with_block_cache_policy`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_block_cache_policy).
+The policy applies to the block cache only.
 
 The policy holds one target list per write source. The default inserts data blocks, the index, and the filters after a memtable flush, and inserts only the index and the filters as compaction output is written, so compaction does not evict blocks that reads have made hot. Replace either list with [`BlockCachePolicy::with_flush_targets`](https://docs.rs/slatedb/latest/slatedb/struct.BlockCachePolicy.html#method.with_flush_targets) or [`BlockCachePolicy::with_compaction_output_targets`](https://docs.rs/slatedb/latest/slatedb/struct.BlockCachePolicy.html#method.with_compaction_output_targets). An empty list disables insertion for that source.
 
@@ -102,11 +106,22 @@ let db = Db::builder(path, object_store)
 
 ## Sharing Between Instances
 
-You can share one block cache between multiple [`Db`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html) or [`DbReader`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html) instances. Both [`DbBuilder::with_db_cache`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_db_cache) and [`DbReaderBuilder::with_db_cache`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbReaderBuilder.html#method.with_db_cache) take your cache object plus a `db_cache_id: u64`. This allows you to reuse the same process-local cache implementation across builders if you wish to share a single pool of memory. `db_cache_id` keeps separate `Db` entries from colliding with one another. Pass different ids for logically different databases. Use the same id across a legitimate reopen of the same database to recover its warm (persisted) entries.
+You can share one block cache between multiple
+[`Db`](https://docs.rs/slatedb/latest/slatedb/struct.Db.html) or
+[`DbReader`](https://docs.rs/slatedb/latest/slatedb/struct.DbReader.html) instances. Both
+[`DbBuilder::with_db_cache`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbBuilder.html#method.with_db_cache)
+and
+[`DbReaderBuilder::with_db_cache`](https://docs.rs/slatedb/latest/slatedb/db/struct.DbReaderBuilder.html#method.with_db_cache)
+take your cache object plus a `db_cache_id: u64`. This allows you to reuse the same process-local
+cache implementation across builders if you wish to share a single pool of memory. `db_cache_id`
+keeps separate `Db` entries from colliding with one another. Pass different ids for logically
+different databases. Use the same id across a legitimate reopen of the same database to recover its
+warm (persisted) entries.
 
 A cache you pass in stays owned by you: `Db::close()` and `DbReader::close()` never close it, so closing one instance does not affect the others sharing it. Once every instance using the cache is closed, call [`DbCache::close`](https://docs.rs/slatedb/latest/slatedb/db_cache/trait.DbCache.html#method.close) yourself so hybrid implementations can flush their memory tier to disk.
 
-For `DbReader`, treat a caller-managed block cache as an advanced optimization. It can make sense to keep one reader-side cache per database in a single process.
+For `DbReader`, treat a caller-managed block cache as an advanced optimization. It can make sense to
+keep one reader-side cache per database in a single process.
 
 ## Tradeoffs
 
@@ -118,6 +133,7 @@ mirror for the remaining compacted SSTs. Block size matters here too, because it
 cache granularity and therefore affects hit rate and read amplification.
 [Tuning](/docs/operations/tuning) covers that knob.
 
-If you enable [`FoyerHybridCache`](https://docs.rs/slatedb/latest/slatedb/db_cache/foyer_hybrid/struct.FoyerHybridCache.html)
+If you enable
+[`FoyerHybridCache`](https://docs.rs/slatedb/latest/slatedb/db_cache/foyer_hybrid/struct.FoyerHybridCache.html)
 and also use the mirror, SlateDB stores some SST data twice on local disk: as decoded entries in the
 Foyer disk tier, and as whole SSTs in the mirror.

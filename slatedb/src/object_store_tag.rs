@@ -36,8 +36,8 @@ pub use crate::error::RetryReason;
 /// call source). Tagged on every SST read and write alongside the
 /// [`SstType`].
 ///
-/// A caching wrapper combines it with the call type (get vs put)
-/// to decide admission.
+/// A wrapper can combine it with the call type (get or put) to decide how to
+/// handle the call, for example whether to keep a local copy of the SST.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TableStoreKind {
     /// The primary database store: foreground reads and memtable flush writes.
@@ -53,8 +53,9 @@ pub enum TableStoreKind {
 /// The tag carried on every TableStore SST object store call via
 /// [`object_store::Extensions`].
 ///
-/// An `ObjectStore` wrapper (such as an object store cache) reads the tag to
-/// decide the action for the call.
+/// An `ObjectStore` wrapper reads the tag to decide the action for the call.
+/// For example, [`SlateDbMirrorPolicy`](crate::SlateDbMirrorPolicy) reads the
+/// SST type, the segment, and the retry reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectStoreCallTag {
     /// The source of the call, to distinguish main store, compactor, etc.
