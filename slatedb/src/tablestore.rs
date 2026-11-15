@@ -4,10 +4,14 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use fail_parallel::{fail_point, FailPointRegistry};
-use futures::{future::join_all, StreamExt};
+use futures::{
+    future::{join_all, try_join_all},
+    StreamExt,
+};
 use log::{debug, warn};
 use object_store::buffered::BufWriter;
 use object_store::path::Path;
+use object_store::{coalesce_ranges, OBJECT_STORE_COALESCE_DEFAULT};
 use object_store::{GetOptions, ObjectStore, ObjectStoreExt};
 use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_common::ObjectMetadata;
@@ -15,6 +19,7 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use ulid::Ulid;
 
+use crate::blob::ReadOnlyBlob;
 use crate::block_cache_policy::{should_cache_data_block, BlockCachePolicy};
 use crate::bytes_range::BytesRange;
 use crate::db_cache::{CacheFetch, CacheLookup, CacheTarget};
@@ -785,8 +790,9 @@ impl TableStore {
     /// Reads specified blocks from an SSTable using the provided index.
     ///
     /// This function reads blocks from the cache if one is available. It reads
-    /// the uncached blocks from storage in one GET, from the first uncached
-    /// block to the last. It can optionally cache newly read blocks.
+    /// the uncached blocks from storage, merging blocks less than
+    /// `OBJECT_STORE_COALESCE_DEFAULT` bytes apart into one GET. It can
+    /// optionally cache newly read blocks.
     /// `segment` is a hint attached to the [`ObjectStoreCallTag`] for
     /// object-store routing.
     /// `trace` owns the span for the block read.
@@ -825,8 +831,7 @@ impl TableStore {
         // Single-block reads (point-gets via SstIterator::for_key, SstFile::read_block,
         // etc.) take a dedup-aware fast-path: concurrent callers for the same block
         // collapse onto one loader. Multi-block reads fall through to the range-
-        // coalesced path below, which issues one object-store GET spanning the
-        // first through the last uncached block. Cache errors fall through to the
+        // coalesced path below. Cache errors fall through to the
         // direct load, which produces the authoritative error if any.
         if cache_blocks && blocks.len() == 1 {
             if let Some(cache) = self.cache_for_reads() {
@@ -867,17 +872,32 @@ impl TableStore {
         let cache_misses = slots.len() - cache_hits;
         record_read_block_cache_counts(&span, cache_hits, cache_misses);
 
-        // Fetch the uncached blocks in one GET, from the first to the last of
-        // them. A cache that holds scattered blocks of the range would
-        // otherwise split the read into one GET per gap. The GET also reads the
-        // cached blocks in between. We drop those copies and keep the cached ones.
-        let first = slots.iter().position(Option::is_none);
-        let last = slots.iter().rposition(Option::is_none);
-        if let (Some(first), Some(last)) = (first, last) {
-            let fetch_range = (blocks.start + first)..(blocks.start + last + 1);
+        // Fetch the uncached blocks. Ranges less than OBJECT_STORE_COALESCE_DEFAULT
+        // bytes apart share one GET, so a cache that holds scattered blocks of the
+        // range does not split the read into one GET per gap, and a large cached
+        // gap is not read again. Only the uncached blocks are decoded.
+        let missing: Vec<usize> = (0..slots.len()).filter(|&i| slots[i].is_none()).collect();
+        if !missing.is_empty() {
+            let (ranges, offsets): (Vec<Range<u64>>, Vec<u64>) = {
+                let index_borrow = index.borrow();
+                missing
+                    .iter()
+                    .map(|&i| {
+                        let block_num = blocks.start + i;
+                        (
+                            self.sst_format.block_byte_range(
+                                &handle.info,
+                                &index_borrow,
+                                block_num,
+                            ),
+                            index_borrow.block_meta().get(block_num).offset(),
+                        )
+                    })
+                    .unzip()
+            };
             let object_store = &self.object_store;
             let path = &self.path(&handle.id);
-            let index_ref = &index;
+            let ranges = &ranges;
             let fetched = read_with_validation_retry(
                 ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment),
                 |tag| {
@@ -886,42 +906,40 @@ impl TableStore {
                         path: path.clone(),
                         tag,
                     };
-                    let range = fetch_range.clone();
                     async move {
-                        self.sst_format
-                            .read_blocks(&handle.info, index_ref, range, &obj)
-                            .await
-                            .map_err(|e| e.with_path(&obj.path))
+                        let bytes = coalesce_ranges(
+                            ranges,
+                            |range| obj.read_range(range),
+                            OBJECT_STORE_COALESCE_DEFAULT,
+                        )
+                        .await?;
+                        try_join_all(bytes.into_iter().map(|bytes| {
+                            self.sst_format
+                                .decode_block(bytes, handle.info.compression_codec)
+                        }))
+                        .await
+                        .map_err(|e| e.with_path(&obj.path))
                     }
                 },
             )
             .await?;
 
-            let mut blocks_to_cache = Vec::with_capacity(cache_misses);
-            {
-                let index_borrow = index.borrow();
-                for ((block_num, slot), block) in
-                    fetch_range.zip(&mut slots[first..=last]).zip(fetched)
-                {
-                    if slot.is_some() {
-                        continue;
-                    }
-                    let block = Arc::new(block);
-                    if cache_blocks {
-                        let offset = index_borrow.block_meta().get(block_num).offset();
-                        blocks_to_cache.push((handle.id, offset, block.clone()));
-                    }
-                    *slot = Some(block);
+            let cache = if cache_blocks {
+                self.cache_for_reads()
+            } else {
+                None
+            };
+            let mut inserts = Vec::new();
+            for ((i, offset), block) in missing.into_iter().zip(offsets).zip(fetched) {
+                let block = Arc::new(block);
+                if let Some(cache) = cache {
+                    inserts.push(
+                        cache.insert((handle.id, offset).into(), CachedEntry::with_block(&block)),
+                    );
                 }
+                slots[i] = Some(block);
             }
-
-            // Cache the newly read blocks if caching is enabled
-            if let Some(cache) = self.cache_for_reads() {
-                join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
-                    cache.insert((id, offset).into(), CachedEntry::with_block(&block))
-                }))
-                .await;
-            }
+            join_all(inserts).await;
         }
 
         Ok(slots
@@ -3452,19 +3470,24 @@ mod tests {
         assert_eq!(actual, 2..4);
     }
 
-    /// A partly cached range is fetched in one GET, not one per gap, and every
-    /// block reads back in order. `cached` is `None` for a reader without a cache.
+    /// Uncached blocks less than `OBJECT_STORE_COALESCE_DEFAULT` bytes apart
+    /// are fetched in one GET, not one per gap, and every block reads back in
+    /// order. `cached` is `None` for a reader without a cache. Each block holds
+    /// one row with a `value_len`-byte value.
     #[cfg(feature = "foyer")]
     #[rstest]
-    #[case::no_cache(None, 1)]
-    #[case::nothing_cached(Some(vec![]), 1)]
-    #[case::odd_blocks_cached(Some((1..20).step_by(2).collect()), 1)]
-    #[case::edges_cached(Some(vec![0, 19]), 1)]
-    #[case::only_edges_uncached(Some((1..19).collect()), 1)]
-    #[case::all_cached(Some((0..20).collect()), 0)]
+    #[case::no_cache(None, 16, 1)]
+    #[case::nothing_cached(Some(vec![]), 16, 1)]
+    #[case::odd_blocks_cached(Some((1..20).step_by(2).collect()), 16, 1)]
+    #[case::edges_cached(Some(vec![0, 19]), 16, 1)]
+    #[case::only_edges_uncached(Some((1..19).collect()), 16, 1)]
+    #[case::all_cached(Some((0..20).collect()), 16, 0)]
+    #[case::small_gaps_in_large_blocks(Some((1..20).step_by(2).collect()), 128 * 1024, 1)]
+    #[case::large_gap_in_large_blocks(Some((1..19).collect()), 128 * 1024, 2)]
     #[tokio::test]
-    async fn should_fetch_a_partly_cached_range_in_one_get(
+    async fn should_coalesce_uncached_blocks_into_few_gets(
         #[case] cached: Option<Vec<usize>>,
+        #[case] value_len: usize,
         #[case] expected_gets: usize,
     ) {
         use crate::db_cache::foyer::FoyerCache;
@@ -3490,7 +3513,7 @@ mod tests {
         let mut expected_data = Vec::with_capacity(20);
         for i in 0..20 {
             let key = [i as u8; 16];
-            let value = [(i + 1) as u8; 16];
+            let value = vec![(i + 1) as u8; value_len];
             expected_data.push((
                 Vec::from(key.as_slice()),
                 ValueDeletable::Value(Bytes::copy_from_slice(&value)),
@@ -3560,7 +3583,7 @@ mod tests {
             .await
             .unwrap();
 
-        // then: at most one GET, and every block in order
+        // then: the expected GETs, and every block in order
         assert_eq!(
             counting.get_range_count.load(Ordering::SeqCst) - before,
             expected_gets
