@@ -6,7 +6,7 @@ use rand::{Rng, RngExt};
 use slatedb::config::{
     CompactionWorkerOptions, CompactorOptions, CompressionCodec, DbReaderOptions, DurabilityLevel,
     GarbageCollectorDirectoryOptions, GarbageCollectorOptions, GarbageCollectorScheduleOptions,
-    ScanOptions, SizeTieredCompactionSchedulerOptions,
+    ReadOptions, ScanOptions, SizeTieredCompactionSchedulerOptions,
 };
 use slatedb::{DbRand, IterationOrder, Settings};
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -87,6 +87,15 @@ pub fn build_reader_options(rand: &DbRand) -> DbReaderOptions {
         max_memtable_bytes,
         ..DbReaderOptions::default()
     }
+}
+
+/// Builds randomized deterministic point-read options for DST scenarios.
+pub fn build_read_options(rand: &DbRand, read_durability: DurabilityLevel) -> ReadOptions {
+    let mut rng = rand.rng();
+    ReadOptions::new()
+        .with_durability_filter(read_durability)
+        .with_cache_blocks(rng.random_bool(0.5))
+        .with_max_concurrent_sources(rng.random_range(1..=4))
 }
 
 /// Builds randomized deterministic scan options for DST scenarios.
