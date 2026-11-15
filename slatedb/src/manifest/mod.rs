@@ -1997,7 +1997,7 @@ mod tests {
                     SstEntry::projected("sr0_first", "a", "h".."o"),
                 ],
                 vec![
-                    SstEntry::projected("sr1_second", "f", "h".."m"),
+                    SstEntry::projected("sr1_second", "f", "h"..="m"),
                     SstEntry::projected("sr1_third", "m", "m".."o"),
                 ],
             ],
@@ -2045,7 +2045,7 @@ mod tests {
             l0: vec![],
             sorted_runs: vec![
                 vec![
-                    SstEntry::projected("sr0_first", "a", "a".."b"),
+                    SstEntry::projected("sr0_first", "a", "a"..="b"),
                     SstEntry::projected("sr0_second", "b", "b".."c"),
                 ],
                 vec![

@@ -1,3 +1,6 @@
+// This module implements the deprecated `CachedObjectStore`.
+#![allow(deprecated)]
+
 pub use object_store::{CachedObjectStore, CachedObjectStoreBuilder};
 #[allow(unused_imports)]
 pub use storage::{LocalCacheEntry, LocalCacheHead, LocalCacheStorage, PartID};

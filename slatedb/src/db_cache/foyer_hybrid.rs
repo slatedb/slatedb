@@ -240,7 +240,6 @@ mod tests {
     };
     use rand::Rng;
     use std::collections::HashMap;
-    use std::sync::Arc;
     use tempfile::{tempdir, TempDir};
     use ulid::Ulid;
 
@@ -283,8 +282,7 @@ mod tests {
                 break;
             }
         }
-        let block = Arc::new(builder.build().unwrap());
-        CachedEntry::with_block(block)
+        CachedEntry::with_block(&builder.build().unwrap())
     }
 
     async fn setup() -> (FoyerHybridCache, TempDir) {

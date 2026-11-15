@@ -173,9 +173,29 @@ impl<'a> SortedRunIterator<'a> {
     ) -> Result<Self, SlateDBError> {
         let range = BytesRange::from(range);
         let tables = sorted_run.into_tables_covering_range(&range);
-        let view = SortedRunView::Owned(tables, range);
+        SortedRunIterator::new_owned_from_tables(
+            tables,
+            range,
+            table_store,
+            sst_iter_options,
+            sst_tracing_context,
+            db_stats,
+        )
+        .await
+    }
+
+    /// Builds an iterator over `tables`, the SSTs of one sorted run that cover
+    /// `range`, in run order.
+    pub(crate) async fn new_owned_from_tables(
+        tables: VecDeque<SsTableView>,
+        range: BytesRange,
+        table_store: Arc<TableStore>,
+        sst_iter_options: SstIteratorOptions,
+        sst_tracing_context: Option<SstTracingContext>,
+        db_stats: Option<DbStats>,
+    ) -> Result<Self, SlateDBError> {
         SortedRunIterator::new(
-            view,
+            SortedRunView::Owned(tables, range),
             table_store,
             sst_iter_options,
             sst_tracing_context,

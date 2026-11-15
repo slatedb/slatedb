@@ -270,6 +270,7 @@ mod tests {
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::cached_object_store::policy::CachePutConfig;
     use crate::cached_object_store::stats::CachedObjectStoreStats;
+    #[allow(deprecated)] // `CachedObjectStore` is deprecated.
     use crate::cached_object_store::{CachedObjectStore, FsCacheStorage};
     use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::compactor_state::{Compaction, CompactionSpec, SourceId};
@@ -842,6 +843,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)] // `CachedObjectStore` is deprecated.
     async fn test_compacted_gc_evicts_deleted_sst_from_object_store_cache() {
         let recorder = slatedb_common::metrics::MetricsRecorderHelper::noop();
         let main_store = Arc::new(InMemory::new());

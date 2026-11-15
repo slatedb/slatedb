@@ -1,0 +1,40 @@
+name: Vouch Manage by Issue
+
+# Allow committers to manage .github/VOUCHED.td by commenting `vouch`, `unvouch`, or `denounce`
+# on an issue or pull request. Pushes directly to main via the `vouch` environment deploy key.
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: vouch-manage
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  manage:
+    if: >-
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+      (
+        startsWith(github.event.comment.body, 'vouch') ||
+        startsWith(github.event.comment.body, 'unvouch') ||
+        startsWith(github.event.comment.body, 'denounce')
+      )
+    runs-on: ubuntu-latest
+    environment: vouch
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ssh-key: ${{ secrets.VOUCH_DEPLOY_KEY }}
+      - uses: mitchellh/vouch/action/manage-by-issue@d66fa29a64600490892131ad87597c30c91fcac4 # v1.5.0
+        with:
+          repo: ${{ github.repository }}
+          issue-id: ${{ github.event.issue.number }}
+          comment-id: ${{ github.event.comment.id }}
+          roles: "admin,maintain,write"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

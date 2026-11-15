@@ -282,7 +282,6 @@ impl CompactionWorkerHandler {
                 stats: stats.clone(),
                 worker_stats,
                 clock: system_clock.clone(),
-                manifest_store: manifest_store.clone(),
                 merge_operator: merge_operator.clone(),
                 #[cfg(feature = "compaction_filters")]
                 compaction_filter_supplier: compaction_filter_supplier.clone(),
@@ -730,9 +729,9 @@ impl CompactionWorkerHandler {
     /// Returns whether `error` shows that an input SST of the job is lost. A
     /// `NotFound` shows this only if the latest manifest still names the
     /// inputs of the job, and every input is an SST of this database. A job
-    /// whose inputs left the manifest is stale. A standalone worker resolves
-    /// an SST of another database, for example the parent of a clone, under
-    /// the path of its own database, so its `NotFound` does not prove a loss.
+    /// whose inputs left the manifest is stale. A job that uses SSTs of
+    /// another database, for example the parent of a clone, follows the retry
+    /// limit.
     async fn lost_input_sst(
         &mut self,
         compaction_id: Ulid,
@@ -1798,7 +1797,6 @@ mod tests {
                 },
                 worker_stats: WorkerStats::noop(),
                 clock: clock.clone(),
-                manifest_store: manifest_store.clone(),
                 merge_operator: None,
                 #[cfg(feature = "compaction_filters")]
                 compaction_filter_supplier: None,

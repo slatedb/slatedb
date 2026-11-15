@@ -4,10 +4,11 @@ use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use futures::future::{join_all, try_join_all};
 use log::warn;
 use object_store::path::Path;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreExt};
 
 use crate::inner::Inner;
 use crate::ordering::{OpKind, Ticket};
@@ -114,6 +115,15 @@ impl MirrorHandle {
     pub fn remote(&self) -> &Arc<dyn ObjectStore> {
         &self.inner.remote
     }
+
+    /// Reads the whole object at `path` from the wrapped store. The read skips
+    /// the policy and does not make a local copy.
+    pub async fn get_remote(&self, path: &Path) -> object_store::Result<Bytes> {
+        self.inner
+            .retry
+            .run(|| async { self.inner.remote.get(path).await?.bytes().await })
+            .await
+    }
 }
 
 async fn fetch_one(inner: &Inner, path: Path, ticket: Ticket) -> object_store::Result<()> {
@@ -164,6 +174,28 @@ mod tests {
         assert!(mirror.handle().contains(&path));
         eventually(|| mirror.inner.ordering.is_empty()).await;
         assert!(mirror.handle().contains(&path));
+    }
+
+    #[tokio::test]
+    async fn should_get_remote_without_local_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(InMemory::new());
+        let mirror = ObjectStoreMirror::for_test(dir.path(), Arc::clone(&store) as _).await;
+        let path = Path::from(SST);
+        store
+            .put(&path, PutPayload::from_static(b"x"))
+            .await
+            .unwrap();
+
+        let bytes = mirror.handle().get_remote(&path).await.unwrap();
+        assert_eq!(bytes, Bytes::from_static(b"x"));
+        assert!(!mirror.handle().contains(&path));
+
+        let missing = mirror
+            .handle()
+            .get_remote(&Path::from("db/compacted/01B.sst"))
+            .await;
+        assert!(matches!(missing, Err(object_store::Error::NotFound { .. })));
     }
 
     #[tokio::test]

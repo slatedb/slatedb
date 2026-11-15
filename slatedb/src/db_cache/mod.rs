@@ -427,24 +427,33 @@ pub struct CachedEntry {
 }
 
 impl CachedEntry {
-    /// Create a new `CachedEntry` with the given block.
-    pub(crate) fn with_block(block: Arc<Block>) -> Self {
+    /// Create a new `CachedEntry` with a clamped copy of the given block.
+    pub(crate) fn with_block(block: &Block) -> Self {
         Self {
-            item: CachedItem::Block(block),
+            item: CachedItem::Block(Arc::new(block.clamp_allocated_size())),
         }
     }
 
-    /// Create a new `CachedEntry` with the given SSTable index.
-    pub(crate) fn with_sst_index(sst_index: Arc<SsTableIndexOwned>) -> Self {
+    /// Create a new `CachedEntry` with a clamped copy of the given SSTable index.
+    pub(crate) fn with_sst_index(sst_index: &SsTableIndexOwned) -> Self {
         Self {
-            item: CachedItem::SsTableIndex(sst_index),
+            item: CachedItem::SsTableIndex(Arc::new(sst_index.clamp_allocated_size())),
         }
     }
 
-    /// Create a new `CachedEntry` with the given decoded filters.
-    pub(crate) fn with_filters(filters: Arc<[NamedFilter]>) -> Self {
+    /// Create a new `CachedEntry` with clamped copies of the given decoded filters.
+    pub(crate) fn with_filters(filters: &[NamedFilter]) -> Self {
         Self {
-            item: CachedItem::Filters(filters),
+            item: CachedItem::Filters(
+                filters
+                    .iter()
+                    .map(|nf| NamedFilter {
+                        name: nf.name.clone(),
+                        filter: nf.filter.clamp_allocated_size(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
         }
     }
 
@@ -504,29 +513,12 @@ impl CachedEntry {
         }
     }
 
+    #[deprecated(
+        since = "0.18.0",
+        note = "Constructors clamp each entry. This method returns a clone."
+    )]
     pub fn clamp_allocated_size(&self) -> Self {
-        match &self.item {
-            CachedItem::Block(block) => Self::with_block(Arc::new(block.clamp_allocated_size())),
-            CachedItem::SsTableIndex(sst_index) => {
-                Self::with_sst_index(Arc::new(sst_index.clamp_allocated_size()))
-            }
-            CachedItem::Filters(filters) => Self::with_filters(
-                filters
-                    .iter()
-                    .map(|nf| NamedFilter {
-                        name: nf.name.clone(),
-                        filter: nf.filter.clamp_allocated_size(),
-                    })
-                    .collect::<Vec<_>>()
-                    .into(),
-            ),
-            CachedItem::EncodedFilters(filters) => Self {
-                item: CachedItem::EncodedFilters(filters.clone()),
-            },
-            CachedItem::SstStats(stats) => {
-                Self::with_sst_stats(Arc::new(stats.clamp_allocated_size()))
-            }
-        }
+        self.clone()
     }
 }
 
@@ -604,14 +596,14 @@ impl DbCache for SplitCache {
         match &value.item {
             CachedItem::Block(_) => {
                 if let Some(ref cache) = self.block_cache {
-                    cache.insert(key, value.clamp_allocated_size()).await;
+                    cache.insert(key, value).await;
                 } else {
                     trace!("no block cache available for insertion");
                 }
             }
             CachedItem::SsTableIndex(_) | CachedItem::Filters(_) | CachedItem::SstStats(_) => {
                 if let Some(ref cache) = self.meta_cache {
-                    cache.insert(key, value.clamp_allocated_size()).await;
+                    cache.insert(key, value).await;
                 } else {
                     trace!("no meta cache available for insertion");
                 }
@@ -1388,12 +1380,10 @@ mod tests {
                 assert!(builder
                     .add(RowEntry::new_value(b"key", b"value", 0))
                     .unwrap());
-                let block = Arc::new(builder.build().unwrap());
+                let entry = CachedEntry::with_block(&builder.build().unwrap());
+                let block = entry.block().unwrap();
                 let cache = DbCacheWrapper::new(
-                    Arc::new(ReportedLookupCache {
-                        lookup,
-                        entry: CachedEntry::with_block(block.clone()),
-                    }),
+                    Arc::new(ReportedLookupCache { lookup, entry }),
                     &helper,
                     Arc::new(DefaultSystemClock::default()),
                     1,
@@ -1475,7 +1465,7 @@ mod tests {
                 .unwrap());
             let block = Arc::new(builder.build().unwrap());
             for attempt in 0..2 {
-                let entry = CachedEntry::with_block(block.clone());
+                let entry = CachedEntry::with_block(&block);
                 let loader: CacheLoader = Box::new(move || Box::pin(async move { Ok(entry) }));
                 let fetch = match method {
                     "data_block" => cache.fetch_block(key.clone(), loader).await,
@@ -1516,7 +1506,7 @@ mod tests {
                     assert!(builder
                         .add(RowEntry::new_value(b"key", b"value", 0))
                         .unwrap());
-                    Ok(CachedEntry::with_block(Arc::new(builder.build().unwrap())))
+                    Ok(CachedEntry::with_block(&builder.build().unwrap()))
                 })
             })
         };
@@ -1553,7 +1543,7 @@ mod tests {
         // given:
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
-            .insert(key.clone(), CachedEntry::with_filters(sst.filters))
+            .insert(key.clone(), CachedEntry::with_filters(&sst.filters))
             .await;
 
         for i in 1..4 {
@@ -1621,10 +1611,7 @@ mod tests {
         // given:
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
-            .insert(
-                key.clone(),
-                CachedEntry::with_sst_index(Arc::new(sst.index)),
-            )
+            .insert(key.clone(), CachedEntry::with_sst_index(&sst.index))
             .await;
 
         for i in 1..4 {
@@ -1649,29 +1636,6 @@ mod tests {
                 )
             );
         }
-    }
-
-    #[rstest]
-    #[tokio::test]
-    async fn test_should_clamp_entries_to_cache(
-        cache: (DbCacheWrapper, Arc<DefaultMetricsRecorder>),
-        sst_format: SsTableFormat,
-        #[future(awt)] sst: EncodedSsTable,
-    ) {
-        let (cache, _registry) = cache;
-        // given:
-        let bytes = sst.remaining_as_bytes();
-        let index = Arc::new(sst_format.read_index_raw(&sst.info, &bytes).await.unwrap());
-        let key = CachedKey::from((SST_ID, 12345u64));
-        cache
-            .insert(key.clone(), CachedEntry::with_sst_index(index.clone()))
-            .await;
-
-        // when:
-        let cached = cache.get_index(&key).await.unwrap().unwrap();
-
-        // then:
-        assert_index_clamped(index.as_ref(), cached.sst_index().unwrap().as_ref());
     }
 
     #[rstest]
@@ -1721,7 +1685,7 @@ mod tests {
             .unwrap();
         let key = CachedKey::from((SST_ID, 12345u64));
         cache
-            .insert(key.clone(), CachedEntry::with_block(Arc::new(block)))
+            .insert(key.clone(), CachedEntry::with_block(&block))
             .await;
 
         for i in 1..4 {
@@ -1904,7 +1868,7 @@ mod tests {
         cache_a
             .insert(
                 key.clone(),
-                CachedEntry::with_filters(Arc::from([named.clone()])),
+                CachedEntry::with_filters(std::slice::from_ref(&named)),
             )
             .await;
 
@@ -1912,7 +1876,7 @@ mod tests {
         assert!(cache_b.get_filter(&key).await.unwrap().is_none());
 
         cache_b
-            .insert(key.clone(), CachedEntry::with_filters(Arc::from([named])))
+            .insert(key.clone(), CachedEntry::with_filters(&[named]))
             .await;
 
         assert_eq!(2, shared_cache.entry_count());
@@ -1933,14 +1897,14 @@ mod tests {
         let key = CachedKey::from((SST_ID, 2u64));
 
         cache_a
-            .insert(key.clone(), CachedEntry::with_sst_index(index.clone()))
+            .insert(key.clone(), CachedEntry::with_sst_index(&index))
             .await;
 
         assert!(cache_a.get_index(&key).await.unwrap().is_some());
         assert!(cache_b.get_index(&key).await.unwrap().is_none());
 
         cache_b
-            .insert(key.clone(), CachedEntry::with_sst_index(index))
+            .insert(key.clone(), CachedEntry::with_sst_index(&index))
             .await;
 
         assert_eq!(2, shared_cache.entry_count());
@@ -1962,14 +1926,14 @@ mod tests {
         let key = CachedKey::from((SST_ID, 3u64));
 
         cache_a
-            .insert(key.clone(), CachedEntry::with_block(block.clone()))
+            .insert(key.clone(), CachedEntry::with_block(&block))
             .await;
 
         assert!(cache_a.get_block(&key).await.unwrap().is_some());
         assert!(cache_b.get_block(&key).await.unwrap().is_none());
 
         cache_b
-            .insert(key.clone(), CachedEntry::with_block(block))
+            .insert(key.clone(), CachedEntry::with_block(&block))
             .await;
 
         assert_eq!(2, shared_cache.entry_count());
@@ -1991,10 +1955,10 @@ mod tests {
         let key = CachedKey::from((SST_ID, 4u64));
 
         cache_a
-            .insert(key.clone(), CachedEntry::with_block(block.clone()))
+            .insert(key.clone(), CachedEntry::with_block(&block))
             .await;
         cache_b
-            .insert(key.clone(), CachedEntry::with_block(block))
+            .insert(key.clone(), CachedEntry::with_block(&block))
             .await;
         assert_eq!(2, shared_cache.entry_count());
 
@@ -2045,7 +2009,7 @@ mod tests {
         assert!(builder.add(RowEntry::new_value(b"k1", b"v1", 0)).unwrap());
         let block = Arc::new(builder.build().unwrap());
         first_open
-            .insert(key.clone(), CachedEntry::with_block(block))
+            .insert(key.clone(), CachedEntry::with_block(&block))
             .await;
         drop(first_open); // simulates `Db::close()`
 
@@ -2059,6 +2023,72 @@ mod tests {
             reopened.get_block(&key).await.unwrap().is_some(),
             "reopening with the same db_cache_id should recover the previous instance's entries"
         );
+    }
+
+    #[test]
+    fn test_with_block_should_clamp_block() {
+        // given:
+        let mut builder = BlockBuilder::new_latest(4096);
+        assert!(builder
+            .add(RowEntry::new_value(b"key", b"value", 0))
+            .unwrap());
+        let block = builder.build().unwrap();
+
+        // when:
+        let entry = CachedEntry::with_block(&block);
+
+        // then:
+        let cached = entry.block().unwrap();
+        assert_eq!(block.data, cached.data);
+        assert_ne!(block.data.as_ptr(), cached.data.as_ptr());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_with_sst_index_should_clamp_index(#[future(awt)] sst: EncodedSsTable) {
+        // when:
+        let entry = CachedEntry::with_sst_index(&sst.index);
+
+        // then:
+        assert_index_clamped(&sst.index, entry.sst_index().unwrap().as_ref());
+    }
+
+    #[test]
+    fn test_with_filters_should_clamp_filters() {
+        use crate::filter_policy::{Filter, FilterQuery};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingFilter(Arc<AtomicUsize>);
+
+        impl Filter for CountingFilter {
+            fn might_match(&self, _: &FilterQuery) -> bool {
+                true
+            }
+
+            fn encode(&self, _: &mut dyn bytes::BufMut) {}
+
+            fn size(&self) -> usize {
+                0
+            }
+
+            fn clamp_allocated_size(&self) -> Arc<dyn Filter> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Arc::new(Self(self.0.clone()))
+            }
+        }
+
+        // given:
+        let clamps = Arc::new(AtomicUsize::new(0));
+        let named = NamedFilter {
+            name: "test".to_string(),
+            filter: Arc::new(CountingFilter(clamps.clone())),
+        };
+
+        // when:
+        let _entry = CachedEntry::with_filters(&[named]);
+
+        // then:
+        assert_eq!(clamps.load(Ordering::Relaxed), 1);
     }
 
     #[fixture]
@@ -2180,17 +2210,18 @@ mod tests {
             }
         }
 
-        let marker_block = build_block(b"marker");
+        let marker = CachedEntry::with_block(&build_block(b"marker"));
+        let marker_block = marker.block().unwrap();
         let probe = Arc::new(ProbeCache {
             close_called: AtomicBool::new(false),
             flush_scope_called: AtomicBool::new(false),
             flush_to_disk_called: AtomicBool::new(false),
-            marker: CachedEntry::with_block(marker_block.clone()),
+            marker,
         });
         let unowned = UnownedDbCache::new(probe.clone());
 
         let loader = || -> CacheLoader {
-            Box::new(|| Box::pin(async { Ok(CachedEntry::with_block(build_block(b"loader"))) }))
+            Box::new(|| Box::pin(async { Ok(CachedEntry::with_block(&build_block(b"loader"))) }))
         };
         let key = || CachedKey::from((SST_ID, 0u64));
 

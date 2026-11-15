@@ -145,6 +145,12 @@ pub struct ReadOptions {
     /// Whether fetched data blocks should be inserted into the block cache.
     /// SST metadata is cached independently.
     pub cache_blocks: bool,
+    /// How many SSTs or sorted runs a lookup reads at the same time once the
+    /// key is not in the newest one. 1 reads them one after another; higher
+    /// values lower latency at the cost of extra reads on a hit. 0 is treated
+    /// as 1.
+    #[uniffi(default = 1)]
+    pub max_concurrent_sources: u32,
     /// Optional context forwarded to custom filter policies; ignored by
     /// built-in filters.
     #[uniffi(default = None)]
@@ -160,6 +166,7 @@ impl Default for ReadOptions {
             durability_filter: DurabilityLevel::default(),
             dirty: false,
             cache_blocks: true,
+            max_concurrent_sources: 1,
             filter_context: None,
             tracing_options: None,
         }
@@ -172,6 +179,8 @@ impl From<ReadOptions> for slatedb::config::ReadOptions {
             durability_filter: value.durability_filter.into(),
             dirty: value.dirty,
             cache_blocks: value.cache_blocks,
+            max_concurrent_sources: usize::try_from(value.max_concurrent_sources)
+                .expect("u32 should fit in usize on supported platforms"),
             filter_context: value.filter_context.map(Into::into),
             tracing_options: value.tracing_options.map(Into::into),
         }
@@ -222,6 +231,9 @@ pub struct ReaderOptions {
     #[uniffi(default = None)]
     pub object_store_max_retries: Option<u32>,
     /// The reader's object-store cache. `None` is the engine's default.
+    ///
+    /// Deprecated: the engine is replacing this cache with a local object
+    /// mirror.
     #[uniffi(default = None)]
     pub object_store_cache_options: Option<ObjectStoreCacheOptions>,
 }
@@ -241,6 +253,8 @@ impl Default for ReaderOptions {
 
 /// Which SSTs a reader loads into its disk cache at startup, up to
 /// `max_cache_size_bytes`.
+///
+/// Deprecated: the engine is replacing this cache with a local object mirror.
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
 pub enum PreloadLevel {
     /// The L0 SSTs only, the most recently written.
@@ -249,6 +263,7 @@ pub enum PreloadLevel {
     AllSst,
 }
 
+#[allow(deprecated)] // The engine's `PreloadLevel` is deprecated.
 impl From<PreloadLevel> for slatedb::config::PreloadLevel {
     fn from(value: PreloadLevel) -> Self {
         match value {
@@ -260,6 +275,8 @@ impl From<PreloadLevel> for slatedb::config::PreloadLevel {
 
 /// The on-disk object-store cache of one reader. Every default is the
 /// engine's; `root_folder` `None` disables the cache.
+///
+/// Deprecated: the engine is replacing this cache with a local object mirror.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ObjectStoreCacheOptions {
     /// Directory the cached parts are written under. `None` disables the
@@ -300,6 +317,7 @@ pub struct ObjectStoreCacheOptions {
     pub max_open_file_handles: u64,
 }
 
+#[allow(deprecated)] // The engine's `ObjectStoreCacheOptions` is deprecated.
 impl Default for ObjectStoreCacheOptions {
     fn default() -> Self {
         let engine = slatedb::config::ObjectStoreCacheOptions::default();
@@ -316,6 +334,7 @@ impl Default for ObjectStoreCacheOptions {
     }
 }
 
+#[allow(deprecated)] // The engine's `ObjectStoreCacheOptions` is deprecated.
 impl TryFrom<ObjectStoreCacheOptions> for slatedb::config::ObjectStoreCacheOptions {
     type Error = Error;
 
@@ -346,6 +365,7 @@ impl TryFrom<ObjectStoreCacheOptions> for slatedb::config::ObjectStoreCacheOptio
     }
 }
 
+#[allow(deprecated)] // The engine's `object_store_cache_options` is deprecated.
 impl TryFrom<ReaderOptions> for slatedb::config::DbReaderOptions {
     type Error = Error;
 
@@ -774,6 +794,7 @@ impl TryFrom<CompactorOptions> for slatedb::config::CompactorOptions {
             worker: value.worker.map(TryInto::try_into).transpose()?,
             metric_level: None,
             commit_compacted_interval: Duration::from_millis(value.commit_compacted_interval_ms),
+            enable_experimental_incremental_compaction: false,
             checkpoint_lifetime: Duration::from_millis(value.checkpoint_lifetime_ms),
             worker_heartbeat_timeout: Duration::from_millis(value.worker_heartbeat_timeout_ms),
             object_store_max_retries: value.object_store_max_retries,
@@ -1077,6 +1098,7 @@ impl TryFrom<&CheckpointOptions> for slatedb::config::CheckpointOptions {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // The engine's `ObjectStoreCacheOptions` is deprecated.
 mod reader_options_tests {
     use super::*;
 

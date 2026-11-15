@@ -24,17 +24,23 @@ use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::read_trace::ReadTrace;
 use crate::tablestore::TableStore;
 
+/// The worker's progress through one planned key range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) enum SubcompactionStatus {
+    /// The range can produce more output. It need not have started yet.
+    InProgress,
+    /// The worker stored all output for the range, including an empty result.
+    Completed,
+}
+
 /// A compaction over a sub-range of the parent compaction's key space
 /// (RFC-0028).
 ///
 /// Subcompactions are only valid within the context of a parent
 /// [`Compaction`](crate::compactor_state::Compaction) and let a single logical
 /// compaction execute its disjoint ranges in parallel while resuming at range
-/// granularity after a failure. A subcompaction carries no lifecycle status:
-/// the parent [`Compaction`](crate::compactor_state::Compaction) owns status,
-/// and a range's progress is captured entirely by its recorded `output_ssts`.
-/// On resume every range is re-run from its persisted output; a range that
-/// already finished has nothing left to merge and completes immediately.
+/// granularity after a failure. Completed ranges do not run again, even when
+/// they produce no output.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Subcompaction {
     /// Key range covered by this subcompaction. The ranges of the
@@ -43,6 +49,7 @@ pub struct Subcompaction {
     range: BytesRange,
     /// Output SSTs produced by this subcompaction so far.
     output_ssts: Vec<SsTableHandle>,
+    status: SubcompactionStatus,
 }
 
 impl Subcompaction {
@@ -50,12 +57,28 @@ impl Subcompaction {
         Self {
             range,
             output_ssts: Vec::new(),
+            status: SubcompactionStatus::InProgress,
         }
     }
 
     pub(crate) fn with_output_ssts(mut self, output_ssts: Vec<SsTableHandle>) -> Self {
         self.output_ssts = output_ssts;
         self
+    }
+
+    pub(crate) fn with_status(mut self, status: SubcompactionStatus) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// Returns the worker's progress through this range.
+    pub(crate) fn status(&self) -> SubcompactionStatus {
+        self.status
+    }
+
+    /// Returns whether the worker stored all output for this range.
+    pub(crate) fn completed(&self) -> bool {
+        self.status == SubcompactionStatus::Completed
     }
 
     /// Returns the key range covered by this subcompaction.

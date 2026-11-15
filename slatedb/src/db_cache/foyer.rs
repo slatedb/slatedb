@@ -237,10 +237,10 @@ mod tests {
 
     fn block(weight: usize) -> CachedEntry {
         assert!(weight >= 2);
-        CachedEntry::with_block(Arc::new(Block {
+        CachedEntry::with_block(&Block {
             data: Bytes::from(vec![42; weight - 2]),
             offsets: vec![],
-        }))
+        })
     }
 
     /// A caller-built FIFO cache that refuses any entry heavier than a shard's share of
@@ -271,8 +271,8 @@ mod tests {
         let index = format.read_index_raw(&sst.info, &bytes).await.unwrap();
         [
             block(32),
-            CachedEntry::with_sst_index(Arc::new(index)),
-            CachedEntry::with_filters(sst.filters),
+            CachedEntry::with_sst_index(&index),
+            CachedEntry::with_filters(&sst.filters),
             CachedEntry::with_sst_stats(Arc::new(SstStats::default())),
         ]
     }
@@ -387,8 +387,8 @@ mod tests {
         assert!(builder
             .add(RowEntry::new_value(b"key", b"value", 0))
             .unwrap());
-        let block = Arc::new(builder.build().unwrap());
-        let entry = CachedEntry::with_block(block.clone());
+        let entry = CachedEntry::with_block(&builder.build().unwrap());
+        let block = entry.block().unwrap();
         let loader: CacheLoader = Box::new(move || Box::pin(async move { Ok(entry) }));
 
         let first = cache.fetch_block(key.clone(), loader).await.unwrap();

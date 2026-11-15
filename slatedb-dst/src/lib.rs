@@ -4,8 +4,9 @@
 //! The crate re-exports the harness API and the public fault-injection types
 //! used to build deterministic DST scenarios.
 
-#![doc = include_str!("../README.md")]
 #![cfg(tokio_unstable)]
+// The README doctests require the crate, which is gated on tokio_unstable.
+#![cfg_attr(any(not(doctest), tokio_unstable), doc = include_str!("../README.md"))]
 
 pub mod actors;
 mod clocked_object_store;

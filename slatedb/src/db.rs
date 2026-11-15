@@ -45,6 +45,7 @@ use std::time::Duration;
 use crate::batch::WriteBatch;
 use crate::batch_write::{BatchWriterMessage, WriteBatchRequest, WRITE_BATCH_TASK_NAME};
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
+#[allow(deprecated)] // `CachedObjectStore` is deprecated.
 use crate::cached_object_store::CachedObjectStore;
 use crate::clock::MonotonicClock;
 use crate::config::{
@@ -458,11 +459,10 @@ impl DbInner {
             .value
             .core
             .replay_after_wal_id;
-        let writer_epoch = self.state.read().state().manifest.value.writer_epoch;
         fail_point!(
             Arc::clone(&self.fp_registry),
             "replay-wal-pause",
-            writer_epoch == 1,
+            self.state.read().state().manifest.value.writer_epoch == 1,
             |_| -> Result<(), SlateDBError> { Ok(()) }
         );
 
@@ -488,10 +488,8 @@ impl DbInner {
                 // the GC has removed this WAL entry. Check the latest manifest's
                 // writer_epoch to see if this client is fenced.
                 Err(SlateDBError::WalTruncated(wal_id)) => {
+                    // Refresh checks the manifest epoch and returns Fenced if it has advanced.
                     self.memtable_flusher.refresh_manifest().await?;
-                    if self.state.read().state().manifest.value.writer_epoch > writer_epoch {
-                        return Err(SlateDBError::Fenced);
-                    }
                     return Err(SlateDBError::WalTruncated(wal_id));
                 }
                 Err(err) => return Err(err),
@@ -533,6 +531,9 @@ impl DbInner {
             current_memtable_wal_id = replayed_table_last_wal_id;
         }
 
+        // Reject a writer that lost its epoch during replay (#2225).
+        self.memtable_flusher.refresh_manifest().await?;
+
         let guard = self.state.read();
         self.status_manager
             .report_memtable_segments(collect_touched_segments(&guard.view()));
@@ -540,6 +541,7 @@ impl DbInner {
         Ok(())
     }
 
+    #[allow(deprecated)] // `CachedObjectStore` and its options are deprecated.
     async fn preload_cache(
         &self,
         cached_obj_store: &CachedObjectStore,
@@ -1198,14 +1200,14 @@ impl Db {
     /// ## Examples
     ///
     /// Pull entries from the freshest source under the prefix and stop.
-    /// Because sources are walked newest-first and lazily initialized, an
-    /// early-return like this only touches the source that holds the
-    /// freshest data. Note that *within* a source the order is set by
-    /// `options.order` (ascending by default), so the first yielded entry
-    /// is the smallest key in the freshest source, not necessarily the
-    /// most recently written key. Across sources the same key may appear
-    /// more than once, so callers that want only the freshest value per
-    /// key should dedupe.
+    /// Because sources are walked newest-first, and each source's iterator is
+    /// built only when the walk reaches it, an early return like this builds
+    /// no iterators for the sources after the first source that holds a
+    /// match. Note that *within* a source the order is set by `options.order`
+    /// (ascending by default), so the first yielded entry is the smallest key
+    /// in the freshest source, not necessarily the most recently written key.
+    /// Across sources the same key may appear more than once, so callers that
+    /// want only the freshest value per key should dedupe.
     ///
     /// ```
     /// use slatedb::{Db, Error};
@@ -1885,12 +1887,51 @@ impl Db {
     /// - `Error`: if the URL is unparseable, if the URL contains a path component, or if
     ///   there was an error initializing the object store.
     pub fn resolve_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, crate::Error> {
+        Self::resolve_object_store_with_options(url, std::iter::empty::<(String, String)>())
+    }
+
+    /// Resolve an object store from a URL and explicit options.
+    ///
+    /// This works like [`Db::resolve_object_store`], but also applies `options` to the
+    /// store. Options use the `object_store` crate's config keys, for example
+    /// `aws_access_key_id`, `aws_secret_access_key`, `aws_session_token`, and `aws_region`
+    /// for S3. Keys are case-insensitive. An option overrides an environment variable with
+    /// the same key. The options apply only to the returned store. They do not change the
+    /// process environment.
+    ///
+    /// Like `object_store::parse_url_opts`, this ignores keys that the store does not
+    /// recognize.
+    ///
+    /// ## Arguments
+    /// - `url`: the URL to resolve with no trailing path, for example `s3://my-bucket`.
+    /// - `options`: config key and value pairs for the store.
+    ///
+    /// ## Returns
+    /// - `Result<Arc<dyn ObjectStore>, crate::Error>`: the resolved object store
+    ///
+    /// ## Errors
+    /// - `Error`: if the URL is unparseable, if the URL contains a path component, or if
+    ///   there was an error initializing the object store.
+    pub fn resolve_object_store_with_options<I, K, V>(
+        url: &str,
+        options: I,
+    ) -> Result<Arc<dyn ObjectStore>, crate::Error>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: Into<String>,
+    {
         let url = url
             .try_into()
             .map_err(|e| SlateDBError::InvalidObjectStoreURL(url.to_string(), e))?;
-        // Lowercase env keys because parse_url_opts only recognizes lower case option keys.
+        // Lowercase keys because parse_url_opts only recognizes lower case option keys.
+        // Explicit options come after env vars so that they take precedence.
         let env_vars = std::env::vars().map(|(key, value)| (key.to_ascii_lowercase(), value));
-        let (object_store, path) = parse_url_opts(&url, env_vars).map_err(SlateDBError::from)?;
+        let options = options
+            .into_iter()
+            .map(|(key, value)| (key.as_ref().to_ascii_lowercase(), value.into()));
+        let (object_store, path) =
+            parse_url_opts(&url, env_vars.chain(options)).map_err(SlateDBError::from)?;
         if !path.as_ref().is_empty() {
             return Err(SlateDBError::InvalidObjectStorePath(path.to_string()))?;
         }
@@ -2228,9 +2269,8 @@ mod tests {
     use crate::config::MetricLevel;
     use crate::config::{
         CheckpointOptions, CheckpointScope, CloseOptions, CompactionWorkerOptions,
-        CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
-        ObjectStoreCacheOptions, PutOptions, ScanOptions, Settings, SstBlockSize, Ttl,
-        WriteOptions,
+        CompactorOptions, GarbageCollectorDirectoryOptions, GarbageCollectorOptions, PutOptions,
+        ScanOptions, Settings, SstBlockSize, Ttl, WriteOptions,
     };
     use crate::db::builder::GarbageCollectorBuilder;
     use crate::db_stats::IMMUTABLE_MEMTABLE_FLUSHES;
@@ -2930,6 +2970,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_scan_prefix_by_recency_counts_each_l0_filter_once() {
+        use crate::db_stats::{
+            FILTER_KIND_LABEL, FILTER_KIND_PREFIX, SST_FILTER_FALSE_POSITIVE_COUNT,
+            SST_FILTER_NEGATIVE_COUNT, SST_FILTER_POSITIVE_COUNT,
+        };
+        use crate::filter_policy::{BloomFilterPolicy, FilterPolicy};
+        use crate::test_utils::FixedThreeBytePrefixExtractor;
+
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let filter_policy: Arc<dyn FilterPolicy> = Arc::new(
+            BloomFilterPolicy::new(10)
+                .with_prefix_extractor(Arc::new(FixedThreeBytePrefixExtractor)),
+        );
+        let db = Db::builder("/tmp/test_recency_skips_filtered_l0", object_store)
+            .with_settings(test_db_options(0, 64 * 1024, None))
+            .with_filter_policies(vec![filter_policy])
+            .with_metrics_recorder(metrics_recorder.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // Three L0 SSTs that all span `px:`, so only the prefix filter can
+        // rule one out. Only the oldest holds `px:`.
+        for prefix in [b"px:", b"qx:", b"rx:"] {
+            db.put(b"aa:a", b"v").await.unwrap();
+            db.put([prefix.as_slice(), b"a"].concat(), b"v")
+                .await
+                .unwrap();
+            db.put(b"zz:a", b"v").await.unwrap();
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        }
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        let entry = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(entry.key.as_ref(), b"px:a");
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        // Each SST's filter is checked once: the two newer SSTs are ruled out,
+        // and the oldest passes and holds the key.
+        let prefix_count = |name| {
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                name,
+                &[(FILTER_KIND_LABEL, FILTER_KIND_PREFIX)],
+            )
+            .unwrap_or(0)
+        };
+        assert_eq!(prefix_count(SST_FILTER_NEGATIVE_COUNT), 2);
+        assert_eq!(prefix_count(SST_FILTER_POSITIVE_COUNT), 1);
+        assert_eq!(prefix_count(SST_FILTER_FALSE_POSITIVE_COUNT), 0);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_resumes_a_source_after_a_dropped_next_entry() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let gated = Arc::new(GatedObjectStore::new(inner));
+        // No manifest polls during the test, so the only read that reaches
+        // the gate below is the scan's own.
+        let mut settings = test_db_options(0, 64 * 1024, None);
+        settings.manifest_poll_interval = Duration::from_secs(3600);
+        let db = Db::builder("/tmp/test_recency_dropped_next_entry", gated.clone())
+            .with_settings(settings)
+            .with_db_cache_disabled()
+            .build()
+            .await
+            .unwrap();
+
+        // Older L0 SST, then newer L0 SST, each with a version of px:a.
+        // Nothing for the prefix stays in the memtable.
+        for value in [b"old_a", b"new_a"] {
+            db.put(b"px:a", value).await.unwrap();
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        }
+
+        // Hold every read, so starting the newer SST's iterator waits on
+        // the object store. Drop that next_entry call while it waits.
+        let arrivals = gated.get_opts_gate.arrivals();
+        gated.get_opts_gate.close();
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        tokio::select! {
+            _ = iter.next_entry() => panic!("the held read must block next_entry"),
+            _ = gated.get_opts_gate.wait_for_arrivals(arrivals + 1) => {}
+        }
+        gated.get_opts_gate.release();
+
+        // The newer SST must be read again, not skipped.
+        let entry = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(entry.key.as_ref(), b"px:a");
+        assert_value(&entry, b"new_a");
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_scan_prefix_by_recency_active_memtable_avoids_main_object_store_gets() {
         // When the prefix is satisfied entirely by the active memtable, the
         // recency scan should not issue any GETs against the main object
@@ -3106,6 +3251,246 @@ mod tests {
             .unwrap();
     }
 
+    /// Opens a db whose compactor turns each L0 SST into its own sorted run
+    /// and never merges sorted runs. With `max_sst_size` set, the compactor
+    /// splits each run into SSTs of about that size.
+    async fn open_db_with_one_run_per_l0_sst(
+        path: &str,
+        filter_policies: Vec<Arc<dyn crate::filter_policy::FilterPolicy>>,
+        metrics_recorder: Arc<DefaultMetricsRecorder>,
+        max_sst_size: Option<usize>,
+    ) -> Db {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut compactor_options = fast_compactor_options();
+        if let (Some(max_sst_size), Some(worker)) = (max_sst_size, &mut compactor_options.worker) {
+            worker.max_sst_size = max_sst_size;
+        }
+        compactor_options.scheduler_options = std::collections::HashMap::from([
+            ("min_compaction_sources".to_string(), "1".to_string()),
+            ("max_compaction_sources".to_string(), "1".to_string()),
+            // Runs are merged only when the largest is at most this many
+            // times the smallest, which a value below 1 never allows.
+            ("include_size_threshold".to_string(), "0.5".to_string()),
+        ]);
+        Db::builder(path, object_store)
+            .with_settings(test_db_options(0, 64 * 1024, Some(compactor_options)))
+            .with_filter_policies(filter_policies)
+            .with_metrics_recorder(metrics_recorder)
+            .build()
+            .await
+            .unwrap()
+    }
+
+    /// Flushes the memtable to L0 and waits until the compactor has turned it
+    /// into sorted run number `runs`.
+    async fn flush_and_compact(db: &Db, runs: usize) {
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                {
+                    let state = db.inner.state.read().state();
+                    let tree = &state.core().tree;
+                    if tree.l0.is_empty() && tree.compacted.len() == runs {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_counts_each_sorted_run_filter_once() {
+        use crate::db_stats::{
+            FILTER_KIND_LABEL, FILTER_KIND_PREFIX, SST_FILTER_FALSE_POSITIVE_COUNT,
+            SST_FILTER_NEGATIVE_COUNT, SST_FILTER_POSITIVE_COUNT,
+        };
+        use crate::filter_policy::{BloomFilterPolicy, FilterPolicy};
+        use crate::test_utils::FixedThreeBytePrefixExtractor;
+
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let filter_policy: Arc<dyn FilterPolicy> = Arc::new(
+            BloomFilterPolicy::new(10)
+                .with_prefix_extractor(Arc::new(FixedThreeBytePrefixExtractor)),
+        );
+        let db = open_db_with_one_run_per_l0_sst(
+            "/tmp/test_recency_skips_filtered_run",
+            vec![filter_policy],
+            metrics_recorder.clone(),
+            None,
+        )
+        .await;
+
+        // Two sorted runs that both span `px:`, so only the prefix filter can
+        // rule one out. Only the older run holds `px:`.
+        for (runs, prefix) in [(1, b"px:"), (2, b"qx:")] {
+            db.put(b"aa:a", b"v").await.unwrap();
+            db.put([prefix.as_slice(), b"a"].concat(), b"v")
+                .await
+                .unwrap();
+            db.put(b"zz:a", b"v").await.unwrap();
+            flush_and_compact(&db, runs).await;
+        }
+
+        let mut iter = db.scan_prefix_by_recency(b"px:").await.unwrap();
+        let entry = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(entry.key.as_ref(), b"px:a");
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        // Each run's only covering SST is checked once: the newer run is
+        // ruled out, and the older one passes and holds the key.
+        let prefix_count = |name| {
+            lookup_metric_with_labels(
+                &metrics_recorder,
+                name,
+                &[(FILTER_KIND_LABEL, FILTER_KIND_PREFIX)],
+            )
+            .unwrap_or(0)
+        };
+        assert_eq!(prefix_count(SST_FILTER_NEGATIVE_COUNT), 1);
+        assert_eq!(prefix_count(SST_FILTER_POSITIVE_COUNT), 1);
+        assert_eq!(prefix_count(SST_FILTER_FALSE_POSITIVE_COUNT), 0);
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_descends_through_sorted_run() {
+        let db = open_db_with_one_run_per_l0_sst(
+            "/tmp/test_recency_descends_run",
+            vec![],
+            Arc::new(DefaultMetricsRecorder::new()),
+            None,
+        )
+        .await;
+        db.put(b"px:a", b"va").await.unwrap();
+        db.put(b"px:b", b"vb").await.unwrap();
+        db.put(b"qx:a", b"v").await.unwrap();
+        flush_and_compact(&db, 1).await;
+
+        let options = ScanOptions::default().with_order(IterationOrder::Descending);
+        let mut iter = db
+            .scan_prefix_by_recency_with_options(b"px:", &options)
+            .await
+            .unwrap();
+        let e1 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e1.key.as_ref(), b"px:b");
+        assert_value(&e1, b"vb");
+        let e2 = iter.next_entry().await.unwrap().unwrap();
+        assert_eq!(e2.key.as_ref(), b"px:a");
+        assert_value(&e2, b"va");
+        assert!(iter.next_entry().await.unwrap().is_none());
+
+        db.close().await.unwrap();
+    }
+
+    #[rstest::rstest]
+    #[case::ascending(IterationOrder::Ascending)]
+    #[case::descending(IterationOrder::Descending)]
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_reads_a_prefix_across_ssts_of_a_sorted_run(
+        #[case] order: IterationOrder,
+    ) {
+        let db = open_db_with_one_run_per_l0_sst(
+            &format!("/tmp/test_recency_multi_sst_run_{order:?}"),
+            vec![],
+            Arc::new(DefaultMetricsRecorder::new()),
+            Some(4 * 1024),
+        )
+        .await;
+        // About 25 KiB under `px:`, so the run splits it across several SSTs.
+        let keys: Vec<Vec<u8>> = (0..200)
+            .map(|i| format!("px:{i:03}").into_bytes())
+            .collect();
+        db.put(b"aa:a", b"v").await.unwrap();
+        for key in &keys {
+            db.put(key, [b'v'; 100]).await.unwrap();
+        }
+        db.put(b"zz:a", b"v").await.unwrap();
+        flush_and_compact(&db, 1).await;
+        let covering_ssts = db.inner.state.read().state().core().tree.compacted[0]
+            .tables_covering_range(BytesRange::from_prefix(b"px:"))
+            .len();
+        assert!(covering_ssts > 1, "covering SSTs: {covering_ssts}");
+
+        let options = ScanOptions::default().with_order(order);
+        let mut iter = db
+            .scan_prefix_by_recency_with_options(b"px:", &options)
+            .await
+            .unwrap();
+        let mut read = Vec::new();
+        while let Some(entry) = iter.next_entry().await.unwrap() {
+            read.push(entry.key.to_vec());
+        }
+        let mut expected = keys;
+        if matches!(order, IterationOrder::Descending) {
+            expected.reverse();
+        }
+        assert_eq!(read, expected);
+
+        db.close().await.unwrap();
+    }
+
+    #[rstest::rstest]
+    #[case::ascending(IterationOrder::Ascending)]
+    #[case::descending(IterationOrder::Descending)]
+    #[tokio::test]
+    async fn test_scan_prefix_by_recency_reads_versions_across_ssts_of_a_sorted_run(
+        #[case] order: IterationOrder,
+    ) {
+        let db = open_db_with_one_run_per_l0_sst(
+            &format!("/tmp/test_recency_versions_multi_sst_run_{order:?}"),
+            vec![],
+            Arc::new(DefaultMetricsRecorder::new()),
+            Some(4 * 1024),
+        )
+        .await;
+        // About 25 KiB of versions of one key, so the run splits them across
+        // several SSTs. A snapshot after each write keeps every version.
+        let values: Vec<Vec<u8>> = (0..200)
+            .map(|i| format!("{i:03}").into_bytes().repeat(34))
+            .collect();
+        let mut snapshots = Vec::new();
+        db.put(b"aa:a", b"v").await.unwrap();
+        for value in &values {
+            db.put(b"px:a", value).await.unwrap();
+            snapshots.push(db.snapshot().unwrap());
+        }
+        db.put(b"zz:a", b"v").await.unwrap();
+        flush_and_compact(&db, 1).await;
+        let covering_ssts = db.inner.state.read().state().core().tree.compacted[0]
+            .tables_covering_range(BytesRange::from_prefix(b"px:"))
+            .len();
+        assert!(covering_ssts > 1, "covering SSTs: {covering_ssts}");
+
+        // Versions of a key come newest first in both orders.
+        let options = ScanOptions::default().with_order(order);
+        let mut iter = db
+            .scan_prefix_by_recency_with_options(b"px:", &options)
+            .await
+            .unwrap();
+        let mut read = Vec::new();
+        while let Some(entry) = iter.next_entry().await.unwrap() {
+            assert_eq!(entry.key.as_ref(), b"px:a");
+            match entry.value {
+                crate::types::ValueDeletable::Value(v) => read.push(v.to_vec()),
+                other => panic!("expected a value, got {other:?}"),
+            }
+        }
+        let mut expected = values;
+        expected.reverse();
+        assert_eq!(read, expected);
+
+        drop(snapshots);
+        db.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_scan_prefix_by_recency_errors_on_multi_segment_prefix() {
         use crate::manifest::{LsmTreeState, Segment};
@@ -3193,6 +3578,7 @@ mod tests {
                                         durability_filter: Memory,
                                         dirty: false,
                                         cache_blocks: true,
+                                        max_concurrent_sources: 1,
                                         filter_context: None,
                                         tracing_options: None,
                                     }
@@ -6453,7 +6839,8 @@ mod tests {
         kv_store.close().await.unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // Two paused uploads block workers; keep others free for manifest refresh.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_should_recover_imm_from_wal() {
         let fp_registry = Arc::new(FailPointRegistry::new());
         fail_parallel::cfg(fp_registry.clone(), "write-compacted-sst-io-error", "pause").unwrap();
@@ -7200,8 +7587,7 @@ mod tests {
         //   enters replay_wal. We pause it inside replay_wal.
         // - W2 starts opening: claims writer_epoch=2, writes its own fence WAL
         //   (above W1's), replays, and finishes init.
-        // - W1 unpauses, finishes replay_wal, and returns its Db handle.
-        // - W1 issues a put. This put should fail because W1's next WAL id is taken.
+        // - W1 resumes replay and fails to open because W2 owns a newer epoch.
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = "/tmp/test_writer_paused_in_replay_wal_race";
         let fp_registry = Arc::new(FailPointRegistry::new());
@@ -7268,26 +7654,15 @@ mod tests {
             2
         );
 
-        // Release W1. It finishes replay_wal and returns a Db handle.
+        // Release W1. The manifest check after replay must reject its stale epoch.
         fail_parallel::cfg(fp_registry.clone(), "replay-wal-pause", "off").unwrap();
-        let db1 = w1_handle.await.unwrap().unwrap();
-        assert_eq!(
-            db1.inner.state.read().state().manifest.value.writer_epoch,
-            1
-        );
+        let err = match w1_handle.await.unwrap() {
+            Ok(_) => panic!("expected W1 open to fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.kind(), crate::ErrorKind::Closed(CloseReason::Fenced));
 
-        // W1's put should fail because its now fenced
-        let result = db1
-            .put_with_options(
-                b"w1",
-                b"value",
-                &PutOptions::default(),
-                &WriteOptions::default(),
-            )
-            .await;
-        if let Ok(handle) = result {
-            assert!(handle.await_durable().await.is_err());
-        }
+        db2.close().await.unwrap();
     }
 
     async fn wait_for_wal_sst_count(wal_store: &WalTableStore, min_count: usize, context: &str) {
@@ -7299,6 +7674,109 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("{context}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn wal_replay_should_preserve_data_when_gc_slot_is_reused() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/wal_replay_should_preserve_data_when_gc_slot_is_reused";
+        let wal_store = WalTableStore::new(
+            object_store.clone(),
+            SsTableFormat::default(),
+            path,
+            TableStoreKind::Main,
+        );
+
+        // 1. Seed the two committed WALs from issue #2225.
+        for (id, key, value) in [(1, b"k1", b"v1"), (2, b"k2", b"v2")] {
+            let mut builder = wal_store.table_builder();
+            builder
+                .add(RowEntry::new_value(key, value, id))
+                .await
+                .unwrap();
+            wal_store
+                .write_sst(id.into(), &builder.build().await.unwrap())
+                .await
+                .unwrap();
+        }
+
+        // 2. Open a writer, but pause before replay. Freeze time to prevent later manifest polls.
+        let mut settings = test_db_options(0, 1024 * 1024, None);
+        settings.flush_interval = None;
+        let fp_registry = Arc::new(FailPointRegistry::new());
+        let replay_pause =
+            fail_parallel::FailGuard::new(fp_registry.clone(), "replay-wal-pause", "pause")
+                .unwrap();
+        let recorder = Arc::new(DefaultMetricsRecorder::new());
+        let opening = tokio::spawn({
+            let object_store = object_store.clone();
+            let settings = settings.clone();
+            let fp_registry = fp_registry.clone();
+            let recorder = recorder.clone();
+            async move {
+                Db::builder(path, object_store)
+                    .with_settings(settings)
+                    .with_system_clock(Arc::new(MockSystemClock::new()))
+                    .with_fp_registry(fp_registry)
+                    .with_metrics_recorder(recorder)
+                    .build()
+                    .await
+            }
+        });
+
+        // 3. Wait for validation and the initial manifest poll. Replay remains paused.
+        while lookup_metric(&recorder, crate::memtable_flusher::MANIFEST_REFRESH_COUNT).unwrap_or(0)
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+
+        // 4. Let a newer writer recover both values and flush them to L0.
+        let current = Db::builder(path, object_store)
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+        current
+            .flush_with_options(FlushOptions {
+                flush_type: FlushType::MemTable,
+            })
+            .await
+            .unwrap();
+        assert!(current.inner.manifest().core().replay_after_wal_id > 1);
+        current.close().await.unwrap();
+
+        // 5. Simulate GC deleting the first data WAL after the flush makes it eligible.
+        wal_store.delete_sst(1.into()).await.unwrap();
+
+        // 6. Simulate a delayed writer creating its fence at the deleted WAL's ID.
+        wal_store.write_wal_fence(1.into()).await.unwrap();
+
+        // 7. Resume the stale writer's replay, which now reads a fence in place of the first value.
+        drop(replay_pause);
+
+        // 8. Require fencing or a complete recovered view before reads can succeed.
+        match opening.await.unwrap() {
+            Err(err) => assert_eq!(err.kind(), crate::ErrorKind::Closed(CloseReason::Fenced)),
+            Ok(stale) => {
+                let observed = (
+                    stale.get(b"k1").await.unwrap(),
+                    stale.get(b"k2").await.unwrap(),
+                );
+                stale
+                    .close_with_options(CloseOptions { flush_type: None })
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    observed,
+                    (
+                        Some(Bytes::from_static(b"v1")),
+                        Some(Bytes::from_static(b"v2"))
+                    ),
+                    "WAL replay must not expose a later value while losing an earlier value"
+                );
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -7928,6 +8406,7 @@ mod tests {
         }
     }
 
+    #[allow(deprecated)] // `object_store_cache_options` is deprecated.
     fn test_db_options_with_ttl(
         min_filter_keys: u32,
         l0_sst_size_bytes: usize,
@@ -7949,7 +8428,7 @@ mod tests {
             max_wal_flushes_before_l0_flush: 4096,
             compactor_options,
             compression_codec: None,
-            object_store_cache_options: ObjectStoreCacheOptions::default(),
+            object_store_cache_options: crate::config::ObjectStoreCacheOptions::default(),
             garbage_collector_options: None,
             metric_level: MetricLevel::default(),
             default_ttl_millis,
@@ -12023,7 +12502,7 @@ mod tests {
                     break;
                 }
             }
-            CachedEntry::with_block(Arc::new(builder.build().unwrap()))
+            CachedEntry::with_block(&builder.build().unwrap())
         }
 
         async fn open_shared_cache(path: &std::path::Path) -> Arc<dyn DbCache> {
@@ -12119,6 +12598,7 @@ mod tests {
         );
     }
 
+    #[allow(deprecated)] // `CachedObjectStore` is deprecated.
     mod object_store_cache {
         use super::*;
         use crate::cached_object_store::stats::{PART_ACCESS_COUNT, PART_HIT_COUNT};
@@ -12485,6 +12965,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[allow(deprecated)] // `CachedObjectStore` is deprecated.
         async fn test_db_records_read_calls_into_cached_object_store() {
             let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let mut opts = test_db_options(0, 1024, None);

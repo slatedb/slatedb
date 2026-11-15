@@ -254,6 +254,14 @@ impl MemTableIterator {
         self.next_sync();
     }
 
+    /// Whether the iterator has no entries left to return.
+    ///
+    /// In descending order, older versions of a key wait in the stack after
+    /// `item` is already `None`, so both must be empty.
+    pub(crate) fn is_exhausted(&self) -> bool {
+        self.borrow_item().is_none() && self.borrow_descending_stack().is_empty()
+    }
+
     pub(crate) fn next_sync(&mut self) -> Option<RowEntry> {
         let span = self.borrow_read_trace().new_memtable_span();
         let _guard = span.enter();
@@ -1133,6 +1141,59 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[rstest]
+    #[case::key_with_prefix(b"bb".as_slice(), false)]
+    #[case::key_equal_to_prefix(b"bbbb".as_slice(), false)]
+    #[case::tombstone_only(b"dd".as_slice(), false)]
+    #[case::between_keys(b"bc".as_slice(), true)]
+    #[case::before_first_key(b"a".as_slice(), true)]
+    #[case::after_last_key(b"zz".as_slice(), true)]
+    fn test_memtable_prefix_range_is_exhausted(
+        #[case] prefix: &[u8],
+        #[case] expected: bool,
+        #[values(IterationOrder::Ascending, IterationOrder::Descending)] order: IterationOrder,
+    ) {
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"bbbb", b"old", 1));
+        table.put(RowEntry::new_value(b"bbbb", b"new", 2));
+        table.put(RowEntry::new_value(b"cccc", b"v", 3));
+        table.put(RowEntry::new_tombstone(b"dddd", 4));
+
+        let iter = table
+            .table()
+            .range(BytesRange::from_prefix(prefix), order, ReadTrace::none());
+        assert_eq!(iter.is_exhausted(), expected);
+    }
+
+    #[test]
+    fn test_empty_memtable_iterator_is_exhausted() {
+        let table = WritableKVTable::new();
+        let iter = table
+            .table()
+            .range(.., IterationOrder::Ascending, ReadTrace::none());
+        assert!(iter.is_exhausted());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_memtable_iterator_is_exhausted_only_after_last_entry(
+        #[values(IterationOrder::Ascending, IterationOrder::Descending)] order: IterationOrder,
+    ) {
+        // Two versions of one key: in descending order the older one waits in
+        // the stack after `item` is already `None`.
+        let table = WritableKVTable::new();
+        table.put(RowEntry::new_value(b"bbbb", b"old", 1));
+        table.put(RowEntry::new_value(b"bbbb", b"new", 2));
+
+        let mut iter = table.table().range(.., order, ReadTrace::none());
+        assert!(!iter.is_exhausted());
+        assert!(iter.next().await.unwrap().is_some());
+        assert!(!iter.is_exhausted());
+        assert!(iter.next().await.unwrap().is_some());
+        assert!(iter.is_exhausted());
+        assert!(iter.next().await.unwrap().is_none());
     }
 
     fn seek_test_table() -> WritableKVTable {
