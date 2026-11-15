@@ -784,10 +784,9 @@ impl TableStore {
 
     /// Reads specified blocks from an SSTable using the provided index.
     ///
-    /// This function attempts to read blocks from the cache if available
-    /// and falls back to reading from storage for uncached blocks
-    /// using an async fetch for each contiguous range that blocks are not cached.
-    /// It can optionally cache newly read blocks.
+    /// This function reads blocks from the cache if one is available. It reads
+    /// the uncached blocks from storage in one GET, from the first uncached
+    /// block to the last. It can optionally cache newly read blocks.
     /// `segment` is a hint attached to the [`ObjectStoreCallTag`] for
     /// object-store routing.
     /// `trace` owns the span for the block read.
@@ -826,9 +825,9 @@ impl TableStore {
         // Single-block reads (point-gets via SstIterator::for_key, SstFile::read_block,
         // etc.) take a dedup-aware fast-path: concurrent callers for the same block
         // collapse onto one loader. Multi-block reads fall through to the range-
-        // coalesced path below, which issues one object-store GET per contiguous
-        // run of uncached blocks. Cache errors fall through to the direct load,
-        // which produces the authoritative error if any.
+        // coalesced path below, which issues one object-store GET spanning the
+        // first through the last uncached block. Cache errors fall through to the
+        // direct load, which produces the authoritative error if any.
         if cache_blocks && blocks.len() == 1 {
             if let Some(cache) = self.cache_for_reads() {
                 let block_num = blocks.start;
@@ -842,117 +841,82 @@ impl TableStore {
                             CacheLookup::Miss => (0, 1),
                         };
                         record_read_block_cache_counts(&span, cache_hits, cache_misses);
-                        let mut result = VecDeque::with_capacity(1);
-                        result.push_back(block);
-                        return Ok(result);
+                        return Ok(VecDeque::from([block]));
                     }
                 }
             }
         }
 
-        let object_store = self.object_store.clone();
-        let path = self.path(&handle.id);
-        // Initialize the result vector and a vector to track uncached ranges
-        let mut blocks_read = VecDeque::with_capacity(blocks.end - blocks.start);
-        let mut uncached_ranges = Vec::new();
-        let mut cache_hits = 0;
-        let mut cache_misses = 0;
-
-        // If block cache is available, try to retrieve cached blocks
-        if let Some(cache) = self.cache_for_reads() {
-            let index_borrow = index.borrow();
-            // Attempt to get all requested blocks from cache concurrently
-            let cached_blocks = join_all(blocks.clone().map(|block_num| async move {
-                let block_meta = index_borrow.block_meta().get(block_num);
-                let offset = block_meta.offset();
-                cache
-                    .get_block(&(handle.id, offset).into())
-                    .await
-                    .unwrap_or(None)
-                    .and_then(|entry| entry.block())
-            }))
-            .await;
-
-            let mut last_uncached_start = None;
-
-            // Process cached block results
-            for (index, block_result) in cached_blocks.into_iter().enumerate() {
-                match block_result {
-                    Some(cached_block) => {
-                        cache_hits += 1;
-                        // If a cached block is found, add it to blocks_read
-                        if let Some(start) = last_uncached_start.take() {
-                            uncached_ranges.push((blocks.start + start)..(blocks.start + index));
-                        }
-                        blocks_read.push_back(cached_block);
-                    }
-                    None => {
-                        cache_misses += 1;
-                        // If a block is not in cache, mark the start of an uncached range
-                        last_uncached_start.get_or_insert(index);
-                    }
-                }
-            }
-            // Add the last uncached range if it exists
-            if let Some(start) = last_uncached_start {
-                uncached_ranges.push((blocks.start + start)..blocks.end);
-            }
-        } else {
-            // If no cache is available, treat all blocks as uncached
-            cache_misses = blocks.len();
-            uncached_ranges.push(blocks.clone());
-        }
-        record_read_block_cache_counts(&span, cache_hits, cache_misses);
-        // Read uncached blocks concurrently
-        let uncached_blocks = join_all(uncached_ranges.iter().map(|range| {
-            let object_store = &object_store;
-            let path = &path;
-            let index_ref = &index;
-            let segment = segment.clone();
-            async move {
-                read_with_validation_retry(
-                    ObjectStoreCallTag::new_with_segment(
-                        self.kind,
-                        SstType::from(&handle.id),
-                        segment,
-                    ),
-                    |tag| {
-                        let obj = ReadOnlyObject {
-                            object_store: object_store.clone(),
-                            path: path.clone(),
-                            tag,
-                        };
-                        async move {
-                            self.sst_format
-                                .read_blocks(&handle.info, index_ref, range.clone(), &obj)
-                                .await
-                                .map_err(|e| e.with_path(&obj.path))
-                        }
-                    },
-                )
+        // Each slot holds a cached block, or None if the block must be fetched.
+        let mut slots: Vec<Option<Arc<Block>>> = match self.cache_for_reads() {
+            Some(cache) => {
+                let index_borrow = index.borrow();
+                join_all(blocks.clone().map(|block_num| async move {
+                    let offset = index_borrow.block_meta().get(block_num).offset();
+                    cache
+                        .get_block(&(handle.id, offset).into())
+                        .await
+                        .unwrap_or(None)
+                        .and_then(|entry| entry.block())
+                }))
                 .await
             }
-        }))
-        .await;
+            None => vec![None; blocks.len()],
+        };
+        let cache_hits = slots.iter().filter(|slot| slot.is_some()).count();
+        let cache_misses = slots.len() - cache_hits;
+        record_read_block_cache_counts(&span, cache_hits, cache_misses);
 
-        // Merge uncached blocks with blocks_read and prepare blocks for caching
-        let mut blocks_to_cache = vec![];
-        for (range, range_blocks) in uncached_ranges.into_iter().zip(uncached_blocks) {
-            let index_borrow = index.borrow();
-            for (block_num, block_read) in range.zip(range_blocks?) {
-                let block = Arc::new(block_read);
-                if cache_blocks {
-                    let block_meta = index_borrow.block_meta().get(block_num);
-                    let offset = block_meta.offset();
-                    blocks_to_cache.push((handle.id, offset, block.clone()));
+        // Fetch the uncached blocks in one GET, from the first to the last of
+        // them. A cache that holds scattered blocks of the range would
+        // otherwise split the read into one GET per gap. The GET also reads the
+        // cached blocks in between. We drop those copies and keep the cached ones.
+        let first = slots.iter().position(Option::is_none);
+        let last = slots.iter().rposition(Option::is_none);
+        if let (Some(first), Some(last)) = (first, last) {
+            let fetch_range = (blocks.start + first)..(blocks.start + last + 1);
+            let object_store = &self.object_store;
+            let path = &self.path(&handle.id);
+            let index_ref = &index;
+            let fetched = read_with_validation_retry(
+                ObjectStoreCallTag::new_with_segment(self.kind, SstType::from(&handle.id), segment),
+                |tag| {
+                    let obj = ReadOnlyObject {
+                        object_store: object_store.clone(),
+                        path: path.clone(),
+                        tag,
+                    };
+                    let range = fetch_range.clone();
+                    async move {
+                        self.sst_format
+                            .read_blocks(&handle.info, index_ref, range, &obj)
+                            .await
+                            .map_err(|e| e.with_path(&obj.path))
+                    }
+                },
+            )
+            .await?;
+
+            let mut blocks_to_cache = Vec::with_capacity(cache_misses);
+            {
+                let index_borrow = index.borrow();
+                for ((block_num, slot), block) in
+                    fetch_range.zip(&mut slots[first..=last]).zip(fetched)
+                {
+                    if slot.is_some() {
+                        continue;
+                    }
+                    let block = Arc::new(block);
+                    if cache_blocks {
+                        let offset = index_borrow.block_meta().get(block_num).offset();
+                        blocks_to_cache.push((handle.id, offset, block.clone()));
+                    }
+                    *slot = Some(block);
                 }
-                blocks_read.insert(block_num - blocks.start, block);
             }
-        }
 
-        // Cache the newly read blocks if caching is enabled
-        if let Some(cache) = self.cache_for_reads() {
-            if !blocks_to_cache.is_empty() {
+            // Cache the newly read blocks if caching is enabled
+            if let Some(cache) = self.cache_for_reads() {
                 join_all(blocks_to_cache.into_iter().map(|(id, offset, block)| {
                     cache.insert((id, offset).into(), CachedEntry::with_block(&block))
                 }))
@@ -960,7 +924,10 @@ impl TableStore {
             }
         }
 
-        Ok(blocks_read)
+        Ok(slots
+            .into_iter()
+            .map(|slot| slot.expect("every block is cached or fetched"))
+            .collect())
     }
 
     #[allow(dead_code)]
@@ -3483,6 +3450,122 @@ mod tests {
         // The last block ends at byte 500 and is 200 bytes, so one preceding
         // block is required to meet a 201-byte target.
         assert_eq!(actual, 2..4);
+    }
+
+    /// A partly cached range is fetched in one GET, not one per gap, and every
+    /// block reads back in order. `cached` is `None` for a reader without a cache.
+    #[cfg(feature = "foyer")]
+    #[rstest]
+    #[case::no_cache(None, 1)]
+    #[case::nothing_cached(Some(vec![]), 1)]
+    #[case::odd_blocks_cached(Some((1..20).step_by(2).collect()), 1)]
+    #[case::edges_cached(Some(vec![0, 19]), 1)]
+    #[case::only_edges_uncached(Some((1..19).collect()), 1)]
+    #[case::all_cached(Some((0..20).collect()), 0)]
+    #[tokio::test]
+    async fn should_fetch_a_partly_cached_range_in_one_get(
+        #[case] cached: Option<Vec<usize>>,
+        #[case] expected_gets: usize,
+    ) {
+        use crate::db_cache::foyer::FoyerCache;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use tokio::sync::Notify;
+
+        // given: an SST of 20 blocks
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let format = SsTableFormat {
+            block_size: 32,
+            ..SsTableFormat::default()
+        };
+        let writer = TableStore::new(
+            inner.clone(),
+            format.clone(),
+            Path::from(ROOT),
+            None,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        );
+        let id = SsTableId::from(ulid::Ulid::new());
+        let mut table = writer.table_builder();
+        let mut expected_data = Vec::with_capacity(20);
+        for i in 0..20 {
+            let key = [i as u8; 16];
+            let value = [(i + 1) as u8; 16];
+            expected_data.push((
+                Vec::from(key.as_slice()),
+                ValueDeletable::Value(Bytes::copy_from_slice(&value)),
+            ));
+            table
+                .add(RowEntry::new_value(key.as_ref(), value.as_ref(), 0))
+                .await
+                .unwrap();
+        }
+        let handle = writer
+            .write_sst(&id, &table.build().await.unwrap(), Some(Bytes::new()))
+            .await
+            .unwrap();
+
+        // given: a reader whose cache holds the `cached` blocks
+        let counting = Arc::new(PauseFirstReadStore {
+            inner: inner.clone(),
+            get_range_count: AtomicUsize::new(0),
+            paused: AtomicBool::new(false),
+            first_read_started: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        });
+        let counting_store: Arc<dyn ObjectStore> = counting.clone();
+        let cache = cached
+            .is_some()
+            .then(|| Arc::new(FoyerCache::new()) as Arc<dyn DbCache>);
+        let reader = TableStore::new(
+            counting_store,
+            format,
+            Path::from(ROOT),
+            cache,
+            TableStoreKind::Main,
+            BlockCachePolicy::default(),
+        );
+        let index = reader
+            .read_index(&handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
+            .await
+            .unwrap();
+        assert_eq!(index.borrow().block_meta().len(), 20);
+        for block in cached.into_iter().flatten() {
+            reader
+                .read_blocks_using_index(
+                    &handle,
+                    index.clone(),
+                    block..block + 1,
+                    true,
+                    Some(Bytes::new()),
+                    &ReadTrace::none(),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+
+        // when: the whole range is read
+        let before = counting.get_range_count.load(Ordering::SeqCst);
+        let blocks = reader
+            .read_blocks_using_index(
+                &handle,
+                index.clone(),
+                0..20,
+                true,
+                Some(Bytes::new()),
+                &ReadTrace::none(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // then: at most one GET, and every block in order
+        assert_eq!(
+            counting.get_range_count.load(Ordering::SeqCst) - before,
+            expected_gets
+        );
+        assert_blocks(&blocks, &expected_data).await;
     }
 
     /// End-to-end test: concurrent index reads through `TableStore` issue a single
