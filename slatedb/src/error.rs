@@ -24,8 +24,13 @@ pub(crate) enum SlateDBError {
     #[error("checksum mismatch{}", .path.as_ref().map(|p| format!(" in {p}")).unwrap_or_default())]
     ChecksumMismatch { path: Option<Path> },
 
+    /// A zero-byte SST object. A WAL fence is a zero-byte object.
     #[error("empty SSTable")]
     EmptySSTable,
+
+    /// An SST object that is too short to hold its metadata and footer.
+    #[error("truncated SSTable{}. len=`{len}`", .path.as_ref().map(|p| format!(" in {p}")).unwrap_or_default())]
+    TruncatedSSTable { path: Option<Path>, len: u64 },
 
     #[error("empty block metadata")]
     EmptyBlockMeta,
@@ -326,6 +331,10 @@ impl SlateDBError {
         match self {
             SlateDBError::ChecksumMismatch { path: None } => SlateDBError::ChecksumMismatch {
                 path: Some(path.clone()),
+            },
+            SlateDBError::TruncatedSSTable { path: None, len } => SlateDBError::TruncatedSSTable {
+                path: Some(path.clone()),
+                len,
             },
             other => other,
         }
@@ -805,6 +814,7 @@ impl From<SlateDBError> for Error {
             SlateDBError::EmptyBlockMeta => Error::data(msg),
             SlateDBError::InvalidFilterBlock => Error::data(msg),
             SlateDBError::EmptySSTable => Error::data(msg),
+            SlateDBError::TruncatedSSTable { .. } => Error::data(msg),
             SlateDBError::ChecksumMismatch { .. } => Error::data(msg),
             SlateDBError::CloneExternalDbMissing => Error::data(msg),
             SlateDBError::CloneIncorrectExternalDbCheckpoint { .. } => Error::data(msg),

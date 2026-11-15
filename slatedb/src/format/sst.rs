@@ -746,8 +746,16 @@ impl SsTableFormat {
         obj: &impl ReadOnlyBlob,
     ) -> Result<LengthOffsetAndVersion, SlateDBError> {
         let obj_len = obj.len().await?;
-        if obj_len <= NUM_FOOTER_BYTES_LONG {
+        // A WAL fence is a zero-byte object. Every other SST has metadata before its
+        // footer, so an object that is not longer than the footer is corrupt.
+        if obj_len == 0 {
             return Err(SlateDBError::EmptySSTable);
+        }
+        if obj_len <= NUM_FOOTER_BYTES_LONG {
+            return Err(SlateDBError::TruncatedSSTable {
+                path: None,
+                len: obj_len,
+            });
         }
         let header = obj
             .read_range((obj_len - NUM_FOOTER_BYTES_LONG)..obj_len)

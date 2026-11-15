@@ -517,7 +517,8 @@ mod tests {
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, ObjectStoreExt};
+    use rstest::rstest;
     use slatedb_common::clock::DefaultSystemClock;
 
     use super::{
@@ -529,9 +530,10 @@ mod tests {
     use crate::iter::EmptyIterator;
     use crate::manifest::{Manifest, ManifestCore, VersionedManifest};
     use crate::object_store_tag::TableStoreKind;
+    use crate::paths::PathResolver;
     use crate::types::RowEntry;
     use crate::wal::slatedb::sst_iterator::WalSstIterator;
-    use crate::wal::slatedb::store::WalTableStore;
+    use crate::wal::slatedb::store::{WalFileId, WalTableStore};
     use crate::wal::{WalError, WalIterator as _};
 
     fn versioned_manifest(id: u64, next_wal_id: u64) -> VersionedManifest {
@@ -601,6 +603,39 @@ mod tests {
         assert_eq!(batch.last_consumed_wal_file_id, 1);
         assert!(batch.rows.is_empty());
         assert!(wal_iter.next().await.unwrap().is_none());
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn should_fail_on_a_wal_shorter_than_a_footer(#[values(1, 10)] len: usize) {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let root = Path::from("/tmp/test_kv_store");
+        let table_store = Arc::new(WalTableStore::new(
+            Arc::clone(&object_store),
+            SsTableFormat::default(),
+            root.clone(),
+            TableStoreKind::Main,
+        ));
+        let path = PathResolver::from_root(root).wal_sst_path(&WalFileId::from(1));
+        object_store
+            .put(&path, Bytes::from(vec![0; len]).into())
+            .await
+            .unwrap();
+        let mut wal_iter = SlateDbWalIterator::range(
+            1,
+            WalIteratorEndBound::Exclusive(2),
+            SlateDbWalIteratorOptions::default(),
+            table_store,
+        )
+        .unwrap();
+
+        let Err(WalError::DataError(err)) = wal_iter.next().await else {
+            panic!("expected a WAL data error");
+        };
+        assert_eq!(
+            err.to_string(),
+            format!("truncated SSTable in {path}. len=`{len}`")
+        );
     }
 
     #[tokio::test]
