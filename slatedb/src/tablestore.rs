@@ -878,22 +878,18 @@ impl TableStore {
         // gap is not read again. Only the uncached blocks are decoded.
         let missing: Vec<usize> = (0..slots.len()).filter(|&i| slots[i].is_none()).collect();
         if !missing.is_empty() {
-            let (ranges, offsets): (Vec<Range<u64>>, Vec<u64>) = {
+            let ranges: Vec<Range<u64>> = {
                 let index_borrow = index.borrow();
                 missing
                     .iter()
                     .map(|&i| {
-                        let block_num = blocks.start + i;
-                        (
-                            self.sst_format.block_byte_range(
-                                &handle.info,
-                                &index_borrow,
-                                block_num,
-                            ),
-                            index_borrow.block_meta().get(block_num).offset(),
+                        self.sst_format.block_byte_range(
+                            &handle.info,
+                            &index_borrow,
+                            blocks.start + i,
                         )
                     })
-                    .unzip()
+                    .collect()
             };
             let object_store = &self.object_store;
             let path = &self.path(&handle.id);
@@ -930,12 +926,13 @@ impl TableStore {
                 None
             };
             let mut inserts = Vec::new();
-            for ((i, offset), block) in missing.into_iter().zip(offsets).zip(fetched) {
+            for ((i, range), block) in missing.into_iter().zip(ranges).zip(fetched) {
                 let block = Arc::new(block);
                 if let Some(cache) = cache {
-                    inserts.push(
-                        cache.insert((handle.id, offset).into(), CachedEntry::with_block(&block)),
-                    );
+                    inserts.push(cache.insert(
+                        (handle.id, range.start).into(),
+                        CachedEntry::with_block(&block),
+                    ));
                 }
                 slots[i] = Some(block);
             }
