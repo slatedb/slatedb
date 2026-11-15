@@ -3299,6 +3299,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "foyer",
  "futures",
  "object_store",
  "rand 0.10.3",
