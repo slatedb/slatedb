@@ -3470,26 +3470,49 @@ mod tests {
     /// Uncached blocks less than `OBJECT_STORE_COALESCE_DEFAULT` bytes apart
     /// are fetched in one GET, not one per gap, and every block reads back in
     /// order. `cached` is `None` for a reader without a cache. Each block holds
-    /// one row with a `value_len`-byte value.
+    /// one row with a `value_len`-byte value. `read` is the block range to read,
+    /// and `expected_gets` lists the blocks each GET spans, so cached blocks at
+    /// the edges of a GET are trimmed from it. Ranges that start after block 0
+    /// check the offset between the read range and the SST's block numbers.
     #[cfg(feature = "foyer")]
     #[rstest]
-    #[case::no_cache(None, 16, 1)]
-    #[case::nothing_cached(Some(vec![]), 16, 1)]
-    #[case::odd_blocks_cached(Some((1..20).step_by(2).collect()), 16, 1)]
-    #[case::edges_cached(Some(vec![0, 19]), 16, 1)]
-    #[case::only_edges_uncached(Some((1..19).collect()), 16, 1)]
-    #[case::all_cached(Some((0..20).collect()), 16, 0)]
-    #[case::small_gaps_in_large_blocks(Some((1..20).step_by(2).collect()), 128 * 1024, 1)]
-    #[case::large_gap_in_large_blocks(Some((1..19).collect()), 128 * 1024, 2)]
+    #[case::no_cache(None, 16, 0..20, vec![0..20])]
+    #[case::nothing_cached(Some(vec![]), 16, 0..20, vec![0..20])]
+    #[case::odd_blocks_cached(Some((1..20).step_by(2).collect()), 16, 0..20, vec![0..19])]
+    #[case::edges_cached(Some(vec![0, 19]), 16, 0..20, vec![1..19])]
+    #[case::only_edges_uncached(Some((1..19).collect()), 16, 0..20, vec![0..20])]
+    #[case::all_cached(Some((0..20).collect()), 16, 0..20, vec![])]
+    #[case::small_gaps_in_large_blocks(
+        Some((1..20).step_by(2).collect()),
+        128 * 1024,
+        0..20,
+        vec![0..19]
+    )]
+    #[case::large_gap_in_large_blocks(
+        Some((1..19).collect()),
+        128 * 1024,
+        0..20,
+        vec![0..1, 19..20]
+    )]
+    #[case::subrange_nothing_cached(Some(vec![]), 16, 4..16, vec![4..16])]
+    #[case::subrange_edges_cached(Some(vec![4, 15]), 16, 4..16, vec![5..15])]
+    #[case::subrange_odd_blocks_cached(Some((5..16).step_by(2).collect()), 16, 4..16, vec![4..15])]
+    #[case::subrange_large_gap_in_large_blocks(
+        Some((5..15).collect()),
+        128 * 1024,
+        4..16,
+        vec![4..5, 15..16]
+    )]
     #[tokio::test]
     async fn should_coalesce_uncached_blocks_into_few_gets(
         #[case] cached: Option<Vec<usize>>,
         #[case] value_len: usize,
-        #[case] expected_gets: usize,
+        #[case] read: Range<usize>,
+        #[case] expected_gets: Vec<Range<usize>>,
     ) {
         use crate::db_cache::foyer::FoyerCache;
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use tokio::sync::Notify;
+        use crate::test_utils::RecordingObjectStore;
+        use object_store::GetRange;
 
         // given: an SST of 20 blocks
         let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -3526,19 +3549,12 @@ mod tests {
             .unwrap();
 
         // given: a reader whose cache holds the `cached` blocks
-        let counting = Arc::new(PauseFirstReadStore {
-            inner: inner.clone(),
-            get_range_count: AtomicUsize::new(0),
-            paused: AtomicBool::new(false),
-            first_read_started: Arc::new(Notify::new()),
-            release: Arc::new(Notify::new()),
-        });
-        let counting_store: Arc<dyn ObjectStore> = counting.clone();
+        let recording = Arc::new(RecordingObjectStore::new(inner.clone()));
         let cache = cached
             .is_some()
             .then(|| Arc::new(FoyerCache::new()) as Arc<dyn DbCache>);
         let reader = TableStore::new(
-            counting_store,
+            recording.clone(),
             format,
             Path::from(ROOT),
             cache,
@@ -3565,13 +3581,13 @@ mod tests {
                 .unwrap();
         }
 
-        // when: the whole range is read
-        let before = counting.get_range_count.load(Ordering::SeqCst);
+        // when: the range is read
+        recording.clear();
         let blocks = reader
             .read_blocks_using_index(
                 &handle,
                 index.clone(),
-                0..20,
+                read.clone(),
                 true,
                 Some(Bytes::new()),
                 &ReadTrace::none(),
@@ -3580,12 +3596,26 @@ mod tests {
             .await
             .unwrap();
 
-        // then: the expected GETs, and every block in order
-        assert_eq!(
-            counting.get_range_count.load(Ordering::SeqCst) - before,
+        // then: each GET spans exactly the expected blocks, and every block
+        // reads back in order
+        let expected_ranges: Vec<Option<GetRange>> = {
+            let index_borrow = index.borrow();
+            let byte_range = |block| {
+                reader
+                    .sst_format
+                    .block_byte_range(&handle.info, &index_borrow, block)
+            };
             expected_gets
-        );
-        assert_blocks(&blocks, &expected_data).await;
+                .iter()
+                .map(|blocks| {
+                    let start = byte_range(blocks.start).start;
+                    let end = byte_range(blocks.end - 1).end;
+                    Some(GetRange::Bounded(start..end))
+                })
+                .collect()
+        };
+        assert_eq!(recording.recorded_get_ranges(false), expected_ranges);
+        assert_blocks(&blocks, &expected_data[read]).await;
     }
 
     /// End-to-end test: concurrent index reads through `TableStore` issue a single
