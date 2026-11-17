@@ -2085,6 +2085,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_objectstore_resolve_with_options()
+		})
+		if checksum != 20386 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_objectstore_resolve_with_options: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_constructor_objectstorebuilder_from_env()
 		})
 		if checksum != 25402 {
@@ -9009,6 +9018,29 @@ func ObjectStoreResolve(url string) (*ObjectStore, error) {
 	}
 }
 
+// Resolves an object store from a URL, like `resolve`, and applies
+// `options` to it.
+//
+// Option keys are the `object_store` crate's config keys, for example
+// `aws_access_key_id`, `aws_secret_access_key`, `aws_session_token`, and
+// `aws_region` for S3. Keys are case-insensitive. An option overrides an
+// environment variable with the same key. The options apply only to this
+// store. They do not change the process environment.
+//
+// Returns an error if a key is not a valid config key for an S3, Azure,
+// or GCS URL. Options for other URLs are ignored.
+func ObjectStoreResolveWithOptions(url string, options map[string]string) (*ObjectStore, error) {
+	_uniffiRV, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_objectstore_resolve_with_options(FfiConverterStringINSTANCE.Lower(url), FfiConverterMapStringStringINSTANCE.Lower(options), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue *ObjectStore
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterObjectStoreINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+
 func (object *ObjectStore) Destroy() {
 	runtime.SetFinalizer(object, nil)
 	object.ffiObject.destroy()
@@ -13296,7 +13328,7 @@ type BlockTransformerCallbackError struct {
 	err error
 }
 
-// Convience method to turn *BlockTransformerCallbackError into error
+// Convenience method to turn *BlockTransformerCallbackError into error
 // Avoiding treating nil pointer as non nil error interface
 func (err *BlockTransformerCallbackError) AsError() error {
 	if err == nil {
@@ -13748,7 +13780,7 @@ type Error struct {
 	err error
 }
 
-// Convience method to turn *Error into error
+// Convenience method to turn *Error into error
 // Avoiding treating nil pointer as non nil error interface
 func (err *Error) AsError() error {
 	if err == nil {
@@ -14328,7 +14360,7 @@ type MergeOperatorCallbackError struct {
 	err error
 }
 
-// Convience method to turn *MergeOperatorCallbackError into error
+// Convenience method to turn *MergeOperatorCallbackError into error
 // Avoiding treating nil pointer as non nil error interface
 func (err *MergeOperatorCallbackError) AsError() error {
 	if err == nil {

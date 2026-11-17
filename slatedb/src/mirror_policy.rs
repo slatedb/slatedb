@@ -56,18 +56,14 @@ type SegmentPredicate = dyn Fn(&VersionedManifest, &[u8]) -> bool + Send + Sync;
 /// A [`MirrorPolicy`] that mirrors the compacted SSTs of one SlateDB database.
 ///
 /// The policy serves one database. It records the root of that database from
-/// the first manifest or `.compactions` object that it reads or writes. After
-/// that, a read or write of a manifest or `.compactions` object under another
-/// root fails, because the policy tracks the manifests of one database only.
-/// This check does not apply to SSTs. The policy also mirrors the SSTs that
-/// the manifest references under other roots, for example the SSTs of the
-/// parent database after a clone.
+/// the first manifest or `.compactions` object that it reads or writes, and it
+/// tracks the manifests under that root only.
 ///
-/// The policy does not support cloning. Creating a clone and detaching a clone
-/// from its parent both read and write the manifest of the parent database,
-/// and the policy rejects that manifest because it is under another root. Use
-/// the wrapped store to create clones and to run the garbage collector of a
-/// clone, which does the detach.
+/// For a clone, the policy also mirrors the parent SSTs that the clone
+/// references. Calls for the manifests and `.compactions` objects of a parent
+/// go to the wrapped store. The parents are the databases in the
+/// `external_dbs` of the newest manifest. Create a clone with the wrapped
+/// store, not with a mirror. Then open the clone with its own mirror.
 ///
 /// ```no_run
 /// # use std::sync::Arc;
@@ -122,11 +118,13 @@ impl MirrorPolicy for SlateDbMirrorPolicy {
         }
         // A manifest or `.compactions` object is read from object storage.
         // Then `observe` downloads the SSTs that SlateDB reads next, before
-        // the caller gets the object. An object of a database other than the
-        // first one fails.
+        // the caller gets the object. An object of a parent database is not
+        // observed. An object of any other database fails.
         if let Some(root) = manifest_or_compactions_root(path) {
-            self.record_or_check_root(&root)?;
-            return Ok(ReadRoute::Observe);
+            return Ok(match self.classify_root(&root)? {
+                RootKind::Mirrored => ReadRoute::Observe,
+                RootKind::Parent => ReadRoute::Remote,
+            });
         }
         // WAL SSTs, compacted SSTs in segments that are not selected, and all
         // other objects are read from object storage.
@@ -154,9 +152,13 @@ impl MirrorPolicy for SlateDbMirrorPolicy {
         // coordinator's `CompactionsStore`, which keeps the bytes of its own
         // last write. So the worker gets that object without a GET, and only
         // this write can download the output that the worker resumes from.
+        //
+        // An object of a parent database is not observed, as in `read_route`.
         if let Some(root) = manifest_or_compactions_root(path) {
-            self.record_or_check_root(&root)?;
-            return Ok(WriteRoute::Observe);
+            return Ok(match self.classify_root(&root)? {
+                RootKind::Mirrored => WriteRoute::Observe,
+                RootKind::Parent => WriteRoute::Remote,
+            });
         }
         // All other objects are written to object storage only.
         Ok(WriteRoute::Remote)
@@ -314,6 +316,11 @@ impl SlateDbMirrorPolicy {
                     // removes them.
                     mirror.evict(state.retained.difference(&retained).cloned());
                     state.retained = retained;
+                    state.parent_roots = versioned_manifest
+                        .external_dbs()
+                        .iter()
+                        .map(|external_db| Path::from(external_db.path.as_str()))
+                        .collect();
                     state.newest = Some(Arc::clone(&versioned_manifest));
                     state.checkpoints = checkpoints;
                     to_download
@@ -407,19 +414,21 @@ impl SlateDbMirrorPolicy {
         newest.is_some_and(|newest| predicate(&newest, segment))
     }
 
-    /// Records `root` as the database root, or fails if the policy already
-    /// serves another root.
-    fn record_or_check_root(&self, root: &Path) -> object_store::Result<()> {
+    /// Tells whether `root` is the mirrored database or one of its parents.
+    /// The first root becomes the mirrored database. Any other root fails.
+    fn classify_root(&self, root: &Path) -> object_store::Result<RootKind> {
         let mut state = self.state.lock();
         match &state.root {
-            Some(known) if known != root => Err(policy_error(format!(
-                "object is outside the mirrored database. root=`{root}`, mirrored_root=`{known}`"
-            ))),
-            Some(_) => Ok(()),
             None => {
                 state.root = Some(root.clone());
-                Ok(())
+                Ok(RootKind::Mirrored)
             }
+            Some(known) if known == root => Ok(RootKind::Mirrored),
+            Some(_) if state.parent_roots.contains(root) => Ok(RootKind::Parent),
+            Some(known) => Err(policy_error(format!(
+                "object is outside the mirrored database and its parents, create clones with \
+                 the wrapped store. root=`{root}`, mirrored_root=`{known}`"
+            ))),
         }
     }
 
@@ -609,9 +618,20 @@ struct PolicyState {
     /// on time. Then a rebuilt set can leave out an SST that the old set kept,
     /// and the policy does not evict it.
     retained: HashSet<Path>,
+    /// The roots of the parent databases in `newest`. Manifest and
+    /// `.compactions` calls under these roots use the wrapped store only.
+    parent_roots: HashSet<Path>,
     /// The SST paths of the checkpoint manifests that `newest` references, by
     /// manifest ID. Manifests are immutable, so entries never go stale.
     checkpoints: HashMap<u64, Arc<ManifestSstPaths>>,
+}
+
+/// The database that a manifest or `.compactions` object belongs to.
+enum RootKind {
+    /// The database that the policy mirrors.
+    Mirrored,
+    /// A parent database of the mirrored clone.
+    Parent,
 }
 
 impl PolicyState {
@@ -733,20 +753,24 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::admin::Admin;
     use crate::bytes_range::BytesRange;
     use crate::checkpoint::Checkpoint;
     use crate::compactor_state::{
         Compaction, CompactionContext, CompactionSpec, CompactionStatus, Compactions,
     };
-    use crate::config::{DbReaderOptions, FlushOptions, FlushType};
+    use crate::config::{
+        CompactionWorkerOptions, CompactorOptions, DbReaderOptions, FlushOptions, FlushType,
+        GarbageCollectorOptions, GarbageCollectorScheduleOptions, Settings,
+    };
     use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::error::RetryReason;
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
     use crate::manifest::store::ManifestStore;
-    use crate::manifest::{LsmTreeState, ManifestCore, Segment};
+    use crate::manifest::{ExternalDb, LsmTreeState, ManifestCore, Segment};
     use crate::object_store_tag::TableStoreKind;
     use crate::subcompaction::Subcompaction;
-    use crate::{Db, DbReader, DbReaderMode};
+    use crate::{CloneSourceSpec, Db, DbReader, DbReaderMode, ErrorKind};
 
     const ROOT: &str = "db";
 
@@ -1011,6 +1035,46 @@ mod tests {
         assert!(policy
             .put_route(&other, &put_options(None, PutMode::Create))
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_parent_objects_use_remote_route() {
+        let fixture = Fixture::new(0, SlateDbMirrorPolicy::builder()).await;
+        let policy = &fixture.policy;
+        let parent_objects = [
+            Path::from("parent/manifest/00000000000000000001.manifest"),
+            Path::from("parent/compactions/00000000000000000001.compactions"),
+        ];
+        let mut clone = manifest(&[], &[]);
+        clone.external_dbs = vec![ExternalDb {
+            path: "parent".to_string(),
+            source_checkpoint_id: Uuid::nil(),
+            final_checkpoint_id: None,
+            sst_ids: Vec::new(),
+        }];
+
+        policy
+            .read_route(&manifest_file(1), &get_options(None))
+            .unwrap();
+        fixture.observe(1, &clone).await.unwrap();
+        for path in &parent_objects {
+            assert_eq!(
+                policy.read_route(path, &get_options(None)).unwrap(),
+                ReadRoute::Remote
+            );
+            assert_eq!(
+                policy
+                    .put_route(path, &put_options(None, PutMode::Create))
+                    .unwrap(),
+                WriteRoute::Remote
+            );
+        }
+
+        // A detached parent is like any other database.
+        fixture.observe(2, &manifest(&[], &[])).await.unwrap();
+        for path in &parent_objects {
+            assert!(policy.read_route(path, &get_options(None)).is_err());
+        }
     }
 
     #[tokio::test]
@@ -1295,13 +1359,16 @@ mod tests {
         assert_eq!(parse_manifest_path(&compactions_file(7)), None);
     }
 
-    async fn latest_ssts(remote: Arc<dyn ObjectStore>) -> HashSet<Path> {
-        let root = Path::from(ROOT);
-        let manifest = ManifestStore::new(&root, remote)
+    async fn latest_manifest(remote: &Arc<dyn ObjectStore>, root: &str) -> VersionedManifest {
+        ManifestStore::new(&Path::from(root), Arc::clone(remote))
             .read_latest_manifest()
             .await
-            .unwrap();
-        ManifestSstPaths::from_manifest(&root, &manifest.manifest)
+            .unwrap()
+    }
+
+    async fn latest_ssts(remote: &Arc<dyn ObjectStore>, root: &str) -> HashSet<Path> {
+        let manifest = latest_manifest(remote, root).await;
+        ManifestSstPaths::from_manifest(&Path::from(root), &manifest.manifest)
             .segments()
             .iter()
             .flat_map(|segment| segment.paths.iter().cloned())
@@ -1332,7 +1399,7 @@ mod tests {
         };
         db.put(b"a", b"1").await.unwrap();
         db.flush_with_options(flush.clone()).await.unwrap();
-        let first = latest_ssts(Arc::clone(&remote)).await;
+        let first = latest_ssts(&remote, ROOT).await;
         assert!(!first.is_empty());
         // The writer mirrors its own SSTs as it uploads them.
         assert!(first.iter().all(|sst| writer_mirror.handle().contains(sst)));
@@ -1357,7 +1424,7 @@ mod tests {
 
         db.put(b"b", b"2").await.unwrap();
         db.flush_with_options(flush).await.unwrap();
-        let second = latest_ssts(Arc::clone(&remote)).await;
+        let second = latest_ssts(&remote, ROOT).await;
         assert!(second.len() > first.len());
         // The reader's next poll downloads the new SST.
         assert!(
@@ -1369,5 +1436,154 @@ mod tests {
 
         reader.close().await.unwrap();
         db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_read_manifest_fails_when_sst_is_missing_remotely() {
+        let remote: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::builder(ROOT, Arc::clone(&remote))
+            .build()
+            .await
+            .unwrap();
+        db.put(b"a", b"1").await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+        let ssts = latest_ssts(&remote, ROOT).await;
+        for sst in &ssts {
+            remote.delete(sst).await.unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = ObjectStoreMirror::builder(
+            dir.path(),
+            Arc::clone(&remote),
+            SlateDbMirrorPolicy::builder().build(),
+        )
+        .with_remote_scan_interval(None)
+        .build()
+        .await
+        .unwrap();
+        let admin = Admin::builder(ROOT, mirror as Arc<dyn ObjectStore>).build();
+        // Before #2255 was fixed, the reader took the missing SST for a
+        // missing manifest and listed the manifests again without a limit.
+        let err = tokio::time::timeout(Duration::from_secs(10), admin.read_manifest(None))
+            .await
+            .expect("read_manifest did not return")
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::Data);
+        let err = format!("{err:?}");
+        assert!(ssts.iter().any(|sst| err.contains(sst.as_ref())), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_clone_detaches_from_parent_through_mirror() {
+        const PARENT: &str = "parent";
+        const CLONE: &str = "clone";
+        let remote: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let flush = FlushOptions {
+            flush_type: FlushType::MemTable,
+        };
+
+        let parent = Db::builder(PARENT, Arc::clone(&remote))
+            .build()
+            .await
+            .unwrap();
+        parent.put(b"a", b"1").await.unwrap();
+        parent.flush_with_options(flush.clone()).await.unwrap();
+        parent.close().await.unwrap();
+
+        Admin::builder(CLONE, Arc::clone(&remote))
+            .build()
+            .create_clone_builder_from_source(CloneSourceSpec::new(PARENT))
+            .build()
+            .await
+            .unwrap();
+        let parent_ssts = latest_ssts(&remote, CLONE).await;
+        assert!(!parent_ssts.is_empty());
+        assert!(parent_ssts
+            .iter()
+            .all(|sst| sst.prefix_matches(&Path::from(PARENT))));
+        let final_checkpoint_id = latest_manifest(&remote, CLONE).await.external_dbs()[0]
+            .final_checkpoint_id
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = ObjectStoreMirror::builder(
+            dir.path(),
+            Arc::clone(&remote),
+            SlateDbMirrorPolicy::builder().build(),
+        )
+        .with_remote_scan_interval(None)
+        .build()
+        .await
+        .unwrap();
+        let clone = Db::builder(CLONE, mirror.clone() as Arc<dyn ObjectStore>)
+            .with_settings(Settings {
+                compactor_options: Some(CompactorOptions {
+                    poll_interval: Duration::from_millis(50),
+                    // Compact the parent L0 SST with the first clone L0 SST.
+                    scheduler_options: HashMap::from([(
+                        "min_compaction_sources".to_string(),
+                        "2".to_string(),
+                    )]),
+                    // The compactor checkpoint references the parent SST, so
+                    // detach waits until it expires.
+                    checkpoint_lifetime: Duration::from_millis(100),
+                    worker: Some(CompactionWorkerOptions {
+                        compactions_poll_interval: Duration::from_millis(50),
+                        ..CompactionWorkerOptions::default()
+                    }),
+                    ..CompactorOptions::default()
+                }),
+                garbage_collector_options: Some(GarbageCollectorOptions {
+                    detach_options: Some(GarbageCollectorScheduleOptions {
+                        interval: Some(Duration::from_millis(50)),
+                    }),
+                    ..GarbageCollectorOptions::default()
+                }),
+                ..Settings::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        assert!(parent_ssts.iter().all(|sst| mirror.handle().contains(sst)));
+        assert_eq!(
+            clone.get(b"a").await.unwrap(),
+            Some(Bytes::from_static(b"1"))
+        );
+
+        // The compaction replaces the parent SST. Then the garbage collector
+        // detaches the clone, which writes the parent manifest.
+        clone.put(b"b", b"2").await.unwrap();
+        clone.flush_with_options(flush).await.unwrap();
+        let mut detached = false;
+        for _ in 0..500 {
+            if latest_manifest(&remote, CLONE)
+                .await
+                .external_dbs()
+                .is_empty()
+            {
+                detached = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(detached);
+        assert!(latest_manifest(&remote, PARENT)
+            .await
+            .checkpoints()
+            .iter()
+            .all(|checkpoint| checkpoint.id != final_checkpoint_id));
+        assert!(wait_until(|| parent_ssts.iter().all(|sst| !mirror.handle().contains(sst))).await);
+        assert_eq!(
+            clone.get(b"a").await.unwrap(),
+            Some(Bytes::from_static(b"1"))
+        );
+
+        clone.close().await.unwrap();
     }
 }

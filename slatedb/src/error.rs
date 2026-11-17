@@ -711,6 +711,17 @@ impl From<SlateDBError> for Error {
                     // close with this error, and reopening runs `observe`
                     // again (RFC 0034).
                     Some(MirrorError::WriteCommitted { .. }) => Error::data(msg),
+                    // `observe` did not find an object that the read object
+                    // references, such as an SST of a manifest. The data is
+                    // lost.
+                    Some(MirrorError::Policy { source })
+                        if matches!(
+                            source.downcast_ref::<object_store::Error>(),
+                            Some(object_store::Error::NotFound { .. })
+                        ) =>
+                    {
+                        Error::data(msg)
+                    }
                     Some(
                         MirrorError::Policy { .. }
                         | MirrorError::Unsupported { .. }
@@ -871,8 +882,17 @@ mod tests {
         );
         assert_eq!(
             mirror_error_kind(MirrorError::WriteCommitted {
-                path,
+                path: path.clone(),
                 source: Box::new(std::io::Error::other("disk full")),
+            }),
+            ErrorKind::Data
+        );
+        assert_eq!(
+            mirror_error_kind(MirrorError::Policy {
+                source: Box::new(object_store::Error::NotFound {
+                    path: path.to_string(),
+                    source: Box::new(std::io::Error::other("missing")),
+                }),
             }),
             ErrorKind::Data
         );

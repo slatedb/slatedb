@@ -58,14 +58,19 @@ pub enum MultipartRoute {
 /// [`ReadRoute::Local`], [`ReadRoute::Refetch`], [`WriteRoute::Mirror`], or
 /// [`MultipartRoute::Mirror`].
 ///
-/// Errors from the policy reach the caller in three ways:
+/// The mirror wraps errors from the policy, so that callers can tell them
+/// apart from errors of the wrapped store:
 ///
-/// - A route error becomes `MirrorError::Policy`. If the error already
-///   contains a `MirrorError`, the mirror returns it unchanged.
-/// - An `observe` error on a read is returned unchanged. Nothing was written,
-///   so the caller can retry the read.
+/// - A route error becomes `MirrorError::Policy`.
+/// - An `observe` error on a read becomes `MirrorError::Policy`. This error
+///   can be about another object. For example, `observe` fails with
+///   `NotFound` when it fetches an object that is missing. Unwrapped, that
+///   `NotFound` would tell the caller that the object it read is missing.
 /// - An `observe` error on a write becomes `MirrorError::WriteCommitted`,
 ///   because the remote write already succeeded.
+///
+/// A route error or a read's `observe` error that already contains a
+/// `MirrorError` is returned unchanged.
 #[async_trait]
 pub trait MirrorPolicy: Send + Sync + 'static {
     /// Runs on every GET and HEAD. `options.head` is true for HEAD. Must be

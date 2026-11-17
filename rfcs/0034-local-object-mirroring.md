@@ -530,13 +530,19 @@ already been retried.
 
 `observe` failures are handled by call type:
 
-- **Reads.** The error goes to the caller. Nothing was committed, so a caller
-  that retries the read runs `observe` again.
-- **Writes.** The mirror returns `WriteCommitted`. The object is durable, but
-  the policy's follow-up work didn't finish, so the caller has to treat the
-  write as having happened. SlateDB treats it as fatal: `Db` and the compactor
-  close with a `Data` error, the same as local disk errors. On reopen, the
-  manifest is read again and `observe` runs again.
+- **Reads.** The mirror returns `MirrorError::Policy`, with the policy's error
+  as its source. This error can come from a different object than the one
+  that the caller read. For example, `observe` of a manifest fails with
+  `NotFound` when an SST that the manifest references is missing. If the
+  mirror returned that `NotFound` unchanged, the caller would think that the
+  manifest is missing. `Policy` is not retryable, because the mirror already
+  retried the remote calls in `observe`. Nothing was written, so the caller
+  can safely read the object again, and that read runs `observe` again.
+- **Writes.** The mirror returns `MirrorError::WriteCommitted`. The object is
+  durable, but the policy's follow-up work didn't finish, so the caller has to
+  treat the write as having happened. SlateDB treats it as fatal: `Db` and the
+  compactor close with a `Data` error, the same as local disk errors. On reopen,
+  the manifest is read again and `observe` runs again.
 
 ### Ordering
 
@@ -650,7 +656,9 @@ error instead of `Mirror` for a `PutMode::Update` write:
 
 | Call | Route |
 |---|---|
-| GET or PUT of `*.manifest` or `*.compactions` | `Observe` (error if the database root doesn't match) |
+| GET or PUT of `*.manifest` or `*.compactions` under the database root | `Observe` |
+| GET or PUT of `*.manifest` or `*.compactions` under a parent root (see [Clones](#clones)) | `Remote` |
+| GET or PUT of `*.manifest` or `*.compactions` under any other root | Error |
 | Multipart upload of `*.manifest` or `*.compactions` | Error, because a multipart upload has no `Observe` route |
 | Tagged compacted SST in a selected segment, with `tag.retry.is_some()` | `Refetch` |
 | Tagged compacted SST in a selected segment | `Local` for reads, `Mirror` for writes |
@@ -664,6 +672,7 @@ The policy keeps this state behind a mutex:
   it sees.
 - The ID of the newest manifest it has processed.
 - `retained`: the SST paths that must not be evicted.
+- The parent roots: the paths in the `external_dbs` of the newest manifest.
 - Decoded checkpoint manifests, cached by ID. Manifests are immutable, so these
   never go stale.
 
@@ -796,6 +805,31 @@ disks.
 The mirror's [remote scan](#remote-scan) is the backstop. It handles SSTs that
 were written locally and then lost before they were recorded in `.compactions`
 or `.manifest` files. Manifest transitions can't discover such files.
+
+#### Clones
+
+A clone reads SSTs of its parent databases. Its manifest references them
+through `ExternalDb.sst_ids`, so the policy downloads, retains, and evicts
+them like the clone's own SSTs.
+
+The clone also reads and writes the manifests of its parents. The clone's
+garbage collector deletes the clone's final checkpoint in a parent when it
+detaches the clone. `Admin::delete_db` does the same for each parent. These
+calls take the `Remote` route. The policy does not observe a parent manifest,
+because the parent's SSTs are not the clone's SSTs. The clone's manifest
+already lists the parent SSTs to keep.
+
+When a newer manifest becomes current, the policy replaces the parent roots
+with the paths in its `external_dbs`. Detach deletes the parent checkpoint
+before it removes the `ExternalDb` entry. So the parent root is known for
+every parent call. Inherited entries stay in `external_dbs` while the clone
+references their SSTs, so a clone of a clone can also detach.
+
+Clones must be created with the wrapped store. Clone creation reads the
+parent manifest before the clone has a manifest. A new mirror would record
+the parent as its database root, and the write of the clone manifest would
+fail. The caller passes the wrapped store to `ObjectStoreMirror::builder`, so
+the caller has it.
 
 #### Segment Support
 
@@ -1158,6 +1192,13 @@ There is, however, an open question around the CPU cost of computing the MD5 pre
 
 ## Updates
 
+- An `observe` error on a read becomes `MirrorError::Policy`. Before, the
+  mirror returned it unchanged, so a missing SST looked like a missing
+  manifest ([#2255](https://github.com/slatedb/slatedb/issues/2255)).
+- Added clone support to `SlateDbMirrorPolicy`. Manifest and `.compactions`
+  calls under a parent root in the newest manifest's `external_dbs` take the
+  `Remote` route instead of failing. This lets a mirrored clone detach from
+  its parents. Clones must still be created with the wrapped store.
 - Aligned with the `SlateDbMirrorPolicy` implementation. The segment
   predicate receives a `VersionedManifest` instead of `ManifestCore`, which is
   crate-private. Added `with_compactions_poll_interval` and

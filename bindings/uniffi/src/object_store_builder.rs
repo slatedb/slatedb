@@ -234,6 +234,38 @@ impl ObjectStoreBuilderInner {
     }
 }
 
+/// Checks that `key` is a valid config key for the provider that `url` names.
+///
+/// Only S3, Azure, and GCS URLs are checked. Keys for other URLs pass, because
+/// `object_store::parse_url_opts` ignores options for those stores. An
+/// unparseable URL also passes, so that the caller reports the URL error.
+pub(crate) fn validate_url_config_key(url: &str, key: &str) -> Result<(), SlateDbError> {
+    let Ok(parsed) = Url::parse(url) else {
+        return Ok(());
+    };
+    let Ok((scheme, _)) = ObjectStoreScheme::parse(&parsed) else {
+        return Ok(());
+    };
+    let lower_key = key.to_ascii_lowercase();
+    let provider = match scheme {
+        ObjectStoreScheme::AmazonS3 => AmazonS3ConfigKey::from_str(&lower_key).err().map(|_| "S3"),
+        ObjectStoreScheme::MicrosoftAzure => {
+            AzureConfigKey::from_str(&lower_key).err().map(|_| "Azure")
+        }
+        ObjectStoreScheme::GoogleCloudStorage => {
+            GoogleConfigKey::from_str(&lower_key).err().map(|_| "GCS")
+        }
+        _ => None,
+    };
+    match provider {
+        Some(provider) => Err(SlateDbError::InvalidObjectStoreConfigKey {
+            provider,
+            key: key.to_string(),
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Builds an [`ObjectStore`] through the same builder shape the `object_store`
 /// crate itself uses, for callers that need finer control than
 /// `ObjectStore::resolve` or `ObjectStore::from_env`.
