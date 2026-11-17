@@ -72,7 +72,7 @@ use crate::compactor_state::{Compaction, CompactionContext, CompactionStatus, Wo
 use crate::config::CompactionWorkerOptions;
 use crate::db_state::SortedRun;
 use crate::dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef};
-use crate::error::{ErrorKind, SlateDBError};
+use crate::error::SlateDBError;
 use crate::manifest::store::ManifestStore;
 use crate::manifest::ManifestCore;
 use crate::merge_operator::MergeOperatorType;
@@ -194,23 +194,9 @@ pub(crate) struct CompactionWorkerHandler {
     /// [`Self::heartbeat_owned_jobs`]); progress reports themselves never
     /// write.
     job_progress: BTreeMap<Ulid, Option<CompactionContext>>,
-    /// The number of failed runs of each job on this worker. See
-    /// [`CompactionWorkerOptions::compaction_job_max_retries`].
-    job_failures: BTreeMap<Ulid, u32>,
-    /// The job that this worker gave up on, with the kind of its error.
-    /// `cleanup` marks it `Failed` after the dispatcher records the error of
-    /// the job as the close reason.
-    failed_job: Option<(Ulid, ErrorKind)>,
-}
-
-/// The result of [`CompactionWorkerHandler::update_owned_claim`].
-enum ClaimUpdate {
-    /// The worker wrote the update.
-    Written,
-    /// The compaction is not in `.compactions`.
-    Missing,
-    /// The worker does not own the compaction, which is the current entry.
-    NotOwned(Compaction),
+    /// Failed executions by job ID on this worker. Only finite limits need a
+    /// counter. Counts survive claim releases, but not worker restarts.
+    job_failures: BTreeMap<Ulid, u64>,
 }
 
 impl CompactionWorkerHandler {
@@ -236,7 +222,6 @@ impl CompactionWorkerHandler {
             fp_registry,
             job_progress: BTreeMap::new(),
             job_failures: BTreeMap::new(),
-            failed_job: None,
         }
     }
 
@@ -341,7 +326,7 @@ impl CompactionWorkerHandler {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
             let mut dirty_compactions = stored.prepare_dirty()?;
-            // Forget the failures of jobs that finished on any worker.
+
             self.job_failures
                 .retain(|id, _| dirty_compactions.value.get(id).is_some_and(|c| c.active()));
 
@@ -615,35 +600,45 @@ impl CompactionWorkerHandler {
         compaction_id: Ulid,
         sorted_run: SortedRun,
     ) -> Result<(), SlateDBError> {
-        let output_ssts: Vec<_> = sorted_run
-            .sst_views()
-            .iter()
-            .map(|v| v.sst.clone())
-            .collect();
-        let heartbeat_ms = self.clock.now().timestamp_millis() as u64;
-        let worker = WorkerSpec::new(self.worker_id.clone(), heartbeat_ms);
-        let update = self
-            .update_owned_claim(compaction_id, |c| {
-                c.with_status(CompactionStatus::Compacted)
-                    .with_output_ssts(output_ssts.clone())
-                    .with_worker(Some(worker.clone()))
-                    .with_ctx(None)
-            })
-            .await?;
-        match update {
-            ClaimUpdate::Written => {}
-            ClaimUpdate::Missing => info!(
-                "compaction entry missing on completion; dropping [id={}]",
-                compaction_id
-            ),
-            ClaimUpdate::NotOwned(existing) => info!(
-                "lost ownership before completion; dropping [id={}, status={:?}, owner={:?}]",
-                compaction_id,
-                existing.status(),
-                existing.worker().map(|w| &w.worker_id),
-            ),
+        loop {
+            let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
+            stored.refresh().await?;
+            let mut dirty = stored.prepare_dirty()?;
+            let Some(existing) = dirty.value.get(&compaction_id).cloned() else {
+                info!(
+                    "compaction entry missing on completion; dropping [id={}]",
+                    compaction_id
+                );
+                return Ok(());
+            };
+            if existing.worker().map(|w| w.worker_id.as_str()) != Some(self.worker_id.as_str()) {
+                info!(
+                    "lost ownership before completion; dropping [id={}, status={:?}, owner={:?}]",
+                    compaction_id,
+                    existing.status(),
+                    existing.worker().map(|w| &w.worker_id),
+                );
+                return Ok(());
+            }
+            let heartbeat_ms = self.clock.now().timestamp_millis() as u64;
+            let updated = existing
+                .with_status(CompactionStatus::Compacted)
+                .with_output_ssts(
+                    sorted_run
+                        .sst_views()
+                        .iter()
+                        .map(|v| v.sst.clone())
+                        .collect(),
+                )
+                .with_worker(Some(WorkerSpec::new(self.worker_id.clone(), heartbeat_ms)))
+                .with_ctx(None);
+            dirty.value.insert(updated);
+            match stored.update(dirty).await {
+                Ok(()) => return Ok(()),
+                Err(e) if e.is_sequenced_write_conflict() => continue,
+                Err(e) => return Err(e),
+            }
         }
-        Ok(())
     }
 
     // Stops a compaction job that is currently executing on this worker, removing
@@ -665,149 +660,80 @@ impl CompactionWorkerHandler {
     /// Returns a claim to `Scheduled` so it can be re-attempted by any worker
     /// (used when execution fails or when the worker shuts down gracefully).
     async fn release_claim(&mut self, compaction_id: Ulid) -> Result<(), SlateDBError> {
-        let update = self
-            .update_owned_claim(compaction_id, |c| {
-                c.with_status(CompactionStatus::Scheduled).with_worker(None)
-            })
-            .await?;
-        match update {
-            ClaimUpdate::Written => {}
-            ClaimUpdate::Missing => info!(
-                "compaction no longer exists, no claim to release [worker_id]={} [compaction_id]={}",
-                self.worker_id,
-                compaction_id
-            ),
-            ClaimUpdate::NotOwned(existing) => info!(
-                "compaction is not owned by this worker, no claim to release [worker_id]={} [compaction_id]={} [owner]={:?}",
-                self.worker_id,
-                compaction_id,
-                existing.worker().map(|w| w.worker_id.as_str())
-            ),
-        }
-        Ok(())
-    }
-
-    /// Writes `update` of a claimed compaction to `.compactions` if this
-    /// worker still owns it. Writes nothing if the compaction is not in
-    /// `.compactions` or this worker does not own it.
-    async fn update_owned_claim(
-        &mut self,
-        compaction_id: Ulid,
-        update: impl Fn(Compaction) -> Compaction,
-    ) -> Result<ClaimUpdate, SlateDBError> {
+        let worker_id = self.worker_id.as_str();
         loop {
             let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
             stored.refresh().await?;
             let mut dirty = stored.prepare_dirty()?;
             let Some(existing) = dirty.value.get(&compaction_id).cloned() else {
-                return Ok(ClaimUpdate::Missing);
+                info!(
+                    "compaction no longer exists, no claim to release [worker_id]={} [compaction_id]={}",
+                    worker_id,
+                    compaction_id
+                );
+                return Ok(());
             };
-            if existing.worker().map(|w| w.worker_id.as_str()) != Some(self.worker_id.as_str()) {
-                return Ok(ClaimUpdate::NotOwned(existing));
+            let compaction_owner = existing.worker().map(|w| w.worker_id.as_str());
+            if compaction_owner != Some(worker_id) {
+                info!(
+                    "compaction is not owned by this worker, no claim to release [worker_id]={} [compaction_id]={} [owner]={:?}",
+                    worker_id,
+                    compaction_id,
+                    compaction_owner
+                );
+                return Ok(());
             }
-            dirty.value.insert(update(existing));
+            let updated = existing
+                .with_status(CompactionStatus::Scheduled)
+                .with_worker(None);
+            dirty.value.insert(updated);
             match stored.update(dirty).await {
-                Ok(()) => return Ok(ClaimUpdate::Written),
+                Ok(()) => return Ok(()),
                 Err(e) if e.is_sequenced_write_conflict() => continue,
                 Err(e) => return Err(e),
             }
         }
     }
 
-    /// Returns whether this worker owns the compaction in the latest
-    /// `.compactions`.
-    async fn owns_claim(&mut self, compaction_id: Ulid) -> Result<bool, SlateDBError> {
-        let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
-        Ok(stored
-            .refresh()
-            .await?
-            .get(&compaction_id)
-            .and_then(|c| c.worker())
-            .is_some_and(|w| w.worker_id == self.worker_id))
-    }
-
-    /// Returns whether `error` shows that an input SST of the job is lost. A
-    /// `NotFound` shows this only if the latest manifest still names the
-    /// inputs of the job, and every input is an SST of this database. A job
-    /// whose inputs left the manifest is stale. A job that uses SSTs of
-    /// another database, for example the parent of a clone, follows the retry
-    /// limit.
-    async fn lost_input_sst(
-        &mut self,
-        compaction_id: Ulid,
-        error: &SlateDBError,
-    ) -> Result<bool, SlateDBError> {
-        if !error.has_object_store_not_found() {
-            return Ok(false);
-        }
-        let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
-        let Some(compaction) = stored.refresh().await?.get(&compaction_id).cloned() else {
-            return Ok(false);
-        };
-        let manifest = self.manifest_store.read_latest_manifest().await?;
-        let Ok(args) = Self::build_job_args(&compaction, manifest.core(), &self.worker_id) else {
-            return Ok(false);
-        };
-        let external_ssts = manifest.external_ssts();
-        Ok(args
-            .l0_sst_views
-            .iter()
-            .chain(args.sorted_runs.iter().flat_map(|sr| sr.sst_views().iter()))
-            .all(|view| !external_ssts.contains_key(&view.sst.id)))
-    }
-
-    /// Records a finished job. A failed job goes back to `Scheduled` until it
-    /// uses up [`CompactionWorkerOptions::compaction_job_max_retries`]. After
-    /// that, or at once if an input SST is lost, the worker returns the error
-    /// of the job, which stops the worker. `cleanup` then marks the job
-    /// `Failed`.
     async fn handle_finished(
         &mut self,
         id: Ulid,
         result: Result<SortedRun, SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        self.job_progress.remove(&id);
-        let e = match result {
+        match result {
             Ok(sorted_run) => {
+                self.job_progress.remove(&id);
                 self.job_failures.remove(&id);
-                return self.write_compacted(id, sorted_run).await;
+                self.write_compacted(id, sorted_run).await?;
             }
-            Err(e) => e,
-        };
-        let failures = self
-            .job_failures
-            .get(&id)
-            .map_or(1, |failures| failures + 1);
-        let gives_up = self
-            .options
-            .compaction_job_max_retries
-            .is_some_and(|max_retries| failures > max_retries)
-            || self.lost_input_sst(id, &e).await?;
-        if !gives_up {
-            self.job_failures.insert(id, failures);
-            error!(
-                "compaction job failed [id={}, failures={}, error={:?}]",
-                id, failures, e
-            );
-            return self.release_claim(id).await;
+            Err(e) => {
+                if let Some(max_retries) = self.options.compaction_job_max_retries {
+                    let failures = self.job_failures.entry(id).or_default();
+                    *failures = failures.saturating_add(1);
+                    if *failures > u64::from(max_retries) {
+                        let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
+                        // A refresh failure replaces the execution error.
+                        let still_owned = stored.refresh().await?.get(&id).is_some_and(|c| {
+                            c.status() == CompactionStatus::Running
+                                && c.worker().is_some_and(|w| w.worker_id == self.worker_id)
+                        });
+                        if still_owned {
+                            error!(
+                                "compaction job exhausted its retries [id={}, failures={}, error={:?}]",
+                                id, failures, e
+                            );
+                            // Keep the claim for cleanup. The dispatcher records
+                            // this error before cleanup releases the claim.
+                            return Err(e);
+                        }
+                    }
+                }
+                self.job_progress.remove(&id);
+                error!("compaction job failed [id={}, error={:?}]", id, e);
+                self.release_claim(id).await?;
+            }
         }
-        if !self.owns_claim(id).await? {
-            // The worker can claim the job again, so it keeps the count.
-            self.job_failures.insert(id, failures);
-            info!(
-                "compaction job failed, but this worker no longer owns it [worker_id={}, id={}, failures={}, error={:?}]",
-                self.worker_id, id, failures, e
-            );
-            return Ok(());
-        }
-        self.job_failures.remove(&id);
-        error!(
-            "compaction job failed, and the worker gives up on it [id={}, failures={}, error={:?}]",
-            id, failures, e
-        );
-        // The coordinator reports the failure with the same kind of error.
-        self.failed_job = Some((id, crate::Error::from(e.clone()).kind()));
-        Err(e)
+        Ok(())
     }
 }
 
@@ -870,28 +796,6 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
         // heartbeat-timeout reclamation path. Stopping the executor also
         // decrements `running_compactions` for cancelled tasks.
         self.executor.stop();
-        // The dispatcher already recorded the error of the failed job as the
-        // close reason, so a coordinator that sees `Failed` cannot report the
-        // failure first.
-        if let Some((id, error_kind)) = self.failed_job.take() {
-            let update = self
-                .update_owned_claim(id, |c| {
-                    c.with_status(CompactionStatus::Failed)
-                        .with_error_kind(Some(error_kind))
-                })
-                .await;
-            match update {
-                Ok(ClaimUpdate::Written) => {}
-                Ok(ClaimUpdate::Missing | ClaimUpdate::NotOwned(_)) => info!(
-                    "this worker no longer owns the failed compaction job, so it does not mark it failed [worker_id={}, id={}]",
-                    self.worker_id, id
-                ),
-                Err(e) => error!(
-                    "failed to mark the compaction job failed on shutdown [worker_id={}, id={}, error={:?}]",
-                    self.worker_id, id, e
-                ),
-            }
-        }
         let claimed = std::mem::take(&mut self.job_progress);
         for id in claimed.into_keys() {
             if let Err(e) = self.release_claim(id).await {
@@ -916,9 +820,9 @@ mod tests {
     use crate::db_state::{SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::manifest::store::StoredManifest;
-    use crate::manifest::{ExternalDb, Manifest, ManifestCore};
+    use crate::manifest::ManifestCore;
     use crate::tablestore::{TableStore, TableStoreKind};
-    use crate::test_utils::{build_sorted_runs, write_ssts, FlakyObjectStore, GatedObjectStore};
+    use crate::test_utils::{build_sorted_runs, write_ssts, GatedObjectStore};
     use crate::types::RowEntry;
     use crate::utils::WatchableOnceCell;
     use bytes::Bytes;
@@ -968,7 +872,6 @@ mod tests {
     }
 
     struct WorkerFixture {
-        manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
         executor: Arc<NoopExecutor>,
         handler: CompactionWorkerHandler,
@@ -1040,7 +943,6 @@ mod tests {
                 .expect("compactions file seeded above");
 
             Self {
-                manifest_store,
                 compactions_store,
                 executor,
                 handler,
@@ -1070,33 +972,6 @@ mod tests {
                 .await
                 .unwrap();
             v.compactions.get(&id).cloned()
-        }
-
-        /// Applies `update` to a compaction in `.compactions`, as another
-        /// worker or the coordinator does.
-        async fn update_compaction(&self, id: Ulid, update: impl FnOnce(Compaction) -> Compaction) {
-            let mut stored = StoredCompactions::try_load(self.compactions_store.clone())
-                .await
-                .unwrap()
-                .expect("compactions file must exist");
-            let mut dirty = stored.prepare_dirty().unwrap();
-            let existing = dirty.value.get(&id).cloned().expect("compaction missing");
-            dirty.value.insert(update(existing));
-            stored.update(dirty).await.unwrap();
-        }
-
-        /// Applies `update` to the latest manifest, as the writer or the
-        /// coordinator does.
-        async fn update_manifest(&self, update: impl FnOnce(&mut Manifest)) {
-            let mut stored = StoredManifest::load(
-                self.manifest_store.clone(),
-                Arc::new(DefaultSystemClock::new()),
-            )
-            .await
-            .unwrap();
-            let mut dirty = stored.prepare_dirty().unwrap();
-            update(&mut dirty.value);
-            stored.update(dirty).await.unwrap();
         }
     }
 
@@ -1311,260 +1186,6 @@ mod tests {
         assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
         assert!(!fx.handler.job_progress.contains_key(&id));
-    }
-
-    /// The error that a compaction job returns when an input SST is gone.
-    fn missing_input_error() -> SlateDBError {
-        SlateDBError::from(object_store::Error::NotFound {
-            path: format!("{ROOT}/compacted/missing.sst"),
-            source: Box::new(std::io::Error::other("not found")),
-        })
-    }
-
-    /// A missing input SST does not come back on a retry. The worker returns
-    /// the error on the first failure, also when `compaction_job_max_retries`
-    /// is `None`. It writes `Failed` only in `cleanup`, which runs after the
-    /// dispatcher records the error as the close reason. So a coordinator in
-    /// the same process cannot report the failure first.
-    #[tokio::test]
-    async fn test_worker_marks_job_failed_on_missing_input() {
-        let mut fx = WorkerFixture::new("worker-A").await;
-        assert_eq!(fx.handler.options.compaction_job_max_retries, None);
-        let id = Ulid::from_parts(1, 0);
-        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
-            .await;
-        fx.handler.poll_and_claim().await.unwrap();
-
-        let err = fx
-            .handler
-            .handle_finished(id, Err(missing_input_error()))
-            .await
-            .expect_err("a missing input must stop the worker");
-
-        assert!(err.has_object_store_not_found(), "{err:?}");
-        let c = fx.read_compaction(id).await.expect("compaction missing");
-        assert_eq!(c.status(), CompactionStatus::Running);
-        assert_eq!(c.worker().unwrap().worker_id, fx.worker_id);
-        assert!(!fx.handler.job_progress.contains_key(&id));
-
-        let empty: BoxStream<'_, WorkerMessage> = futures::stream::empty().boxed();
-        fx.handler.cleanup(empty, Err(err)).await.unwrap();
-
-        let c = fx.read_compaction(id).await.expect("compaction missing");
-        assert_eq!(c.status(), CompactionStatus::Failed);
-        assert_eq!(c.error_kind(), Some(ErrorKind::Data));
-    }
-
-    /// A job whose inputs left the latest manifest is stale. Its `NotFound`
-    /// does not prove a lost SST, so the job goes back to `Scheduled`.
-    #[tokio::test]
-    async fn test_worker_releases_stale_job_on_missing_input() {
-        let mut fx = WorkerFixture::new("worker-A").await;
-        let id = Ulid::from_parts(1, 0);
-        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
-            .await;
-        fx.handler.poll_and_claim().await.unwrap();
-        fx.update_manifest(|m| Arc::make_mut(&mut m.core.tree).l0.clear())
-            .await;
-
-        fx.handler
-            .handle_finished(id, Err(missing_input_error()))
-            .await
-            .expect("a stale job must not stop the worker");
-
-        let c = fx.read_compaction(id).await.expect("compaction missing");
-        assert_eq!(c.status(), CompactionStatus::Scheduled);
-        assert!(c.worker().is_none());
-    }
-
-    /// A standalone worker resolves an SST of another database, for example
-    /// the parent of a clone, under the path of its own database. So a
-    /// `NotFound` for such an SST does not prove a lost SST, and the job goes
-    /// back to `Scheduled`.
-    #[tokio::test]
-    async fn test_worker_releases_job_on_missing_external_sst() {
-        let mut fx = WorkerFixture::new("worker-A").await;
-        let external_sst = fx.l0_view.sst.id;
-        fx.update_manifest(|m| {
-            m.external_dbs.push(ExternalDb {
-                path: "parent".to_string(),
-                source_checkpoint_id: uuid::Uuid::from_u128(1),
-                final_checkpoint_id: None,
-                sst_ids: vec![external_sst],
-            })
-        })
-        .await;
-        let id = Ulid::from_parts(1, 0);
-        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
-            .await;
-        fx.handler.poll_and_claim().await.unwrap();
-
-        fx.handler
-            .handle_finished(id, Err(missing_input_error()))
-            .await
-            .expect("a missing external SST must not stop the worker");
-
-        let c = fx.read_compaction(id).await.expect("compaction missing");
-        assert_eq!(c.status(), CompactionStatus::Scheduled);
-        assert!(c.worker().is_none());
-    }
-
-    /// With `compaction_job_max_retries: Some(n)`, the worker releases a job
-    /// after each of its first `n` failures. The next failure marks the job
-    /// `Failed` with the kind of its error and returns the error.
-    #[tokio::test]
-    async fn test_worker_marks_job_failed_after_max_retries() {
-        // An object store outage that outlasts the retries of the store.
-        let outage = || {
-            SlateDBError::from(object_store::Error::Generic {
-                store: "test",
-                source: Box::new(std::io::Error::other("service unavailable")),
-            })
-        };
-        let options = CompactionWorkerOptions {
-            compaction_job_max_retries: Some(2),
-            ..CompactionWorkerOptions::default()
-        };
-        let mut fx =
-            WorkerFixture::new_with_clock("worker-A", Arc::new(DefaultSystemClock::new()), options)
-                .await;
-        let id = Ulid::from_parts(1, 0);
-        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
-            .await;
-
-        for attempt in 1..=2 {
-            fx.handler.poll_and_claim().await.unwrap();
-            fx.handler
-                .handle_finished(id, Err(outage()))
-                .await
-                .unwrap_or_else(|e| panic!("attempt {attempt} must be retried: {e:?}"));
-            let c = fx.read_compaction(id).await.expect("compaction missing");
-            assert_eq!(c.status(), CompactionStatus::Scheduled);
-            assert!(c.worker().is_none());
-        }
-
-        fx.handler.poll_and_claim().await.unwrap();
-        let err = fx
-            .handler
-            .handle_finished(id, Err(outage()))
-            .await
-            .expect_err("the failure after the last retry must stop the worker");
-
-        assert!(matches!(err, SlateDBError::ObjectStoreError(_)), "{err:?}");
-        assert_eq!(fx.executor.jobs().len(), 3);
-        let empty: BoxStream<'_, WorkerMessage> = futures::stream::empty().boxed();
-        fx.handler.cleanup(empty, Err(err)).await.unwrap();
-        let c = fx.read_compaction(id).await.expect("compaction missing");
-        assert_eq!(c.status(), CompactionStatus::Failed);
-        assert_eq!(c.error_kind(), Some(ErrorKind::Unavailable));
-    }
-
-    /// A worker keeps the failure count of a job when it loses the claim to a
-    /// reclaim. So the job does not get more runs on this worker than
-    /// `compaction_job_max_retries` allows.
-    #[tokio::test]
-    async fn test_worker_keeps_failure_count_when_it_loses_the_claim() {
-        let outage = || {
-            SlateDBError::from(object_store::Error::Generic {
-                store: "test",
-                source: Box::new(std::io::Error::other("service unavailable")),
-            })
-        };
-        let options = CompactionWorkerOptions {
-            compaction_job_max_retries: Some(1),
-            ..CompactionWorkerOptions::default()
-        };
-        let mut fx =
-            WorkerFixture::new_with_clock("worker-A", Arc::new(DefaultSystemClock::new()), options)
-                .await;
-        let id = Ulid::from_parts(1, 0);
-        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
-            .await;
-
-        // The first run fails, and the worker releases the job.
-        fx.handler.poll_and_claim().await.unwrap();
-        fx.handler.handle_finished(id, Err(outage())).await.unwrap();
-
-        // The second run fails after the coordinator reclaimed the job.
-        fx.handler.poll_and_claim().await.unwrap();
-        fx.update_compaction(id, |c| {
-            c.with_status(CompactionStatus::Scheduled).with_worker(None)
-        })
-        .await;
-        fx.handler
-            .handle_finished(id, Err(outage()))
-            .await
-            .expect("a job that the worker lost must not stop the worker");
-
-        // The third run uses up the retries.
-        fx.handler.poll_and_claim().await.unwrap();
-        let err = fx
-            .handler
-            .handle_finished(id, Err(outage()))
-            .await
-            .expect_err("the third run is past the limit of one retry");
-        assert!(matches!(err, SlateDBError::ObjectStoreError(_)), "{err:?}");
-    }
-
-    /// A standalone worker reads through a retrying object store, so a
-    /// transient object store error does not stop it.
-    #[tokio::test(start_paused = true)]
-    async fn test_standalone_worker_retries_transient_object_store_errors() {
-        // given: `.compactions` exists, and the first list of the store fails
-        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from(ROOT);
-        StoredCompactions::create(Arc::new(CompactionsStore::new(&path, inner.clone())), 0)
-            .await
-            .unwrap();
-        let flaky = Arc::new(FlakyObjectStore::new(inner, 0).with_list_failures(1, 0));
-        let worker = crate::db::builder::CompactionWorkerBuilder::new(
-            path,
-            flaky.clone() as Arc<dyn ObjectStore>,
-        )
-        .build()
-        .await
-        .unwrap();
-
-        // when: the first poll loads `.compactions`, which lists the store
-        worker.start().unwrap();
-        tokio::time::timeout(Duration::from_secs(60), async {
-            while flaky.list_attempts() < 2 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("the worker must list `.compactions` again");
-
-        // then: the retry layer listed once more, and the worker still runs
-        assert_eq!(flaky.list_attempts(), 2);
-        worker
-            .stop()
-            .await
-            .expect("a transient object store error must not stop the worker");
-    }
-
-    /// A worker that lost a job to another worker leaves the job to its new
-    /// owner. It does not mark the job `Failed` and does not stop.
-    #[tokio::test]
-    async fn test_worker_does_not_fail_job_owned_by_another_worker() {
-        let mut fx = WorkerFixture::new("worker-A").await;
-        let id = Ulid::from_parts(1, 0);
-        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
-            .await;
-        fx.handler.poll_and_claim().await.unwrap();
-        fx.update_compaction(id, |c| {
-            c.with_worker(Some(WorkerSpec::new("worker-B".to_string(), 12345)))
-        })
-        .await;
-
-        fx.handler
-            .handle_finished(id, Err(missing_input_error()))
-            .await
-            .expect("a failure of a job owned by another worker must not stop the worker");
-
-        let c = fx.read_compaction(id).await.expect("compaction missing");
-        assert_eq!(c.status(), CompactionStatus::Running);
-        assert_eq!(c.worker().unwrap().worker_id, "worker-B");
     }
 
     #[tokio::test]
@@ -2102,5 +1723,280 @@ mod tests {
         assert_eq!(ctx.subcompactions().len(), 1);
         assert_eq!(ctx.subcompactions()[0].output_ssts().len(), 1);
         assert_eq!(ctx.subcompactions()[0].output_ssts()[0].id, sst1.id);
+    }
+
+    #[tokio::test]
+    async fn test_worker_retry_limits_and_cleanup() {
+        for limit in [Some(0), Some(2), None] {
+            let mut fx = WorkerFixture::new_with_clock(
+                "worker-A",
+                Arc::new(DefaultSystemClock::new()),
+                CompactionWorkerOptions {
+                    compaction_job_max_retries: limit,
+                    ..Default::default()
+                },
+            )
+            .await;
+            let id = Ulid::from_parts(1, 0);
+            fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+                .await;
+            let attempts = limit.map_or(5, |n| n + 1);
+            for attempt in 1..=attempts {
+                fx.handler.poll_and_claim().await.unwrap();
+                let err = SlateDBError::from(object_store::Error::NotFound {
+                    path: "missing.sst".into(),
+                    source: "missing".into(),
+                });
+                let result = fx.handler.handle_finished(id, Err(err)).await;
+                if limit.is_some_and(|n| attempt > n) {
+                    let err = result.unwrap_err();
+                    assert_eq!(
+                        crate::Error::from(err.clone()).kind(),
+                        crate::ErrorKind::Data
+                    );
+                    assert!(fx.handler.job_progress.contains_key(&id));
+                    fx.handler
+                        .cleanup(futures::stream::empty().boxed(), Err(err))
+                        .await
+                        .unwrap();
+                } else {
+                    result.unwrap();
+                }
+                if limit.is_none() {
+                    assert!(fx.handler.job_failures.is_empty());
+                }
+                let job = fx.read_compaction(id).await.unwrap();
+                assert_eq!(job.status(), CompactionStatus::Scheduled);
+                assert!(job.worker().is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_worker_success_clears_failure_count() {
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-A",
+            Arc::new(DefaultSystemClock::new()),
+            CompactionWorkerOptions {
+                compaction_job_max_retries: Some(1),
+                ..Default::default()
+            },
+        )
+        .await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        fx.handler
+            .handle_finished(id, Err(SlateDBError::InvalidDBState))
+            .await
+            .unwrap();
+        assert_eq!(fx.handler.job_failures.get(&id), Some(&1));
+        fx.handler.poll_and_claim().await.unwrap();
+        fx.handler
+            .handle_finished(id, Ok(SortedRun::new(0, [])))
+            .await
+            .unwrap();
+        assert!(fx.handler.job_failures.is_empty());
+        assert_eq!(
+            fx.read_compaction(id).await.unwrap().status(),
+            CompactionStatus::Compacted
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::released(Some(CompactionStatus::Scheduled), None)]
+    #[case::stolen(Some(CompactionStatus::Running), Some("worker-B"))]
+    #[case::missing(None, None)]
+    #[tokio::test]
+    async fn test_worker_stale_failure_does_not_close_worker(
+        #[case] status: Option<CompactionStatus>,
+        #[case] owner: Option<&str>,
+        #[values(None, Some(0), Some(2))] max_retries: Option<u32>,
+    ) {
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-A",
+            Arc::new(DefaultSystemClock::new()),
+            CompactionWorkerOptions {
+                compaction_job_max_retries: max_retries,
+                ..Default::default()
+            },
+        )
+        .await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        let mut stored = StoredCompactions::load(fx.compactions_store.clone())
+            .await
+            .unwrap();
+        let mut dirty = stored.prepare_dirty().unwrap();
+        if let Some(status) = status {
+            let job = dirty.value.get(&id).unwrap().clone();
+            dirty.value.insert(
+                job.with_status(status)
+                    .with_worker(owner.map(|id| WorkerSpec::new(id.to_string(), 0))),
+            );
+        } else {
+            dirty.value = dirty.value.with_compactions(vec![]);
+        }
+        stored.update(dirty).await.unwrap();
+        fx.handler
+            .handle_finished(id, Err(SlateDBError::InvalidDBState))
+            .await
+            .unwrap();
+        assert!(!fx.handler.job_progress.contains_key(&id));
+        let job = fx.read_compaction(id).await;
+        assert_eq!(job.as_ref().map(|job| job.status()), status);
+        assert_eq!(
+            job.as_ref()
+                .and_then(|job| job.worker().map(|worker| worker.worker_id.as_str())),
+            owner
+        );
+    }
+
+    #[tokio::test]
+    async fn test_worker_retry_budget_is_local() {
+        let options = CompactionWorkerOptions {
+            compaction_job_max_retries: Some(1),
+            ..Default::default()
+        };
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-A",
+            Arc::new(DefaultSystemClock::new()),
+            options.clone(),
+        )
+        .await;
+        let mut other = CompactionWorkerHandler::new(
+            "worker-B".into(),
+            Arc::new(options),
+            fx.compactions_store.clone(),
+            fx.handler.manifest_store.clone(),
+            Arc::new(NoopExecutor::new()),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::new(1)),
+            Arc::new(FailPointRegistry::new()),
+        );
+        other.ensure_loaded().await.unwrap();
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        for handler in [&mut fx.handler, &mut other] {
+            handler.poll_and_claim().await.unwrap();
+            handler
+                .handle_finished(id, Err(SlateDBError::InvalidDBState))
+                .await
+                .unwrap();
+        }
+        for handler in [&mut fx.handler, &mut other] {
+            handler.poll_and_claim().await.unwrap();
+            let err = handler
+                .handle_finished(id, Err(SlateDBError::InvalidDBState))
+                .await
+                .unwrap_err();
+            handler
+                .cleanup(futures::stream::empty().boxed(), Err(err))
+                .await
+                .unwrap();
+        }
+        assert_eq!(fx.executor.jobs().len(), 2);
+        assert_eq!(
+            fx.read_compaction(id).await.unwrap().status(),
+            CompactionStatus::Scheduled
+        );
+    }
+
+    #[tokio::test]
+    async fn test_worker_forgets_failures_of_finished_jobs() {
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-A",
+            Arc::new(DefaultSystemClock::new()),
+            CompactionWorkerOptions {
+                compaction_job_max_retries: Some(1),
+                ..Default::default()
+            },
+        )
+        .await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        fx.handler
+            .handle_finished(id, Err(SlateDBError::InvalidDBState))
+            .await
+            .unwrap();
+
+        let mut stored = StoredCompactions::load(fx.compactions_store.clone())
+            .await
+            .unwrap();
+        let mut dirty = stored.prepare_dirty().unwrap();
+        let job = dirty.value.get(&id).unwrap().clone();
+        dirty
+            .value
+            .insert(job.with_status(CompactionStatus::Completed));
+        stored.update(dirty).await.unwrap();
+
+        fx.handler.poll_and_claim().await.unwrap();
+        assert!(fx.handler.job_failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_worker_run_returns_original_error_after_retries() {
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-A",
+            Arc::new(DefaultSystemClock::new()),
+            CompactionWorkerOptions {
+                compaction_job_max_retries: Some(0),
+                ..Default::default()
+            },
+        )
+        .await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let cause = Arc::new(object_store::Error::Generic {
+            store: "test",
+            source: "service unavailable".into(),
+        });
+        let (tx, rx) = async_channel::unbounded();
+        tx.try_send(WorkerMessage::CompactionJobFinished {
+            id,
+            result: Err(SlateDBError::ObjectStoreError(cause.clone())),
+        })
+        .unwrap();
+        let task_executor = Arc::new(MessageHandlerExecutor::new(
+            Arc::new(WatchableOnceCell::new()),
+            Arc::new(DefaultSystemClock::new()),
+        ));
+        task_executor
+            .add_handler(
+                COMPACTION_WORKER_TASK_NAME.to_string(),
+                Box::new(fx.handler),
+                rx,
+                &Handle::current(),
+            )
+            .unwrap();
+        let worker = CompactionWorker::new(task_executor);
+        let err = tokio::time::timeout(Duration::from_secs(10), worker.run())
+            .await
+            .expect("the worker must stop after its last retry")
+            .expect_err("the worker must return the execution error");
+
+        assert_eq!(err.kind(), crate::ErrorKind::Unavailable);
+        let source = std::error::Error::source(&err)
+            .and_then(|source| source.downcast_ref::<Arc<object_store::Error>>())
+            .expect("the worker must preserve the object-store error");
+        assert!(Arc::ptr_eq(source, &cause));
+        let jobs = fx
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        let job = jobs.get(&id).unwrap();
+        assert_eq!(job.status(), CompactionStatus::Scheduled);
+        assert!(job.worker().is_none());
     }
 }

@@ -1476,34 +1476,21 @@ pub struct CompactionWorkerOptions {
     /// Defaults to [`MetricLevel::default`] when unset.
     pub metric_level: Option<MetricLevel>,
 
-    /// The maximum number of times that this worker runs a failed compaction
-    /// job again. If the value is `None` (the default), the worker runs a
-    /// failed job again without limit. If the value is `Some(n)`, the worker
-    /// runs it again at most `n` times. Each worker counts the failures of a
-    /// job in memory, so the count starts again when the worker restarts.
+    /// The maximum number of retries for a failed compaction job on this worker.
+    /// `None` (the default) permits unlimited retries. `Some(0)` stops the worker
+    /// after the first failed execution. `Some(n)` permits the initial execution
+    /// and at most `n` retries.
     ///
-    /// When a job uses up its retries, the worker stops with the error of the
-    /// job and marks the job `Failed`. A `Db` that runs the worker closes with
-    /// that error. The compaction coordinator also stops, with an error of the
-    /// same [`crate::ErrorKind`], so a `Db` that runs only the coordinator
-    /// closes too. A `Db` that runs neither does not see the error, and its
-    /// memtable flushes keep waiting while L0 is full.
+    /// Each worker counts failures by job ID in memory. Counts reset on restart
+    /// and are not shared between workers. The worker returns the original error
+    /// when it exhausts the limit. An embedded worker closes its local database
+    /// or compactor with that error. A standalone worker reports the error to its
+    /// caller, but does not close a remote coordinator or database. Cleanup
+    /// releases the claim so another worker can retry the job.
     ///
-    /// A lost input SST fails the job on the first failure, for every value
-    /// of this option. The worker treats an SST as lost if object storage
-    /// returns `NotFound` for it, the latest manifest still names the inputs
-    /// of the job, and the SST belongs to this database. Other errors, for
-    /// example a checksum mismatch, follow the limit.
-    ///
-    /// A failed object store call counts here only after the object store
-    /// retries give up. A standalone worker uses
-    /// [`CompactionWorkerOptions::object_store_max_retries`], and an embedded
-    /// worker uses the store of its `Db` or compactor. With unbounded object
-    /// store retries, an outage does not count.
-    ///
-    /// Upgrade the compaction coordinator before the workers. A coordinator
-    /// from an earlier release does not accept the `Failed` status that a
-    /// worker writes, so it runs the job again.
+    /// A failed object-store request counts only after the request retries stop.
+    /// With unlimited object-store retries, an execution can wait indefinitely
+    /// without consuming a job retry. Missing SSTs follow this job limit too.
     #[serde(default)]
     pub compaction_job_max_retries: Option<u32>,
 
@@ -2032,6 +2019,24 @@ mod tests {
     fn test_db_options_default_metric_level() {
         let options = Settings::default();
         assert_eq!(MetricLevel::default(), options.metric_level);
+    }
+
+    #[test]
+    fn test_compaction_job_retry_limit_config() {
+        let mut value = serde_json::to_value(CompactionWorkerOptions::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("compaction_job_max_retries");
+        let omitted: CompactionWorkerOptions = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(omitted.compaction_job_max_retries, None);
+
+        for retries in [0, 2, u32::MAX] {
+            value["compaction_job_max_retries"] = serde_json::json!(retries);
+            let configured: CompactionWorkerOptions =
+                serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(configured.compaction_job_max_retries, Some(retries));
+        }
     }
 
     #[test]

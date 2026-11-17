@@ -4,7 +4,6 @@ use std::ops::Bound;
 use std::time::Duration;
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error as ThisError;
-use ulid::Ulid;
 use uuid::Uuid;
 
 use crate::bytes_range::BytesRange;
@@ -126,11 +125,6 @@ pub(crate) enum SlateDBError {
 
     #[error("compaction executor failed")]
     CompactorExecutorFailed,
-
-    /// A compaction worker marked the job `Failed`. `kind` is the kind of the
-    /// error of the job, and the worker log has the error itself.
-    #[error("compaction worker marked the compaction job failed. id=`{id}`")]
-    CompactionJobFailed { id: Ulid, kind: Option<ErrorKind> },
 
     #[error(
         "invalid clock tick, must be monotonic. last_tick=`{last_tick}`, next_tick=`{next_tick}`"
@@ -833,15 +827,6 @@ impl From<SlateDBError> for Error {
                 Error::internal(msg).with_source(Box::new(err))
             }
             SlateDBError::WalInternalError(src) => Error::internal(msg).with_source(Box::new(src)),
-
-            // Keeps the kind of the error of the job. A writer from an earlier
-            // release drops the kind when it rewrites `.compactions`, so the kind
-            // can be missing.
-            SlateDBError::CompactionJobFailed { kind, .. } => Error {
-                msg,
-                kind: kind.unwrap_or(ErrorKind::Internal),
-                source: None,
-            },
         }
     }
 }
@@ -859,26 +844,6 @@ mod tests {
         let public_err = Error::from(err);
 
         assert_eq!(public_err.kind(), ErrorKind::Data);
-    }
-
-    #[test]
-    fn compaction_job_failed_keeps_kind_of_job_error() {
-        let err = SlateDBError::CompactionJobFailed {
-            id: Ulid::from_parts(1, 0),
-            kind: Some(ErrorKind::Unavailable),
-        };
-
-        assert_eq!(Error::from(err).kind(), ErrorKind::Unavailable);
-    }
-
-    #[test]
-    fn compaction_job_failed_without_kind_maps_to_internal() {
-        let err = SlateDBError::CompactionJobFailed {
-            id: Ulid::from_parts(1, 0),
-            kind: None,
-        };
-
-        assert_eq!(Error::from(err).kind(), ErrorKind::Internal);
     }
 
     #[test]

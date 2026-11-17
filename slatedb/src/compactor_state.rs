@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
 use crate::db_state::{SortedRun, SsTableHandle, SsTableView};
-use crate::error::{ErrorKind, SlateDBError};
+use crate::error::SlateDBError;
 use crate::incremental_progress::IncrementalProgress;
 use crate::manifest::{Manifest, ManifestCore};
 use crate::subcompaction::{Subcompaction, SubcompactionStatus};
@@ -312,9 +312,6 @@ impl CompactionStatus {
     ///     written back and no worker would ever pick the job up again.
     ///   - `Running -> Running`: should accept heartbeat updates when heartbeats
     ///     land for a job that is already in local state
-    ///   - `Scheduled → Failed` and `Running → Failed`: the worker that owns the
-    ///     job gave up on it. A worker can claim and fail a job before the
-    ///     coordinator sees the claim.
     ///
     /// Terminal local states are not overwritten by a remote `Compacted` entry.
     /// The coordinator writes the manifest before `.compactions`, so local
@@ -324,13 +321,10 @@ impl CompactionStatus {
     fn should_adopt_state_transition(&self, updated_status: CompactionStatus) -> bool {
         match self {
             Self::Submitted => matches!(updated_status, Self::Compacted),
-            Self::Scheduled => matches!(
-                updated_status,
-                Self::Running | Self::Compacted | Self::Failed
-            ),
+            Self::Scheduled => matches!(updated_status, Self::Running | Self::Compacted),
             Self::Running => matches!(
                 updated_status,
-                Self::Scheduled | Self::Running | Self::Compacted | Self::Failed
+                Self::Scheduled | Self::Running | Self::Compacted
             ),
             Self::Compacted => matches!(updated_status, Self::Compacted),
             Self::Completed | Self::Failed => false,
@@ -474,18 +468,6 @@ pub struct Compaction {
     /// compaction is unclaimed (only valid when `status == Submitted`).
     worker: Option<WorkerSpec>,
     ctx: Option<CompactionContext>,
-    /// The kind of the error that made a worker mark this compaction `Failed`.
-    #[serde(serialize_with = "serialize_error_kind")]
-    error_kind: Option<ErrorKind>,
-}
-
-fn serialize_error_kind<S: serde::Serializer>(
-    error_kind: &Option<ErrorKind>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    error_kind
-        .map(|kind| format!("{kind:?}"))
-        .serialize(serializer)
 }
 
 impl Compaction {
@@ -498,7 +480,6 @@ impl Compaction {
             worker: None,
             output_ssts: vec![],
             ctx: None,
-            error_kind: None,
         }
     }
 
@@ -519,11 +500,6 @@ impl Compaction {
 
     pub(crate) fn with_output_ssts(mut self, output_ssts: Vec<SsTableHandle>) -> Self {
         self.output_ssts = output_ssts;
-        self
-    }
-
-    pub(crate) fn with_error_kind(mut self, error_kind: Option<ErrorKind>) -> Self {
-        self.error_kind = error_kind;
         self
     }
 
@@ -721,12 +697,6 @@ impl Compaction {
     /// Returns the worker that has claimed this compaction, if any.
     pub fn worker(&self) -> Option<&WorkerSpec> {
         self.worker.as_ref()
-    }
-
-    /// Returns the kind of the error that made a worker mark this compaction
-    /// `Failed`, if any.
-    pub fn error_kind(&self) -> Option<ErrorKind> {
-        self.error_kind
     }
 
     /// Returns true if the compaction is active (submitted or running).
@@ -1008,16 +978,11 @@ impl CompactorState {
     ///
     /// This preserves local in-flight compactions while pulling in newly submitted remote
     /// compactions (e.g. external scheduling requests).
-    ///
-    /// ## Returns
-    /// - The ids of the active local compactions that a worker marked `Failed`,
-    ///   with the kind of the error of each job.
     pub(crate) fn merge_remote_compactions(
         &mut self,
         mut remote_compactions: DirtyObject<Compactions>,
-    ) -> Vec<(Ulid, Option<ErrorKind>)> {
+    ) {
         let mut merged = BTreeMap::new();
-        let mut failed_by_workers = Vec::new();
 
         for compaction in self.compactions.value.iter() {
             merged.insert(compaction.id(), compaction.clone());
@@ -1055,9 +1020,6 @@ impl CompactorState {
                         .status
                         .should_adopt_state_transition(compaction.status)
                     {
-                        if compaction.status == CompactionStatus::Failed {
-                            failed_by_workers.push((compaction.id(), compaction.error_kind()));
-                        }
                         o.insert(compaction.clone());
                     } else {
                         debug!(
@@ -1077,7 +1039,6 @@ impl CompactorState {
         };
         remote_compactions.value = merged_compactions;
         self.set_compactions(remote_compactions);
-        failed_by_workers
     }
 
     /// Merges the remote (writer) manifest view into the compactor's local state.
@@ -1772,57 +1733,6 @@ mod tests {
         assert_eq!(
             merged.get(&id).expect("not found").status(),
             CompactionStatus::Compacted
-        );
-    }
-
-    #[test]
-    fn test_merge_remote_compactions_accepts_failed_from_worker() {
-        let manifest = new_dirty_manifest();
-        let compactor_epoch = manifest.value.compactor_epoch;
-        let running = Ulid::from_parts(1, 0);
-        let scheduled = Ulid::from_parts(2, 0);
-        let submitted = Ulid::from_parts(3, 0);
-
-        let mut local_compactions = new_dirty_compactions(compactor_epoch);
-        local_compactions
-            .value
-            .insert(compaction_with_status(running, CompactionStatus::Running));
-        local_compactions.value.insert(compaction_with_status(
-            scheduled,
-            CompactionStatus::Scheduled,
-        ));
-        local_compactions.value.insert(compaction_with_status(
-            submitted,
-            CompactionStatus::Submitted,
-        ));
-        let mut state = CompactorState::new(manifest, local_compactions);
-
-        // A worker claims a job (Scheduled -> Running) and can mark it Failed
-        // before the coordinator sees the claim.
-        let mut remote_compactions = new_dirty_compactions(compactor_epoch);
-        for id in [running, scheduled, submitted] {
-            remote_compactions
-                .value
-                .insert(compaction_with_status(id, CompactionStatus::Failed));
-        }
-
-        let failed_by_workers = state.merge_remote_compactions(remote_compactions);
-
-        assert_eq!(failed_by_workers, vec![(running, None), (scheduled, None)]);
-        let merged = &state.compactions.value;
-        assert_eq!(
-            merged.get(&running).expect("not found").status(),
-            CompactionStatus::Failed
-        );
-        assert_eq!(
-            merged.get(&scheduled).expect("not found").status(),
-            CompactionStatus::Failed
-        );
-        // Workers never act on Submitted entries, so the coordinator keeps its
-        // own copy.
-        assert_eq!(
-            merged.get(&submitted).expect("not found").status(),
-            CompactionStatus::Submitted
         );
     }
 
