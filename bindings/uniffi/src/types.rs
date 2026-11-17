@@ -149,6 +149,33 @@ impl From<slatedb::DbStatus> for DbStatus {
     }
 }
 
+/// A key/value pair to append to a [`crate::WriteBatch`] with [`crate::WriteBatch::put_many`].
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PutEntry {
+    /// Row key.
+    pub key: Vec<u8>,
+    /// Row value bytes.
+    pub value: Vec<u8>,
+}
+
+/// Sequence number and creation timestamp assigned to a write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct WriteResult {
+    /// Sequence number assigned to the write.
+    pub seqnum: u64,
+    /// Creation timestamp assigned to the write.
+    pub create_ts: i64,
+}
+
+impl From<&slatedb::WriteHandle> for WriteResult {
+    fn from(value: &slatedb::WriteHandle) -> Self {
+        Self {
+            seqnum: value.seqnum(),
+            create_ts: value.create_ts(),
+        }
+    }
+}
+
 /// A key/value pair together with the row version metadata that produced it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct KeyValue {

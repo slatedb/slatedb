@@ -9,7 +9,7 @@ use crate::db_status_subscription::DbStatusSubscription;
 use crate::db_transaction::DbTransaction;
 use crate::error::Error;
 use crate::iterator::DbIterator;
-use crate::types::{CacheTarget, DbStatus, KeyRange, KeyValue, SsTableId};
+use crate::types::{CacheTarget, DbStatus, KeyRange, KeyValue, SsTableId, WriteResult};
 use crate::validation::{validate_key, validate_key_value};
 use crate::write_batch::WriteBatch;
 use crate::write_handle::WriteHandle;
@@ -243,6 +243,22 @@ impl Db {
         Ok(Arc::new(WriteHandle::new(
             self.inner.write_with_options(batch, &options).await?,
         )))
+    }
+
+    /// Applies all operations in `batch` atomically and returns the assigned sequence number
+    /// and creation timestamp.
+    ///
+    /// Unlike [`Db::write_with_options`], this returns no [`WriteHandle`], so the caller cannot
+    /// await durability through it. The provided batch is consumed and cannot be reused afterwards.
+    pub async fn write_with_options_result(
+        &self,
+        batch: Arc<WriteBatch>,
+        options: WriteOptions,
+    ) -> Result<WriteResult, Error> {
+        let batch = batch.take_for_write()?;
+        let options = options.into();
+        let handle = self.inner.write_with_options(batch, &options).await?;
+        Ok(WriteResult::from(&handle))
     }
 
     /// Flushes the default storage layer.

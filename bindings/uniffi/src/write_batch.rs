@@ -4,6 +4,7 @@ use parking_lot::Mutex;
 
 use crate::config::{MergeOptions, PutOptions};
 use crate::error::{Error, SlateDbError};
+use crate::types::PutEntry;
 use crate::validation::{validate_key, validate_key_value};
 
 /// Mutable batch of write operations applied atomically by [`crate::Db::write`].
@@ -45,6 +46,21 @@ impl WriteBatch {
         validate_key_value(&key, &value)?;
         self.with_open(|batch| batch.put(key, value))
             .map_err(Into::into)
+    }
+
+    /// Appends a put operation for each entry, in order.
+    ///
+    /// Every entry is validated first. If any entry is invalid, the batch is left unchanged.
+    pub fn put_many(&self, entries: Vec<PutEntry>) -> Result<(), Error> {
+        for entry in &entries {
+            validate_key_value(&entry.key, &entry.value)?;
+        }
+        self.with_open(|batch| {
+            for entry in entries {
+                batch.put(entry.key, entry.value);
+            }
+        })
+        .map_err(Into::into)
     }
 
     /// Appends a put operation with custom put options.
