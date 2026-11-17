@@ -36,10 +36,11 @@ use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
 use object_store::path::Path;
 use object_store::{
-    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult, RenameOptions,
+    CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    RenameOptions,
 };
-use slatedb_common::metrics::MetricsRecorderHelper;
+use slatedb_common::metrics::{CounterFn, MetricsRecorderHelper};
 
 use crate::utils::ObjectStoreType;
 
@@ -151,6 +152,30 @@ impl MultipartUpload for InstrumentedMultipartUpload {
     }
 }
 
+/// Counts the payload bytes of a GET as the caller reads them.
+///
+/// A stream payload counts each chunk when the caller polls it, so a body that fails or that the
+/// caller drops counts only the bytes received. A local file payload counts its full range.
+fn count_read_bytes(mut result: GetResult, read_bytes: &Arc<dyn CounterFn>) -> GetResult {
+    let read_bytes = Arc::clone(read_bytes);
+    result.payload = match result.payload {
+        GetResultPayload::Stream(stream) => GetResultPayload::Stream(
+            stream
+                .inspect(move |chunk| {
+                    if let Ok(chunk) = chunk {
+                        read_bytes.increment(chunk.len() as u64);
+                    }
+                })
+                .boxed(),
+        ),
+        GetResultPayload::File(file, path) => {
+            read_bytes.increment(result.range.end - result.range.start);
+            GetResultPayload::File(file, path)
+        }
+    };
+    result
+}
+
 #[async_trait]
 impl ObjectStore for InstrumentedObjectStore {
     async fn get_opts(
@@ -158,17 +183,23 @@ impl ObjectStore for InstrumentedObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        let metric = if options.head {
-            &self.stats.head
+        let (metric, read_bytes) = if options.head {
+            (&self.stats.head, None)
         } else if options.range.is_some() {
-            &self.stats.get_range
+            (
+                &self.stats.get_range,
+                Some(&self.stats.get_range_read_bytes),
+            )
         } else {
-            &self.stats.get
+            (&self.stats.get, Some(&self.stats.get_read_bytes))
         };
         let start = Instant::now();
         let result = self.inner.get_opts(location, options).await;
         metric.record(start.elapsed(), result.is_ok());
-        result
+        match (result, read_bytes) {
+            (Ok(result), Some(read_bytes)) => Ok(count_read_bytes(result, read_bytes)),
+            (result, _) => result,
+        }
     }
 
     async fn get_ranges(
@@ -181,6 +212,10 @@ impl ObjectStore for InstrumentedObjectStore {
         self.stats
             .get_ranges
             .record(start.elapsed(), result.is_ok());
+        if let Ok(parts) = &result {
+            let len: usize = parts.iter().map(Bytes::len).sum();
+            self.stats.get_ranges_read_bytes.increment(len as u64);
+        }
         result
     }
 
@@ -297,6 +332,7 @@ pub mod stats {
     pub const REQUEST_COUNT: &str = object_store_stat_name!("request_count");
     pub const ERROR_COUNT: &str = object_store_stat_name!("error_count");
     pub const REQUEST_DURATION_SECONDS: &str = object_store_stat_name!("request_duration_seconds");
+    pub const READ_BYTES: &str = object_store_stat_name!("read_bytes");
     const REQUEST_COUNT_DESCRIPTION: &str = "Object store API requests";
 
     /// Pre-registered [`RequestMetrics`] for every object store API that
@@ -310,6 +346,9 @@ pub mod stats {
         pub(crate) get: RequestMetrics,
         pub(crate) get_range: RequestMetrics,
         pub(crate) get_ranges: RequestMetrics,
+        pub(crate) get_read_bytes: Arc<dyn CounterFn>,
+        pub(crate) get_range_read_bytes: Arc<dyn CounterFn>,
+        pub(crate) get_ranges_read_bytes: Arc<dyn CounterFn>,
         pub(crate) head: RequestMetrics,
         pub(crate) list: Arc<dyn CounterFn>,
         pub(crate) list_with_offset: Arc<dyn CounterFn>,
@@ -337,6 +376,9 @@ pub mod stats {
                     "get",
                     "get_ranges",
                 ),
+                get_read_bytes: read_bytes(recorder, component, store_type, "get"),
+                get_range_read_bytes: read_bytes(recorder, component, store_type, "get_range"),
+                get_ranges_read_bytes: read_bytes(recorder, component, store_type, "get_ranges"),
                 head: RequestMetrics::new(recorder, component, store_type, "get", "head"),
                 list: recorder
                     .counter(REQUEST_COUNT)
@@ -385,6 +427,19 @@ pub mod stats {
                 delete: RequestMetrics::new(recorder, component, store_type, "delete", "delete"),
             }
         }
+    }
+
+    fn read_bytes(
+        recorder: &MetricsRecorderHelper,
+        component: ObjectStoreComponent,
+        store_type: ObjectStoreType,
+        api: &'static str,
+    ) -> Arc<dyn CounterFn> {
+        recorder
+            .counter(READ_BYTES)
+            .description("Payload bytes received from object store GET requests")
+            .labels(&get_labels(component, store_type, "get", api))
+            .register()
     }
 
     pub(crate) fn get_labels(
@@ -462,16 +517,24 @@ mod tests {
 
     use std::sync::Arc;
 
+    use bytes::Bytes;
+    use futures::StreamExt;
+    use object_store::local::LocalFileSystem;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::{ObjectStore, ObjectStoreExt};
+    use object_store::{
+        Attributes, Extensions, GetResult, GetResultPayload, ObjectMeta, ObjectStore,
+        ObjectStoreExt,
+    };
     use slatedb_common::clock::DefaultSystemClock;
     use slatedb_common::metrics::{lookup_metric_with_labels, test_recorder_helper, MetricValue};
 
     use crate::instrumented_object_store::stats::{
-        get_labels, ERROR_COUNT, REQUEST_COUNT, REQUEST_DURATION_SECONDS,
+        get_labels, ERROR_COUNT, READ_BYTES, REQUEST_COUNT, REQUEST_DURATION_SECONDS,
     };
-    use crate::instrumented_object_store::{InstrumentedObjectStore, ObjectStoreComponent};
+    use crate::instrumented_object_store::{
+        count_read_bytes, InstrumentedObjectStore, ObjectStoreComponent,
+    };
     use crate::retrying_object_store::RetryingObjectStore;
     use crate::test_utils::FlakyObjectStore;
     use crate::utils::ObjectStoreType;
@@ -597,6 +660,117 @@ mod tests {
                 )
             ),
             Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_instrumented_object_store_records_read_bytes() {
+        // given:
+        let (recorder, helper) = test_recorder_helper();
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = InstrumentedObjectStore::new(
+            inner,
+            &helper,
+            ObjectStoreComponent::Db,
+            ObjectStoreType::Main,
+        );
+        let path = Path::from("a");
+        store.put(&path, "0123456789".into()).await.unwrap();
+        let read_bytes = |api| {
+            lookup_metric_with_labels(
+                &recorder,
+                READ_BYTES,
+                &get_labels(ObjectStoreComponent::Db, ObjectStoreType::Main, "get", api),
+            )
+        };
+
+        // when:
+        store.get(&path).await.unwrap().bytes().await.unwrap();
+        store.get_range(&path, 2..6).await.unwrap();
+        store.get_ranges(&path, &[0..1, 3..5]).await.unwrap();
+        store.head(&path).await.unwrap();
+        store.get(&Path::from("missing")).await.unwrap_err();
+
+        // then: a HEAD and a failed GET add no bytes
+        assert_eq!(read_bytes("get"), Some(10));
+        assert_eq!(read_bytes("get_range"), Some(4));
+        assert_eq!(read_bytes("get_ranges"), Some(3));
+    }
+
+    #[tokio::test]
+    async fn test_instrumented_object_store_records_file_payload_bytes() {
+        // given: a local file store, which returns a file payload
+        let (recorder, helper) = test_recorder_helper();
+        let dir = tempfile::tempdir().unwrap();
+        let inner: Arc<dyn ObjectStore> =
+            Arc::new(LocalFileSystem::new_with_prefix(dir.path()).unwrap());
+        let store = InstrumentedObjectStore::new(
+            inner,
+            &helper,
+            ObjectStoreComponent::Db,
+            ObjectStoreType::Main,
+        );
+        let path = Path::from("a");
+        store.put(&path, "0123456789".into()).await.unwrap();
+
+        // when:
+        let result = store.get(&path).await.unwrap();
+        assert!(matches!(result.payload, GetResultPayload::File(_, _)));
+        assert_eq!(result.bytes().await.unwrap().len(), 10);
+
+        // then:
+        assert_eq!(
+            lookup_metric_with_labels(
+                &recorder,
+                READ_BYTES,
+                &get_labels(
+                    ObjectStoreComponent::Db,
+                    ObjectStoreType::Main,
+                    "get",
+                    "get"
+                ),
+            ),
+            Some(10)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_count_read_bytes_counts_only_polled_chunks() {
+        // given: a stream payload with two chunks and a failed chunk
+        let (recorder, helper) = test_recorder_helper();
+        let counter = helper.counter(READ_BYTES).register();
+        let chunks: Vec<object_store::Result<Bytes>> = vec![
+            Ok(Bytes::from_static(b"012")),
+            Err(object_store::Error::NotImplemented {
+                operation: "test".into(),
+                implementer: "test".into(),
+            }),
+            Ok(Bytes::from_static(b"3456789")),
+        ];
+        let result = GetResult {
+            payload: GetResultPayload::Stream(futures::stream::iter(chunks).boxed()),
+            meta: ObjectMeta {
+                location: Path::from("a"),
+                last_modified: chrono::Utc::now(),
+                size: 10,
+                e_tag: None,
+                version: None,
+            },
+            range: 0..10,
+            attributes: Attributes::new(),
+            extensions: Extensions::new(),
+        };
+
+        // when: the caller reads the first chunk and the failed chunk, then drops the stream
+        let mut stream = count_read_bytes(result, &counter).into_stream();
+        stream.next().await.unwrap().unwrap();
+        stream.next().await.unwrap().unwrap_err();
+        drop(stream);
+
+        // then: only the bytes of the first chunk count
+        assert_eq!(
+            lookup_metric_with_labels(&recorder, READ_BYTES, &[]),
+            Some(3)
         );
     }
 
