@@ -46,7 +46,9 @@ impl ScanTotals {
 }
 
 pub(crate) async fn run(db: Arc<Db>, args: BenchmarkScanArgs) -> Result<ScanStats, Box<dyn Error>> {
-    let options = ScanOptions::new().with_read_ahead_bytes(args.read_ahead_bytes);
+    let options = ScanOptions::new()
+        .with_read_ahead_bytes(args.read_ahead_bytes)
+        .with_cache_blocks(args.db_args.block_cache_size.is_some());
     let next_scan = Arc::new(AtomicU64::new(0));
     let totals = Arc::new(ScanTotals::default());
     let duration = args
@@ -142,6 +144,7 @@ mod tests {
     use crate::args::{BencherArgs, BencherCommands};
     use clap::Parser;
     use object_store::memory::InMemory;
+    use slatedb::config::{FlushOptions, FlushType};
 
     #[tokio::test]
     async fn scan_counts_rows_at_the_limit_and_at_eof() {
@@ -202,5 +205,58 @@ mod tests {
         };
         assert_eq!(first, run(db.clone(), other).await.unwrap());
         db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn scan_populates_the_requested_block_cache() {
+        let store = Arc::new(InMemory::new());
+        let db = Db::open("scan", store.clone()).await.unwrap();
+        db.put([255], [1]).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        db.close().await.unwrap();
+
+        let BencherCommands::Scan(mut args) = BencherArgs::parse_from([
+            "bencher",
+            "scan",
+            "--key-len",
+            "1",
+            "--num-scans",
+            "1",
+            "--concurrency",
+            "1",
+        ])
+        .command
+        else {
+            panic!("expected scan arguments");
+        };
+        for block_cache_size in [None, Some(1024 * 1024)] {
+            args.db_args.block_cache_size = block_cache_size;
+            let (mut config, cache) = args.db_args.config().unwrap();
+            config.compactor_options = None;
+            let cache = cache.unwrap();
+            let db = Arc::new(
+                Db::builder("scan", store.clone())
+                    .with_settings(config)
+                    .with_db_cache(cache.clone(), 0)
+                    .build()
+                    .await
+                    .unwrap(),
+            );
+            let cache_key = (db.manifest().l0().front().unwrap().sst.id, 0).into();
+            assert!(cache.get_block(&cache_key).await.unwrap().is_none());
+            for _ in 0..2 {
+                assert_eq!(run(db.clone(), args.clone()).await.unwrap().rows, 1);
+                assert_eq!(
+                    cache.get_block(&cache_key).await.unwrap().is_some(),
+                    block_cache_size.is_some()
+                );
+            }
+            db.close().await.unwrap();
+            cache.close().await.unwrap();
+        }
     }
 }
