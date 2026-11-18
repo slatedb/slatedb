@@ -46,7 +46,7 @@ Authors:
 
 ## Summary
 
-Every read searches the SST index to find the data block that can hold a key. Today the index stays in memory as the FlatBuffer from the file. The search is a binary search that follows FlatBuffer offsets and compares full keys. This RFC proposes a new in-memory form of the index, built each time the index is loaded into memory. The new form has two parts: flat arrays, and a static B+ tree over numeric prefix values. Each node of the tree has 128 bytes. Its prefix values are the 8 key bytes after the prefix that the keys of the node share. In a prototype on AWS Graviton, a point search over an index of 65K blocks with synthetic keys is about 4× faster, both when the index is in the CPU cache and when it is not. The file format, the verifier, and the public API do not change.
+Every read searches the SST index to find the data block that can hold a key. Today the index stays in memory as the FlatBuffer from the file. The search is a binary search that follows FlatBuffer offsets and compares index keys. This RFC proposes a new in-memory form of the index, built each time the index is loaded into memory. The new form has two parts: flat arrays, and a static B+ tree over numeric prefix values. Each node of the tree has 128 bytes. Its prefix values are the 8 key bytes after the prefix that the keys of the node share. In a prototype on AWS Graviton, a point search over an index of 65K blocks with synthetic keys is about 4× faster, both when the index is in the CPU cache and when it is not. The file format, the verifier, and the public API do not change.
 
 ## Motivation
 
@@ -54,31 +54,29 @@ Today the search works like this:
 
 1. The cache keeps the index as the FlatBuffer from the file (`SsTableIndexOwned`). The search reads it in place with `root_unchecked`.
 2. The search is a binary search over the `block_meta` vector. A compacted SST of the default size has about 65K blocks of 4 KiB, so a search takes about 16 steps.
-3. Each step reads the index key of one block (a lower bound for the keys in the block) and compares it with the search key.
-4. After the search, `partitions_covering_key` compares one more key, to find blocks that start with the search key. This one-search path for point keys came from [#2203](https://github.com/slatedb/slatedb/pull/2203).
+3. Each step reads the index key of one block and compares it with the search key. The index key is a lower bound for the keys in the block. It is the shortest prefix of the first key of the block that is above the last key of the block before it. In most SSTs, the first block has an empty index key. The FlatBuffer stores the index key in the field `first_key`.
+4. After the search, `partitions_covering_key` compares at least one more index key, to find the blocks whose index key equals the search key. It compares one more index key for each such block. This one-search path for point keys came from [#2203](https://github.com/slatedb/slatedb/pull/2203).
 
 This approach has these costs:
 
-1. One search step makes about 9 dependent reads to reach one key: the vector, the `BlockMeta` table and its vtable, and the key vector. Some of these reads can miss the CPU cache.
+1. One search step makes up to 12 reads, in a chain up to 9 reads long. It reads the root table and its vtable, the vector, the `BlockMeta` table and its vtable, and the key vector. The vector slot and the `BlockMeta` table, with its key, can miss the CPU cache. The vtables are shared and stay in the cache.
 2. The steps of the binary search run one after the other, because each step needs the result of the step before. If the index is not in the CPU cache, each step waits for main memory before the next step can start.
-3. Each step compares two full keys byte by byte, not two fixed-size values. After the search, one more compare reads a full key.
+3. Each step compares the search key with the index key of one block. The index key is the shortest prefix that separates the block from the block before it. Both keys have a variable length, so the compare loads the length, calls memcmp, and then compares the lengths. It is not one compare of two fixed-size values. After the search, one more equality check loads one index key length. It reads the key bytes only when the lengths are equal.
 
-Both point gets and scans pay for the index search, but point gets pay the most. A point get searches the index of each SST that its filter does not rule out. Its random keys often land in indexes that are not in the CPU cache.
+Both point gets and scans pay for the index search. A point get searches the index of each SST that its filter does not rule out. Its random keys often land in indexes that are not in the CPU cache. A scan searches the index of each SST that it reads, one time for each bound.
 
 A profile of point gets on AWS Graviton shows the size of this cost. In the test, one SST with an index of about 65K blocks holds the key, and all data is in the block cache. A get takes about 11.6 µs, and the index search takes about 6.6% of its CPU (about 760 ns).
 
 ## Goals
 
 - Make the index search faster, both when the index is in the CPU cache and when it is not.
-- Keep the SST file format, the index FlatBuffer schema, and the FlatBuffer verifier unchanged.
 - Keep the public API (`SstIndex`) unchanged.
 - Use no more memory than today for indexes of the default size.
-- Keep the search memory safe for any index that passes the verifier, including indexes with unsorted keys.
+- Make sure that the search cannot panic or read out of bounds for any index that passes the verifier. The verifier does not check that the keys are sorted, so this includes indexes with unsorted keys.
 
 ## Non-Goals
 
-- Making the index load cheaper. Dropping or replacing the verifier is the subject of [#1069](https://github.com/slatedb/slatedb/issues/1069).
-- Changing the index format in the file, such as a partitioned index ([#1068](https://github.com/slatedb/slatedb/issues/1068)).
+- Changing the SST file format, the index schema, or the verifier. The new form is built when the index is loaded, so it needs no new format version. A later format change, such as a partitioned index ([#1068](https://github.com/slatedb/slatedb/issues/1068)), can build the same form.
 - The seek inside a data block. A separate issue covers it ([#2242](https://github.com/slatedb/slatedb/issues/2242)).
 - The memtable search and the filter lookup.
 - Where the cache keeps the index. RFC 0037 ([#2206](https://github.com/slatedb/slatedb/pull/2206)) pins indexes on the SST handle. This RFC changes only the in-memory form of the index, so it works with either place.
@@ -95,38 +93,38 @@ SsTableIndexOwned
 ```text
 IndexArrays
   offsets       [u64; n]          block offset
-  encoded_lens  Option<[u32; n]>  block length (None when all are zero)
-  keys          [u8]              all first keys, one after the other
-  key_ends      [u32; n]          end of each key in `keys`
+  encoded_lens  Option<[u32; n]>  block length (None when no block has padding)
+  index_keys    [u8]              all index keys, one after the other
+  key_ends      [u32; n + 1]      start of each key in `index_keys`, then the end
   tree          Option<StaticBTree>
 ```
 
-When `SsTableIndexOwned::new` accepts an index, it copies the index into one array for each field and drops the FlatBuffer bytes. All first keys are in one buffer, with an array of end positions.
+When `SsTableIndexOwned::new` accepts an index, it copies the index into one array for each field and drops the FlatBuffer bytes. All index keys are in one buffer, with an array of start positions. One buffer needs one allocation, not one for each key. It also has no header for each key: a `Vec` header takes 24 bytes, more than many index keys. The keys of adjacent blocks are adjacent in memory.
 
 In memory, the flat arrays replace the FlatBuffer as the form of the index that the search reads. The file keeps the FlatBuffer. This form makes each search step cheaper:
 
-1. To find key `i`, the search reads `key_ends[i - 1]` and `key_ends[i]`, which are next to each other. It then reads the key bytes. There are no offsets or vtables to follow. In the FlatBuffer, the same step makes many reads through offsets and a vtable.
-2. The search reads only `keys` and `key_ends`. The block offsets and lengths are in other arrays, so they do not take space in the cache lines that the search loads.
+1. To find key `i`, the search reads `key_ends[i]` and `key_ends[i + 1]`, which are next to each other. It then reads the key bytes. There are no offsets or vtables to follow. In the FlatBuffer, the same step makes many reads through offsets and a vtable.
+2. The search reads only `index_keys` and `key_ends`. The block offsets and lengths are in other arrays, so they do not take space in the cache lines that the search loads.
 
 In an isolated test with 65K blocks (section Performance & Cost), a binary search over the flat arrays is 2.6× to 2.7× faster than the same search over the FlatBuffer when the index is in the CPU cache (164 to 189 ns against 438 to 499 ns). It is 1.8× to 2.0× faster when the index is not in the CPU cache (598 to 747 ns against 1,164 to 1,393 ns).
 
 ### Prefix values
 
-With flat arrays alone, the search still compares full keys in each step. To make these compares cheaper, the search compares prefix values. The prefix value of a key is the 8 bytes of the key after a shared prefix, padded with zeros and read as a big-endian `u64`. Take two keys that start with the shared prefix. If one key is smaller, its prefix value is smaller or equal. So the search can compare two `u64` values, and only equal values need a full key compare.
+With flat arrays alone, the search still compares index keys in each step. To make these compares cheaper, the search compares prefix values. The prefix value of a key is the 8 bytes of the key after a shared prefix. The bytes are padded with zeros and read as a big-endian `u64`. Take two keys that start with the shared prefix. If one key is smaller, its prefix value is smaller or equal. So the search can compare two `u64` values, and only equal values need an index key compare.
 
-A shared prefix belongs to a range of keys, and its boundary keys define it. Take a group of consecutive index keys, and the first key after the group. These two boundary keys bound the group: every key of the group is at or above the first one and below the second one. The keys are sorted, so every key between the two boundary keys starts with their shared prefix. A search key between the boundary keys also starts with it, so the index needs to store only the length of the shared prefix, not its bytes.
+A shared prefix belongs to a range of keys, and its boundary keys define it. Take a group of consecutive index keys, and the index key after the group. These two boundary keys bound the group: every key of the group is at or above the first one and below the second one. The keys are sorted, so every key between the two boundary keys starts with their shared prefix. A search key between the boundary keys also starts with it, so the index needs to store only the length of the shared prefix, not its bytes.
 
 The size of the group sets how well prefix values work. With one group for the whole SST, a single key in a different part of the key space shortens the shared prefix for all keys. With small groups, such a key affects only its own group. The next section uses groups of 15 keys, one for each node of the B+ tree. "B-Trees Are Back" takes the prefix of each B-tree node from its boundary keys in the same way, and RocksDB `format_version` 8 stores the common key prefix of each index block one time ([RocksDB PR 15117](https://github.com/facebook/rocksdb/pull/15117)).
 
-Smaller groups keep more prefix values distinct, but they cost more. Each group stores the length of its shared prefix. The search also computes the prefix value of the key again for each group that it visits. Larger groups, such as one for the whole SST, store fewer lengths and compute fewer prefix values, but one unusual key or one large parent then makes more values equal, and each tie costs a full key compare. The Open Questions ask whether the size should be tunable.
+Smaller groups keep more prefix values distinct, but they cost more. Each group stores the length of its shared prefix. The search also computes the prefix value of the key again for each group that it visits. Larger groups, such as one for the whole SST, store fewer lengths and compute fewer prefix values, but one unusual key or one large parent then makes more values equal, and each tie costs an index key compare. The Open Questions ask whether the size should be tunable.
 
-In the isolated test, a binary search over prefix values is 2.0× to 2.3× faster than a binary search over the full keys in the flat arrays when the index is in the CPU cache (77 to 83 ns against 164 to 189 ns). It is 1.2× to 1.5× faster when the index is not in the CPU cache (413 to 532 ns against 598 to 747 ns). Both searches read the same arrays and use no tree.
+In the isolated test, a binary search over prefix values is 2.0× to 2.3× faster than a binary search over the index keys in the flat arrays when the index is in the CPU cache (77 to 83 ns against 164 to 189 ns). It is 1.2× to 1.5× faster when the index is not in the CPU cache (413 to 532 ns against 598 to 747 ns). Both searches read the same arrays and use no tree.
 
 ### Static B+ tree
 
 The tree holds the prefix values. A B+ tree keeps one value for each block in its leaf level, and its upper levels only guide the search.
 
-Each node has 128 bytes and is aligned to 128 bytes. This is one cache line on CPUs with 128-byte lines, such as Apple M-series CPUs. On x86 and AWS Graviton, which have 64-byte lines, a node is two adjacent lines, and these CPUs usually fetch the two lines together. A node of one 64-byte line would hold only 7 values, so the tree would need one more level (section Alternatives). Each node holds one group of keys from the previous section. One slot of the node holds the length of the shared prefix of the group, and the other 15 slots hold the prefix values of its keys. The boundary keys of a node are its first key and the first key of the next node on the same level.
+Each node has 128 bytes and is aligned to 128 bytes. This is one cache line on CPUs with 128-byte lines, such as Apple M-series CPUs. On x86 and AWS Graviton, which have 64-byte lines, a node is two adjacent lines, and these CPUs usually fetch the two lines together. A node of one 64-byte line holds only 7 values, so the tree needs one more level (section Alternatives). Each node holds one group of keys from the previous section. One slot of the node holds the length of the shared prefix of the group. The other 15 slots hold the prefix values of its keys. The boundary keys of a node are its first index key and the first index key of the next node on the same level.
 
 ```text
 StaticBTree   (5 levels for n = 65K)
@@ -137,7 +135,7 @@ StaticBTree   (5 levels for n = 65K)
   levels[0]     n / 15 nodes      (leaves)
 ```
 
-Each value of a leaf is the prefix value of the first key of one block. Each value of an upper node is the prefix value of the first key of one child. A search reads one node for each level. It computes the prefix value of the search key at the shared prefix of the node, and counts the values below and at or below it with a plain loop.
+Each value of a leaf is the prefix value of the index key of one block. Each value of an upper node is the prefix value of the index key of one child. A search reads one node for each level. It computes the prefix value of the search key at the shared prefix of the node. Then it counts the values below it, and at or below it, with a plain loop.
 
 The tree causes fewer cache misses than a binary search when the index is not fully in the CPU cache. A binary search over 65K values makes 16 steps that wait on each other, and each step can miss the cache. The tree makes 5 steps, one for each level, and its upper levels (about 40 KB for 65K blocks) often stay in the cache.
 
@@ -149,13 +147,13 @@ Point gets and scans use the same search. The search goes down the tree from the
 
 1. Take the prefix value of the key at the shared prefix of the node.
 2. Find the values of the node that equal it. These are the tied children. They are next to each other.
-3. If there are no tied children, the values decide. The search goes to the last child whose value is below the prefix value of the key, or to the first child if there is none.
-4. If there are tied children, a binary search over their first keys, with full key compares, finds the last tied child whose first key is at or below the key. The search goes to that child. If there is none, it goes to the child before the tied children.
+3. If there are no tied children, the values decide. The search goes to the last child whose value is below the prefix value of the key. If there is none, it goes to the first child.
+4. If there are tied children, a binary search over their index keys finds the last tied child at or below the key. The search goes to that child. If there is none, it goes to the child before the tied children.
 
-In the leaf level, the tied children are the candidate blocks: the blocks whose prefix value equals the prefix value of the key. The search compares full keys only inside the candidates:
+In the leaf level, the tied children are the candidate blocks: the blocks whose prefix value equals the prefix value of the key. The search compares index keys only inside the candidates:
 
-- A point get calls `partitions_covering_key(key)`. It returns the block before the first block whose first key is at or above the key. It also returns the blocks whose first key equals the key. There can be several, because the versions of one key can fill more than one block.
-- A scan calls `partition_point_le` and `partition_point_lt` for its start and end bounds. Each returns the number of blocks whose first key is at or below the bound (`le`) or below the bound (`lt`).
+- A point get calls `partitions_covering_key(key)`. It returns the block before the first block whose index key is at or above the key. It also returns the blocks whose index key equals the key. There can be several, because the versions of one key can fill more than one block.
+- A scan calls `partition_point_le` and `partition_point_lt` for its start and end bounds. Each returns the number of blocks whose index key is at or below the bound (`le`) or below the bound (`lt`).
 
 The pseudocode for the search is:
 
@@ -169,18 +167,18 @@ candidates(key, cmp):    # cmp is <= for partition_point_le, < otherwise
         last = count of values <= v in node                 # tied values: first..last
         if level is the leaves:
             return node.start + first .. node.start + last
-        child = last child in first..last whose first key cmp key   # full compares
+        child = last child in first..last whose index key cmp key   # index key compares
                 or first - 1 if there is none
         node = child (clamped to the nodes of the level below)
 
 partition_point_le(key):    # partition_point_lt uses < in place of <=
     c = candidates(key, <=)
-    return first block in c whose first key is not <= key   # full compares
+    return first block in c whose index key is not <= key   # index key compares
 
 partitions_covering_key(key):
     c = candidates(key, <)
-    first_equal = first block in c whose first key is not below key   # full compares
-    end = first block in first_equal..n whose first key is not equal to key
+    first_equal = first block in c whose index key is not below key   # index key compares
+    end = first block in first_equal..n whose index key is not equal to key
     return first_equal.saturating_sub(1)..end
 ```
 
@@ -190,11 +188,11 @@ The index builds the tree when it has at least one block. For an empty index, `I
 
 `RangePartitionedKeySpace` gets three methods with default bodies that keep the current behavior:
 
-- `partition_point_le(key)`: the number of partitions whose first key is at or below `key`.
-- `partition_point_lt(key)`: the number of partitions whose first key is below `key`.
+- `partition_point_le(key)`: the number of partitions whose index key is at or below `key`.
+- `partition_point_lt(key)`: the number of partitions whose index key is below `key`.
 - `partitions_covering_key(key)`: the partitions that can hold `key`.
 
-The free functions in `partitioned_keyspace.rs` call these methods. `SsTableIndexOwned` and the public `SstIndex` override them. So point gets, scans, seeks, cache warming, and cache eviction all use the new search. `SstIndex::partition_point(pred)` takes a predicate, so it keeps the binary search over full keys.
+The free functions in `partitioned_keyspace.rs` call these methods. `SsTableIndexOwned` and the public `SstIndex` override them. So point gets, scans, seeks, cache warming, and cache eviction all use the new search. `SstIndex::partition_point(pred)` takes a predicate, so it keeps the binary search over index keys.
 
 `SsTableIndexOwned` gets plain accessors (`len`, `offset(i)`, `first_key(i)`, `encoded_len(i)`) in place of `borrow().block_meta()`. The code moves to `format/sst_index.rs`.
 
@@ -204,18 +202,18 @@ The search uses no `unsafe` code. Nothing makes sure that the keys of an index a
 
 ### Optional optimization: interpolation guess
 
-When the prefix values are evenly spaced, the index can guess the position of a key from its value using interpolation, as RocksDB does for index blocks ([RocksDB blog](https://rocksdb.org/blog/2026/05/04/interpolation-search.html)). The load fits one line through the values and measures the exact maximum error of the guess. It then picks the lowest tree level whose nodes cover all positions that the error allows, and the search starts there instead of at the root.
+When the prefix values are evenly spaced, the index can guess the position of a key from its value. This is interpolation, as RocksDB uses for index blocks ([RocksDB blog](https://rocksdb.org/blog/2026/05/04/interpolation-search.html)). The load fits one line through the values and measures the exact maximum error of the guess. It then picks the lowest tree level whose nodes cover all positions that the error allows. The search starts there instead of at the root.
 
 1. The guess gives an exact bound, so the search is always correct.
 2. The load cost is one more pass over the prefix values.
-3. It should help evenly spaced keys, such as big-endian sequence numbers. For those keys, the error is small, so the search can skip the upper levels of the tree.
-4. It should help little for hashed keys, and not at all for text keys, whose prefix values are not evenly spaced.
+3. We expect it to help evenly spaced keys, such as big-endian sequence numbers. For those keys, the error is small, so the search can skip the upper levels of the tree.
+4. We expect it to help little for hashed keys, and not at all for text keys, whose prefix values are not evenly spaced.
 
 This RFC proposes the guess as a later, optional phase.
 
 ### Optional optimization: SIMD
 
-The search counts the values in each node with a plain loop, and relies on the compiler to turn it into SIMD compares. The compiler does this on some targets but not on others. This phase writes the node count with explicit SIMD, with a scalar fallback, and picks the code for the CPU at build time or at runtime.
+The search counts the values in each node with a plain loop, and relies on the compiler to turn it into SIMD compares. The compiler does this on some targets but not on others. This phase writes the node count with explicit SIMD and a scalar fallback. It picks the code for the CPU at build time or at runtime.
 
 The expected benefit is mainly for indexes in the CPU cache. There, the compares take a large part of each node visit, and SIMD replaces the 15 compares of a node with a few instructions. For indexes not in the CPU cache, the search mostly waits for memory, so the gain is small.
 
@@ -280,7 +278,7 @@ The read semantics do not change. Get, scan, and seek return the same blocks as 
 
 ### Performance & Cost
 
-We measured the prototype with the `sst_index_search` benchmark on AWS Graviton and on x86. Each number is the Criterion estimate of the time of one point search: the search for the blocks that can hold a key, and the read of the first block offset. Each search waits for the one before it, as the SST lookups of a get do. "Not in the CPU cache" means 64 indexes of 65K blocks (about 140 to 215 MB), searched in random order.
+We measured the prototype with the `sst_index_search` benchmark on AWS Graviton and on x86. Each number is the Criterion estimate of the time of one point search. A point search finds the blocks that can hold a key, and reads the first block offset. Each search waits for the one before it, as the SST lookups of a get do. "Not in the CPU cache" means 64 indexes of 65K blocks (about 140 to 215 MB), searched in random order.
 
 On AWS Graviton:
 
@@ -304,7 +302,7 @@ On x86:
 | 64 × 65K blocks, not in the CPU cache | hashed | 957 to 1,395 ns | 245 to 455 ns | 3.5× |
 | 64 × 65K blocks, not in the CPU cache | sequential | 963 to 1,376 ns | 260 to 394 ns | 3.6× |
 
-The isolated test times each step of the design on its own, on Graviton. It finds `partition_point_le` for random keys in the same synthetic indexes, with each search waiting for the one before it, and with no read of the block offset. It compares a binary search over the full keys in the FlatBuffer, the same search over the flat arrays, a binary search over prefix values (with one shared prefix for each SST and no tree), and the tree. The sections above give its results.
+The isolated test times each step of the design on its own, on Graviton. It finds `partition_point_le` for random keys in the same synthetic indexes, with each search waiting for the one before it, and with no read of the block offset. It compares a binary search over the index keys in the FlatBuffer, the same search over the flat arrays, a binary search over prefix values (with one shared prefix for each SST and no tree), and the tree. The sections above give its results.
 
 - Latency: point gets spend less CPU in each SST they search. A get takes 10.99 to 11.29 µs, against 11.45 to 11.70 µs today, which is about 4% less. The index search drops from 6.6% to 2.3% of the CPU of a get. Scans and seeks gain on the search when they open an iterator or seek.
 - Memory: the cache weight of an index is the memory of its arrays and its tree. In the prototype, an index of 65K blocks uses 8% to 15% less memory than today, with the tree included, because the arrays drop the FlatBuffer table, offsets, and padding of each block.
@@ -325,9 +323,8 @@ The isolated test times each step of the design on its own, on Graviton. It find
 
 ## Testing
 
-- Unit tests: the decode of each field, an empty index, and the round trip through `data()`. Other unit tests cover the tree levels, the shared prefix of each node, and unsorted keys.
-- Property tests: the search gives the same results as the current binary search over full keys, for `partition_point_le`, `partition_point_lt`, and `partitions_covering_key`. The keys have shared prefixes of up to 24 bytes, an optional empty first key, and bytes near `0xFF`. The search keys include keys outside the first and last nodes, and keys that tie in upper nodes. The indexes have up to 5,000 blocks and up to 4 tree levels.
-- Property tests: the tree count gives the same result as `slice::partition_point` for repeated values, 0, and `u64::MAX`.
+- Unit tests: the decode of each field, an empty index, and the round trip through `data()`. Other unit tests cover the node count (for repeated values, 0, and `u64::MAX`), the tree levels, the shared prefix of each node, and unsorted keys.
+- Property tests: the search gives the same results as the current binary search over index keys, for `partition_point_le`, `partition_point_lt`, and `partitions_covering_key`. The keys have shared prefixes of up to 24 bytes, an optional empty first index key, and bytes near `0xFF`. The search keys include keys outside the first and last nodes, and keys that tie in upper nodes. The indexes have up to 5,000 blocks and up to 4 tree levels.
 - Integration tests: the existing tests of `sst_iter`, `tablestore`, and `db` use the new index.
 - Fault-injection/chaos tests: none needed. Nothing that is written changes.
 - Deterministic simulation tests: the existing tests run with the new index.
