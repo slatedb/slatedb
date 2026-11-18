@@ -266,6 +266,7 @@ impl BlockBuilderV2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::row_codec_v2::SstRowHeaderV2;
     use crate::types::ValueDeletable;
     use rstest::rstest;
 
@@ -397,23 +398,16 @@ mod tests {
 
         let block = builder.build().expect("build failed");
 
-        // when: decoding entries at restart points
-        let codec = SstRowCodecV2::new();
+        // when: decoding the row headers at restart points
+        let header0 = SstRowHeaderV2::decode(&block.data, block.offsets[0] as usize);
+        let header2 = SstRowHeaderV2::decode(&block.data, block.offsets[1] as usize);
 
-        // First restart point
-        let mut data: &[u8] = &block.data[block.offsets[0] as usize..];
-        let entry0 = codec.decode(&mut data).expect("decode failed");
+        // then: restart point entries have shared=0
+        assert_eq!(header0.shared, 0);
+        assert_eq!(header0.key_suffix(&block.data), b"prefix_aaa");
 
-        // Second restart point
-        let mut data: &[u8] = &block.data[block.offsets[1] as usize..];
-        let entry2 = codec.decode(&mut data).expect("decode failed");
-
-        // then: restart point entries have shared_bytes=0
-        assert_eq!(entry0.shared_bytes, 0);
-        assert_eq!(entry0.key_suffix.as_ref(), b"prefix_aaa");
-
-        assert_eq!(entry2.shared_bytes, 0);
-        assert_eq!(entry2.key_suffix.as_ref(), b"prefix_bbb");
+        assert_eq!(header2.shared, 0);
+        assert_eq!(header2.key_suffix(&block.data), b"prefix_bbb");
     }
 
     #[test]
@@ -427,20 +421,14 @@ mod tests {
         let block = builder.build().expect("build failed");
 
         // when: decoding the second entry
-        let codec = SstRowCodecV2::new();
-
-        // Skip first entry
-        let restart_offset = block.offsets[0] as usize;
-        let mut data: &[u8] = &block.data[restart_offset..];
-        let first_entry = codec.decode(&mut data).expect("decode failed");
-
-        // Now data points to second entry
-        let second_entry = codec.decode(&mut data).expect("decode failed");
+        let first = SstRowHeaderV2::decode(&block.data, block.offsets[0] as usize);
+        let second_offset = first.next_row_offset(&block.data).expect("decode failed");
+        let second = SstRowHeaderV2::decode(&block.data, second_offset);
 
         // then: second entry uses prefix compression
-        assert_eq!(first_entry.shared_bytes, 0);
-        assert_eq!(second_entry.shared_bytes, 9); // "prefix_aa" shared
-        assert_eq!(second_entry.key_suffix.as_ref(), b"b"); // only "b" differs
+        assert_eq!(first.shared, 0);
+        assert_eq!(second.shared, 9); // "prefix_aa" shared
+        assert_eq!(second.key_suffix(&block.data), b"b"); // only "b" differs
     }
 
     #[test]
@@ -573,13 +561,12 @@ mod tests {
         assert_eq!(block.offsets, decoded.offsets);
 
         // Verify we can read the entry back with correct key length
-        let codec = SstRowCodecV2::new();
-        let mut data: &[u8] = &decoded.data[decoded.offsets[0] as usize..];
-        let entry = codec.decode(&mut data).expect("decode failed");
+        let header = SstRowHeaderV2::decode(&decoded.data, decoded.offsets[0] as usize);
+        let key_suffix = header.key_suffix(&decoded.data);
 
-        assert_eq!(entry.shared_bytes, 0);
-        assert_eq!(entry.key_suffix.len(), large_key_size);
-        assert_eq!(entry.key_suffix.as_ref(), large_key.as_slice());
+        assert_eq!(header.shared, 0);
+        assert_eq!(key_suffix.len(), large_key_size);
+        assert_eq!(key_suffix, large_key.as_slice());
     }
 
     #[test]
@@ -615,18 +602,15 @@ mod tests {
         let block = builder.build().expect("build failed");
 
         // then: second entry uses prefix compression with large shared_bytes
-        let codec = SstRowCodecV2::new();
+        let first = SstRowHeaderV2::decode(&block.data, block.offsets[0] as usize);
+        assert_eq!(first.shared, 0);
+        assert_eq!(first.key_suffix(&block.data).len(), key1.len());
 
-        // Skip first entry
-        let mut data: &[u8] = &block.data[block.offsets[0] as usize..];
-        let first_entry = codec.decode(&mut data).expect("decode failed");
-        assert_eq!(first_entry.shared_bytes, 0);
-        assert_eq!(first_entry.key_suffix.len(), key1.len());
-
-        // Second entry should have large shared_bytes (the 1MB prefix)
-        let second_entry = codec.decode(&mut data).expect("decode failed");
-        assert_eq!(second_entry.shared_bytes, prefix_size as u32);
-        assert_eq!(second_entry.key_suffix.len(), suffix_size);
+        // Second entry should have a large shared prefix (the 1MB prefix)
+        let second_offset = first.next_row_offset(&block.data).expect("decode failed");
+        let second = SstRowHeaderV2::decode(&block.data, second_offset);
+        assert_eq!(second.shared, prefix_size);
+        assert_eq!(second.key_suffix(&block.data).len(), suffix_size);
     }
 }
 
