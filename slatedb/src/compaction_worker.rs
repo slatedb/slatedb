@@ -87,6 +87,11 @@ use slatedb_common::DbRand;
 
 pub(crate) const COMPACTION_WORKER_TASK_NAME: &str = "compaction_worker";
 
+struct ActiveCompaction {
+    execution_id: Ulid,
+    ctx: Option<CompactionContext>,
+}
+
 #[derive(Debug)]
 pub(crate) enum WorkerMessage {
     /// Signals that a compaction job has finished execution.
@@ -193,7 +198,7 @@ pub(crate) struct CompactionWorkerHandler {
     /// to `.compactions` with the next heartbeat tick (see
     /// [`Self::heartbeat_owned_jobs`]); progress reports themselves never
     /// write.
-    job_progress: BTreeMap<Ulid, Option<CompactionContext>>,
+    job_progress: BTreeMap<Ulid, ActiveCompaction>,
     /// Failed executions by job ID on this worker. Only finite limits need a
     /// counter. Counts survive claim releases, but not worker restarts.
     job_failures: BTreeMap<Ulid, u64>,
@@ -397,15 +402,21 @@ impl CompactionWorkerHandler {
         let manifest = self.manifest_store.read_latest_manifest().await?;
 
         for compaction in claimed {
-            match Self::build_job_args(&compaction, manifest.core(), &self.worker_id) {
+            let execution_id = self.rand.rng().gen_ulid(self.clock.as_ref());
+            match Self::build_job_args(&compaction, manifest.core(), execution_id) {
                 Ok(args) => {
                     info!(
                         "claimed compaction [worker_id={}, id={}]",
                         self.worker_id,
                         compaction.id()
                     );
-                    self.job_progress
-                        .insert(compaction.id(), compaction.ctx().cloned());
+                    self.job_progress.insert(
+                        compaction.id(),
+                        ActiveCompaction {
+                            execution_id,
+                            ctx: compaction.ctx().cloned(),
+                        },
+                    );
                     Self::dispatch_to_executor(&self.executor, args);
                 }
                 Err(e) => {
@@ -438,14 +449,20 @@ impl CompactionWorkerHandler {
                 format_bytes_si(bytes_processed),
                 total_output_ssts(ctx.subcompactions())
             );
-            *latest = Some(ctx);
+            latest.ctx = Some(ctx);
         }
+    }
+
+    fn compaction_for_execution(&self, execution_id: Ulid) -> Option<Ulid> {
+        self.job_progress
+            .iter()
+            .find_map(|(id, active)| (active.execution_id == execution_id).then_some(*id))
     }
 
     fn build_job_args(
         compaction: &Compaction,
         db_state: &ManifestCore,
-        _worker_id: &str,
+        execution_id: Ulid,
     ) -> Result<StartCompactionJobArgs, SlateDBError> {
         let destination = compaction
             .spec()
@@ -490,9 +507,7 @@ impl CompactionWorkerHandler {
         };
 
         Ok(StartCompactionJobArgs {
-            // Use compaction_id as job id so completion messages line up with
-            // the entry in `.compactions`. (One-job-per-Compaction in phase 2.)
-            id: compaction.id(),
+            id: execution_id,
             compaction_id: compaction.id(),
             segment: compaction.spec().segment().clone(),
             destination,
@@ -558,7 +573,11 @@ impl CompactionWorkerHandler {
                 }
 
                 let mut updated = existing.with_worker(Some(worker_spec.clone()));
-                if let Some(ctx) = self.job_progress.get(&id).and_then(|ctx| ctx.clone()) {
+                if let Some(ctx) = self
+                    .job_progress
+                    .get(&id)
+                    .and_then(|active| active.ctx.clone())
+                {
                     published_output_ssts += total_output_ssts(ctx.subcompactions());
                     updated.set_ctx(Some(ctx));
                 }
@@ -650,11 +669,12 @@ impl CompactionWorkerHandler {
     // To release ownership of a job, use `release_claim` instead.
     fn stop_compaction_job(
         executor: &Arc<dyn CompactionExecutor + Send + Sync>,
-        job_progress: &mut BTreeMap<Ulid, Option<CompactionContext>>,
+        job_progress: &mut BTreeMap<Ulid, ActiveCompaction>,
         compaction_id: Ulid,
     ) {
-        executor.stop_compaction_job(compaction_id);
-        job_progress.remove(&compaction_id);
+        if let Some(active) = job_progress.remove(&compaction_id) {
+            executor.stop_compaction_job(active.execution_id);
+        }
     }
 
     /// Returns a claim to `Scheduled` so it can be re-attempted by any worker
@@ -707,6 +727,7 @@ impl CompactionWorkerHandler {
                 self.write_compacted(id, sorted_run).await?;
             }
             Err(e) => {
+                error!("compaction job failed [id={}, error={:?}]", id, e);
                 if let Some(max_retries) = self.options.compaction_job_max_retries {
                     let failures = self.job_failures.entry(id).or_default();
                     *failures = failures.saturating_add(1);
@@ -726,10 +747,11 @@ impl CompactionWorkerHandler {
                             // this error before cleanup releases the claim.
                             return Err(e);
                         }
+                        self.job_progress.remove(&id);
+                        return Ok(());
                     }
                 }
                 self.job_progress.remove(&id);
-                error!("compaction job failed [id={}, error={:?}]", id, e);
                 self.release_claim(id).await?;
             }
         }
@@ -773,14 +795,18 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
                 self.heartbeat_owned_jobs().await?;
             }
             WorkerMessage::CompactionJobFinished { id, result } => {
-                self.handle_finished(id, result).await?;
+                if let Some(compaction_id) = self.compaction_for_execution(id) {
+                    self.handle_finished(compaction_id, result).await?;
+                }
             }
             WorkerMessage::CompactionJobProgress {
                 id,
                 bytes_processed,
                 ctx,
             } => {
-                self.record_progress(id, bytes_processed, ctx);
+                if let Some(compaction_id) = self.compaction_for_execution(id) {
+                    self.record_progress(compaction_id, bytes_processed, ctx);
+                }
             }
         }
         Ok(())
@@ -1034,6 +1060,7 @@ mod tests {
             Arc::new(DefaultSystemClock::new()),
             CompactionWorkerOptions {
                 max_concurrent_compactions: 1,
+                compaction_job_max_retries: Some(0),
                 ..CompactionWorkerOptions::default()
             },
         )
@@ -1072,11 +1099,43 @@ mod tests {
             1,
             "worker must not dispatch a duplicate execution"
         );
-        assert_eq!(fx.executor.stopped_jobs(), vec![id]);
+        assert_eq!(fx.executor.stopped_jobs(), vec![fx.executor.jobs()[0].id]);
         assert!(!fx.handler.job_progress.contains_key(&id));
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
+
+        let old_execution = fx.executor.jobs()[0].id;
+        fx.handler.poll_and_claim().await.unwrap();
+        let current_execution = fx.executor.jobs()[1].id;
+        assert_ne!(old_execution, current_execution);
+
+        // Events from the retired execution must leave the new execution untouched.
+        for message in [
+            WorkerMessage::CompactionJobProgress {
+                id: old_execution,
+                bytes_processed: 1,
+                ctx: CompactionContext::new(vec![], Some(123)),
+            },
+            WorkerMessage::CompactionJobFinished {
+                id: old_execution,
+                result: Ok(SortedRun::new(0, [])),
+            },
+            WorkerMessage::CompactionJobFinished {
+                id: old_execution,
+                result: Err(SlateDBError::InvalidDBState),
+            },
+        ] {
+            fx.handler.handle(message).await.unwrap();
+        }
+        let active = fx.handler.job_progress.get(&id).unwrap();
+        assert_eq!(active.execution_id, current_execution);
+        assert!(active.ctx.is_none());
+        assert!(fx.handler.job_failures.is_empty());
+        assert_eq!(
+            fx.read_compaction(id).await.unwrap().status(),
+            CompactionStatus::Running
+        );
     }
 
     #[tokio::test]
@@ -1116,7 +1175,7 @@ mod tests {
 
         fx.handler.heartbeat_owned_jobs().await.unwrap();
 
-        assert_eq!(fx.executor.stopped_jobs(), vec![id]);
+        assert_eq!(fx.executor.stopped_jobs(), vec![fx.executor.jobs()[0].id]);
         assert!(!fx.handler.job_progress.contains_key(&id));
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Running);
@@ -1553,7 +1612,14 @@ mod tests {
         mock_clock.advance(Duration::from_secs(5)).await;
         fx.handler.heartbeat_owned_jobs().await.unwrap();
 
-        assert_eq!(fx.executor.stopped_jobs(), vec![lost_id]);
+        let lost_execution = fx
+            .executor
+            .jobs()
+            .iter()
+            .find(|job| job.compaction_id == lost_id)
+            .unwrap()
+            .id;
+        assert_eq!(fx.executor.stopped_jobs(), vec![lost_execution]);
         assert!(!fx.handler.job_progress.contains_key(&lost_id));
         assert!(fx.handler.job_progress.contains_key(&kept_id));
 
@@ -1849,6 +1915,10 @@ mod tests {
         let job = fx.read_compaction(id).await;
         assert_eq!(job.as_ref().map(|job| job.status()), status);
         assert_eq!(
+            fx.handler.job_failures.get(&id).copied(),
+            max_retries.map(|_| 1)
+        );
+        assert_eq!(
             job.as_ref()
                 .and_then(|job| job.worker().map(|worker| worker.worker_id.as_str())),
             owner
@@ -1962,7 +2032,7 @@ mod tests {
         });
         let (tx, rx) = async_channel::unbounded();
         tx.try_send(WorkerMessage::CompactionJobFinished {
-            id,
+            id: fx.executor.jobs()[0].id,
             result: Err(SlateDBError::ObjectStoreError(cause.clone())),
         })
         .unwrap();

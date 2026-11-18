@@ -838,6 +838,10 @@ pub struct CompactionWorkerOptions {
     /// `compression_codec`.
     #[uniffi(default = None)]
     pub compression_codec: Option<CompressionCodec>,
+    /// Maximum retries for a failed job on this worker. `None` permits unlimited
+    /// retries. `Some(0)` stops the worker after its first failed execution.
+    #[uniffi(default = None)]
+    pub compaction_job_max_retries: Option<u32>,
 }
 
 impl Default for CompactionWorkerOptions {
@@ -853,6 +857,7 @@ impl Default for CompactionWorkerOptions {
             max_subcompactions: core.max_subcompactions as u64,
             min_filter_keys: core.min_filter_keys,
             compression_codec: core.compression_codec.map(Into::into),
+            compaction_job_max_retries: core.compaction_job_max_retries,
         }
     }
 }
@@ -875,7 +880,7 @@ impl TryFrom<CompactionWorkerOptions> for slatedb::config::CompactionWorkerOptio
             min_filter_keys: value.min_filter_keys,
             compression_codec: value.compression_codec.map(Into::into),
             metric_level: None,
-            compaction_job_max_retries: None,
+            compaction_job_max_retries: value.compaction_job_max_retries,
             object_store_max_retries: None,
         })
     }
@@ -1027,6 +1032,22 @@ mod tests {
         assert_eq!(core.max_subcompactions, engine.max_subcompactions);
         assert_eq!(core.min_filter_keys, engine.min_filter_keys);
         assert_eq!(core.compression_codec, engine.compression_codec);
+        assert_eq!(
+            core.compaction_job_max_retries,
+            engine.compaction_job_max_retries
+        );
+    }
+
+    #[test]
+    fn compaction_worker_options_carry_retry_limit_into_the_engine() {
+        for retries in [None, Some(0), Some(2)] {
+            let options = CompactionWorkerOptions {
+                compaction_job_max_retries: retries,
+                ..CompactionWorkerOptions::default()
+            };
+            let core = slatedb::config::CompactionWorkerOptions::try_from(options).unwrap();
+            assert_eq!(core.compaction_job_max_retries, retries);
+        }
     }
 
     #[test]
@@ -1042,6 +1063,7 @@ mod tests {
             worker: Some(CompactionWorkerOptions {
                 max_sst_size: 1 << 20,
                 compression_codec: Some(CompressionCodec::Lz4),
+                compaction_job_max_retries: Some(2),
                 ..CompactionWorkerOptions::default()
             }),
             object_store_max_retries: Some(3),
@@ -1054,6 +1076,7 @@ mod tests {
         assert_eq!(core.scheduler_options["min_compaction_sources"], "2");
         let worker = core.worker.unwrap();
         assert_eq!(worker.max_sst_size, 1 << 20);
+        assert_eq!(worker.compaction_job_max_retries, Some(2));
         assert_eq!(
             worker.compression_codec,
             Some(slatedb::config::CompressionCodec::Lz4)

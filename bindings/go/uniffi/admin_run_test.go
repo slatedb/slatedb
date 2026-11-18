@@ -1,11 +1,39 @@
 package slatedb_test
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
 	slatedb "slatedb.io/slatedb-go/uniffi"
 )
+
+func TestCompactionWorkerRetryLimitRoundTrip(t *testing.T) {
+	zero, two := uint32(0), uint32(2)
+	for _, tc := range []struct {
+		name  string
+		limit *uint32
+	}{
+		{"unlimited", nil},
+		{"zero", &zero},
+		{"two", &two},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			options := slatedb.CompactionWorkerOptions{CompactionJobMaxRetries: tc.limit}
+			var buffer bytes.Buffer
+			converter := slatedb.FfiConverterCompactionWorkerOptionsINSTANCE
+			converter.Write(&buffer, options)
+			decoded := converter.Read(&buffer)
+			if tc.limit == nil {
+				if decoded.CompactionJobMaxRetries != nil {
+					t.Fatal("the unlimited retry limit must remain nil")
+				}
+			} else if decoded.CompactionJobMaxRetries == nil || *decoded.CompactionJobMaxRetries != *tc.limit {
+				t.Fatalf("retry limit did not round-trip: want %d", *tc.limit)
+			}
+		})
+	}
+}
 
 // A foreground Admin loop returns once its token is cancelled, whether the
 // cancel came before the loop started or from another goroutine while it ran.
