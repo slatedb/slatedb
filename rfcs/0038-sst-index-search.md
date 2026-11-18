@@ -17,6 +17,7 @@ Table of Contents:
   - [Safety](#safety)
   - [Optional optimization: interpolation guess](#optional-optimization-interpolation-guess)
   - [Optional optimization: SIMD](#optional-optimization-simd)
+  - [Optional optimization: end search for range scans](#optional-optimization-end-search-for-range-scans)
 - [Impact Analysis](#impact-analysis)
   - [Core API & Query Semantics](#core-api--query-semantics)
   - [Consistency, Isolation, and Multi-Versioning](#consistency-isolation-and-multi-versioning)
@@ -216,6 +217,33 @@ This RFC proposes the guess as a later, optional phase.
 The search counts the values in each node with a plain loop, and relies on the compiler to turn it into SIMD compares. The compiler does this on some targets but not on others. This phase writes the node count with explicit SIMD and a scalar fallback. It picks the code for the CPU at build time or at runtime.
 
 The expected benefit is mainly for indexes in the CPU cache. There, the compares take a large part of each node visit, and SIMD replaces the 15 compares of a node with a few instructions. For indexes not in the CPU cache, the search mostly waits for memory, so the gain is small.
+
+### Optional optimization: end search for range scans
+
+A scan searches the index two times: one time for the start bound and one time for the end bound. For a short scan, the second search looks wasted. We measured six ways to find the end block in indexes of 65K blocks, for ranges of 1 to 64 blocks:
+
+- Full: a second search, as today.
+- Bounded: a binary search over the blocks after the start block.
+- Step: a step forward one block at a time, up to 16 blocks, then a bounded search.
+- Gallop: a compare with the block 1, 2, 4, and so on after the start block, then a binary search inside the last jump.
+- Peek: a compare with the next 2 blocks, then a second search.
+- Leaf: a search for the end block in the leaf of the start block, which the first search just read. If the end is past that leaf, a second search.
+
+| Range | Full | Bounded | Step | Gallop | Peek | Leaf |
+|---|---|---|---|---|---|---|
+| 1 block | 310 / 720 ns | 323 / 1,223 ns | 204 / 639 ns | 208 / 639 ns | 206 / 642 ns | 225 / 653 ns |
+| 2 blocks | 305 / 733 ns | 332 / 1,234 ns | 207 / 651 ns | 204 / 656 ns | 202 / 649 ns | 233 / 668 ns |
+| 4 blocks | 308 / 748 ns | 328 / 1,235 ns | 218 / 791 ns | 219 / 788 ns | 343 / 892 ns | 248 / 700 ns |
+| 8 blocks | 306 / 741 ns | 331 / 1,247 ns | 237 / 824 ns | 222 / 809 ns | 329 / 900 ns | 283 / 733 ns |
+| 16 blocks | 309 / 740 ns | 344 / 1,251 ns | 280 / 880 ns | 231 / 840 ns | 331 / 898 ns | 332 / 779 ns |
+| 32 blocks | 310 / 777 ns | 348 / 1,257 ns | 428 / 1,551 ns | 248 / 893 ns | 328 / 944 ns | 334 / 799 ns |
+| 64 blocks | 309 / 812 ns | 355 / 1,282 ns | 435 / 1,566 ns | 267 / 973 ns | 349 / 997 ns | 330 / 809 ns |
+
+The second full search is cheap. It takes the same tree path as the first search until the two keys go to different children, so most of its nodes are already in the CPU cache. It compares only prefix values, so its time changes little with the range.
+
+Bounded, Step, Gallop, and Peek compare index keys, which are stored apart from the nodes. Each compare can read a new cache line. In the CPU cache, Gallop is faster than Full for every range up to 64 blocks, but gets slower as the number blocks to scan increases. Out of the CPU cache, the forward searches are about 10% faster for 1 or 2 blocks, but they are slower from 4 blocks on.
+
+Leaf compares only the prefix values of a leaf that the first search just read. It is faster than Full for ranges of 1 to 8 blocks, by 8% to 27% in the CPU cache and by 1% to 9% out of it. For longer ranges, it falls back to a second search, and it is at most 8% slower than Full. Since the index search cost is relatively more significant for short scans, this optimization might be worth doing.
 
 ## Impact Analysis
 
