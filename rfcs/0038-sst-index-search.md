@@ -46,7 +46,7 @@ Authors:
 
 ## Summary
 
-Every read searches the SST index to find the data block that can hold a key. Today the index stays in memory as the FlatBuffer from the file. The search is a binary search that follows FlatBuffer offsets and compares full keys. This RFC proposes a new in-memory form of the index, built each time the index is loaded into memory. The new form has three parts: flat arrays, one numeric prefix value for each block, and a static B+ tree over these values. Each node of the tree fills one cache line. In a prototype, a point search is 11× to 15× faster when the index is in the CPU cache, and 4× to 9× faster when it is not. The file format, the verifier, and the public API do not change.
+Every read searches the SST index to find the data block that can hold a key. Today the index stays in memory as the FlatBuffer from the file. The search is a binary search that follows FlatBuffer offsets and compares full keys. This RFC proposes a new in-memory form of the index, built each time the index is loaded into memory. The new form has two parts: flat arrays, and a static B+ tree over numeric prefix values. Each node of the tree has 128 bytes. Its prefix values are the 8 key bytes after the prefix that the keys of the node share. In a prototype on AWS Graviton, a point search over an index of 65K blocks with synthetic keys is about 4× faster, both when the index is in the CPU cache and when it is not. The file format, the verifier, and the public API do not change.
 
 ## Motivation
 
@@ -65,7 +65,7 @@ This approach has these costs:
 
 Both point gets and scans pay for the index search, but point gets pay the most. A point get searches the index of each SST that its filter does not rule out. Its random keys often land in indexes that are not in the CPU cache.
 
-A profile of point gets shows the size of this cost. In the test, one SST holds the key, all data is in the block cache, and a get takes about 6 to 6.5 µs. The index search takes about 11% of the CPU of a get for an index of 65K blocks (about 720 ns).
+A profile of point gets on AWS Graviton shows the size of this cost. In the test, one SST with an index of about 65K blocks holds the key, and all data is in the block cache. A get takes about 11.6 µs, and the index search takes about 6.6% of its CPU (about 760 ns).
 
 ## Goals
 
@@ -98,7 +98,7 @@ IndexArrays
   encoded_lens  Option<[u32; n]>  block length (None when all are zero)
   keys          [u8]              all first keys, one after the other
   key_ends      [u32; n]          end of each key in `keys`
-  prefixes      Option<PrefixArray>
+  tree          Option<StaticBTree>
 ```
 
 When `SsTableIndexOwned::new` accepts an index, it copies the index into one array for each field and drops the FlatBuffer bytes. All first keys are in one buffer, with an array of end positions.
@@ -108,68 +108,51 @@ In memory, the flat arrays replace the FlatBuffer as the form of the index that 
 1. To find key `i`, the search reads `key_ends[i - 1]` and `key_ends[i]`, which are next to each other. It then reads the key bytes. There are no offsets or vtables to follow. In the FlatBuffer, the same step makes many reads through offsets and a vtable.
 2. The search reads only `keys` and `key_ends`. The block offsets and lengths are in other arrays, so they do not take space in the cache lines that the search loads.
 
-In an isolated test with 65K blocks in the CPU cache, a binary search over the flat arrays takes 254 ns, against 468 ns for the FlatBuffer.
+In an isolated test with 65K blocks (section Performance & Cost), a binary search over the flat arrays is 2.6× to 2.7× faster than the same search over the FlatBuffer when the index is in the CPU cache (164 to 189 ns against 438 to 499 ns). It is 1.8× to 2.0× faster when the index is not in the CPU cache (598 to 747 ns against 1,164 to 1,393 ns).
 
 ### Prefix values
 
-With flat arrays alone, the search still compares full keys in each step. To make these compares cheaper, the load first computes the shared prefix of the SST. The shared prefix is the longest prefix that every key in `keys` starts with, except the first key, which is always empty today. The keys are sorted, so the load compares only the second key and the last key. Their common prefix is also a prefix of every key between them. The shared prefix is empty if the second key and the last key start with different bytes.
+With flat arrays alone, the search still compares full keys in each step. To make these compares cheaper, the search compares prefix values. The prefix value of a key is the 8 bytes of the key after a shared prefix, padded with zeros and read as a big-endian `u64`. Take two keys that start with the shared prefix. If one key is smaller, its prefix value is smaller or equal. So the search can compare two `u64` values, and only equal values need a full key compare.
 
-If the shared prefix is short (for example, at most 16 bytes), the index stores it inline. Otherwise, the search reads the first `shared_len` bytes of the last key in `keys`.
+A shared prefix belongs to a range of keys, and its boundary keys define it. Take a group of consecutive index keys, and the first key after the group. These two boundary keys bound the group: every key of the group is at or above the first one and below the second one. The keys are sorted, so every key between the two boundary keys starts with their shared prefix. A search key between the boundary keys also starts with it, so the index needs to store only the length of the shared prefix, not its bytes.
 
-With the shared prefix, the index stores a prefix value for each block: a fixed-size number that the search can compare cheaply. The prefix value is the 8 key bytes after the shared prefix, padded with zeros and read as a big-endian `u64`. The empty first key has the value 0. If key `a` is smaller than key `b`, the value of `a` is smaller than or equal to the value of `b`. So a smaller value means a smaller key, and a larger value means a larger key. Only equal values need a full key compare, so most search steps compare two `u64` values.
+The size of the group sets how well prefix values work. With one group for the whole SST, a single key in a different part of the key space shortens the shared prefix for all keys. With small groups, such a key affects only its own group. The next section uses groups of 15 keys, one for each node of the B+ tree. "B-Trees Are Back" takes the prefix of each B-tree node from its boundary keys in the same way, and RocksDB `format_version` 8 stores the common key prefix of each index block one time ([RocksDB PR 15117](https://github.com/facebook/rocksdb/pull/15117)).
 
-RocksDB `format_version` 8 uses a similar idea: it stores the common key prefix of each index block one time and compares only the rest of each key ([RocksDB PR 15117](https://github.com/facebook/rocksdb/pull/15117)).
+Smaller groups keep more prefix values distinct, but they cost more. Each group stores the length of its shared prefix. The search also computes the prefix value of the key again for each group that it visits. Larger groups, such as one for the whole SST, store fewer lengths and compute fewer prefix values, but one unusual key or one large parent then makes more values equal, and each tie costs a full key compare. The Open Questions ask whether the size should be tunable.
 
-```text
-PrefixArray
-  shared_len      usize             length of the shared prefix
-  shared_inline   [u8; 16]          shared prefix, if it is at most 16 bytes
-  btree           StaticBTree       the prefix values, in a B+ tree
-```
-
-As an optimization, the load builds `IndexArrays::prefixes` only if all of these conditions are true:
-
-1. The index has at least 2 blocks.
-2. The first key is empty, and no other key is empty.
-3. At least half of the prefix values are distinct.
-
-Otherwise, `IndexArrays::prefixes` is `None`, and the search falls back to a binary search over the full keys in the arrays.
-
-The rationale for doing so is that with many equal values, the search must compare full keys inside long runs of equal values. The prefix values then give a small gain for their memory. The "at least half" condition is part of the open questions.
-
-In an isolated test with 65K blocks in the CPU cache, a binary search over the prefix values takes 47 ns, against 254 ns over the flat arrays.
+In the isolated test, a binary search over prefix values is 2.0× to 2.3× faster than a binary search over the full keys in the flat arrays when the index is in the CPU cache (77 to 83 ns against 164 to 189 ns). It is 1.2× to 1.5× faster when the index is not in the CPU cache (413 to 532 ns against 598 to 747 ns). Both searches read the same arrays and use no tree.
 
 ### Static B+ tree
 
-The prefix values are the leaf level of a static B+ tree. A B+ tree keeps all values in its leaf level, and its upper levels only guide the search.
+The tree holds the prefix values. A B+ tree keeps one value for each block in its leaf level, and its upper levels only guide the search.
 
-Each node is one cache line, aligned to the line. The node size comes from the target architecture at compile time. This section assumes 128-byte cache lines.
+Each node has 128 bytes and is aligned to 128 bytes. This is one cache line on CPUs with 128-byte lines, such as Apple M-series CPUs. On x86 and AWS Graviton, which have 64-byte lines, a node is two adjacent lines, and these CPUs usually fetch the two lines together. A node of one 64-byte line would hold only 7 values, so the tree would need one more level (section Alternatives). Each node holds one group of keys from the previous section. One slot of the node holds the length of the shared prefix of the group, and the other 15 slots hold the prefix values of its keys. The boundary keys of a node are its first key and the first key of the next node on the same level.
 
 ```text
-StaticBTree                         (4 levels for n = 65K)
-  levels[3]     1 node              first value of each node below
-  levels[2]     n / 4096 nodes      first value of each node below
-  levels[1]     n / 256 nodes       first value of each node below
-  levels[0]     n / 16 nodes        one prefix value for each block
+StaticBTree   (5 levels for n = 65K)
+  levels[4]     1 node
+  levels[3]     n / 15^4 nodes
+  levels[2]     n / 15^3 nodes
+  levels[1]     n / 15^2 nodes
+  levels[0]     n / 15 nodes      (leaves)
 ```
 
-1. Each upper level holds the first value of each node of the level below, as the index holds the first key of each block.
-2. `u64::MAX` pads each level to whole nodes.
-3. A search reads one node for each level. In each node, it counts the values at or below the target with a plain loop.
-4. The descent goes to the last child whose first value is at or below the target.
+Each value of a leaf is the prefix value of the first key of one block. Each value of an upper node is the prefix value of the first key of one child. A search reads one node for each level. It computes the prefix value of the search key at the shared prefix of the node, and counts the values below and at or below it with a plain loop.
 
-The tree causes fewer cache misses than a binary search when the index is not fully in the CPU cache. A binary search over 65K values makes 16 steps that wait on each other, and each step can miss the cache. The tree makes 4 steps, one for each level, and its upper levels (about 35 KB for 65K blocks) often stay in the cache. An isolated test used only indexes that are not in the CPU cache. In this test, a search takes about 200 to 230 ns with the tree, against 550 to 670 ns with a binary search over the prefix values. When the whole index is in the CPU cache, the two are about as fast. The tree adds about 7% to the memory of the prefix values.
+The tree causes fewer cache misses than a binary search when the index is not fully in the CPU cache. A binary search over 65K values makes 16 steps that wait on each other, and each step can miss the cache. The tree makes 5 steps, one for each level, and its upper levels (about 40 KB for 65K blocks) often stay in the cache.
+
+In the isolated test, with 64 indexes of 65K blocks that are not in the CPU cache, the tree is 1.5× to 1.9× faster than a binary search over the same prefix values (233 to 346 ns against 413 to 532 ns). When the whole index is in the CPU cache, the binary search is a little faster. The tree uses about 9.2 bytes for each block, about 15% more than a plain array of prefix values (8 bytes for each block).
 
 ### Search
 
-Point gets and scans use the same search. Each search first uses the prefix values to find the candidate blocks. These are the blocks whose prefix value equals the prefix value of the key. Only these blocks need a full key compare. The steps for finding candidate blocks are:
+Point gets and scans use the same search. The search goes down the tree from the root. In each node, it does these steps:
 
-1. If the key does not start with the shared prefix, the answer follows from the shared prefix alone, with no full key compare. If the key is below the shared prefix, only the first block can hold it. If the key is above the shared prefix, only the last block can hold it. This works because index keys are lower bounds, not row keys.
-2. Take the prefix value of the key, and count the values at or below it in the tree. The count is `end`.
-3. If the prefix value of block `end - 1` does not equal the prefix value of the key, no block has the same value, so the candidates are empty.
-4. If the prefix value of block `end - 1` equals the prefix value of the key, the candidates are all blocks with that value. They are next to each other and end at `end - 1`, so the search walks back from `end - 1` to find the first one.
+1. Take the prefix value of the key at the shared prefix of the node.
+2. Find the values of the node that equal it. These are the tied children. They are next to each other.
+3. If there are no tied children, the values decide. The search goes to the last child whose value is below the prefix value of the key, or to the first child if there is none.
+4. If there are tied children, a binary search over their first keys, with full key compares, finds the last tied child whose first key is at or below the key. The search goes to that child. If there is none, it goes to the child before the tied children.
 
-The search then compares full keys only inside the candidates:
+In the leaf level, the tied children are the candidate blocks: the blocks whose prefix value equals the prefix value of the key. The search compares full keys only inside the candidates:
 
 - A point get calls `partitions_covering_key(key)`. It returns the block before the first block whose first key is at or above the key. It also returns the blocks whose first key equals the key. There can be several, because the versions of one key can fill more than one block.
 - A scan calls `partition_point_le` and `partition_point_lt` for its start and end bounds. Each returns the number of blocks whose first key is at or below the bound (`le`) or below the bound (`lt`).
@@ -177,27 +160,31 @@ The search then compares full keys only inside the candidates:
 The pseudocode for the search is:
 
 ```text
-candidates(key):
-    if no prefix values: return 0..n
-    if not key.starts_with(shared_prefix):
-        return n..n if key > shared_prefix, else (0..1 if key is empty, else 1..1)
-    v = prefix_value(key)
-    end = tree.count_le(v)
-    if end == 0 or prefix_value(block end - 1) != v:
-        return end..end
-    start = first position of the run of equal values before end
-    return start..end
+candidates(key, cmp):    # cmp is <= for partition_point_le, < otherwise
+    if the index is empty: return 0..0
+    node = root
+    for each level from the root down to the leaves:
+        v = prefix_value(key, node.prefix_len)
+        first = count of values < v in node
+        last = count of values <= v in node                 # tied values: first..last
+        if level is the leaves:
+            return node.start + first .. node.start + last
+        child = last child in first..last whose first key cmp key   # full compares
+                or first - 1 if there is none
+        node = child (clamped to the nodes of the level below)
 
 partition_point_le(key):    # partition_point_lt uses < in place of <=
-    c = candidates(key)
+    c = candidates(key, <=)
     return first block in c whose first key is not <= key   # full compares
 
 partitions_covering_key(key):
-    c = candidates(key)
+    c = candidates(key, <)
     first_equal = first block in c whose first key is not below key   # full compares
-    end = first block in first_equal..c.end whose first key is not equal to key
+    end = first block in first_equal..n whose first key is not equal to key
     return first_equal.saturating_sub(1)..end
 ```
+
+The index builds the tree when it has at least one block. For an empty index, `IndexArrays::tree` is `None`, and the search finds no blocks.
 
 ### API changes inside the crate
 
@@ -220,9 +207,9 @@ The search uses no `unsafe` code. Nothing makes sure that the keys of an index a
 When the prefix values are evenly spaced, the index can guess the position of a key from its value using interpolation, as RocksDB does for index blocks ([RocksDB blog](https://rocksdb.org/blog/2026/05/04/interpolation-search.html)). The load fits one line through the values and measures the exact maximum error of the guess. It then picks the lowest tree level whose nodes cover all positions that the error allows, and the search starts there instead of at the root.
 
 1. The guess gives an exact bound, so the search is always correct.
-2. The load cost is one pass over the values, about 45 µs for 65K blocks.
-3. It helps evenly spaced keys, such as big-endian sequence numbers. For those keys, a search in the CPU cache is about 2 times faster, and a search out of the cache is about 23% faster.
-4. It gives no gain for text keys or hashed keys.
+2. The load cost is one more pass over the prefix values.
+3. It should help evenly spaced keys, such as big-endian sequence numbers. For those keys, the error is small, so the search can skip the upper levels of the tree.
+4. It should help little for hashed keys, and not at all for text keys, whose prefix values are not evenly spaced.
 
 This RFC proposes the guess as a later, optional phase.
 
@@ -230,7 +217,7 @@ This RFC proposes the guess as a later, optional phase.
 
 The search counts the values in each node with a plain loop, and relies on the compiler to turn it into SIMD compares. The compiler does this on some targets but not on others. This phase writes the node count with explicit SIMD, with a scalar fallback, and picks the code for the CPU at build time or at runtime.
 
-The expected benefit is mainly for indexes in the CPU cache. There, the compares take a large part of each node visit, and SIMD replaces about 16 compares with a few instructions. For indexes not in the CPU cache, the search mostly waits for memory, so the gain is small.
+The expected benefit is mainly for indexes in the CPU cache. There, the compares take a large part of each node visit, and SIMD replaces the 15 compares of a node with a few instructions. For indexes not in the CPU cache, the search mostly waits for memory, so the gain is small.
 
 ## Impact Analysis
 
@@ -293,23 +280,35 @@ The read semantics do not change. Get, scan, and seek return the same blocks as 
 
 ### Performance & Cost
 
-We measured the prototype on an Apple M4 Pro, with synthetic keys and 65K blocks. The numbers are the thread CPU time of one point search. "Not in the CPU cache" means 48 indexes searched in random order, with each search waiting for the one before it. The table measures the full search, so its numbers differ from the isolated tests in the Design section.
+We measured the prototype with the `sst_index_search` benchmark on AWS Graviton and on x86. Each number is the Criterion estimate of the time of one point search: the search for the blocks that can hold a key, and the read of the first block offset. Each search waits for the one before it, as the SST lookups of a get do. "Not in the CPU cache" means 64 indexes of 65K blocks (about 140 to 215 MB), searched in random order.
+
+On AWS Graviton:
 
 | Case | Keys | Today | Prototype | Gain |
 |---|---|---|---|---|
-| Index in the CPU cache | text | 516 ns | 45 ns | 11× |
-| Index in the CPU cache | hashed | 471 ns | 31 ns | 15× |
-| Index not in the CPU cache | text | 2.0 to 2.4 µs | 279 ns | 7 to 9× |
-| Index not in the CPU cache | hashed | 1.1 µs | 263 ns | 4× |
+| 65K blocks, in the CPU cache | text | 452 to 454 ns | 114 ns | 4.0× |
+| 65K blocks, in the CPU cache | hashed | 402 to 405 ns | 107 ns | 3.8× |
+| 65K blocks, in the CPU cache | sequential | 401 to 406 ns | 109 to 111 ns | 3.7× |
+| 64 × 65K blocks, not in the CPU cache | text | 1,159 to 1,189 ns | 292 to 294 ns | 4.0× |
+| 64 × 65K blocks, not in the CPU cache | hashed | 1,040 to 1,063 ns | 250 to 264 ns | 4.1× |
+| 64 × 65K blocks, not in the CPU cache | sequential | 1,053 to 1,062 ns | 261 to 265 ns | 4.0× |
 
-- Latency: point gets spend less CPU in each SST they search. The new search removes about 76% to 93% of the search time, so a point get uses about 8% to 10% less CPU in the profile from Motivation. This is an estimate from the measurements above, not an A/B run of full gets. Scans and seeks gain on the search when they open an iterator or seek.
-- Throughput: independent searches of indexes not in the CPU cache are 18 to 22 times faster (about 110 ns against 2.0 to 2.5 µs, text keys).
-- Object-store requests: no change.
-- Memory: the cache weight of an index is the memory of its arrays and its tree. An index of 65K blocks uses 10% to 16% less memory than today, with the tree included, because the arrays drop the FlatBuffer table, offsets, and padding of each block.
-- Index load: the load also builds the arrays and the tree. At 65K blocks, load and insert take about 2.4 ms, against 3.6 ms today. A disk cache hit also builds the arrays and the tree. Today the cache insert copies the index and runs the verifier again, but the new insert shares the arrays, so the verifier runs one time.
-- Disk cache writes of an index encode a FlatBuffer again. We did not measure this cost.
+On x86:
 
-The numbers come from two runs on one Apple M4 Pro, with synthetic keys whose prefix values are almost all distinct. Real keys can have fewer distinct values. If the guard then drops the prefix values, the search is only about 2 times faster than today.
+| Case | Keys | Today | Prototype | Gain |
+|---|---|---|---|---|
+| 65K blocks, in the CPU cache | text | 438 to 449 ns | 130 to 133 ns | 3.4× |
+| 65K blocks, in the CPU cache | hashed | 442 to 466 ns | 111 to 112 ns | 4.1× |
+| 65K blocks, in the CPU cache | sequential | 436 to 469 ns | 130 to 133 ns | 3.4× |
+| 64 × 65K blocks, not in the CPU cache | text | 1,134 to 1,599 ns | 262 to 421 ns | 4× |
+| 64 × 65K blocks, not in the CPU cache | hashed | 957 to 1,395 ns | 245 to 455 ns | 3.5× |
+| 64 × 65K blocks, not in the CPU cache | sequential | 963 to 1,376 ns | 260 to 394 ns | 3.6× |
+
+The isolated test times each step of the design on its own, on Graviton. It finds `partition_point_le` for random keys in the same synthetic indexes, with each search waiting for the one before it, and with no read of the block offset. It compares a binary search over the full keys in the FlatBuffer, the same search over the flat arrays, a binary search over prefix values (with one shared prefix for each SST and no tree), and the tree. The sections above give its results.
+
+- Latency: point gets spend less CPU in each SST they search. A get takes 10.99 to 11.29 µs, against 11.45 to 11.70 µs today, which is about 4% less. The index search drops from 6.6% to 2.3% of the CPU of a get. Scans and seeks gain on the search when they open an iterator or seek.
+- Memory: the cache weight of an index is the memory of its arrays and its tree. In the prototype, an index of 65K blocks uses 8% to 15% less memory than today, with the tree included, because the arrays drop the FlatBuffer table, offsets, and padding of each block.
+- Index load: the load also builds the arrays and the tree. At 65K blocks, load and insert take 4.68 to 4.74 ms, against 6.09 to 6.19 ms today. The load alone takes longer than today (4.68 to 4.74 ms against 3.02 to 3.03 ms). But today the cache insert copies the index and runs the verifier again, while the new insert shares the arrays, so the verifier runs one time. A disk cache hit also builds the arrays and the tree.
 
 ### Observability
 
@@ -326,8 +325,8 @@ The numbers come from two runs on one Apple M4 Pro, with synthetic keys whose pr
 
 ## Testing
 
-- Unit tests: the decode of each field, an empty index, and the round trip through `data()`. Other unit tests cover the guard for distinct values, the tree levels, and unsorted keys.
-- Property tests: the search gives the same results as the current binary search over full keys, for `partition_point_le`, `partition_point_lt`, and `partitions_covering_key`. The keys have shared prefixes of up to 24 bytes, an optional empty first key, and bytes near `0xFF`. The indexes have up to 5,000 blocks and up to 4 tree levels.
+- Unit tests: the decode of each field, an empty index, and the round trip through `data()`. Other unit tests cover the tree levels, the shared prefix of each node, and unsorted keys.
+- Property tests: the search gives the same results as the current binary search over full keys, for `partition_point_le`, `partition_point_lt`, and `partitions_covering_key`. The keys have shared prefixes of up to 24 bytes, an optional empty first key, and bytes near `0xFF`. The search keys include keys outside the first and last nodes, and keys that tie in upper nodes. The indexes have up to 5,000 blocks and up to 4 tree levels.
 - Property tests: the tree count gives the same result as `slice::partition_point` for repeated values, 0, and `u64::MAX`.
 - Integration tests: the existing tests of `sst_iter`, `tablestore`, and `db` use the new index.
 - Fault-injection/chaos tests: none needed. Nothing that is written changes.
@@ -338,7 +337,7 @@ The numbers come from two runs on one Apple M4 Pro, with synthetic keys whose pr
 ## Rollout
 
 - Milestones / phases:
-  1. The new index: flat arrays, prefix values, the static B+ tree, the search, and the new trait methods.
+  1. The new index: flat arrays, the static B+ tree with a shared prefix for each node, the search, and the new trait methods.
   2. Optional: the interpolation guess.
   3. Optional: explicit SIMD for the node search.
 - Feature flags / opt-in: none. The change is internal, and it gives the same results.
@@ -346,17 +345,19 @@ The numbers come from two runs on one Apple M4 Pro, with synthetic keys whose pr
 
 ## Alternatives
 
-- Status quo. The search stays at 470 ns to 2.4 µs for each SST, and the cost grows with the number of SSTs that a get searches.
-- Flat arrays only, with no prefix values. The search is about 2 times faster than today. The prefix values give most of the remaining gain.
-- A binary search over the prefix values, with no tree. It is as fast as the tree when the index is in the CPU cache. It is about 2.5 to 3 times slower when the index is not in the CPU cache.
+- Status quo. The search cost grows with the number of SSTs that a get searches.
+- Flat arrays only. This gives up the gains of the prefix values and the tree.
+- One shared prefix for each SST. It needs no slot in each node, and the search computes the prefix value of the key one time. But one key from another part of the key space shortens the prefix of the whole SST, and more values then tie.
+- A binary search over the prefix values, with no tree. It misses the CPU cache more often (section Static B+ tree).
+- Nodes of one 64-byte cache line on x86 and Graviton. A node holds 7 values, so 65K blocks need 6 levels. In the benchmark, 128-byte nodes are 10% to 17% faster.
 - Delta-encoded keys with restart points, as RocksDB uses for data blocks. RocksDB stores index keys in full by default (`index_block_restart_interval` = 1). Delta encoding saves memory, but the search must decode keys one by one.
 
 ## Open Questions
 
-- The guard keeps the prefix values only if at least half of them are distinct. Is this the right threshold for real keys? Keys with long shared parts after the shared prefix, such as `user:` and `session:` in one SST, can fail it.
-- The prefix value has 8 bytes, and the index stores the shared prefix inline only up to 16 bytes. Are these the right sizes? A wider value keeps more values distinct, but a node then holds fewer values.
+- Should the granularity of the shared prefix be tunable? This RFC takes one shared prefix for each node. A more general design takes one shared prefix for each group of nodes, from one node up to the whole SST. A larger group needs fewer prefix lengths and fewer prefix values of the search key, but keeps fewer values distinct.
+- The prefix value has 8 bytes. Is this the right size? A wider value keeps more values distinct, but a node then holds fewer values.
+- Should the prefix length of a node be in a slot of the node, or in a separate array for each level? A slot needs no extra memory read, but it costs one value in each node.
 - Are evenly spaced keys, such as big-endian sequence numbers, common among SlateDB users? The answer decides whether the interpolation guess is worth its own phase.
-- All measurements come from an Apple M4 Pro with 128-byte cache lines. On x86 and AWS Graviton, with 64-byte lines, is a node of one cache line faster than a node of 128 bytes? A node of one line needs more levels.
 - How much faster is the node search with explicit SIMD, on x86 and on ARM?
 
 ## References
@@ -375,3 +376,4 @@ The numbers come from two runs on one Apple M4 Pro, with synthetic keys whose pr
 ## Updates
 
 - 2026-11-09: first draft.
+- 2026-11-17: one shared prefix for each tree node, not for each SST. Updated the prototype and the performance numbers.
