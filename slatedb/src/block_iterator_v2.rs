@@ -213,7 +213,7 @@ impl<B: BlockLike> AscendingState<B> {
     }
 
     fn advance_past_current_entry(&mut self, header: &SstRowHeaderV2) -> Result<(), SlateDBError> {
-        self.offset_in_block = SstRowTailV2::next_row_offset(self.block.data(), header)?;
+        self.offset_in_block = header.next_row_offset(self.block.data())?;
         self.entries_since_restart += 1;
         Ok(())
     }

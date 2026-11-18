@@ -98,25 +98,33 @@ impl SstRowEntryV2 {
         };
         let value_len_varint_size = varint_len(value_len as u32);
 
-        let mut size = shared_bytes_len // shared_bytes varint
-            + unshared_bytes_len        // unshared_bytes varint
-            + value_len_varint_size     // value_len varint
-            + self.key_suffix.len()     // key_delta
-            + value_len                 // value
-            + 8                         // seq (u64)
-            + 1; // flags (u8)
-
-        if self.expire_ts.is_some() {
-            size += 8; // i64
-        }
-        if self.create_ts.is_some() {
-            size += 8; // i64
-        }
-        size
+        shared_bytes_len              // shared_bytes varint
+            + unshared_bytes_len      // unshared_bytes varint
+            + value_len_varint_size   // value_len varint
+            + self.key_suffix.len()   // key_delta
+            + value_len               // value
+            + tail_len(&self.flags()) // seq, flags, and timestamps
     }
 }
 
-/// The header of a V2 row, as positions in the block data.
+/// The number of bytes after the value, including seq (8), flags (1), and
+/// optional timestamps (8 each).
+fn tail_len(flags: &RowFlags) -> usize {
+    let mut len = 8 + 1;
+    if flags.contains(RowFlags::HAS_EXPIRE_TS) {
+        len += 8;
+    }
+    if flags.contains(RowFlags::HAS_CREATE_TS) {
+        len += 8;
+    }
+    len
+}
+
+/// The header of a V2 row, i.e., the part of the row before the key suffix.
+///
+/// A seek reads many rows only to rebuild and compare their keys. The header
+/// lets it rebuild each key and skip to the next row, without decoding the
+/// whole row.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SstRowHeaderV2 {
     /// The number of leading bytes that the key shares with the key before it.
@@ -151,6 +159,13 @@ impl SstRowHeaderV2 {
     pub(crate) fn key_suffix<'a>(&self, data: &'a [u8]) -> &'a [u8] {
         &data[self.key_start..self.key_end]
     }
+
+    /// Returns the offset where the next row starts. Reads only the flags
+    /// byte after the value.
+    pub(crate) fn next_row_offset(&self, data: &[u8]) -> Result<usize, SlateDBError> {
+        let flags = RowFlags::try_from(data[self.value_end + 8])?;
+        Ok(self.value_end + tail_len(&flags))
+    }
 }
 
 /// The fields of a V2 row after the key.
@@ -163,24 +178,6 @@ pub(crate) struct SstRowTailV2 {
 }
 
 impl SstRowTailV2 {
-    /// Returns the offset where the next row starts. `header` is the header of
-    /// the current row.
-    pub(crate) fn next_row_offset(
-        data: &[u8],
-        header: &SstRowHeaderV2,
-    ) -> Result<usize, SlateDBError> {
-        let flags_offset = header.value_end + 8;
-        let flags = SstRowCodecV2::new().decode_flags(data[flags_offset])?;
-        let mut end = flags_offset + 1;
-        if flags.contains(RowFlags::HAS_EXPIRE_TS) {
-            end += 8;
-        }
-        if flags.contains(RowFlags::HAS_CREATE_TS) {
-            end += 8;
-        }
-        Ok(end)
-    }
-
     /// Decode the part of a row after the key.
     ///
     /// The value is a slice of `data`, not a copy. Returns the decoded fields
@@ -192,7 +189,7 @@ impl SstRowTailV2 {
         let value = data.slice(header.key_end..header.value_end);
         let mut buf = &data[header.value_end..];
         let seq = buf.get_u64();
-        let flags = SstRowCodecV2::new().decode_flags(buf.get_u8())?;
+        let flags = RowFlags::try_from(buf.get_u8())?;
         let expire_ts = flags
             .contains(RowFlags::HAS_EXPIRE_TS)
             .then(|| buf.get_i64());
@@ -286,7 +283,7 @@ impl SstRowCodecV2 {
 
         // Read seq & flags
         let seq = data.get_u64();
-        let flags = self.decode_flags(data.get_u8())?;
+        let flags = RowFlags::try_from(data.get_u8())?;
 
         // Read timestamps
         let (expire_ts, create_ts) =
@@ -329,23 +326,6 @@ impl SstRowCodecV2 {
         let key_suffix = data.copy_to_bytes(unshared_bytes);
 
         (shared_bytes, key_suffix)
-    }
-
-    fn decode_flags(&self, flags: u8) -> Result<RowFlags, SlateDBError> {
-        let parsed =
-            RowFlags::from_bits(flags).ok_or_else(|| SlateDBError::InvalidRowFlags {
-                encoded_bits: flags,
-                known_bits: RowFlags::all().bits(),
-                message: "Unable to parse flags. This may be caused by reading data encoded with a newer codec.".to_string(),
-            })?;
-        if parsed.contains(RowFlags::TOMBSTONE | RowFlags::MERGE_OPERAND) {
-            return Err(SlateDBError::InvalidRowFlags {
-                encoded_bits: parsed.bits(),
-                known_bits: RowFlags::all().bits(),
-                message: "Tombstone and Merge Operand are mutually exclusive.".to_string(),
-            });
-        }
-        Ok(parsed)
     }
 }
 
