@@ -367,6 +367,7 @@ func init() {
 	FfiConverterMergeOperatorINSTANCE.register()
 	FfiConverterMetricsRecorderINSTANCE.register()
 	FfiConverterPrefixExtractorINSTANCE.register()
+	FfiConverterSegmentFilterINSTANCE.register()
 	FfiConverterUpDownCounterINSTANCE.register()
 	uniffiCheckChecksums()
 }
@@ -1887,11 +1888,29 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_segment_filter()
+		})
+		if checksum != 32830 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_segment_filter: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_system_clock()
 		})
 		if checksum != 48371 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_system_clock: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_segmentfilter_should_mirror()
+		})
+		if checksum != 28417 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_segmentfilter_should_mirror: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -9380,6 +9399,10 @@ type ObjectStoreMirrorBuilderInterface interface {
 	// from the wrapped store. If the store does not give them, disable the
 	// scan.
 	WithRemoteScanIntervalMs(intervalMs *uint64) error
+	// Sets the filter that selects the segments to keep on local disk. See
+	// [`SegmentFilter`] for when the mirror asks it and what its answers do.
+	// Without a filter, the mirror keeps all segments.
+	WithSegmentFilter(filter SegmentFilter) error
 	// Sets the clock for retry backoff, the scan, the compaction state reads,
 	// and the last-modified time of mirrored writes.
 	WithSystemClock(clock *SystemClock) error
@@ -9508,6 +9531,20 @@ func (_self *ObjectStoreMirrorBuilder) WithRemoteScanIntervalMs(intervalMs *uint
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_objectstoremirrorbuilder_with_remote_scan_interval_ms(
 			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(intervalMs), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Sets the filter that selects the segments to keep on local disk. See
+// [`SegmentFilter`] for when the mirror asks it and what its answers do.
+// Without a filter, the mirror keeps all segments.
+func (_self *ObjectStoreMirrorBuilder) WithSegmentFilter(filter SegmentFilter) error {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStoreMirrorBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_objectstoremirrorbuilder_with_segment_filter(
+			_pointer, FfiConverterSegmentFilterINSTANCE.Lower(filter), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -9759,6 +9796,204 @@ func slatedb_uniffi_filter_policy_cgo_dispatchCallbackInterfacePrefixExtractorCl
 
 func (c FfiConverterPrefixExtractor) register() {
 	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_prefixextractor(&UniffiVTableCallbackInterfacePrefixExtractorINSTANCE)
+}
+
+// Selects the segments whose compacted SSTs a mirror keeps on local disk.
+// The database reads the SSTs of all other segments from the wrapped store.
+//
+// The mirror keeps one answer for each segment and manifest version. It asks
+// again when the database writes a new manifest, at a flush or a compaction.
+//
+// - The empty prefix is the root segment. A database without a segment
+// extractor has only the root segment, so `false` for it turns the mirror
+// off.
+// - A changed answer takes effect at the next manifest. Then the mirror
+// downloads the SSTs of a segment that it starts to keep, and removes the
+// local copies of a segment that it stops keeping.
+// - While those downloads run, reads of the segment can fail with
+// `Error::Data`.
+// - An error from `should_mirror` counts as `false` for that manifest version.
+// The mirror logs a warning.
+// - A read or write that needs the answer waits for `should_mirror`, so it
+// must return quickly.
+type SegmentFilter interface {
+	// Returns true if the mirror keeps the compacted SSTs of the segment with
+	// prefix `segment` on local disk.
+	ShouldMirror(segment []byte) (bool, error)
+}
+
+// Selects the segments whose compacted SSTs a mirror keeps on local disk.
+// The database reads the SSTs of all other segments from the wrapped store.
+//
+// The mirror keeps one answer for each segment and manifest version. It asks
+// again when the database writes a new manifest, at a flush or a compaction.
+//
+// - The empty prefix is the root segment. A database without a segment
+// extractor has only the root segment, so `false` for it turns the mirror
+// off.
+// - A changed answer takes effect at the next manifest. Then the mirror
+// downloads the SSTs of a segment that it starts to keep, and removes the
+// local copies of a segment that it stops keeping.
+// - While those downloads run, reads of the segment can fail with
+// `Error::Data`.
+// - An error from `should_mirror` counts as `false` for that manifest version.
+// The mirror logs a warning.
+// - A read or write that needs the answer waits for `should_mirror`, so it
+// must return quickly.
+type SegmentFilterImpl struct {
+	ffiObject FfiObject
+}
+
+// Returns true if the mirror keeps the compacted SSTs of the segment with
+// prefix `segment` on local disk.
+func (_self *SegmentFilterImpl) ShouldMirror(segment []byte) (bool, error) {
+	_pointer := _self.ffiObject.incrementPointer("SegmentFilter")
+	defer _self.ffiObject.decrementPointer()
+	_uniffiRV, _uniffiErr := rustCallWithError[*SegmentFilterCallbackError](FfiConverterSegmentFilterCallbackError{}, func(_uniffiStatus *C.RustCallStatus) C.int8_t {
+		return C.uniffi_slatedb_uniffi_fn_method_segmentfilter_should_mirror(
+			_pointer, FfiConverterBytesINSTANCE.Lower(segment), _uniffiStatus)
+	})
+	if _uniffiErr != nil {
+		var _uniffiDefaultValue bool
+		return _uniffiDefaultValue, _uniffiErr
+	} else {
+		return FfiConverterBoolINSTANCE.Lift(_uniffiRV), nil
+	}
+}
+func (object *SegmentFilterImpl) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterSegmentFilter struct {
+	handleMap *concurrentHandleMap[SegmentFilter]
+}
+
+var FfiConverterSegmentFilterINSTANCE = FfiConverterSegmentFilter{
+	handleMap: newConcurrentHandleMap[SegmentFilter](),
+}
+
+func (c FfiConverterSegmentFilter) Lift(handle C.uint64_t) SegmentFilter {
+	if uint64(handle)&1 == 0 {
+		// Rust-generated handle (even), construct a new object wrapping the handle
+		result := &SegmentFilterImpl{
+			newFfiObject(
+				handle,
+				func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+					return C.uniffi_slatedb_uniffi_fn_clone_segmentfilter(handle, status)
+				},
+				func(handle C.uint64_t, status *C.RustCallStatus) {
+					C.uniffi_slatedb_uniffi_fn_free_segmentfilter(handle, status)
+				},
+			),
+		}
+		runtime.SetFinalizer(result, (*SegmentFilterImpl).Destroy)
+		return result
+	} else {
+		// Go-generated handle (odd), retrieve from the handle map
+		val, ok := c.handleMap.tryGet(uint64(handle))
+		if !ok {
+			panic(fmt.Errorf("no callback in handle map: %d", handle))
+		}
+		c.handleMap.remove(uint64(handle))
+		return val
+	}
+}
+
+func (c FfiConverterSegmentFilter) Read(reader io.Reader) SegmentFilter {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterSegmentFilter) Lower(value SegmentFilter) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	if val, ok := value.(*SegmentFilterImpl); ok {
+		// Rust-backed object, clone the handle
+		handle := val.ffiObject.incrementPointer("SegmentFilter")
+		defer val.ffiObject.decrementPointer()
+		return handle
+	} else {
+		// Go-backed object, insert into handle map
+		return C.uint64_t(c.handleMap.insert(value))
+	}
+}
+
+func (c FfiConverterSegmentFilter) Write(writer io.Writer, value SegmentFilter) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalSegmentFilter(handle uint64) SegmentFilter {
+	return FfiConverterSegmentFilterINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalSegmentFilter(value SegmentFilter) uint64 {
+	return uint64(FfiConverterSegmentFilterINSTANCE.Lower(value))
+}
+
+type FfiDestroyerSegmentFilter struct{}
+
+func (_ FfiDestroyerSegmentFilter) Destroy(value SegmentFilter) {
+	if val, ok := value.(*SegmentFilterImpl); ok {
+		val.Destroy()
+	}
+}
+
+//export slatedb_uniffi_object_store_mirror_cgo_dispatchCallbackInterfaceSegmentFilterMethod0
+func slatedb_uniffi_object_store_mirror_cgo_dispatchCallbackInterfaceSegmentFilterMethod0(uniffiHandle C.uint64_t, segment C.RustBuffer, uniffiOutReturn *C.int8_t, callStatus *C.RustCallStatus) {
+	handle := uint64(uniffiHandle)
+	uniffiObj, ok := FfiConverterSegmentFilterINSTANCE.handleMap.tryGet(handle)
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+
+	res, err :=
+		uniffiObj.ShouldMirror(
+			FfiConverterBytesINSTANCE.Lift(GoRustBuffer{
+				inner: segment,
+			}),
+		)
+
+	if err != nil {
+		var actualError *SegmentFilterCallbackError
+		if errors.As(err, &actualError) {
+			*callStatus = C.RustCallStatus{
+				code:     C.int8_t(uniffiCallbackResultError),
+				errorBuf: FfiConverterSegmentFilterCallbackErrorINSTANCE.Lower(actualError),
+			}
+		} else {
+			*callStatus = C.RustCallStatus{
+				code: C.int8_t(uniffiCallbackUnexpectedResultError),
+			}
+		}
+		return
+	}
+
+	*uniffiOutReturn = FfiConverterBoolINSTANCE.Lower(res)
+}
+
+var UniffiVTableCallbackInterfaceSegmentFilterINSTANCE = C.UniffiVTableCallbackInterfaceSegmentFilter{
+	uniffiFree:   (C.UniffiCallbackInterfaceFree)(C.slatedb_uniffi_object_store_mirror_cgo_dispatchCallbackInterfaceSegmentFilterFree),
+	uniffiClone:  (C.UniffiCallbackInterfaceClone)(C.slatedb_uniffi_object_store_mirror_cgo_dispatchCallbackInterfaceSegmentFilterClone),
+	shouldMirror: (C.UniffiCallbackInterfaceSegmentFilterMethod0)(C.slatedb_uniffi_object_store_mirror_cgo_dispatchCallbackInterfaceSegmentFilterMethod0),
+}
+
+//export slatedb_uniffi_object_store_mirror_cgo_dispatchCallbackInterfaceSegmentFilterFree
+func slatedb_uniffi_object_store_mirror_cgo_dispatchCallbackInterfaceSegmentFilterFree(handle C.uint64_t) {
+	FfiConverterSegmentFilterINSTANCE.handleMap.remove(uint64(handle))
+}
+
+//export slatedb_uniffi_object_store_mirror_cgo_dispatchCallbackInterfaceSegmentFilterClone
+func slatedb_uniffi_object_store_mirror_cgo_dispatchCallbackInterfaceSegmentFilterClone(handle C.uint64_t) C.uint64_t {
+	val, ok := FfiConverterSegmentFilterINSTANCE.handleMap.tryGet(uint64(handle))
+	if !ok {
+		panic(fmt.Errorf("no callback in handle map: %d", handle))
+	}
+	return C.uint64_t(FfiConverterSegmentFilterINSTANCE.handleMap.insert(val))
+}
+
+func (c FfiConverterSegmentFilter) register() {
+	C.uniffi_slatedb_uniffi_fn_init_callback_vtable_segmentfilter(&UniffiVTableCallbackInterfaceSegmentFilterINSTANCE)
 }
 
 // Mutable database settings object used to configure a [`crate::DbBuilder`].
@@ -15159,6 +15394,116 @@ func (FfiConverterRowEntryKind) Write(writer io.Writer, value RowEntryKind) {
 type FfiDestroyerRowEntryKind struct{}
 
 func (_ FfiDestroyerRowEntryKind) Destroy(value RowEntryKind) {
+}
+
+// Error returned by a foreign [`crate::SegmentFilter`] implementation.
+// Any other error or exception the foreign method raises becomes `Failed`.
+type SegmentFilterCallbackError struct {
+	err error
+}
+
+// Convenience method to turn *SegmentFilterCallbackError into error
+// Avoiding treating nil pointer as non nil error interface
+func (err *SegmentFilterCallbackError) AsError() error {
+	if err == nil {
+		return nil
+	} else {
+		return err
+	}
+}
+
+func (err SegmentFilterCallbackError) Error() string {
+	return fmt.Sprintf("SegmentFilterCallbackError: %s", err.err.Error())
+}
+
+func (err SegmentFilterCallbackError) Unwrap() error {
+	return err.err
+}
+
+// Err* are used for checking error type with `errors.Is`
+var ErrSegmentFilterCallbackErrorFailed = fmt.Errorf("SegmentFilterCallbackErrorFailed")
+
+// Variant structs
+// The filter failed with an application-defined message.
+type SegmentFilterCallbackErrorFailed struct {
+	Message string
+}
+
+// The filter failed with an application-defined message.
+func NewSegmentFilterCallbackErrorFailed(
+	message string,
+) *SegmentFilterCallbackError {
+	return &SegmentFilterCallbackError{err: &SegmentFilterCallbackErrorFailed{
+		Message: message}}
+}
+
+func (e SegmentFilterCallbackErrorFailed) destroy() {
+	FfiDestroyerString{}.Destroy(e.Message)
+}
+
+func (err SegmentFilterCallbackErrorFailed) Error() string {
+	return fmt.Sprint("Failed",
+		": ",
+
+		"Message=",
+		err.Message,
+	)
+}
+
+func (self SegmentFilterCallbackErrorFailed) Is(target error) bool {
+	return target == ErrSegmentFilterCallbackErrorFailed
+}
+
+type FfiConverterSegmentFilterCallbackError struct{}
+
+var FfiConverterSegmentFilterCallbackErrorINSTANCE = FfiConverterSegmentFilterCallbackError{}
+
+func (c FfiConverterSegmentFilterCallbackError) Lift(eb RustBufferI) *SegmentFilterCallbackError {
+	return LiftFromRustBuffer[*SegmentFilterCallbackError](c, eb)
+}
+
+func (c FfiConverterSegmentFilterCallbackError) Lower(value *SegmentFilterCallbackError) C.RustBuffer {
+	return LowerIntoRustBuffer[*SegmentFilterCallbackError](c, value)
+}
+
+func (c FfiConverterSegmentFilterCallbackError) LowerExternal(value *SegmentFilterCallbackError) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*SegmentFilterCallbackError](c, value))
+}
+
+func (c FfiConverterSegmentFilterCallbackError) Read(reader io.Reader) *SegmentFilterCallbackError {
+	errorID := readUint32(reader)
+
+	switch errorID {
+	case 1:
+		return &SegmentFilterCallbackError{&SegmentFilterCallbackErrorFailed{
+			Message: FfiConverterStringINSTANCE.Read(reader),
+		}}
+	default:
+		panic(fmt.Sprintf("Unknown error code %d in FfiConverterSegmentFilterCallbackError.Read()", errorID))
+	}
+}
+
+func (c FfiConverterSegmentFilterCallbackError) Write(writer io.Writer, value *SegmentFilterCallbackError) {
+	switch variantValue := value.err.(type) {
+	case *SegmentFilterCallbackErrorFailed:
+		writeInt32(writer, 1)
+		FfiConverterStringINSTANCE.Write(writer, variantValue.Message)
+	default:
+		_ = variantValue
+		panic(fmt.Sprintf("invalid error value `%v` in FfiConverterSegmentFilterCallbackError.Write", value))
+	}
+}
+
+type FfiDestroyerSegmentFilterCallbackError struct{}
+
+func (_ FfiDestroyerSegmentFilterCallbackError) Destroy(value *SegmentFilterCallbackError) {
+	switch variantValue := value.err.(type) {
+	case SegmentFilterCallbackErrorFailed:
+		variantValue.destroy()
+	default:
+		_ = variantValue
+		panic(fmt.Sprintf("invalid error value `%v` in FfiDestroyerSegmentFilterCallbackError.Destroy", value))
+	}
 }
 
 // Compaction input source identifier.

@@ -82,3 +82,45 @@ test("a mirror rejects a locked directory", async (t) => {
   const error = await expectError(() => buildMirror(cleanup, localDir, store), ErrorUnavailable);
   assert.match(error.message, /locked/);
 });
+
+class RejectingFilter {
+  asked = [];
+
+  should_mirror(segment) {
+    this.asked.push(utf8(segment));
+    return false;
+  }
+}
+
+class FailingFilter {
+  should_mirror() {
+    throw new Error("boom");
+  }
+}
+
+async function assertNothingMirrored(t, filter) {
+  const cleanup = createCleanup(t);
+  const localDir = mirrorDir(t);
+  const builder = cleanup.track(
+    new ObjectStoreMirrorBuilder(localDir, cleanup.track(newMemoryStore())),
+  );
+  builder.with_segment_filter(filter);
+  const mirror = cleanup.track(await builder.build());
+
+  const db = await openDb(mirror, { cleanup });
+  await db.put(bytes("key"), bytes("value"));
+  await db.flush_with_options({ flush_type: FlushType.MemTable });
+  assert.equal(utf8(await db.get(bytes("key"))), "value");
+  assert.ok(!readdirSync(localDir).some((name) => name.endsWith(".obj")));
+}
+
+test("a mirror skips the segments that its filter rejects", async (t) => {
+  const filter = new RejectingFilter();
+  await assertNothingMirrored(t, filter);
+  // A database without a segment extractor has only the root segment.
+  assert.deepEqual([...new Set(filter.asked)], [""]);
+});
+
+test("a mirror skips the segments when its filter throws", async (t) => {
+  await assertNothingMirrored(t, new FailingFilter());
+});

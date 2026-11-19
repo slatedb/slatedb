@@ -122,6 +122,33 @@ const db = await new DbBuilder("demo-db", mirror).build();
 - Create a clone with the wrapped store, not with a mirror. Then open the clone with its own
   mirror.
 
+### Mirrored Segments
+
+By default, the mirror keeps all segments. Give it a `SegmentFilter` to keep only some segments.
+The database reads the other segments from the wrapped store.
+
+```js
+class HotSegments {
+  should_mirror(segment) {
+    return Buffer.from(segment).toString("utf8") !== "cold";
+  }
+}
+
+const builder = new ObjectStoreMirrorBuilder("/var/lib/slatedb/mirror", remote);
+builder.with_segment_filter(new HotSegments());
+const mirror = await builder.build();
+```
+
+- The mirror keeps one answer for each segment and manifest version. It asks again when the
+  database writes a new manifest, at a flush or a compaction.
+- The empty prefix is the root segment. A database without a segment extractor has only the root
+  segment, so `false` for it turns the mirror off.
+- A changed answer takes effect at the next manifest. Then the mirror downloads the SSTs of a
+  segment that it starts to keep, and removes the local copies of a segment that it stops keeping.
+- While those downloads run, reads of the segment can fail with a `Data` error.
+- An error from the filter counts as `false` for that manifest version. The mirror logs a warning.
+- A read or write that needs the answer waits for the filter, so the filter must return quickly.
+
 ## Metrics
 
 The Node binding exposes both application-provided metrics recorders and the built-in

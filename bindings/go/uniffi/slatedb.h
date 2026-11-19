@@ -566,6 +566,20 @@ static void call_UniffiCallbackInterfaceUpDownCounterMethod0(
 
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_SEGMENT_FILTER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_SEGMENT_FILTER_METHOD0
+typedef void (*UniffiCallbackInterfaceSegmentFilterMethod0)(uint64_t uniffi_handle, RustBuffer segment, int8_t* uniffi_out_return, RustCallStatus* callStatus );
+
+// Making function static workaround:
+// https://github.com/golang/go/issues/11263
+static void call_UniffiCallbackInterfaceSegmentFilterMethod0(
+				UniffiCallbackInterfaceSegmentFilterMethod0 cb, uint64_t uniffi_handle, RustBuffer segment, int8_t* uniffi_out_return, RustCallStatus* callStatus )
+{
+	return cb(uniffi_handle, segment, uniffi_out_return, callStatus );
+}
+
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_BLOCK_TRANSFORMER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_BLOCK_TRANSFORMER
 typedef struct UniffiVTableCallbackInterfaceBlockTransformer {
@@ -650,6 +664,15 @@ typedef struct UniffiVTableCallbackInterfaceUpDownCounter {
     UniffiCallbackInterfaceClone uniffiClone;
     UniffiCallbackInterfaceUpDownCounterMethod0 increment;
 } UniffiVTableCallbackInterfaceUpDownCounter;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_SEGMENT_FILTER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_SEGMENT_FILTER
+typedef struct UniffiVTableCallbackInterfaceSegmentFilter {
+    UniffiCallbackInterfaceFree uniffiFree;
+    UniffiCallbackInterfaceClone uniffiClone;
+    UniffiCallbackInterfaceSegmentFilterMethod0 shouldMirror;
+} UniffiVTableCallbackInterfaceSegmentFilter;
 
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_ADMIN
@@ -1905,9 +1928,34 @@ void uniffi_slatedb_uniffi_fn_method_objectstoremirrorbuilder_with_max_retries(u
 void uniffi_slatedb_uniffi_fn_method_objectstoremirrorbuilder_with_remote_scan_interval_ms(uint64_t ptr, RustBuffer interval_ms, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_OBJECTSTOREMIRRORBUILDER_WITH_SEGMENT_FILTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_OBJECTSTOREMIRRORBUILDER_WITH_SEGMENT_FILTER
+void uniffi_slatedb_uniffi_fn_method_objectstoremirrorbuilder_with_segment_filter(uint64_t ptr, uint64_t filter, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_OBJECTSTOREMIRRORBUILDER_WITH_SYSTEM_CLOCK
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_OBJECTSTOREMIRRORBUILDER_WITH_SYSTEM_CLOCK
 void uniffi_slatedb_uniffi_fn_method_objectstoremirrorbuilder_with_system_clock(uint64_t ptr, uint64_t clock, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_SEGMENTFILTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_SEGMENTFILTER
+uint64_t uniffi_slatedb_uniffi_fn_clone_segmentfilter(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_SEGMENTFILTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_FREE_SEGMENTFILTER
+void uniffi_slatedb_uniffi_fn_free_segmentfilter(uint64_t handle, RustCallStatus *out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_SEGMENTFILTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_INIT_CALLBACK_VTABLE_SEGMENTFILTER
+void uniffi_slatedb_uniffi_fn_init_callback_vtable_segmentfilter(UniffiVTableCallbackInterfaceSegmentFilter* vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_SEGMENTFILTER_SHOULD_MIRROR
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_SEGMENTFILTER_SHOULD_MIRROR
+int8_t uniffi_slatedb_uniffi_fn_method_segmentfilter_should_mirror(uint64_t ptr, RustBuffer segment, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_SETTINGS
@@ -3350,9 +3398,21 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_rem
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_OBJECTSTOREMIRRORBUILDER_WITH_SEGMENT_FILTER
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_OBJECTSTOREMIRRORBUILDER_WITH_SEGMENT_FILTER
+uint16_t uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_segment_filter(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_OBJECTSTOREMIRRORBUILDER_WITH_SYSTEM_CLOCK
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_OBJECTSTOREMIRRORBUILDER_WITH_SYSTEM_CLOCK
 uint16_t uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_system_clock(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_SEGMENTFILTER_SHOULD_MIRROR
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_SEGMENTFILTER_SHOULD_MIRROR
+uint16_t uniffi_slatedb_uniffi_checksum_method_segmentfilter_should_mirror(void
     
 );
 #endif
@@ -3653,6 +3713,9 @@ uint64_t slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceMetricsRecorderClon
  void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterMethod0(uint64_t uniffi_handle, int64_t value, void* uniffi_out_return, RustCallStatus* callStatus );
  void slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterFree(uint64_t handle);
 uint64_t slatedb_uniffi_metrics_cgo_dispatchCallbackInterfaceUpDownCounterClone(uint64_t handle);
+ void slatedb_uniffi_object_store_mirror_cgo_dispatchCallbackInterfaceSegmentFilterMethod0(uint64_t uniffi_handle, RustBuffer segment, int8_t* uniffi_out_return, RustCallStatus* callStatus );
+ void slatedb_uniffi_object_store_mirror_cgo_dispatchCallbackInterfaceSegmentFilterFree(uint64_t handle);
+uint64_t slatedb_uniffi_object_store_mirror_cgo_dispatchCallbackInterfaceSegmentFilterClone(uint64_t handle);
 
 void slatedb_uniffiFutureContinuationCallback(uint64_t, int8_t);
 void slatedb_uniffiFreeGorutine(uint64_t);

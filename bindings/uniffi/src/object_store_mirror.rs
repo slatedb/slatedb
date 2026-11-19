@@ -1,9 +1,11 @@
 //! The local object mirror of RFC 0034 for the bindings.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use log::warn;
 use object_store::ObjectStore as RawObjectStore;
 use parking_lot::Mutex;
 use slatedb::{SlateDbMirrorPolicy, SlateDbMirrorPolicyBuilder};
@@ -13,9 +15,91 @@ use slatedb_mirror::{
 };
 
 use crate::clock::SystemClock;
-use crate::error::{Error, SlateDbError};
+use crate::error::{Error, SegmentFilterCallbackError, SlateDbError};
 use crate::object_store::ObjectStore;
 use crate::runtime;
+
+/// Selects the segments whose compacted SSTs a mirror keeps on local disk.
+/// The database reads the SSTs of all other segments from the wrapped store.
+///
+/// The mirror keeps one answer for each segment and manifest version. It asks
+/// again when the database writes a new manifest, at a flush or a compaction.
+///
+/// - The empty prefix is the root segment. A database without a segment
+///   extractor has only the root segment, so `false` for it turns the mirror
+///   off.
+/// - A changed answer takes effect at the next manifest. Then the mirror
+///   downloads the SSTs of a segment that it starts to keep, and removes the
+///   local copies of a segment that it stops keeping.
+/// - While those downloads run, reads of the segment can fail with
+///   `Error::Data`.
+/// - An error from `should_mirror` counts as `false` for that manifest version.
+///   The mirror logs a warning.
+/// - A read or write that needs the answer waits for `should_mirror`, so it
+///   must return quickly.
+#[uniffi::export(with_foreign)]
+pub trait SegmentFilter: Send + Sync {
+    /// Returns true if the mirror keeps the compacted SSTs of the segment with
+    /// prefix `segment` on local disk.
+    fn should_mirror(&self, segment: Vec<u8>) -> Result<bool, SegmentFilterCallbackError>;
+}
+
+/// The number of manifest versions that keep their answers. The database reads
+/// with the current manifest while the policy processes the next one, so two
+/// versions are in use at the same time.
+const ANSWERED_MANIFESTS: usize = 2;
+
+/// Gives the policy the answers of a [`SegmentFilter`], one for each segment
+/// and manifest version. The policy asks on each compacted SST read and write,
+/// so most answers must come from memory and not from the foreign filter.
+struct SegmentFilterAdapter {
+    filter: Arc<dyn SegmentFilter>,
+    /// The answers by manifest ID and segment, for the newest manifest IDs.
+    answers: Mutex<BTreeMap<u64, HashMap<Vec<u8>, bool>>>,
+}
+
+impl SegmentFilterAdapter {
+    fn new(filter: Arc<dyn SegmentFilter>) -> Self {
+        Self {
+            filter,
+            answers: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn should_mirror(&self, manifest_id: u64, segment: &[u8]) -> bool {
+        let cached = self
+            .answers
+            .lock()
+            .get(&manifest_id)
+            .and_then(|answers| answers.get(segment).copied());
+        if let Some(answer) = cached {
+            return answer;
+        }
+        // Call the filter without the lock, so that a slow filter does not
+        // block the answers of other segments.
+        let answer = self
+            .filter
+            .should_mirror(segment.to_vec())
+            .unwrap_or_else(|error| {
+                warn!(
+                    "segment filter failed, the mirror does not keep the segment \
+                     [manifest_id={manifest_id}, segment={segment:?}, error={error}]"
+                );
+                false
+            });
+        let mut answers = self.answers.lock();
+        // Keep the first answer, so that concurrent calls agree.
+        let answer = *answers
+            .entry(manifest_id)
+            .or_default()
+            .entry(segment.to_vec())
+            .or_insert(answer);
+        while answers.len() > ANSWERED_MANIFESTS {
+            answers.pop_first();
+        }
+        answer
+    }
+}
 
 struct MirrorConfig {
     local_dir: PathBuf,
@@ -133,6 +217,21 @@ impl ObjectStoreMirrorBuilder {
         })
     }
 
+    /// Sets the filter that selects the segments to keep on local disk. See
+    /// [`SegmentFilter`] for when the mirror asks it and what its answers do.
+    /// Without a filter, the mirror keeps all segments.
+    pub fn with_segment_filter(&self, filter: Arc<dyn SegmentFilter>) -> Result<(), Error> {
+        let adapter = SegmentFilterAdapter::new(filter);
+        self.update(|mut config| {
+            config.policy = config
+                .policy
+                .with_segment_predicate(move |manifest, segment| {
+                    adapter.should_mirror(manifest.id(), segment)
+                });
+            config
+        })
+    }
+
     /// Sets the clock for retry backoff, the scan, the compaction state reads,
     /// and the last-modified time of mirrored writes.
     pub fn with_system_clock(&self, clock: Arc<SystemClock>) -> Result<(), Error> {
@@ -196,7 +295,61 @@ mod tests {
 
     use super::*;
     use crate::config::{FlushOptions, FlushType};
-    use crate::DbBuilder;
+    use crate::{DbBuilder, PrefixExtractor, PrefixTarget};
+
+    /// Answers `true` for the segments in `kept`, and records each question.
+    struct RecordingFilter {
+        kept: Vec<Vec<u8>>,
+        asked: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl RecordingFilter {
+        fn keeping(kept: &[&[u8]]) -> Arc<Self> {
+            Arc::new(Self {
+                kept: kept.iter().map(|segment| segment.to_vec()).collect(),
+                asked: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn asked(&self) -> usize {
+            self.asked.lock().len()
+        }
+    }
+
+    impl SegmentFilter for RecordingFilter {
+        fn should_mirror(&self, segment: Vec<u8>) -> Result<bool, SegmentFilterCallbackError> {
+            let keep = self.kept.contains(&segment);
+            self.asked.lock().push(segment);
+            Ok(keep)
+        }
+    }
+
+    struct FailingFilter;
+
+    impl SegmentFilter for FailingFilter {
+        fn should_mirror(&self, _segment: Vec<u8>) -> Result<bool, SegmentFilterCallbackError> {
+            Err(SegmentFilterCallbackError::Failed {
+                message: "boom".to_owned(),
+            })
+        }
+    }
+
+    /// Puts each key in the segment of its first three bytes.
+    struct ThreeByteExtractor;
+
+    impl PrefixExtractor for ThreeByteExtractor {
+        fn name(&self) -> String {
+            "fixed3".to_owned()
+        }
+
+        fn prefix_len(&self, target: PrefixTarget) -> Option<u64> {
+            let input = match target {
+                PrefixTarget::Point { key } => key,
+                PrefixTarget::Prefix { prefix } => prefix,
+            };
+            (input.len() >= 3).then_some(3)
+        }
+    }
 
     fn memory_store() -> Arc<ObjectStore> {
         Arc::new(ObjectStore {
@@ -287,5 +440,69 @@ mod tests {
 
         let error = builder.build().await.err().unwrap();
         assert!(matches!(error, Error::Invalid { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn filter_answers_are_kept_for_the_two_newest_manifests() {
+        let filter = RecordingFilter::keeping(&[b"aaa"]);
+        let adapter = SegmentFilterAdapter::new(filter.clone());
+
+        assert!(adapter.should_mirror(1, b"aaa"));
+        assert!(adapter.should_mirror(1, b"aaa"));
+        assert!(!adapter.should_mirror(1, b"bbb"));
+        assert_eq!(filter.asked(), 2);
+
+        adapter.should_mirror(2, b"aaa");
+        adapter.should_mirror(1, b"aaa");
+        assert_eq!(filter.asked(), 3);
+
+        // Manifest 3 drops the answers of manifest 1.
+        adapter.should_mirror(3, b"aaa");
+        adapter.should_mirror(1, b"aaa");
+        assert_eq!(filter.asked(), 5);
+    }
+
+    #[test]
+    fn filter_error_counts_as_false() {
+        let adapter = SegmentFilterAdapter::new(Arc::new(FailingFilter));
+        assert!(!adapter.should_mirror(1, b"aaa"));
+    }
+
+    #[tokio::test]
+    async fn filter_selects_the_segments_kept_on_local_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let filter = RecordingFilter::keeping(&[b"aaa"]);
+        let builder =
+            ObjectStoreMirrorBuilder::new(dir.path().display().to_string(), memory_store());
+        builder.with_segment_filter(filter.clone()).unwrap();
+        let mirror = builder.build().await.unwrap();
+
+        let builder = DbBuilder::new("db".to_owned(), mirror);
+        builder
+            .with_segment_extractor(Arc::new(ThreeByteExtractor))
+            .unwrap();
+        let db = builder.build().await.unwrap();
+        db.put(b"aaa-1".to_vec(), b"a".to_vec()).await.unwrap();
+        db.put(b"bbb-1".to_vec(), b"b".to_vec()).await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+
+        // Each segment has one L0 SST. Only the one of `aaa` is local.
+        assert_eq!(local_objects(dir.path()), 1);
+        let asked = filter.asked.lock().clone();
+        assert!(asked.contains(&b"aaa".to_vec()), "{asked:?}");
+        assert!(asked.contains(&b"bbb".to_vec()), "{asked:?}");
+        assert_eq!(
+            db.get(b"aaa-1".to_vec()).await.unwrap(),
+            Some(b"a".to_vec())
+        );
+        assert_eq!(
+            db.get(b"bbb-1".to_vec()).await.unwrap(),
+            Some(b"b".to_vec())
+        );
+        db.close().await.unwrap();
     }
 }
