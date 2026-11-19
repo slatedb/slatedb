@@ -94,7 +94,13 @@ impl<B: BlockLike> AscendingState<B> {
     /// the offset to the next row.
     fn decode_entry_at_current_offset(&mut self) -> Result<RowEntry, SlateDBError> {
         let header = self.decode_key_at_current_offset();
-        let (tail, new_offset) = SstRowTailV2::decode(self.block.data(), &header)?;
+        self.finish_entry(&header)
+    }
+
+    /// Builds the entry of the row whose key is in `current_key` and whose
+    /// header is `header`, and moves the offset to the next row.
+    fn finish_entry(&mut self, header: &SstRowHeaderV2) -> Result<RowEntry, SlateDBError> {
+        let (tail, new_offset) = SstRowTailV2::decode(self.block.data(), header)?;
         self.offset_in_block = new_offset;
 
         Ok(RowEntry::new(
@@ -269,7 +275,15 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
         }
     }
 
-    fn load_restart_region(&mut self, restart_idx: usize) -> Result<(), SlateDBError> {
+    /// Loads the rows of a restart region into `cached_entries`. 
+    /// 
+    /// If `max_key` is set, stops at the first row whose key is greater than
+    /// `max_key`.
+    fn load_restart_region(
+        &mut self,
+        restart_idx: usize,
+        max_key: Option<&[u8]>,
+    ) -> Result<(), SlateDBError> {
         self.cached_entries.clear();
 
         // Defensive: all callers pass an index in range.
@@ -281,7 +295,11 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
         let region_end = self.ascending.restart_region_end(restart_idx);
 
         while self.ascending.offset_in_block < region_end {
-            let entry = self.ascending.decode_entry_at_current_offset()?;
+            let header = self.ascending.decode_key_at_current_offset();
+            if max_key.is_some_and(|max_key| self.ascending.current_key.as_slice() > max_key) {
+                break;
+            }
+            let entry = self.ascending.finish_entry(&header)?;
             self.cached_entries.push(entry);
         }
 
@@ -294,7 +312,7 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
             self.exhausted = true;
             self.cached_entries.clear();
         } else {
-            self.load_restart_region(self.current_restart_idx as usize)?;
+            self.load_restart_region(self.current_restart_idx as usize, None)?;
         }
         Ok(())
     }
@@ -304,7 +322,7 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
 impl<B: BlockLike> RowEntryIterator for DescendingBlockIteratorV2<B> {
     async fn init(&mut self) -> Result<(), SlateDBError> {
         if !self.initialized && !self.exhausted {
-            self.load_restart_region(self.current_restart_idx as usize)?;
+            self.load_restart_region(self.current_restart_idx as usize, None)?;
             self.initialized = true;
         }
         Ok(())
@@ -345,18 +363,8 @@ impl<B: BlockLike> RowEntryIterator for DescendingBlockIteratorV2<B> {
 
         for restart_idx in (0..=start_restart_idx).rev() {
             self.current_restart_idx = restart_idx as isize;
-            self.load_restart_region(restart_idx)?;
-
-            // Find the largest key <= next_key in this region. Keys are sorted
-            // ascending, so count the keys <= next_key and keep only those.
-            let count = self
-                .cached_entries
-                .iter()
-                .take_while(|entry| entry.key.as_ref() <= next_key)
-                .count();
-
-            if count > 0 {
-                self.cached_entries.truncate(count);
+            self.load_restart_region(restart_idx, Some(next_key))?;
+            if !self.cached_entries.is_empty() {
                 self.exhausted = false;
                 return Ok(());
             }
