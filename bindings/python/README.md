@@ -71,6 +71,28 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## Local Object Mirror
+
+`ObjectStoreMirrorBuilder` wraps an object store and keeps the compacted SSTs of one database on
+local disk. The database then reads those SSTs from local disk. WAL SSTs and manifests stay in the
+wrapped store only.
+
+```python
+from slatedb.uniffi import DbBuilder, ObjectStore, ObjectStoreMirrorBuilder
+
+remote = ObjectStore.resolve("s3://my-bucket")
+mirror = await ObjectStoreMirrorBuilder("/var/lib/slatedb/mirror", remote).build()
+db = await DbBuilder("demo-db", mirror).build()
+```
+
+- Build one mirror for each database, and use it each time you open that database.
+- Each mirror locks its local directory. `build` fails with an `Unavailable` error if another
+  mirror holds the lock. The lock is released after the mirror store and all handles opened with
+  it are garbage collected.
+- The local volume must hold the whole database. The mirror does not evict SSTs.
+- Create a clone with the wrapped store, not with a mirror. Then open the clone with its own
+  mirror.
+
 ## Metrics
 
 The Python binding exposes both custom metrics callbacks and the built-in

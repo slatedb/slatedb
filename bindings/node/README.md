@@ -100,6 +100,28 @@ Option keys are the `object_store` crate's config keys. For S3, see
 An option overrides an environment variable with the same name.
 An unknown key for an S3, Azure, or GCS URL causes an error.
 
+## Local Object Mirror
+
+`ObjectStoreMirrorBuilder` wraps an object store and keeps the compacted SSTs of one database on
+local disk. The database then reads those SSTs from local disk. WAL SSTs and manifests stay in the
+wrapped store only.
+
+```js
+import { DbBuilder, ObjectStore, ObjectStoreMirrorBuilder } from "@slatedb/uniffi";
+
+const remote = ObjectStore.resolve("s3://my-bucket");
+const mirror = await new ObjectStoreMirrorBuilder("/var/lib/slatedb/mirror", remote).build();
+const db = await new DbBuilder("demo-db", mirror).build();
+```
+
+- Build one mirror for each database, and use it each time you open that database.
+- Each mirror locks its local directory. `build` fails with an `Unavailable` error if another
+  mirror holds the lock. The lock is released after the mirror store and all handles opened with
+  it are disposed.
+- The local volume must hold the whole database. The mirror does not evict SSTs.
+- Create a clone with the wrapped store, not with a mirror. Then open the clone with its own
+  mirror.
+
 ## Metrics
 
 The Node binding exposes both application-provided metrics recorders and the built-in

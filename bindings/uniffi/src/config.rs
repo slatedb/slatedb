@@ -232,8 +232,7 @@ pub struct ReaderOptions {
     pub object_store_max_retries: Option<u32>,
     /// The reader's object-store cache. `None` is the engine's default.
     ///
-    /// Deprecated: the engine is replacing this cache with a local object
-    /// mirror.
+    /// Deprecated: use `ObjectStoreMirrorBuilder` instead.
     #[uniffi(default = None)]
     pub object_store_cache_options: Option<ObjectStoreCacheOptions>,
 }
@@ -254,7 +253,7 @@ impl Default for ReaderOptions {
 /// Which SSTs a reader loads into its disk cache at startup, up to
 /// `max_cache_size_bytes`.
 ///
-/// Deprecated: the engine is replacing this cache with a local object mirror.
+/// Deprecated: use `ObjectStoreMirrorBuilder` instead.
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
 pub enum PreloadLevel {
     /// The L0 SSTs only, the most recently written.
@@ -276,7 +275,7 @@ impl From<PreloadLevel> for slatedb::config::PreloadLevel {
 /// The on-disk object-store cache of one reader. Every default is the
 /// engine's; `root_folder` `None` disables the cache.
 ///
-/// Deprecated: the engine is replacing this cache with a local object mirror.
+/// Deprecated: use `ObjectStoreMirrorBuilder` instead.
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ObjectStoreCacheOptions {
     /// Directory the cached parts are written under. `None` disables the

@@ -1842,6 +1842,60 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_build()
+		})
+		if checksum != 57296 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_build: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_compactions_poll_interval_ms()
+		})
+		if checksum != 4026 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_compactions_poll_interval_ms: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_download_concurrency()
+		})
+		if checksum != 45688 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_download_concurrency: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_max_retries()
+		})
+		if checksum != 23222 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_max_retries: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_remote_scan_interval_ms()
+		})
+		if checksum != 61264 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_remote_scan_interval_ms: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_system_clock()
+		})
+		if checksum != 48371 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_objectstoremirrorbuilder_with_system_clock: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_settings_set()
 		})
 		if checksum != 6264 {
@@ -2117,6 +2171,15 @@ func uniffiCheckChecksums() {
 		if checksum != 39759 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_objectstorebuilder_new: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_constructor_objectstoremirrorbuilder_new()
+		})
+		if checksum != 51934 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_constructor_objectstoremirrorbuilder_new: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -9272,6 +9335,252 @@ func (_ FfiDestroyerObjectStoreBuilder) Destroy(value *ObjectStoreBuilder) {
 	value.Destroy()
 }
 
+// Builds an [`ObjectStore`] that keeps a local copy of the compacted SSTs of
+// one database, so that the database reads them from local disk. WAL SSTs,
+// manifests, and all other objects stay in the wrapped store only.
+//
+// Give the built store to `DbBuilder`, `DbReaderBuilder`, or `AdminBuilder`
+// in place of the wrapped store.
+//
+// One mirror serves one database. Build it once, and use the same store each
+// time you open that database. Each mirror locks its own local directory. The
+// lock stays until the store and all handles opened with it are released.
+// The mirror does not remove SSTs to free disk space, so the local volume
+// must hold the whole database.
+//
+// Create a clone with the wrapped store, not with a mirror. Then open the
+// clone with its own mirror.
+//
+// Builders are single-use: calling [`ObjectStoreMirrorBuilder::build`]
+// consumes the builder.
+type ObjectStoreMirrorBuilderInterface interface {
+	// Creates the local directory if necessary, locks it, and loads the local
+	// copies that it holds. Consumes this builder.
+	//
+	// Fails with `Error::Unavailable` if the directory is locked by another
+	// mirror, or if local I/O fails.
+	Build() (*ObjectStore, error)
+	// Sets how often the mirror reads the compaction state, to download the
+	// output of active compactions before a manifest adds it. `None` disables
+	// these reads. Then a manifest downloads the whole output of a compaction
+	// before the caller gets the manifest. The default is 5000 (5 seconds).
+	WithCompactionsPollIntervalMs(intervalMs *uint64) error
+	// Sets the maximum number of concurrent SST downloads. The value must be
+	// greater than zero. The default is 8.
+	WithDownloadConcurrency(concurrency uint64) error
+	// Sets how many times the mirror retries a transient error of a download
+	// or a scan listing. The default, `None`, retries without a limit.
+	WithMaxRetries(maxRetries *uint32) error
+	// Sets the interval of the scan that removes local copies of SSTs that
+	// are no longer in the wrapped store. For example, a garbage collector in
+	// another process can delete them. The value must be greater than zero.
+	// `None` disables the scan. The default is 600000 (10 minutes).
+	//
+	// The scan needs strongly consistent reads, writes, deletes, and listings
+	// from the wrapped store. If the store does not give them, disable the
+	// scan.
+	WithRemoteScanIntervalMs(intervalMs *uint64) error
+	// Sets the clock for retry backoff, the scan, the compaction state reads,
+	// and the last-modified time of mirrored writes.
+	WithSystemClock(clock *SystemClock) error
+}
+
+// Builds an [`ObjectStore`] that keeps a local copy of the compacted SSTs of
+// one database, so that the database reads them from local disk. WAL SSTs,
+// manifests, and all other objects stay in the wrapped store only.
+//
+// Give the built store to `DbBuilder`, `DbReaderBuilder`, or `AdminBuilder`
+// in place of the wrapped store.
+//
+// One mirror serves one database. Build it once, and use the same store each
+// time you open that database. Each mirror locks its own local directory. The
+// lock stays until the store and all handles opened with it are released.
+// The mirror does not remove SSTs to free disk space, so the local volume
+// must hold the whole database.
+//
+// Create a clone with the wrapped store, not with a mirror. Then open the
+// clone with its own mirror.
+//
+// Builders are single-use: calling [`ObjectStoreMirrorBuilder::build`]
+// consumes the builder.
+type ObjectStoreMirrorBuilder struct {
+	ffiObject FfiObject
+}
+
+// Creates a builder for a mirror of `object_store` in the local directory
+// `local_dir`.
+func NewObjectStoreMirrorBuilder(localDir string, objectStore *ObjectStore) *ObjectStoreMirrorBuilder {
+	return FfiConverterObjectStoreMirrorBuilderINSTANCE.Lift(rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint64_t {
+		return C.uniffi_slatedb_uniffi_fn_constructor_objectstoremirrorbuilder_new(FfiConverterStringINSTANCE.Lower(localDir), FfiConverterObjectStoreINSTANCE.Lower(objectStore), _uniffiStatus)
+	}))
+}
+
+// Creates the local directory if necessary, locks it, and loads the local
+// copies that it holds. Consumes this builder.
+//
+// Fails with `Error::Unavailable` if the directory is locked by another
+// mirror, or if local I/O fails.
+func (_self *ObjectStoreMirrorBuilder) Build() (*ObjectStore, error) {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStoreMirrorBuilder")
+	defer _self.ffiObject.decrementPointer()
+	res, err := uniffiRustCallAsync[*Error](
+		FfiConverterErrorINSTANCE,
+		// completeFn
+		func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+			res := C.ffi_slatedb_uniffi_rust_future_complete_u64(handle, status)
+			return res
+		},
+		// liftFn
+		func(ffi C.uint64_t) *ObjectStore {
+			return FfiConverterObjectStoreINSTANCE.Lift(ffi)
+		},
+		C.uniffi_slatedb_uniffi_fn_method_objectstoremirrorbuilder_build(
+			_pointer),
+		// pollFn
+		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_poll_u64(handle, continuation, data)
+		},
+		// freeFn
+		func(handle C.uint64_t) {
+			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
+		},
+	)
+
+	if err == nil {
+		return res, nil
+	}
+
+	return res, err
+}
+
+// Sets how often the mirror reads the compaction state, to download the
+// output of active compactions before a manifest adds it. `None` disables
+// these reads. Then a manifest downloads the whole output of a compaction
+// before the caller gets the manifest. The default is 5000 (5 seconds).
+func (_self *ObjectStoreMirrorBuilder) WithCompactionsPollIntervalMs(intervalMs *uint64) error {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStoreMirrorBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_objectstoremirrorbuilder_with_compactions_poll_interval_ms(
+			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(intervalMs), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Sets the maximum number of concurrent SST downloads. The value must be
+// greater than zero. The default is 8.
+func (_self *ObjectStoreMirrorBuilder) WithDownloadConcurrency(concurrency uint64) error {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStoreMirrorBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_objectstoremirrorbuilder_with_download_concurrency(
+			_pointer, FfiConverterUint64INSTANCE.Lower(concurrency), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Sets how many times the mirror retries a transient error of a download
+// or a scan listing. The default, `None`, retries without a limit.
+func (_self *ObjectStoreMirrorBuilder) WithMaxRetries(maxRetries *uint32) error {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStoreMirrorBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_objectstoremirrorbuilder_with_max_retries(
+			_pointer, FfiConverterOptionalUint32INSTANCE.Lower(maxRetries), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Sets the interval of the scan that removes local copies of SSTs that
+// are no longer in the wrapped store. For example, a garbage collector in
+// another process can delete them. The value must be greater than zero.
+// `None` disables the scan. The default is 600000 (10 minutes).
+//
+// The scan needs strongly consistent reads, writes, deletes, and listings
+// from the wrapped store. If the store does not give them, disable the
+// scan.
+func (_self *ObjectStoreMirrorBuilder) WithRemoteScanIntervalMs(intervalMs *uint64) error {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStoreMirrorBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_objectstoremirrorbuilder_with_remote_scan_interval_ms(
+			_pointer, FfiConverterOptionalUint64INSTANCE.Lower(intervalMs), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Sets the clock for retry backoff, the scan, the compaction state reads,
+// and the last-modified time of mirrored writes.
+func (_self *ObjectStoreMirrorBuilder) WithSystemClock(clock *SystemClock) error {
+	_pointer := _self.ffiObject.incrementPointer("*ObjectStoreMirrorBuilder")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_objectstoremirrorbuilder_with_system_clock(
+			_pointer, FfiConverterSystemClockINSTANCE.Lower(clock), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+func (object *ObjectStoreMirrorBuilder) Destroy() {
+	runtime.SetFinalizer(object, nil)
+	object.ffiObject.destroy()
+}
+
+type FfiConverterObjectStoreMirrorBuilder struct{}
+
+var FfiConverterObjectStoreMirrorBuilderINSTANCE = FfiConverterObjectStoreMirrorBuilder{}
+
+func (c FfiConverterObjectStoreMirrorBuilder) Lift(handle C.uint64_t) *ObjectStoreMirrorBuilder {
+	result := &ObjectStoreMirrorBuilder{
+		newFfiObject(
+			handle,
+			func(handle C.uint64_t, status *C.RustCallStatus) C.uint64_t {
+				return C.uniffi_slatedb_uniffi_fn_clone_objectstoremirrorbuilder(handle, status)
+			},
+			func(handle C.uint64_t, status *C.RustCallStatus) {
+				C.uniffi_slatedb_uniffi_fn_free_objectstoremirrorbuilder(handle, status)
+			},
+		),
+	}
+	runtime.SetFinalizer(result, (*ObjectStoreMirrorBuilder).Destroy)
+	return result
+}
+
+func (c FfiConverterObjectStoreMirrorBuilder) Read(reader io.Reader) *ObjectStoreMirrorBuilder {
+	return c.Lift(C.uint64_t(readUint64(reader)))
+}
+
+func (c FfiConverterObjectStoreMirrorBuilder) Lower(value *ObjectStoreMirrorBuilder) C.uint64_t {
+	// TODO: this is bad - all synchronization from ObjectRuntime.go is discarded here,
+	// because the handle will be decremented immediately after this function returns,
+	// and someone will be left holding onto a non-locked handle.
+	handle := value.ffiObject.incrementPointer("*ObjectStoreMirrorBuilder")
+	defer value.ffiObject.decrementPointer()
+	return handle
+}
+
+func (c FfiConverterObjectStoreMirrorBuilder) Write(writer io.Writer, value *ObjectStoreMirrorBuilder) {
+	writeUint64(writer, uint64(c.Lower(value)))
+}
+
+func LiftFromExternalObjectStoreMirrorBuilder(handle uint64) *ObjectStoreMirrorBuilder {
+	return FfiConverterObjectStoreMirrorBuilderINSTANCE.Lift(C.uint64_t(handle))
+}
+
+func LowerToExternalObjectStoreMirrorBuilder(value *ObjectStoreMirrorBuilder) uint64 {
+	return uint64(FfiConverterObjectStoreMirrorBuilderINSTANCE.Lower(value))
+}
+
+type FfiDestroyerObjectStoreMirrorBuilder struct{}
+
+func (_ FfiDestroyerObjectStoreMirrorBuilder) Destroy(value *ObjectStoreMirrorBuilder) {
+	value.Destroy()
+}
+
 // Application-provided prefix extractor used to configure prefix-based
 // bloom filters and segmented compaction.
 type PrefixExtractor interface {
@@ -12149,7 +12458,7 @@ func (_ FfiDestroyerObjectMetadata) Destroy(value ObjectMetadata) {
 // The on-disk object-store cache of one reader. Every default is the
 // engine's; `root_folder` `None` disables the cache.
 //
-// Deprecated: the engine is replacing this cache with a local object mirror.
+// Deprecated: use `ObjectStoreMirrorBuilder` instead.
 type ObjectStoreCacheOptions struct {
 	// Directory the cached parts are written under. `None` disables the
 	// cache and every other field is ignored.
@@ -12368,8 +12677,7 @@ type ReaderOptions struct {
 	ObjectStoreMaxRetries *uint32
 	// The reader's object-store cache. `None` is the engine's default.
 	//
-	// Deprecated: the engine is replacing this cache with a local object
-	// mirror.
+	// Deprecated: use `ObjectStoreMirrorBuilder` instead.
 	ObjectStoreCacheOptions *ObjectStoreCacheOptions
 }
 
@@ -14693,7 +15001,7 @@ func (_ FfiDestroyerPrefixTarget) Destroy(value PrefixTarget) {
 // Which SSTs a reader loads into its disk cache at startup, up to
 // `max_cache_size_bytes`.
 //
-// Deprecated: the engine is replacing this cache with a local object mirror.
+// Deprecated: use `ObjectStoreMirrorBuilder` instead.
 type PreloadLevel uint
 
 const (

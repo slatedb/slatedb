@@ -126,6 +126,31 @@ public final class Main {
 
 Replace `memory:///` with [any object store URL](https://docs.rs/object_store/latest/object_store/fn.parse_url_opts.html) supported by Rust's `object_store` crate.
 
+## Local Object Mirror
+
+`ObjectStoreMirrorBuilder` wraps an object store and keeps the compacted SSTs of one database on
+local disk. The database then reads those SSTs from local disk. WAL SSTs and manifests stay in the
+wrapped store only.
+
+```java
+try (ObjectStore remote = ObjectStore.resolve("s3://my-bucket");
+        ObjectStoreMirrorBuilder mirrorBuilder =
+                new ObjectStoreMirrorBuilder("/var/lib/slatedb/mirror", remote);
+        ObjectStore mirror = await(mirrorBuilder.build());
+        DbBuilder builder = new DbBuilder("demo-db", mirror)) {
+    Db db = await(builder.build());
+    // ...
+}
+```
+
+- Build one mirror for each database, and use it each time you open that database.
+- Each mirror locks its local directory. `build` fails with an `Unavailable` error if another
+  mirror holds the lock. The lock is released after the mirror store and all handles opened with
+  it are closed.
+- The local volume must hold the whole database. The mirror does not evict SSTs.
+- Create a clone with the wrapped store, not with a mirror. Then open the clone with its own
+  mirror.
+
 ## Build Prerequisites
 
 You only need these if you are regenerating bindings or building from source in this repository:
