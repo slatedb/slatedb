@@ -51,13 +51,6 @@ impl<B: BlockLike> BlockIteratorV2<B> {
             BlockIteratorInner::Descending(state) => state.is_empty(),
         }
     }
-
-    fn decode_first_key_at_restart(block: &B, restart_idx: usize) -> &[u8] {
-        let restart_offset = block.offsets()[restart_idx] as usize;
-        let header = SstRowHeaderV2::decode(block.data(), restart_offset);
-        assert_eq!(header.shared, 0, "restart point should have shared_bytes=0");
-        header.key_suffix(block.data())
-    }
 }
 
 impl<B: BlockLike> AscendingState<B> {
@@ -69,6 +62,15 @@ impl<B: BlockLike> AscendingState<B> {
             current_key: Vec::new(),
             exhausted: false,
         }
+    }
+
+    /// Returns the key of the first row of a restart region, as a slice of the
+    /// block. A restart row stores its whole key as the key suffix.
+    fn restart_key(&self, restart_idx: usize) -> &[u8] {
+        let data = self.block.data();
+        let header = SstRowHeaderV2::decode(data, self.block.offsets()[restart_idx] as usize);
+        assert_eq!(header.shared, 0, "restart point should have shared_bytes=0");
+        header.key_suffix(data)
     }
 
     /// Moves to the first row of a restart region, and clears `current_key`.
@@ -83,28 +85,27 @@ impl<B: BlockLike> AscendingState<B> {
         self.exhausted = false;
     }
 
-    /// Decodes the row at the current offset, and sets `current_key`.
-    fn decode_entry_at_current_offset(&mut self) -> Result<(RowEntry, usize), SlateDBError> {
-        let header = self.decode_key_at_offset(self.offset_in_block);
+    /// Decodes the row at the current offset, sets `current_key`, and moves
+    /// the offset to the next row.
+    fn decode_entry_at_current_offset(&mut self) -> Result<RowEntry, SlateDBError> {
+        let header = self.decode_key_at_current_offset();
         let (tail, new_offset) = SstRowTailV2::decode(self.block.data(), &header)?;
+        self.offset_in_block = new_offset;
 
-        Ok((
-            RowEntry::new(
-                Bytes::copy_from_slice(&self.current_key),
-                tail.value,
-                tail.seq,
-                tail.create_ts,
-                tail.expire_ts,
-            ),
-            new_offset,
+        Ok(RowEntry::new(
+            Bytes::copy_from_slice(&self.current_key),
+            tail.value,
+            tail.seq,
+            tail.create_ts,
+            tail.expire_ts,
         ))
     }
 
-    /// Rebuilds the key of the row at `offset` in `current_key`, and returns
-    /// the row header.
-    fn decode_key_at_offset(&mut self, offset: usize) -> SstRowHeaderV2 {
+    /// Rebuilds the key of the row at the current offset in `current_key`, and
+    /// returns the row header. Does not move the offset.
+    fn decode_key_at_current_offset(&mut self) -> SstRowHeaderV2 {
         let data = self.block.data();
-        let header = SstRowHeaderV2::decode(data, offset);
+        let header = SstRowHeaderV2::decode(data, self.offset_in_block);
 
         assert!(
             header.shared <= self.current_key.len(),
@@ -119,11 +120,6 @@ impl<B: BlockLike> AscendingState<B> {
         self.exhausted || self.offset_in_block >= self.block.data().len()
     }
 
-    /// Returns the restart index to start scanning from when seeking to target.
-    ///
-    /// When a restart point has key exactly equal to target, we return the PREVIOUS
-    /// restart point to ensure we don't miss any entries with that key that might
-    /// exist before the found restart point.
     /// Binary search for the first restart index where key >= target.
     /// Returns `restarts.len()` if no such restart exists.
     fn binary_search_restarts(&self, target: &[u8]) -> usize {
@@ -133,7 +129,7 @@ impl<B: BlockLike> AscendingState<B> {
 
         while low < high {
             let mid = low + (high - low) / 2;
-            let restart_key = BlockIteratorV2::decode_first_key_at_restart(&self.block, mid);
+            let restart_key = self.restart_key(mid);
 
             if restart_key < target {
                 low = mid + 1;
@@ -145,41 +141,22 @@ impl<B: BlockLike> AscendingState<B> {
         low
     }
 
-    /// Find the restart region to begin an ascending scan for `target`.
-    /// Backs up one position when target exactly matches a restart point's first key,
-    /// so that duplicate keys straddling restart boundaries aren't missed.
-    fn find_restart_for_key_ascending(&self, target: &[u8]) -> usize {
-        let restarts = self.block.offsets();
-        if restarts.is_empty() {
-            return 0;
-        }
-
-        let low = self.binary_search_restarts(target);
-
-        low.saturating_sub(1)
-    }
-
     /// Find the restart region to begin a descending scan for `target`.
     /// Returns the last restart whose first key <= target, so that for duplicate keys
     /// spanning multiple restart regions we start from the last one.
     fn find_restart_for_key_descending(&self, target: &[u8]) -> usize {
         let restarts = self.block.offsets();
-        if restarts.is_empty() {
-            return 0;
-        }
 
         // binary_search_restarts finds the first restart with key >= target.
         let low = self.binary_search_restarts(target);
 
         if low < restarts.len() {
-            let restart_key = BlockIteratorV2::decode_first_key_at_restart(&self.block, low);
+            let restart_key = self.restart_key(low);
             if restart_key == target {
                 // Scan forward to find the last restart with the same first key.
                 let mut last = low;
                 while last + 1 < restarts.len() {
-                    let next_key =
-                        BlockIteratorV2::decode_first_key_at_restart(&self.block, last + 1);
-                    if next_key != target {
+                    if self.restart_key(last + 1) != target {
                         break;
                     }
                     last += 1;
@@ -198,11 +175,6 @@ impl<B: BlockLike> AscendingState<B> {
             .map(|&off| off as usize)
             .unwrap_or_else(|| self.block.data().len())
     }
-
-    fn advance_past_current_entry(&mut self, header: &SstRowHeaderV2) -> Result<(), SlateDBError> {
-        self.offset_in_block = header.next_row_offset(self.block.data())?;
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -218,15 +190,7 @@ impl<B: BlockLike> RowEntryIterator for BlockIteratorV2<B> {
                     return Ok(None);
                 }
 
-                let (entry, new_offset) = state.decode_entry_at_current_offset()?;
-
-                state.offset_in_block = new_offset;
-
-                if state.offset_in_block >= state.block.data().len() {
-                    state.exhausted = true;
-                }
-
-                Ok(Some(entry))
+                Ok(Some(state.decode_entry_at_current_offset()?))
             }
             BlockIteratorInner::Descending(iter) => iter.next().await,
         }
@@ -240,9 +204,11 @@ impl<B: BlockLike> RowEntryIterator for BlockIteratorV2<B> {
                     return Ok(());
                 }
 
-                let start_restart_idx = state.find_restart_for_key_ascending(next_key);
+                // The binary search finds the first region whose first key is >= target.
+                // The region before it can also hold keys >= target after its first key,
+                // so start the scan there.
+                let start_restart_idx = state.binary_search_restarts(next_key).saturating_sub(1);
 
-                // Iterate through restart regions starting from binary search result.
                 for restart_idx in start_restart_idx..state.block.offsets().len() {
                     state.seek_to_restart(restart_idx);
 
@@ -252,14 +218,14 @@ impl<B: BlockLike> RowEntryIterator for BlockIteratorV2<B> {
                     while state.offset_in_block < region_end
                         && state.offset_in_block < state.block.data().len()
                     {
-                        let header = state.decode_key_at_offset(state.offset_in_block);
+                        let header = state.decode_key_at_current_offset();
 
                         // Leave the found key in `current_key`. `next` rebuilds the same key.
                         if state.current_key.as_slice() >= next_key {
                             return Ok(());
                         }
 
-                        state.advance_past_current_entry(&header)?;
+                        state.offset_in_block = header.next_row_offset(state.block.data())?;
                     }
                 }
 
@@ -276,8 +242,9 @@ impl<B: BlockLike> RowEntryIterator for BlockIteratorV2<B> {
 pub(crate) struct DescendingBlockIteratorV2<B: BlockLike> {
     ascending: AscendingState<B>,
     current_restart_idx: isize,
+    /// The rows of the current region that `next` has not returned yet, in
+    /// ascending order. `next` pops them from the end.
     cached_entries: Vec<RowEntry>,
-    cache_idx: isize,
     exhausted: bool,
     initialized: bool,
 }
@@ -294,7 +261,6 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
             ascending: AscendingState::new(block),
             current_restart_idx: num_restarts as isize - 1,
             cached_entries: Vec::new(),
-            cache_idx: -1,
             exhausted: num_restarts == 0,
             initialized: false,
         }
@@ -304,7 +270,6 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
         self.cached_entries.clear();
 
         if restart_idx >= self.ascending.block.offsets().len() {
-            self.cache_idx = -1;
             return Ok(());
         }
 
@@ -312,12 +277,10 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
         let region_end = self.ascending.restart_region_end(restart_idx);
 
         while self.ascending.offset_in_block < region_end && !self.ascending.is_empty() {
-            let (entry, new_offset) = self.ascending.decode_entry_at_current_offset()?;
-            self.ascending.offset_in_block = new_offset;
+            let entry = self.ascending.decode_entry_at_current_offset()?;
             self.cached_entries.push(entry);
         }
 
-        self.cache_idx = self.cached_entries.len() as isize - 1;
         Ok(())
     }
 
@@ -326,7 +289,6 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
         if self.current_restart_idx < 0 {
             self.exhausted = true;
             self.cached_entries.clear();
-            self.cache_idx = -1;
         } else {
             self.load_restart_region(self.current_restart_idx as usize)?;
         }
@@ -353,22 +315,17 @@ impl<B: BlockLike> RowEntryIterator for DescendingBlockIteratorV2<B> {
             return Ok(None);
         }
 
-        if self.cache_idx >= 0 {
-            let entry = self.cached_entries[self.cache_idx as usize].clone();
-            self.cache_idx -= 1;
+        if let Some(entry) = self.cached_entries.pop() {
             return Ok(Some(entry));
         }
 
         self.move_to_previous_region()?;
 
-        if self.exhausted || self.cache_idx < 0 {
+        let entry = self.cached_entries.pop();
+        if entry.is_none() {
             self.exhausted = true;
-            return Ok(None);
         }
-
-        let entry = self.cached_entries[self.cache_idx as usize].clone();
-        self.cache_idx -= 1;
-        Ok(Some(entry))
+        Ok(entry)
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
@@ -386,22 +343,16 @@ impl<B: BlockLike> RowEntryIterator for DescendingBlockIteratorV2<B> {
             self.current_restart_idx = restart_idx as isize;
             self.load_restart_region(restart_idx)?;
 
-            // Find the largest key <= next_key in this region.
-            // Since keys are sorted ascending, find the first key > next_key and take the previous.
-            let first_greater = self
+            // Find the largest key <= next_key in this region. Keys are sorted
+            // ascending, so count the keys <= next_key and keep only those.
+            let count = self
                 .cached_entries
                 .iter()
-                .position(|entry| entry.key.as_ref() > next_key);
+                .take_while(|entry| entry.key.as_ref() <= next_key)
+                .count();
 
-            let found_idx = match first_greater {
-                Some(0) => None,
-                Some(i) => Some(i - 1),
-                None if !self.cached_entries.is_empty() => Some(self.cached_entries.len() - 1),
-                None => None,
-            };
-
-            if let Some(idx) = found_idx {
-                self.cache_idx = idx as isize;
+            if count > 0 {
+                self.cached_entries.truncate(count);
                 self.exhausted = false;
                 return Ok(());
             }
@@ -1647,6 +1598,79 @@ mod tests {
                         }
 
                         prop_assert!(iter.next().await.unwrap().is_none());
+                    }
+                    Ok(())
+                });
+                result?;
+            }
+
+            /// Uses one iterator for a sequence of seeks, with some `next`
+            /// calls before and between them. The targets can be in the block
+            /// or not, and can go backward. Checks each returned entry against
+            /// a model built from the sorted entries.
+            #[test]
+            fn should_match_model_for_seek_sequences(
+                entries in sorted_entries_strategy(),
+                restart_interval in 2..=16usize,
+                descending in any::<bool>(),
+                first_nexts in 0..=3usize,
+                ops in prop::collection::vec(
+                    (prop::collection::vec(b'a'..=b'z', 0..=5), 0..=40usize),
+                    1..=8,
+                ),
+            ) {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let result: Result<(), TestCaseError> = rt.block_on(async {
+                    let block = build_block_from_entries(&entries, restart_interval);
+                    let order = if descending {
+                        IterationOrder::Descending
+                    } else {
+                        IterationOrder::Ascending
+                    };
+                    let mut iter = BlockIteratorV2::new(&block, order);
+
+                    // Rows in iteration order, before any seek.
+                    let all: Vec<&(Vec<u8>, u64)> = if descending {
+                        entries.iter().rev().collect()
+                    } else {
+                        entries.iter().collect()
+                    };
+                    for expected in all.iter().take(first_nexts) {
+                        let entry = iter.next().await.unwrap();
+                        prop_assert!(entry.is_some());
+                        let entry = entry.unwrap();
+                        prop_assert_eq!(entry.key.as_ref(), expected.0.as_slice());
+                        prop_assert_eq!(entry.seq, expected.1);
+                    }
+
+                    for (target, nexts) in &ops {
+                        iter.seek(target).await.unwrap();
+                        let expected: Vec<&(Vec<u8>, u64)> = all
+                            .iter()
+                            .copied()
+                            .filter(|(k, _)| if descending { k <= target } else { k >= target })
+                            .collect();
+                        for i in 0..*nexts {
+                            let entry = iter.next().await.unwrap();
+                            match expected.get(i) {
+                                Some((key, seq)) => {
+                                    prop_assert!(
+                                        entry.is_some(),
+                                        "missing entry {} after seek to {:?}", i, target
+                                    );
+                                    let entry = entry.unwrap();
+                                    prop_assert_eq!(entry.key.as_ref(), key.as_slice());
+                                    prop_assert_eq!(entry.seq, *seq);
+                                }
+                                None => {
+                                    prop_assert!(
+                                        entry.is_none(),
+                                        "extra entry {} after seek to {:?}", i, target
+                                    );
+                                    break;
+                                }
+                            }
+                        }
                     }
                     Ok(())
                 });

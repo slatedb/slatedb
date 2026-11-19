@@ -36,7 +36,7 @@ use bytes::{Buf, BufMut, Bytes};
 pub(crate) struct SstRowEntryV2 {
     /// Bytes shared with previous key (0 at restart points)
     pub shared_bytes: u32,
-    /// Unshared portion of the key (the key suffix/delta)
+    /// The key bytes after the part shared with the previous key
     pub key_suffix: Bytes,
     pub seq: u64,
     pub expire_ts: Option<i64>,
@@ -82,16 +82,13 @@ impl SstRowEntryV2 {
     pub(crate) fn encoded_size(&self) -> usize {
         let shared_bytes_len = varint_len(self.shared_bytes);
         let unshared_bytes_len = varint_len(self.key_suffix.len() as u32);
-        let value_len = match &self.value {
-            ValueDeletable::Value(v) | ValueDeletable::Merge(v) => v.len(),
-            ValueDeletable::Tombstone => 0,
-        };
+        let value_len = self.value.len();
         let value_len_varint_size = varint_len(value_len as u32);
 
         shared_bytes_len              // shared_bytes varint
             + unshared_bytes_len      // unshared_bytes varint
             + value_len_varint_size   // value_len varint
-            + self.key_suffix.len()   // key_delta
+            + self.key_suffix.len()   // key suffix
             + value_len               // value
             + tail_len(&self.flags()) // seq, flags, and timestamps
     }
@@ -216,13 +213,9 @@ impl SstRowCodecV2 {
         encode_varint(output, row.shared_bytes);
         encode_varint(output, row.key_suffix.len() as u32);
 
-        let value_len = match &row.value {
-            ValueDeletable::Value(v) | ValueDeletable::Merge(v) => v.len(),
-            ValueDeletable::Tombstone => 0,
-        };
-        encode_varint(output, value_len as u32);
+        encode_varint(output, row.value.len() as u32);
 
-        // Encode key delta
+        // Encode key suffix
         output.put(row.key_suffix.as_ref());
 
         // Encode value (if not tombstone)
@@ -241,17 +234,11 @@ impl SstRowCodecV2 {
         output.put_u8(flags.bits());
 
         // Encode expire & create timestamps
-        if flags.contains(RowFlags::HAS_EXPIRE_TS) {
-            output.put_i64(
-                row.expire_ts
-                    .expect("expire_ts should be set with HAS_EXPIRE_TS"),
-            );
+        if let Some(expire_ts) = row.expire_ts {
+            output.put_i64(expire_ts);
         }
-        if flags.contains(RowFlags::HAS_CREATE_TS) {
-            output.put_i64(
-                row.create_ts
-                    .expect("create_ts should be set with HAS_CREATE_TS"),
-            );
+        if let Some(create_ts) = row.create_ts {
+            output.put_i64(create_ts);
         }
     }
 }
@@ -380,7 +367,7 @@ mod tests {
         assert_eq!(buf[0], 3);
         assert_eq!(buf[1], 3);
         assert_eq!(buf[2], 3);
-        // key_delta follows
+        // key suffix follows
         assert_eq!(&buf[3..6], b"abc");
         // value follows
         assert_eq!(&buf[6..9], b"xyz");
