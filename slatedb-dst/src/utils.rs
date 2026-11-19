@@ -95,6 +95,7 @@ pub fn build_read_options(rand: &DbRand, read_durability: DurabilityLevel) -> Re
     ReadOptions::new()
         .with_durability_filter(read_durability)
         .with_cache_blocks(rng.random_bool(0.5))
+        // Cover serial and concurrent reads. Match the scan limit of 4 to bound DST work.
         .with_max_concurrent_sources(rng.random_range(1..=4))
 }
 
