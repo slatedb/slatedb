@@ -253,7 +253,7 @@ impl StartupCtx {
         Arc::clone(&self.main_object_store)
     }
 
-    /// Returns the main object store for standalone compactors.
+    /// Returns the object store for standalone compactors.
     ///
     /// With [`Harness::with_mirror_fn`], standalone compactors share a second
     /// mirror, as if they ran on another node. Then each mirror downloads the
