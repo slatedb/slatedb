@@ -154,8 +154,9 @@ impl<B: BlockLike> AscendingState<B> {
 
     /// Find the restart region to begin a descending scan for `target`.
     /// Returns the last restart whose first key <= target, so that for duplicate keys
-    /// spanning multiple restart regions we start from the last one.
-    fn find_restart_for_key_descending(&self, target: &[u8]) -> usize {
+    /// spanning multiple restart regions we start from the last one. Returns
+    /// `None` if the block is empty or every key in it is > target.
+    fn find_restart_for_key_descending(&self, target: &[u8]) -> Option<usize> {
         let restarts = self.block.offsets();
 
         // binary_search_restarts finds the first restart with key >= target.
@@ -172,11 +173,13 @@ impl<B: BlockLike> AscendingState<B> {
                     }
                     last += 1;
                 }
-                return last;
+                return Some(last);
             }
         }
 
-        low.saturating_sub(1)
+        // The restart before `low` has a first key < target. If `low` is 0,
+        // every key in the block is > target.
+        low.checked_sub(1)
     }
 
     fn restart_region_end(&self, restart_idx: usize) -> usize {
@@ -275,8 +278,8 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
         }
     }
 
-    /// Loads the rows of a restart region into `cached_entries`. 
-    /// 
+    /// Loads the rows of a restart region into `cached_entries`.
+    ///
     /// If `max_key` is set, stops at the first row whose key is greater than
     /// `max_key`.
     fn load_restart_region(
@@ -353,24 +356,15 @@ impl<B: BlockLike> RowEntryIterator for DescendingBlockIteratorV2<B> {
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
         self.initialized = true;
 
-        if self.ascending.block.offsets().is_empty() {
+        let Some(restart_idx) = self.ascending.find_restart_for_key_descending(next_key) else {
             self.exhausted = true;
             return Ok(());
-        }
+        };
 
-        // Find the last restart region whose first key <= next_key, then scan backwards.
-        let start_restart_idx = self.ascending.find_restart_for_key_descending(next_key);
-
-        for restart_idx in (0..=start_restart_idx).rev() {
-            self.current_restart_idx = restart_idx as isize;
-            self.load_restart_region(restart_idx, Some(next_key))?;
-            if !self.cached_entries.is_empty() {
-                self.exhausted = false;
-                return Ok(());
-            }
-        }
-
-        self.exhausted = true;
+        self.current_restart_idx = restart_idx as isize;
+        self.load_restart_region(restart_idx, Some(next_key))?;
+        // Not empty, because the first key of the region is <= next_key.
+        self.exhausted = self.cached_entries.is_empty();
         Ok(())
     }
 }
