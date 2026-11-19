@@ -552,6 +552,11 @@ impl DbInner {
     /// - `Err(e)` if the DB was closed with an error, where `e` is the error
     ///   (state.result_reader() returns Err(e)).
     pub(crate) fn check_closed(&self) -> Result<(), SlateDBError> {
+        // The common case reads one atomic flag. Reading the result clones a watch receiver
+        // and takes its read lock, which every concurrent read would share.
+        if !self.status_manager.maybe_closed() {
+            return Ok(());
+        }
         if let Some(result) = self.status_manager.result_reader().read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
