@@ -406,6 +406,7 @@ mod tests {
         assert_eq!(header.key_start, 3);
         assert_eq!(header.key_end, 6); // 3 + "key"
         assert_eq!(header.value_end, 11); // 6 + "value"
+
         // and: the next row starts after seq (8) and flags (1)
         assert_eq!(header.next_row_offset(&data).unwrap(), 20);
         assert_eq!(data.len(), 20);

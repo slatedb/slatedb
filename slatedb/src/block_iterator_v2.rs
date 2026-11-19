@@ -11,9 +11,7 @@ use crate::types::RowEntry;
 /// Internal state for ascending iteration.
 struct AscendingState<B: BlockLike> {
     block: B,
-    current_restart_idx: usize,
     offset_in_block: usize,
-    entries_since_restart: usize,
     /// Buffer for full keys, reused for each row.
     current_key: Vec<u8>,
     exhausted: bool,
@@ -67,9 +65,7 @@ impl<B: BlockLike> AscendingState<B> {
     fn new(block: B) -> Self {
         Self {
             block,
-            current_restart_idx: 0,
             offset_in_block: 0,
-            entries_since_restart: 0,
             current_key: Vec::new(),
             exhausted: false,
         }
@@ -82,9 +78,7 @@ impl<B: BlockLike> AscendingState<B> {
             return;
         }
 
-        self.current_restart_idx = restart_idx;
         self.offset_in_block = self.block.offsets()[restart_idx] as usize;
-        self.entries_since_restart = 0;
         self.current_key.clear();
         self.exhausted = false;
     }
@@ -207,7 +201,6 @@ impl<B: BlockLike> AscendingState<B> {
 
     fn advance_past_current_entry(&mut self, header: &SstRowHeaderV2) -> Result<(), SlateDBError> {
         self.offset_in_block = header.next_row_offset(self.block.data())?;
-        self.entries_since_restart += 1;
         Ok(())
     }
 }
@@ -228,17 +221,6 @@ impl<B: BlockLike> RowEntryIterator for BlockIteratorV2<B> {
                 let (entry, new_offset) = state.decode_entry_at_current_offset()?;
 
                 state.offset_in_block = new_offset;
-                state.entries_since_restart += 1;
-
-                // Check if we've moved to a new restart region
-                if let Some(&next_restart_offset) =
-                    state.block.offsets().get(state.current_restart_idx + 1)
-                {
-                    if state.offset_in_block >= next_restart_offset as usize {
-                        state.current_restart_idx += 1;
-                        state.entries_since_restart = 0;
-                    }
-                }
 
                 if state.offset_in_block >= state.block.data().len() {
                     state.exhausted = true;
@@ -332,7 +314,6 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
         while self.ascending.offset_in_block < region_end && !self.ascending.is_empty() {
             let (entry, new_offset) = self.ascending.decode_entry_at_current_offset()?;
             self.ascending.offset_in_block = new_offset;
-            self.ascending.entries_since_restart += 1;
             self.cached_entries.push(entry);
         }
 
