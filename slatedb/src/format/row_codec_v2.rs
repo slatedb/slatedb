@@ -115,7 +115,7 @@ fn tail_len(flags: &RowFlags) -> usize {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SstRowHeaderV2 {
     /// The number of leading bytes that the key shares with the key before it.
-    pub shared: usize,
+    shared: usize,
     /// The start of the key suffix.
     key_start: usize,
     /// The end of the key suffix, which is also the start of the value.
@@ -140,6 +140,11 @@ impl SstRowHeaderV2 {
             key_end,
             value_end: key_end + value_len,
         }
+    }
+
+    /// The number of leading bytes that the key shares with the key before it.
+    pub(crate) fn shared(&self) -> usize {
+        self.shared
     }
 
     /// The key suffix of the row, as a slice of `data`.
@@ -302,7 +307,7 @@ mod tests {
         let (tail, end) = SstRowTailV2::decode(&data, &header).expect("decode failed");
 
         // then: all fields match
-        assert_eq!(header.shared, shared_bytes as usize);
+        assert_eq!(header.shared(), shared_bytes as usize);
         assert_eq!(header.key_suffix(&data), key_suffix.as_slice());
         assert_eq!(tail.seq, seq);
         assert_eq!(tail.value, value);
@@ -341,7 +346,7 @@ mod tests {
         let header = SstRowHeaderV2::decode(&data, 0);
 
         // then: key info is correct
-        assert_eq!(header.shared, shared_bytes as usize);
+        assert_eq!(header.shared(), shared_bytes as usize);
         assert_eq!(header.key_suffix(&data), key_suffix.as_slice());
     }
 
@@ -461,7 +466,7 @@ mod tests {
             let skipped_end = header.next_row_offset(&data).expect("decode failed");
 
             // then: all fields match
-            prop_assert_eq!(header.shared, shared_bytes as usize);
+            prop_assert_eq!(header.shared(), shared_bytes as usize);
             prop_assert_eq!(header.key_suffix(&data), key_suffix.as_slice());
             prop_assert_eq!(tail.seq, seq);
             prop_assert_eq!(tail.value, value);

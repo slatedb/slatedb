@@ -69,12 +69,17 @@ impl<B: BlockLike> AscendingState<B> {
     fn restart_key(&self, restart_idx: usize) -> &[u8] {
         let data = self.block.data();
         let header = SstRowHeaderV2::decode(data, self.block.offsets()[restart_idx] as usize);
-        assert_eq!(header.shared, 0, "restart point should have shared_bytes=0");
+        assert_eq!(
+            header.shared(),
+            0,
+            "restart point should have shared_bytes=0"
+        );
         header.key_suffix(data)
     }
 
     /// Moves to the first row of a restart region, and clears `current_key`.
     fn seek_to_restart(&mut self, restart_idx: usize) {
+        // Defensive: all callers pass an index in range.
         if restart_idx >= self.block.offsets().len() {
             self.exhausted = true;
             return;
@@ -108,10 +113,10 @@ impl<B: BlockLike> AscendingState<B> {
         let header = SstRowHeaderV2::decode(data, self.offset_in_block);
 
         assert!(
-            header.shared <= self.current_key.len(),
+            header.shared() <= self.current_key.len(),
             "shared_bytes is longer than the previous key"
         );
-        self.current_key.truncate(header.shared);
+        self.current_key.truncate(header.shared());
         self.current_key.extend_from_slice(header.key_suffix(data));
         header
     }
@@ -215,9 +220,7 @@ impl<B: BlockLike> RowEntryIterator for BlockIteratorV2<B> {
                     // Scan entries within this restart region
                     let region_end = state.restart_region_end(restart_idx);
 
-                    while state.offset_in_block < region_end
-                        && state.offset_in_block < state.block.data().len()
-                    {
+                    while state.offset_in_block < region_end {
                         let header = state.decode_key_at_current_offset();
 
                         // Leave the found key in `current_key`. `next` rebuilds the same key.
@@ -269,6 +272,7 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
     fn load_restart_region(&mut self, restart_idx: usize) -> Result<(), SlateDBError> {
         self.cached_entries.clear();
 
+        // Defensive: all callers pass an index in range.
         if restart_idx >= self.ascending.block.offsets().len() {
             return Ok(());
         }
@@ -276,7 +280,7 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
         self.ascending.seek_to_restart(restart_idx);
         let region_end = self.ascending.restart_region_end(restart_idx);
 
-        while self.ascending.offset_in_block < region_end && !self.ascending.is_empty() {
+        while self.ascending.offset_in_block < region_end {
             let entry = self.ascending.decode_entry_at_current_offset()?;
             self.cached_entries.push(entry);
         }

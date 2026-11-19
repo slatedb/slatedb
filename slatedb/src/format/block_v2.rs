@@ -403,10 +403,10 @@ mod tests {
         let header2 = SstRowHeaderV2::decode(&block.data, block.offsets[1] as usize);
 
         // then: restart point entries have shared=0
-        assert_eq!(header0.shared, 0);
+        assert_eq!(header0.shared(), 0);
         assert_eq!(header0.key_suffix(&block.data), b"prefix_aaa");
 
-        assert_eq!(header2.shared, 0);
+        assert_eq!(header2.shared(), 0);
         assert_eq!(header2.key_suffix(&block.data), b"prefix_bbb");
     }
 
@@ -426,8 +426,8 @@ mod tests {
         let second = SstRowHeaderV2::decode(&block.data, second_offset);
 
         // then: second entry uses prefix compression
-        assert_eq!(first.shared, 0);
-        assert_eq!(second.shared, 9); // "prefix_aa" shared
+        assert_eq!(first.shared(), 0);
+        assert_eq!(second.shared(), 9); // "prefix_aa" shared
         assert_eq!(second.key_suffix(&block.data), b"b"); // only "b" differs
     }
 
@@ -564,7 +564,7 @@ mod tests {
         let header = SstRowHeaderV2::decode(&decoded.data, decoded.offsets[0] as usize);
         let key_suffix = header.key_suffix(&decoded.data);
 
-        assert_eq!(header.shared, 0);
+        assert_eq!(header.shared(), 0);
         assert_eq!(key_suffix.len(), large_key_size);
         assert_eq!(key_suffix, large_key.as_slice());
     }
@@ -603,13 +603,13 @@ mod tests {
 
         // then: second entry uses prefix compression with large shared_bytes
         let first = SstRowHeaderV2::decode(&block.data, block.offsets[0] as usize);
-        assert_eq!(first.shared, 0);
+        assert_eq!(first.shared(), 0);
         assert_eq!(first.key_suffix(&block.data).len(), key1.len());
 
         // Second entry should have a large shared prefix (the 1MB prefix)
         let second_offset = first.next_row_offset(&block.data).expect("decode failed");
         let second = SstRowHeaderV2::decode(&block.data, second_offset);
-        assert_eq!(second.shared, prefix_size);
+        assert_eq!(second.shared(), prefix_size);
         assert_eq!(second.key_suffix(&block.data).len(), suffix_size);
     }
 }
