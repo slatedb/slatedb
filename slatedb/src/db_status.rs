@@ -91,6 +91,11 @@ impl fmt::Debug for DbStatusManager {
 }
 
 impl DbStatusManager {
+    /// Returns false if the database has no close result yet. It reads one atomic flag.
+    pub(crate) fn maybe_closed(&self) -> bool {
+        self.cell.maybe_written()
+    }
+
     #[cfg(test)]
     pub(crate) fn new(initial_durable_seq: u64) -> Self {
         use crate::manifest::Manifest;
