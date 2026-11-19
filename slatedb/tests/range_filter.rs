@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use slatedb::fail_parallel::{self, FailPointRegistry};
+
 use slatedb::config::{FlushOptions, FlushType, Settings};
 use slatedb::db_stats::{
     FILTER_KIND_LABEL, FILTER_KIND_RANGE, SST_FILTER_NEGATIVE_COUNT, SST_FILTER_POSITIVE_COUNT,
@@ -146,7 +148,17 @@ fn main_store_gets(recorder: &DefaultMetricsRecorder) -> u64 {
 async fn open_db(path: &str, filtered: bool) -> (Db, Arc<DefaultMetricsRecorder>) {
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    // The test counts every main-store read during a scan, so the manifest
+    // poll that durable progress schedules stays off.
+    let fp_registry = Arc::new(FailPointRegistry::new());
+    fail_parallel::cfg(
+        fp_registry.clone(),
+        "manifest-writer-durable-seq-poll",
+        "return",
+    )
+    .expect("failed to configure the durable seq poll failpoint");
     let mut builder = Db::builder(path, store)
+        .with_fp_registry(fp_registry)
         .with_settings(Settings {
             min_filter_keys: 0,
             compactor_options: None,
