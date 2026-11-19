@@ -33,24 +33,9 @@ pub(crate) struct BlockIteratorV2<B: BlockLike> {
 impl<B: BlockLike> BlockIteratorV2<B> {
     pub(crate) fn new(block: B, ordering: IterationOrder) -> Self {
         match ordering {
-            IterationOrder::Ascending => {
-                let initial_key = if block.offsets().is_empty() {
-                    Vec::new()
-                } else {
-                    Self::decode_first_key_at_restart(&block, 0).to_vec()
-                };
-
-                BlockIteratorV2 {
-                    inner: BlockIteratorInner::Ascending(AscendingState {
-                        block,
-                        current_restart_idx: 0,
-                        offset_in_block: 0,
-                        entries_since_restart: 0,
-                        current_key: initial_key,
-                        exhausted: false,
-                    }),
-                }
-            }
+            IterationOrder::Ascending => BlockIteratorV2 {
+                inner: BlockIteratorInner::Ascending(AscendingState::new(block)),
+            },
             IterationOrder::Descending => BlockIteratorV2 {
                 inner: BlockIteratorInner::Descending(DescendingBlockIteratorV2::new(block)),
             },
@@ -78,6 +63,19 @@ impl<B: BlockLike> BlockIteratorV2<B> {
 }
 
 impl<B: BlockLike> AscendingState<B> {
+    /// Starts before the first row of `block`, with an empty key buffer.
+    fn new(block: B) -> Self {
+        Self {
+            block,
+            current_restart_idx: 0,
+            offset_in_block: 0,
+            entries_since_restart: 0,
+            current_key: Vec::new(),
+            exhausted: false,
+        }
+    }
+
+    /// Moves to the first row of a restart region, and clears `current_key`.
     fn seek_to_restart(&mut self, restart_idx: usize) {
         if restart_idx >= self.block.offsets().len() {
             self.exhausted = true;
@@ -88,11 +86,6 @@ impl<B: BlockLike> AscendingState<B> {
         self.offset_in_block = self.block.offsets()[restart_idx] as usize;
         self.entries_since_restart = 0;
         self.current_key.clear();
-        self.current_key
-            .extend_from_slice(BlockIteratorV2::decode_first_key_at_restart(
-                &self.block,
-                restart_idx,
-            ));
         self.exhausted = false;
     }
 
@@ -271,10 +264,6 @@ impl<B: BlockLike> RowEntryIterator for BlockIteratorV2<B> {
                 for restart_idx in start_restart_idx..state.block.offsets().len() {
                     state.seek_to_restart(restart_idx);
 
-                    if state.exhausted || state.current_key.as_slice() >= next_key {
-                        return Ok(());
-                    }
-
                     // Scan entries within this restart region
                     let region_end = state.restart_region_end(restart_idx);
 
@@ -318,21 +307,9 @@ impl<B: BlockLike> DescendingBlockIteratorV2<B> {
 
     pub(crate) fn new(block: B) -> Self {
         let num_restarts = block.offsets().len();
-        let initial_key = if num_restarts == 0 {
-            Vec::new()
-        } else {
-            BlockIteratorV2::decode_first_key_at_restart(&block, 0).to_vec()
-        };
 
         DescendingBlockIteratorV2 {
-            ascending: AscendingState {
-                block,
-                current_restart_idx: 0,
-                offset_in_block: 0,
-                entries_since_restart: 0,
-                current_key: initial_key,
-                exhausted: false,
-            },
+            ascending: AscendingState::new(block),
             current_restart_idx: num_restarts as isize - 1,
             cached_entries: Vec::new(),
             cache_idx: -1,
