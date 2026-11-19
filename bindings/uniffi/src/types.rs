@@ -262,6 +262,8 @@ pub struct VersionedManifest {
     pub l0: Vec<SsTableView>,
     /// Current compacted sorted runs (root `prefix=""` tree).
     pub compacted: Vec<SortedRun>,
+    /// Segment extractor identity persisted at the first open.
+    pub segment_extractor_name: Option<String>,
     /// Per-segment LSM state for named (non-empty-prefix) segments.
     pub segments: Vec<Segment>,
     /// Next WAL SST ID to assign.
@@ -294,6 +296,7 @@ impl From<&CoreVersionedManifest> for VersionedManifest {
             last_compacted_l0_sst_id: value.last_compacted_l0_sst_id().map(|id| id.to_string()),
             l0: value.l0().iter().map(SsTableView::from).collect(),
             compacted: value.compacted().iter().map(SortedRun::from).collect(),
+            segment_extractor_name: value.segment_extractor_name().map(str::to_owned),
             segments: value.segments().iter().map(Segment::from).collect(),
             next_wal_sst_id: value.next_wal_sst_id(),
             replay_after_wal_id: value.replay_after_wal_id(),
