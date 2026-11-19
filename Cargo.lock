@@ -3379,6 +3379,7 @@ dependencies = [
  "rstest",
  "slatedb",
  "slatedb-common",
+ "slatedb-mirror",
  "tempfile",
  "tokio",
  "tokio-util",
