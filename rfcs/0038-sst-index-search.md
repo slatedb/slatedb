@@ -15,6 +15,7 @@ Table of Contents:
   - [Search](#search)
   - [API changes inside the crate](#api-changes-inside-the-crate)
   - [Safety](#safety)
+  - [Disk cache format](#disk-cache-format)
   - [Optional optimization: interpolation guess](#optional-optimization-interpolation-guess)
   - [Optional optimization: SIMD](#optional-optimization-simd)
   - [Optional optimization: end search for range scans](#optional-optimization-end-search-for-range-scans)
@@ -201,6 +202,17 @@ The free functions in `partitioned_keyspace.rs` call these methods. `SsTableInde
 
 The search uses no `unsafe` code. Nothing makes sure that the keys of an index are sorted. With unsorted keys, a search can return a wrong block, as it can today. But it cannot panic or read out of bounds. The search clamps every node index, and every range stays inside `0..n`.
 
+### Disk cache format
+
+The Foyer hybrid cache keeps entries in memory and on local disk. Today a disk cache entry for an index holds the FlatBuffer. With the new form, a FlatBuffer entry costs more: each write to disk encodes the FlatBuffer again, and each disk hit runs the verifier, builds the arrays, and builds the tree.
+
+The disk cache does not have to use the format of the SST. Its entries have versions (`SerializedCachedEntry::V1` and `V2`), so a new version stores the arrays as they are in memory:
+
+1. A write copies the arrays. It does not encode a FlatBuffer.
+2. A read copies the arrays back and makes sure that they are valid, in place of the verifier. The array lengths must match. `key_ends` must start at 0, never decrease, and end at the length of `index_keys`.
+3. The read builds the tree. The entry does not store it.
+4. The cache still reads old entries that hold a FlatBuffer.
+
 ### Optional optimization: interpolation guess
 
 When the prefix values are evenly spaced, the index can guess the position of a key from its value. This is interpolation, as RocksDB uses for index blocks ([RocksDB blog](https://rocksdb.org/blog/2026/05/04/interpolation-search.html)). The load fits one line through the values and measures the exact maximum error of the guess. It then picks the lowest tree level whose nodes cover all positions that the error allows. The search starts there instead of at the root.
@@ -334,7 +346,7 @@ The isolated test times each step of the design on its own, on Graviton. It find
 
 - Latency: point gets spend less CPU in each SST they search. A get takes 10.99 to 11.29 µs, against 11.45 to 11.70 µs today, which is about 4% less. The index search drops from 6.6% to 2.3% of the CPU of a get. Scans and seeks gain on the search when they open an iterator or seek.
 - Memory: the cache weight of an index is the memory of its arrays and its tree. In the prototype, an index of 65K blocks uses 8% to 15% less memory than today, with the tree included, because the arrays drop the FlatBuffer table, offsets, and padding of each block.
-- Index load: the load also builds the arrays and the tree. At 65K blocks, load and insert take 4.68 to 4.74 ms, against 6.09 to 6.19 ms today. The load alone takes longer than today (4.68 to 4.74 ms against 3.02 to 3.03 ms). But today the cache insert copies the index and runs the verifier again, while the new insert shares the arrays, so the verifier runs one time. A disk cache hit also builds the arrays and the tree.
+- Index load: the load also builds the arrays and the tree. At 65K blocks, load and insert take 4.68 to 4.74 ms, against 6.09 to 6.19 ms today. The load alone takes longer than today (4.68 to 4.74 ms against 3.02 to 3.03 ms). But today the cache insert copies the index and runs the verifier again, while the new insert shares the arrays, so the verifier runs one time. A disk cache hit reads the arrays without the verifier and builds the tree (section Disk cache format).
 
 ### Observability
 
@@ -345,16 +357,16 @@ The isolated test times each step of the design on its own, on Graviton. It find
 
 ### Compatibility
 
-- Existing data on object storage / on-disk formats: no change. The SST format, the index schema, and the disk cache entries stay the same. The Foyer disk cache still stores the index as a FlatBuffer: `data()` encodes the arrays again when the cache writes the index to disk.
+- Existing data on object storage / on-disk formats: the SST format and the index schema do not change. The Foyer disk cache gets a new entry version for indexes, and still reads old entries. An older SlateDB cannot read the new entries. It treats them as cache misses and reads the index from object storage.
 - Existing public APIs (including bindings): no change. `SstIndex` keeps its methods and results.
-- Rolling upgrades / mixed-version behavior: not affected, because nothing that is written changes.
+- Rolling upgrades / mixed-version behavior: the SST does not change. A disk cache that both versions share gives the older version cache misses for the new entries.
 
 ## Testing
 
-- Unit tests: the decode of each field, an empty index, and the round trip through `data()`. Other unit tests cover the node count (for repeated values, 0, and `u64::MAX`), the tree levels, the shared prefix of each node, and unsorted keys.
+- Unit tests: the decode of each field, an empty index, and the round trip through the disk cache entry, with invalid arrays rejected. Other unit tests cover the node count (for repeated values, 0, and `u64::MAX`), the tree levels, the shared prefix of each node, and unsorted keys.
 - Property tests: the search gives the same results as the current binary search over index keys, for `partition_point_le`, `partition_point_lt`, and `partitions_covering_key`. The keys have shared prefixes of up to 24 bytes, an optional empty first index key, and bytes near `0xFF`. The search keys include keys outside the first and last nodes, and keys that tie in upper nodes. The indexes have up to 5,000 blocks and up to 4 tree levels.
 - Integration tests: the existing tests of `sst_iter`, `tablestore`, and `db` use the new index.
-- Fault-injection/chaos tests: none needed. Nothing that is written changes.
+- Fault-injection/chaos tests: none needed. The SST does not change.
 - Deterministic simulation tests: the existing tests run with the new index.
 - Formal methods verification: none.
 - Performance tests: a new Criterion benchmark, `slatedb/benches/sst_index_search.rs`, behind the `bench-internal` feature. It runs point searches on 1 index and on 64 indexes, with text, hashed, and sequential keys.
@@ -362,7 +374,7 @@ The isolated test times each step of the design on its own, on Graviton. It find
 ## Rollout
 
 - Milestones / phases:
-  1. The new index: flat arrays, the static B+ tree with a shared prefix for each node, the search, and the new trait methods.
+  1. The new index: flat arrays, the static B+ tree with a shared prefix for each node, the search, the new trait methods, and the disk cache format.
   2. Optional: the interpolation guess.
   3. Optional: explicit SIMD for the node search.
 - Feature flags / opt-in: none. The change is internal, and it gives the same results.
@@ -402,3 +414,4 @@ The isolated test times each step of the design on its own, on Graviton. It find
 
 - 2026-11-09: first draft.
 - 2026-11-17: one shared prefix for each tree node, not for each SST. Updated the prototype and the performance numbers.
+- 2026-11-19: the disk cache stores the arrays, not the FlatBuffer.
