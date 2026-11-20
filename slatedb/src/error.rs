@@ -356,11 +356,22 @@ impl SlateDBError {
     /// Classifies this error as a recoverable SST validation failure to reissue
     /// the read with a [`RetryReason`], or `None` if it is not recoverable.
     ///
-    /// This doesn't include transient errors like I/O or object store errors.
-    /// It includes errors that indicate the SST is corrupt or invalid, and the
-    /// read should be retried with a different strategy.
+    /// This doesn't include transient errors like remote I/O or object store
+    /// errors. It includes errors that indicate the SST is corrupt or invalid,
+    /// and failed reads of a local mirror copy. The read should be retried with
+    /// a different strategy.
     pub(crate) fn maybe_validation_retry_reason(&self) -> Option<RetryReason> {
         match self {
+            // A local copy on a bad disk sector fails every read until it's
+            // replaced.
+            SlateDBError::MirrorError(err)
+                if matches!(
+                    MirrorError::find(err.as_ref()),
+                    Some(MirrorError::Local { .. })
+                ) =>
+            {
+                Some(RetryReason::LocalReadError)
+            }
             SlateDBError::ChecksumMismatch { .. } => Some(RetryReason::CrcMismatch),
             #[cfg(any(
                 feature = "snappy",
@@ -557,8 +568,8 @@ impl std::fmt::Display for ErrorKind {
     }
 }
 
-/// Why a recoverable SST read is being reissued (the reason it failed validation
-/// the first time).
+/// Why a recoverable SST read is being reissued: the first read failed
+/// validation, or it could not read a local copy.
 ///
 /// Carried on the reissued read's
 /// [`ObjectStoreCallTag`](crate::object_store_tag::ObjectStoreCallTag) so a
@@ -569,6 +580,8 @@ impl std::fmt::Display for ErrorKind {
 pub enum RetryReason {
     /// The read bytes failed a checksum validation.
     CrcMismatch,
+    /// Reading a local copy failed with an I/O error.
+    LocalReadError,
     /// The read bytes could not be decoded as a block.
     BlockDecodeError,
     /// The read bytes could not be decompressed.
@@ -962,5 +975,35 @@ mod tests {
             source: Box::new(std::io::Error::other("missing")),
         });
         assert!(matches!(err, SlateDBError::ObjectStoreError(_)));
+    }
+
+    #[test]
+    fn mirror_local_read_error_is_a_validation_retry() {
+        let retry_reason = |err: MirrorError| {
+            SlateDBError::from(object_store::Error::from(err)).maybe_validation_retry_reason()
+        };
+        let path = Path::from("compacted/01K.sst");
+
+        assert_eq!(
+            retry_reason(MirrorError::Local {
+                source: std::io::Error::other("bad sector"),
+            }),
+            Some(RetryReason::LocalReadError)
+        );
+        assert_eq!(
+            retry_reason(MirrorError::NotLocal { path: path.clone() }),
+            None
+        );
+        assert_eq!(
+            retry_reason(MirrorError::WriteCommitted {
+                path,
+                source: Box::new(std::io::Error::other("disk full")),
+            }),
+            None
+        );
+        assert_eq!(
+            SlateDBError::from(std::io::Error::other("remote")).maybe_validation_retry_reason(),
+            None
+        );
     }
 }

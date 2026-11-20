@@ -11,12 +11,12 @@ hand.
 - Go 1.25.0 or newer
 - CGO enabled
 - a working C toolchain
-- `uniffi-bindgen-go` `0.7.0+v0.31.0`
+- `uniffi-bindgen-go` `0.7.1+v0.31.0`
 
 Install the generator with:
 
 ```bash
-cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.7.0+v0.31.0
+cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.7.1+v0.31.0
 ```
 
 ## Regenerate Bindings
@@ -28,8 +28,7 @@ From the repository root:
 ```
 
 The script builds `slatedb-uniffi`, runs `uniffi-bindgen-go`, copies the
-generated Go package into `bindings/go/uniffi`, and applies the async error
-workaround needed by `uniffi-bindgen-go v0.7.0+v0.31.0`.
+generated Go package into `bindings/go/uniffi`, and runs `go fmt`.
 
 ## Validate Changes
 

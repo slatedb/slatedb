@@ -22,6 +22,7 @@ parking_lot = { workspace = true }
 object_store = { workspace = true }
 slatedb = { workspace = true, features = ["all"] }
 slatedb-common = { workspace = true, features = ["test-util"] }
+slatedb-mirror = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
@@ -36,6 +37,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

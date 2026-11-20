@@ -5,11 +5,14 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use log::info;
 use rand::Rng;
-use slatedb::config::{DurabilityLevel, MergeOptions, PutOptions, ReadOptions, WriteOptions};
+use slatedb::config::{DurabilityLevel, MergeOptions, PutOptions, WriteOptions};
 use slatedb::{Error, IterationOrder, MergeOperator, MergeOperatorError, WriteBatch};
 use tracing::instrument;
 
-use crate::{utils::build_scan_options, Actor, ActorCtx};
+use crate::{
+    utils::{build_read_options, build_scan_options},
+    Actor, ActorCtx,
+};
 
 use super::PROGRESS_LOG_INTERVAL;
 
@@ -390,7 +393,7 @@ async fn verify_get(
     read_durability: DurabilityLevel,
     observed: &mut BTreeMap<Bytes, Observation>,
 ) -> Result<(), Error> {
-    let read_options = ReadOptions::new().with_durability_filter(read_durability);
+    let read_options = build_read_options(ctx.rand(), read_durability);
     match ctx
         .db()
         .get_with_options(key.clone(), &read_options)

@@ -8,8 +8,11 @@
 #  - To denounce a user, add a minus prefix: `-username`.
 #  - You can add details after a space that follows the handle.
 cadonna
+el-yawd
 hzhou0
-JayJamieson
+jayjamieson
+jrandolf
+kkould
 kumarujjawal
 sgbalogh
 siddontang

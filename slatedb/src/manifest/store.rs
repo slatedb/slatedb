@@ -1,5 +1,5 @@
 use crate::checkpoint::Checkpoint;
-use crate::config::CheckpointOptions;
+use crate::config::{CheckpointOptions, EpochClaim};
 use crate::error::SlateDBError;
 use crate::error::SlateDBError::{
     CheckpointMissing, InvalidDBState, LatestTransactionalObjectVersionMissing, ManifestMissing,
@@ -37,13 +37,13 @@ impl FenceableManifest {
         stored_manifest: StoredManifest,
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
-        expected_epoch: Option<u64>,
+        epoch_claim: EpochClaim,
     ) -> Result<Self, SlateDBError> {
         Self::init(
             stored_manifest,
             manifest_update_timeout,
             system_clock,
-            expected_epoch,
+            epoch_claim,
             |m: &Manifest| m.writer_epoch,
             |m: &mut Manifest, e: u64| m.writer_epoch = e,
         )
@@ -60,25 +60,37 @@ impl FenceableManifest {
             stored_manifest,
             manifest_update_timeout,
             system_clock,
-            expected_epoch,
+            expected_epoch.map_or(EpochClaim::Increment, |expected| {
+                EpochClaim::ExpectCurrent(expected)
+            }),
             |m: &Manifest| m.compactor_epoch,
             |m: &mut Manifest, e: u64| m.compactor_epoch = e,
         )
         .await
     }
 
-    /// Uses a fixed claim for an observed epoch, or the default retry loop.
+    /// Claims an epoch as `epoch_claim` specifies.
     async fn init(
         stored_manifest: StoredManifest,
         manifest_update_timeout: Duration,
         system_clock: Arc<dyn SystemClock>,
-        expected_epoch: Option<u64>,
+        epoch_claim: EpochClaim,
         get_epoch: fn(&Manifest) -> u64,
         set_epoch: fn(&mut Manifest, u64),
     ) -> Result<Self, SlateDBError> {
         let clock = system_clock.clone();
-        let inner = match expected_epoch {
-            Some(expected_epoch) => {
+        let inner = match epoch_claim {
+            EpochClaim::Increment => {
+                FenceableTransactionalObject::init(
+                    stored_manifest.inner,
+                    manifest_update_timeout,
+                    system_clock,
+                    get_epoch,
+                    set_epoch,
+                )
+                .await?
+            }
+            EpochClaim::ExpectCurrent(expected_epoch) => {
                 let epoch = expected_epoch
                     .checked_add(1)
                     .ok_or(SlateDBError::InvalidTransactionalObjectState)?;
@@ -93,11 +105,13 @@ impl FenceableManifest {
                 )
                 .await?
             }
-            None => {
-                FenceableTransactionalObject::init(
+            EpochClaim::AssignIfGreater(epoch) => {
+                FenceableTransactionalObject::init_with_epoch(
                     stored_manifest.inner,
                     manifest_update_timeout,
                     system_clock,
+                    epoch,
+                    false,
                     get_epoch,
                     set_epoch,
                 )
@@ -654,7 +668,7 @@ pub(crate) mod test_utils {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::Checkpoint;
-    use crate::config::CheckpointOptions;
+    use crate::config::{CheckpointOptions, EpochClaim};
     use crate::error::SlateDBError;
     use crate::manifest::store::{FenceableManifest, ManifestStore, StoredManifest};
     use crate::manifest::ManifestCore;
@@ -689,15 +703,24 @@ mod tests {
         let current = StoredManifest::load(store.clone(), clock.clone())
             .await
             .unwrap();
-        let mut winner =
-            FenceableManifest::init_writer(current, Duration::from_secs(5), clock.clone(), None)
-                .await
-                .unwrap();
+        let mut winner = FenceableManifest::init_writer(
+            current,
+            Duration::from_secs(5),
+            clock.clone(),
+            EpochClaim::Increment,
+        )
+        .await
+        .unwrap();
         let before = store.read_latest_manifest().await.unwrap();
         object_store.clear();
 
-        let result =
-            FenceableManifest::init_writer(stale, Duration::from_secs(5), clock, Some(0)).await;
+        let result = FenceableManifest::init_writer(
+            stale,
+            Duration::from_secs(5),
+            clock,
+            EpochClaim::ExpectCurrent(0),
+        )
+        .await;
 
         assert!(matches!(result, Err(SlateDBError::Fenced)));
         assert_eq!(object_store.write_kinds().len(), 1);
@@ -723,9 +746,14 @@ mod tests {
         let before = store.read_latest_manifest().await.unwrap();
         object_store.clear();
 
-        let writer = FenceableManifest::init_writer(stale, Duration::from_secs(5), clock, Some(0))
-            .await
-            .unwrap();
+        let writer = FenceableManifest::init_writer(
+            stale,
+            Duration::from_secs(5),
+            clock,
+            EpochClaim::ExpectCurrent(0),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(object_store.write_kinds().len(), 2);
         let after = store.read_latest_manifest().await.unwrap();
@@ -734,6 +762,154 @@ mod tests {
         assert_eq!(after.compactor_epoch(), before.compactor_epoch());
         assert_eq!(writer.local_epoch(), after.writer_epoch());
         compactor.refresh().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_assigned_writer_epoch_skips_epochs() {
+        let (store, object_store) = new_recording_manifest_store();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let stored =
+            StoredManifest::create_new_db(store.clone(), ManifestCore::new(), clock.clone())
+                .await
+                .unwrap();
+        let before = store.read_latest_manifest().await.unwrap();
+        object_store.clear();
+
+        let writer = FenceableManifest::init_writer(
+            stored,
+            Duration::from_secs(5),
+            clock,
+            EpochClaim::AssignIfGreater(7),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(object_store.write_kinds().len(), 1);
+        let after = store.read_latest_manifest().await.unwrap();
+        assert_eq!(after.id(), before.id() + 1);
+        assert_eq!(after.writer_epoch(), 7);
+        assert_eq!(after.compactor_epoch(), before.compactor_epoch());
+        assert_eq!(writer.local_epoch(), 7);
+    }
+
+    #[tokio::test]
+    async fn test_assigned_writer_epoch_rejects_epoch_not_greater_than_stored() {
+        let (store, object_store) = new_recording_manifest_store();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let stored =
+            StoredManifest::create_new_db(store.clone(), ManifestCore::new(), clock.clone())
+                .await
+                .unwrap();
+        let mut owner = FenceableManifest::init_writer(
+            stored,
+            Duration::from_secs(5),
+            clock.clone(),
+            EpochClaim::AssignIfGreater(7),
+        )
+        .await
+        .unwrap();
+        let before = store.read_latest_manifest().await.unwrap();
+        object_store.clear();
+
+        for epoch in [0, 6, 7] {
+            let current = StoredManifest::load(store.clone(), clock.clone())
+                .await
+                .unwrap();
+            let result = FenceableManifest::init_writer(
+                current,
+                Duration::from_secs(5),
+                clock.clone(),
+                EpochClaim::AssignIfGreater(epoch),
+            )
+            .await;
+            assert!(matches!(result, Err(SlateDBError::Fenced)));
+        }
+
+        assert!(object_store.write_kinds().is_empty());
+        assert_eq!(store.read_latest_manifest().await.unwrap(), before);
+        owner.refresh().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_assigned_max_writer_epoch_blocks_later_claims() {
+        let store = new_memory_manifest_store();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let timeout = Duration::from_secs(5);
+        let stored =
+            StoredManifest::create_new_db(store.clone(), ManifestCore::new(), clock.clone())
+                .await
+                .unwrap();
+        let mut owner = FenceableManifest::init_writer(
+            stored,
+            timeout,
+            clock.clone(),
+            EpochClaim::AssignIfGreater(u64::MAX),
+        )
+        .await
+        .unwrap();
+
+        // The default claim must not wrap the epoch to 0.
+        let current = StoredManifest::load(store.clone(), clock.clone())
+            .await
+            .unwrap();
+        let result =
+            FenceableManifest::init_writer(current, timeout, clock.clone(), EpochClaim::Increment)
+                .await;
+        assert!(matches!(
+            result,
+            Err(SlateDBError::InvalidTransactionalObjectState)
+        ));
+
+        let current = StoredManifest::load(store.clone(), clock.clone())
+            .await
+            .unwrap();
+        let result =
+            FenceableManifest::init_writer(current, timeout, clock, EpochClaim::AssignIfGreater(3))
+                .await;
+        assert!(matches!(result, Err(SlateDBError::Fenced)));
+
+        let latest = store.read_latest_manifest().await.unwrap();
+        assert_eq!(latest.writer_epoch(), u64::MAX);
+        owner.refresh().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_assigned_writer_epoch_fences_lower_competing_writer() {
+        let (store, object_store) = new_recording_manifest_store();
+        let clock = Arc::new(DefaultSystemClock::new());
+        let stale =
+            StoredManifest::create_new_db(store.clone(), ManifestCore::new(), clock.clone())
+                .await
+                .unwrap();
+        let current = StoredManifest::load(store.clone(), clock.clone())
+            .await
+            .unwrap();
+        let mut loser = FenceableManifest::init_writer(
+            current,
+            Duration::from_secs(5),
+            clock.clone(),
+            EpochClaim::Increment,
+        )
+        .await
+        .unwrap();
+        object_store.clear();
+
+        // The first write conflicts with the competing claim. The retry succeeds, because the
+        // assigned epoch is still greater than the stored epoch.
+        let writer = FenceableManifest::init_writer(
+            stale,
+            Duration::from_secs(5),
+            clock,
+            EpochClaim::AssignIfGreater(5),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(object_store.write_kinds().len(), 2);
+        assert_eq!(writer.local_epoch(), 5);
+        let after = store.read_latest_manifest().await.unwrap();
+        assert_eq!(after.writer_epoch(), 5);
+        assert!(matches!(loser.refresh().await, Err(SlateDBError::Fenced)));
     }
 
     #[tokio::test]
@@ -889,9 +1065,14 @@ mod tests {
             let sm = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
                 .await
                 .unwrap();
-            FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()), None)
-                .await
-                .unwrap();
+            FenceableManifest::init_writer(
+                sm,
+                timeout,
+                Arc::new(DefaultSystemClock::new()),
+                EpochClaim::Increment,
+            )
+            .await
+            .unwrap();
             let manifest = ms.read_latest_manifest().await.unwrap();
             assert_eq!(manifest.manifest.writer_epoch, i);
         }
@@ -909,17 +1090,26 @@ mod tests {
         .await
         .unwrap();
         let timeout = Duration::from_secs(300);
-        let mut writer1 =
-            FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()), None)
-                .await
-                .unwrap();
+        let mut writer1 = FenceableManifest::init_writer(
+            sm,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            EpochClaim::Increment,
+        )
+        .await
+        .unwrap();
         let sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
             .await
             .unwrap();
 
-        FenceableManifest::init_writer(sm2, timeout, Arc::new(DefaultSystemClock::new()), None)
-            .await
-            .unwrap();
+        FenceableManifest::init_writer(
+            sm2,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            EpochClaim::Increment,
+        )
+        .await
+        .unwrap();
 
         let result = writer1.refresh().await;
         assert!(matches!(result, Err(SlateDBError::Fenced)));
@@ -1058,17 +1248,25 @@ mod tests {
         .await
         .unwrap();
         let timeout = Duration::from_secs(300);
-        let mut fm1 =
-            FenceableManifest::init_writer(sm, timeout, Arc::new(DefaultSystemClock::new()), None)
-                .await
-                .unwrap();
+        let mut fm1 = FenceableManifest::init_writer(
+            sm,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            EpochClaim::Increment,
+        )
+        .await
+        .unwrap();
         let sm2 = StoredManifest::load(ms.clone(), Arc::new(DefaultSystemClock::new()))
             .await
             .unwrap();
-        let mut fm2 =
-            FenceableManifest::init_writer(sm2, timeout, Arc::new(DefaultSystemClock::new()), None)
-                .await
-                .unwrap();
+        let mut fm2 = FenceableManifest::init_writer(
+            sm2,
+            timeout,
+            Arc::new(DefaultSystemClock::new()),
+            EpochClaim::Increment,
+        )
+        .await
+        .unwrap();
 
         let result = fm1
             .maybe_apply_update(|fm| {
@@ -1657,7 +1855,7 @@ mod tests {
             sm_b,
             timeout,
             Arc::new(DefaultSystemClock::new()),
-            None,
+            EpochClaim::Increment,
         )
         .await
         .unwrap();
@@ -1668,7 +1866,7 @@ mod tests {
             sm_a,
             timeout,
             Arc::new(DefaultSystemClock::new()),
-            None,
+            EpochClaim::Increment,
         )
         .await
         .unwrap();

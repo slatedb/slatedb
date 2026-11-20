@@ -1,3 +1,4 @@
+use crate::config::EpochClaim;
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
 use crate::manifest::store::{FenceableManifest, StoredManifest};
@@ -88,7 +89,7 @@ impl WriterFencer {
     pub(crate) async fn fence(
         mut self,
         stored_manifest: StoredManifest,
-        expected_epoch: Option<u64>,
+        epoch_claim: EpochClaim,
     ) -> Result<WriterFenceResult, SlateDBError> {
         let wal_writer_init = match self.wal_writer_init.take() {
             Some(wal_writer_init) => wal_writer_init,
@@ -110,7 +111,7 @@ impl WriterFencer {
             stored_manifest,
             self.manifest_update_timeout,
             self.system_clock.clone(),
-            expected_epoch,
+            epoch_claim,
         )
         .await?;
         self.fail_point_send("FenceManifest");
@@ -131,7 +132,8 @@ mod tests {
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::compactions_store::CompactionsStore;
     use crate::config::{
-        FlushOptions, FlushType, GarbageCollectorDirectoryOptions, GarbageCollectorOptions,
+        EpochClaim, FlushOptions, FlushType, GarbageCollectorDirectoryOptions,
+        GarbageCollectorOptions,
     };
     use crate::dispatcher::MessageHandlerExecutor;
     use crate::error::SlateDBError;
@@ -413,7 +415,9 @@ mod tests {
         h.put(&db, 1, false).await;
         let fencer = h.fencer.take().unwrap();
 
-        let result = fencer.fence(h.stored_manifest.take().unwrap(), None).await;
+        let result = fencer
+            .fence(h.stored_manifest.take().unwrap(), EpochClaim::Increment)
+            .await;
 
         assert!(result.is_ok());
         h.put(&db, 2, true).await;
@@ -460,7 +464,9 @@ mod tests {
 
         let fencer = h.fencer.take().unwrap();
         let stored_manifest = h.stored_manifest.take().unwrap();
-        let jh = tokio::task::spawn(async move { fencer.fence(stored_manifest, None).await });
+        let jh = tokio::task::spawn(async move {
+            fencer.fence(stored_manifest, EpochClaim::Increment).await
+        });
         // wait for LoadEmptyWalId pause
         assert_eq!(h.event_rx.recv().await.unwrap(), "LoadEmptyWalId");
 
@@ -558,7 +564,9 @@ mod tests {
         // spawn WriterFencer on another task
         let fencer = h.fencer.take().unwrap();
         let stored_manifest = h.stored_manifest.take().unwrap();
-        let jh = tokio::task::spawn(async move { fencer.fence(stored_manifest, None).await });
+        let jh = tokio::task::spawn(async move {
+            fencer.fence(stored_manifest, EpochClaim::Increment).await
+        });
         // Each failpoint sends an event, so wait for the configured pause.
         while h.event_rx.recv().await.unwrap() != case.event {}
 
