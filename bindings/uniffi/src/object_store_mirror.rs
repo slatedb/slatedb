@@ -35,7 +35,7 @@ use crate::runtime;
 ///   `Error::Data`.
 /// - An error from `should_mirror` counts as `false` for that manifest version.
 ///   The mirror logs a warning.
-/// - A read or write that needs the answer waits for `should_mirror`, so it
+/// - `should_mirror` blocks a runtime thread that all databases share, so it
 ///   must return quickly.
 #[uniffi::export(with_foreign)]
 pub trait SegmentFilter: Send + Sync {
@@ -94,9 +94,16 @@ impl SegmentFilterAdapter {
             .or_default()
             .entry(segment.to_vec())
             .or_insert(answer);
-        while answers.len() > ANSWERED_MANIFESTS {
-            answers.pop_first();
-        }
+        let retired = if answers.len() > ANSWERED_MANIFESTS {
+            answers.pop_first()
+        } else {
+            None
+        };
+        // Release the lock first, so that cached lookups do not wait while the
+        // retired map frees its segment keys. Without these calls, `retired`
+        // drops first, because locals drop in reverse order.
+        drop(answers);
+        drop(retired);
         answer
     }
 }
@@ -361,9 +368,11 @@ mod tests {
         local_dir: &Path,
         remote: &Arc<ObjectStore>,
     ) -> Result<Arc<ObjectStore>, Error> {
-        ObjectStoreMirrorBuilder::new(local_dir.display().to_string(), remote.clone())
-            .build()
-            .await
+        let builder =
+            ObjectStoreMirrorBuilder::new(local_dir.display().to_string(), remote.clone());
+        // A scan removes the local copies of SSTs that a test deletes from the remote.
+        builder.with_remote_scan_interval_ms(None)?;
+        builder.build().await
     }
 
     fn local_objects(local_dir: &Path) -> usize {

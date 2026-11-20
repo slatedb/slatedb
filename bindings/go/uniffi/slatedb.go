@@ -9814,7 +9814,7 @@ func (c FfiConverterPrefixExtractor) register() {
 // `Error::Data`.
 // - An error from `should_mirror` counts as `false` for that manifest version.
 // The mirror logs a warning.
-// - A read or write that needs the answer waits for `should_mirror`, so it
+// - `should_mirror` blocks a runtime thread that all databases share, so it
 // must return quickly.
 type SegmentFilter interface {
 	// Returns true if the mirror keeps the compacted SSTs of the segment with
@@ -9838,7 +9838,7 @@ type SegmentFilter interface {
 // `Error::Data`.
 // - An error from `should_mirror` counts as `false` for that manifest version.
 // The mirror logs a warning.
-// - A read or write that needs the answer waits for `should_mirror`, so it
+// - `should_mirror` blocks a runtime thread that all databases share, so it
 // must return quickly.
 type SegmentFilterImpl struct {
 	ffiObject FfiObject

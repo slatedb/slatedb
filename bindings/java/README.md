@@ -175,7 +175,7 @@ mirrorBuilder.withSegmentFilter(new HotSegments());
   segment that it starts to keep, and removes the local copies of a segment that it stops keeping.
 - While those downloads run, reads of the segment can fail with a `Data` error.
 - An error from the filter counts as `false` for that manifest version. The mirror logs a warning.
-- A read or write that needs the answer waits for the filter, so the filter must return quickly.
+- The filter blocks a runtime thread that all databases share, so it must return quickly.
 
 ## Build Prerequisites
 
