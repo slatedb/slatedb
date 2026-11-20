@@ -107,9 +107,9 @@ impl SlateDbMirrorPolicy {
 impl MirrorPolicy for SlateDbMirrorPolicy {
     fn read_route(&self, path: &Path, options: &GetOptions) -> object_store::Result<ReadRoute> {
         // Mirrored SSTs come first, so that their reads do not parse the path.
-        // A read that SlateDB retries because the SST contents were corrupt
-        // downloads the SST again, because the local copy can be the corrupt
-        // one. Other reads use the local copy.
+        // SlateDB retries a read when the SST contents are corrupt or the
+        // local copy can't be read. The retry downloads the SST again, because
+        // the local copy can be the cause. Other reads use the local copy.
         if let Some(tag) = self.mirrored_sst_tag(&options.extensions) {
             return Ok(match tag.retry {
                 Some(_) => ReadRoute::Refetch,
