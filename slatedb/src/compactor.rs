@@ -1184,9 +1184,9 @@ impl CompactorEventHandler {
     /// - Drain specs do not target the empty-prefix (root) segment
     /// - The target segment exists in the manifest
     /// - All sources exist in the target segment's tree
-    /// - Submitted L0-only tiered compactions have a destination > highest SR id across all trees
-    /// - Compacted L0-only tiered compactions have a destination > highest SR id in their segment
+    /// - L0-only tiered compactions have a destination > highest SR id in their segment
     /// - A tiered destination does not overwrite a committed SR in any tree unless the SR is among sources
+    /// - Submitted tiered compactions do not reuse a destination claimed by an active job
     /// - Drain L0 sources cover every L0 at or below the newest drained L0 in the target tree
     /// - At most one L0 compaction is Running per segment
     /// - Scheduler-specific policy via [`CompactionScheduler::validate_compaction`]
@@ -1232,22 +1232,15 @@ impl CompactorEventHandler {
             return Err(SlateDBError::InvalidCompaction);
         }
 
-        // Validate L0-only compactions create a new SR after every SR that matters
-        // for their lifecycle stage. Submitted specs reserve a fresh globally
-        // unique SR id, so they must be above every committed SR in every segment.
-        // Compacted entries are being committed into one target segment and may
-        // validly finish after a different segment has already committed a higher
-        // SR id, but they still must preserve local SR ordering within the target
-        // segment.
+        // Validate L0-only compactions place the new SR ahead of every committed
+        // SR in the target segment. Cross-segment L0 compactions can validate and
+        // commit out of global SR order as long as each segment keeps descending
+        // SR IDs and destination IDs stay globally unique.
         if spec.has_l0_sources() && !spec.has_sr_sources() {
-            let highest_id = if compaction.status() == CompactionStatus::Submitted {
-                db_state
-                    .trees()
-                    .flat_map(|t| t.compacted.iter())
-                    .map(|sr| sr.id)
-                    .max()
-                    .map_or(0, |id| id + 1)
-            } else if compaction.status() == CompactionStatus::Compacted {
+            let highest_id = if matches!(
+                compaction.status(),
+                CompactionStatus::Submitted | CompactionStatus::Compacted
+            ) {
                 tree.compacted
                     .iter()
                     .map(|sr| sr.id)
@@ -1274,6 +1267,22 @@ impl CompactorEventHandler {
         }
 
         Self::validate_destination_overwrite(spec, db_state)?;
+        if compaction.status() == CompactionStatus::Submitted {
+            if let Some(dst) = spec.destination() {
+                let claimed = self
+                    .state()
+                    .compactions_with_status(&[
+                        CompactionStatus::Scheduled,
+                        CompactionStatus::Running,
+                        CompactionStatus::Compacted,
+                    ])
+                    .any(|c| c.spec().destination() == Some(dst));
+                if claimed {
+                    warn!("compaction destination already claimed: {:?}", dst);
+                    return Err(SlateDBError::InvalidCompaction);
+                }
+            }
+        }
         Self::validate_drain_watermark_advance(spec, tree)?;
 
         // Reject parallel L0 compactions within the same segment. Each
@@ -6430,12 +6439,12 @@ mod tests {
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
-    /// The L0-only monotonicity check is global across all segment trees, not
-    /// just the target tree. A spec whose destination is above the target
-    /// tree's local max but below the global max (an SR in some other
-    /// segment) must be rejected.
+    /// Cross-segment L0 compactions can validate and commit out of global SR
+    /// order. Both `Submitted` and `Compacted` L0-only specs remain valid when
+    /// their destination exceeds the target segment's local max, unless an
+    /// active job already claimed that destination.
     #[tokio::test]
-    async fn test_validate_compaction_l0_only_rejects_when_dest_below_global_highest_sr() {
+    async fn test_validate_l0_allows_destination_below_global_highest_sr() {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
         let prefix = Bytes::from_static(b"seg/");
         let l0_view = Ulid::from_parts(1, 0);
@@ -6453,9 +6462,6 @@ mod tests {
             .manifest_mut_for_test()
             .value
             .core;
-        // Root tree holds SR(7) — the global max. The segment-targeted spec
-        // below proposes dst=3, which is above the segment's local max (0)
-        // but below the global max.
         Arc::make_mut(&mut core.tree).compacted = vec![SortedRun::new(7, [])];
         core.segments = vec![Segment {
             prefix: prefix.clone(),
@@ -6468,6 +6474,23 @@ mod tests {
         }];
 
         let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SstView(l0_view)], 3);
+        for status in [CompactionStatus::Submitted, CompactionStatus::Compacted] {
+            fixture
+                .handler
+                .validate_compaction(
+                    &Compaction::new(Ulid::new(), spec.clone()).with_status(status),
+                )
+                .expect("L0 compaction above segment-local max should validate");
+        }
+
+        // Claiming dst=3 on another job rejects a Submitted spec for dst=3.
+        fixture.handler.state_mut().insert_compaction_for_test(
+            Compaction::new(
+                Ulid::new(),
+                CompactionSpec::new(vec![SourceId::SortedRun(7)], 3),
+            )
+            .with_status(CompactionStatus::Scheduled),
+        );
         let err = fixture
             .handler
             .validate_compaction(&Compaction::new(Ulid::new(), spec))
@@ -6475,56 +6498,8 @@ mod tests {
         assert!(matches!(err, SlateDBError::InvalidCompaction));
     }
 
-    /// Completion validation must not reuse the Submitted-only fresh-SR check.
-    /// Cross-segment L0 compactions can commit out of order: a job submitted
-    /// earlier with destination 3 is still valid even if another segment has
-    /// since committed destination 7.
     #[tokio::test]
-    async fn test_validate_completed_l0_allows_destination_below_global_highest_sr() {
-        let mut fixture = CompactorEventHandlerTestFixture::new().await;
-        let prefix = Bytes::from_static(b"seg/");
-        let l0_view = Ulid::from_parts(1, 0);
-        let make_view = |id: Ulid| {
-            SsTableView::identity(SsTableHandle::new(
-                SsTableId::from(id),
-                SST_FORMAT_VERSION_LATEST,
-                SsTableInfo::default(),
-            ))
-        };
-        let core = &mut fixture
-            .handler
-            .state_writer
-            .state
-            .manifest_mut_for_test()
-            .value
-            .core;
-        Arc::make_mut(&mut core.tree).compacted = vec![SortedRun::new(7, [])];
-        core.segments = vec![Segment {
-            prefix: prefix.clone(),
-            tree: Arc::new(LsmTreeState {
-                last_compacted_l0_sst_view_id: None,
-                last_compacted_l0_sst_id: None,
-                l0: VecDeque::from(vec![make_view(l0_view)]),
-                compacted: Vec::new(),
-            }),
-        }];
-
-        let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SstView(l0_view)], 3);
-
-        let submitted_err = fixture
-            .handler
-            .validate_compaction(&Compaction::new(Ulid::new(), spec.clone()))
-            .unwrap_err();
-        assert!(matches!(submitted_err, SlateDBError::InvalidCompaction));
-        let completed = Compaction::new(Ulid::new(), spec).with_status(CompactionStatus::Compacted);
-        fixture
-            .handler
-            .validate_compaction(&completed)
-            .expect("completed L0 compaction should not require a still-fresh destination");
-    }
-
-    #[tokio::test]
-    async fn test_validate_completed_l0_rejects_destination_below_segment_highest_sr() {
+    async fn test_validate_l0_rejects_destination_below_segment_highest_sr() {
         let mut fixture = CompactorEventHandlerTestFixture::new().await;
         let prefix = Bytes::from_static(b"seg/");
         let l0_view = Ulid::from_parts(1, 0);
@@ -6553,10 +6528,14 @@ mod tests {
         }];
 
         let spec = CompactionSpec::for_segment(prefix, vec![SourceId::SstView(l0_view)], 3);
-        let completed = Compaction::new(Ulid::new(), spec).with_status(CompactionStatus::Compacted);
-
-        let err = fixture.handler.validate_compaction(&completed).unwrap_err();
-        assert!(matches!(err, SlateDBError::InvalidCompaction));
+        for status in [CompactionStatus::Submitted, CompactionStatus::Compacted] {
+            let compaction = Compaction::new(Ulid::new(), spec.clone()).with_status(status);
+            let err = fixture
+                .handler
+                .validate_compaction(&compaction)
+                .unwrap_err();
+            assert!(matches!(err, SlateDBError::InvalidCompaction));
+        }
     }
 
     #[tokio::test]
