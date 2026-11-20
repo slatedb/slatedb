@@ -178,10 +178,6 @@ request even though it never reaches the remote store, and the requests the
 cache issues against the remote store to fill a miss are not counted.
 Use the cache metrics below to tell hits from misses.
 
-`read_bytes` counts each payload chunk when SlateDB reads it. A failed request adds no bytes. A
-body that fails or that SlateDB drops adds only the bytes received. A retried read counts the bytes
-of each attempt. A cache hit also counts its bytes.
-
 ### Object store cache (`slatedb.object_store_cache.*`)
 
 These metrics come from the deprecated `CachedObjectStore`. See
