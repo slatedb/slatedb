@@ -139,9 +139,6 @@ pub(crate) enum SlateDBError {
     #[error("detected newer DB client")]
     Fenced,
 
-    #[error("invalid cache part size bytes, it must be multiple of 1024 and greater than 0")]
-    InvalidCachePartSize,
-
     #[error("invalid compression codec")]
     InvalidCompressionCodec,
 
@@ -759,7 +756,6 @@ impl From<SlateDBError> for Error {
             SlateDBError::WalUnavailable(src) => Error::unavailable(msg).with_source(Box::new(src)),
 
             // Invalid errors
-            SlateDBError::InvalidCachePartSize => Error::invalid(msg),
             SlateDBError::InvalidCompressionCodec => Error::invalid(msg),
             SlateDBError::WalStoreReconfigurationError => Error::invalid(msg),
             SlateDBError::InvalidConfigurationFormat(err) => {

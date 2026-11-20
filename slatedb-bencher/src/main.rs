@@ -90,10 +90,10 @@ async fn exec_benchmark_scan(
     object_store: Arc<dyn ObjectStore>,
     args: BenchmarkScanArgs,
 ) -> Result<(), Box<dyn Error>> {
-    let (mut config, memory_cache) = args.db_args.config()?;
+    let (mut config, db_cache) = args.db_args.config().await?;
     config.compactor_options = None;
     let mut builder = Db::builder(path, object_store).with_settings(config);
-    if let Some(cache) = memory_cache {
+    if let Some(cache) = db_cache {
         builder = builder.with_db_cache(cache, 0);
     }
     let db = Arc::new(builder.build().await?);
@@ -105,7 +105,7 @@ async fn exec_benchmark_scan(
 }
 
 async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args: BenchmarkDbArgs) {
-    let (mut config, memory_cache) = args.db_args.config().unwrap();
+    let (mut config, db_cache) = args.db_args.config().await.unwrap();
     if args.no_compactor {
         config.compactor_options = None;
     }
@@ -113,8 +113,8 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
 
     let mut builder = Db::builder(path.clone(), object_store.clone()).with_settings(config);
 
-    if let Some(memory_cache) = memory_cache {
-        builder = builder.with_db_cache(memory_cache, 0);
+    if let Some(db_cache) = &db_cache {
+        builder = builder.with_db_cache(db_cache.clone(), 0);
     }
 
     let db = Arc::new(builder.build().await.unwrap());
@@ -133,6 +133,10 @@ async fn exec_benchmark_db(path: Path, object_store: Arc<dyn ObjectStore>, args:
     bencher.run().await;
 
     db.close().await.expect("failed to close db");
+    // `Db::close` does not close a cache passed to the builder.
+    if let Some(db_cache) = db_cache {
+        db_cache.close().await.expect("failed to close db cache");
+    }
 }
 
 async fn exec_benchmark_compaction(
@@ -179,13 +183,13 @@ async fn exec_benchmark_transaction(
     object_store: Arc<dyn ObjectStore>,
     args: BenchmarkTransactionArgs,
 ) {
-    let (config, memory_cache) = args.db_args.config().unwrap();
+    let (config, db_cache) = args.db_args.config().await.unwrap();
     let write_options = WriteOptions::default();
 
     let mut builder = Db::builder(path.clone(), object_store.clone()).with_settings(config);
 
-    if let Some(memory_cache) = memory_cache {
-        builder = builder.with_db_cache(memory_cache, 0);
+    if let Some(db_cache) = &db_cache {
+        builder = builder.with_db_cache(db_cache.clone(), 0);
     }
 
     let db = Arc::new(builder.build().await.unwrap());
@@ -206,6 +210,10 @@ async fn exec_benchmark_transaction(
     bencher.run().await;
 
     db.close().await.expect("failed to close db");
+    // `Db::close` does not close a cache passed to the builder.
+    if let Some(db_cache) = db_cache {
+        db_cache.close().await.expect("failed to close db cache");
+    }
 }
 
 /// Creates a lock file that's used as a signal to clean up test data.

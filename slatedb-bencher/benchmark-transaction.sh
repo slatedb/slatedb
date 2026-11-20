@@ -30,10 +30,11 @@ run_txn_bench() {
 
   local bench_cmd="cargo run -r --package slatedb-bencher -- \
     --path /${DB_PATH_NAME}_${isolation_level}_${concurrency}_${transaction_size}_${use_write_batch} $clean_flag transaction \
-    --db-options-path $DIR/Slatedb.toml \
+    --db-options-path $DIR/SlateDb.toml \
     --duration 60 \
     --val-len 1024 \
     --block-cache-size 100663296 \
+    --block-cache-disk-dir /tmp/slatedb-bencher-block-cache \
     --meta-cache-size 33554432 \
     --concurrency $concurrency \
     --key-count 10000 \
