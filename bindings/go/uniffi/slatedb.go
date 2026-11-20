@@ -11536,6 +11536,9 @@ type CompactionWorkerOptions struct {
 	// Compression for the SSTs the worker writes. Must match the writer's
 	// `compression_codec`.
 	CompressionCodec *CompressionCodec
+	// Maximum retries for a failed job on this worker. `None` permits unlimited
+	// retries. `Some(0)` stops the worker after its first failed execution.
+	CompactionJobMaxRetries *uint32
 }
 
 func (r *CompactionWorkerOptions) Destroy() {
@@ -11548,6 +11551,7 @@ func (r *CompactionWorkerOptions) Destroy() {
 	FfiDestroyerUint64{}.Destroy(r.MaxSubcompactions)
 	FfiDestroyerUint32{}.Destroy(r.MinFilterKeys)
 	FfiDestroyerOptionalCompressionCodec{}.Destroy(r.CompressionCodec)
+	FfiDestroyerOptionalUint32{}.Destroy(r.CompactionJobMaxRetries)
 }
 
 type FfiConverterCompactionWorkerOptions struct{}
@@ -11569,6 +11573,7 @@ func (c FfiConverterCompactionWorkerOptions) Read(reader io.Reader) CompactionWo
 		FfiConverterUint64INSTANCE.Read(reader),
 		FfiConverterUint32INSTANCE.Read(reader),
 		FfiConverterOptionalCompressionCodecINSTANCE.Read(reader),
+		FfiConverterOptionalUint32INSTANCE.Read(reader),
 	}
 }
 
@@ -11590,6 +11595,7 @@ func (c FfiConverterCompactionWorkerOptions) Write(writer io.Writer, value Compa
 	FfiConverterUint64INSTANCE.Write(writer, value.MaxSubcompactions)
 	FfiConverterUint32INSTANCE.Write(writer, value.MinFilterKeys)
 	FfiConverterOptionalCompressionCodecINSTANCE.Write(writer, value.CompressionCodec)
+	FfiConverterOptionalUint32INSTANCE.Write(writer, value.CompactionJobMaxRetries)
 }
 
 type FfiDestroyerCompactionWorkerOptions struct{}

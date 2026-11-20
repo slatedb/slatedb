@@ -1734,12 +1734,14 @@ mod tests {
     use std::future::Future;
     use std::ops::Bound::{Excluded, Included};
     use std::ops::Range;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 
+    use futures::TryStreamExt;
     use object_store::memory::InMemory;
     use object_store::path::Path;
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, ObjectStoreExt};
     use parking_lot::Mutex;
     use rand::Rng;
     use rstest::rstest;
@@ -1769,6 +1771,7 @@ mod tests {
     use crate::db_cache::test_utils::TestCache;
     use crate::db_cache::CacheTarget;
     use crate::db_state::{SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
+    use crate::db_stats::{L0_STALL_COUNT, L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS};
     use crate::error::SlateDBError;
     use crate::format::sst::{SsTableFormat, SST_FORMAT_VERSION_LATEST};
     use crate::iter::RowEntryIterator;
@@ -1781,11 +1784,13 @@ mod tests {
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::{
         assert_iterator, bounded_sst_view, FixedThreeBytePrefixExtractor, GatedObjectStore,
+        OnDemandCompactionSchedulerSupplier,
     };
     use crate::types::KeyValue;
     use crate::types::RowEntry;
     use bytes::Bytes;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
+    use slatedb_common::metrics::{lookup_metric_with_labels, DefaultMetricsRecorder};
 
     const PATH: &str = "/test/db";
 
@@ -2533,7 +2538,7 @@ mod tests {
         let db_state = run_for(Duration::from_secs(10), || {
             let db = &db;
             let system_clock = system_clock.clone();
-            let nudge_value = nudge.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let nudge_value = nudge.fetch_add(1, Ordering::Relaxed);
             async move {
                 system_clock
                     .as_ref()
@@ -5159,7 +5164,7 @@ mod tests {
         scheduler: Arc<MockScheduler>,
         real_executor: Arc<TokioCompactionExecutor>,
         real_executor_rx: async_channel::Receiver<WorkerMessage>,
-        test_recorder: Arc<slatedb_common::metrics::DefaultMetricsRecorder>,
+        test_recorder: Arc<DefaultMetricsRecorder>,
         handler: CompactorEventHandler,
     }
 
@@ -5183,7 +5188,7 @@ mod tests {
             let scheduler = Arc::new(MockScheduler::new());
             let (real_executor_tx, real_executor_rx) = async_channel::unbounded();
             let rand = Arc::new(DbRand::default());
-            let test_recorder = Arc::new(slatedb_common::metrics::DefaultMetricsRecorder::new());
+            let test_recorder = Arc::new(DefaultMetricsRecorder::new());
             let recorder = MetricsRecorderHelper::new(
                 test_recorder.clone() as Arc<dyn slatedb_common::metrics::MetricsRecorder>,
                 slatedb_common::metrics::MetricLevel::default(),
@@ -5253,7 +5258,7 @@ mod tests {
             let scheduler = Arc::new(MockScheduler::new());
             let (real_executor_tx, real_executor_rx) = async_channel::unbounded();
             let rand = Arc::new(DbRand::default());
-            let test_recorder = Arc::new(slatedb_common::metrics::DefaultMetricsRecorder::new());
+            let test_recorder = Arc::new(DefaultMetricsRecorder::new());
             let recorder = MetricsRecorderHelper::new(
                 test_recorder.clone() as Arc<dyn slatedb_common::metrics::MetricsRecorder>,
                 slatedb_common::metrics::MetricLevel::default(),
@@ -8204,5 +8209,140 @@ mod tests {
             "should be reclaimed"
         );
         assert!(c.worker().is_none(), "worker should remain cleared");
+    }
+
+    /// Fills L0 up to `l0_max_ssts` and starts a memtable flush that waits for
+    /// compaction to free L0. If `lose_oldest_sst` is true, storage loses the
+    /// oldest L0 SST first. Compaction starts only after the flush waits, and
+    /// then reads every L0 SST.
+    async fn start_flush_that_waits_for_compaction(
+        lose_oldest_sst: bool,
+    ) -> (Db, tokio::task::JoinHandle<Result<(), Error>>) {
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let compact_now = Arc::new(AtomicBool::new(false));
+        let scheduler = {
+            let compact_now = compact_now.clone();
+            Arc::new(OnDemandCompactionSchedulerSupplier::new(Arc::new(
+                move |_state| compact_now.load(Ordering::SeqCst),
+            )))
+        };
+        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
+        let db = Db::builder(PATH, os.clone())
+            .with_settings(Settings {
+                l0_max_ssts: 3,
+                ..db_options(None)
+            })
+            .with_metrics_recorder(metrics_recorder.clone())
+            .with_compactor_builder(
+                compactor_builder_with_scheduler(
+                    os.clone(),
+                    scheduler,
+                    Arc::new(DefaultSystemClock::new()),
+                )
+                .with_options(CompactorOptions {
+                    worker: Some(CompactionWorkerOptions {
+                        compaction_job_max_retries: Some(0),
+                        ..compactor_options().worker.unwrap()
+                    }),
+                    ..compactor_options()
+                }),
+            )
+            // Compaction must read the input SSTs from storage.
+            .with_db_cache_disabled()
+            .build()
+            .await
+            .unwrap();
+
+        put_and_flush_memtable(&db, b"key-0", b"value").await;
+        if lose_oldest_sst {
+            let ssts: Vec<Path> = os
+                .list(Some(&Path::from(format!("{PATH}/compacted"))))
+                .map_ok(|meta| meta.location)
+                .try_collect()
+                .await
+                .unwrap();
+            assert_eq!(ssts.len(), 1, "{ssts:?}");
+            os.delete(&ssts[0]).await.unwrap();
+        }
+        put_and_flush_memtable(&db, b"key-1", b"value").await;
+        put_and_flush_memtable(&db, b"key-2", b"value").await;
+        assert_eq!(read_db_state_core(&db).tree.l0.len(), 3);
+
+        db.put(b"key-3", b"value").await.unwrap();
+        let flush = {
+            let db = db.clone();
+            tokio::spawn(async move {
+                db.flush_with_options(FlushOptions {
+                    flush_type: FlushType::MemTable,
+                })
+                .await
+            })
+        };
+        // The flusher counts a stall when it holds back a memtable on a full L0.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while lookup_metric_with_labels(
+                &metrics_recorder,
+                L0_STALL_COUNT,
+                &[(L0_STALL_TYPE_LABEL, L0_STALL_TYPE_NUM_SSTS)],
+            )
+            .unwrap_or(0)
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the flush must wait while L0 is full");
+        assert!(!flush.is_finished(), "the flush must wait while L0 is full");
+
+        compact_now.store(true, Ordering::SeqCst);
+        (db, flush)
+    }
+
+    /// Control: when every input SST is present, compaction frees L0 and the
+    /// waiting flush returns.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_compaction_frees_full_l0_for_waiting_flush() {
+        let (db, flush) = start_flush_that_waits_for_compaction(false).await;
+
+        tokio::time::timeout(Duration::from_secs(10), flush)
+            .await
+            .expect("compaction must free L0")
+            .unwrap()
+            .expect("the flush must succeed");
+
+        assert!(db.status().close_reason.is_none());
+        db.close().await.unwrap();
+    }
+
+    /// When storage lost a compaction input SST, the job fails and closes the
+    /// `Db` with the error of the job. The waiting flush returns that error
+    /// and does not wait forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_db_closes_when_compaction_input_sst_is_missing() {
+        let (db, flush) = start_flush_that_waits_for_compaction(true).await;
+
+        let err = tokio::time::timeout(Duration::from_secs(10), flush)
+            .await
+            .expect("the flush must not wait forever")
+            .unwrap()
+            .expect_err("the flush must return the error of the compaction job");
+
+        assert_eq!(err.kind(), crate::ErrorKind::Data, "{err:?}");
+        let source = std::error::Error::source(&err)
+            .and_then(|source| source.downcast_ref::<Arc<object_store::Error>>());
+        assert!(
+            matches!(
+                source.map(|e| e.as_ref()),
+                Some(object_store::Error::NotFound { .. })
+            ),
+            "{err:?}"
+        );
+        assert!(db.status().close_reason.is_some());
+        let err = db
+            .put(b"key-4", b"value")
+            .await
+            .expect_err("a closed db must reject writes");
+        assert_eq!(err.kind(), crate::ErrorKind::Data, "{err:?}");
     }
 }

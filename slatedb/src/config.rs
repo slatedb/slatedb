@@ -1502,6 +1502,24 @@ pub struct CompactionWorkerOptions {
     /// Defaults to [`MetricLevel::default`] when unset.
     pub metric_level: Option<MetricLevel>,
 
+    /// The maximum number of retries for a failed compaction job on this worker.
+    /// `None` (the default) permits unlimited retries. `Some(0)` stops the worker
+    /// after the first failed execution. `Some(n)` permits the initial execution
+    /// and at most `n` retries.
+    ///
+    /// Each worker counts failures by job ID in memory. Counts reset on restart
+    /// and are not shared between workers. The worker returns the original error
+    /// when it exhausts the limit. An embedded worker closes its local database
+    /// or compactor with that error. A standalone worker reports the error to its
+    /// caller, but does not close a remote coordinator or database. Cleanup
+    /// releases the claim so another worker can retry the job.
+    ///
+    /// A failed object-store request counts only after the request retries stop.
+    /// With unlimited object-store retries, an execution can wait indefinitely
+    /// without consuming a job retry. Missing SSTs follow this job limit too.
+    #[serde(default)]
+    pub compaction_job_max_retries: Option<u32>,
+
     /// Controls wrapper-level retries for standalone compaction workers'
     /// object-store operations. Defaults to unbounded retries.
     ///
@@ -1527,6 +1545,7 @@ impl Default for CompactionWorkerOptions {
             min_filter_keys: 1000,
             compression_codec: None,
             metric_level: None,
+            compaction_job_max_retries: None,
             object_store_max_retries: None,
         }
     }
@@ -2026,6 +2045,24 @@ mod tests {
     fn test_db_options_default_metric_level() {
         let options = Settings::default();
         assert_eq!(MetricLevel::default(), options.metric_level);
+    }
+
+    #[test]
+    fn test_compaction_job_retry_limit_config() {
+        let mut value = serde_json::to_value(CompactionWorkerOptions::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("compaction_job_max_retries");
+        let omitted: CompactionWorkerOptions = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(omitted.compaction_job_max_retries, None);
+
+        for retries in [0, 2, u32::MAX] {
+            value["compaction_job_max_retries"] = serde_json::json!(retries);
+            let configured: CompactionWorkerOptions =
+                serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(configured.compaction_job_max_retries, Some(retries));
+        }
     }
 
     #[test]
