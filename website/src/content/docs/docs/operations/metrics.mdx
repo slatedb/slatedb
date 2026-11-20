@@ -169,6 +169,7 @@ All object store metrics carry four labels:
 | `slatedb.object_store.request_count` | counter | Total API calls (success and error) |
 | `slatedb.object_store.error_count` | counter | Failed API calls |
 | `slatedb.object_store.request_duration_seconds` | histogram | Per-request latency |
+| `slatedb.object_store.read_bytes` | counter | Payload bytes received from `get`, `get_range` and `get_ranges` calls |
 
 The instrumented store sits beneath the retrying layer, so each retry attempt
 is counted separately. It sits above the optional object-store cache, so these metrics
