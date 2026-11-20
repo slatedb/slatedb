@@ -1213,15 +1213,6 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_db_write_with_options_result()
-		})
-		if checksum != 12341 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_db_write_with_options_result: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_dbreader_evict_cached_sst()
 		})
 		if checksum != 58617 {
@@ -4308,12 +4299,6 @@ type DbInterface interface {
 	//
 	// The provided batch is consumed and cannot be reused afterwards.
 	WriteWithOptions(batch *WriteBatch, options WriteOptions) (*WriteHandle, error)
-	// Applies all operations in `batch` atomically and returns the assigned sequence number
-	// and creation timestamp.
-	//
-	// Unlike [`Db::write_with_options`], this returns no [`WriteHandle`], so the caller cannot
-	// await durability through it. The provided batch is consumed and cannot be reused afterwards.
-	WriteWithOptionsResult(batch *WriteBatch, options WriteOptions) (WriteResult, error)
 }
 
 // A writable SlateDB handle.
@@ -5205,46 +5190,6 @@ func (_self *Db) WriteWithOptions(batch *WriteBatch, options WriteOptions) (*Wri
 		// freeFn
 		func(handle C.uint64_t) {
 			C.ffi_slatedb_uniffi_rust_future_free_u64(handle)
-		},
-	)
-
-	if err == nil {
-		return res, nil
-	}
-
-	return res, err
-}
-
-// Applies all operations in `batch` atomically and returns the assigned sequence number
-// and creation timestamp.
-//
-// Unlike [`Db::write_with_options`], this returns no [`WriteHandle`], so the caller cannot
-// await durability through it. The provided batch is consumed and cannot be reused afterwards.
-func (_self *Db) WriteWithOptionsResult(batch *WriteBatch, options WriteOptions) (WriteResult, error) {
-	_pointer := _self.ffiObject.incrementPointer("*Db")
-	defer _self.ffiObject.decrementPointer()
-	res, err := uniffiRustCallAsync[*Error](
-		FfiConverterErrorINSTANCE,
-		// completeFn
-		func(handle C.uint64_t, status *C.RustCallStatus) RustBufferI {
-			res := C.ffi_slatedb_uniffi_rust_future_complete_rust_buffer(handle, status)
-			return GoRustBuffer{
-				inner: res,
-			}
-		},
-		// liftFn
-		func(ffi RustBufferI) WriteResult {
-			return FfiConverterWriteResultINSTANCE.Lift(ffi)
-		},
-		C.uniffi_slatedb_uniffi_fn_method_db_write_with_options_result(
-			_pointer, FfiConverterWriteBatchINSTANCE.Lower(batch), FfiConverterWriteOptionsINSTANCE.Lower(options)),
-		// pollFn
-		func(handle C.uint64_t, continuation C.UniffiRustFutureContinuationCallback, data C.uint64_t) {
-			C.ffi_slatedb_uniffi_rust_future_poll_rust_buffer(handle, continuation, data)
-		},
-		// freeFn
-		func(handle C.uint64_t) {
-			C.ffi_slatedb_uniffi_rust_future_free_rust_buffer(handle)
 		},
 	)
 
@@ -13893,53 +13838,6 @@ func (c FfiConverterWriteOptions) Write(writer io.Writer, value WriteOptions) {
 type FfiDestroyerWriteOptions struct{}
 
 func (_ FfiDestroyerWriteOptions) Destroy(value WriteOptions) {
-	value.Destroy()
-}
-
-// Sequence number and creation timestamp assigned to a write.
-type WriteResult struct {
-	// Sequence number assigned to the write.
-	Seqnum uint64
-	// Creation timestamp assigned to the write.
-	CreateTs int64
-}
-
-func (r *WriteResult) Destroy() {
-	FfiDestroyerUint64{}.Destroy(r.Seqnum)
-	FfiDestroyerInt64{}.Destroy(r.CreateTs)
-}
-
-type FfiConverterWriteResult struct{}
-
-var FfiConverterWriteResultINSTANCE = FfiConverterWriteResult{}
-
-func (c FfiConverterWriteResult) Lift(rb RustBufferI) WriteResult {
-	return LiftFromRustBuffer[WriteResult](c, rb)
-}
-
-func (c FfiConverterWriteResult) Read(reader io.Reader) WriteResult {
-	return WriteResult{
-		FfiConverterUint64INSTANCE.Read(reader),
-		FfiConverterInt64INSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterWriteResult) Lower(value WriteResult) C.RustBuffer {
-	return LowerIntoRustBuffer[WriteResult](c, value)
-}
-
-func (c FfiConverterWriteResult) LowerExternal(value WriteResult) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[WriteResult](c, value))
-}
-
-func (c FfiConverterWriteResult) Write(writer io.Writer, value WriteResult) {
-	FfiConverterUint64INSTANCE.Write(writer, value.Seqnum)
-	FfiConverterInt64INSTANCE.Write(writer, value.CreateTs)
-}
-
-type FfiDestroyerWriteResult struct{}
-
-func (_ FfiDestroyerWriteResult) Destroy(value WriteResult) {
 	value.Destroy()
 }
 

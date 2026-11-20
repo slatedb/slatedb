@@ -107,16 +107,6 @@ func BenchmarkWriteBatchCommit(b *testing.B) {
 			defer handle.Destroy()
 			return handle.Seqnum()
 		}},
-		{"PutMany+WriteWithOptionsResult", func(b *testing.B, db *slatedb.Db) uint64 {
-			batch := slatedb.NewWriteBatch()
-			defer batch.Destroy()
-			fillPutMany(b, batch, keys, values)
-			result, err := db.WriteWithOptionsResult(batch, slatedb.WriteOptions{})
-			if err != nil {
-				b.Fatalf("WriteWithOptionsResult: %v", err)
-			}
-			return result.Seqnum
-		}},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			db := openEmptyBenchDB(b)

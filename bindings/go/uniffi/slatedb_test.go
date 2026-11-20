@@ -982,7 +982,7 @@ func TestDbBatchWriteAndConsumption(t *testing.T) {
 	}
 }
 
-func TestDbBatchPutManyAndWriteResult(t *testing.T) {
+func TestDbBatchPutMany(t *testing.T) {
 	store := newMemoryStore(t)
 	handle := openTestDB(t, store, nil)
 
@@ -1006,13 +1006,11 @@ func TestDbBatchPutManyAndWriteResult(t *testing.T) {
 		t.Fatalf("WriteBatch.PutMany(nil): %v", err)
 	}
 
-	first, err := handle.db.WriteWithOptionsResult(batch, slatedb.WriteOptions{})
+	batchWrite, err := handle.db.Write(batch)
 	if err != nil {
-		t.Fatalf("WriteWithOptionsResult(): %v", err)
+		t.Fatalf("Write(): %v", err)
 	}
-	if first.Seqnum == 0 {
-		t.Fatalf("WriteWithOptionsResult(): Seqnum = 0")
-	}
+	trackWriteHandle(t, batchWrite)
 
 	for key, want := range map[string]string{"many-1": "value-1b", "many-2": "value-2"} {
 		value, err := handle.db.Get([]byte(key))
@@ -1031,24 +1029,8 @@ func TestDbBatchPutManyAndWriteResult(t *testing.T) {
 		t.Fatalf("Get(rejected): got %q, want nil", *value)
 	}
 
-	if _, err := handle.db.WriteWithOptionsResult(batch, slatedb.WriteOptions{}); !errors.Is(err, slatedb.ErrErrorInvalid) {
-		t.Fatalf("WriteWithOptionsResult(consumed batch): got %v, want invalid error", err)
-	}
 	if err := batch.PutMany([]slatedb.PutEntry{{Key: []byte("late"), Value: []byte("value")}}); !errors.Is(err, slatedb.ErrErrorInvalid) {
 		t.Fatalf("WriteBatch.PutMany(consumed batch): got %v, want invalid error", err)
-	}
-
-	secondBatch := slatedb.NewWriteBatch()
-	t.Cleanup(secondBatch.Destroy)
-	if err := secondBatch.PutMany([]slatedb.PutEntry{{Key: []byte("many-3"), Value: []byte("value-3")}}); err != nil {
-		t.Fatalf("WriteBatch.PutMany(): %v", err)
-	}
-	second, err := handle.db.WriteWithOptionsResult(secondBatch, slatedb.WriteOptions{})
-	if err != nil {
-		t.Fatalf("WriteWithOptionsResult(): %v", err)
-	}
-	if second.Seqnum <= first.Seqnum {
-		t.Fatalf("WriteWithOptionsResult(): Seqnum %d not after %d", second.Seqnum, first.Seqnum)
 	}
 }
 

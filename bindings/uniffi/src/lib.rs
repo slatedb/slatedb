@@ -67,7 +67,7 @@ pub use types::{
     CompactorStateView, CompressionCodec, DbStatus, ExternalDb, FilterFormat,
     IdentifiedObjectMetadata, KeyRange, KeyValue, ObjectMetadata, PutEntry, RowEntry, RowEntryKind,
     Segment, SegmentPrefix, SortedRun, SourceId, SsTableHandle, SsTableId, SsTableInfo,
-    SsTableView, SstType, VersionedCompactions, VersionedManifest, WriteResult,
+    SsTableView, SstType, VersionedCompactions, VersionedManifest,
 };
 pub use wal_reader::{SlateDbWalIterator, SlateDbWalReader, SlateDbWalReaderOptions, WalRows};
 pub use write_batch::WriteBatch;

@@ -1257,11 +1257,6 @@ uint64_t uniffi_slatedb_uniffi_fn_method_db_write(uint64_t ptr, uint64_t batch
 uint64_t uniffi_slatedb_uniffi_fn_method_db_write_with_options(uint64_t ptr, uint64_t batch, RustBuffer options
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WRITE_WITH_OPTIONS_RESULT
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_DB_WRITE_WITH_OPTIONS_RESULT
-uint64_t uniffi_slatedb_uniffi_fn_method_db_write_with_options_result(uint64_t ptr, uint64_t batch, RustBuffer options
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBCACHE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_CLONE_DBCACHE
 uint64_t uniffi_slatedb_uniffi_fn_clone_dbcache(uint64_t handle, RustCallStatus *out_status
@@ -2955,12 +2950,6 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_db_write(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_WRITE_WITH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_WRITE_WITH_OPTIONS
 uint16_t uniffi_slatedb_uniffi_checksum_method_db_write_with_options(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_WRITE_WITH_OPTIONS_RESULT
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_DB_WRITE_WITH_OPTIONS_RESULT
-uint16_t uniffi_slatedb_uniffi_checksum_method_db_write_with_options_result(void
     
 );
 #endif
