@@ -1,10 +1,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use slatedb::config::DbReaderOptions;
 use slatedb::{DbReadOps, DbReader, Error};
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument};
 
 use crate::{Actor, ActorCtx};
 
@@ -17,7 +17,7 @@ pub enum BankAuditView {
     Regular,
     /// Audit a new point-in-time `DbSnapshot` from the current shared `Db`.
     Snapshot,
-    /// Audit a long-lived read-only `DbReader`.
+    /// Audit a read-only `DbReader` with random restarts.
     Reader { options: DbReaderOptions },
 }
 
@@ -81,13 +81,30 @@ impl Actor for AuditorActor {
             }
             BankAuditView::Reader { options } => {
                 if self.reader.is_none() {
-                    self.reader = Some(open_bank_reader(ctx, options).await?);
+                    self.reader = Some(open_bank_reader(ctx, options.clone()).await?);
                 }
-                let reader = self
-                    .reader
-                    .as_ref()
-                    .expect("bank reader auditor should have opened a reader");
-                audit_bank_view(reader, &self.bank, self.step).await?;
+                if ctx.rand().rng().random_bool(0.1) {
+                    self.reader
+                        .take()
+                        .expect("bank reader auditor should have opened a reader")
+                        .close()
+                        .await?;
+                    self.reader = Some(open_bank_reader(ctx, options).await?);
+                    debug!(
+                        "bank reader restarted [name={}, step={}]",
+                        ctx.name(),
+                        self.step
+                    );
+                } else {
+                    audit_bank_view(
+                        self.reader
+                            .as_ref()
+                            .expect("bank reader auditor should have opened a reader"),
+                        &self.bank,
+                        self.step,
+                    )
+                    .await?;
+                }
             }
         };
 
@@ -109,9 +126,10 @@ impl Actor for AuditorActor {
         Ok(())
     }
 
-    async fn finish(&mut self, _ctx: &ActorCtx) -> Result<(), Error> {
+    async fn finish(&mut self, ctx: &ActorCtx) -> Result<(), Error> {
         if let Some(reader) = self.reader.take() {
             reader.close().await?;
+            debug!("bank reader closed [name={}]", ctx.name());
         }
         Ok(())
     }
