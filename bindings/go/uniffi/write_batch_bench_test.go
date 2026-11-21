@@ -1,20 +1,24 @@
 package slatedb_test
 
 import (
+	"bytes"
 	"fmt"
 	"testing"
 
 	slatedb "slatedb.io/slatedb-go/uniffi"
 )
 
-const benchBatchSize = 64
+var (
+	benchBatchSizes = []int{64, 1024}
+	benchValueSizes = []int{11, 1 << 10, 16 << 10}
+)
 
-func benchRecords(n int) ([][]byte, [][]byte) {
+func benchRecords(n, valueSize int) ([][]byte, [][]byte) {
 	keys := make([][]byte, n)
 	values := make([][]byte, n)
 	for i := range n {
 		keys[i] = fmt.Appendf(nil, "key-%08d", i)
-		values[i] = []byte("value-01234")
+		values[i] = bytes.Repeat([]byte{byte('a' + i%26)}, valueSize)
 	}
 	return keys, values
 }
@@ -49,81 +53,85 @@ func fillPutLoop(b *testing.B, batch *slatedb.WriteBatch, keys, values [][]byte)
 	}
 }
 
-func fillPutMany(b *testing.B, batch *slatedb.WriteBatch, keys, values [][]byte) {
-	entries := make([]slatedb.PutEntry, len(keys))
+func fillExtend(b *testing.B, batch *slatedb.WriteBatch, keys, values [][]byte) {
+	ops := make([]slatedb.WriteOp, len(keys))
 	for i := range keys {
-		entries[i] = slatedb.PutEntry{Key: keys[i], Value: values[i]}
+		ops[i] = slatedb.WriteOpPut{Key: keys[i], Value: values[i]}
 	}
-	if err := batch.PutMany(entries); err != nil {
-		b.Fatalf("PutMany: %v", err)
+	if err := batch.Extend(ops); err != nil {
+		b.Fatalf("Extend: %v", err)
 	}
 }
 
+type fillFunc func(*testing.B, *slatedb.WriteBatch, [][]byte, [][]byte)
+
+var fills = []struct {
+	name string
+	fill fillFunc
+}{
+	{"Put", fillPutLoop},
+	{"Extend", fillExtend},
+}
+
+func reportEntries(b *testing.B, keys, values [][]byte) {
+	var n int64
+	for i := range keys {
+		n += int64(len(keys[i]) + len(values[i]))
+	}
+	b.SetBytes(n)
+	b.ReportMetric(float64(len(keys))*float64(b.N)/b.Elapsed().Seconds(), "entries/s")
+}
+
 func BenchmarkWriteBatchFill(b *testing.B) {
-	keys, values := benchRecords(benchBatchSize)
-	for _, tc := range []struct {
-		name string
-		fill func(*testing.B, *slatedb.WriteBatch, [][]byte, [][]byte)
-	}{
-		{"Put", fillPutLoop},
-		{"PutMany", fillPutMany},
-	} {
-		b.Run(tc.name, func(b *testing.B) {
-			b.ReportAllocs()
-			for b.Loop() {
-				batch := slatedb.NewWriteBatch()
-				tc.fill(b, batch, keys, values)
-				batch.Destroy()
+	for _, size := range benchBatchSizes {
+		for _, valueSize := range benchValueSizes {
+			keys, values := benchRecords(size, valueSize)
+			for _, tc := range fills {
+				b.Run(fmt.Sprintf("%s/n=%d/v=%d", tc.name, size, valueSize), func(b *testing.B) {
+					b.ReportAllocs()
+					for b.Loop() {
+						batch := slatedb.NewWriteBatch()
+						tc.fill(b, batch, keys, values)
+						batch.Destroy()
+					}
+					reportEntries(b, keys, values)
+				})
 			}
-		})
+		}
 	}
 }
 
 func BenchmarkWriteBatchCommit(b *testing.B) {
-	keys, values := benchRecords(benchBatchSize)
-	for _, tc := range []struct {
-		name   string
-		commit func(*testing.B, *slatedb.Db) uint64
-	}{
-		{"Put+WriteWithOptions", func(b *testing.B, db *slatedb.Db) uint64 {
-			batch := slatedb.NewWriteBatch()
-			defer batch.Destroy()
-			fillPutLoop(b, batch, keys, values)
-			handle, err := db.WriteWithOptions(batch, slatedb.WriteOptions{})
-			if err != nil {
-				b.Fatalf("WriteWithOptions: %v", err)
+	for _, size := range benchBatchSizes {
+		for _, valueSize := range benchValueSizes {
+			keys, values := benchRecords(size, valueSize)
+			for _, tc := range fills {
+				b.Run(fmt.Sprintf("%s/n=%d/v=%d", tc.name, size, valueSize), func(b *testing.B) {
+					db := openEmptyBenchDB(b)
+					b.ReportAllocs()
+					var last uint64
+					for b.Loop() {
+						batch := slatedb.NewWriteBatch()
+						tc.fill(b, batch, keys, values)
+						handle, err := db.WriteWithOptions(batch, slatedb.WriteOptions{})
+						if err != nil {
+							b.Fatalf("WriteWithOptions: %v", err)
+						}
+						seq := handle.Seqnum()
+						handle.Destroy()
+						batch.Destroy()
+						if seq <= last {
+							b.Fatalf("seqnum %d not after %d", seq, last)
+						}
+						last = seq
+					}
+					reportEntries(b, keys, values)
+					value, err := db.Get(keys[size-1])
+					if err != nil || value == nil {
+						b.Fatalf("Get after commits: value=%v err=%v", value, err)
+					}
+				})
 			}
-			defer handle.Destroy()
-			return handle.Seqnum()
-		}},
-		{"PutMany+WriteWithOptions", func(b *testing.B, db *slatedb.Db) uint64 {
-			batch := slatedb.NewWriteBatch()
-			defer batch.Destroy()
-			fillPutMany(b, batch, keys, values)
-			handle, err := db.WriteWithOptions(batch, slatedb.WriteOptions{})
-			if err != nil {
-				b.Fatalf("WriteWithOptions: %v", err)
-			}
-			defer handle.Destroy()
-			return handle.Seqnum()
-		}},
-	} {
-		b.Run(tc.name, func(b *testing.B) {
-			db := openEmptyBenchDB(b)
-			b.ReportAllocs()
-			var commits, last uint64
-			for b.Loop() {
-				seq := tc.commit(b, db)
-				if seq <= last {
-					b.Fatalf("seqnum %d not after %d", seq, last)
-				}
-				last = seq
-				commits++
-			}
-			value, err := db.Get(keys[benchBatchSize-1])
-			if err != nil || value == nil {
-				b.Fatalf("Get after %d commits: value=%v err=%v", commits, value, err)
-			}
-		})
+		}
 	}
 }

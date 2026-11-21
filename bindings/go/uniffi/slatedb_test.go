@@ -982,28 +982,49 @@ func TestDbBatchWriteAndConsumption(t *testing.T) {
 	}
 }
 
-func TestDbBatchPutMany(t *testing.T) {
+func TestDbBatchExtend(t *testing.T) {
 	store := newMemoryStore(t)
-	handle := openTestDB(t, store, nil)
+	handle := openTestDB(t, store, func(t *testing.T, builder *slatedb.DbBuilder) {
+		t.Helper()
+		if err := builder.WithMergeOperator(concatMergeOperator{}); err != nil {
+			t.Fatalf("WithMergeOperator(): %v", err)
+		}
+	})
+
+	if _, err := handle.db.Put([]byte("gone"), []byte("value")); err != nil {
+		t.Fatalf("Put(gone): %v", err)
+	}
 
 	batch := slatedb.NewWriteBatch()
 	t.Cleanup(batch.Destroy)
 
-	if err := batch.PutMany([]slatedb.PutEntry{
-		{Key: []byte("many-1"), Value: []byte("value-1")},
-		{Key: []byte("many-2"), Value: []byte("value-2")},
-		{Key: []byte("many-1"), Value: []byte("value-1b")},
+	if err := batch.Extend([]slatedb.WriteOp{
+		slatedb.WriteOpPut{Key: []byte("ext-1"), Value: []byte("value-1")},
+		slatedb.WriteOpPut{
+			Key:     []byte("ext-2"),
+			Value:   []byte("value-2"),
+			Options: &slatedb.PutOptions{Ttl: slatedb.TtlNoExpiry{}},
+		},
+		slatedb.WriteOpDelete{Key: []byte("gone")},
+		slatedb.WriteOpPut{Key: []byte("ext-1"), Value: []byte("value-1b")},
+		slatedb.WriteOpPut{Key: []byte("ext-merge"), Value: []byte("base")},
+		slatedb.WriteOpMerge{Key: []byte("ext-merge"), Operand: []byte(":one")},
+		slatedb.WriteOpMerge{
+			Key:     []byte("ext-merge"),
+			Operand: []byte(":two"),
+			Options: &slatedb.MergeOptions{Ttl: slatedb.TtlNoExpiry{}},
+		},
 	}); err != nil {
-		t.Fatalf("WriteBatch.PutMany(): %v", err)
+		t.Fatalf("WriteBatch.Extend(): %v", err)
 	}
-	if err := batch.PutMany([]slatedb.PutEntry{
-		{Key: []byte("rejected"), Value: []byte("value")},
-		{Key: []byte{}, Value: []byte("value")},
+	if err := batch.Extend([]slatedb.WriteOp{
+		slatedb.WriteOpPut{Key: []byte("rejected"), Value: []byte("value")},
+		slatedb.WriteOpDelete{Key: []byte{}},
 	}); !errors.Is(err, slatedb.ErrErrorInvalid) {
-		t.Fatalf("WriteBatch.PutMany(empty key): got %v, want invalid error", err)
+		t.Fatalf("WriteBatch.Extend(empty key): got %v, want invalid error", err)
 	}
-	if err := batch.PutMany(nil); err != nil {
-		t.Fatalf("WriteBatch.PutMany(nil): %v", err)
+	if err := batch.Extend(nil); err != nil {
+		t.Fatalf("WriteBatch.Extend(nil): %v", err)
 	}
 
 	batchWrite, err := handle.db.Write(batch)
@@ -1012,7 +1033,11 @@ func TestDbBatchPutMany(t *testing.T) {
 	}
 	trackWriteHandle(t, batchWrite)
 
-	for key, want := range map[string]string{"many-1": "value-1b", "many-2": "value-2"} {
+	for key, want := range map[string]string{
+		"ext-1":     "value-1b",
+		"ext-2":     "value-2",
+		"ext-merge": "base:one:two",
+	} {
 		value, err := handle.db.Get([]byte(key))
 		if err != nil {
 			t.Fatalf("Get(%s): %v", key, err)
@@ -1021,16 +1046,18 @@ func TestDbBatchPutMany(t *testing.T) {
 			t.Fatalf("Get(%s): got %v, want %q", key, value, want)
 		}
 	}
-	value, err := handle.db.Get([]byte("rejected"))
-	if err != nil {
-		t.Fatalf("Get(rejected): %v", err)
-	}
-	if value != nil {
-		t.Fatalf("Get(rejected): got %q, want nil", *value)
+	for _, key := range []string{"gone", "rejected"} {
+		value, err := handle.db.Get([]byte(key))
+		if err != nil {
+			t.Fatalf("Get(%s): %v", key, err)
+		}
+		if value != nil {
+			t.Fatalf("Get(%s): got %q, want nil", key, *value)
+		}
 	}
 
-	if err := batch.PutMany([]slatedb.PutEntry{{Key: []byte("late"), Value: []byte("value")}}); !errors.Is(err, slatedb.ErrErrorInvalid) {
-		t.Fatalf("WriteBatch.PutMany(consumed batch): got %v, want invalid error", err)
+	if err := batch.Extend([]slatedb.WriteOp{slatedb.WriteOpDelete{Key: []byte("late")}}); !errors.Is(err, slatedb.ErrErrorInvalid) {
+		t.Fatalf("WriteBatch.Extend(consumed batch): got %v, want invalid error", err)
 	}
 }
 

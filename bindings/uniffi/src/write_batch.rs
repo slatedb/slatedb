@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 
 use crate::config::{MergeOptions, PutOptions};
 use crate::error::{Error, SlateDbError};
-use crate::types::PutEntry;
+use crate::types::WriteOp;
 use crate::validation::{validate_key, validate_key_value};
 
 /// Mutable batch of write operations applied atomically by [`crate::Db::write`].
@@ -48,16 +48,34 @@ impl WriteBatch {
             .map_err(Into::into)
     }
 
-    /// Appends a put operation for each entry, in order.
+    /// Appends each operation, in order.
     ///
-    /// Every entry is validated first. If any entry is invalid, the batch is left unchanged.
-    pub fn put_many(&self, entries: Vec<PutEntry>) -> Result<(), Error> {
-        for entry in &entries {
-            validate_key_value(&entry.key, &entry.value)?;
+    /// Every operation is validated first. If any operation is invalid, the batch is left unchanged.
+    pub fn extend(&self, ops: Vec<WriteOp>) -> Result<(), Error> {
+        for op in &ops {
+            match op {
+                WriteOp::Put { key, value, .. } => validate_key_value(key, value)?,
+                WriteOp::Delete { key } => validate_key(key)?,
+                WriteOp::Merge { key, operand, .. } => validate_key_value(key, operand)?,
+            }
         }
         self.with_open(|batch| {
-            for entry in entries {
-                batch.put(entry.key, entry.value);
+            for op in ops {
+                match op {
+                    WriteOp::Put {
+                        key,
+                        value,
+                        options,
+                    } => batch.put_with_options(key, value, &options.unwrap_or_default().into()),
+                    WriteOp::Delete { key } => batch.delete(key),
+                    WriteOp::Merge {
+                        key,
+                        operand,
+                        options,
+                    } => {
+                        batch.merge_with_options(key, operand, &options.unwrap_or_default().into())
+                    }
+                }
             }
         })
         .map_err(Into::into)

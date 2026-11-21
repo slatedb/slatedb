@@ -149,13 +149,23 @@ impl From<slatedb::DbStatus> for DbStatus {
     }
 }
 
-/// A key/value pair to append to a [`crate::WriteBatch`] with [`crate::WriteBatch::put_many`].
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct PutEntry {
-    /// Row key.
-    pub key: Vec<u8>,
-    /// Row value bytes.
-    pub value: Vec<u8>,
+/// One operation applied by [`crate::WriteBatch::extend`].
+#[derive(Clone, Debug, uniffi::Enum)]
+pub enum WriteOp {
+    /// Inserts or overwrites `key` with `value`.
+    Put {
+        key: Vec<u8>,
+        value: Vec<u8>,
+        options: Option<crate::config::PutOptions>,
+    },
+    /// Deletes `key`.
+    Delete { key: Vec<u8> },
+    /// Appends a merge operand for `key`.
+    Merge {
+        key: Vec<u8>,
+        operand: Vec<u8>,
+        options: Option<crate::config::MergeOptions>,
+    },
 }
 
 /// A key/value pair together with the row version metadata that produced it.

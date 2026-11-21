@@ -2086,6 +2086,11 @@ uint64_t uniffi_slatedb_uniffi_fn_constructor_writebatch_new(RustCallStatus *out
 void uniffi_slatedb_uniffi_fn_method_writebatch_delete(uint64_t ptr, RustBuffer key, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_EXTEND
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_EXTEND
+void uniffi_slatedb_uniffi_fn_method_writebatch_extend(uint64_t ptr, RustBuffer ops, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_MERGE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_MERGE
 void uniffi_slatedb_uniffi_fn_method_writebatch_merge(uint64_t ptr, RustBuffer key, RustBuffer operand, RustCallStatus *out_status
@@ -2099,11 +2104,6 @@ void uniffi_slatedb_uniffi_fn_method_writebatch_merge_with_options(uint64_t ptr,
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_PUT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_PUT
 void uniffi_slatedb_uniffi_fn_method_writebatch_put(uint64_t ptr, RustBuffer key, RustBuffer value, RustCallStatus *out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_PUT_MANY
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_PUT_MANY
-void uniffi_slatedb_uniffi_fn_method_writebatch_put_many(uint64_t ptr, RustBuffer entries, RustCallStatus *out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_PUT_WITH_OPTIONS
@@ -3457,6 +3457,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_writebatch_delete(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEBATCH_EXTEND
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEBATCH_EXTEND
+uint16_t uniffi_slatedb_uniffi_checksum_method_writebatch_extend(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEBATCH_MERGE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEBATCH_MERGE
 uint16_t uniffi_slatedb_uniffi_checksum_method_writebatch_merge(void
@@ -3472,12 +3478,6 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_writebatch_merge_with_options(voi
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEBATCH_PUT
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEBATCH_PUT
 uint16_t uniffi_slatedb_uniffi_checksum_method_writebatch_put(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEBATCH_PUT_MANY
-#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEBATCH_PUT_MANY
-uint16_t uniffi_slatedb_uniffi_checksum_method_writebatch_put_many(void
     
 );
 #endif

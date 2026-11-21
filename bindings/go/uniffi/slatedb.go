@@ -1969,6 +1969,15 @@ func uniffiCheckChecksums() {
 	}
 	{
 		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
+			return C.uniffi_slatedb_uniffi_checksum_method_writebatch_extend()
+		})
+		if checksum != 14172 {
+			// If this happens try cleaning and rebuilding your project
+			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_extend: UniFFI API checksum mismatch")
+		}
+	}
+	{
+		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
 			return C.uniffi_slatedb_uniffi_checksum_method_writebatch_merge()
 		})
 		if checksum != 62067 {
@@ -1992,15 +2001,6 @@ func uniffiCheckChecksums() {
 		if checksum != 48246 {
 			// If this happens try cleaning and rebuilding your project
 			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_put: UniFFI API checksum mismatch")
-		}
-	}
-	{
-		checksum := rustCall(func(_uniffiStatus *C.RustCallStatus) C.uint16_t {
-			return C.uniffi_slatedb_uniffi_checksum_method_writebatch_put_many()
-		})
-		if checksum != 43839 {
-			// If this happens try cleaning and rebuilding your project
-			panic("slatedb: uniffi_slatedb_uniffi_checksum_method_writebatch_put_many: UniFFI API checksum mismatch")
 		}
 	}
 	{
@@ -10831,16 +10831,16 @@ func (c FfiConverterUpDownCounter) register() {
 type WriteBatchInterface interface {
 	// Appends a delete operation to the batch.
 	Delete(key []byte) error
+	// Appends each operation, in order.
+	//
+	// Every operation is validated first. If any operation is invalid, the batch is left unchanged.
+	Extend(ops []WriteOp) error
 	// Appends a merge operation to the batch.
 	Merge(key []byte, operand []byte) error
 	// Appends a merge operation with custom merge options.
 	MergeWithOptions(key []byte, operand []byte, options MergeOptions) error
 	// Appends a put operation to the batch.
 	Put(key []byte, value []byte) error
-	// Appends a put operation for each entry, in order.
-	//
-	// Every entry is validated first. If any entry is invalid, the batch is left unchanged.
-	PutMany(entries []PutEntry) error
 	// Appends a put operation with custom put options.
 	PutWithOptions(key []byte, value []byte, options PutOptions) error
 }
@@ -10866,6 +10866,20 @@ func (_self *WriteBatch) Delete(key []byte) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_writebatch_delete(
 			_pointer, FfiConverterBytesINSTANCE.Lower(key), _uniffiStatus)
+		return false
+	})
+	return _uniffiErr.AsError()
+}
+
+// Appends each operation, in order.
+//
+// Every operation is validated first. If any operation is invalid, the batch is left unchanged.
+func (_self *WriteBatch) Extend(ops []WriteOp) error {
+	_pointer := _self.ffiObject.incrementPointer("*WriteBatch")
+	defer _self.ffiObject.decrementPointer()
+	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
+		C.uniffi_slatedb_uniffi_fn_method_writebatch_extend(
+			_pointer, FfiConverterSequenceWriteOpINSTANCE.Lower(ops), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -10902,20 +10916,6 @@ func (_self *WriteBatch) Put(key []byte, value []byte) error {
 	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
 		C.uniffi_slatedb_uniffi_fn_method_writebatch_put(
 			_pointer, FfiConverterBytesINSTANCE.Lower(key), FfiConverterBytesINSTANCE.Lower(value), _uniffiStatus)
-		return false
-	})
-	return _uniffiErr.AsError()
-}
-
-// Appends a put operation for each entry, in order.
-//
-// Every entry is validated first. If any entry is invalid, the batch is left unchanged.
-func (_self *WriteBatch) PutMany(entries []PutEntry) error {
-	_pointer := _self.ffiObject.incrementPointer("*WriteBatch")
-	defer _self.ffiObject.decrementPointer()
-	_, _uniffiErr := rustCallWithError[*Error](FfiConverterError{}, func(_uniffiStatus *C.RustCallStatus) bool {
-		C.uniffi_slatedb_uniffi_fn_method_writebatch_put_many(
-			_pointer, FfiConverterSequencePutEntryINSTANCE.Lower(entries), _uniffiStatus)
 		return false
 	})
 	return _uniffiErr.AsError()
@@ -12714,53 +12714,6 @@ func (c FfiConverterObjectMetadata) Write(writer io.Writer, value ObjectMetadata
 type FfiDestroyerObjectMetadata struct{}
 
 func (_ FfiDestroyerObjectMetadata) Destroy(value ObjectMetadata) {
-	value.Destroy()
-}
-
-// A key/value pair to append to a [`crate::WriteBatch`] with [`crate::WriteBatch::put_many`].
-type PutEntry struct {
-	// Row key.
-	Key []byte
-	// Row value bytes.
-	Value []byte
-}
-
-func (r *PutEntry) Destroy() {
-	FfiDestroyerBytes{}.Destroy(r.Key)
-	FfiDestroyerBytes{}.Destroy(r.Value)
-}
-
-type FfiConverterPutEntry struct{}
-
-var FfiConverterPutEntryINSTANCE = FfiConverterPutEntry{}
-
-func (c FfiConverterPutEntry) Lift(rb RustBufferI) PutEntry {
-	return LiftFromRustBuffer[PutEntry](c, rb)
-}
-
-func (c FfiConverterPutEntry) Read(reader io.Reader) PutEntry {
-	return PutEntry{
-		FfiConverterBytesINSTANCE.Read(reader),
-		FfiConverterBytesINSTANCE.Read(reader),
-	}
-}
-
-func (c FfiConverterPutEntry) Lower(value PutEntry) C.RustBuffer {
-	return LowerIntoRustBuffer[PutEntry](c, value)
-}
-
-func (c FfiConverterPutEntry) LowerExternal(value PutEntry) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[PutEntry](c, value))
-}
-
-func (c FfiConverterPutEntry) Write(writer io.Writer, value PutEntry) {
-	FfiConverterBytesINSTANCE.Write(writer, value.Key)
-	FfiConverterBytesINSTANCE.Write(writer, value.Value)
-}
-
-type FfiDestroyerPutEntry struct{}
-
-func (_ FfiDestroyerPutEntry) Destroy(value PutEntry) {
 	value.Destroy()
 }
 
@@ -15696,6 +15649,112 @@ func (_ FfiDestroyerTtl) Destroy(value Ttl) {
 	value.Destroy()
 }
 
+// One operation applied by [`crate::WriteBatch::extend`].
+type WriteOp interface {
+	Destroy()
+}
+
+// Inserts or overwrites `key` with `value`.
+type WriteOpPut struct {
+	Key     []byte
+	Value   []byte
+	Options *PutOptions
+}
+
+func (e WriteOpPut) Destroy() {
+	FfiDestroyerBytes{}.Destroy(e.Key)
+	FfiDestroyerBytes{}.Destroy(e.Value)
+	FfiDestroyerOptionalPutOptions{}.Destroy(e.Options)
+}
+
+// Deletes `key`.
+type WriteOpDelete struct {
+	Key []byte
+}
+
+func (e WriteOpDelete) Destroy() {
+	FfiDestroyerBytes{}.Destroy(e.Key)
+}
+
+// Appends a merge operand for `key`.
+type WriteOpMerge struct {
+	Key     []byte
+	Operand []byte
+	Options *MergeOptions
+}
+
+func (e WriteOpMerge) Destroy() {
+	FfiDestroyerBytes{}.Destroy(e.Key)
+	FfiDestroyerBytes{}.Destroy(e.Operand)
+	FfiDestroyerOptionalMergeOptions{}.Destroy(e.Options)
+}
+
+type FfiConverterWriteOp struct{}
+
+var FfiConverterWriteOpINSTANCE = FfiConverterWriteOp{}
+
+func (c FfiConverterWriteOp) Lift(rb RustBufferI) WriteOp {
+	return LiftFromRustBuffer[WriteOp](c, rb)
+}
+
+func (c FfiConverterWriteOp) Lower(value WriteOp) C.RustBuffer {
+	return LowerIntoRustBuffer[WriteOp](c, value)
+}
+
+func (c FfiConverterWriteOp) LowerExternal(value WriteOp) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[WriteOp](c, value))
+}
+func (FfiConverterWriteOp) Read(reader io.Reader) WriteOp {
+	id := readInt32(reader)
+	switch id {
+	case 1:
+		return WriteOpPut{
+			FfiConverterBytesINSTANCE.Read(reader),
+			FfiConverterBytesINSTANCE.Read(reader),
+			FfiConverterOptionalPutOptionsINSTANCE.Read(reader),
+		}
+	case 2:
+		return WriteOpDelete{
+			FfiConverterBytesINSTANCE.Read(reader),
+		}
+	case 3:
+		return WriteOpMerge{
+			FfiConverterBytesINSTANCE.Read(reader),
+			FfiConverterBytesINSTANCE.Read(reader),
+			FfiConverterOptionalMergeOptionsINSTANCE.Read(reader),
+		}
+	default:
+		panic(fmt.Sprintf("invalid enum value %v in FfiConverterWriteOp.Read()", id))
+	}
+}
+
+func (FfiConverterWriteOp) Write(writer io.Writer, value WriteOp) {
+	switch variant_value := value.(type) {
+	case WriteOpPut:
+		writeInt32(writer, 1)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.Key)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.Value)
+		FfiConverterOptionalPutOptionsINSTANCE.Write(writer, variant_value.Options)
+	case WriteOpDelete:
+		writeInt32(writer, 2)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.Key)
+	case WriteOpMerge:
+		writeInt32(writer, 3)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.Key)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.Operand)
+		FfiConverterOptionalMergeOptionsINSTANCE.Write(writer, variant_value.Options)
+	default:
+		_ = variant_value
+		panic(fmt.Sprintf("invalid enum value `%v` in FfiConverterWriteOp.Write", value))
+	}
+}
+
+type FfiDestroyerWriteOp struct{}
+
+func (_ FfiDestroyerWriteOp) Destroy(value WriteOp) {
+	value.Destroy()
+}
+
 type FfiConverterOptionalUint32 struct{}
 
 var FfiConverterOptionalUint32INSTANCE = FfiConverterOptionalUint32{}
@@ -16393,6 +16452,47 @@ func (_ FfiDestroyerOptionalKeyValue) Destroy(value *KeyValue) {
 	}
 }
 
+type FfiConverterOptionalMergeOptions struct{}
+
+var FfiConverterOptionalMergeOptionsINSTANCE = FfiConverterOptionalMergeOptions{}
+
+func (c FfiConverterOptionalMergeOptions) Lift(rb RustBufferI) *MergeOptions {
+	return LiftFromRustBuffer[*MergeOptions](c, rb)
+}
+
+func (_ FfiConverterOptionalMergeOptions) Read(reader io.Reader) *MergeOptions {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterMergeOptionsINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalMergeOptions) Lower(value *MergeOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[*MergeOptions](c, value)
+}
+
+func (c FfiConverterOptionalMergeOptions) LowerExternal(value *MergeOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*MergeOptions](c, value))
+}
+
+func (_ FfiConverterOptionalMergeOptions) Write(writer io.Writer, value *MergeOptions) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterMergeOptionsINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalMergeOptions struct{}
+
+func (_ FfiDestroyerOptionalMergeOptions) Destroy(value *MergeOptions) {
+	if value != nil {
+		FfiDestroyerMergeOptions{}.Destroy(*value)
+	}
+}
+
 type FfiConverterOptionalMetric struct{}
 
 var FfiConverterOptionalMetricINSTANCE = FfiConverterOptionalMetric{}
@@ -16431,6 +16531,47 @@ type FfiDestroyerOptionalMetric struct{}
 func (_ FfiDestroyerOptionalMetric) Destroy(value *Metric) {
 	if value != nil {
 		FfiDestroyerMetric{}.Destroy(*value)
+	}
+}
+
+type FfiConverterOptionalPutOptions struct{}
+
+var FfiConverterOptionalPutOptionsINSTANCE = FfiConverterOptionalPutOptions{}
+
+func (c FfiConverterOptionalPutOptions) Lift(rb RustBufferI) *PutOptions {
+	return LiftFromRustBuffer[*PutOptions](c, rb)
+}
+
+func (_ FfiConverterOptionalPutOptions) Read(reader io.Reader) *PutOptions {
+	if readInt8(reader) == 0 {
+		return nil
+	}
+	temp := FfiConverterPutOptionsINSTANCE.Read(reader)
+	return &temp
+}
+
+func (c FfiConverterOptionalPutOptions) Lower(value *PutOptions) C.RustBuffer {
+	return LowerIntoRustBuffer[*PutOptions](c, value)
+}
+
+func (c FfiConverterOptionalPutOptions) LowerExternal(value *PutOptions) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[*PutOptions](c, value))
+}
+
+func (_ FfiConverterOptionalPutOptions) Write(writer io.Writer, value *PutOptions) {
+	if value == nil {
+		writeInt8(writer, 0)
+	} else {
+		writeInt8(writer, 1)
+		FfiConverterPutOptionsINSTANCE.Write(writer, *value)
+	}
+}
+
+type FfiDestroyerOptionalPutOptions struct{}
+
+func (_ FfiDestroyerOptionalPutOptions) Destroy(value *PutOptions) {
+	if value != nil {
+		FfiDestroyerPutOptions{}.Destroy(*value)
 	}
 }
 
@@ -17320,53 +17461,6 @@ func (FfiDestroyerSequenceMetricLabel) Destroy(sequence []MetricLabel) {
 	}
 }
 
-type FfiConverterSequencePutEntry struct{}
-
-var FfiConverterSequencePutEntryINSTANCE = FfiConverterSequencePutEntry{}
-
-func (c FfiConverterSequencePutEntry) Lift(rb RustBufferI) []PutEntry {
-	return LiftFromRustBuffer[[]PutEntry](c, rb)
-}
-
-func (c FfiConverterSequencePutEntry) Read(reader io.Reader) []PutEntry {
-	length := readInt32(reader)
-	if length == 0 {
-		return nil
-	}
-	result := make([]PutEntry, 0, length)
-	for i := int32(0); i < length; i++ {
-		result = append(result, FfiConverterPutEntryINSTANCE.Read(reader))
-	}
-	return result
-}
-
-func (c FfiConverterSequencePutEntry) Lower(value []PutEntry) C.RustBuffer {
-	return LowerIntoRustBuffer[[]PutEntry](c, value)
-}
-
-func (c FfiConverterSequencePutEntry) LowerExternal(value []PutEntry) ExternalCRustBuffer {
-	return RustBufferFromC(LowerIntoRustBuffer[[]PutEntry](c, value))
-}
-
-func (c FfiConverterSequencePutEntry) Write(writer io.Writer, value []PutEntry) {
-	if len(value) > math.MaxInt32 {
-		panic("[]PutEntry is too large to fit into Int32")
-	}
-
-	writeInt32(writer, int32(len(value)))
-	for _, item := range value {
-		FfiConverterPutEntryINSTANCE.Write(writer, item)
-	}
-}
-
-type FfiDestroyerSequencePutEntry struct{}
-
-func (FfiDestroyerSequencePutEntry) Destroy(sequence []PutEntry) {
-	for _, value := range sequence {
-		FfiDestroyerPutEntry{}.Destroy(value)
-	}
-}
-
 type FfiConverterSequenceRowEntry struct{}
 
 var FfiConverterSequenceRowEntryINSTANCE = FfiConverterSequenceRowEntry{}
@@ -17881,6 +17975,53 @@ type FfiDestroyerSequenceSourceId struct{}
 func (FfiDestroyerSequenceSourceId) Destroy(sequence []SourceId) {
 	for _, value := range sequence {
 		FfiDestroyerSourceId{}.Destroy(value)
+	}
+}
+
+type FfiConverterSequenceWriteOp struct{}
+
+var FfiConverterSequenceWriteOpINSTANCE = FfiConverterSequenceWriteOp{}
+
+func (c FfiConverterSequenceWriteOp) Lift(rb RustBufferI) []WriteOp {
+	return LiftFromRustBuffer[[]WriteOp](c, rb)
+}
+
+func (c FfiConverterSequenceWriteOp) Read(reader io.Reader) []WriteOp {
+	length := readInt32(reader)
+	if length == 0 {
+		return nil
+	}
+	result := make([]WriteOp, 0, length)
+	for i := int32(0); i < length; i++ {
+		result = append(result, FfiConverterWriteOpINSTANCE.Read(reader))
+	}
+	return result
+}
+
+func (c FfiConverterSequenceWriteOp) Lower(value []WriteOp) C.RustBuffer {
+	return LowerIntoRustBuffer[[]WriteOp](c, value)
+}
+
+func (c FfiConverterSequenceWriteOp) LowerExternal(value []WriteOp) ExternalCRustBuffer {
+	return RustBufferFromC(LowerIntoRustBuffer[[]WriteOp](c, value))
+}
+
+func (c FfiConverterSequenceWriteOp) Write(writer io.Writer, value []WriteOp) {
+	if len(value) > math.MaxInt32 {
+		panic("[]WriteOp is too large to fit into Int32")
+	}
+
+	writeInt32(writer, int32(len(value)))
+	for _, item := range value {
+		FfiConverterWriteOpINSTANCE.Write(writer, item)
+	}
+}
+
+type FfiDestroyerSequenceWriteOp struct{}
+
+func (FfiDestroyerSequenceWriteOp) Destroy(sequence []WriteOp) {
+	for _, value := range sequence {
+		FfiDestroyerWriteOp{}.Destroy(value)
 	}
 }
 
