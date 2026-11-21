@@ -163,8 +163,9 @@ targets into one call lets SlateDB share the SST index read across
 For data warming, callers pass any standard `RangeBounds` through
 `CacheTarget::data(range)`, mirroring the `Db::scan<K, T>(range: T)` signature.
 Overlapping target ranges in a single call are not coalesced upfront; the
-block cache's per-block lookup in `read_blocks_using_index` prevents duplicate
-object-store fetches.
+block cache's per-block lookup in `read_blocks_using_index` keeps a later
+target from fetching blocks an earlier one already cached, except for small
+cached gaps that get merged into a GET (see below).
 
 `CacheTarget::data(..)` expresses "all data" with an unbounded range, so
 full-SST data warming does not need a separate `AllData` target.
@@ -201,8 +202,11 @@ For each `CacheTarget::Data(range)`, SlateDB:
 
 For each `CacheTarget::Data(_)`, SlateDB warms the covered block ranges
 through `TableStore::read_blocks_using_index(..., cache=true)`. That reader
-consults the block cache per block and fetches only uncached ones, so
-overlapping targets in the same call do not double-fetch.
+consults the block cache per block and decodes and caches only uncached ones.
+It merges uncached blocks at most `OBJECT_STORE_COALESCE_DEFAULT` (1 MiB)
+apart into one GET, downloading and dropping cached gaps of at most that size.
+Larger cached gaps stay separate, so overlapping targets in the same call
+re-read at most 1 MiB per gap.
 
 If the SST is not reachable from the current manifest, `warm_sst()` returns
 `Ok(())` without doing any work. It does not try to recreate a previous

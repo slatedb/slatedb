@@ -31,7 +31,6 @@ flatbuffers = { workspace = true }
 foyer = { workspace = true, features = ["serde"], optional = true }
 futures = { workspace = true }
 log = { workspace = true }
-lru = { workspace = true }
 lz4_flex = { workspace = true, optional = true }
 moka = { workspace = true, features = ["future"], optional = true }
 object_store = { workspace = true }
@@ -58,7 +57,6 @@ tokio = { workspace = true, features = [
 tracing = { workspace = true, features = ["log"] }
 ulid = { workspace = true, features = ["serde"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
-walkdir = { workspace = true }
 zstd = { workspace = true, optional = true }
 tokio-util = { workspace = true, default-features = false, features = [
     "rt",
@@ -73,7 +71,6 @@ criterion = { workspace = true, features = ["async_tokio", "html_reports"] }
 ctor = { workspace = true }
 fail-parallel = { workspace = true, features = ["failpoints"] }
 figment = { workspace = true, features = ["test"] }
-filetime = { workspace = true }
 insta = { workspace = true }
 parking_lot = { workspace = true, features = ["deadlock_detection"] }
 proptest = { workspace = true }

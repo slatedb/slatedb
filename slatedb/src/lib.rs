@@ -35,7 +35,6 @@ pub use object_store;
 pub use batch::WriteBatch;
 pub use block_cache_policy::BlockCachePolicy;
 pub use bytes_range::ByteRangeBounds;
-pub use cached_object_store::stats as cached_object_store_stats;
 pub use checkpoint::{Checkpoint, CheckpointCreateResult, CheckpointHandle};
 #[cfg(feature = "compaction_filters")]
 pub use compaction_filter::{
@@ -83,7 +82,6 @@ pub use wal::slatedb::writer::stats as wal_buffer_stats;
 pub use wal_reader::{WalFile, WalFileIterator, WalReader};
 
 pub mod admin;
-pub mod cached_object_store;
 pub mod clock;
 #[cfg(feature = "bencher")]
 pub mod compaction_execute_bench;

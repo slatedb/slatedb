@@ -235,7 +235,7 @@ mod tests {
         };
         for block_cache_size in [None, Some(1024 * 1024)] {
             args.db_args.block_cache_size = block_cache_size;
-            let (mut config, cache) = args.db_args.config().unwrap();
+            let (mut config, cache) = args.db_args.config().await.unwrap();
             config.compactor_options = None;
             let cache = cache.unwrap();
             let db = Arc::new(

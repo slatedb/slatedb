@@ -569,7 +569,7 @@ enum TrackedImmState {
 mod tests {
     use crate::batch_write::BatchWriterMessage;
     use crate::block_cache_policy::BlockCachePolicy;
-    use crate::config::{CheckpointOptions, Settings};
+    use crate::config::{CheckpointOptions, EpochClaim, Settings};
     use crate::db::DbInner;
     use crate::db_state::{
         FilterFormat, SsTableHandle, SsTableId, SsTableInfo, SsTableView, SstType,
@@ -692,7 +692,7 @@ mod tests {
             stored_manifest,
             Duration::from_secs(300),
             system_clock,
-            None,
+            EpochClaim::Increment,
         )
         .await
         .unwrap();
@@ -1118,7 +1118,7 @@ mod tests {
                 stored_manifest,
                 Duration::from_secs(300),
                 Arc::new(DefaultSystemClock::new()),
-                None,
+                EpochClaim::Increment,
             )
             .await
             .unwrap()

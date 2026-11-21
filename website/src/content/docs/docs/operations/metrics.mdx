@@ -169,34 +169,14 @@ All object store metrics carry four labels:
 | `slatedb.object_store.request_count` | counter | Total API calls (success and error) |
 | `slatedb.object_store.error_count` | counter | Failed API calls |
 | `slatedb.object_store.request_duration_seconds` | histogram | Per-request latency |
+| `slatedb.object_store.read_bytes` | counter | Payload bytes received from `get`, `get_range` and `get_ranges` calls |
 
 The instrumented store sits beneath the retrying layer, so each retry attempt
-is counted separately. It sits above the optional object-store cache, so these metrics
-count the calls SlateDB makes into the cache: a cache hit is counted as one
-request even though it never reaches the remote store, and the requests the
-cache issues against the remote store to fill a miss are not counted.
-Use the cache metrics below to tell hits from misses.
-
-### Object store cache (`slatedb.object_store_cache.*`)
-
-These metrics come from the deprecated `CachedObjectStore`. See
-[Object-Store Cache](/docs/design/caching#object-store-cache) for the replacement.
-
-| Name | Type | Labels | Description |
-|------|------|--------|-------------|
-| `slatedb.object_store_cache.part_hit_count` | counter | | Cache part hits |
-| `slatedb.object_store_cache.part_access_count` | counter | | Cache part accesses |
-| `slatedb.object_store_cache.cache_keys` | gauge | | Cached keys |
-| `slatedb.object_store_cache.cache_bytes` | gauge | | Cached bytes |
-| `slatedb.object_store_cache.evicted_keys` | counter | | Evicted keys |
-| `slatedb.object_store_cache.evicted_bytes` | counter | | Evicted bytes |
-
-When the cache comes from `object_store_cache_options`, it records to the
-recorder configured on the database builder. When you build a
-`CachedObjectStore` yourself, it records to a no-op recorder unless you pass
-one with `with_metrics_recorder`, so these metrics stay empty until you do.
-
-These are passed to `register_histogram` as the `boundaries` parameter.
+is counted separately. If the object store that you give to SlateDB is itself a
+wrapper, such as the [local object mirror](/docs/design/caching#local-object-mirror),
+these metrics count the calls that SlateDB makes into that wrapper. A read from
+the local copy is counted as one request. The requests that the wrapper sends to
+the remote store are not counted.
 
 ## Using DefaultMetricsRecorder
 

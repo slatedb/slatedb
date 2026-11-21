@@ -71,6 +71,57 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## Local Object Mirror
+
+`ObjectStoreMirrorBuilder` wraps an object store and keeps the compacted SSTs of one database on
+local disk. The database then reads those SSTs from local disk. WAL SSTs and manifests stay in the
+wrapped store only.
+
+```python
+from slatedb.uniffi import DbBuilder, ObjectStore, ObjectStoreMirrorBuilder
+
+remote = ObjectStore.resolve("s3://my-bucket")
+mirror = await ObjectStoreMirrorBuilder("/var/lib/slatedb/mirror", remote).build()
+db = await DbBuilder("demo-db", mirror).build()
+```
+
+- Build one mirror for each database, and use it each time you open that database.
+- Each mirror locks its local directory. `build` fails with an `Unavailable` error if another
+  mirror holds the lock. The lock is released after the mirror store and all handles opened with
+  it are garbage collected.
+- The local volume must hold the whole database. The mirror does not evict SSTs.
+- Create a clone with the wrapped store, not with a mirror. Then open the clone with its own
+  mirror.
+
+### Mirrored Segments
+
+By default, the mirror keeps all segments. Give it a `SegmentFilter` to keep only some segments.
+The database reads the other segments from the wrapped store.
+
+```python
+from slatedb.uniffi import ObjectStoreMirrorBuilder, SegmentFilter
+
+
+class HotSegments(SegmentFilter):
+    def should_mirror(self, segment: bytes) -> bool:
+        return segment != b"cold"
+
+
+builder = ObjectStoreMirrorBuilder("/var/lib/slatedb/mirror", remote)
+builder.with_segment_filter(HotSegments())
+mirror = await builder.build()
+```
+
+- The mirror keeps one answer for each segment and manifest version. It asks again when the
+  database writes a new manifest, at a flush or a compaction.
+- The empty prefix is the root segment. A database without a segment extractor has only the root
+  segment, so `False` for it turns the mirror off.
+- A changed answer takes effect at the next manifest. Then the mirror downloads the SSTs of a
+  segment that it starts to keep, and removes the local copies of a segment that it stops keeping.
+- While those downloads run, reads of the segment can fail with a `Data` error.
+- An error from the filter counts as `False` for that manifest version. The mirror logs a warning.
+- The filter blocks a runtime thread that all databases share, so it must return quickly.
+
 ## Metrics
 
 The Python binding exposes both custom metrics callbacks and the built-in

@@ -1,5 +1,3 @@
-#[allow(deprecated)] // `CachedObjectStore` is deprecated.
-use crate::cached_object_store::CachedObjectStore;
 use crate::wal::slatedb::reader::SlateDbWalReaderOptions;
 use {
     crate::{
@@ -21,7 +19,6 @@ use {
         mem_table::{ImmutableMemtable, KVTable, WritableKVTable},
         merge_operator::MergeOperatorType,
         oracle::DbReaderOracle,
-        paths::PathResolver,
         prefix_extractor::PrefixExtractor,
         reader::{DbStateReader, Reader, ScanContext},
         tablestore::TableStore,
@@ -882,27 +879,6 @@ impl DbReader {
             });
         }
         Ok(())
-    }
-
-    /// Preload the disk cache from the current manifest state.
-    #[allow(deprecated)] // `CachedObjectStore` and its options are deprecated.
-    pub(crate) async fn preload_cache(
-        &self,
-        cached_obj_store: &CachedObjectStore,
-        path: Path,
-    ) -> Result<(), SlateDBError> {
-        let state = Arc::clone(&self.inner.state.read());
-        let external_ssts = state.manifest.external_ssts();
-        let path_resolver = PathResolver::new_with_external_ssts(path, external_ssts);
-        let cache_opts = &self.inner.options.object_store_cache_options;
-        crate::utils::preload_cache_from_manifest(
-            &state.manifest.core,
-            cached_obj_store,
-            &path_resolver,
-            cache_opts.preload_disk_cache_on_startup,
-            cache_opts.max_cache_size_bytes.unwrap_or(usize::MAX),
-        )
-        .await
     }
 
     /// Creates a database reader that can read the contents of a database (but cannot write any
@@ -3562,59 +3538,6 @@ mod tests {
         assert!(
             inner.should_reestablish_checkpoint(&latest),
             "segment drain marker should retire the snapshot"
-        );
-    }
-
-    #[tokio::test]
-    #[allow(deprecated)] // `CachedObjectStore` is deprecated.
-    async fn should_populate_disk_cache_on_read() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("/tmp/test_db_reader_disk_cache");
-
-        // Write data via Db
-        let db = Db::builder(path.clone(), Arc::clone(&object_store))
-            .with_settings(Settings::default())
-            .build()
-            .await
-            .unwrap();
-        db.put(b"key1", b"value1").await.unwrap();
-        db.flush().await.unwrap();
-        db.close().await.unwrap();
-
-        // Open a DbReader over a user-constructed cached store
-        let cache_dir = tempfile::Builder::new()
-            .prefix("dbreader_cache_test_")
-            .tempdir()
-            .unwrap();
-        let cache_path = cache_dir.keep();
-
-        let cached_store = crate::cached_object_store::CachedObjectStore::builder(
-            cache_path.clone(),
-            Arc::clone(&object_store),
-        )
-        .with_part_size_bytes(1024)
-        .build()
-        .await
-        .unwrap();
-
-        let reader = DbReader::open(
-            path.clone(),
-            cached_store,
-            DbReaderMode::ManagedCheckpoint,
-            DbReaderOptions::default(),
-        )
-        .await
-        .unwrap();
-
-        // Read data to populate the cache
-        let val = reader.get(b"key1").await.unwrap();
-        assert_eq!(val, Some(Bytes::from_static(b"value1")));
-
-        // Verify the cache directory has been populated
-        let entries: Vec<_> = std::fs::read_dir(&cache_path).unwrap().collect();
-        assert!(
-            !entries.is_empty(),
-            "Expected disk cache directory to be populated after read"
         );
     }
 

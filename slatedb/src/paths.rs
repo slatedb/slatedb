@@ -20,8 +20,8 @@ const SST_PATH_STACK_LEN: usize = 256;
 /// Useful outside the database handle, for example to map the SST ids in a
 /// [`VersionedManifest`](crate::VersionedManifest) to paths in Object Store
 ///
-/// Can be used when preloading `CachedObjectStore`, or for administrative
-/// tooling that inspects a database's objects directly.
+/// Can be used by administrative tooling that inspects a database's objects
+/// directly.
 ///
 /// Constructed from a manifest via [`Self::new`]. The manifest is required
 /// because it can reference SSTs owned by another database (external SSTs,

@@ -118,8 +118,6 @@ use crate::admin::{Admin, AdminWal};
 use crate::batch_write::WriteBatchEventHandler;
 use crate::batch_write::WRITE_BATCH_TASK_NAME;
 use crate::block_cache_policy::BlockCachePolicy;
-#[allow(deprecated)] // `CachedObjectStore` is deprecated.
-use crate::cached_object_store::CachedObjectStore;
 use crate::clone::{SegmentFilterFn, SegmentProjectionFn};
 #[cfg(feature = "compaction_filters")]
 use crate::compaction_filter::CompactionFilterSupplier;
@@ -136,7 +134,7 @@ use crate::compactor::{CompactionSchedulerSupplier, Compactor};
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
 use crate::config::{CompactionWorkerOptions, CompactorOptions};
-use crate::config::{Settings, SstBlockSize};
+use crate::config::{EpochClaim, Settings, SstBlockSize};
 use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::SplitCache;
@@ -200,7 +198,7 @@ pub struct DbBuilder<P: Into<Path>> {
     metrics_recorder: Arc<dyn MetricsRecorder>,
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     wal_writer_init: Option<Box<dyn wal::WriterInit>>,
-    expected_epoch: Option<u64>,
+    epoch_claim: EpochClaim,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -233,18 +231,16 @@ impl<P: Into<Path>> DbBuilder<P> {
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
             segment_extractor: None,
             wal_writer_init: None,
-            expected_epoch: None,
+            epoch_claim: EpochClaim::default(),
         }
     }
 
-    /// Attempts to claim writer epoch `expected_epoch + 1`.
+    /// Sets how the writer claims its epoch when it opens the database.
     ///
-    /// If a different writer epoch is observed, opening fails with
-    /// [`crate::CloseReason::Fenced`]. Compactor epoch changes are tolerated.
-    /// Without this option, opening retries claims against newer writers.
-    /// `expected_epoch` must be less than `u64::MAX`.
-    pub fn with_expected_epoch(mut self, expected_epoch: u64) -> Self {
-        self.expected_epoch = Some(expected_epoch);
+    /// The default is [`EpochClaim::Increment`]. If the claim fails, opening fails with
+    /// [`crate::CloseReason::Fenced`]. Compactor epoch changes do not cause a claim to fail.
+    pub fn with_epoch_claim(mut self, epoch_claim: EpochClaim) -> Self {
+        self.epoch_claim = epoch_claim;
         self
     }
 
@@ -533,27 +529,8 @@ impl<P: Into<Path>> DbBuilder<P> {
                 max_retries,
             )
         };
-        // Set up the object store with optional caching from the settings,
-        // producing the same layering as a caller-built
-        // [`CachedObjectStore`] passed to [`DbBuilder::new`]: the cache sits
-        // under the retry and instrumentation layers, so the same cache
-        // instance can be shared with the WAL store, compactor, and GC.
-        #[allow(deprecated)] // `CachedObjectStore` and its options are deprecated.
-        let cached_object_store = CachedObjectStore::from_config(
-            self.main_object_store.clone(),
-            &self.settings.object_store_cache_options,
-            &recorder,
-            system_clock.clone(),
-            rand.clone(),
-        )
-        .await?;
-        let maybe_cached_main_object_store: Arc<dyn ObjectStore> = match &cached_object_store {
-            Some(cached_store) => cached_store.clone(),
-            None => self.main_object_store.clone(),
-        };
-
         let retrying_main_object_store = wrap_object_store(
-            maybe_cached_main_object_store,
+            self.main_object_store.clone(),
             ObjectStoreComponent::Db,
             ObjectStoreType::Main,
         );
@@ -705,7 +682,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             manifest,
             replay_iterator,
             mut wal_writer,
-        } = fencer.fence(stored_manifest, self.expected_epoch).await?;
+        } = fencer.fence(stored_manifest, self.epoch_claim).await?;
         let (wal_writer, wal_observer) = if DbInner::wal_enabled_in_options(&self.settings) {
             let wal_observer = wal_writer.observer();
             (Some(wal_writer), wal_observer)
@@ -761,23 +738,6 @@ impl<P: Into<Path>> DbBuilder<P> {
             self.write_runtime.as_ref().unwrap_or(&tokio_handle),
         )?;
 
-        // Selects the store a background component (compactor, GC) reads and
-        // writes through, before the component wraps it in its own retry and
-        // instrumentation layer.
-        //
-        // When the component runs against the DB's own store (the auto from
-        // settings path, or a caller-supplied builder holding a clone of the
-        // DB's store) and object store caching is configured, the DB's cache
-        // instance is shared. A different caller-supplied store is used as
-        // given (e.g. a custom compaction reader takes effect instead of being
-        // silently ignored) and stays cacheless.
-        let background_component_store = |raw_store: Arc<dyn ObjectStore>| -> Arc<dyn ObjectStore> {
-            match &cached_object_store {
-                Some(cached) if Arc::ptr_eq(&raw_store, &self.main_object_store) => cached.clone(),
-                _ => raw_store,
-            }
-        };
-
         // The compactor reads/writes through the object store held by its
         // builder: the DB's own store on the auto from settings path, or the
         // store the caller passed to their own `CompactorBuilder`.
@@ -804,7 +764,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             builder = builder.with_fp_registry(self.fp_registry.clone());
 
             let compactor_main_object_store = wrap_object_store(
-                background_component_store(builder.main_object_store.clone()),
+                builder.main_object_store.clone(),
                 ObjectStoreComponent::Compactor,
                 ObjectStoreType::Main,
             );
@@ -840,8 +800,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             }
         }
 
-        // Same store selection as the compactor above. Sharing the DB's cache
-        // also means an SST deleted by the GC has its cache entries evicted.
+        // Same store selection as the compactor above.
         let gc_builder = self.gc_builder.or_else(|| {
             self.settings
                 .garbage_collector_options
@@ -858,7 +817,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 .metric_level
                 .or(Some(self.settings.metric_level));
             let gc_object_store = wrap_object_store(
-                background_component_store(gc_builder.main_object_store.clone()),
+                gc_builder.main_object_store.clone(),
                 ObjectStoreComponent::Gc,
                 ObjectStoreType::Main,
             );
@@ -912,13 +871,6 @@ impl<P: Into<Path>> DbBuilder<P> {
 
         // Replay WAL
         inner.replay_wal(replay_iterator).await?;
-
-        // Preload cache if enabled
-        if let Some(cached_obj_store) = cached_object_store {
-            inner
-                .preload_cache(&cached_obj_store, &path_resolver)
-                .await?;
-        }
 
         // Create and return the Db instance
         Ok(Db {
@@ -2039,25 +1991,8 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
         );
         // TODO: proper URI generation, for now it works just as a flag
         let wal_object_store_uri = self.wal_object_store.as_ref().map(|_| String::new());
-        // Set up the object store with optional caching from the reader
-        // options, with the cache under the retry and instrumentation layers,
-        // matching a caller-built [`CachedObjectStore`] passed to the reader.
-        #[allow(deprecated)] // `CachedObjectStore` and its options are deprecated.
-        let maybe_cached = CachedObjectStore::from_config(
-            self.object_store.clone(),
-            &self.options.object_store_cache_options,
-            &recorder,
-            self.system_clock.clone(),
-            self.rand.clone(),
-        )
-        .await?;
-        let maybe_cached_object_store: Arc<dyn ObjectStore> = match &maybe_cached {
-            Some(cached) => Arc::clone(cached) as Arc<dyn ObjectStore>,
-            None => self.object_store.clone(),
-        };
-
         let retrying_object_store = instrumented_retrying_object_store(
-            maybe_cached_object_store,
+            self.object_store,
             &recorder,
             ObjectStoreComponent::Reader,
             ObjectStoreType::Main,
@@ -2125,7 +2060,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             block_transformer: self.block_transformer,
             ..SsTableFormat::default()
         };
-        let path_resolver = PathResolver::new_with_external_ssts(path.clone(), external_ssts);
+        let path_resolver = PathResolver::new_with_external_ssts(path, external_ssts);
         let fp_registry = Arc::new(FailPointRegistry::new());
         let table_store = Arc::new(TableStore::new_with_fp_registry(
             retrying_object_store,
@@ -2144,7 +2079,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             TableStoreKind::Reader,
         ));
 
-        let reader = DbReader::open_internal(
+        DbReader::open_internal(
             manifest_store,
             table_store,
             wal_store,
@@ -2158,13 +2093,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             recorder,
         )
         .await
-        .map_err(crate::Error::from)?;
-
-        if let Some(cached) = &maybe_cached {
-            reader.preload_cache(cached, path).await?;
-        }
-
-        Ok(reader)
+        .map_err(crate::Error::from)
     }
 }
 
@@ -2445,17 +2374,14 @@ pub(crate) fn default_meta_cache() -> Option<Arc<dyn DbCache>> {
 
 #[cfg(test)]
 mod tests {
-    #[allow(deprecated)] // `CachedObjectStore` is deprecated.
-    use crate::cached_object_store::CachedObjectStore;
-    use crate::compactions_store::{CompactionsStore, StoredCompactions};
     use crate::config::{
-        CompactionWorkerOptions, CompactorOptions, GarbageCollectorOptions, MetricLevel, Settings,
+        CompactionWorkerOptions, CompactorOptions, EpochClaim, GarbageCollectorOptions,
+        MetricLevel, Settings,
     };
     use crate::error::ErrorKind;
     use crate::garbage_collector::stats::GC_COUNT;
     use crate::instrumented_object_store::stats::REQUEST_COUNT as OBJECT_STORE_REQUEST_COUNT;
     use crate::manifest::store::{ManifestStore, StoredManifest};
-    use crate::manifest::ManifestCore;
     use crate::test_utils::FlakyObjectStore;
     use crate::wal::test_utils::FakeWalWriter;
     use crate::wal::{
@@ -2530,7 +2456,7 @@ mod tests {
     #[tokio::test]
     async fn test_expected_writer_epoch_returns_closed_fenced() {
         let result = crate::Db::builder("epoch-mismatch", Arc::new(InMemory::new()))
-            .with_expected_epoch(1)
+            .with_epoch_claim(EpochClaim::ExpectCurrent(1))
             .build()
             .await;
 
@@ -2538,6 +2464,97 @@ mod tests {
             result,
             Err(error) if error.kind() == ErrorKind::Closed(crate::CloseReason::Fenced)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_assigned_writer_epoch_fences_writers_with_lower_epochs() {
+        let path = "test_assigned_writer_epoch_fences_writers_with_lower_epochs";
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let manifest_store = ManifestStore::new(&Path::from(path), object_store.clone());
+        let open = |epoch: u64| {
+            crate::Db::builder(path, object_store.clone())
+                .with_epoch_claim(EpochClaim::AssignIfGreater(epoch))
+                .build()
+        };
+
+        // The assigned epoch can skip values.
+        let db1 = open(7).await.unwrap();
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(manifest.writer_epoch(), 7);
+        db1.put(b"k1", b"v1")
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+
+        // A claim fails if the epoch is not greater than the stored epoch.
+        for epoch in [3, 7] {
+            let result = open(epoch).await;
+            assert!(matches!(
+                result,
+                Err(error) if error.kind() == ErrorKind::Closed(crate::CloseReason::Fenced)
+            ));
+        }
+        db1.put(b"k2", b"v2")
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+
+        // A greater epoch fences the current writer.
+        let db2 = open(9).await.unwrap();
+        let manifest = manifest_store.read_latest_manifest().await.unwrap();
+        assert_eq!(manifest.writer_epoch(), 9);
+        let result = match db1.put(b"k3", b"v3").await {
+            Ok(handle) => handle.await_durable().await,
+            Err(error) => Err(error),
+        };
+        assert_eq!(
+            result.unwrap_err().kind(),
+            ErrorKind::Closed(crate::CloseReason::Fenced)
+        );
+        assert_eq!(db2.get(b"k1").await.unwrap().as_deref(), Some(&b"v1"[..]));
+        assert_eq!(db2.get(b"k2").await.unwrap().as_deref(), Some(&b"v2"[..]));
+        db2.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_failed_writer_epoch_claim_does_not_init_wal_writer() {
+        let path = "test_failed_writer_epoch_claim_does_not_init_wal_writer";
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = crate::Db::builder(path, object_store.clone())
+            .with_epoch_claim(EpochClaim::AssignIfGreater(7))
+            .build()
+            .await
+            .unwrap();
+
+        // A writer that does not own the epoch must not fence the WAL.
+        for epoch in [0, 3, 7] {
+            let called = Arc::new(AtomicBool::new(false));
+            let result = crate::Db::builder(path, object_store.clone())
+                .with_epoch_claim(EpochClaim::AssignIfGreater(epoch))
+                .with_wal_writer(Box::new(RecordingWriterInit {
+                    called: Arc::clone(&called),
+                }))
+                .build()
+                .await;
+            assert!(matches!(
+                result,
+                Err(error) if error.kind() == ErrorKind::Closed(crate::CloseReason::Fenced)
+            ));
+            assert!(!called.load(Ordering::Relaxed));
+        }
+
+        // The failed claims do not fence the current writer.
+        db.put(b"k1", b"v1")
+            .await
+            .unwrap()
+            .await_durable()
+            .await
+            .unwrap();
+        db.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -2805,111 +2822,6 @@ mod tests {
             &object_store_labels("compactor", "main", "get", "list"),
         )
         .is_some_and(|count| count > 0));
-    }
-
-    #[tokio::test]
-    #[allow(deprecated)] // `CachedObjectStore` is deprecated.
-    async fn test_object_store_cache_does_not_cache_metadata_store_reads() {
-        let metrics_recorder = Arc::new(DefaultMetricsRecorder::new());
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("test_object_store_cache_does_not_cache_metadata_store_reads");
-        let manifest_store = Arc::new(ManifestStore::new(&path, object_store.clone()));
-        StoredManifest::create_new_db(
-            manifest_store,
-            ManifestCore::new(),
-            Arc::new(DefaultSystemClock::new()),
-        )
-        .await
-        .expect("failed to seed manifest");
-        let compactions_store = Arc::new(CompactionsStore::new(&path, object_store.clone()));
-        StoredCompactions::create(compactions_store, 0)
-            .await
-            .expect("failed to seed compactions");
-
-        let cache_dir = tempfile::Builder::new()
-            .prefix("metadata_store_cache_test_")
-            .tempdir()
-            .expect("failed to create cache dir");
-        let cache_path = cache_dir.path().to_path_buf();
-        let settings = Settings {
-            garbage_collector_options: None,
-            ..Settings::default()
-        };
-        let cached_store = CachedObjectStore::builder(cache_path.clone(), object_store)
-            .with_part_size_bytes(1024)
-            .build()
-            .await
-            .expect("failed to build cached store");
-
-        let db = crate::Db::builder(path.clone(), cached_store)
-            .with_settings(settings)
-            .with_metrics_recorder(metrics_recorder.clone())
-            .build()
-            .await
-            .expect("failed to build db");
-
-        let cached_db_path = cache_path.join(path.as_ref());
-        assert!(!cached_db_path.join("manifest").exists());
-        assert!(!cached_db_path.join("compactions").exists());
-        assert!(!cached_db_path.join("gc").exists());
-
-        db.close().await.expect("failed to close db");
-    }
-
-    #[tokio::test]
-    #[allow(deprecated)] // `object_store_cache_options` is deprecated.
-    async fn test_settings_configured_object_store_cache() {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let path = Path::from("test_settings_configured_object_store_cache");
-
-        // Seed an L0 SST without any cache configured.
-        let db = crate::Db::builder(path.clone(), object_store.clone())
-            .with_settings(Settings {
-                garbage_collector_options: None,
-                ..Settings::default()
-            })
-            .build()
-            .await
-            .expect("failed to build db");
-        db.put(b"k1", b"v1").await.expect("failed to put");
-        db.flush().await.expect("failed to flush");
-        db.close().await.expect("failed to close db");
-
-        // Reopen with the cache configured through Settings and preload on.
-        let cache_dir = tempfile::Builder::new()
-            .prefix("settings_cache_test_")
-            .tempdir()
-            .expect("failed to create cache dir");
-        let cache_path = cache_dir.path().to_path_buf();
-        let mut settings = Settings {
-            garbage_collector_options: None,
-            ..Settings::default()
-        };
-        settings.object_store_cache_options.root_folder = Some(cache_path.clone());
-        settings.object_store_cache_options.part_size_bytes = 1024;
-        settings
-            .object_store_cache_options
-            .preload_disk_cache_on_startup = Some(crate::config::PreloadLevel::AllSst);
-
-        let db = crate::Db::builder(path.clone(), object_store)
-            .with_settings(settings)
-            .build()
-            .await
-            .expect("failed to build db");
-
-        // The preload populated the cache with the compacted SST's parts.
-        let cached_db_path = cache_path.join(path.as_ref());
-        let cached_compacted = std::fs::read_dir(cached_db_path.join("compacted"))
-            .expect("expected cached compacted dir")
-            .count();
-        assert!(cached_compacted > 0);
-        assert!(!cached_db_path.join("manifest").exists());
-
-        assert_eq!(
-            db.get(b"k1").await.expect("failed to get").as_deref(),
-            Some(b"v1".as_ref())
-        );
-        db.close().await.expect("failed to close db");
     }
 
     // Not a `#[tokio::test]`: the caller has to own both runtimes.

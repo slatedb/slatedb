@@ -20,6 +20,7 @@ bench = false
 bytes = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["derive"] }
 chrono = { workspace = true, features = ["serde"] }
+foyer = { workspace = true }
 futures = { workspace = true }
 object_store = { workspace = true }
 rand = { workspace = true }

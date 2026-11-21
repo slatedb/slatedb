@@ -243,11 +243,23 @@ impl ObjectStoreBoundaryObject {
                     Err(TransactionalObjectError::InvalidObjectState)
                 }
             },
-            // A missing boundary is treated as zero. Don't use cache because
-            // a write that occurred before a boundary file exists is valid even if
-            // we later have a cached boundary above it. Assume the object store is
-            // infallible here; if the object store loses data, this will return 0
-            // when it should panic. But object stores should never lose data.
+            // The cache snapshot was taken before the GET. The cache is only set after a
+            // successful GET or put, so the boundary existed before this GET was sent. With
+            // a strongly consistent store, NotFound now means something outside SlateDB
+            // removed it. Fail instead of resetting the boundary to zero, which would stop
+            // fencing stale writes.
+            Err(Error::NotFound { .. }) if cached.is_some() => {
+                error!(
+                    "boundary object removed after it was observed [path={}]",
+                    self.filepath
+                );
+                Err(TransactionalObjectError::InvalidObjectState)
+            }
+            // A missing boundary that this process never observed is treated as zero. Don't
+            // use a cache that was set after the GET was sent, because a write that occurred
+            // before a boundary file exists is valid even if we later have a cached boundary
+            // above it. This arm cannot tell "never created" from "removed before this
+            // process observed it". In the second case, it returns zero and fencing is lost.
             Err(Error::NotFound { .. }) => Ok((MonotonicId::new(0), None)),
             Err(e) => Err(TransactionalObjectError::from(e)),
         }
@@ -992,6 +1004,45 @@ mod tests {
         let (observed_boundary, observed_version) = read.await.unwrap().unwrap();
         assert_eq!(MonotonicId::new(0), observed_boundary);
         assert!(observed_version.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_boundary_advance_fails_when_observed_boundary_is_removed() {
+        // InMemory returns Precondition for PutMode::Update on a missing object.
+        // S3 behaves the same way through object_store. Before the fix, advance
+        // retried the same update forever.
+        let object_store = Arc::new(InMemory::new());
+        let boundary =
+            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store.clone(), "manifest");
+        let boundary_path = Path::from("/root/gc/manifest.boundary");
+
+        boundary.advance(MonotonicId::new(2)).await.unwrap();
+        object_store.delete(&boundary_path).await.unwrap();
+
+        let err = boundary.advance(MonotonicId::new(4)).await.unwrap_err();
+        assert!(matches!(err, TransactionalObjectError::InvalidObjectState));
+
+        // The removed boundary must not be recreated with a reset value.
+        let err = object_store.get(&boundary_path).await.unwrap_err();
+        assert!(matches!(err, ObjectStoreError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_boundary_check_fails_when_observed_boundary_is_removed() {
+        let object_store = Arc::new(InMemory::new());
+        let boundary =
+            ObjectStoreBoundaryObject::new(&Path::from("/root"), object_store.clone(), "manifest");
+
+        boundary.advance(MonotonicId::new(2)).await.unwrap();
+        object_store
+            .delete(&Path::from("/root/gc/manifest.boundary"))
+            .await
+            .unwrap();
+
+        // An id above the cached boundary passes the cache check, so check reads the
+        // store and finds the boundary gone.
+        let err = boundary.check(MonotonicId::new(3)).await.unwrap_err();
+        assert!(matches!(err, TransactionalObjectError::InvalidObjectState));
     }
 
     #[tokio::test]
