@@ -224,7 +224,7 @@ impl<T: RowEntryIterator> RowEntryIterator for RetentionIterator<T> {
                                 metrics,
                             )
                         },
-                    )?;
+                    );
                 }
             }
         }
@@ -247,16 +247,22 @@ impl<T: TrackedRowEntryIterator> TrackedRowEntryIterator for RetentionIterator<T
     }
 }
 
+#[derive(Default)]
+enum CurrentVersions {
+    #[default]
+    Empty,
+    Single(RowEntry),
+    Multiple(BTreeMap<Reverse<u64>, RowEntry>),
+}
+
 /// A buffer that collects and manages multiple versions of the same key from an iterator.
 ///
 /// This buffer implements a state machine to efficiently collect all versions of a key
 /// before applying retention filtering. It maintains the current key's versions and
 /// a preview of the next key's first entry.
 struct RetentionBuffer {
-    /// The first version stays inline until another version of the same key arrives.
-    single_version: Option<RowEntry>,
-    /// All versions of the current key being processed, ordered by sequence number (latest first)
-    current_versions: BTreeMap<Reverse<u64>, RowEntry>,
+    /// Keep one version inline. Order multiple versions by sequence number, newest first.
+    current_versions: CurrentVersions,
     /// The first entry of the next key (if available). This is used to note the current key has
     /// been exhausted, and await to process the current key versions.
     next: Option<RowEntry>,
@@ -286,8 +292,7 @@ impl RetentionBuffer {
     /// Creates a new empty retention buffer
     fn new() -> Self {
         Self {
-            single_version: None,
-            current_versions: BTreeMap::new(),
+            current_versions: CurrentVersions::Empty,
             next: None,
             processed: false,
             end_of_input: false,
@@ -321,8 +326,7 @@ impl RetentionBuffer {
     ///
     /// Called when seeking to a new position in the iterator.
     fn clear(&mut self) {
-        self.single_version = None;
-        self.current_versions.clear();
+        self.current_versions = CurrentVersions::Empty;
         self.next = None;
         self.processed = false;
         self.end_of_input = false;
@@ -341,27 +345,30 @@ impl RetentionBuffer {
     /// It maintains the invariant that all versions of the current key are collected
     /// before moving to the next key.
     fn push(&mut self, entry: RowEntry) {
-        let current = self
-            .single_version
-            .as_ref()
-            .or_else(|| self.current_versions.values().next());
-        match current {
-            None => {
-                self.single_version = Some(entry);
-                return;
-            }
-            Some(current) if entry.key != current.key => {
-                self.next = Some(entry);
-                return;
-            }
-            Some(_) => {}
+        let current = match &self.current_versions {
+            CurrentVersions::Empty => None,
+            CurrentVersions::Single(entry) => Some(entry),
+            CurrentVersions::Multiple(versions) => versions.values().next(),
+        };
+        if current.is_some_and(|current| entry.key != current.key) {
+            self.next = Some(entry);
+            return;
         }
 
-        // Keep the map's ordering and replacement behavior for multi-version keys.
-        if let Some(first) = self.single_version.take() {
-            self.current_versions.insert(Reverse(first.seq), first);
-        }
-        self.current_versions.insert(Reverse(entry.seq), entry);
+        self.current_versions = match std::mem::take(&mut self.current_versions) {
+            CurrentVersions::Empty => CurrentVersions::Single(entry),
+            CurrentVersions::Single(first) => {
+                // Keep the map's ordering and replacement behavior for multiple versions.
+                let mut versions = BTreeMap::new();
+                versions.insert(Reverse(first.seq), first);
+                versions.insert(Reverse(entry.seq), entry);
+                CurrentVersions::Multiple(versions)
+            }
+            CurrentVersions::Multiple(mut versions) => {
+                versions.insert(Reverse(entry.seq), entry);
+                CurrentVersions::Multiple(versions)
+            }
+        };
     }
 
     /// Applies retention filtering to the collected versions
@@ -371,33 +378,41 @@ impl RetentionBuffer {
         filter_multiple: impl FnOnce(
             BTreeMap<Reverse<u64>, RowEntry>,
         ) -> BTreeMap<Reverse<u64>, RowEntry>,
-    ) -> Result<(), SlateDBError> {
+    ) {
         if self.processed {
-            return Ok(());
+            return;
         }
-        if let Some(entry) = self.single_version.take() {
-            self.single_version = filter_single(entry);
-        } else {
-            self.current_versions = filter_multiple(std::mem::take(&mut self.current_versions));
-        }
+        self.current_versions = match std::mem::take(&mut self.current_versions) {
+            CurrentVersions::Empty => CurrentVersions::Empty,
+            CurrentVersions::Single(entry) => filter_single(entry)
+                .map(CurrentVersions::Single)
+                .unwrap_or_default(),
+            CurrentVersions::Multiple(versions) => {
+                CurrentVersions::Multiple(filter_multiple(versions))
+            }
+        };
         self.processed = true;
-        Ok(())
     }
 
     /// Pops the next entry from the current versions
     /// When current versions are exhausted, it promotes the next entry to become the new current key.
     fn pop(&mut self) -> Option<RowEntry> {
-        match self
-            .single_version
-            .take()
-            .or_else(|| self.current_versions.pop_first().map(|(_, entry)| entry))
-        {
+        let entry = match std::mem::take(&mut self.current_versions) {
+            CurrentVersions::Empty => None,
+            CurrentVersions::Single(entry) => Some(entry),
+            CurrentVersions::Multiple(mut versions) => {
+                let entry = versions.pop_first().map(|(_, entry)| entry);
+                self.current_versions = CurrentVersions::Multiple(versions);
+                entry
+            }
+        };
+        match entry {
             Some(entry) => Some(entry),
             None => {
                 // Current versions exhausted - promote next entry to current versions
                 let next = self.next.take();
                 if let Some(entry) = next {
-                    self.single_version = Some(entry);
+                    self.current_versions = CurrentVersions::Single(entry);
                     self.processed = false;
                     None // Signal that we need to continue processing
                 } else if self.end_of_input {
@@ -471,7 +486,7 @@ mod tests {
         build: || {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
-            buffer.process_retention(Some, |versions| versions).unwrap();
+            buffer.process_retention(Some, |versions| versions);
             buffer
         },
         expected_current_versions_len: 1,
@@ -486,7 +501,7 @@ mod tests {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer.mark_end_of_input();
-            buffer.process_retention(Some, |versions| versions).unwrap();
+            buffer.process_retention(Some, |versions| versions);
             buffer
         },
         expected_current_versions_len: 1,
@@ -516,7 +531,7 @@ mod tests {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer.push(RowEntry::new_value(b"key1", b"value2", 2));
-            buffer.process_retention(Some, |versions| versions).unwrap();
+            buffer.process_retention(Some, |versions| versions);
             buffer.pop(); // Execute pop operation in the build function
             buffer
         },
@@ -532,7 +547,7 @@ mod tests {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer.push(RowEntry::new_value(b"key2", b"value2", 2));
-            buffer.process_retention(Some, |versions| versions).unwrap();
+            buffer.process_retention(Some, |versions| versions);
             buffer.mark_end_of_input();
             buffer.clear(); // Execute clear operation in the build function
             buffer
@@ -577,7 +592,11 @@ mod tests {
 
         // Verify expected state
         assert_eq!(
-            buffer.current_versions.len() + usize::from(buffer.single_version.is_some()),
+            match &buffer.current_versions {
+                CurrentVersions::Empty => 0,
+                CurrentVersions::Single(_) => 1,
+                CurrentVersions::Multiple(versions) => versions.len(),
+            },
             test_case.expected_current_versions_len,
             "Test case '{}': current_versions_len mismatch",
             test_case.name
