@@ -203,10 +203,10 @@ For each `CacheTarget::Data(range)`, SlateDB:
 For each `CacheTarget::Data(_)`, SlateDB warms the covered block ranges
 through `TableStore::read_blocks_using_index(..., cache=true)`. That reader
 consults the block cache per block and decodes and caches only uncached ones.
-It merges uncached blocks less than `OBJECT_STORE_COALESCE_DEFAULT` (1 MiB)
-apart into one GET, so a cached gap smaller than that is downloaded again and
-dropped. Larger cached gaps are not fetched, so overlapping targets in the
-same call re-read less than 1 MiB per gap.
+It merges uncached blocks at most `OBJECT_STORE_COALESCE_DEFAULT` (1 MiB)
+apart into one GET, downloading and dropping cached gaps of at most that size.
+Larger cached gaps stay separate, so overlapping targets in the same call
+re-read at most 1 MiB per gap.
 
 If the SST is not reachable from the current manifest, `warm_sst()` returns
 `Ok(())` without doing any work. It does not try to recreate a previous

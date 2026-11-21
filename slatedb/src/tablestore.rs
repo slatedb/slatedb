@@ -790,7 +790,7 @@ impl TableStore {
     /// Reads specified blocks from an SSTable using the provided index.
     ///
     /// This function reads blocks from the cache if one is available. It reads
-    /// the uncached blocks from storage, merging blocks less than
+    /// the uncached blocks from storage, merging blocks at most
     /// `OBJECT_STORE_COALESCE_DEFAULT` bytes apart into one GET. It can
     /// optionally cache newly read blocks.
     /// `segment` is a hint attached to the [`ObjectStoreCallTag`] for
@@ -872,7 +872,7 @@ impl TableStore {
         let cache_misses = slots.len() - cache_hits;
         record_read_block_cache_counts(&span, cache_hits, cache_misses);
 
-        // Fetch the uncached blocks. Ranges less than OBJECT_STORE_COALESCE_DEFAULT
+        // Fetch the uncached blocks. Ranges at most OBJECT_STORE_COALESCE_DEFAULT
         // bytes apart share one GET, so a cache that holds scattered blocks of the
         // range does not split the read into one GET per gap, and a large cached
         // gap is not read again. Only the uncached blocks are decoded.
@@ -927,13 +927,17 @@ impl TableStore {
             };
             let mut inserts = Vec::new();
             for ((i, range), block) in missing.into_iter().zip(ranges).zip(fetched) {
-                let block = Arc::new(block);
-                if let Some(cache) = cache {
-                    inserts.push(cache.insert(
-                        (handle.id, range.start).into(),
-                        CachedEntry::with_block(&block),
-                    ));
-                }
+                // Reuse the cache entry's clamped copy so the returned block
+                // does not pin the coalesced GET buffer.
+                let block = match cache {
+                    Some(cache) => {
+                        let entry = CachedEntry::with_block(&block);
+                        let cached = entry.block().expect("entry holds a block");
+                        inserts.push(cache.insert((handle.id, range.start).into(), entry));
+                        cached
+                    }
+                    None => Arc::new(block),
+                };
                 slots[i] = Some(block);
             }
             join_all(inserts).await;
@@ -3467,7 +3471,7 @@ mod tests {
         assert_eq!(actual, 2..4);
     }
 
-    /// Uncached blocks less than `OBJECT_STORE_COALESCE_DEFAULT` bytes apart
+    /// Uncached blocks at most `OBJECT_STORE_COALESCE_DEFAULT` bytes apart
     /// are fetched in one GET, not one per gap, and every block reads back in
     /// order. `cached` is `None` for a reader without a cache. Each block holds
     /// one row with a `value_len`-byte value. `read` is the block range to read,
