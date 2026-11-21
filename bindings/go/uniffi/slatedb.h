@@ -2086,6 +2086,11 @@ uint64_t uniffi_slatedb_uniffi_fn_constructor_writebatch_new(RustCallStatus *out
 void uniffi_slatedb_uniffi_fn_method_writebatch_delete(uint64_t ptr, RustBuffer key, RustCallStatus *out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_EXTEND
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_EXTEND
+void uniffi_slatedb_uniffi_fn_method_writebatch_extend(uint64_t ptr, RustBuffer ops, RustCallStatus *out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_MERGE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_FN_METHOD_WRITEBATCH_MERGE
 void uniffi_slatedb_uniffi_fn_method_writebatch_merge(uint64_t ptr, RustBuffer key, RustBuffer operand, RustCallStatus *out_status
@@ -3449,6 +3454,12 @@ uint16_t uniffi_slatedb_uniffi_checksum_method_slatedbwalreader_last_wal_file_id
 #ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEBATCH_DELETE
 #define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEBATCH_DELETE
 uint16_t uniffi_slatedb_uniffi_checksum_method_writebatch_delete(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEBATCH_EXTEND
+#define UNIFFI_FFIDEF_UNIFFI_SLATEDB_UNIFFI_CHECKSUM_METHOD_WRITEBATCH_EXTEND
+uint16_t uniffi_slatedb_uniffi_checksum_method_writebatch_extend(void
     
 );
 #endif
