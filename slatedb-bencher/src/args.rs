@@ -1,15 +1,19 @@
 use std::{
     fmt::{Display, Formatter},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
 use clap::{builder::PossibleValue, Args, Parser, Subcommand, ValueEnum};
+use foyer::{
+    BlockEngineConfig, DeviceBuilder, FsDeviceBuilder, HybridCacheBuilder, PsyncIoEngineConfig,
+};
 use slatedb::{
     config::{CompressionCodec, Settings},
     db_cache::{
         foyer::{FoyerCache, FoyerCacheOptions},
-        DbCache, SplitCache,
+        foyer_hybrid::FoyerHybridCache,
+        CachedEntry, DbCache, SplitCache,
     },
     Error, IsolationLevel,
 };
@@ -118,6 +122,20 @@ pub(crate) struct DbArgs {
     #[arg(long, help = "The size in bytes of the block cache.")]
     pub(crate) block_cache_size: Option<u64>,
 
+    #[arg(
+        long,
+        requires = "block_cache_size",
+        help = "Local directory for a disk tier of the block cache. If set, the block cache is a Foyer hybrid cache with `block_cache_size` bytes in memory and `block_cache_disk_size` bytes on disk."
+    )]
+    pub(crate) block_cache_disk_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "The size in bytes of the disk tier of the block cache. Foyer reserves this space on disk when the cache opens.",
+        default_value_t = 1024 * 1024 * 1024
+    )]
+    pub(crate) block_cache_disk_size: u64,
+
     #[arg(long, help = "The size in bytes of the meta cache.")]
     pub(crate) meta_cache_size: Option<u64>,
 
@@ -130,19 +148,23 @@ pub(crate) struct DbArgs {
 
 impl DbArgs {
     /// Returns a `(Settings, Option<Arc<dyn DbCache>>)` struct based on DbArgs's arguments.
-    pub(crate) fn config(&self) -> Result<(Settings, Option<Arc<dyn DbCache>>), Error> {
+    pub(crate) async fn config(&self) -> Result<(Settings, Option<Arc<dyn DbCache>>), Error> {
         let settings = if let Some(path) = &self.db_options_path {
             Settings::from_file(path)?
         } else {
             Settings::load()?
         };
 
-        let block_cache = self.block_cache_size.map(|capacity| {
-            Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
+        let block_cache = match (self.block_cache_size, &self.block_cache_disk_dir) {
+            (Some(capacity), Some(dir)) => {
+                Some(hybrid_cache(capacity, dir, self.block_cache_disk_size).await)
+            }
+            (Some(capacity), None) => Some(Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
                 max_capacity: capacity,
                 ..Default::default()
-            })) as Arc<dyn DbCache>
-        });
+            })) as Arc<dyn DbCache>),
+            (None, _) => None,
+        };
 
         // If we use unified cache, we will increase `block_cache` reference count
         let meta_cache = if self.unified_cache {
@@ -155,15 +177,36 @@ impl DbArgs {
                 })) as Arc<dyn DbCache>
             })
         };
-        let memory_cache = Some(Arc::new(
+        let db_cache = Some(Arc::new(
             SplitCache::new()
                 .with_block_cache(block_cache)
                 .with_meta_cache(meta_cache)
                 .build(),
         ) as Arc<dyn DbCache>);
 
-        Ok((settings, memory_cache))
+        Ok((settings, db_cache))
     }
+}
+
+/// Builds a Foyer hybrid cache with `memory_bytes` in memory and `disk_bytes`
+/// on disk in `dir`.
+async fn hybrid_cache(memory_bytes: u64, dir: &Path, disk_bytes: u64) -> Arc<dyn DbCache> {
+    info!(dir = %dir.display(), memory_bytes, disk_bytes, "using hybrid block cache");
+    let device = FsDeviceBuilder::new(dir)
+        .with_capacity(disk_bytes as usize)
+        .build()
+        .expect("failed to build block cache disk device");
+    let cache = HybridCacheBuilder::new()
+        .with_name("slatedb_bencher_block_cache")
+        .memory(memory_bytes as usize)
+        .with_weighter(|_, v: &CachedEntry| v.size())
+        .storage()
+        .with_io_engine_config(PsyncIoEngineConfig::new())
+        .with_engine_config(BlockEngineConfig::new(device))
+        .build()
+        .await
+        .expect("failed to build hybrid block cache");
+    Arc::new(FoyerHybridCache::new_with_cache(cache))
 }
 
 #[derive(Args, Clone)]

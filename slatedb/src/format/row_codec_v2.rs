@@ -1,9 +1,8 @@
-#![allow(dead_code)]
 use crate::error::SlateDBError;
 use crate::format::row::RowFlags;
 use crate::types::ValueDeletable;
 use crate::utils::{decode_varint, encode_varint, varint_len};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes};
 
 /// Intermediate representation for V2 row encoding.
 ///
@@ -37,7 +36,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 pub(crate) struct SstRowEntryV2 {
     /// Bytes shared with previous key (0 at restart points)
     pub shared_bytes: u32,
-    /// Unshared portion of the key (the key suffix/delta)
+    /// The key bytes after the part shared with the previous key
     pub key_suffix: Bytes,
     pub seq: u64,
     pub expire_ts: Option<i64>,
@@ -79,40 +78,130 @@ impl SstRowEntryV2 {
         flags
     }
 
-    /// Restore the full key given the previous key.
-    pub(crate) fn restore_full_key(&self, previous_key: &[u8]) -> Bytes {
-        let shared = self.shared_bytes as usize;
-        let mut full_key = BytesMut::with_capacity(shared + self.key_suffix.len());
-        full_key.extend_from_slice(&previous_key[..shared]);
-        full_key.extend_from_slice(&self.key_suffix);
-        full_key.freeze()
-    }
-
     /// Calculate the encoded size of this entry including varint overhead.
     pub(crate) fn encoded_size(&self) -> usize {
         let shared_bytes_len = varint_len(self.shared_bytes);
         let unshared_bytes_len = varint_len(self.key_suffix.len() as u32);
-        let value_len = match &self.value {
-            ValueDeletable::Value(v) | ValueDeletable::Merge(v) => v.len(),
-            ValueDeletable::Tombstone => 0,
-        };
+        let value_len = self.value.len();
         let value_len_varint_size = varint_len(value_len as u32);
 
-        let mut size = shared_bytes_len // shared_bytes varint
-            + unshared_bytes_len        // unshared_bytes varint
-            + value_len_varint_size     // value_len varint
-            + self.key_suffix.len()     // key_delta
-            + value_len                 // value
-            + 8                         // seq (u64)
-            + 1; // flags (u8)
+        shared_bytes_len              // shared_bytes varint
+            + unshared_bytes_len      // unshared_bytes varint
+            + value_len_varint_size   // value_len varint
+            + self.key_suffix.len()   // key suffix
+            + value_len               // value
+            + tail_len(&self.flags()) // seq, flags, and timestamps
+    }
+}
 
-        if self.expire_ts.is_some() {
-            size += 8; // i64
+/// The number of bytes after the value, including seq (8), flags (1), and
+/// optional timestamps (8 each).
+fn tail_len(flags: &RowFlags) -> usize {
+    let mut len = 8 + 1;
+    if flags.contains(RowFlags::HAS_EXPIRE_TS) {
+        len += 8;
+    }
+    if flags.contains(RowFlags::HAS_CREATE_TS) {
+        len += 8;
+    }
+    len
+}
+
+/// The header of a V2 row, i.e., the part of the row before the key suffix.
+///
+/// A seek reads many rows only to rebuild and compare their keys. The header
+/// lets it rebuild each key and skip to the next row, without decoding the
+/// whole row.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SstRowHeaderV2 {
+    /// The number of leading bytes that the key shares with the key before it.
+    shared: usize,
+    /// The start of the key suffix.
+    key_start: usize,
+    /// The end of the key suffix, which is also the start of the value.
+    key_end: usize,
+    /// The end of the value.
+    value_end: usize,
+}
+
+impl SstRowHeaderV2 {
+    /// Decode the row header at `offset` in `data`, without copies or
+    /// allocations.
+    pub(crate) fn decode(data: &[u8], offset: usize) -> Self {
+        let mut buf = &data[offset..];
+        let shared = decode_varint(&mut buf) as usize;
+        let unshared = decode_varint(&mut buf) as usize;
+        let value_len = decode_varint(&mut buf) as usize;
+        let key_start = data.len() - buf.len();
+        let key_end = key_start + unshared;
+        Self {
+            shared,
+            key_start,
+            key_end,
+            value_end: key_end + value_len,
         }
-        if self.create_ts.is_some() {
-            size += 8; // i64
-        }
-        size
+    }
+
+    /// The number of leading bytes that the key shares with the key before it.
+    pub(crate) fn shared(&self) -> usize {
+        self.shared
+    }
+
+    /// The key suffix of the row, as a slice of `data`.
+    pub(crate) fn key_suffix<'a>(&self, data: &'a [u8]) -> &'a [u8] {
+        &data[self.key_start..self.key_end]
+    }
+
+    /// Returns the offset where the next row starts. Reads only the flags
+    /// byte after the value.
+    pub(crate) fn next_row_offset(&self, data: &[u8]) -> Result<usize, SlateDBError> {
+        let flags = RowFlags::try_from(data[self.value_end + 8])?;
+        Ok(self.value_end + tail_len(&flags))
+    }
+}
+
+/// The fields of a V2 row after the key.
+#[derive(Debug, Clone)]
+pub(crate) struct SstRowTailV2 {
+    pub seq: u64,
+    pub expire_ts: Option<i64>,
+    pub create_ts: Option<i64>,
+    pub value: ValueDeletable,
+}
+
+impl SstRowTailV2 {
+    /// Decode the part of a row after the key.
+    ///
+    /// The value is a slice of `data`, not a copy. Returns the decoded fields
+    /// and the offset of the next row.
+    pub(crate) fn decode(
+        data: &Bytes,
+        header: &SstRowHeaderV2,
+    ) -> Result<(Self, usize), SlateDBError> {
+        let value = data.slice(header.key_end..header.value_end);
+        let mut buf = &data[header.value_end..];
+        let seq = buf.get_u64();
+        let flags = RowFlags::try_from(buf.get_u8())?;
+        let expire_ts = flags
+            .contains(RowFlags::HAS_EXPIRE_TS)
+            .then(|| buf.get_i64());
+        let create_ts = flags
+            .contains(RowFlags::HAS_CREATE_TS)
+            .then(|| buf.get_i64());
+        let value = if flags.contains(RowFlags::TOMBSTONE) {
+            ValueDeletable::Tombstone
+        } else if flags.contains(RowFlags::MERGE_OPERAND) {
+            ValueDeletable::Merge(value)
+        } else {
+            ValueDeletable::Value(value)
+        };
+        let tail = Self {
+            seq,
+            expire_ts,
+            create_ts,
+            value,
+        };
+        Ok((tail, data.len() - buf.len()))
     }
 }
 
@@ -129,13 +218,9 @@ impl SstRowCodecV2 {
         encode_varint(output, row.shared_bytes);
         encode_varint(output, row.key_suffix.len() as u32);
 
-        let value_len = match &row.value {
-            ValueDeletable::Value(v) | ValueDeletable::Merge(v) => v.len(),
-            ValueDeletable::Tombstone => 0,
-        };
-        encode_varint(output, value_len as u32);
+        encode_varint(output, row.value.len() as u32);
 
-        // Encode key delta
+        // Encode key suffix
         output.put(row.key_suffix.as_ref());
 
         // Encode value (if not tombstone)
@@ -154,98 +239,12 @@ impl SstRowCodecV2 {
         output.put_u8(flags.bits());
 
         // Encode expire & create timestamps
-        if flags.contains(RowFlags::HAS_EXPIRE_TS) {
-            output.put_i64(
-                row.expire_ts
-                    .expect("expire_ts should be set with HAS_EXPIRE_TS"),
-            );
+        if let Some(expire_ts) = row.expire_ts {
+            output.put_i64(expire_ts);
         }
-        if flags.contains(RowFlags::HAS_CREATE_TS) {
-            output.put_i64(
-                row.create_ts
-                    .expect("create_ts should be set with HAS_CREATE_TS"),
-            );
+        if let Some(create_ts) = row.create_ts {
+            output.put_i64(create_ts);
         }
-    }
-
-    /// Decode a V2 row entry from the data buffer.
-    pub(crate) fn decode(&self, data: &mut impl Buf) -> Result<SstRowEntryV2, SlateDBError> {
-        let shared_bytes = decode_varint(data);
-        let unshared_bytes = decode_varint(data) as usize;
-        let value_len = decode_varint(data) as usize;
-
-        // Read key_delta
-        let key_suffix = data.copy_to_bytes(unshared_bytes);
-
-        // Read value
-        let value_bytes = if value_len > 0 {
-            Some(data.copy_to_bytes(value_len))
-        } else {
-            None
-        };
-
-        // Read seq & flags
-        let seq = data.get_u64();
-        let flags = self.decode_flags(data.get_u8())?;
-
-        // Read timestamps
-        let (expire_ts, create_ts) =
-            if flags.contains(RowFlags::HAS_EXPIRE_TS | RowFlags::HAS_CREATE_TS) {
-                (Some(data.get_i64()), Some(data.get_i64()))
-            } else if flags.contains(RowFlags::HAS_EXPIRE_TS) {
-                (Some(data.get_i64()), None)
-            } else if flags.contains(RowFlags::HAS_CREATE_TS) {
-                (None, Some(data.get_i64()))
-            } else {
-                (None, None)
-            };
-
-        // Determine value type
-        let value = if flags.contains(RowFlags::TOMBSTONE) {
-            ValueDeletable::Tombstone
-        } else if flags.contains(RowFlags::MERGE_OPERAND) {
-            ValueDeletable::Merge(value_bytes.unwrap_or_else(Bytes::new))
-        } else {
-            ValueDeletable::Value(value_bytes.unwrap_or_else(Bytes::new))
-        };
-
-        Ok(SstRowEntryV2 {
-            shared_bytes,
-            key_suffix,
-            seq,
-            expire_ts,
-            create_ts,
-            value,
-        })
-    }
-
-    /// Decode only the key portion for seek optimization.
-    /// Returns (shared_bytes, key_suffix).
-    pub(crate) fn decode_key_only(&self, data: &mut impl Buf) -> (u32, Bytes) {
-        let shared_bytes = decode_varint(data);
-        let unshared_bytes = decode_varint(data) as usize;
-        let _value_len = decode_varint(data);
-
-        let key_suffix = data.copy_to_bytes(unshared_bytes);
-
-        (shared_bytes, key_suffix)
-    }
-
-    fn decode_flags(&self, flags: u8) -> Result<RowFlags, SlateDBError> {
-        let parsed =
-            RowFlags::from_bits(flags).ok_or_else(|| SlateDBError::InvalidRowFlags {
-                encoded_bits: flags,
-                known_bits: RowFlags::all().bits(),
-                message: "Unable to parse flags. This may be caused by reading data encoded with a newer codec.".to_string(),
-            })?;
-        if parsed.contains(RowFlags::TOMBSTONE | RowFlags::MERGE_OPERAND) {
-            return Err(SlateDBError::InvalidRowFlags {
-                encoded_bits: parsed.bits(),
-                known_bits: RowFlags::all().bits(),
-                message: "Tombstone and Merge Operand are mutually exclusive.".to_string(),
-            });
-        }
-        Ok(parsed)
     }
 }
 
@@ -263,6 +262,13 @@ mod tests {
             "merge" => ValueDeletable::Merge(Bytes::from(data.unwrap())),
             _ => panic!("unknown value tag: {}", tag),
         }
+    }
+
+    /// Encodes `entry` as the only row in a buffer.
+    fn encode(entry: &SstRowEntryV2) -> Bytes {
+        let mut buf = Vec::new();
+        SstRowCodecV2::new().encode(&mut buf, entry);
+        Bytes::from(buf)
     }
 
     #[rstest]
@@ -295,21 +301,19 @@ mod tests {
             expire_ts,
         );
 
-        let codec = SstRowCodecV2::new();
-        let mut buf = Vec::new();
-
         // when: encoding and decoding
-        codec.encode(&mut buf, &entry);
-        let mut slice = buf.as_slice();
-        let decoded = codec.decode(&mut slice).expect("decode failed");
+        let data = encode(&entry);
+        let header = SstRowHeaderV2::decode(&data, 0);
+        let (tail, end) = SstRowTailV2::decode(&data, &header).expect("decode failed");
 
         // then: all fields match
-        assert_eq!(decoded.shared_bytes, shared_bytes);
-        assert_eq!(decoded.key_suffix.as_ref(), key_suffix.as_slice());
-        assert_eq!(decoded.seq, seq);
-        assert_eq!(decoded.value, value);
-        assert_eq!(decoded.create_ts, create_ts);
-        assert_eq!(decoded.expire_ts, expire_ts);
+        assert_eq!(header.shared(), shared_bytes as usize);
+        assert_eq!(header.key_suffix(&data), key_suffix.as_slice());
+        assert_eq!(tail.seq, seq);
+        assert_eq!(tail.value, value);
+        assert_eq!(tail.create_ts, create_ts);
+        assert_eq!(tail.expire_ts, expire_ts);
+        assert_eq!(end, data.len());
     }
 
     #[rstest]
@@ -319,7 +323,7 @@ mod tests {
     #[case("large shared bytes", 16384, b"x".to_vec(), "value", Some(b"v".to_vec()))]
     #[case("with tombstone", 3, b"deleted".to_vec(), "tombstone", None)]
     #[case("large key suffix", 0, vec![b'k'; 1000], "value", Some(b"v".to_vec()))]
-    fn should_decode_key_only(
+    fn should_decode_header(
         #[case] _name: &str,
         #[case] shared_bytes: u32,
         #[case] key_suffix: Vec<u8>,
@@ -336,18 +340,14 @@ mod tests {
             None,
             None,
         );
+        let data = encode(&entry);
 
-        let codec = SstRowCodecV2::new();
-        let mut buf = Vec::new();
-        codec.encode(&mut buf, &entry);
-
-        // when: decoding key only
-        let mut slice = buf.as_slice();
-        let (decoded_shared, decoded_suffix) = codec.decode_key_only(&mut slice);
+        // when: decoding only the header
+        let header = SstRowHeaderV2::decode(&data, 0);
 
         // then: key info is correct
-        assert_eq!(decoded_shared, shared_bytes);
-        assert_eq!(decoded_suffix.as_ref(), key_suffix.as_slice());
+        assert_eq!(header.shared(), shared_bytes as usize);
+        assert_eq!(header.key_suffix(&data), key_suffix.as_slice());
     }
 
     #[test]
@@ -362,11 +362,8 @@ mod tests {
             None,
         );
 
-        let codec = SstRowCodecV2::new();
-        let mut buf = Vec::new();
-
         // when: encoding
-        codec.encode(&mut buf, &entry);
+        let buf = encode(&entry);
 
         // then: varints are at the start
         // shared_bytes=3 -> 0x03 (1 byte)
@@ -375,34 +372,14 @@ mod tests {
         assert_eq!(buf[0], 3);
         assert_eq!(buf[1], 3);
         assert_eq!(buf[2], 3);
-        // key_delta follows
+        // key suffix follows
         assert_eq!(&buf[3..6], b"abc");
         // value follows
         assert_eq!(&buf[6..9], b"xyz");
     }
 
     #[test]
-    fn should_restore_full_key_from_previous() {
-        // given: an entry with shared bytes
-        let previous_key = b"shared_prefix_different_suffix";
-        let entry = SstRowEntryV2::new(
-            13, // "shared_prefix"
-            Bytes::from("_new_suffix"),
-            1,
-            ValueDeletable::Value(Bytes::from("val")),
-            None,
-            None,
-        );
-
-        // when: restoring full key
-        let full_key = entry.restore_full_key(previous_key);
-
-        // then: key is correctly reconstructed
-        assert_eq!(full_key.as_ref(), b"shared_prefix_new_suffix");
-    }
-
-    #[test]
-    fn should_decode_key_only_advance_buffer_correctly() {
+    fn should_decode_header_positions() {
         // given: an encoded entry
         let entry = SstRowEntryV2::new(
             2,
@@ -412,20 +389,19 @@ mod tests {
             None,
             None,
         );
+        let data = encode(&entry);
 
-        let codec = SstRowCodecV2::new();
-        let mut buf = Vec::new();
-        codec.encode(&mut buf, &entry);
-        let original_len = buf.len();
+        // when: decoding only the header
+        let header = SstRowHeaderV2::decode(&data, 0);
 
-        // when: decoding key only
-        let mut slice = buf.as_slice();
-        let _ = codec.decode_key_only(&mut slice);
+        // then: the positions follow the three 1-byte varints
+        assert_eq!(header.key_start, 3);
+        assert_eq!(header.key_end, 6); // 3 + "key"
+        assert_eq!(header.value_end, 11); // 6 + "value"
 
-        // then: buffer is advanced past the varints and key_suffix
-        // shared_bytes(1) + unshared_bytes(1) + value_len(1) + key_suffix(3) = 6 bytes consumed
-        let consumed = original_len - slice.len();
-        assert_eq!(consumed, 6); // 1 + 1 + 1 + 3 = 6
+        // and: the next row starts after seq (8) and flags (1)
+        assert_eq!(header.next_row_offset(&data).unwrap(), 20);
+        assert_eq!(data.len(), 20);
     }
 
     #[test]
@@ -444,10 +420,7 @@ mod tests {
         let size = entry.encoded_size();
 
         // then: size matches actual encoding
-        let codec = SstRowCodecV2::new();
-        let mut buf = Vec::new();
-        codec.encode(&mut buf, &entry);
-        assert_eq!(size, buf.len());
+        assert_eq!(size, encode(&entry).len());
     }
 
     /// Strategy to generate arbitrary ValueDeletable
@@ -486,24 +459,24 @@ mod tests {
                 expire_ts,
             );
 
-            let codec = SstRowCodecV2::new();
-            let mut buf = Vec::new();
-
             // when: encoding and decoding
-            codec.encode(&mut buf, &entry);
-            let mut slice = buf.as_slice();
-            let decoded = codec.decode(&mut slice).expect("decode failed");
+            let data = encode(&entry);
+            let header = SstRowHeaderV2::decode(&data, 0);
+            let (tail, decoded_end) = SstRowTailV2::decode(&data, &header).expect("decode failed");
+            let skipped_end = header.next_row_offset(&data).expect("decode failed");
 
             // then: all fields match
-            prop_assert_eq!(decoded.shared_bytes, shared_bytes);
-            prop_assert_eq!(decoded.key_suffix.as_ref(), key_suffix.as_slice());
-            prop_assert_eq!(decoded.seq, seq);
-            prop_assert_eq!(decoded.value, value);
-            prop_assert_eq!(decoded.create_ts, create_ts);
-            prop_assert_eq!(decoded.expire_ts, expire_ts);
+            prop_assert_eq!(header.shared(), shared_bytes as usize);
+            prop_assert_eq!(header.key_suffix(&data), key_suffix.as_slice());
+            prop_assert_eq!(tail.seq, seq);
+            prop_assert_eq!(tail.value, value);
+            prop_assert_eq!(tail.create_ts, create_ts);
+            prop_assert_eq!(tail.expire_ts, expire_ts);
 
-            // and: encoded_size matches actual size
-            prop_assert_eq!(entry.encoded_size(), buf.len());
+            // and: the decoder, the skip, and encoded_size agree on the row end
+            prop_assert_eq!(decoded_end, data.len());
+            prop_assert_eq!(skipped_end, data.len());
+            prop_assert_eq!(entry.encoded_size(), data.len());
         }
     }
 }

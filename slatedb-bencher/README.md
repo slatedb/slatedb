@@ -16,6 +16,10 @@ Options:
           Options path to a file with options for DbOptions, `SlateDb.toml` is used if this flag is not set.
       --block-cache-size <BLOCK_CACHE_SIZE>
           The size in bytes of the block cache.
+      --block-cache-disk-dir <BLOCK_CACHE_DISK_DIR>
+          Local directory for a disk tier of the block cache. If set, the block cache is a Foyer hybrid cache with `block_cache_size` bytes in memory and `block_cache_disk_size` bytes on disk.
+      --block-cache-disk-size <BLOCK_CACHE_DISK_SIZE>
+          The size in bytes of the disk tier of the block cache. Foyer reserves this space on disk when the cache opens. [default: 1073741824]
       --duration <DURATION>
           The duration in seconds to run the benchmark for.
       --key-generator <KEY_GENERATOR>
@@ -92,6 +96,9 @@ EOF
 
 Replace `20_1.dat` and the labels with the benchmark configuration you want to
 plot.
+
+The script uses a Foyer hybrid block cache with its disk tier in
+`/tmp/slatedb-bencher-block-cache`.
 
 The script also has a `SLATEDB_BENCH_CLEAN` environment variable which can be set to `true` to clean up the test data in object storage after each benchmark.
 

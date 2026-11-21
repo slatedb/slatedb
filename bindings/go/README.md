@@ -91,6 +91,66 @@ func main() {
 - handle types own Rust-side resources, so call `Shutdown()` on databases and
   readers and `Destroy()` on handles when you are done with them
 
+## Local Object Mirror
+
+`ObjectStoreMirrorBuilder` wraps an object store and keeps the compacted SSTs of one database on
+local disk. The database then reads those SSTs from local disk. WAL SSTs and manifests stay in the
+wrapped store only.
+
+```go
+remote, err := slatedb.ObjectStoreResolve("s3://my-bucket")
+if err != nil {
+	panic(err)
+}
+defer remote.Destroy()
+
+mirrorBuilder := slatedb.NewObjectStoreMirrorBuilder("/var/lib/slatedb/mirror", remote)
+defer mirrorBuilder.Destroy()
+mirror, err := mirrorBuilder.Build()
+if err != nil {
+	panic(err)
+}
+defer mirror.Destroy()
+
+builder := slatedb.NewDbBuilder("demo-db", mirror)
+defer builder.Destroy()
+```
+
+- Build one mirror for each database, and use it each time you open that database.
+- Each mirror locks its local directory. `build` fails with an `Unavailable` error if another
+  mirror holds the lock. The lock is released after the mirror store and all handles opened with
+  it are destroyed.
+- The local volume must hold the whole database. The mirror does not evict SSTs.
+- Create a clone with the wrapped store, not with a mirror. Then open the clone with its own
+  mirror.
+
+### Mirrored Segments
+
+By default, the mirror keeps all segments. Give it a `SegmentFilter` to keep only some segments.
+The database reads the other segments from the wrapped store.
+
+```go
+type hotSegments struct{}
+
+func (hotSegments) ShouldMirror(segment []byte) (bool, error) {
+	return string(segment) != "cold", nil
+}
+
+if err := mirrorBuilder.WithSegmentFilter(hotSegments{}); err != nil {
+	panic(err)
+}
+```
+
+- The mirror keeps one answer for each segment and manifest version. It asks again when the
+  database writes a new manifest, at a flush or a compaction.
+- The empty prefix is the root segment. A database without a segment extractor has only the root
+  segment, so `false` for it turns the mirror off.
+- A changed answer takes effect at the next manifest. Then the mirror downloads the SSTs of a
+  segment that it starts to keep, and removes the local copies of a segment that it stops keeping.
+- While those downloads run, reads of the segment can fail with a `Data` error.
+- An error from the filter counts as `false` for that manifest version. The mirror logs a warning.
+- The filter blocks a runtime thread that all databases share, so it must return quickly.
+
 ## Metrics
 
 The Go binding exposes both custom metrics callbacks and the built-in

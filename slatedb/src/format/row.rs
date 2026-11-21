@@ -15,6 +15,29 @@ bitflags! {
     }
 }
 
+impl TryFrom<u8> for RowFlags {
+    type Error = SlateDBError;
+
+    /// Parses an encoded flags byte. Fails on unknown bits, and when both
+    /// `TOMBSTONE` and `MERGE_OPERAND` are set.
+    fn try_from(flags: u8) -> Result<Self, Self::Error> {
+        let parsed =
+            RowFlags::from_bits(flags).ok_or_else(|| SlateDBError::InvalidRowFlags {
+                encoded_bits: flags,
+                known_bits: RowFlags::all().bits(),
+                message: "Unable to parse flags. This may be caused by reading data encoded with a newer codec.".to_string(),
+            })?;
+        if parsed.contains(RowFlags::TOMBSTONE | RowFlags::MERGE_OPERAND) {
+            return Err(SlateDBError::InvalidRowFlags {
+                encoded_bits: parsed.bits(),
+                known_bits: RowFlags::all().bits(),
+                message: "Tombstone and Merge Operand are mutually exclusive.".to_string(),
+            });
+        }
+        Ok(parsed)
+    }
+}
+
 /// Encodes key and value using the binary codec for SlateDB row representation
 /// using the `v0` encoding scheme.
 ///
@@ -205,7 +228,7 @@ impl SstRowCodecV0 {
 
         // decode seq & flags
         let seq = data.get_u64();
-        let flags = self.decode_flags(data.get_u8())?;
+        let flags = RowFlags::try_from(data.get_u8())?;
 
         // decode expire_ts & create_ts
         let (expire_ts, create_ts) =
@@ -246,23 +269,6 @@ impl SstRowCodecV0 {
                 ValueDeletable::Value(value)
             },
         })
-    }
-
-    fn decode_flags(&self, flags: u8) -> Result<RowFlags, SlateDBError> {
-        let parsed =
-            RowFlags::from_bits(flags).ok_or_else(|| SlateDBError::InvalidRowFlags {
-                encoded_bits: flags,
-                known_bits: RowFlags::all().bits(),
-                message: "Unable to parse flags. This may be caused by reading data encoded with a newer codec.".to_string(),
-            })?;
-        if parsed.contains(RowFlags::TOMBSTONE | RowFlags::MERGE_OPERAND) {
-            return Err(SlateDBError::InvalidRowFlags {
-                encoded_bits: parsed.bits(),
-                known_bits: RowFlags::all().bits(),
-                message: "Tombstone and Merge Operand are mutually exclusive.".to_string(),
-            });
-        }
-        Ok(parsed)
     }
 }
 
@@ -466,7 +472,6 @@ mod tests {
 
     #[test]
     fn test_decode_invalid_flags() {
-        let codec = SstRowCodecV0::new();
         let mut tests: Vec<u8> = Vec::new();
 
         // Tombstone and Merge Operand are mutually exclusive
@@ -478,7 +483,7 @@ mod tests {
         tests.push(0b10000000);
 
         for invalid_flags in tests.iter() {
-            let err = codec.decode_flags(*invalid_flags).unwrap_err();
+            let err = RowFlags::try_from(*invalid_flags).unwrap_err();
             assert!(matches!(err, SlateDBError::InvalidRowFlags { .. }));
         }
     }

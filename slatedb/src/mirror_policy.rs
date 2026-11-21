@@ -13,7 +13,7 @@
 //!
 //! An optional segment predicate limits the mirror to some segments.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -107,9 +107,9 @@ impl SlateDbMirrorPolicy {
 impl MirrorPolicy for SlateDbMirrorPolicy {
     fn read_route(&self, path: &Path, options: &GetOptions) -> object_store::Result<ReadRoute> {
         // Mirrored SSTs come first, so that their reads do not parse the path.
-        // A read that SlateDB retries because the SST contents were corrupt
-        // downloads the SST again, because the local copy can be the corrupt
-        // one. Other reads use the local copy.
+        // SlateDB retries a read when the SST contents are corrupt or the
+        // local copy can't be read. The retry downloads the SST again, because
+        // the local copy can be the cause. Other reads use the local copy.
         if let Some(tag) = self.mirrored_sst_tag(&options.extensions) {
             return Ok(match tag.retry {
                 Some(_) => ReadRoute::Refetch,
@@ -285,7 +285,12 @@ impl SlateDbMirrorPolicy {
             // Keep the SSTs that are already local. `fetch` skips them after
             // earlier operations on the same path finish. A `contains` check
             // here could see a local copy that a queued eviction then removes.
-            let to_download: HashSet<Path> = self
+            //
+            // The sets that go to `fetch`, `prefetch`, and `evict` are
+            // `BTreeSet`s, so the mirror gets the paths in a stable order.
+            // `HashSet` iteration order changes between processes, which can
+            // give the DST runtime a different order of remote calls.
+            let to_download: BTreeSet<Path> = self
                 .selected_ssts(&versioned_manifest, &manifest_paths)
                 .cloned()
                 .collect();
@@ -520,7 +525,7 @@ impl SlateDbMirrorPolicy {
         root: &Path,
         manifest: &VersionedManifest,
         compactions: &VersionedCompactions,
-    ) -> HashSet<Path> {
+    ) -> BTreeSet<Path> {
         let resolver = PathResolver::from_root(root.clone());
         compactions
             .recent_compactions()
@@ -616,8 +621,9 @@ struct PolicyState {
     /// from `newest` and `checkpoints` for each manifest. The predicate can
     /// give a different answer when it runs again, for example if it depends
     /// on time. Then a rebuilt set can leave out an SST that the old set kept,
-    /// and the policy does not evict it.
-    retained: HashSet<Path>,
+    /// and the policy does not evict it. It is ordered, so evictions reach the
+    /// mirror in a stable order (see `observe_manifest`).
+    retained: BTreeSet<Path>,
     /// The roots of the parent databases in `newest`. Manifest and
     /// `.compactions` calls under these roots use the wrapped store only.
     parent_roots: HashSet<Path>,
@@ -1111,7 +1117,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             fixture.policy.state.lock().retained,
-            HashSet::from([sst(1), sst(2), sst(3)])
+            BTreeSet::from([sst(1), sst(2), sst(3)])
         );
         fixture.observe(3, &manifest(&[3], &[])).await.unwrap();
         // Manifest 3 releases the checkpoint.
@@ -1144,7 +1150,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             fixture.policy.state.lock().retained,
-            HashSet::from([sst(1), sst(2)])
+            BTreeSet::from([sst(1), sst(2)])
         );
     }
 
@@ -1321,7 +1327,7 @@ mod tests {
                 &manifest,
                 &VersionedCompactions::from_compactions(1, compactions),
             ),
-            HashSet::from([sst(1), sst(2)])
+            BTreeSet::from([sst(1), sst(2)])
         );
     }
 

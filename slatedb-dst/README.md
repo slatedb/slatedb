@@ -26,6 +26,8 @@ internal path dependency rather than from crates.io.
   compactor, shutdown, and bank-transfer/auditor actors
 - `DeterministicLocalFilesystem`: filesystem-backed `ObjectStore` with stable
   metadata, in-memory attribute preservation, and deterministic listing behavior
+- `DeterministicVfs`: in-memory `Vfs` for the RFC 0034 local mirror, because
+  `StdVfs` runs its calls on Tokio's blocking pool
 - `FailingObjectStore`: harness-installed `ObjectStore` wrapper that injects
   deterministic latency, bandwidth, reset-peer, slow-close, and synthetic HTTP
   failures
@@ -434,7 +436,8 @@ RUSTFLAGS="--cfg dst --cfg tokio_unstable" \
 cargo test -p slatedb-dst --test determinism
 ```
 
-The scenario tests (`determinism`, `segments`) run one OS thread per listed
-seed; the `bank` test runs the listed seeds serially. The variable applies to
+The `determinism` test runs one OS thread per listed seed. The seed also picks
+the features of the run, such as the mirror. The `bank` test runs the listed
+seeds serially. The variable applies to
 every DST test in the invocation, so target one test binary with
 `--test <name>` when reproducing a single failure.
