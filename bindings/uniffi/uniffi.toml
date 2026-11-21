@@ -7,6 +7,11 @@ c_module_filename = "slatedb"
 package_name = "io.slatedb.uniffi"
 cdylib_name = "slatedb_uniffi"
 
+# uniffi-bindgen-java 0.4.1 binds enum fields by name inside converter methods whose parameter is
+# `value`, so a field named `value` does not compile. Version 0.5.2 fixes this but needs uniffi 0.32.
+[bindings.java.rename]
+"WriteOp.Put.value" = "val"
+
 [bindings.node]
 package_name = "@slatedb/uniffi"
 node_engine = ">=20"
