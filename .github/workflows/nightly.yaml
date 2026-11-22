@@ -1,4 +1,4 @@
-name: Nightly Benchmarks
+name: Nightly
 
 on:
   schedule:
@@ -7,113 +7,9 @@ on:
   workflow_dispatch: # Allow manual trigger
 
 permissions:
-  # Required for storing benchmark results
-  contents: write
-  # Required for reading ZeroFS's main action status
-  actions: read
+  contents: read
 
 jobs:
-  # Run and save nightly microbenchmark data so PRs have a fresh baseline to compare against
-  microbenchmarks:
-    runs-on: warp-ubuntu-latest-arm64-8x
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run microbenchmark
-        run: cargo bench --features bench-internal -- --output-format bencher | tee output.txt
-
-      - name: Download nightly microbenchmark data
-        uses: actions/cache/restore@v4
-        with:
-          path: ./microbenchmarks-cache
-          key: ${{ runner.os }}-microbenchmarks-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-microbenchmarks-
-
-      - name: Update microbenchmark result
-        id: update_microbenchmark_result
-        continue-on-error: true
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          name: cargo bench
-          tool: "cargo"
-          output-file-path: output.txt
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          external-data-json-path: ./microbenchmarks-cache/benchmark-data.json
-          fail-on-alert: true
-          summary-always: true
-          max-items-in-chart: 30
-
-      - name: Save nightly microbenchmark data
-        uses: actions/cache/save@v4
-        with:
-          path: ./microbenchmarks-cache
-          key: ${{ runner.os }}-microbenchmarks-${{ github.run_id }}
-
-      - name: Fail on microbenchmark alert
-        if: steps.update_microbenchmark_result.outcome == 'failure'
-        run: exit 1
-
-  microbenchmark-pprofs:
-    runs-on: warp-ubuntu-latest-arm64-8x
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-`uname -r`
-
-      - name: Configure perf
-        run: |
-          echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
-          echo 0 | sudo tee /proc/sys/kernel/kptr_restrict
-
-      - name: Generate pprofs
-        env:
-          # Keep source lines in profiles and reduce link time.
-          CARGO_PROFILE_BENCH_DEBUG: line-tables-only
-          CARGO_PROFILE_BENCH_LTO: thin
-        run: |
-          cargo bench -p slatedb --benches -- --profile-time 10
-          find . -name "*.pb" -exec gzip {} \;
-
-      # install instructions from https://github.com/polarsignals/pprofme/tree/main
-      - name: Install pprofme
-        run: |
-          PPROFME_ARCH=$(uname -m)
-          if [ "$PPROFME_ARCH" = "aarch64" ]; then
-            PPROFME_ARCH=arm64
-          fi
-          PPROFME_BINARY="pprofme_$(uname)_${PPROFME_ARCH}"
-          curl -fLO "https://github.com/polarsignals/pprofme/releases/latest/download/${PPROFME_BINARY}"
-          curl -sL https://github.com/polarsignals/pprofme/releases/latest/download/pprofme_checksums.txt | shasum --ignore-missing -a 256 --check
-          chmod a+x "${PPROFME_BINARY}"
-          sudo mv "${PPROFME_BINARY}" /usr/local/bin/pprofme
-
-      - name: Upload pprofs and add links to summary
-        run: |
-          echo "## 🔥 Microbenchmark Performance Profiles" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "The following pprof profiles were generated from nightly microbenchmarks:" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          PPROF_FILES=$(find . -name "*.pb.gz" -type f 2>/dev/null || true)
-          if [ -z "$PPROF_FILES" ]; then
-            echo "⚠️ No pprof files found" >> $GITHUB_STEP_SUMMARY
-          else
-            for pprof_file in $PPROF_FILES; do
-              bench_name=$(basename "$pprof_file" .pb.gz)
-              description="SlateDB Nightly Microbenchmark: $bench_name ($(date -u +%Y-%m-%d))"
-              upload_url=$(pprofme upload -d "$description" "$pprof_file" 2>&1 | grep -o 'https://pprof.me/[a-zA-Z0-9]*' | head -1)
-              if [ -n "$upload_url" ]; then
-                echo "- [$bench_name]($upload_url)" >> $GITHUB_STEP_SUMMARY
-              else
-                echo "- ❌ Failed to upload $bench_name" >> $GITHUB_STEP_SUMMARY
-              fi
-            done
-          fi
-          echo "" >> $GITHUB_STEP_SUMMARY
-
   detect-flaky-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 25
