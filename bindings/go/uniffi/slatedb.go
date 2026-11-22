@@ -15654,16 +15654,19 @@ type WriteOp interface {
 	Destroy()
 }
 
-// Inserts or overwrites `key` with `value`.
+// Inserts or overwrites `key` with `val`.
+//
+// The field is not named `value` because uniffi-bindgen-java 0.4.1 then generates Java that
+// does not compile.
 type WriteOpPut struct {
 	Key     []byte
-	Value   []byte
+	Val     []byte
 	Options *PutOptions
 }
 
 func (e WriteOpPut) Destroy() {
 	FfiDestroyerBytes{}.Destroy(e.Key)
-	FfiDestroyerBytes{}.Destroy(e.Value)
+	FfiDestroyerBytes{}.Destroy(e.Val)
 	FfiDestroyerOptionalPutOptions{}.Destroy(e.Options)
 }
 
@@ -15733,7 +15736,7 @@ func (FfiConverterWriteOp) Write(writer io.Writer, value WriteOp) {
 	case WriteOpPut:
 		writeInt32(writer, 1)
 		FfiConverterBytesINSTANCE.Write(writer, variant_value.Key)
-		FfiConverterBytesINSTANCE.Write(writer, variant_value.Value)
+		FfiConverterBytesINSTANCE.Write(writer, variant_value.Val)
 		FfiConverterOptionalPutOptionsINSTANCE.Write(writer, variant_value.Options)
 	case WriteOpDelete:
 		writeInt32(writer, 2)

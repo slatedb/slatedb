@@ -152,10 +152,13 @@ impl From<slatedb::DbStatus> for DbStatus {
 /// One operation applied by [`crate::WriteBatch::extend`].
 #[derive(Clone, Debug, uniffi::Enum)]
 pub enum WriteOp {
-    /// Inserts or overwrites `key` with `value`.
+    /// Inserts or overwrites `key` with `val`.
+    ///
+    /// The field is not named `value` because uniffi-bindgen-java 0.4.1 then generates Java that
+    /// does not compile.
     Put {
         key: Vec<u8>,
-        value: Vec<u8>,
+        val: Vec<u8>,
         options: Option<crate::config::PutOptions>,
     },
     /// Deletes `key`.

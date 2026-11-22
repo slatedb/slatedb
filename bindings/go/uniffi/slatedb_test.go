@@ -999,15 +999,15 @@ func TestDbBatchExtend(t *testing.T) {
 	t.Cleanup(batch.Destroy)
 
 	if err := batch.Extend([]slatedb.WriteOp{
-		slatedb.WriteOpPut{Key: []byte("ext-1"), Value: []byte("value-1")},
+		slatedb.WriteOpPut{Key: []byte("ext-1"), Val: []byte("value-1")},
 		slatedb.WriteOpPut{
 			Key:     []byte("ext-2"),
-			Value:   []byte("value-2"),
+			Val:     []byte("value-2"),
 			Options: &slatedb.PutOptions{Ttl: slatedb.TtlNoExpiry{}},
 		},
 		slatedb.WriteOpDelete{Key: []byte("gone")},
-		slatedb.WriteOpPut{Key: []byte("ext-1"), Value: []byte("value-1b")},
-		slatedb.WriteOpPut{Key: []byte("ext-merge"), Value: []byte("base")},
+		slatedb.WriteOpPut{Key: []byte("ext-1"), Val: []byte("value-1b")},
+		slatedb.WriteOpPut{Key: []byte("ext-merge"), Val: []byte("base")},
 		slatedb.WriteOpMerge{Key: []byte("ext-merge"), Operand: []byte(":one")},
 		slatedb.WriteOpMerge{
 			Key:     []byte("ext-merge"),
@@ -1018,7 +1018,7 @@ func TestDbBatchExtend(t *testing.T) {
 		t.Fatalf("WriteBatch.Extend(): %v", err)
 	}
 	if err := batch.Extend([]slatedb.WriteOp{
-		slatedb.WriteOpPut{Key: []byte("rejected"), Value: []byte("value")},
+		slatedb.WriteOpPut{Key: []byte("rejected"), Val: []byte("value")},
 		slatedb.WriteOpDelete{Key: []byte{}},
 	}); !errors.Is(err, slatedb.ErrErrorInvalid) {
 		t.Fatalf("WriteBatch.Extend(empty key): got %v, want invalid error", err)

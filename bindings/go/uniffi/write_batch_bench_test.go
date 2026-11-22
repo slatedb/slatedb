@@ -56,7 +56,7 @@ func fillPutLoop(b *testing.B, batch *slatedb.WriteBatch, keys, values [][]byte)
 func fillExtend(b *testing.B, batch *slatedb.WriteBatch, keys, values [][]byte) {
 	ops := make([]slatedb.WriteOp, len(keys))
 	for i := range keys {
-		ops[i] = slatedb.WriteOpPut{Key: keys[i], Value: values[i]}
+		ops[i] = slatedb.WriteOpPut{Key: keys[i], Val: values[i]}
 	}
 	if err := batch.Extend(ops); err != nil {
 		b.Fatalf("Extend: %v", err)

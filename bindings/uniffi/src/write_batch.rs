@@ -54,7 +54,7 @@ impl WriteBatch {
     pub fn extend(&self, ops: Vec<WriteOp>) -> Result<(), Error> {
         for op in &ops {
             match op {
-                WriteOp::Put { key, value, .. } => validate_key_value(key, value)?,
+                WriteOp::Put { key, val, .. } => validate_key_value(key, val)?,
                 WriteOp::Delete { key } => validate_key(key)?,
                 WriteOp::Merge { key, operand, .. } => validate_key_value(key, operand)?,
             }
@@ -62,11 +62,9 @@ impl WriteBatch {
         self.with_open(|batch| {
             for op in ops {
                 match op {
-                    WriteOp::Put {
-                        key,
-                        value,
-                        options,
-                    } => batch.put_with_options(key, value, &options.unwrap_or_default().into()),
+                    WriteOp::Put { key, val, options } => {
+                        batch.put_with_options(key, val, &options.unwrap_or_default().into())
+                    }
                     WriteOp::Delete { key } => batch.delete(key),
                     WriteOp::Merge {
                         key,
