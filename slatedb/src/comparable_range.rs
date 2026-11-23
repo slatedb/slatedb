@@ -235,33 +235,6 @@ impl<T: Ord + Clone> ComparableRange<T> {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn union(&self, other: &Self) -> Option<Self> {
-        // Sort the ranges to make the function commutative
-        let (first, second) = if self < other {
-            (self, other)
-        } else {
-            (other, self)
-        };
-        // If the ranges are not intersecting and they are not adjacent, no union is possible
-        if first.intersect(second).is_none() && !first.are_adjacent(second) {
-            return None;
-        }
-        // Take the minimum of start bounds and maximum of end bounds
-        Some(Self {
-            start: min(&first.start, &other.start).clone(),
-            end: max(&first.end, &second.end).clone(),
-        })
-    }
-
-    fn are_adjacent(&self, other: &Self) -> bool {
-        match (&self.end.inner, &other.start.inner) {
-            (Bound::Included(a), Bound::Excluded(b)) => a == b,
-            (Bound::Excluded(a), Bound::Included(b)) => a == b,
-            _ => false,
-        }
-    }
-
     pub(crate) fn non_empty(&self) -> bool {
         match (&self.start.inner, &self.end.inner) {
             (Bound::Included(a), Bound::Included(b)) => a <= b,
@@ -421,26 +394,6 @@ pub(crate) mod tests {
         ] {
             let intersection = first.intersect(second);
             assert_eq!(intersection, test_case.result);
-        }
-    }
-
-    #[rstest]
-    #[case(TwoRangeOperation::some(0..10, 10..100, 0..100))]
-    #[case(TwoRangeOperation::some(0..=10, 10..100, 0..100))]
-    #[case(TwoRangeOperation::none(0..10, 11..100))]
-    #[case(TwoRangeOperation::some(..100, 5..=100, ..=100))]
-    #[case(TwoRangeOperation::some(..100, 5.., ..))]
-    #[case(TwoRangeOperation::some(0..=10, (Bound::Excluded(10), Bound::Included(100)), 0..=100))]
-    #[allow(clippy::reversed_empty_ranges)]
-    #[case::empty_range(TwoRangeOperation::none(5..0, 0..10))]
-    #[case::empty_range(TwoRangeOperation::none((Bound::Excluded(5), Bound::Excluded(5)), 0..10))]
-    fn test_union(#[case] test_case: TwoRangeOperation<u32>) {
-        for (first, second) in [
-            (&test_case.first, &test_case.second),
-            (&test_case.second, &test_case.first),
-        ] {
-            let union = first.union(second);
-            assert_eq!(union, test_case.result);
         }
     }
 
