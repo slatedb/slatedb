@@ -122,7 +122,7 @@ pub(crate) mod arbitrary {
             None
         } else {
             let (start, end) = min_and_max(a, b);
-            if bytes_range::is_prefix_increment(&start, &end) {
+            if bytes_range::is_next_key(&start, &end) {
                 None
             } else {
                 Some((start, end))
@@ -416,7 +416,7 @@ pub(crate) mod sample {
                 let start = test_utils::bound_as_option(range.start_bound())
                     .cloned()
                     .unwrap_or_default();
-                if bytes_range::is_prefix_increment(&start, end) {
+                if bytes_range::is_next_key(&start, end) {
                     let mut tmp = Vec::new();
                     if matches!(range.start_bound(), Included(_) | Unbounded) {
                         tmp.push(start);

@@ -4,7 +4,10 @@ use std::{
     ops::{Bound, RangeBounds},
 };
 
+use bytes::Bytes;
 use serde::{ser::SerializeStruct, Serialize, Serializer};
+
+use crate::bytes_range::is_next_key;
 
 #[derive(Debug, Eq)]
 pub(crate) struct StartBound<T: Ord> {
@@ -181,6 +184,36 @@ fn cmp_bound<T: Ord>(a: &Bound<T>, b: &Bound<T>, start: bool) -> Ordering {
     }
 }
 
+/// A key type for [`ComparableRange`]. `Ord` cannot show that no key lies between
+/// two keys, so each key type supplies that rule.
+pub(crate) trait RangeKey: Ord {
+    /// Whether `self` is the smallest key greater than `prev`.
+    fn is_next_key_after(&self, prev: &Self) -> bool;
+}
+
+impl RangeKey for Bytes {
+    fn is_next_key_after(&self, prev: &Self) -> bool {
+        is_next_key(prev, self)
+    }
+}
+
+impl RangeKey for &[u8] {
+    fn is_next_key_after(&self, prev: &Self) -> bool {
+        is_next_key(prev, self)
+    }
+}
+
+fn bounds_non_empty<T: RangeKey>(start: &Bound<T>, end: &Bound<T>) -> bool {
+    match (start, end) {
+        (Bound::Included(a), Bound::Included(b)) => a <= b,
+        (Bound::Included(a), Bound::Excluded(b)) => a < b,
+        // `a < b` is not enough: no key lies between `a` and the next key after it.
+        (Bound::Excluded(a), Bound::Excluded(b)) => a < b && !b.is_next_key_after(a),
+        (Bound::Excluded(a), Bound::Included(b)) => a < b,
+        (Bound::Unbounded, _) | (_, Bound::Unbounded) => true,
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct ComparableRange<T: Ord> {
     start: StartBound<T>,
@@ -192,6 +225,34 @@ impl<T: Ord> ComparableRange<T> {
         Self {
             start: StartBound::from(start),
             end: EndBound::from(end),
+        }
+    }
+
+    pub(crate) fn intersects(&self, other: &Self) -> bool
+    where
+        T: RangeKey,
+    {
+        let max_start = max(&self.start, &other.start);
+        let min_end = min(&self.end, &other.end);
+        bounds_non_empty(&max_start.inner, &min_end.inner)
+    }
+
+    pub(crate) fn non_empty(&self) -> bool
+    where
+        T: RangeKey,
+    {
+        bounds_non_empty(&self.start.inner, &self.end.inner)
+    }
+
+    pub(crate) fn comparable_start_bound(&self) -> StartBound<&T> {
+        StartBound {
+            inner: self.start_bound(),
+        }
+    }
+
+    pub(crate) fn comparable_end_bound(&self) -> EndBound<&T> {
+        EndBound {
+            inner: self.end_bound(),
         }
     }
 }
@@ -221,68 +282,16 @@ impl<T: Ord + Clone> ComparableRange<T> {
         Self::new(range.start_bound().cloned(), range.end_bound().cloned())
     }
 
-    pub(crate) fn intersect(&self, other: &Self) -> Option<Self> {
+    pub(crate) fn intersect(&self, other: &Self) -> Option<Self>
+    where
+        T: RangeKey,
+    {
         let max_start = max(&self.start, &other.start);
         let min_end = min(&self.end, &other.end);
-        let intersection = Self {
+        bounds_non_empty(&max_start.inner, &min_end.inner).then(|| Self {
             start: max_start.clone(),
             end: min_end.clone(),
-        };
-        if intersection.non_empty() {
-            Some(intersection)
-        } else {
-            None
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn union(&self, other: &Self) -> Option<Self> {
-        // Sort the ranges to make the function commutative
-        let (first, second) = if self < other {
-            (self, other)
-        } else {
-            (other, self)
-        };
-        // If the ranges are not intersecting and they are not adjacent, no union is possible
-        if first.intersect(second).is_none() && !first.are_adjacent(second) {
-            return None;
-        }
-        // Take the minimum of start bounds and maximum of end bounds
-        Some(Self {
-            start: min(&first.start, &other.start).clone(),
-            end: max(&first.end, &second.end).clone(),
         })
-    }
-
-    fn are_adjacent(&self, other: &Self) -> bool {
-        match (&self.end.inner, &other.start.inner) {
-            (Bound::Included(a), Bound::Excluded(b)) => a == b,
-            (Bound::Excluded(a), Bound::Included(b)) => a == b,
-            _ => false,
-        }
-    }
-
-    pub(crate) fn non_empty(&self) -> bool {
-        match (&self.start.inner, &self.end.inner) {
-            (Bound::Included(a), Bound::Included(b)) => a <= b,
-            (Bound::Included(a), Bound::Excluded(b)) => a < b,
-            (Bound::Excluded(a), Bound::Excluded(b)) => a < b,
-            (Bound::Excluded(a), Bound::Included(b)) => a < b,
-            (Bound::Unbounded, _) => true,
-            (_, Bound::Unbounded) => true,
-        }
-    }
-
-    pub(crate) fn comparable_start_bound(&self) -> StartBound<&T> {
-        StartBound {
-            inner: self.start_bound(),
-        }
-    }
-
-    pub(crate) fn comparable_end_bound(&self) -> EndBound<&T> {
-        EndBound {
-            inner: self.end_bound(),
-        }
     }
 }
 
@@ -313,7 +322,21 @@ pub(crate) mod tests {
     use rand::seq::SliceRandom;
     use rstest::rstest;
 
-    use crate::comparable_range::{ComparableRange, EndBound, StartBound};
+    use bytes::Bytes;
+
+    use crate::comparable_range::{ComparableRange, EndBound, RangeKey, StartBound};
+
+    impl RangeKey for u32 {
+        fn is_next_key_after(&self, prev: &Self) -> bool {
+            prev.checked_add(1) == Some(*self)
+        }
+    }
+
+    impl RangeKey for i32 {
+        fn is_next_key_after(&self, prev: &Self) -> bool {
+            prev.checked_add(1) == Some(*self)
+        }
+    }
 
     struct TestCase(Bound<u32>, Bound<u32>, Ordering);
 
@@ -412,6 +435,7 @@ pub(crate) mod tests {
     #[case(TwoRangeOperation::some(0..10, 0..9, 0..9))]
     #[case(TwoRangeOperation::some(0..10, 0..=9, 0..=9))]
     #[case(TwoRangeOperation::some(..=1337, 10..15, 10..15))]
+    #[case(TwoRangeOperation::none(0..10, 10..20))]
     #[allow(clippy::reversed_empty_ranges)]
     #[case(TwoRangeOperation::none(50..40, 10..60))]
     fn test_intersection(#[case] test_case: TwoRangeOperation<u32>) {
@@ -421,26 +445,7 @@ pub(crate) mod tests {
         ] {
             let intersection = first.intersect(second);
             assert_eq!(intersection, test_case.result);
-        }
-    }
-
-    #[rstest]
-    #[case(TwoRangeOperation::some(0..10, 10..100, 0..100))]
-    #[case(TwoRangeOperation::some(0..=10, 10..100, 0..100))]
-    #[case(TwoRangeOperation::none(0..10, 11..100))]
-    #[case(TwoRangeOperation::some(..100, 5..=100, ..=100))]
-    #[case(TwoRangeOperation::some(..100, 5.., ..))]
-    #[case(TwoRangeOperation::some(0..=10, (Bound::Excluded(10), Bound::Included(100)), 0..=100))]
-    #[allow(clippy::reversed_empty_ranges)]
-    #[case::empty_range(TwoRangeOperation::none(5..0, 0..10))]
-    #[case::empty_range(TwoRangeOperation::none((Bound::Excluded(5), Bound::Excluded(5)), 0..10))]
-    fn test_union(#[case] test_case: TwoRangeOperation<u32>) {
-        for (first, second) in [
-            (&test_case.first, &test_case.second),
-            (&test_case.second, &test_case.first),
-        ] {
-            let union = first.union(second);
-            assert_eq!(union, test_case.result);
+            assert_eq!(first.intersects(second), test_case.result.is_some());
         }
     }
 
@@ -452,7 +457,9 @@ pub(crate) mod tests {
             TestCase(Bound::Included(1), Bound::Excluded(1), false),
             TestCase(Bound::Excluded(1), Bound::Included(1), false),
             TestCase(Bound::Excluded(1), Bound::Excluded(1), false),
-            TestCase(Bound::Excluded(1), Bound::Excluded(2), true),
+            // No integer lies between 1 and 2.
+            TestCase(Bound::Excluded(1), Bound::Excluded(2), false),
+            TestCase(Bound::Excluded(1), Bound::Excluded(3), true),
             TestCase(Bound::Excluded(2), Bound::Excluded(1), false),
             TestCase(Bound::Unbounded, Bound::Included(1), true),
             TestCase(Bound::Unbounded, Bound::Excluded(1), true),
@@ -463,5 +470,35 @@ pub(crate) mod tests {
         for case in cases {
             assert_eq!(ComparableRange::new(case.0, case.1).non_empty(), case.2);
         }
+    }
+
+    #[test]
+    fn test_is_non_empty_for_byte_keys() {
+        let b = || Bytes::from_static(b"b");
+        let next = || Bytes::from_static(b"b\0");
+        let cases = vec![
+            // No key lies between "b" and "b\0".
+            (Bound::Excluded(b()), Bound::Excluded(next()), false),
+            (Bound::Excluded(b()), Bound::Included(next()), true),
+            (Bound::Included(b()), Bound::Excluded(next()), true),
+            (
+                Bound::Excluded(b()),
+                Bound::Excluded(Bytes::from_static(b"b\0\0")),
+                true,
+            ),
+            (
+                Bound::Excluded(b()),
+                Bound::Excluded(Bytes::from_static(b"c")),
+                true,
+            ),
+        ];
+        for (start, end, expected) in cases {
+            assert_eq!(ComparableRange::new(start, end).non_empty(), expected);
+        }
+
+        // The overlap is ("b", "b\0"), so the intersection is empty.
+        let after_b = ComparableRange::new(Bound::Excluded(b()), Bound::Unbounded);
+        let before_next = ComparableRange::new(Bound::Unbounded, Bound::Excluded(next()));
+        assert_eq!(after_b.intersect(&before_next), None);
     }
 }

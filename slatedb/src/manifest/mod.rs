@@ -1389,7 +1389,7 @@ impl Manifest {
         ranges: &[BytesRange],
     ) -> Result<(), SlateDBError> {
         for pair in ranges.windows(2) {
-            if pair[1].intersect(&pair[0]).is_some() {
+            if pair[1].intersects(&pair[0]) {
                 let scope = match segment {
                     Some(prefix) => format!(" in segment `{:?}`", prefix),
                     None => String::new(),
