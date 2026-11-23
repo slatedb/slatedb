@@ -1,4 +1,5 @@
-use crate::bytes_range::BytesRange;
+use crate::bytes_range::{bound_as_slice, BytesRange};
+use crate::comparable_range::ComparableRange;
 use crate::config::CompressionCodec;
 use crate::error::SlateDBError;
 use crate::manifest::{Manifest, ManifestCore};
@@ -258,12 +259,12 @@ impl SsTableView {
     }
 
     /// Point-key form of [`Self::intersects_range`]: equivalent to
-    /// `self.intersects_range(end_bound, &BytesRange::from_slice(key..=key))`
-    /// without building or cloning any range.
+    /// `self.intersects_range(end_bound, &BytesRange::from_slice(key..=key).as_slice_range())`
+    /// without building a range.
     ///
     /// As there, `end_bound` replaces the view's own end, so a key in the gap
     /// between this view's last key and `end_bound` still intersects.
-    pub(crate) fn intersects_point(&self, end_bound: Bound<&[u8]>, key: &[u8]) -> bool {
+    fn intersects_point(&self, end_bound: Bound<&[u8]>, key: &[u8]) -> bool {
         let after_start = match self.effective_range.start_bound() {
             Included(start) => key >= start.as_ref(),
             Excluded(start) => key > start.as_ref(),
@@ -279,15 +280,15 @@ impl SsTableView {
         after_start && before_end && self.effective_range.non_empty()
     }
 
-    pub(crate) fn intersects_range(&self, end_bound: Bound<Bytes>, range: &BytesRange) -> bool {
-        let sst_range =
-            BytesRange::new(Unbounded, end_bound.clone()).intersect(&self.effective_range);
-        match sst_range {
-            Some(sst_range) => BytesRange::new(sst_range.start_bound().cloned(), end_bound)
-                .intersect(range)
-                .is_some(),
-            None => false,
-        }
+    /// Whether `[effective_start, end_bound)` overlaps `range` for a non-empty
+    /// view, where `end_bound` replaces this view's own end bound.
+    fn intersects_range(&self, end_bound: Bound<&[u8]>, range: &ComparableRange<&[u8]>) -> bool {
+        self.effective_range.non_empty()
+            && ComparableRange::new(
+                bound_as_slice(self.effective_range.start_bound()),
+                end_bound,
+            )
+            .intersects(range)
     }
 
     /// Calculate the view range for the given range.
@@ -666,11 +667,11 @@ impl SortedRun {
             .sst_views
             .last()
             .expect("non-empty: first exists, so last exists");
-        let span = BytesRange::new(
-            first.compacted_effective_range().start_bound().cloned(),
-            last.compacted_effective_range().end_bound().cloned(),
+        let span = ComparableRange::new(
+            bound_as_slice(first.compacted_effective_range().start_bound()),
+            bound_as_slice(last.compacted_effective_range().end_bound()),
         );
-        span.intersect(range).is_some()
+        span.intersects(&range.as_slice_range())
     }
 
     pub(crate) fn find_last_sst_with_range_covering_key(&self, key: &[u8]) -> Option<usize> {
@@ -689,14 +690,14 @@ impl SortedRun {
     ///
     /// The bound is normally the next view's start key, but becomes inclusive
     /// when adjacent views overlap on that boundary key.
-    fn table_end_bound(&self, idx: usize) -> Bound<&Bytes> {
+    fn table_end_bound(&self, idx: usize) -> Bound<&[u8]> {
         let current_sst = &self.sst_views[idx];
         if idx + 1 < self.sst_views.len() {
             let next_start = self.sst_views[idx + 1].compacted_effective_start_key();
             if current_sst.compacted_effective_range().contains(next_start) {
-                Included(next_start)
+                Included(next_start.as_ref())
             } else {
-                Excluded(next_start)
+                Excluded(next_start.as_ref())
             }
         } else {
             Unbounded
@@ -706,8 +707,13 @@ impl SortedRun {
     /// Whether the view at `idx` can hold `key`, bounded by the next view's
     /// start as in [`Self::table_end_bound`].
     fn point_intersects_table(&self, idx: usize, key: &[u8]) -> bool {
-        let end_bound = self.table_end_bound(idx).map(Bytes::as_ref);
-        self.sst_views[idx].intersects_point(end_bound, key)
+        self.sst_views[idx].intersects_point(self.table_end_bound(idx), key)
+    }
+
+    /// Whether the view at `idx` can hold a key in `range`, bounded by the
+    /// next view's start as in [`Self::table_end_bound`].
+    fn range_intersects_table(&self, idx: usize, range: &ComparableRange<&[u8]>) -> bool {
+        self.sst_views[idx].intersects_range(self.table_end_bound(idx), range)
     }
 
     /// Returns the contiguous range of SST view indices that can contribute to a
@@ -731,7 +737,7 @@ impl SortedRun {
         min_idx..(max_idx + 1)
     }
 
-    fn table_idx_covering_range(&self, range: &BytesRange) -> Range<usize> {
+    fn table_idx_covering_range(&self, range: &ComparableRange<&[u8]>) -> Range<usize> {
         let views = &self.sst_views;
         if views.is_empty() {
             return 0..0;
@@ -741,15 +747,17 @@ impl SortedRun {
         // bound. SST[i]'s slot begins at start_key[i]; if start_key[i] is past
         // the range's upper bound the slot cannot overlap.
         let max_idx = match range.end_bound() {
-            Included(hi) => {
-                let p = views.partition_point(|sst| sst.compacted_effective_start_key() <= hi);
+            Included(&hi) => {
+                let p =
+                    views.partition_point(|sst| sst.compacted_effective_start_key().as_ref() <= hi);
                 if p == 0 {
                     return 0..0;
                 }
                 p - 1
             }
-            Excluded(hi) => {
-                let p = views.partition_point(|sst| sst.compacted_effective_start_key() < hi);
+            Excluded(&hi) => {
+                let p =
+                    views.partition_point(|sst| sst.compacted_effective_start_key().as_ref() < hi);
                 if p == 0 {
                     return 0..0;
                 }
@@ -758,7 +766,7 @@ impl SortedRun {
             Unbounded => views.len() - 1,
         };
 
-        if !views[max_idx].intersects_range(self.table_end_bound(max_idx).cloned(), range) {
+        if !self.range_intersects_table(max_idx, range) {
             return 0..0;
         }
 
@@ -766,24 +774,19 @@ impl SortedRun {
         // before it cannot intersect except via boundary-key overlap, handled
         // by the backward walk below.
         let start_candidate = match range.start_bound() {
-            Included(lo) | Excluded(lo) => views
-                .partition_point(|sst| sst.compacted_effective_start_key() <= lo)
+            Included(&lo) | Excluded(&lo) => views
+                .partition_point(|sst| sst.compacted_effective_start_key().as_ref() <= lo)
                 .checked_sub(1),
             Unbounded => None,
         };
 
         let mut min_idx = match start_candidate {
-            Some(idx) if views[idx].intersects_range(self.table_end_bound(idx).cloned(), range) => {
-                idx
-            }
+            Some(idx) if self.range_intersects_table(idx, range) => idx,
             Some(idx) => idx + 1,
             None => 0,
         };
 
-        while min_idx > 0
-            && views[min_idx - 1]
-                .intersects_range(self.table_end_bound(min_idx - 1).cloned(), range)
-        {
+        while min_idx > 0 && self.range_intersects_table(min_idx - 1, range) {
             min_idx -= 1;
         }
 
@@ -792,8 +795,12 @@ impl SortedRun {
 
     /// Returns the SST views in this sorted run that overlap the given key range.
     pub fn tables_covering_range<R: RangeBounds<Bytes>>(&self, range: R) -> VecDeque<&SsTableView> {
-        let bytes_range = BytesRange::new(range.start_bound().cloned(), range.end_bound().cloned());
-        let matching_range = self.table_idx_covering_range(&bytes_range);
+        let slice_range = ComparableRange::new(
+            bound_as_slice(range.start_bound()),
+            bound_as_slice(range.end_bound()),
+        );
+        assert!(slice_range.non_empty(), "Range must be non-empty");
+        let matching_range = self.table_idx_covering_range(&slice_range);
         self.sst_views[matching_range].iter().collect()
     }
 
@@ -804,7 +811,7 @@ impl SortedRun {
     }
 
     pub(crate) fn into_tables_covering_range(self, range: &BytesRange) -> VecDeque<SsTableView> {
-        let matching_range = self.table_idx_covering_range(range);
+        let matching_range = self.table_idx_covering_range(&range.as_slice_range());
         // `sst_views` is shared behind an `Arc`, so we clone only the few
         // covering views rather than draining the whole run. The full slice
         // is released with a single refcount decrement when `self` drops.
@@ -989,7 +996,7 @@ impl<'a> StateModifier<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::bytes_range::BytesRange;
+    use crate::bytes_range::{bound_as_slice, BytesRange};
     use crate::checkpoint::Checkpoint;
     use crate::db_state::{DbState, SortedRun, SsTableHandle, SsTableId, SsTableInfo, SsTableView};
     use crate::format::sst::SST_FORMAT_VERSION_LATEST;
@@ -1412,8 +1419,9 @@ mod tests {
                 }
             };
             let point_range = BytesRange::from_slice(&key[..]..=&key[..]);
-            let expected = view.intersects_range(end_bound.clone(), &point_range);
-            let actual = view.intersects_point(end_bound.as_ref().map(Bytes::as_ref), &key);
+            let end_bound = bound_as_slice(end_bound.as_ref());
+            let expected = view.intersects_range(end_bound, &point_range.as_slice_range());
+            let actual = view.intersects_point(end_bound, &key);
             proptest::prop_assert_eq!(
                 actual,
                 expected,
@@ -1444,8 +1452,58 @@ mod tests {
             let point_range = BytesRange::from_slice(&probe[..]..=&probe[..]);
             proptest::prop_assert_eq!(
                 sorted_run.point_table_idx_covering_key(&probe),
-                sorted_run.table_idx_covering_range(&point_range)
+                sorted_run.table_idx_covering_range(&point_range.as_slice_range())
             );
+        });
+    }
+
+    #[test]
+    fn test_sorted_run_overlaps_range_empty_and_projected_boundaries() {
+        let empty_run = SortedRun::new(0, []);
+        assert!(!empty_run.overlaps_range(&BytesRange::unbounded()));
+
+        let first = create_compacted_sst_view_with_bounds(b"a", Some(b"m"))
+            .with_visible_range(BytesRange::from_ref("d"..="m"));
+        let last = create_compacted_sst_view_with_bounds(b"n", Some(b"z"))
+            .with_visible_range(BytesRange::from_ref("n".."t"));
+        let run = SortedRun::new(0, [first, last]);
+
+        assert!(!run.overlaps_range(&BytesRange::from_ref("a".."d")));
+        assert!(run.overlaps_range(&BytesRange::from_ref("a"..="d")));
+        assert!(run.overlaps_range(&BytesRange::from_ref("m"..="n")));
+        assert!(!run.overlaps_range(&BytesRange::from_ref("t"..="z")));
+        assert!(run.overlaps_range(&BytesRange::from_ref("s".."t")));
+    }
+
+    #[test]
+    fn test_sorted_run_overlaps_range_matches_span() {
+        proptest!(|(
+            mut keys in vec(small_key(), 2..=12),
+            open_last in proptest::bool::ANY,
+            range in arbitrary::nonempty_range(3),
+        )| {
+            keys.sort();
+            let pairs: Vec<_> = keys.chunks_exact(2).collect();
+            let views: Vec<_> = pairs.iter().enumerate().map(|(i, pair)| {
+                let last = (!(open_last && i == pairs.len() - 1)).then_some(&pair[1][..]);
+                create_compacted_sst_view_with_bounds(&pair[0], last)
+            }).collect();
+            let sorted_run = SortedRun::new(0, views);
+
+            let any_view_intersects = sorted_run
+                .sst_views()
+                .iter()
+                .any(|v| v.compacted_effective_range().intersects(&range));
+            if any_view_intersects {
+                proptest::prop_assert!(sorted_run.overlaps_range(&range));
+            }
+
+            let expected = BytesRange::new(
+                sorted_run.sst_views().first().unwrap().compacted_effective_range().start_bound().cloned(),
+                sorted_run.sst_views().last().unwrap().compacted_effective_range().end_bound().cloned(),
+            )
+            .intersects(&range);
+            proptest::prop_assert_eq!(sorted_run.overlaps_range(&range), expected);
         });
     }
 

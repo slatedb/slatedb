@@ -181,6 +181,16 @@ fn cmp_bound<T: Ord>(a: &Bound<T>, b: &Bound<T>, start: bool) -> Ordering {
     }
 }
 
+fn bounds_non_empty<T: Ord>(start: &Bound<T>, end: &Bound<T>) -> bool {
+    match (start, end) {
+        (Bound::Included(a), Bound::Included(b)) => a <= b,
+        (Bound::Included(a), Bound::Excluded(b)) => a < b,
+        (Bound::Excluded(a), Bound::Excluded(b)) => a < b,
+        (Bound::Excluded(a), Bound::Included(b)) => a < b,
+        (Bound::Unbounded, _) | (_, Bound::Unbounded) => true,
+    }
+}
+
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct ComparableRange<T: Ord> {
     start: StartBound<T>,
@@ -192,6 +202,28 @@ impl<T: Ord> ComparableRange<T> {
         Self {
             start: StartBound::from(start),
             end: EndBound::from(end),
+        }
+    }
+
+    pub(crate) fn intersects(&self, other: &Self) -> bool {
+        let max_start = max(&self.start, &other.start);
+        let min_end = min(&self.end, &other.end);
+        bounds_non_empty(&max_start.inner, &min_end.inner)
+    }
+
+    pub(crate) fn non_empty(&self) -> bool {
+        bounds_non_empty(&self.start.inner, &self.end.inner)
+    }
+
+    pub(crate) fn comparable_start_bound(&self) -> StartBound<&T> {
+        StartBound {
+            inner: self.start_bound(),
+        }
+    }
+
+    pub(crate) fn comparable_end_bound(&self) -> EndBound<&T> {
+        EndBound {
+            inner: self.end_bound(),
         }
     }
 }
@@ -224,38 +256,10 @@ impl<T: Ord + Clone> ComparableRange<T> {
     pub(crate) fn intersect(&self, other: &Self) -> Option<Self> {
         let max_start = max(&self.start, &other.start);
         let min_end = min(&self.end, &other.end);
-        let intersection = Self {
+        bounds_non_empty(&max_start.inner, &min_end.inner).then(|| Self {
             start: max_start.clone(),
             end: min_end.clone(),
-        };
-        if intersection.non_empty() {
-            Some(intersection)
-        } else {
-            None
-        }
-    }
-
-    pub(crate) fn non_empty(&self) -> bool {
-        match (&self.start.inner, &self.end.inner) {
-            (Bound::Included(a), Bound::Included(b)) => a <= b,
-            (Bound::Included(a), Bound::Excluded(b)) => a < b,
-            (Bound::Excluded(a), Bound::Excluded(b)) => a < b,
-            (Bound::Excluded(a), Bound::Included(b)) => a < b,
-            (Bound::Unbounded, _) => true,
-            (_, Bound::Unbounded) => true,
-        }
-    }
-
-    pub(crate) fn comparable_start_bound(&self) -> StartBound<&T> {
-        StartBound {
-            inner: self.start_bound(),
-        }
-    }
-
-    pub(crate) fn comparable_end_bound(&self) -> EndBound<&T> {
-        EndBound {
-            inner: self.end_bound(),
-        }
+        })
     }
 }
 
@@ -385,6 +389,7 @@ pub(crate) mod tests {
     #[case(TwoRangeOperation::some(0..10, 0..9, 0..9))]
     #[case(TwoRangeOperation::some(0..10, 0..=9, 0..=9))]
     #[case(TwoRangeOperation::some(..=1337, 10..15, 10..15))]
+    #[case(TwoRangeOperation::none(0..10, 10..20))]
     #[allow(clippy::reversed_empty_ranges)]
     #[case(TwoRangeOperation::none(50..40, 10..60))]
     fn test_intersection(#[case] test_case: TwoRangeOperation<u32>) {
@@ -394,6 +399,7 @@ pub(crate) mod tests {
         ] {
             let intersection = first.intersect(second);
             assert_eq!(intersection, test_case.result);
+            assert_eq!(first.intersects(second), test_case.result.is_some());
         }
     }
 

@@ -4,25 +4,29 @@ use std::ops::Bound;
 
 use bytes::Bytes;
 
-use crate::bytes_range::BytesRange;
+use crate::bytes_range::ByteRangeBounds;
+use crate::comparable_range::ComparableRange;
 use crate::db_cache::CacheTarget;
 
 /// Whether any [`CacheTarget::Data`] range in `targets` overlaps a data
 /// block whose first and last key are `key_span`.
 pub(crate) fn should_cache_data_block(targets: &[CacheTarget], key_span: &(Bytes, Bytes)) -> bool {
+    // The block covers `[first_key, last_key]`. Build this range once from borrowed
+    // slices, so the overlap check for each target clones no `Bytes`.
+    let (first_key, last_key) = key_span;
+    let span = ComparableRange::new(
+        Bound::Included(first_key.as_ref()),
+        Bound::Included(last_key.as_ref()),
+    );
     targets.iter().any(|target| {
         let CacheTarget::Data(range) = target else {
             return false;
         };
-        let (first_key, last_key) = key_span;
-        let Some(range) = BytesRange::try_new(range.0.clone(), range.1.clone()) else {
-            return false;
-        };
-        let span = BytesRange::new(
-            Bound::Included(first_key.clone()),
-            Bound::Included(last_key.clone()),
-        );
-        range.intersect(&span).is_some()
+        ComparableRange::new(
+            ByteRangeBounds::start_bound(range),
+            ByteRangeBounds::end_bound(range),
+        )
+        .intersects(&span)
     })
 }
 
