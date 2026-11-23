@@ -80,6 +80,10 @@ jobs:
           name: v${{ github.event.inputs.version }}
           generateReleaseNotes: true
           generateReleaseNotesPreviousTag: ${{ steps.previous_release.outputs.tag }}
+          # GitHub puts this body above the auto-generated notes.
+          body: |
+            > [!WARNING]
+            > **Storage compatibility:** SlateDB can read data written by the three previous minor releases. Data written by older releases may not be readable. Before you upgrade, make sure every database, including its checkpoints and clones, has been fully compacted on a release within that window. See [Upgrading Across a Support Window Boundary](https://slatedb.io/docs/operations/compatibility/#upgrading-across-a-support-window-boundary).
           token: ${{ secrets.GITHUB_TOKEN }}
 
       # Publish crate chain to crates.io in dependency order

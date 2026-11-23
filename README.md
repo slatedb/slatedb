@@ -142,7 +142,7 @@ Visit [slatedb.io](https://slatedb.io) to learn more.
 
 ## Release Schedule
 
-SlateDB follows Semantic Versioning. We release new versions approximately every 2 months at the end of each even month (February, April, and so on). We guarantee forward/backward compatibility for storage formats between adjacent versions, but we do not currently guarantee API compatibility at this time (we reserve the right to break compile-time API compatibility).
+SlateDB follows Semantic Versioning. We release new versions approximately every 2 months at the end of each even month (February, April, and so on). Each release can read storage formats written by the three previous minor releases (about six months), and by the next minor release so that upgrades can be rolled out and rolled back one process at a time. See [compatibility guide](https://slatedb.io/docs/operations/compatibility/) for upgrade instructions. We do not currently guarantee API compatibility at this time (we reserve the right to break compile-time API compatibility).
 
 ## Adopters
 
