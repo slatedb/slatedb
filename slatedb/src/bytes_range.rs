@@ -125,16 +125,10 @@ impl Serialize for BytesRange {
     }
 }
 
-#[cfg(test)]
-// Checks for the annoying case when we have ("prefix", "prefix\0").
-// When both bounds are excluded, the range is empty even though
-// "prefix" < "prefix\0".
-pub(crate) fn is_prefix_increment(prefix: &[u8], b: &[u8]) -> bool {
-    if !b.starts_with(prefix.as_ref()) {
-        return false;
-    }
-
-    b[prefix.len()..] == [u8::MIN]
+/// Whether `key` is `prev` with one `0x00` byte added. That is the smallest key greater
+/// than `prev`, so no key lies strictly between them.
+pub(crate) fn is_next_key(prev: &[u8], key: &[u8]) -> bool {
+    key.starts_with(prev) && key[prev.len()..] == [u8::MIN]
 }
 
 impl RangeBounds<Bytes> for BytesRange {
@@ -344,6 +338,14 @@ pub(crate) mod tests {
         proptest!(|(range in arbitrary::empty_range(10))| {
             assert!(range.empty());
         });
+    }
+
+    #[test]
+    fn test_try_new_rejects_excluded_bounds_with_no_key_between() {
+        let a = Bytes::from_static(b"a");
+        let next = Bytes::from_static(b"a\0");
+        assert!(BytesRange::try_new(Excluded(a.clone()), Excluded(next.clone())).is_none());
+        assert!(BytesRange::try_new(Excluded(a), Included(next)).is_some());
     }
 
     #[test]
