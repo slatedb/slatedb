@@ -4,6 +4,7 @@ use parking_lot::Mutex;
 
 use crate::config::{MergeOptions, PutOptions};
 use crate::error::{Error, SlateDbError};
+use crate::types::WriteOp;
 use crate::validation::{validate_key, validate_key_value};
 
 /// Mutable batch of write operations applied atomically by [`crate::Db::write`].
@@ -45,6 +46,37 @@ impl WriteBatch {
         validate_key_value(&key, &value)?;
         self.with_open(|batch| batch.put(key, value))
             .map_err(Into::into)
+    }
+
+    /// Appends each operation, in order.
+    ///
+    /// Every operation is validated first. If any operation is invalid, the batch is left unchanged.
+    pub fn extend(&self, ops: Vec<WriteOp>) -> Result<(), Error> {
+        for op in &ops {
+            match op {
+                WriteOp::Put { key, val, .. } => validate_key_value(key, val)?,
+                WriteOp::Delete { key } => validate_key(key)?,
+                WriteOp::Merge { key, operand, .. } => validate_key_value(key, operand)?,
+            }
+        }
+        self.with_open(|batch| {
+            for op in ops {
+                match op {
+                    WriteOp::Put { key, val, options } => {
+                        batch.put_with_options(key, val, &options.unwrap_or_default().into())
+                    }
+                    WriteOp::Delete { key } => batch.delete(key),
+                    WriteOp::Merge {
+                        key,
+                        operand,
+                        options,
+                    } => {
+                        batch.merge_with_options(key, operand, &options.unwrap_or_default().into())
+                    }
+                }
+            }
+        })
+        .map_err(Into::into)
     }
 
     /// Appends a put operation with custom put options.

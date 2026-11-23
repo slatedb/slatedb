@@ -149,6 +149,28 @@ impl From<slatedb::DbStatus> for DbStatus {
     }
 }
 
+/// One operation applied by [`crate::WriteBatch::extend`].
+#[derive(Clone, Debug, uniffi::Enum)]
+pub enum WriteOp {
+    /// Inserts or overwrites `key` with `val`.
+    ///
+    /// The field is not named `value` because uniffi-bindgen-java 0.4.1 then generates Java that
+    /// does not compile.
+    Put {
+        key: Vec<u8>,
+        val: Vec<u8>,
+        options: Option<crate::config::PutOptions>,
+    },
+    /// Deletes `key`.
+    Delete { key: Vec<u8> },
+    /// Appends a merge operand for `key`.
+    Merge {
+        key: Vec<u8>,
+        operand: Vec<u8>,
+        options: Option<crate::config::MergeOptions>,
+    },
+}
+
 /// A key/value pair together with the row version metadata that produced it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct KeyValue {
