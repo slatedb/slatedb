@@ -3,15 +3,40 @@ title: Compatibility
 description: What SlateDB currently guarantees across releases, storage formats, object stores, and tested targets
 ---
 
-SlateDB follows Semantic Versioning and guarantees forward and backward compatibility for storage formats between adjacent releases. **We do not currently guarantee compile-time API compatibility.**
+SlateDB follows Semantic Versioning. **We do not currently guarantee compile-time API compatibility.**
 
-Shared deployments should move one release at a time. If several processes read and write the same database path, keep them within one release step of each other until the rollout is complete.
+## Storage Format Support Window
+
+SlateDB releases a new minor version about every two months.
+
+- **Backward compatibility:** a release can read and write a database that contains data written by any of the three previous minor releases. At the normal release cadence, that is about six months. For example, `0.21.x` can open a database that still holds SSTs written by `0.18.x`.
+- **Forward compatibility:** a release can read data written by the next minor release. This lets you roll an upgrade out one process at a time, and roll it back.
 
 ## Stored Data
 
 A single database can contain a mix of older and newer SST files during normal operation. Readers and compactors must understand every format already present in the bucket. SlateDB version-checks its persistent formats and fails fast when it sees a version it does not understand.
 
 Compression is part of compatibility too. A process can only read compressed SSTs for codecs that were compiled into that binary. If one deployment writes Zstd-compressed SSTs, every reader and compactor that touches that database needs the `zstd` feature enabled. [Compression](/docs/design/compression) covers the codec feature flags.
+
+## Upgrading Across a Support Window Boundary
+
+SlateDB rewrites data as part of normal operation. WAL SSTs are flushed into L0 SSTs, L0 SSTs are compacted into sorted runs, and the manifest is rewritten on every update. Most databases that stay on supported releases move off old formats on their own. Do not rely on this. A sorted run that is rarely compacted can hold SSTs written many releases ago.
+
+Suppose release `Y` drops support for data written before release `X`. Before you deploy `Y`, do the following:
+
+1. Upgrade every process that uses the database to `X` or newer. This includes writers, readers, compactors, and garbage collectors. Move one release at a time. After this step, every new WAL SST, L0 SST, and compacted SST is written by `X` or newer.
+2. Let regular compaction move older L0 SSTs into sorted runs. A full compaction does not include L0 SSTs, so this has to happen first. The size-tiered scheduler compacts L0 once enough L0 SSTs build up. On a database with few writes, submit a `Spec` compaction request that names the remaining L0 SSTs.
+3. Rewrite every sorted run with a full compaction. A compactor must be running to pick up the request:
+
+   ```bash
+   slatedb --path <db-path> submit-compaction --request '"Full"'
+   ```
+
+4. Handle checkpoints and clones. A checkpoint keeps the manifest and SSTs it references, so old SSTs stay in use until the checkpoint expires or you delete it. If you still need a checkpoint, create a new one after the full compaction and delete the old one. Refreshing a checkpoint only extends its expiry; it does not move it to a newer manifest. Use `slatedb --path <db-path> list-checkpoints` to find them. A clone reads SSTs from its parent database through a checkpoint, so run these steps on every clone as well.
+5. Check the result. Run `slatedb --path <db-path> read-manifest` and look at the SSTs it lists. Compacted SST IDs are ULIDs, and a ULID encodes the time it was created. Every L0 and sorted run SST ID should have a timestamp after step 1 finished. Allow for clock skew between hosts.
+6. Deploy `Y`, one release at a time.
+
+These steps also work for an upgrade that skips more than one release. For example, to upgrade from `0.16.x` to `0.21.x`, upgrade to each minor release in turn. Before each release that drops support for older data, finish steps 2 through 5.
 
 ## Union clone view IDs
 
