@@ -245,6 +245,19 @@ pub trait WalWriter: Send {
     /// - Each WAL file that a flush uploads contains at least one row.
     async fn flush(&mut self) -> Result<WalFlushResult, WalError>;
 
+    /// Requests a flush of all appended write batches to durable storage without a WAL file ID.
+    /// This method does not wait for the upload.
+    ///
+    /// Unlike [`WalWriter::flush`], an implementation does not need to cut a WAL file before
+    /// returning. It may defer the cut until the flush runs so writes appended in the meantime
+    /// join the same WAL file.
+    ///
+    /// The returned future completes when all rows appended before the call are durable, or
+    /// returns the flush error.
+    async fn request_flush(&mut self) -> Result<FlushResultFuture, WalError> {
+        Ok(self.flush().await?.completion)
+    }
+
     /// Returns true if the WAL implementation wants to request that the current in-memory
     /// writes be flushed to a new l0. WAL implementations can use this to (1) bound the range
     /// of writes that need to be replayed when SlateDB restarts, and (2) push data to L0s earlier

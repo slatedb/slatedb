@@ -51,24 +51,25 @@ use tokio::sync::oneshot;
 pub(crate) const WRITE_BATCH_TASK_NAME: &str = "writer";
 
 pub(crate) type WriteBatchResult = Result<WriteHandle, SlateDBError>;
-pub(crate) type BatchWriterFlushResult = (FlushResultFuture, CheckpointCursor);
 
 /// A message processed by the batch writer event loop.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum BatchWriterMessage {
     /// Apply a write batch to the WAL and memtable. This may trigger freezing the memtable.
     WriteBatch(WriteBatchRequest),
-    /// Flush the wal if enabled, and optionally freeze the current active memtable.
+    /// Flush the WAL if enabled, and optionally freeze the active memtable.
     Flush(BatchWriterFlush),
+    /// Freeze the WAL and active memtable, and return the checkpoint cursor.
+    Checkpoint {
+        done: oneshot::Sender<Result<CheckpointCursor, SlateDBError>>,
+    },
 }
 
 pub(crate) struct BatchWriterFlush {
-    /// If true, then also freeze the current active memtable.
+    /// If true, also freeze the current active memtable.
     freeze_memtable: bool,
-    /// Sends a message when the writer has processed the flush message. On successful receipt
-    /// of a message, the caller should wait on the received Receiver to get the result of the
-    /// wal flush.
-    done: oneshot::Sender<Result<BatchWriterFlushResult, SlateDBError>>,
+    /// Sends the flush handle once the writer processes this message.
+    done: oneshot::Sender<Result<FlushResultFuture, SlateDBError>>,
 }
 
 pub(crate) struct WriteBatchRequest {
@@ -95,6 +96,7 @@ impl std::fmt::Debug for BatchWriterMessage {
                 .debug_struct("Flush")
                 .field("freeze_memtable", freeze_memtable)
                 .finish(),
+            BatchWriterMessage::Checkpoint { .. } => f.debug_struct("Checkpoint").finish(),
         }
     }
 }
@@ -139,11 +141,10 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
                     }
                 }
             }
-            BatchWriterMessage::Flush(flush_msg) => {
-                let BatchWriterFlush {
-                    freeze_memtable,
-                    done,
-                } = flush_msg;
+            BatchWriterMessage::Flush(BatchWriterFlush {
+                freeze_memtable,
+                done,
+            }) => {
                 let result = self
                     .db_inner
                     .flush_batch_writer(freeze_memtable, self.wal_writer.as_mut())
@@ -151,6 +152,22 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
                 match result {
                     Ok(flush_result) => {
                         let _ = done.send(Ok(flush_result));
+                        Ok(())
+                    }
+                    Err(error) => {
+                        let _ = done.send(Err(error.clone()));
+                        Err(error)
+                    }
+                }
+            }
+            BatchWriterMessage::Checkpoint { done } => {
+                let result = self
+                    .db_inner
+                    .flush_batch_writer_for_checkpoint(self.wal_writer.as_mut())
+                    .await;
+                match result {
+                    Ok(cursor) => {
+                        let _ = done.send(Ok(cursor));
                         Ok(())
                     }
                     Err(error) => {
@@ -173,11 +190,13 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
                 BatchWriterMessage::WriteBatch(req) => {
                     let _ = req.done.send(Err(error.clone()));
                 }
-                BatchWriterMessage::Flush(flush_msg) => {
-                    let BatchWriterFlush {
-                        freeze_memtable: _,
-                        done,
-                    } = flush_msg;
+                BatchWriterMessage::Flush(BatchWriterFlush {
+                    freeze_memtable: _,
+                    done,
+                }) => {
+                    let _ = done.send(Err(error.clone()));
+                }
+                BatchWriterMessage::Checkpoint { done } => {
                     let _ = done.send(Err(error.clone()));
                 }
             }
@@ -351,30 +370,46 @@ impl DbInner {
         Ok(())
     }
 
+    fn freeze_memtable_on_flush(&self) -> Result<(), SlateDBError> {
+        // This value may not include the flush above because we do not wait for it. Any earlier
+        // WAL is still a safe replay point.
+        let replay_after_wal_id = self.wal_observer.status()?.last_flushed_wal_id;
+        let mut guard = self.state.write();
+        self.freeze_current_memtable_with_state_guard(&mut guard, replay_after_wal_id);
+        Ok(())
+    }
+
     async fn flush_batch_writer(
         &self,
         freeze_memtable: bool,
         wal_writer: Option<&mut Box<dyn WalWriter>>,
-    ) -> Result<BatchWriterFlushResult, SlateDBError> {
-        let (flush_rx, wal_file) = if let Some(wal_writer) = wal_writer {
-            let flush = wal_writer.flush().await?;
-            (flush.completion, Some(flush.wal_id))
+    ) -> Result<FlushResultFuture, SlateDBError> {
+        let flush_rx = if let Some(wal_writer) = wal_writer {
+            wal_writer.request_flush().await?
         } else {
-            (async { Ok(()) }.boxed(), None)
+            async { Ok(()) }.boxed()
+        };
+        if freeze_memtable {
+            self.freeze_memtable_on_flush()?;
+        }
+        Ok(flush_rx)
+    }
+
+    async fn flush_batch_writer_for_checkpoint(
+        &self,
+        wal_writer: Option<&mut Box<dyn WalWriter>>,
+    ) -> Result<CheckpointCursor, SlateDBError> {
+        let wal_file = if let Some(wal_writer) = wal_writer {
+            Some(wal_writer.flush().await?.wal_id)
+        } else {
+            None
         };
         let cursor = CheckpointCursor {
             seq: self.oracle.last_committed_seq(),
             wal_file,
         };
-        if freeze_memtable {
-            // Note that this likely won't reflect the result of the above flush call as we don't
-            // block until the flush completes. That's fine, as any earlier wal is still a safe
-            // replay point.
-            let replay_after_wal_id = self.wal_observer.status()?.last_flushed_wal_id;
-            let mut guard = self.state.write();
-            self.freeze_current_memtable_with_state_guard(&mut guard, replay_after_wal_id);
-        }
-        Ok((flush_rx, cursor))
+        self.freeze_memtable_on_flush()?;
+        Ok(cursor)
     }
 
     // TODO: this is only pub(crate) because currently the replay logic resides in db_common. We
@@ -392,27 +427,26 @@ impl DbInner {
         let _ = self.memtable_flusher().notify_memtable_frozen();
     }
 
-    /// Request a memtable freeze from the writer task. Sends a
-    /// [`BatchWriterMessage::Flush`] to the writer event loop and waits for it to complete.
+    /// Request a flush from the writer task. Sends a [`BatchWriterMessage::Flush`] to the
+    /// writer event loop and waits for the WAL flush to complete.
     #[instrument(level = "trace", skip_all, err(level = tracing::Level::DEBUG))]
     pub(crate) async fn request_batch_writer_flush(
         &self,
         freeze_memtable: bool,
     ) -> Result<(), SlateDBError> {
-        let (flush_result, _) = self.begin_batch_writer_flush(freeze_memtable).await?;
-        Ok(flush_result.await?)
-    }
-
-    pub(crate) async fn begin_batch_writer_flush(
-        &self,
-        freeze_memtable: bool,
-    ) -> Result<BatchWriterFlushResult, SlateDBError> {
         let (done, rx) = oneshot::channel();
         self.write_notifier
             .send(BatchWriterMessage::Flush(BatchWriterFlush {
                 freeze_memtable,
                 done,
             }))?;
+        Ok(rx.await??.await?)
+    }
+
+    pub(crate) async fn begin_batch_writer_flush(&self) -> Result<CheckpointCursor, SlateDBError> {
+        let (done, rx) = oneshot::channel();
+        self.write_notifier
+            .send(BatchWriterMessage::Checkpoint { done })?;
         rx.await?
     }
 
@@ -649,6 +683,97 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(caller_error, SlateDBError::Fenced));
+
+        let (done, done_rx) = oneshot::channel();
+        let msg = BatchWriterMessage::Checkpoint { done };
+
+        let handler_error = handler.handle(msg).await.unwrap_err();
+        assert!(matches!(handler_error, SlateDBError::Fenced));
+        let caller_error = match done_rx.await.unwrap() {
+            Ok(_) => panic!("checkpoint flush unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(matches!(caller_error, SlateDBError::Fenced));
+
+        db.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_flush_routes_plain_and_checkpoint_flushes_to_wal_writer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct RecordingWalWriter {
+            inner: FakeWalWriter,
+            flush_calls: Arc<AtomicUsize>,
+            request_flush_calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl WalWriter for RecordingWalWriter {
+            async fn append(&mut self, write_batch: &[RowEntry]) -> Result<(), WalError> {
+                self.inner.append(write_batch).await
+            }
+
+            async fn flush(&mut self) -> Result<crate::wal::WalFlushResult, WalError> {
+                self.flush_calls.fetch_add(1, Ordering::SeqCst);
+                self.inner.flush().await
+            }
+
+            async fn request_flush(&mut self) -> Result<FlushResultFuture, WalError> {
+                self.request_flush_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(async { Ok(()) }.boxed())
+            }
+
+            fn observer(&self) -> Box<dyn WalObserver> {
+                self.inner.observer()
+            }
+
+            fn status(&self) -> Result<WalStatus, WalStatus> {
+                self.inner.status()
+            }
+
+            async fn close(&mut self) -> Result<(), WalError> {
+                self.inner.close().await
+            }
+        }
+
+        let object_store = Arc::new(InMemory::new());
+        let db = Db::open(
+            "/tmp/test_flush_routes_plain_and_checkpoint_flushes_to_wal_writer",
+            object_store,
+        )
+        .await
+        .unwrap();
+        let flush_calls = Arc::new(AtomicUsize::new(0));
+        let request_flush_calls = Arc::new(AtomicUsize::new(0));
+        let wal_writer = Box::new(RecordingWalWriter {
+            inner: FakeWalWriter::new(7),
+            flush_calls: Arc::clone(&flush_calls),
+            request_flush_calls: Arc::clone(&request_flush_calls),
+        });
+        let mut handler = WriteBatchEventHandler::new(db.inner.clone(), Some(wal_writer));
+
+        let (done, done_rx) = oneshot::channel();
+        handler
+            .handle(BatchWriterMessage::Flush(BatchWriterFlush {
+                freeze_memtable: false,
+                done,
+            }))
+            .await
+            .unwrap();
+        done_rx.await.unwrap().unwrap().await.unwrap();
+        assert_eq!(request_flush_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(flush_calls.load(Ordering::SeqCst), 0);
+
+        let (done, done_rx) = oneshot::channel();
+        handler
+            .handle(BatchWriterMessage::Checkpoint { done })
+            .await
+            .unwrap();
+        let cursor = done_rx.await.unwrap().unwrap();
+        assert_eq!(cursor.wal_file, Some(7));
+        assert_eq!(request_flush_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(flush_calls.load(Ordering::SeqCst), 1);
 
         db.close().await.unwrap();
     }

@@ -5642,6 +5642,69 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wal_flush_under_continuous_writes_writes_at_most_one_wal_per_flush() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = "/tmp/test_wal_flush_continuous_writes";
+        let settings = Settings {
+            flush_interval: None,
+            l0_sst_size_bytes: 64 * 1024 * 1024,
+            max_unflushed_bytes: 128 * 1024 * 1024,
+            compactor_options: None,
+            garbage_collector_options: None,
+            ..Settings::default()
+        };
+        let db = Arc::new(
+            Db::builder(path, object_store)
+                .with_settings(settings)
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let initial_wal_id = db.inner.wal_observer.status().unwrap().last_flushed_wal_id;
+        let running = Arc::new(AtomicBool::new(true));
+        let writer_running = Arc::clone(&running);
+        let writer_db = Arc::clone(&db);
+        let writer = tokio::spawn(async move {
+            let mut i = 0u64;
+            while writer_running.load(Ordering::Relaxed) {
+                writer_db
+                    .put(format!("k{i}").as_bytes(), b"v")
+                    .await
+                    .unwrap();
+                i += 1;
+                if i.is_multiple_of(8) {
+                    tokio::task::yield_now().await;
+                }
+            }
+            i
+        });
+
+        let flush_count = 20u64;
+        for _ in 0..flush_count {
+            tokio::task::yield_now().await;
+            db.flush_with_options(FlushOptions {
+                flush_type: FlushType::Wal,
+            })
+            .await
+            .unwrap();
+        }
+
+        running.store(false, Ordering::Relaxed);
+        let writes = writer.await.unwrap();
+        assert!(writes > 0);
+
+        let last_flushed_wal_id = db.inner.wal_observer.status().unwrap().last_flushed_wal_id;
+        let written_wals = last_flushed_wal_id - initial_wal_id;
+        assert!(
+            written_wals >= 1 && written_wals <= flush_count,
+            "expected between 1 and {flush_count} WAL files, got {written_wals}"
+        );
+
+        db.close().await.unwrap();
+    }
+
     #[tokio::test]
     #[cfg(feature = "wal_disable")]
     async fn test_flush_with_options_wal_disabled_error() {
