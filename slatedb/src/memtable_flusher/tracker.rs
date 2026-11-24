@@ -684,6 +684,8 @@ mod tests {
                 None,
                 Arc::new(status_manager),
                 segment_extractor,
+                #[cfg(feature = "range_cache")]
+                None,
             )
             .await
             .unwrap(),

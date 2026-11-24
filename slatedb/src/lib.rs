@@ -70,6 +70,13 @@ pub use mirror_policy::{SlateDbMirrorPolicy, SlateDbMirrorPolicyBuilder};
 pub use ops::{DbCacheManagerOps, DbMetadataOps, DbReadOps, DbTransactionOps, DbWriteOps};
 pub use paths::PathResolver;
 pub use prefix_extractor::{PrefixExtractor, PrefixTarget};
+#[cfg(feature = "range_cache")]
+pub use range_cache::stats as range_cache_stats;
+#[cfg(feature = "range_cache")]
+#[doc(hidden)]
+pub use range_cache::RangeCacheTuning;
+#[cfg(feature = "range_cache")]
+pub use range_cache::{CachedRangeInfo, RangeCacheOptions, RangeCachePageSource};
 pub use slatedb_common::{DbRand, IdentifiedObjectMetadata, ObjectMetadata};
 #[cfg(test)]
 pub use sst_builder::BlockFormat;
@@ -155,6 +162,8 @@ mod paths;
 mod peeking_iterator;
 #[cfg(test)]
 mod proptest_util;
+#[cfg(feature = "range_cache")]
+mod range_cache;
 mod read_trace;
 mod reader;
 mod retention_iterator;

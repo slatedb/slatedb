@@ -199,6 +199,8 @@ pub struct DbBuilder<P: Into<Path>> {
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     wal_writer_init: Option<Box<dyn wal::WriterInit>>,
     epoch_claim: EpochClaim,
+    #[cfg(feature = "range_cache")]
+    range_cache: Option<crate::range_cache::RangeCacheOptions>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -232,6 +234,8 @@ impl<P: Into<Path>> DbBuilder<P> {
             segment_extractor: None,
             wal_writer_init: None,
             epoch_claim: EpochClaim::default(),
+            #[cfg(feature = "range_cache")]
+            range_cache: None,
         }
     }
 
@@ -474,6 +478,20 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Enables the experimental local range cache.
+    ///
+    /// Keeps local copies of ranges loaded with [`Db::cache_range`](crate::Db::cache_range) and
+    /// serves point reads and ascending scans from local disk and memory. The cache is disposable
+    /// and starts empty on each open.
+    ///
+    /// Incompatible with compaction filters (including in external compactors), which can modify
+    /// rows without passing through the write path.
+    #[cfg(feature = "range_cache")]
+    pub fn with_range_cache(mut self, options: crate::range_cache::RangeCacheOptions) -> Self {
+        self.range_cache = Some(options);
+        self
+    }
+
     /// Sets the filter policies used for SST filter construction and evaluation.
     ///
     /// Each policy produces a separate filter per SST, stored in a composite
@@ -708,6 +726,32 @@ impl<P: Into<Path>> DbBuilder<P> {
         let reader = status_manager.result_reader();
         let (write_tx, write_rx) = SafeSender::unbounded_channel(reader);
 
+        #[cfg(feature = "range_cache")]
+        let range_cache = match self.range_cache {
+            Some(options) => {
+                #[cfg(feature = "compaction_filters")]
+                if self
+                    .compactor_builder
+                    .as_ref()
+                    .is_some_and(|b| b.compaction_filter_supplier.is_some())
+                {
+                    return Err(SlateDBError::InvalidConfiguration(
+                        "the range cache does not support compaction filters".to_string(),
+                    )
+                    .into());
+                }
+                Some(crate::range_cache::RangeCache::open(
+                    options,
+                    &recorder,
+                    Handle::current(),
+                    self.merge_operator.clone(),
+                    self.fp_registry.clone(),
+                    system_clock.clone(),
+                )?)
+            }
+            None => None,
+        };
+
         // Create the database inner state
         let memtable_flusher = Arc::new(MemtableFlusher::new(status_manager.as_ref()));
         let inner = Arc::new(
@@ -725,6 +769,8 @@ impl<P: Into<Path>> DbBuilder<P> {
                 self.merge_operator.clone(),
                 status_manager,
                 self.segment_extractor.clone(),
+                #[cfg(feature = "range_cache")]
+                range_cache,
             )
             .await?,
         );
@@ -865,6 +911,20 @@ impl<P: Into<Path>> DbBuilder<P> {
             &task_executor,
             inner.status_manager.as_ref(),
         )?;
+
+        // Range cache maintenance task for flushes and major merges.
+        #[cfg(feature = "range_cache")]
+        if let Some(cache) = &inner.range_cache {
+            task_executor.add_handler(
+                crate::range_cache::RANGE_CACHE_MAINTENANCE_TASK_NAME.to_string(),
+                Box::new(crate::range_cache::Maintainer::new(
+                    inner.clone(),
+                    cache.clone(),
+                )),
+                cache.maintenance_receiver(),
+                &tokio_handle,
+            )?;
+        }
 
         // Monitor background tasks
         task_executor.monitor_on(&tokio_handle)?;

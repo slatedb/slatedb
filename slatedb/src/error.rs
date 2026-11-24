@@ -305,6 +305,14 @@ pub(crate) enum SlateDBError {
     #[error("compaction filter error: {0}")]
     CompactionFilterError(Arc<crate::compaction_filter::CompactionFilterError>),
 
+    #[cfg(feature = "range_cache")]
+    #[error("the database has no range cache")]
+    RangeCacheNotConfigured,
+
+    #[cfg(feature = "range_cache")]
+    #[error("range cache rejected the load: {0}")]
+    RangeCacheLoadRejected(&'static str),
+
     #[error("invalid sequence number ordering during merge. expected sequence numbers in descending order, but found {current_seq} followed by {next_seq}")]
     InvalidSequenceOrder { current_seq: u64, next_seq: u64 },
 
@@ -756,6 +764,10 @@ impl From<SlateDBError> for Error {
             SlateDBError::WalUnavailable(src) => Error::unavailable(msg).with_source(Box::new(src)),
 
             // Invalid errors
+            #[cfg(feature = "range_cache")]
+            SlateDBError::RangeCacheNotConfigured => Error::invalid(msg),
+            #[cfg(feature = "range_cache")]
+            SlateDBError::RangeCacheLoadRejected(_) => Error::invalid(msg),
             SlateDBError::InvalidCompressionCodec => Error::invalid(msg),
             SlateDBError::WalStoreReconfigurationError => Error::invalid(msg),
             SlateDBError::InvalidConfigurationFormat(err) => {

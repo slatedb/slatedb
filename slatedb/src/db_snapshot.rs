@@ -79,14 +79,20 @@ impl DbSnapshot {
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
         self.db_inner.check_closed()?;
-        let db_state = self.db_inner.state.read().view();
-        let kv = self
+        #[cfg(feature = "range_cache")]
+        if let Some(result) = self
             .db_inner
+            .range_cache_get(key.as_ref(), options, Some(self.started_seq))
+            .await
+        {
+            return result.map_err(Into::into);
+        }
+        let db_state = self.db_inner.state.read().view();
+        self.db_inner
             .reader
             .get_key_value_with_options(key, options, &db_state, None, Some(self.started_seq))
             .await
-            .map_err(crate::Error::from)?;
-        Ok(kv)
+            .map_err(crate::Error::from)
     }
 
     /// Scan a range of keys using the default scan options.
@@ -187,6 +193,15 @@ impl DbSnapshot {
         prefix: Option<Bytes>,
     ) -> Result<DbIterator, crate::Error> {
         self.db_inner.check_closed()?;
+        #[cfg(feature = "range_cache")]
+        let range = match self
+            .db_inner
+            .range_cache_scan(range, options, prefix.as_ref(), Some(self.started_seq))
+            .await
+        {
+            crate::range_cache::ScanRoute::Served(result) => return result.map_err(Into::into),
+            crate::range_cache::ScanRoute::Normal(range) => range,
+        };
         let db_state = self.db_inner.state.read().view();
         self.db_inner
             .reader

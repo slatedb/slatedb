@@ -117,6 +117,9 @@ pub(crate) struct DbInner {
     /// L0 SSTs. When `None`, the database is the singleton `prefix=""`
     /// segment encoded in the manifest's top-level tree.
     pub(crate) segment_extractor: Option<Arc<dyn PrefixExtractor>>,
+    /// Local range cache, enabled by `DbBuilder::with_range_cache`.
+    #[cfg(feature = "range_cache")]
+    pub(crate) range_cache: Option<Arc<crate::range_cache::RangeCache>>,
 }
 
 impl DbInner {
@@ -134,6 +137,7 @@ impl DbInner {
         merge_operator: Option<MergeOperatorType>,
         status_manager: Arc<DbStatusManager>,
         segment_extractor: Option<Arc<dyn PrefixExtractor>>,
+        #[cfg(feature = "range_cache")] range_cache: Option<Arc<crate::range_cache::RangeCache>>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
@@ -195,6 +199,8 @@ impl DbInner {
             snapshot_manager,
             status_manager,
             segment_extractor,
+            #[cfg(feature = "range_cache")]
+            range_cache,
         };
         Ok(db_inner)
     }
@@ -217,9 +223,13 @@ impl DbInner {
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, SlateDBError> {
         self.check_closed()?;
+        #[cfg(feature = "range_cache")]
+        if let Some(result) = self.range_cache_get(key.as_ref(), options, None).await {
+            return result;
+        }
         let db_state = self.state.read().view();
         self.reader
-            .get_key_value_with_options(key, options, &db_state, None, None)
+            .get_key_value_with_options(key.as_ref(), options, &db_state, None, None)
             .await
     }
 
@@ -233,6 +243,14 @@ impl DbInner {
         prefix: Option<Bytes>,
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
+        #[cfg(feature = "range_cache")]
+        let range = match self
+            .range_cache_scan(range, options, prefix.as_ref(), None)
+            .await
+        {
+            crate::range_cache::ScanRoute::Served(result) => return result,
+            crate::range_cache::ScanRoute::Normal(range) => range,
+        };
         let db_state = self.state.read().view();
         self.reader
             .scan_with_options(
@@ -695,6 +713,18 @@ impl Db {
         };
 
         MemtableFlusher::shutdown(&self.task_executor).await;
+
+        #[cfg(feature = "range_cache")]
+        if let Err(e) = self
+            .task_executor
+            .shutdown_task(crate::range_cache::RANGE_CACHE_MAINTENANCE_TASK_NAME)
+            .await
+        {
+            warn!(
+                "failed to shutdown range cache maintenance task [error={:?}]",
+                e
+            );
+        }
 
         if let Err(e) = self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await {
             warn!("failed to shutdown compactor task [error={:?}]", e);

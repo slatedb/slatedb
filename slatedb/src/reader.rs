@@ -64,6 +64,8 @@ pub(crate) struct ScanContext<'a> {
     pub(crate) prefix: Option<Bytes>,
 }
 
+// Mixed range cache scans clone `Reader` to open gaps lazily.
+#[cfg_attr(feature = "range_cache", derive(Clone))]
 pub(crate) struct Reader {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) db_stats: DbStats,
