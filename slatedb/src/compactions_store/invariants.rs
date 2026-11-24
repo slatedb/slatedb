@@ -14,7 +14,7 @@ pub(crate) fn compaction_job_id_cutoff(
     dirty: &Compactions,
     current: &Compactions,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let Some(watermark) = current.iter().map(|job| job.id().timestamp_ms()).max() else {
+    let Some(watermark) = current.max_id_timestamp_ms() else {
         return Ok(());
     };
 

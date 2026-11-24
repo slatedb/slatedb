@@ -309,6 +309,7 @@ fn compute_lower_bound(prev_block_last_key: &Bytes, this_block_first_key: &Bytes
 pub(crate) trait IdGenerator {
     fn gen_uuid(&mut self) -> Uuid;
     fn gen_ulid(&mut self, clock: &dyn SystemClock) -> Ulid;
+    fn gen_ulid_at_least(&mut self, clock: &dyn SystemClock, floor_ms: u64) -> Ulid;
 }
 
 impl<R: Rng> IdGenerator for R {
@@ -326,10 +327,14 @@ impl<R: Rng> IdGenerator for R {
     /// Generates a random ULID using the provided RNG. The clock is used to generate
     /// the timestamp component of the ULID.
     fn gen_ulid(&mut self, clock: &dyn SystemClock) -> Ulid {
+        self.gen_ulid_at_least(clock, 0)
+    }
+
+    /// Generates a random ULID. The timestamp is the later of the clock time and `floor_ms`.
+    fn gen_ulid_at_least(&mut self, clock: &dyn SystemClock, floor_ms: u64) -> Ulid {
         let now = u64::try_from(clock.now().timestamp_millis())
             .expect("timestamp outside u64 range in gen_ulid");
-        let random_bytes = self.random::<u128>();
-        Ulid::from_parts(now, random_bytes)
+        Ulid::from_parts(now.max(floor_ms), self.random::<u128>())
     }
 }
 

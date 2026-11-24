@@ -868,6 +868,10 @@ impl Compactions {
             .filter(move |c| statuses.contains(&c.status()))
     }
 
+    pub(crate) fn max_id_timestamp_ms(&self) -> Option<u64> {
+        self.iter().map(|c| c.id().timestamp_ms()).max()
+    }
+
     /// Keeps the most recently finished compaction and any active compactions, and removes others.
     pub(crate) fn retain_active_and_last_finished(&mut self) {
         let latest_finished = self
@@ -963,6 +967,28 @@ impl CompactorState {
     /// Returns the dirty compactions tracked by this state.
     pub(crate) fn compactions(&self) -> &DirtyObject<Compactions> {
         &self.compactions
+    }
+
+    /// The `.compactions` invariant rejects a new job with an older id than a stored job.
+    pub(crate) fn advance_unpersisted_ids(&mut self, stored: &Compactions) {
+        let Some(watermark) = stored.max_id_timestamp_ms() else {
+            return;
+        };
+        let recent = &mut self.compactions.value.core.recent_compactions;
+        // The invariant accepts stored ids, and an admin caller reads its job by the stored id.
+        let behind = recent
+            .extract_if(..Ulid::from_parts(watermark, 0), |id, c| {
+                c.status() == CompactionStatus::Submitted && stored.get(id).is_none()
+            })
+            .collect::<Vec<_>>();
+        for (id, mut compaction) in behind {
+            compaction.id = Ulid::from_parts(watermark, id.random());
+            debug!(
+                "advancing unpersisted compaction id [old={}, new={}]",
+                id, compaction.id
+            );
+            recent.insert(compaction.id, compaction);
+        }
     }
 
     /// Replaces the tracked dirty compactions with the provided value.
