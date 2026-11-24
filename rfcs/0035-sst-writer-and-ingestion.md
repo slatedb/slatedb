@@ -23,9 +23,10 @@ Authors:
 
 ## Summary
 
-This RFC adds a standalone `SstWriter` and an `Lsm` client for bulk loading and
-reading SSTs. The application builds sorted files without going through `Db`'s
-memory write path, then lets SlateDB manage those files and compaction.
+This RFC adds standalone tools to write and read SSTs, and an `Lsm` client that
+ingests SSTs into a database. The application builds sorted files without going
+through `Db`'s memory write path. `Lsm` only publishes the files. Reads go
+through `DbReader`, and a compactor merges the files later.
 
 The application opens `Lsm` before it builds the files. `Lsm` assigns each
 file's final path and ID, so ingestion can publish it without copying it.
@@ -66,7 +67,7 @@ a SlateDB ingestion protocol.
 ## Goals
 
 - Expose standalone SST creation and reading.
-- Expose LSM reads and ingestion independently of ordinary KV writes.
+- Expose SST ingestion independently of ordinary KV writes.
 - Define exclusive writer ownership, publication, and handoff to `Db`.
 - Preserve sequence ordering, recovery, and file cleanup guarantees.
 - Measure manifest growth and the complete bulk-loading cost.
@@ -84,11 +85,15 @@ a SlateDB ingestion protocol.
 ### Component Boundary
 
 `Db` handles ordinary KV operations, memtables, transactions, and the WAL.
-`Lsm` handles file allocation, publication, and reads over published data.
-The application scans and sorts its input, then feeds those records to the SST
-writer. Both clients reuse manifest publication, compaction, and GC, and follow
-the same writer fencing protocol. They also use the existing `Reader` for get
-and scan execution.
+`Lsm` handles file allocation and publication. It has no reads, and it starts
+no compactor or garbage collector. The application scans and sorts its input,
+then feeds those records to the SST writer. `Db` and `Lsm` publish to the same
+manifest and follow the same writer fencing protocol.
+
+Applications read published data through `DbReader`, also while `Lsm` runs.
+While `Lsm` runs, a compactor and a garbage collector can run as separate
+processes, through `CompactorBuilder` and `GarbageCollectorBuilder`, or through
+`Admin::run_compactor` and `Admin::run_gc`.
 
 `Db`, `Lsm`, and `Compactor` share the code that reads and writes SST files.
 That includes `Db`'s L0 flushes and `Compactor`'s output files. Each client still
@@ -104,10 +109,12 @@ recovery for data it hasn't published.
 flowchart LR
     W[Pluggable WAL] <--> D[Db: ordinary KV operations]
     P[Application: scan and sort] --> S[Shared SST writer]
-    L[Lsm: allocation, ingestion, and reads] -->|Final path and file ID| S
+    L[Lsm: allocation and ingestion] -->|Final path and file ID| S
     S -->|Completed file| L
-    D --> M[Shared file access, publication, compaction, and GC]
+    D --> M[Manifest publication]
     L --> M
+    M --> R[DbReader: reads]
+    M --> C[Compactor and GC: separate processes]
 ```
 
 For one database path, `Db` and `Lsm` operate at different times. Read-only
@@ -193,8 +200,8 @@ which supplies the path, ID, and configuration.
 A standalone reader opens an SST with `SstReader::open_at(path, id)`, so it does
 not need a database root. Callers without artifact metadata use a fresh ID.
 
-`Lsm` supplies the cache for database reads. Standalone readers can share that
-cache through `SstReaderOptions` or run without one.
+A standalone reader can take a block cache through `SstReaderOptions`, or run
+without one. `Lsm` has no reads, so it has no cache.
 
 Readers sharing a cache scope need to agree on which file each ID refers to and
 how to decode it. Sequence overrides happen after reading cached blocks, and
@@ -241,23 +248,16 @@ impl Lsm {
         options: IngestOptions,
     ) -> Result<IngestResult, Error>;
 
-    pub async fn get_with_options(
-        &self, key: &[u8], options: &ReadOptions,
-    ) -> Result<Option<Bytes>, Error>;
-
-    pub async fn scan_with_options(
-        &self, range: BytesRange, options: &ScanOptions,
-    ) -> Result<DbIterator, Error>;
-
     pub async fn close(&self) -> Result<(), Error>;
 }
 ```
 
 The builder follows the existing SlateDB configuration conventions for file
-access, caching, compaction, and the segment extractor. It also takes the
-database's WAL configuration, merge operator, and system clock. Files use the
+access and the segment extractor. It also takes the database's WAL
+configuration and system clock. It takes no block cache, merge operator, or
+compaction settings, because `Lsm` does not read or compact. Files use the
 client's store, transformer, and format configuration, with no per-import
-override. `Lsm` has no put, write, delete, or transaction methods.
+override. `Lsm` has no get, scan, put, write, delete, or transaction methods.
 
 The WAL configuration selects the WAL store or custom `WriterInit` used for
 fencing and recovery checks when switching from `Db`. Imports don't append WAL
@@ -294,7 +294,8 @@ existing merge rules still apply. Filters must handle missing timestamps, and
 the handoff section. Otherwise, an import could advance the sequence frontier
 past writes that still need replay.
 
-Reads and compaction continue while files are built and ingested. `SstWriter`
+`DbReader` reads and a separate compactor can continue while files are built
+and ingested. `SstWriter`
 checks the records, writes block checksums, and uploads the file to its final
 path. We rely on upload success and supported transport checksums instead of
 reading the whole file back.
@@ -317,12 +318,13 @@ durable pending-import metadata.
 
 Once the file is uploaded, one manifest update publishes its view and sequence
 override. It advances `last_l0_seq` and the monotonic `last_l0_clock_tick`,
-records the sequence/time sample, and updates `recent_snapshot_min_seq` under
-the existing retention rules for active read views.
-The WAL replay boundary stays at the frontier established before opening `Lsm`.
-Imports advance committed and database-durable progress after local read state
-is installed, without advancing WAL progress or waiting for a nonexistent WAL
-record. Success means the file and publication are durable.
+records the sequence/time sample, and sets `recent_snapshot_min_seq` to the new
+`last_l0_seq`. A `Db` flush does the same when it has no active snapshots, and
+`Lsm` has no snapshots. The WAL replay boundary stays at the frontier
+established before opening `Lsm`. Imports advance committed and durable progress
+after the manifest update succeeds, without advancing WAL progress or waiting
+for a nonexistent WAL record. Success means the file and publication are
+durable.
 
 ### Segments
 
@@ -344,7 +346,7 @@ finish active transactions before closing it. `Db` must close with a successful
 `FlushType::MemTable` flush so the files cover its accepted writes. A WAL-only
 flush is insufficient.
 
-Before serving reads or imports, `Lsm` uses the existing `WriterFencer` and
+Before it accepts imports, `Lsm` uses the existing `WriterFencer` and
 configured `WriterInit::fence_and_init` to fence both manifest and WAL writers.
 It consumes the returned bounded replay iterator, ignoring rows already covered
 by `last_l0_seq`. If any row has a higher sequence, opening fails and the
@@ -367,28 +369,28 @@ fence older writers and perform the recovery checks.
 
 ### Read Visibility
 
-Each `Lsm` read captures a consistent published view and sequence through shared
-read machinery and uses existing read-retention rules to protect its files.
-An import at 101 supersedes older records for new reads, while a reader pinned
-to an earlier checkpoint retains its old manifest. Existing compaction-filter
-limits on snapshot consistency still apply.
+`Lsm` has no reads. Applications read published data through `DbReader`.
+`Lsm` writes no WAL, so while it runs, a `DbReader` only follows the manifest.
+A reader sees an import after its next manifest poll.
+[#2186](https://github.com/slatedb/slatedb/pull/2186) proposes a refresh on
+demand, so that a reader can see an import as soon as `ingest` returns. A
+reader pinned to an earlier checkpoint keeps its old manifest.
 
-A WAL-following `DbReader` can stay open while the application switches clients.
-For example, it can still hold the manifest for 100 when `Lsm` publishes 101.
-If `Db` then resumes and writes 102, the reader can follow that WAL using its
-old manifest and expose 102 before it sees 101. Updating the replay boundary
-in the new manifest only helps once the reader loads that manifest.
+One race remains after `Db` opens again. In each poll, a `DbReader` loads the
+latest manifest and then lists new WAL files. Suppose that the reader loads the
+manifest with write 100. Before it lists the WAL, `Lsm` publishes import 101 and
+closes, and `Db` opens and writes 102. The reader then replays 102 on top of the
+manifest with 100. Until its next poll, it exposes 102 without 101. Sequence
+gaps cannot show the missing import, because ordinary writes can supply
+explicit sequences.
 
-To avoid that race, the reader first captures a bounded WAL end, then loads a
-fresh manifest and replays only through the captured bound. It installs the
-combined state before advancing durable progress. Initial open and refresh use
-this same order under the existing checkpoint policy. Pinned readers keep their
-fixed manifest and replay boundary.
-
-If the captured WAL includes a later `Db` write at 102, the subsequent manifest
-read must include import 101. Sequence gaps cannot identify imports because
-ordinary writes can supply explicit sequences. This requires a fresh, strongly
-consistent manifest read and bounded replay support from the WAL implementation.
+To prevent this, the reader lists the WAL first, then loads the latest manifest,
+and replays only the WAL files in its list. If the list includes 102, the
+manifest load comes after the write of 102, so the manifest includes 101. The
+reader advances its durable sequence only after it installs the new state.
+Initial open uses the same order. Pinned readers keep their fixed manifest and
+replay boundary. This needs a strongly consistent manifest read, and a WAL
+replay that stops at a given WAL file.
 
 ### Manifest Representation
 
@@ -535,8 +537,8 @@ whether upload, publication, or compaction limits throughput. Measure peak
 memory and concurrent uploads alongside throughput.
 
 The tradeoff is that `Db` writes to that database stay paused while the files
-are built, uploaded, and published. Reads can continue under the visibility
-rules above. This whole pause needs to be measured when comparing direct
+are built, uploaded, and published. `DbReader` reads can continue under the
+visibility rules above. This whole pause needs to be measured when comparing direct
 construction with a future mode that stages files before the handoff.
 
 Compare the complete pipeline with normal batch writes: sorting and spill,
@@ -602,8 +604,9 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
   configuration. Segment routing must use the completed key bounds without
   scanning records at publication time.
 - Publication and reads: Import 101 over earlier data while retaining an older
-  checkpoint. Check get/scan, shared caches, projections, and restart. Overrides
-  must survive trivial moves, and rewrites must materialize their sequences.
+  checkpoint. Read through `DbReader` with get, scan, projections, and restart.
+  Overrides must survive trivial moves, and rewrites must materialize their
+  sequences.
 - Handoff: Close `Db` with write 100 published, import 101 through `Lsm`, then
   reopen `Db` and write 102. Race that handoff with a long-lived `DbReader` still
   holding the old manifest, and include explicit sequence gaps.
@@ -635,7 +638,7 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
 1. Measure manifest growth and establish a bulk-load baseline, including sorting and L0 waits.
 2. Extract shared SST code with compatible exports, then expose the standalone writer and reader paths.
 3. Add conditional manifest versions and propagate overrides through reads, compaction, and retained manifests.
-4. Add `Lsm` file allocation, direct SST construction, ingestion, and reads, including exclusive fencing and handling of uncertain outcomes.
+4. Add `Lsm` file allocation, direct SST construction, and ingestion, including exclusive fencing and handling of uncertain outcomes.
 5. Validate the `Db` handoff, long-lived readers, and segment routing.
 
 The standalone interfaces can ship on their own. The `Lsm` release needs to
@@ -657,8 +660,8 @@ write modes within one database.
 Normal batch writes keep the existing lifecycle and don't require the
 application to sort its input. They remain the performance baseline because
 externally built files still enter L0. A writer-only release helps standalone
-file tools, but applications still need `Lsm` for publication and reads over
-database state.
+file tools, but applications still need `Lsm` to publish files into a
+database.
 
 ### Stage Files Before Handoff
 
