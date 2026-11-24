@@ -27,12 +27,11 @@ This RFC adds a standalone `SstWriter` and an `Lsm` client for bulk loading and
 reading SSTs. The application builds sorted files without going through `Db`'s
 memory write path, then lets SlateDB manage those files and compaction.
 
-For the first ingestion mode, the application opens `Lsm` before building the
-files. `Lsm` assigns each file's final path and ID, so ingestion can publish it
-without copying it. Destination sequences live in the manifest, with no change
-to the physical SST format. Once loading is done, the application closes `Lsm`
-and switches to `Db` for ordinary writes. Only one of them can be the active
-writer for a database.
+The application opens `Lsm` before it builds the files. `Lsm` assigns each
+file's final path and ID, so ingestion can publish it without copying it.
+Destination sequences live in the manifest, with no change to the physical SST
+format. Once loading is done, the application closes `Lsm` and switches to `Db`
+for ordinary writes. Only one of them can be the active writer for a database.
 
 ## Motivation
 
@@ -43,19 +42,22 @@ updates in structures such as vectors or bitmaps and encode them at flush time.
 Shared file interfaces let these producers reuse SlateDB's storage layer while
 keeping their own memory representation.
 
-An [Iceberg primary-key index](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5789501302)
-provides a bulk-loading use case. Initial construction runs without a WAL,
-followed by ordinary reads, writes, and deletes for CDC with the WAL enabled.
-Snapshot runs fill memory and L0 quickly, then wait for compaction.
-External SST construction can avoid the memory write path, but its benefit
-also depends on sorting, L0 admission, and compaction throughput.
+Bulk loads are one example. An
+[Iceberg primary-key index](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5789501302)
+stores one key for each source row: the primary key, mapped to a data file and
+a row position. An initial build or a full rebuild writes every key one time
+through `Db`, with the WAL off. Normal reads, writes, and deletes follow, with
+the WAL on. During the load, L0 fills fast, and writes wait for compaction.
+Compaction used 33% of all CPU in an initial load and 54% in a rebuild
+([#2148](https://github.com/slatedb/slatedb/issues/2148)), although almost
+every key has one version. Files built outside `Db` skip the memtable and its
+flushes, but the application must sort the keys.
 
-The index also rebuilds individual tables during CDC. Its owner confirmed that
-[separate databases per table are compatible](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5808365694)
-and cross-table index transactions are unnecessary. Each table can switch
-clients independently, following the
-[ingestion-only client proposal](https://github.com/slatedb/slatedb/pull/2103#pullrequestreview-5286827487)
-and [per-table handoff](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5800449727).
+An application can use one database for each table, so one table can load
+while the others take normal writes
+([per-table handoff](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5800449727)).
+Each database switches between `Db` and `Lsm` on its own
+([ingestion-only client](https://github.com/slatedb/slatedb/pull/2103#pullrequestreview-5286827487)).
 
 This proposal builds on [RFC #1146](https://github.com/slatedb/slatedb/pull/1146),
 by [KarinaMilet](https://github.com/KarinaMilet), with shared SST interfaces and
@@ -200,32 +202,16 @@ writes use the final file ID when caching is enabled.
 
 ### Producing Sorted Files
 
-`SstWriter` expects sorted records, so the application does the source scanning
-and sorting. For unsorted snapshot or rebuild data, it chooses how to sort
-within its memory budget and whether to spill to temporary storage. Sorting and
-spill policy stay in the application; this RFC doesn't add a sorter to SlateDB.
+`SstWriter` takes rows in key order. The application reads and sorts its input,
+and it owns any temporary storage for the sort.
 
-If a source contains repeated keys, the last source update wins for puts and
-deletes. For example, a delete at source version 20 wins over a put at version
-10, even if a parallel scan returns the put later. The result must not depend
-on which scan finishes first.
-
-Merge operands need more care because keeping only the last operand can lose
-earlier updates. The application must preserve their effects in source order
-and use a compatible merge operator in `Lsm` and the later `Db`.
-It can combine operands if that preserves their meaning. Otherwise, it writes
-them to separate files and publishes those files in source order. Each deferred
-file still has only one entry per key.
-
-The same ordering requirement applies across files with overlapping keys.
-The application allocates and publishes them in source order or removes the
-overlap before writing them. Sequence zero won't tell `Lsm` which source update
-is newer.
-
-The first mode builds files at paths assigned by `Lsm`. The application can do
-the sorting before switching clients, as long as it preserves a consistent
-source snapshot and update order. It also owns the temporary storage used for
-sorting.
+A file for `Lsm::ingest` holds at most one entry per key. If the input has the
+same key more than once, the application keeps the newest entry before it
+writes the file. When two files have the same key, the file that publishes
+later wins. A merge operand in an ingested file combines with older values
+through the merge operator of the database, the same as a merge from `Db`. To
+keep several merge operands for one key, the application writes them to
+separate files and publishes those files in order.
 
 ### Lsm API
 
@@ -557,9 +543,6 @@ Compare the complete pipeline with normal batch writes: sorting and spill,
 SST construction, index/filter buffers, upload, validation, publication, and
 compaction. Ingestion still waits for L0 capacity. Independent databases avoid
 a shared writer pause but multiply cache budgets, polling, and maintenance work.
-Measure active table counts and CDC latency alongside initial build time and
-rebuild time. The adopter's 100k+ TPS CDC target is a goal, not a measured benefit
-of this proposal.
 
 ### Observability
 
@@ -653,7 +636,7 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
 2. Extract shared SST code with compatible exports, then expose the standalone writer and reader paths.
 3. Add conditional manifest versions and propagate overrides through reads, compaction, and retained manifests.
 4. Add `Lsm` file allocation, direct SST construction, ingestion, and reads, including exclusive fencing and handling of uncertain outcomes.
-5. Validate the `Db` handoff, long-lived readers, and segment routing before enabling the per-table index workflow.
+5. Validate the `Db` handoff, long-lived readers, and segment routing.
 
 The standalone interfaces can ship on their own. The `Lsm` release needs to
 document the supported WAL handoffs and segment scope, along with file
@@ -665,8 +648,9 @@ ownership, upload cleanup, retries, client switching, and upgrades.
 
 A mixed API supports imports while ordinary writes continue in the same database,
 but requires coordination with memory, transactions, WAL progress, and publication.
-The per-table workload can switch clients instead. Mixed ingestion remains a
-future extension if a workload requires concurrent write modes within one database.
+An application with one database for each table can switch clients instead.
+Mixed ingestion remains a future extension if a workload requires concurrent
+write modes within one database.
 
 ### Normal Batch Writes or Writer-Only Release
 
@@ -681,13 +665,14 @@ database state.
 An application could build SSTs outside managed directories while `Db` keeps
 receiving writes, then switch to `Lsm` to import them. That can shorten the write
 pause, but it needs a way to validate and install those files safely under GC.
-The application also has to account for writes made after its source snapshot.
+Writes that `Db` takes while the files are built get lower sequences than the
+import, so the import overwrites them, even when they are newer.
 This stays outside the first release; we can revisit it if a workload needs a
 shorter write pause.
 
 If a future staged mode copies files, a storage-side COPY could avoid sending
 the bytes through the client. Validation and copying must refer to the same
-source version. The first mode builds directly under `Lsm`, so neither copy
+source version. This RFC builds files directly under `Lsm`, so neither copy
 path is needed.
 
 ### Durable Request Tracking
@@ -707,7 +692,7 @@ rules for overlap, bounds, and snapshots.
 ## Open Questions
 
 1. Does the first `Lsm` release include single-segment ingestion, or does adoption wait for a later segment milestone?
-2. What manifest growth and per-table resource budgets are acceptable at the expected table count?
+2. What manifest growth is acceptable for a large load?
 3. Does a concrete workload require import-time timestamps, atomic multi-file publication, or durable retry tracking?
 
 ## References
