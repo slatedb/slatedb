@@ -13,6 +13,7 @@ use crate::merge_operator::{
 };
 use crate::read_trace::{ReadTrace, SstTraceLevel};
 use crate::segment_iterator::{build_l0_point_iters, build_sr_point_iters, SegmentScanContext};
+use crate::snapshot_manager::RetentionPin;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstTracingContext};
 use crate::tablestore::TableStore;
@@ -262,6 +263,8 @@ pub struct DbIterator {
     last_key: Option<Bytes>,
     order: IterationOrder,
     read_span: tracing::Span,
+    /// Keeps the snapshot or transaction registered until this iterator drops.
+    retention: Option<Arc<RetentionPin>>,
 }
 
 impl DbIterator {
@@ -338,7 +341,15 @@ impl DbIterator {
             last_key: None,
             order,
             read_span,
+            retention: None,
         })
+    }
+
+    /// Holds `pin`, the registration of the snapshot or the transaction that the scan reads in,
+    /// until the iterator drops.
+    pub(crate) fn retaining(mut self, pin: Arc<RetentionPin>) -> Self {
+        self.retention = Some(pin);
+        self
     }
 
     /// Get the next key-value pair.

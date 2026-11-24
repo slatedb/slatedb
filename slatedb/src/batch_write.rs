@@ -316,8 +316,11 @@ impl DbInner {
         // track the recent committed txn for conflict check. if a txn is not supplied,
         // we still consider this as an transaction commit.
         if let Some(txn) = txn {
-            self.txn_manager
-                .track_recent_committed_txn(&txn.id(), commit_seq);
+            self.txn_manager.track_recent_committed_txn_with(
+                &txn.id(),
+                commit_seq,
+                !txn.scans_hold_retention(),
+            );
         } else {
             let write_keys = batch.keys();
             self.txn_manager

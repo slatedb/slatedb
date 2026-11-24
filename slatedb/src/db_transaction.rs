@@ -13,6 +13,7 @@ use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::reader::ScanContext;
+use crate::snapshot_manager::RetentionPin;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::KeyValue;
 use crate::{DbReadOps, DbTransactionOps};
@@ -75,6 +76,10 @@ pub struct DbTransaction {
     range_trackers: Mutex<Vec<DbIteratorRangeTracker>>,
     /// Keys that should be excluded from write conflict detection when committing.
     untracked_write_keys: RwLock<HashSet<Bytes>>,
+    /// The retention of the transaction's sequence number, which the iterators of its scans
+    /// hold too, so that it outlives the transaction while one of them reads on. `None` only
+    /// while the transaction drops.
+    retention: Option<Arc<RetentionPin>>,
 }
 
 impl DbTransaction {
@@ -89,6 +94,7 @@ impl DbTransaction {
         Self {
             txn_id,
             started_seq: seq,
+            retention: Some(RetentionPin::transaction(txn_manager.clone(), txn_id)),
             txn_manager,
             write_batch: RwLock::new(WriteBatch::new()),
             db_inner,
@@ -332,7 +338,23 @@ impl DbTransaction {
                 },
             )
             .await
+            .map(|iter| self.retaining(iter))
             .map_err(Into::into)
+    }
+
+    /// Attaches the transaction's retention pin to `iter`.
+    fn retaining(&self, iter: DbIterator) -> DbIterator {
+        match &self.retention {
+            Some(pin) => iter.retaining(pin.clone()),
+            None => iter,
+        }
+    }
+
+    /// Returns true if an open scan iterator still holds this transaction's retention pin.
+    pub(crate) fn scans_hold_retention(&self) -> bool {
+        self.retention
+            .as_ref()
+            .is_some_and(|pin| Arc::strong_count(pin) > 1)
     }
 
     /// Put a key-value pair into the transaction.
@@ -791,7 +813,15 @@ impl DbTransactionOps for DbTransaction {
 /// If the transaction hasn't been committed, it's considered rolled back.
 impl Drop for DbTransaction {
     fn drop(&mut self) {
-        self.txn_manager.drop_txn(&self.txn_id);
+        // If no iterator of the transaction's scans holds its retention, it ends here with the
+        // rest of the transaction's state; otherwise the last such iterator ends it.
+        let pin = self.retention.take().and_then(Arc::into_inner);
+        let release_retention = pin.is_some();
+        if let Some(pin) = pin {
+            pin.disarm();
+        }
+        self.txn_manager
+            .drop_txn_with(&self.txn_id, release_retention);
     }
 }
 
@@ -2324,5 +2354,61 @@ mod tests {
             .unwrap();
 
         assert!(result.is_none());
+    }
+
+    /// The iterator of a scan keeps the transaction's sequence number registered after the
+    /// transaction commits, rolls back or drops, until the iterator drops: a newer version and a
+    /// memtable flush in between leave the scan reading the transaction's rows, and the flush's
+    /// retention boundary stays at or below the transaction.
+    #[rstest]
+    #[case::committed("commit")]
+    #[case::rolled_back("rollback")]
+    #[case::dropped("drop")]
+    #[tokio::test]
+    async fn test_scan_keeps_transaction_registered_until_iterator_drops(#[case] end: &str) {
+        let db = crate::Db::open(
+            format!("/tmp/test_scan_keeps_transaction_registered_{end}"),
+            Arc::new(InMemory::new()),
+        )
+        .await
+        .unwrap();
+        for i in 0..20u8 {
+            db.put([b'k', i], [b'v', i]).await.unwrap();
+        }
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
+        let seq = txn.seqnum();
+        let mut iter = txn.scan(..).await.unwrap();
+        let mut got = vec![iter.next().await.unwrap().unwrap()];
+        match end {
+            "commit" => {
+                txn.put(b"z", b"after the scan").unwrap();
+                txn.commit().await.unwrap();
+            }
+            "rollback" => txn.rollback(),
+            _ => drop(txn),
+        }
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(seq));
+        assert!(db
+            .inner
+            .compute_flush_retention_seq(u64::MAX)
+            .is_some_and(|boundary| boundary <= seq));
+        db.put([b'k', 15], b"newer").await.unwrap();
+        db.flush_with_options(crate::config::FlushOptions {
+            flush_type: crate::config::FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        while let Some(kv) = iter.next().await.unwrap() {
+            got.push(kv);
+        }
+        let want: Vec<(Bytes, Bytes)> = (0..20u8)
+            .map(|i| (Bytes::from(vec![b'k', i]), Bytes::from(vec![b'v', i])))
+            .collect();
+        let got: Vec<(Bytes, Bytes)> = got.into_iter().map(|kv| (kv.key, kv.value)).collect();
+        assert_eq!(got, want);
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(seq));
+        drop(iter);
+        assert_eq!(db.inner.txn_manager.min_active_seq(), None);
+        db.close().await.unwrap();
     }
 }

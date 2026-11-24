@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
 use crate::config::{ReadOptions, ScanOptions};
@@ -9,10 +8,13 @@ use crate::types::KeyValue;
 
 use crate::db::DbInner;
 use crate::reader::ScanContext;
+use crate::snapshot_manager::RetentionPin;
 use crate::DbReadOps;
 
 pub struct DbSnapshot {
-    snapshot_id: Uuid,
+    /// The snapshot's registration, which the iterators of its scans hold too: it ends when the
+    /// snapshot and every such iterator have dropped.
+    retention: Arc<RetentionPin>,
     started_seq: u64,
     db_inner: Arc<DbInner>,
 }
@@ -22,7 +24,7 @@ impl DbSnapshot {
         let (snapshot_id, started_seq) = db_inner.snapshot_manager.new_snapshot(seq);
 
         Arc::new(Self {
-            snapshot_id,
+            retention: RetentionPin::snapshot(db_inner.snapshot_manager.clone(), snapshot_id),
             started_seq,
             db_inner,
         })
@@ -201,6 +203,7 @@ impl DbSnapshot {
                 },
             )
             .await
+            .map(|iter| iter.retaining(self.retention.clone()))
             .map_err(Into::into)
     }
 }
@@ -245,14 +248,6 @@ impl DbReadOps for DbSnapshot {
         T: ByteRangeBounds + Send,
     {
         DbSnapshot::scan_prefix_with_options(self, prefix, subrange, options).await
-    }
-}
-
-impl Drop for DbSnapshot {
-    fn drop(&mut self) {
-        self.db_inner
-            .snapshot_manager
-            .drop_snapshot(&self.snapshot_id);
     }
 }
 
@@ -796,5 +791,50 @@ mod tests {
         let db_result = db.get(b"key1").await?;
         assert_eq!(db_result, Some(Bytes::from("value2")));
         Ok(())
+    }
+
+    /// The iterator of a scan keeps the snapshot's sequence number registered after the
+    /// snapshot drops, until the iterator drops: a newer version and a memtable flush in
+    /// between leave the scan reading the snapshot's rows, and the flush's retention boundary
+    /// stays at or below the snapshot.
+    #[tokio::test]
+    async fn test_scan_keeps_snapshot_registered_until_iterator_drops() {
+        let db = Db::open(
+            "/tmp/test_scan_keeps_snapshot_registered_until_iterator_drops",
+            Arc::new(InMemory::new()),
+        )
+        .await
+        .unwrap();
+        for i in 0..20u8 {
+            db.put([b'k', i], [b'v', i]).await.unwrap();
+        }
+        let snapshot = db.snapshot().unwrap();
+        let seq = snapshot.seq();
+        let mut iter = snapshot.scan(..).await.unwrap();
+        let mut got = vec![iter.next().await.unwrap().unwrap()];
+        drop(snapshot);
+        assert_eq!(db.inner.snapshot_manager.min_active_seq(), Some(seq));
+        assert!(db
+            .inner
+            .compute_flush_retention_seq(u64::MAX)
+            .is_some_and(|boundary| boundary <= seq));
+        db.put([b'k', 15], b"newer").await.unwrap();
+        db.flush_with_options(crate::config::FlushOptions {
+            flush_type: crate::config::FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        while let Some(kv) = iter.next().await.unwrap() {
+            got.push(kv);
+        }
+        let want: Vec<(Bytes, Bytes)> = (0..20u8)
+            .map(|i| (Bytes::from(vec![b'k', i]), Bytes::from(vec![b'v', i])))
+            .collect();
+        let got: Vec<(Bytes, Bytes)> = got.into_iter().map(|kv| (kv.key, kv.value)).collect();
+        assert_eq!(got, want);
+        assert_eq!(db.inner.snapshot_manager.min_active_seq(), Some(seq));
+        drop(iter);
+        assert_eq!(db.inner.snapshot_manager.min_active_seq(), None);
+        db.close().await.unwrap();
     }
 }

@@ -4,8 +4,60 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::oracle::{DbOracle, Oracle};
+use crate::transaction_manager::TransactionManager;
 use crate::utils::IdGenerator;
 use slatedb_common::DbRand;
+
+/// The registration of a snapshot's or a transaction's sequence number, which memtable flushes
+/// and compaction retain what it sees of. The snapshot or the transaction holds it, and so does
+/// every iterator of its scans: the registration ends when the last of them drops, so an
+/// iterator that outlives its snapshot or its transaction still reads a state that its sequence
+/// number sees.
+pub(crate) struct RetentionPin {
+    registration: Option<Registration>,
+}
+
+enum Registration {
+    Snapshot {
+        manager: Arc<SnapshotManager>,
+        id: Uuid,
+    },
+    Transaction {
+        manager: Arc<TransactionManager>,
+        id: Uuid,
+    },
+}
+
+impl RetentionPin {
+    /// The pin of the snapshot `id`, which `manager` registered.
+    pub(crate) fn snapshot(manager: Arc<SnapshotManager>, id: Uuid) -> Arc<Self> {
+        Arc::new(Self {
+            registration: Some(Registration::Snapshot { manager, id }),
+        })
+    }
+
+    /// The pin of the transaction `id`, whose sequence number `manager` retains.
+    pub(crate) fn transaction(manager: Arc<TransactionManager>, id: Uuid) -> Arc<Self> {
+        Arc::new(Self {
+            registration: Some(Registration::Transaction { manager, id }),
+        })
+    }
+
+    /// Leaves the release of the registration to the caller.
+    pub(crate) fn disarm(mut self) {
+        self.registration = None;
+    }
+}
+
+impl Drop for RetentionPin {
+    fn drop(&mut self) {
+        match self.registration.take() {
+            Some(Registration::Snapshot { manager, id }) => manager.drop_snapshot(&id),
+            Some(Registration::Transaction { manager, id }) => manager.release_retention(&id),
+            None => {}
+        }
+    }
+}
 
 /// Tracks active snapshot registrations by sequence number.
 ///
