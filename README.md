@@ -163,6 +163,7 @@ See who's using SlateDB.
 - [OpenData](https://www.opendata.dev)
 - [Prisma](https://www.prisma.io)
 - [Responsive](https://responsive.dev)
+- [Rivet](https://rivet.dev)
 - [s2-lite](https://github.com/s2-streamstore/s2)
 - [Storrito](https://storrito.com)
 - [Taquba](https://github.com/micllam/taquba)
