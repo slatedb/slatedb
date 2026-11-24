@@ -131,6 +131,7 @@ use crate::compactor::CompactorMessage;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
+use crate::config::CloseOptions;
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
 use crate::config::{CompactionWorkerOptions, CompactorOptions};
@@ -155,6 +156,7 @@ use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
 use crate::paths::PathResolver;
 use crate::retrying_object_store::RetryingObjectStore;
+use crate::row_cache::{OpenContext as RowCacheOpenContext, RowCache};
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::ObjectStoreType;
 use crate::utils::SafeSender;
@@ -199,6 +201,7 @@ pub struct DbBuilder<P: Into<Path>> {
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     wal_writer_init: Option<Box<dyn wal::WriterInit>>,
     epoch_claim: EpochClaim,
+    row_cache: Option<Arc<dyn RowCache>>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -232,6 +235,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             segment_extractor: None,
             wal_writer_init: None,
             epoch_claim: EpochClaim::default(),
+            row_cache: None,
         }
     }
 
@@ -474,6 +478,12 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Attaches a pluggable logical [`RowCache`] to the database.
+    pub fn with_row_cache(mut self, row_cache: Arc<dyn RowCache>) -> Self {
+        self.row_cache = Some(row_cache);
+        self
+    }
+
     /// Sets the filter policies used for SST filter construction and evaluation.
     ///
     /// Each policy produces a separate filter per SST, stored in a composite
@@ -708,6 +718,14 @@ impl<P: Into<Path>> DbBuilder<P> {
         let reader = status_manager.result_reader();
         let (write_tx, write_rx) = SafeSender::unbounded_channel(reader);
 
+        #[cfg(feature = "compaction_filters")]
+        let has_compaction_filter = self
+            .compactor_builder
+            .as_ref()
+            .is_some_and(|b| b.compaction_filter_supplier.is_some());
+        #[cfg(not(feature = "compaction_filters"))]
+        let has_compaction_filter = false;
+
         // Create the database inner state
         let memtable_flusher = Arc::new(MemtableFlusher::new(status_manager.as_ref()));
         let inner = Arc::new(
@@ -725,6 +743,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 self.merge_operator.clone(),
                 status_manager,
                 self.segment_extractor.clone(),
+                self.row_cache,
             )
             .await?,
         );
@@ -872,11 +891,27 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Replay WAL
         inner.replay_wal(replay_iterator).await?;
 
-        // Create and return the Db instance
-        Ok(Db {
+        let db = Db {
             inner,
             task_executor,
-        })
+        };
+        if let Some(row_cache) = &db.inner.row_cache {
+            let ctx = RowCacheOpenContext::new(
+                &db.inner,
+                tokio_handle,
+                metrics_recorder,
+                has_compaction_filter,
+            );
+            if let Err(err) = row_cache.open(ctx) {
+                let _ = db
+                    .close_inner(CloseOptions { flush_type: None }, false)
+                    .await;
+                return Err(err);
+            }
+        }
+
+        // Create and return the Db instance
+        Ok(db)
     }
 }
 

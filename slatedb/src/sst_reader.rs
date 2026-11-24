@@ -152,6 +152,10 @@ pub struct SstIndex {
 }
 
 impl SstIndex {
+    pub(crate) fn from_owned(inner: Arc<SsTableIndexOwned>) -> Self {
+        Self { inner }
+    }
+
     /// Returns the number of data blocks described by the index.
     pub fn len(&self) -> usize {
         self.inner.borrow().block_meta().len()

@@ -63,6 +63,7 @@ use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
 use crate::prefix_extractor::PrefixExtractor;
 use crate::reader::{Reader, ScanContext};
+use crate::row_cache::{scan_start_key, GetOutcome, RowCache, ScanOutcome};
 use crate::snapshot_manager::SnapshotManager;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
@@ -117,6 +118,8 @@ pub(crate) struct DbInner {
     /// L0 SSTs. When `None`, the database is the singleton `prefix=""`
     /// segment encoded in the manifest's top-level tree.
     pub(crate) segment_extractor: Option<Arc<dyn PrefixExtractor>>,
+    /// Pluggable logical row cache, configured through `DbBuilder::with_row_cache`.
+    pub(crate) row_cache: Option<Arc<dyn RowCache>>,
 }
 
 impl DbInner {
@@ -134,6 +137,7 @@ impl DbInner {
         merge_operator: Option<MergeOperatorType>,
         status_manager: Arc<DbStatusManager>,
         segment_extractor: Option<Arc<dyn PrefixExtractor>>,
+        row_cache: Option<Arc<dyn RowCache>>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
@@ -195,6 +199,7 @@ impl DbInner {
             snapshot_manager,
             status_manager,
             segment_extractor,
+            row_cache,
         };
         Ok(db_inner)
     }
@@ -217,10 +222,26 @@ impl DbInner {
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, SlateDBError> {
         self.check_closed()?;
+        let key_ref = key.as_ref();
+        let miss = if let Some(row_cache) = &self.row_cache {
+            match row_cache.get(key_ref, options, None) {
+                GetOutcome::Hit(result) => {
+                    return result.map_err(|err| SlateDBError::RowCache(Arc::new(err)));
+                }
+                GetOutcome::Miss(token) => token,
+            }
+        } else {
+            None
+        };
         let db_state = self.state.read().view();
-        self.reader
-            .get_key_value_with_options(key, options, &db_state, None, None)
-            .await
+        let result = self
+            .reader
+            .get_key_value_with_options(key_ref, options, &db_state, None, None)
+            .await;
+        if let (Some(row_cache), Some(token)) = (&self.row_cache, miss) {
+            row_cache.record_miss(token, key_ref);
+        }
+        result
     }
 
     /// Shared scan path for plain range scans and prefix scans. When
@@ -233,8 +254,24 @@ impl DbInner {
         prefix: Option<Bytes>,
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
+        let miss = if let Some(row_cache) = &self.row_cache {
+            let bounds = (
+                ByteRangeBounds::start_bound(&range),
+                ByteRangeBounds::end_bound(&range),
+            );
+            match row_cache.scan(bounds, options, prefix.as_deref(), None) {
+                ScanOutcome::Hit(result) => {
+                    let iter = result.map_err(|err| SlateDBError::RowCache(Arc::new(err)))?;
+                    return Ok(DbIterator::from_row_cache(range, iter));
+                }
+                ScanOutcome::Miss(token) => token.map(|token| (token, scan_start_key(&range))),
+            }
+        } else {
+            None
+        };
         let db_state = self.state.read().view();
-        self.reader
+        let result = self
+            .reader
             .scan_with_options(
                 range,
                 options,
@@ -245,7 +282,11 @@ impl DbInner {
                     prefix,
                 },
             )
-            .await
+            .await;
+        if let (Some(row_cache), Some((token, start_key))) = (&self.row_cache, miss) {
+            row_cache.record_miss(token, &start_key);
+        }
+        result
     }
 
     pub(crate) async fn scan_prefix_by_recency_with_options(
@@ -668,6 +709,14 @@ impl Db {
     /// Close the database with custom options.
     ///
     pub async fn close_with_options(&self, options: CloseOptions) -> Result<(), crate::Error> {
+        self.close_inner(options, true).await
+    }
+
+    pub(crate) async fn close_inner(
+        &self,
+        options: CloseOptions,
+        close_row_cache: bool,
+    ) -> Result<(), crate::Error> {
         let flush_type = match self.status().close_reason {
             // If already closed, don't close again.
             Some(CloseReason::Clean) => return Err(SlateDBError::Closed.into()),
@@ -695,6 +744,12 @@ impl Db {
         };
 
         MemtableFlusher::shutdown(&self.task_executor).await;
+
+        if close_row_cache {
+            if let Some(row_cache) = &self.inner.row_cache {
+                row_cache.close().await;
+            }
+        }
 
         if let Err(e) = self.task_executor.shutdown_task(COMPACTOR_TASK_NAME).await {
             warn!("failed to shutdown compactor task [error={:?}]", e);

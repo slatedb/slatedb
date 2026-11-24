@@ -4,15 +4,18 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::batch::{WriteBatch, WriteBatchIterator};
+use crate::batch::{WriteBatch, WriteBatchIterator, WriteOp};
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
-use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
+use crate::config::{
+    DurabilityLevel, MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
+};
 use crate::db::DbInner;
 use crate::db::WriteHandle;
 use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
 use crate::reader::ScanContext;
+use crate::row_cache::{scan_start_key, GetOutcome, ScanOutcome};
 use crate::snapshot_manager::RetentionPin;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::KeyValue;
@@ -160,13 +163,54 @@ impl DbTransaction {
             self.txn_manager.track_read_keys(&self.txn_id, read_keys);
         }
 
+        let key_slice = key.as_ref();
+        let miss = if let Some(row_cache) = &self.db_inner.row_cache {
+            enum BatchLookup {
+                Absent,
+                Resolved(Option<KeyValue>),
+                Fallthrough,
+            }
+            let lookup = {
+                let batch = self.write_batch.read();
+                match batch.ops.get_key_value(key_slice) {
+                    None => BatchLookup::Absent,
+                    Some((batch_key, ops)) => match ops.last() {
+                        Some(op @ WriteOp::Put(..)) => BatchLookup::Resolved(Some(KeyValue::from(
+                            op.to_row_entry(batch_key, u64::MAX, None, None),
+                        ))),
+                        Some(WriteOp::Delete) => BatchLookup::Resolved(None),
+                        Some(WriteOp::Merge(..)) | None => BatchLookup::Fallthrough,
+                    },
+                }
+            };
+            match lookup {
+                BatchLookup::Resolved(kv)
+                    if matches!(options.durability_filter, DurabilityLevel::Memory)
+                        && !options.dirty
+                        && options.filter_context.is_none()
+                        && options.tracing_options.is_none() =>
+                {
+                    self.db_inner.db_stats.get_requests.increment(1);
+                    return Ok(kv);
+                }
+                BatchLookup::Resolved(_) | BatchLookup::Fallthrough => None,
+                BatchLookup::Absent => {
+                    match row_cache.get(key_slice, options, Some(self.started_seq)) {
+                        GetOutcome::Hit(result) => return result,
+                        GetOutcome::Miss(token) => token,
+                    }
+                }
+            }
+        } else {
+            None
+        };
+
         let db_state = self.db_inner.state.read().view();
 
         // Build the write batch iterator synchronously while holding the read
         // guard, avoiding a clone of the full batch. The iterator materializes
         // only the entries overlapping the read range (a single key for a
         // point get), so this is O(log N) instead of O(N).
-        let key_slice = key.as_ref();
         let range = BytesRange::from_slice(key_slice..=key_slice);
         let write_batch_iter = {
             let guard = self.write_batch.read();
@@ -184,15 +228,17 @@ impl DbTransaction {
             .db_inner
             .reader
             .get_key_value_with_options(
-                key,
+                key_slice,
                 options,
                 &db_state,
                 write_batch_iter,
                 Some(self.started_seq),
             )
-            .await
-            .map_err(crate::Error::from)?;
-        Ok(kv)
+            .await;
+        if let (Some(row_cache), Some(token)) = (&self.db_inner.row_cache, miss) {
+            row_cache.record_miss(token, key_slice);
+        }
+        kv.map_err(crate::Error::from)
     }
 
     /// Scan a range of keys using the default scan options.
@@ -308,6 +354,39 @@ impl DbTransaction {
         }
 
         self.db_inner.check_closed()?;
+
+        // Serve from the row cache when the transaction has no pending writes in `range`.
+        let miss = if let Some(row_cache) = &self.db_inner.row_cache {
+            let batch_overlaps = {
+                let guard = self.write_batch.read();
+                guard
+                    .ops
+                    .range::<Bytes, _>((
+                        std::ops::RangeBounds::start_bound(&range),
+                        std::ops::RangeBounds::end_bound(&range),
+                    ))
+                    .next()
+                    .is_some()
+            };
+            if batch_overlaps {
+                None
+            } else {
+                let bounds = (
+                    ByteRangeBounds::start_bound(&range),
+                    ByteRangeBounds::end_bound(&range),
+                );
+                match row_cache.scan(bounds, options, prefix.as_deref(), Some(self.started_seq)) {
+                    ScanOutcome::Hit(result) => {
+                        return result
+                            .map(|iter| self.retaining(DbIterator::from_row_cache(range, iter)));
+                    }
+                    ScanOutcome::Miss(token) => token.map(|token| (token, scan_start_key(&range))),
+                }
+            }
+        } else {
+            None
+        };
+
         let db_state = self.db_inner.state.read().view();
 
         // Build the write batch iterator synchronously while holding the read
@@ -325,7 +404,8 @@ impl DbTransaction {
             ))
         };
 
-        self.db_inner
+        let result = self
+            .db_inner
             .reader
             .scan_with_options(
                 range,
@@ -337,9 +417,11 @@ impl DbTransaction {
                     prefix,
                 },
             )
-            .await
-            .map(|iter| self.retaining(iter))
-            .map_err(Into::into)
+            .await;
+        if let (Some(row_cache), Some((token, start_key))) = (&self.db_inner.row_cache, miss) {
+            row_cache.record_miss(token, &start_key);
+        }
+        result.map(|iter| self.retaining(iter)).map_err(Into::into)
     }
 
     /// Attaches the transaction's retention pin to `iter`.

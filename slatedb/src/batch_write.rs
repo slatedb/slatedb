@@ -71,6 +71,8 @@ pub(crate) enum BatchWriterMessage {
         /// Sends the cursor after the writer processes this message.
         done: oneshot::Sender<Result<CheckpointCursor, SlateDBError>>,
     },
+    /// Drain queued row cache work when the batch writer is idle.
+    DrainRowCache,
 }
 
 pub(crate) struct WriteBatchRequest {
@@ -103,6 +105,7 @@ impl std::fmt::Debug for BatchWriterMessage {
                 .debug_struct("ForceFlush")
                 .field("freeze_memtable", freeze_memtable)
                 .finish(),
+            BatchWriterMessage::DrainRowCache => f.debug_struct("DrainRowCache").finish(),
         }
     }
 }
@@ -185,6 +188,12 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
                     }
                 }
             }
+            BatchWriterMessage::DrainRowCache => {
+                if let Some(row_cache) = &self.db_inner.row_cache {
+                    row_cache.drain_writer(self.db_inner.oracle.last_committed_seq());
+                }
+                Ok(())
+            }
         }
     }
 
@@ -193,6 +202,10 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
         mut messages: BoxStream<'async_trait, BatchWriterMessage>,
         result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
+        // Stop serving the row cache before failing remaining messages (close or fence).
+        if let Some(row_cache) = &self.db_inner.row_cache {
+            row_cache.close_writer();
+        }
         let error = result.clone().err().unwrap_or(SlateDBError::Closed);
         while let Some(msg) = messages.next().await {
             match msg {
@@ -211,6 +224,7 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
                 } => {
                     let _ = done.send(Err(error.clone()));
                 }
+                BatchWriterMessage::DrainRowCache => {}
             }
         }
         if let Some(wal_writer) = self.wal_writer.as_mut() {
@@ -530,6 +544,15 @@ impl DbInner {
         let memtable = guard.memtable();
         self.status_manager.add_memtable_segments(&touched_segments);
         memtable.record_touched_segments(touched_segments.clone());
+        if let Some(row_cache) = &self.row_cache {
+            // Apply entries to the row cache after memtable insert and before the committed
+            // sequence number advances.
+            entries.iter().for_each(|entry| memtable.put(entry.clone()));
+            let durable_watcher = memtable.table().durable_watcher();
+            drop(guard);
+            row_cache.apply_write(&entries, self.oracle.last_committed_seq());
+            return durable_watcher;
+        }
         entries.into_iter().for_each(|entry| memtable.put(entry));
         memtable.table().durable_watcher()
     }

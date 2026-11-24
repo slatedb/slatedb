@@ -12,6 +12,7 @@ use crate::merge_operator::{
     MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
 };
 use crate::read_trace::{ReadTrace, SstTraceLevel};
+use crate::row_cache::{self, BatchStatus};
 use crate::segment_iterator::{build_l0_point_iters, build_sr_point_iters, SegmentScanContext};
 use crate::snapshot_manager::RetentionPin;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -256,13 +257,24 @@ impl RowEntryIterator for ScanIterator {
     }
 }
 
+enum IterSource {
+    Internal(Box<dyn RowEntryIterator + 'static>),
+    External(Box<dyn row_cache::ScanIterator>),
+}
+
+/// An external source checks the cooperative budget once in this many entries, not for each
+/// entry. Its entries come from memory or local pages, so a task still yields often.
+const EXTERNAL_BUDGET_EVERY: u32 = 32;
+
 pub struct DbIterator {
     range: BytesRange,
-    iter: Box<dyn RowEntryIterator + 'static>,
+    iter: IterSource,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
     order: IterationOrder,
     read_span: tracing::Span,
+    /// Entries returned from an external source since the last cooperative budget check.
+    unbudgeted: u32,
     /// Keeps the snapshot or transaction registered until this iterator drops.
     retention: Option<Arc<RetentionPin>>,
 }
@@ -336,13 +348,31 @@ impl DbIterator {
 
         Ok(DbIterator {
             range,
-            iter,
+            iter: IterSource::Internal(iter),
             invalidated_error: None,
             last_key: None,
             order,
             read_span,
+            unbudgeted: 0,
             retention: None,
         })
+    }
+
+    /// Builds an iterator over a pre-resolved ascending row cache source.
+    pub(crate) fn from_row_cache(
+        range: BytesRange,
+        iter: Box<dyn row_cache::ScanIterator>,
+    ) -> Self {
+        DbIterator {
+            range,
+            iter: IterSource::External(iter),
+            invalidated_error: None,
+            last_key: None,
+            order: IterationOrder::Ascending,
+            read_span: tracing::Span::none(),
+            unbudgeted: 0,
+            retention: None,
+        }
     }
 
     /// Holds `pin`, the registration of the snapshot or the transaction that the scan reads in,
@@ -361,6 +391,12 @@ impl DbIterator {
     ///
     /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
     pub async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error> {
+        if let Some(error) = self.invalidated_error.clone() {
+            return Err(error.into());
+        }
+        if matches!(self.iter, IterSource::External(_)) {
+            return self.next_external().await;
+        }
         let entry_opt = self.next_entry().await?;
         match entry_opt {
             Some(entry) => {
@@ -373,7 +409,163 @@ impl DbIterator {
         }
     }
 
+    /// Appends up to `max` rows to `out` and returns the appended count.
+    ///
+    /// Returns `0` when the iterator reaches its end or `max` is `0`. Produces the same rows and
+    /// iterator state as calling [`DbIterator::next`] repeatedly. On row-cache scans, reads rows
+    /// synchronously without a per-row future.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error from [`DbIterator::next`]. Rows appended before the error stay in `out`.
+    pub async fn next_batch(
+        &mut self,
+        out: &mut Vec<KeyValue>,
+        max: usize,
+    ) -> Result<usize, crate::Error> {
+        let mut n = 0;
+        if matches!(self.iter, IterSource::External(_)) && self.invalidated_error.is_none() {
+            while n < max {
+                let budget_left = (EXTERNAL_BUDGET_EVERY - self.unbudgeted).max(1) as usize;
+                let want = (max - n).min(budget_left);
+                let step = match &mut self.iter {
+                    IterSource::External(iter) => iter.next_batch_sync(out, want),
+                    IterSource::Internal(_) => unreachable!("checked external source"),
+                };
+                n += step.count;
+                self.unbudgeted += step.count as u32;
+                match step.status {
+                    BatchStatus::More => {
+                        if self.unbudgeted >= EXTERNAL_BUDGET_EVERY {
+                            self.unbudgeted = 0;
+                            self.set_last_key(out, n);
+                            tokio::task::coop::consume_budget().await;
+                        }
+                    }
+                    BatchStatus::Done => break,
+                    BatchStatus::NeedsAsync => {
+                        self.set_last_key(out, n);
+                        match self.next_external_async().await? {
+                            Some(kv) => {
+                                out.push(kv);
+                                n += 1;
+                            }
+                            None => return Ok(n),
+                        }
+                    }
+                    BatchStatus::Error(err) => {
+                        self.set_last_key(out, n);
+                        return Err(self.invalidate_public(err));
+                    }
+                }
+            }
+            self.set_last_key(out, n);
+            return Ok(n);
+        }
+        while n < max {
+            match self.next().await? {
+                Some(kv) => {
+                    out.push(kv);
+                    n += 1;
+                }
+                None => break,
+            }
+        }
+        Ok(n)
+    }
+
+    async fn next_external(&mut self) -> Result<Option<KeyValue>, crate::Error> {
+        if self.unbudgeted + 1 < EXTERNAL_BUDGET_EVERY {
+            let sync = match &mut self.iter {
+                IterSource::External(iter) => iter.next_sync(),
+                IterSource::Internal(_) => unreachable!("checked external source"),
+            };
+            if let Some(result) = sync {
+                return match result {
+                    Ok(Some(kv)) => {
+                        self.unbudgeted += 1;
+                        self.last_key = Some(kv.key.clone());
+                        Ok(Some(kv))
+                    }
+                    Ok(None) => Ok(None),
+                    Err(err) => Err(self.invalidate_public(err)),
+                };
+            }
+        }
+        let next = match &mut self.iter {
+            IterSource::External(iter) => match iter.next_sync() {
+                Some(result) => result,
+                None => iter.next().await,
+            },
+            IterSource::Internal(_) => unreachable!("checked external source"),
+        };
+        self.unbudgeted += 1;
+        if self.unbudgeted >= EXTERNAL_BUDGET_EVERY {
+            self.unbudgeted = 0;
+            tokio::task::coop::consume_budget().await;
+        }
+        match next {
+            Ok(Some(kv)) => {
+                self.last_key = Some(kv.key.clone());
+                Ok(Some(kv))
+            }
+            Ok(None) => Ok(None),
+            Err(err) => Err(self.invalidate_public(err)),
+        }
+    }
+
+    async fn next_external_async(&mut self) -> Result<Option<KeyValue>, crate::Error> {
+        let next = match &mut self.iter {
+            IterSource::External(iter) => iter.next().await,
+            IterSource::Internal(_) => unreachable!("checked external source"),
+        };
+        self.unbudgeted = 0;
+        tokio::task::coop::consume_budget().await;
+        match next {
+            Ok(Some(kv)) => {
+                self.last_key = Some(kv.key.clone());
+                Ok(Some(kv))
+            }
+            Ok(None) => Ok(None),
+            Err(err) => Err(self.invalidate_public(err)),
+        }
+    }
+
+    /// Updates `last_key` from the final appended row in `out`.
+    fn set_last_key(&mut self, out: &[KeyValue], appended: usize) {
+        if appended > 0 {
+            if let Some(kv) = out.last() {
+                self.last_key = Some(kv.key.clone());
+            }
+        }
+    }
+
+    fn invalidate_public(&mut self, err: crate::Error) -> crate::Error {
+        self.invalidated_error = Some(SlateDBError::RowCache(Arc::new(err.clone_without_source())));
+        err
+    }
+
     pub(crate) async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        if matches!(self.iter, IterSource::External(_)) {
+            if let Some(error) = self.invalidated_error.clone() {
+                return Err(error);
+            }
+            return self
+                .next_external()
+                .await
+                .map(|kv_opt| {
+                    kv_opt.map(|kv| {
+                        RowEntry::new(
+                            kv.key,
+                            ValueDeletable::Value(kv.value),
+                            kv.seq,
+                            Some(kv.create_ts),
+                            kv.expire_ts,
+                        )
+                    })
+                })
+                .map_err(|err| SlateDBError::RowCache(Arc::new(err)));
+        }
         let read_span = self.read_span.clone();
         self.next_entry_inner().instrument(read_span).await
     }
@@ -383,7 +575,10 @@ impl DbIterator {
             Err(error)
         } else {
             let result = loop {
-                let next = self.iter.next().await;
+                let next = match &mut self.iter {
+                    IterSource::Internal(iter) => iter.next().await,
+                    IterSource::External(_) => unreachable!("handled in next_entry"),
+                };
                 // Keep cached iteration cooperative.
                 tokio::task::coop::consume_budget().await;
                 match next {
@@ -452,8 +647,16 @@ impl DbIterator {
         {
             Err(SlateDBError::SeekKeyLessThanLastReturnedKey.into())
         } else {
-            let result = self.iter.seek(next_key).await;
-            self.maybe_invalidate(result).map_err(Into::into)
+            match &mut self.iter {
+                IterSource::Internal(iter) => {
+                    let result = iter.seek(next_key).await;
+                    self.maybe_invalidate(result).map_err(Into::into)
+                }
+                IterSource::External(iter) => iter
+                    .seek(next_key)
+                    .await
+                    .map_err(|err| self.invalidate_public(err)),
+            }
         }
     }
 }

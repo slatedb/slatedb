@@ -321,6 +321,9 @@ pub(crate) enum SlateDBError {
         "invalid sequence number, must be greater than the current max. provided=`{provided}`, current=`{current}`"
     )]
     InvalidSequenceNumber { provided: u64, current: u64 },
+
+    #[error("{0}")]
+    RowCache(Arc<Error>),
 }
 
 impl SlateDBError {
@@ -695,6 +698,14 @@ impl Error {
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }
+
+    pub(crate) fn clone_without_source(&self) -> Self {
+        Self {
+            msg: self.msg.clone(),
+            kind: self.kind,
+            source: None,
+        }
+    }
 }
 
 impl From<SlateDBError> for Error {
@@ -846,6 +857,14 @@ impl From<SlateDBError> for Error {
                 Error::internal(msg).with_source(Box::new(err))
             }
             SlateDBError::WalInternalError(src) => Error::internal(msg).with_source(Box::new(src)),
+            SlateDBError::RowCache(err) => match Arc::try_unwrap(err) {
+                Ok(err) => err,
+                Err(err) => Error {
+                    msg: err.msg.clone(),
+                    kind: err.kind,
+                    source: None,
+                },
+            },
         }
     }
 }

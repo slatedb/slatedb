@@ -8,6 +8,7 @@ use crate::types::KeyValue;
 
 use crate::db::DbInner;
 use crate::reader::ScanContext;
+use crate::row_cache::{scan_start_key, GetOutcome, ScanOutcome};
 use crate::snapshot_manager::RetentionPin;
 use crate::DbReadOps;
 
@@ -81,14 +82,25 @@ impl DbSnapshot {
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, crate::Error> {
         self.db_inner.check_closed()?;
+        let key_ref = key.as_ref();
+        let miss = if let Some(row_cache) = &self.db_inner.row_cache {
+            match row_cache.get(key_ref, options, Some(self.started_seq)) {
+                GetOutcome::Hit(result) => return result,
+                GetOutcome::Miss(token) => token,
+            }
+        } else {
+            None
+        };
         let db_state = self.db_inner.state.read().view();
         let kv = self
             .db_inner
             .reader
-            .get_key_value_with_options(key, options, &db_state, None, Some(self.started_seq))
-            .await
-            .map_err(crate::Error::from)?;
-        Ok(kv)
+            .get_key_value_with_options(key_ref, options, &db_state, None, Some(self.started_seq))
+            .await;
+        if let (Some(row_cache), Some(token)) = (&self.db_inner.row_cache, miss) {
+            row_cache.record_miss(token, key_ref);
+        }
+        kv.map_err(crate::Error::from)
     }
 
     /// Scan a range of keys using the default scan options.
@@ -189,8 +201,25 @@ impl DbSnapshot {
         prefix: Option<Bytes>,
     ) -> Result<DbIterator, crate::Error> {
         self.db_inner.check_closed()?;
+        let miss = if let Some(row_cache) = &self.db_inner.row_cache {
+            let bounds = (
+                ByteRangeBounds::start_bound(&range),
+                ByteRangeBounds::end_bound(&range),
+            );
+            match row_cache.scan(bounds, options, prefix.as_deref(), Some(self.started_seq)) {
+                ScanOutcome::Hit(result) => {
+                    return result.map(|iter| {
+                        DbIterator::from_row_cache(range, iter).retaining(self.retention.clone())
+                    });
+                }
+                ScanOutcome::Miss(token) => token.map(|token| (token, scan_start_key(&range))),
+            }
+        } else {
+            None
+        };
         let db_state = self.db_inner.state.read().view();
-        self.db_inner
+        let result = self
+            .db_inner
             .reader
             .scan_with_options(
                 range,
@@ -202,7 +231,11 @@ impl DbSnapshot {
                     prefix,
                 },
             )
-            .await
+            .await;
+        if let (Some(row_cache), Some((token, start_key))) = (&self.db_inner.row_cache, miss) {
+            row_cache.record_miss(token, &start_key);
+        }
+        result
             .map(|iter| iter.retaining(self.retention.clone()))
             .map_err(Into::into)
     }
