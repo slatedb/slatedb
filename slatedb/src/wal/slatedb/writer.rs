@@ -195,11 +195,10 @@ impl SlateDbWalWriter {
         &self,
         result_tx: Option<oneshot::Sender<Result<(), WalError>>>,
     ) -> Result<(), WalError> {
+        self.stats.flush_requests.increment(1);
         self.inner
             .read()
-            .send_flush_msg(WalFlushWork::FreezeAndFlush { result_tx })?;
-        self.stats.flush_requests.increment(1);
-        Ok(())
+            .send_flush_msg(WalFlushWork::FreezeAndFlush { result_tx })
     }
 }
 
