@@ -166,6 +166,7 @@ See who's using SlateDB.
 - [Responsive](https://responsive.dev)
 - [s2-lite](https://github.com/s2-streamstore/s2)
 - [Storrito](https://storrito.com)
+- [Supermetal](https://supermetal.io)
 - [Taquba](https://github.com/micllam/taquba)
 - [Tensorlake](https://www.tensorlake.ai)
 - [Triplox](https://github.com/fiv0/triplox)
