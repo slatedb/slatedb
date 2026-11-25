@@ -70,6 +70,7 @@ a SlateDB ingestion protocol.
 - Expose SST ingestion independently of ordinary KV writes.
 - Define exclusive writer ownership, publication, and handoff to `Db`.
 - Preserve sequence ordering, recovery, and file cleanup guarantees.
+- Publish many files atomically in one manifest update.
 - Measure manifest growth and the complete bulk-loading cost.
 
 ## Non-Goals
@@ -77,7 +78,7 @@ a SlateDB ingestion protocol.
 - Add ingestion to `Db` or run `Db` and `Lsm` writers concurrently on one database.
 - Define custom KV provider traits or coordinate their unpublished memory reads.
 - Add a general external sorter, foreign formats, or custom comparators.
-- Import source database histories or publish multiple files atomically.
+- Import source database histories.
 - Provide durable request deduplication or automatic rebuild recovery.
 
 ## Design
@@ -237,7 +238,7 @@ impl Lsm {
         sequence: IngestSequence,
     ) -> Result<SstWriter, Error>;
 
-    pub async fn ingest(&self, artifact: SstArtifact) -> Result<(), Error>;
+    pub async fn ingest(&self, artifacts: Vec<SstArtifact>) -> Result<(), Error>;
 
     pub async fn close(&self) -> Result<(), Error>;
 }
@@ -256,17 +257,17 @@ records. The handoff section describes those checks.
 
 `Lsm::new_sst_writer` returns an `SstWriter` with the final path, file ID, and
 sequence `s`, in `Fixed(s)` mode. The application adds sorted records, closes
-the writer, and passes the artifact to `ingest`. It requests writers in
-publication order. Files can build and upload in parallel, but `Lsm` publishes
-them in the order it allocated their IDs.
+the writer, and passes the artifact to `ingest`, alone or in a batch with other
+artifacts. It requests writers in publication order. Files can build and upload
+in parallel, but `Lsm` publishes them in the order it allocated their IDs.
 
 `Allocate` takes the next sequence from the oracle of the client. `Explicit`
 works like `WriteOptions::seqnum`. The caller supplies a sequence above every
 sequence that `Lsm` gave out or published. It also keeps those values ordered
-across imports and later `Db` writes. `Lsm` reserves the sequence when it creates the
-writer, so sequences rise in allocation order, and publication order decides
-which record wins when files overlap. If the application drops a writer, its
-sequence stays unused. That gap is safe, because `WriteOptions::seqnum` can
+across imports and later `Db` writes. `Lsm` reserves the sequence when it
+creates the writer, so sequences rise in allocation order, and publication order
+decides which record wins when files overlap. If the application drops a writer,
+its sequence stays unused. That gap is safe, because `WriteOptions::seqnum` can
 also skip sequences. The SST ID in the artifact is useful for diagnostics, but
 compaction can replace and collect the object it identifies.
 
@@ -291,10 +292,13 @@ and ingested. `SstWriter` checks the records, writes block checksums, and
 uploads the file to its final path. We rely on upload success and supported
 transport checksums instead of reading the whole file back.
 
-`ingest` uses the file ID to check that the file was built through this `Lsm`
-client. It also checks the path, the sequence, and the format. Once L0 has
-space, it publishes the SST using its handle. There is no copy or second record
-scan.
+`ingest` takes a batch of one or more artifacts. For each file, it uses the file
+ID to check that this `Lsm` client built the file. It also checks the path, the
+sequence, and the format. It publishes the files using their handles. There is
+no copy or second record scan. It does not wait for L0 space, because `Db` is
+closed and `Lsm` starts no compactor, so a wait can block forever. L0 can grow
+past `l0_max_ssts`, which adds manifest views and L0 reads for `DbReader`. A
+reader can avoid those reads with a checkpoint from before the load.
 
 `Lsm` follows [RFC 0029](0029-gc-safe-sst-ulid-timestamps.md): it allocates each
 final SST ID before construction, and the physical ID and initial view ID match.
@@ -302,21 +306,23 @@ Their timestamps must meet the current L0 cutoff and never go backwards in
 allocation order. Equal timestamp milliseconds are allowed.
 
 Publication follows allocation order even when uploads finish out of order.
-A later file can proceed once the earlier file is published or is abandoned
-before publication starts. An abandoned file cannot be published later. This
-keeps unfinished files protected by the existing GC cutoff without adding
-durable pending-import metadata.
+A batch waits until every file allocated before its first file is published or
+is abandoned before publication starts. An abandoned file cannot be published
+later. This keeps unfinished files protected by the existing GC cutoff without
+adding durable pending-import metadata. The files in a batch follow allocation
+order, with no gap except abandoned files. `ingest` rejects a batch with any
+other gap, because a later batch cannot publish the missing file first.
 
-Once the file is uploaded, one manifest update publishes its view. It advances
-`last_l0_seq` to the sequence of the file. It advances `last_l0_clock_tick` to
-the current time of the `Lsm` clock, which is not below any `create_ts` in the
-file. It records the sequence/time sample, and sets `recent_snapshot_min_seq`
-to the new `last_l0_seq`. A `Db` flush does the same when it has no active
-snapshots, and `Lsm` has no snapshots. The WAL replay boundary stays at the frontier
-established before opening `Lsm`. Imports advance committed and durable progress
-after the manifest update succeeds, without advancing WAL progress or waiting
-for a nonexistent WAL record. Success means the file and publication are
-durable.
+One manifest update publishes the views of all files in the batch, or none of
+them. It advances `last_l0_seq` to the highest sequence in the batch. It
+advances `last_l0_clock_tick` to the current time of the `Lsm` clock, which is
+not below any `create_ts` in the batch. It records the sequence/time sample,
+and sets `recent_snapshot_min_seq` to the new `last_l0_seq`. A `Db` flush does
+the same when it has no active snapshots, and `Lsm` has no snapshots. The WAL
+replay boundary stays at the frontier established before opening `Lsm`.
+Imports advance committed and durable progress after the manifest update
+succeeds, without advancing WAL progress or waiting for a nonexistent WAL
+record. Success means that the files and their publication are durable.
 
 ### Segments
 
@@ -357,6 +363,13 @@ already in progress before releasing ownership. The next `Db` reads the latest
 manifest and starts above the last imported sequence. `Db` can reuse the
 sequences of dropped writers. That is safe, because their files never publish.
 
+Before `Db` opens, the application can compact the ingested files.
+`CompactionRequest::Full` leaves L0 out, so this needs a running compactor or a
+`CompactionRequest::Spec` request that names the L0 files. With
+`enable_trivial_move`, files whose key ranges do not overlap move into sorted
+runs without a rewrite. If `Db` opens while L0 is at `l0_max_ssts`, its flushes
+wait until a compactor drains L0.
+
 If close or publication has an uncertain outcome, the next client still has to
 fence older writers and perform the recovery checks.
 
@@ -396,16 +409,18 @@ pending-import collection.
 ### Failures and Retries
 
 If construction or upload fails, nothing is published. Before publication
-starts, dropping the writer or an unused artifact abandons the file. `Lsm` can
-then publish later files, but it will reject the abandoned file. We try to abort
-unfinished uploads, and GC handles anything left behind under the existing age
-and cutoff rules.
+starts, dropping the writer or an unused artifact abandons the file. If
+`ingest` rejects a batch before publication starts, every file in the batch is
+abandoned. `Lsm` can then publish later files, but it will reject an abandoned
+file. We try to abort unfinished uploads, and GC handles anything left behind
+under the existing age and cutoff rules.
 
-`Lsm` retains the operation's sequence `s`, destination ID, writer epoch, and
-exact candidate update for manifest version `m`. Later imports remain blocked
-until publication resolves. After a lost write response, it refreshes through
-the fenced manifest interface. If it still owns the epoch, `last_l0_seq >= s`
-proves publication because `s` exceeds the previous frontier.
+`Lsm` retains the highest sequence `s` of the batch, the file IDs, the writer
+epoch, and the exact candidate update for manifest version `m`. Later imports
+remain blocked until publication resolves. After a lost write response, it
+refreshes through the fenced manifest interface. If it still owns the epoch,
+`last_l0_seq >= s` proves that the whole batch published. `s` exceeds the
+previous frontier, and the batch publishes in one update.
 
 Each manifest version is a conditional create at the next ID. If the frontier
 remains below `s` and `m` is absent, `Lsm` retries the same update at `m`.
@@ -427,9 +442,14 @@ There is no request ID or status lookup, so after a lost response the applicatio
 has to reconcile its progress before retrying. Publishing the same data again
 at a new sequence can overwrite imports made in between. Another writer
 advancing the frontier doesn't identify the earlier request. Having the SST
-object or its saved
-metadata doesn't tell us whether publication succeeded. Neither proves that an
-old, unreferenced file is safe to publish under the current GC cutoff.
+object or its saved metadata doesn't tell us whether publication succeeded.
+Neither proves that an old, unreferenced file is safe to publish under the
+current GC cutoff.
+
+The application knows the sequences of its files before publication. After it
+opens a new `Lsm`, which fences the old one, it reads `last_l0_seq`. If no other
+client wrote since the lost response, a value at or above the highest sequence
+of the batch shows that the batch published.
 
 ## Impact Analysis
 
@@ -496,32 +516,33 @@ encode and decode time, decoded memory, and the traffic of repeated full
 manifest uploads.
 
 Building an SST of `S` bytes through `Lsm` uploads those bytes once. Ingestion
-then adds one successful manifest update, without downloading, uploading, or
-scanning the file again. That count excludes opening and fencing, concurrent
-compaction, multipart requests, and retries. Manifest reads and object listings
-during open, recovery, and GC also add requests. The application budgets its
-local sorting scratch separately.
+then adds one successful manifest update for each batch, without downloading,
+uploading, or scanning the file again. That count excludes opening and fencing,
+concurrent compaction, multipart requests, and retries. Manifest reads and
+object listings during open, recovery, and GC also add requests. The application
+budgets its local sorting scratch separately.
 
 Manifest publication stays ordered while file construction and uploads can
-overlap. Benchmark file sizes, construction concurrency, and L0 waits to see
+overlap. Benchmark file sizes, batch sizes, and construction concurrency to see
 whether upload, publication, or compaction limits throughput. Measure peak
 memory and concurrent uploads alongside throughput.
 
 The tradeoff is that `Db` writes to that database stay paused while the files
 are built, uploaded, and published. `DbReader` reads can continue under the
-visibility rules above. This whole pause needs to be measured when comparing direct
-construction with a future mode that stages files before the handoff.
+visibility rules above. This whole pause needs to be measured when comparing
+direct construction with a future mode that stages files before the handoff.
 
 Compare the complete pipeline with normal batch writes: sorting and spill,
 SST construction, index/filter buffers, upload, validation, publication, and
-compaction. Ingestion still waits for L0 capacity. Independent databases avoid
+compaction. Ingested L0 files still need compaction, unless trivial moves
+apply. Independent databases avoid
 a shared writer pause but multiply cache budgets, polling, and maintenance work.
 
 ### Observability
 
 Applications opt in by opening `Lsm`; there is no ingestion setting on `Db`.
-Track bytes built and imported, time spent waiting for L0 capacity, file build
-and publication time, failures, uncertain outcomes, and manifest size.
+Track bytes built and imported, batch sizes, L0 file counts, file build and
+publication time, failures, uncertain outcomes, and manifest size.
 Expose the published sequence and clock along with handoff failures and errors
 that require recovery. Object and manifest IDs help with diagnostics, but they
 aren't retry tokens.
@@ -561,6 +582,12 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
   abandoned ID. Check that artifacts match the issued physical IDs and file
   configuration. Segment routing must use the completed key bounds without
   scanning records at publication time.
+- Batches: Publish a batch in one manifest update, across segments. Reject an
+  empty batch, a batch out of allocation order, and a batch with a gap that is
+  not an abandoned file. A rejected batch abandons its files.
+- Load order: Ingest past `l0_max_ssts` and `l0_max_ssts_per_key`. Compact with
+  and without trivial moves, and with a `Spec` request. Open `Db` before and
+  after compaction, and measure the flush stall.
 - Publication and reads: Import 101 over earlier data while retaining an older
   checkpoint. Read through `DbReader` with get, scan, projections, and restart.
   Trivial moves and rewrites must keep the sequences of ingested rows.
@@ -577,6 +604,7 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
   manifest ID, including a delayed original write and a competing metadata
   update. Keep epoch fencing and metadata GC boundary checks in place. Another
   writer publishing 102 must not count as proof that an import at 101 succeeded.
+  After a lost response, a new `Lsm` must report the right state of the batch.
   Test writer and artifact cleanup, recovery of published state after restart,
   and GC during uploads that outlast the minimum file age.
 - Segments: Route files belonging to one segment and reject missing bounds,
@@ -591,7 +619,7 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
 
 ## Rollout
 
-1. Measure manifest growth and establish a bulk-load baseline, including sorting and L0 waits.
+1. Measure manifest growth and establish a bulk-load baseline, including sorting and compaction.
 2. Extract shared SST code with compatible exports, then expose the standalone writer and reader paths.
 3. Add `Lsm` file allocation, direct SST construction, and ingestion, including exclusive fencing and handling of uncertain outcomes.
 4. Validate the `Db` handoff, long-lived readers, and segment routing.
@@ -660,7 +688,7 @@ the rows, but it decodes and encodes every record.
 
 1. Does the first `Lsm` release include single-segment ingestion, or does adoption wait for a later segment milestone?
 2. What manifest growth is acceptable for a large load?
-3. Does a concrete workload require atomic multi-file publication or durable retry tracking?
+3. Does a concrete workload require durable retry tracking?
 
 ## References
 
