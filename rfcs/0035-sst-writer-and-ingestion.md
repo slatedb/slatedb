@@ -31,8 +31,9 @@ through `DbReader`, and a compactor merges the files later.
 The application opens `Lsm` before it builds the files. `Lsm` assigns each
 file's final path, ID, and sequence, so ingestion can publish it without
 copying it. The rows store real sequences, so the SST and manifest formats do
-not change. Once loading is done, the application closes `Lsm` and switches to `Db`
-for ordinary writes. Only one of them can be the active writer for a database.
+not change. Once loading is done, the application closes `Lsm` and switches to
+`Db` for ordinary writes. Only one of them can be the active writer for a
+database.
 
 ## Motivation
 
@@ -210,7 +211,7 @@ the cache also uses. For other names, it uses a fresh ID. The public
 `SstReader::new`, `open(id)`, and `open_with_handle` stay unchanged.
 
 A standalone reader can take a block cache through `SstReaderOptions`, or run
-without one. `Lsm` has no reads, so it has no cache.
+without one.
 
 Readers sharing a cache scope need to agree on which file each ID refers to and
 how to decode it. Writes use the final file ID when caching is enabled.
@@ -293,10 +294,9 @@ for a missing creation time.
 the handoff section. Otherwise, an import could advance the sequence frontier
 past writes that still need replay.
 
-`DbReader` reads and a separate compactor can continue while files are built
-and ingested. `SstWriter` checks the records, writes block checksums, and
-uploads the file to its final path. We rely on upload success and supported
-transport checksums instead of reading the whole file back.
+`SstWriter` checks the records, writes block checksums, and uploads the file to
+its final path. We rely on upload success and supported transport checksums
+instead of reading the whole file back.
 
 `ingest` takes a batch of one or more artifacts. For each file, it uses the file
 ID to check that this `Lsm` client built the file. It also checks the path, the
@@ -381,12 +381,11 @@ fence older writers and perform the recovery checks.
 
 ### Read Visibility
 
-`Lsm` has no reads. Applications read published data through `DbReader`.
-`Lsm` writes no WAL, so while it runs, a `DbReader` only follows the manifest.
-A reader sees an import after its next manifest poll.
+`Lsm` writes no WAL, so while it runs, a `DbReader` only follows the manifest. A
+reader sees an import after its next manifest poll.
 [#2186](https://github.com/slatedb/slatedb/pull/2186) proposes a refresh on
-demand, so that a reader can see an import as soon as `ingest` returns. A
-reader pinned to an earlier checkpoint keeps its old manifest.
+demand, so that a reader can see an import as soon as `ingest` returns. A reader
+pinned to an earlier checkpoint keeps its old manifest.
 
 One race remains after `Db` opens again. In each poll, a `DbReader` loads the
 latest manifest and then lists new WAL files. Suppose that the reader loads the
@@ -403,14 +402,6 @@ reader advances its durable sequence only after it installs the new state.
 Initial open uses the same order. Pinned readers keep their fixed manifest and
 replay boundary. This needs a strongly consistent manifest read, and a WAL
 replay that stops at a given WAL file.
-
-### Manifest Representation
-
-Ingested files use the existing manifest format. An ingested file has the
-same kind of L0 view as a file from a `Db` flush, and its rows hold their real
-sequences. So reads, compaction, trivial moves, checkpoints, clones, and
-projections need no change. The manifest contains no durable request history or
-pending-import collection.
 
 ### Failures and Retries
 
@@ -461,8 +452,8 @@ of the batch shows that the batch published.
 
 ### Core API & Query Semantics
 
-- [x] Basic KV API (`get`/`put`/`delete`)
-- [x] Range queries, iterators, seek semantics
+- [ ] Basic KV API (`get`/`put`/`delete`)
+- [ ] Range queries, iterators, seek semantics
 - [ ] Range deletions
 - [x] Error model, API errors
 
@@ -484,31 +475,31 @@ of the batch shows that the batch published.
 
 - [ ] Manifest format - ingested files use the existing format.
 - [x] Checkpoints
-- [x] Clones
+- [ ] Clones
 - [x] Garbage collection
-- [x] Database splitting and merging
+- [ ] Database splitting and merging
 - [x] Multi-writer - `Db` and `Lsm` share writer fencing.
 
 ### Compaction
 
-- [x] Compaction state persistence
-- [x] Compaction filters
-- [x] Compaction strategies
-- [x] Distributed compaction
+- [ ] Compaction state persistence
+- [ ] Compaction filters
+- [x] Compaction strategies - L0 can grow past `l0_max_ssts` during a load.
+- [ ] Distributed compaction
 - [ ] Compactions format
 
 ### Storage Engine Internals
 
 - [x] Write-ahead log (WAL)
 - [x] Block cache
-- [x] Object store cache
+- [ ] Object store cache
 - [x] Indexing (bloom filters, metadata)
 - [ ] SST format or block format - physical layout is unchanged.
 
 ### Ecosystem & Operations
 
-- [x] CLI tools
-- [x] Language bindings (Go/Python/etc)
+- [ ] CLI tools
+- [x] Language bindings (Go/Python/etc) - new bindings are follow-up work.
 - [x] Observability (metrics/logging/tracing)
 
 ## Operations
@@ -541,8 +532,8 @@ direct construction with a future mode that stages files before the handoff.
 Compare the complete pipeline with normal batch writes: sorting and spill,
 SST construction, index/filter buffers, upload, validation, publication, and
 compaction. Ingested L0 files still need compaction, unless trivial moves
-apply. Independent databases avoid
-a shared writer pause but multiply cache budgets, polling, and maintenance work.
+apply. Independent databases avoid a shared writer pause but multiply cache
+budgets, polling, and maintenance work.
 
 ### Observability
 
@@ -563,7 +554,8 @@ dependencies. Move `CompressionCodec` with the file code while preserving
 Expose the handle's format version through an accessor.
 
 The manifest, `.compactions`, SST, and WAL formats do not change. Ingested files
-look like flushed L0 files, so older readers, compactors, and garbage
+look like flushed L0 files, so reads, compaction, trivial moves, checkpoints,
+clones, and projections need no change. Older readers, compactors, and garbage
 collectors can read a database after an import. Upgrade every `DbReader` that
 follows the WAL before the first import, so that it uses the WAL-first order
 from Read Visibility. A downgrade needs no extra steps.
@@ -581,13 +573,13 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
   keys in `Fixed(s)` files, and format violations are rejected before reaching
   the builder. Merge effects must survive ordered ingested files and later `Db`
   writes. Reject a `create_ts` above the `Lsm` clock.
-- Direct construction: Check that `Lsm` assigns the final path and ID before
-  writing and uploads each file once. Finish uploads out of order and verify
-  that publication stays in allocation order. Abandon an earlier file before
-  ingestion and verify that later files can progress without publishing the
-  abandoned ID. Check that artifacts match the issued physical IDs and file
-  configuration. Segment routing must use the completed key bounds without
-  scanning records at publication time.
+- Direct construction: Check that `Lsm` assigns the final path, ID, and sequence
+  before writing and uploads each file once. Finish uploads out of order and
+  verify that publication stays in allocation order. Abandon an earlier file
+  before ingestion and verify that later files can progress without publishing
+  the abandoned ID. Check that artifacts match the issued physical IDs and
+  file configuration. Segment routing must use the completed key bounds
+  without scanning records at publication time.
 - Batches: Publish a batch in one manifest update, across segments. Reject an
   empty batch, a batch out of allocation order, and a batch with a gap that is
   not an abandoned file. A rejected batch abandons its files.
@@ -598,8 +590,8 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
   checkpoint. Read through `DbReader` with get, scan, projections, and restart.
   Trivial moves and rewrites must keep the sequences of ingested rows.
 - Handoff: Close `Db` with write 100 published, import 101 through `Lsm`, then
-  reopen `Db` and write 102. Race that handoff with a long-lived `DbReader` still
-  holding the old manifest, and include explicit sequence gaps.
+  reopen `Db` and write 102. Run the whole handoff between the manifest load and
+  the WAL listing of a `DbReader` poll, and include explicit sequence gaps.
 - Recovery and fencing: Test failed `Db` close, configured WAL stores and custom
   `WriterInit`, replay exhaustion and errors, WAL-writer close failures, and
   competing clients. WAL rows beyond file coverage must prevent `Lsm` from
@@ -629,8 +621,9 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
 
 1. Measure manifest growth and establish a bulk-load baseline, including sorting and compaction.
 2. Extract shared SST code with compatible exports, then expose the standalone writer and reader paths.
-3. Add `Lsm` file allocation, direct SST construction, and ingestion, including exclusive fencing and handling of uncertain outcomes.
-4. Validate the `Db` handoff, long-lived readers, and segment routing.
+3. Change `DbReader` to list the WAL before it loads the manifest. This ships before the first import.
+4. Add `Lsm` file allocation, direct SST construction, and ingestion, including exclusive fencing and handling of uncertain outcomes.
+5. Validate the `Db` handoff, the `DbReader` WAL order, and segment routing.
 
 The standalone interfaces can ship on their own. The `Lsm` release needs to
 document the supported WAL handoffs and segment scope, along with file
@@ -683,11 +676,11 @@ proposes an offset in the manifest view. The file keeps its own sequences, and
 readers add the offset when they read. So a file does not depend on the
 database, and a tool can build it before `Lsm` opens. The cost is a new view
 field, the offset in every read and compaction, and offsets that stay in sorted
-runs after trivial moves. Each release must read data from the next release.
-So a new manifest version needs one release that reads it before a release that
-writes it. This RFC builds every file under `Lsm`, so a sequence from
-`new_sst_writer` has no such cost. A later mode that ingests files built
-outside `Lsm` can add offsets.
+runs after trivial moves. Each release must read data from the next release
+([#2289](https://github.com/slatedb/slatedb/pull/2289)). So a new manifest
+version needs one release that reads it before a release that writes it. This
+RFC builds every file under `Lsm`, so a sequence from `new_sst_writer` has no
+such cost. A later mode that ingests files built outside `Lsm` can add offsets.
 
 Rewriting each file during ingestion also puts the destination sequence into
 the rows, but it decodes and encodes every record.
@@ -704,10 +697,11 @@ the rows, but it decodes and encodes every record.
 - RFC #1146 requests for the [package boundary](https://github.com/slatedb/slatedb/pull/1146#discussion_r2649290355), [reader paths](https://github.com/slatedb/slatedb/pull/1146#discussion_r2649289303), [returned handle](https://github.com/slatedb/slatedb/pull/1146#discussion_r2674413603), and [SlateDB manifest representation](https://github.com/slatedb/slatedb/pull/1146#discussion_r2674447687).
 - RFC #2103 discussions of the [Lsm client](https://github.com/slatedb/slatedb/pull/2103#pullrequestreview-5286827487), [per-table databases](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5800449727), [producer requirements](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5808365694), [retry guarantees](https://github.com/slatedb/slatedb/pull/2103#discussion_r4078981105), and [shared configuration](https://github.com/slatedb/slatedb/pull/2103#discussion_r4079040923).
 - RFC #2103 reviews of [building SSTs without copying](https://github.com/slatedb/slatedb/pull/2103#discussion_r4202127474), [sorting in the application](https://github.com/slatedb/slatedb/pull/2103#discussion_r4204482400), and [routing from key bounds](https://github.com/slatedb/slatedb/pull/2103#discussion_r4204648367).
+- RFC #2103 reviews of the [write-only Lsm](https://github.com/slatedb/slatedb/pull/2103#discussion_r4575091524), [sequences at ingestion](https://github.com/slatedb/slatedb/pull/2103#discussion_r4575091605), [batch ingestion](https://github.com/slatedb/slatedb/pull/2103#discussion_r4575091581), [L0 overrun and trivial moves](https://github.com/slatedb/slatedb/pull/2103#discussion_r4645403774), and [one entry per key](https://github.com/slatedb/slatedb/pull/2103#discussion_r4645441858).
+- [Sequence offsets](https://github.com/slatedb/slatedb/pull/1146#discussion_r2649854164) in RFC #1146, [manual `DbReader` refresh](https://github.com/slatedb/slatedb/pull/2186), and the [storage format support window](https://github.com/slatedb/slatedb/pull/2289).
 - [Issue #1105](https://github.com/slatedb/slatedb/issues/1105), including [read and freeze coordination](https://github.com/slatedb/slatedb/issues/1105#issuecomment-3666587872).
 - [Pluggable WAL](0030-pluggable-wal.md), [sequence tracking](0012-sequence-tracker.md), [checkpoints](0004-checkpoints.md), and [GC-safe SST identifiers](0029-gc-safe-sst-ulid-timestamps.md).
 - [Segment-oriented compaction](0024-segment-oriented-compaction.md) and [compaction filters](0017-compaction-filters.md).
-- [SST writer](../slatedb/src/tablestore.rs), [standalone reader](../slatedb/src/sst_reader.rs), [shared Reader](../slatedb/src/reader.rs), and [manifest publication](../slatedb/src/memtable_flusher/manifest_writer.rs).
+- [SST writer](../slatedb/src/tablestore.rs), [standalone reader](../slatedb/src/sst_reader.rs), [DbReader](../slatedb/src/db_reader.rs), and [manifest publication](../slatedb/src/memtable_flusher/manifest_writer.rs).
 - [Writer fencing](../slatedb/src/fence.rs), [WAL initialization](../slatedb/src/wal/mod.rs), and [client configuration](../slatedb/src/db/builder.rs).
-- [File-view schema](../schemas/sst.fbs), [manifest schema](../schemas/manifest.fbs), and [compaction-state schema](../schemas/compactor.fbs).
 - [Conditional metadata writes](../slatedb-txn-obj/src/object_store.rs), [metadata GC boundary checks](../slatedb-txn-obj/src/lib.rs), and [manual compaction](../slatedb/src/admin.rs).
