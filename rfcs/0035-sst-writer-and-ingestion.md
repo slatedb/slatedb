@@ -97,9 +97,12 @@ processes, through `CompactorBuilder` and `GarbageCollectorBuilder`, or through
 `Admin::run_compactor` and `Admin::run_gc`.
 
 `Db`, `Lsm`, and `Compactor` share the code that reads and writes SST files.
-That includes `Db`'s L0 flushes and `Compactor`'s output files. Each client still
-keeps its own sequence and publication rules. Files from all three clients
-store real sequences in their rows.
+Today, the `Db` memtable flush and the compactor build files with the same
+internal writer, `TableStore::table_writer`. `SstWriter` is the public form of
+that writer, and all three clients use it. This is the same split as `Reader`,
+which `Db` and `DbReader` share. Each client keeps its own ID allocation,
+segment split, upload limits, sequence rules, and manifest publication. Files
+from all three clients store real sequences in their rows.
 
 Together with the pluggable WAL, this lets an application provide its own write
 frontend while SlateDB manages the LSM. The application still handles reads and
@@ -166,7 +169,7 @@ impl SstReader {
         options: SstReaderOptions,
     ) -> Self;
 
-    pub async fn open_at(&self, path: Path, id: Ulid) -> Result<SstFile, Error>;
+    pub async fn open_at(&self, path: Path) -> Result<SstFile, Error>;
 }
 ```
 
@@ -200,8 +203,11 @@ The caller owns the upload and cleanup and must keep the completed file
 immutable. For ingestion into `Lsm`, the application uses `Lsm::new_sst_writer`,
 which supplies the path, ID, sequence, and configuration.
 
-A standalone reader opens an SST with `SstReader::open_at(path, id)`, so it does
-not need a database root. Callers without artifact metadata use a fresh ID.
+A standalone reader opens an SST with `SstReader::open_at(path)`, where `path`
+is the full path of the `.sst` object, so it does not need a database root. If
+the file name is `{ULID}.sst`, the reader uses that ULID as the file ID, which
+the cache also uses. For other names, it uses a fresh ID. The public
+`SstReader::new`, `open(id)`, and `open_with_handle` stay unchanged.
 
 A standalone reader can take a block cache through `SstReaderOptions`, or run
 without one. `Lsm` has no reads, so it has no cache.
@@ -612,7 +618,9 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
 - Compatibility: Test that older readers, compactors, and garbage collectors
   read a database after an import. Include imports without `expire_ts` under a
   configured default TTL, dropped writers that leave sequence gaps, optional
-  reader roots and caches, and unchanged public exports.
+  reader roots and caches, and unchanged public exports. Open files by full path
+  with a `{ULID}.sst` name and with another name, and keep `open(id)` working
+  with a database root.
 - Simulation and cost: Combine construction, ingestion, compaction, GC, fencing,
   and restart in the existing simulation framework. Run the metadata and
   end-to-end experiments described above.
