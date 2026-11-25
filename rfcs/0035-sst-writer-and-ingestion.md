@@ -46,14 +46,13 @@ keeping their own memory representation.
 
 Bulk loads are one example. An
 [Iceberg primary-key index](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5789501302)
-stores one key for each source row: the primary key, mapped to a data file and
-a row position. An initial build or a full rebuild writes every key one time
-through `Db`, with the WAL off. Normal reads, writes, and deletes follow, with
-the WAL on. During the load, L0 fills fast, and writes wait for compaction.
-Compaction used 33% of all CPU in an initial load and 54% in a rebuild
-([#2148](https://github.com/slatedb/slatedb/issues/2148)), although almost
-every key has one version. Files built outside `Db` skip the memtable and its
-flushes, but the application must sort the keys.
+stores one key for each source row. An initial build or a full rebuild writes
+every key one time through `Db`, with the WAL off. Normal reads, writes, and
+deletes follow, with the WAL on. During the load, L0 fills fast, and writes wait
+for compaction. Compaction used 33% of all CPU in an initial load and 54% in a
+rebuild ([#2148](https://github.com/slatedb/slatedb/issues/2148)), although
+almost every key has one version. Files built outside `Db` skip the memtable and
+its flushes, but the application must sort the keys.
 
 An application can use one database for each table, so one table can load
 while the others take normal writes
@@ -80,17 +79,16 @@ a SlateDB ingestion protocol.
 - Define custom KV provider traits or coordinate their unpublished memory reads.
 - Add a general external sorter, foreign formats, or custom comparators.
 - Import source database histories.
-- Provide durable request deduplication or automatic rebuild recovery.
+- Provide durable request deduplication or automatic resume of a failed load.
 
 ## Design
 
 ### Component Boundary
 
-`Db` handles ordinary KV operations, memtables, transactions, and the WAL.
-`Lsm` handles file allocation and publication. It has no reads, and it starts
-no compactor or garbage collector. The application scans and sorts its input,
-then feeds those records to the SST writer. `Db` and `Lsm` publish to the same
-manifest and follow the same writer fencing protocol.
+`Db` handles ordinary KV operations, memtables, transactions, and the WAL. `Lsm`
+handles file allocation and publication. It has no reads, and it starts no
+compactor or garbage collector. `Db` and `Lsm` publish to the same manifest and
+follow the same writer fencing protocol.
 
 Applications read published data through `DbReader`, also while `Lsm` runs.
 While `Lsm` runs, a compactor and a garbage collector can run as separate
@@ -113,7 +111,7 @@ recovery for data it hasn't published.
 flowchart LR
     W[Pluggable WAL] <--> D[Db: ordinary KV operations]
     P[Application: scan and sort] --> S[Shared SST writer]
-    L[Lsm: allocation and ingestion] -->|Final path and file ID| S
+    L[Lsm: allocation and ingestion] -->|Final path, file ID, and sequence| S
     S -->|Completed file| L
     D --> M[Manifest publication]
     L --> M
@@ -210,16 +208,16 @@ the file name is `{ULID}.sst`, the reader uses that ULID as the file ID, which
 the cache also uses. For other names, it uses a fresh ID. The public
 `SstReader::new`, `open(id)`, and `open_with_handle` stay unchanged.
 
-A standalone reader can take a block cache through `SstReaderOptions`, or run
-without one.
+A standalone reader takes the block transformer that wrote the file through
+`SstReaderOptions`, and an optional block cache.
 
 Readers sharing a cache scope need to agree on which file each ID refers to and
 how to decode it. Writes use the final file ID when caching is enabled.
 
 ### Producing Sorted Files
 
-`SstWriter` takes rows in key order. The application reads and sorts its input,
-and it owns any temporary storage for the sort.
+The application sorts its input before it adds rows to `SstWriter`, and it owns
+any temporary storage for the sort.
 
 A file for `Lsm::ingest` holds at most one entry per key. If the input has the
 same key more than once, the application keeps the newest entry before it
@@ -266,7 +264,7 @@ records. The handoff section describes those checks.
 sequence `s`, in `Fixed(s)` mode. The application adds sorted records, closes
 the writer, and passes the artifact to `ingest`, alone or in a batch with other
 artifacts. It requests writers in publication order. Files can build and upload
-in parallel, but `Lsm` publishes them in the order it allocated their IDs.
+in parallel.
 
 `Allocate` takes the next sequence from the oracle of the client. `Explicit`
 works like `WriteOptions::seqnum`. The caller supplies a sequence above every
@@ -431,7 +429,7 @@ If reads or writes remain uncertain, or another writer fences the client,
 the call doesn't let later imports pass an unresolved publication.
 
 After a restart, published data comes from the manifest. The application owns
-its unpublished input, sorting scratch, and rebuild progress. This RFC doesn't
+its unpublished input, sorting scratch, and load progress. This RFC doesn't
 define automatic resumption of unfinished uploads or adoption of old
 unreferenced files.
 
@@ -687,7 +685,7 @@ the rows, but it decodes and encodes every record.
 
 ## Open Questions
 
-1. Does the first `Lsm` release include single-segment ingestion, or does adoption wait for a later segment milestone?
+1. Does the first `Lsm` release support segmented databases, or does segment support come later?
 2. What manifest growth is acceptable for a large load?
 3. Does a concrete workload require durable retry tracking?
 
