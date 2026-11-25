@@ -87,6 +87,11 @@ use slatedb_common::DbRand;
 
 pub(crate) const COMPACTION_WORKER_TASK_NAME: &str = "compaction_worker";
 
+struct ActiveCompaction {
+    execution_id: Ulid,
+    ctx: Option<CompactionContext>,
+}
+
 #[derive(Debug)]
 pub(crate) enum WorkerMessage {
     /// Signals that a compaction job has finished execution.
@@ -193,7 +198,10 @@ pub(crate) struct CompactionWorkerHandler {
     /// to `.compactions` with the next heartbeat tick (see
     /// [`Self::heartbeat_owned_jobs`]); progress reports themselves never
     /// write.
-    job_progress: BTreeMap<Ulid, Option<CompactionContext>>,
+    job_progress: BTreeMap<Ulid, ActiveCompaction>,
+    /// Failed executions by job ID on this worker. Only finite limits need a
+    /// counter. Counts survive claim releases, but not worker restarts.
+    job_failures: BTreeMap<Ulid, u64>,
 }
 
 impl CompactionWorkerHandler {
@@ -218,6 +226,7 @@ impl CompactionWorkerHandler {
             rand,
             fp_registry,
             job_progress: BTreeMap::new(),
+            job_failures: BTreeMap::new(),
         }
     }
 
@@ -323,6 +332,9 @@ impl CompactionWorkerHandler {
             stored.refresh().await?;
             let mut dirty_compactions = stored.prepare_dirty()?;
 
+            self.job_failures
+                .retain(|id, _| dirty_compactions.value.get(id).is_some_and(|c| c.active()));
+
             let mut to_claim: Vec<Compaction> = Vec::new();
             for c in dirty_compactions
                 .value
@@ -390,15 +402,21 @@ impl CompactionWorkerHandler {
         let manifest = self.manifest_store.read_latest_manifest().await?;
 
         for compaction in claimed {
-            match Self::build_job_args(&compaction, manifest.core(), &self.worker_id) {
+            let execution_id = self.rand.rng().gen_ulid(self.clock.as_ref());
+            match Self::build_job_args(&compaction, manifest.core(), execution_id) {
                 Ok(args) => {
                     info!(
                         "claimed compaction [worker_id={}, id={}]",
                         self.worker_id,
                         compaction.id()
                     );
-                    self.job_progress
-                        .insert(compaction.id(), compaction.ctx().cloned());
+                    self.job_progress.insert(
+                        compaction.id(),
+                        ActiveCompaction {
+                            execution_id,
+                            ctx: compaction.ctx().cloned(),
+                        },
+                    );
                     Self::dispatch_to_executor(&self.executor, args);
                 }
                 Err(e) => {
@@ -431,14 +449,20 @@ impl CompactionWorkerHandler {
                 format_bytes_si(bytes_processed),
                 total_output_ssts(ctx.subcompactions())
             );
-            *latest = Some(ctx);
+            latest.ctx = Some(ctx);
         }
+    }
+
+    fn compaction_for_execution(&self, execution_id: Ulid) -> Option<Ulid> {
+        self.job_progress
+            .iter()
+            .find_map(|(id, active)| (active.execution_id == execution_id).then_some(*id))
     }
 
     fn build_job_args(
         compaction: &Compaction,
         db_state: &ManifestCore,
-        _worker_id: &str,
+        execution_id: Ulid,
     ) -> Result<StartCompactionJobArgs, SlateDBError> {
         let destination = compaction
             .spec()
@@ -483,9 +507,7 @@ impl CompactionWorkerHandler {
         };
 
         Ok(StartCompactionJobArgs {
-            // Use compaction_id as job id so completion messages line up with
-            // the entry in `.compactions`. (One-job-per-Compaction in phase 2.)
-            id: compaction.id(),
+            id: execution_id,
             compaction_id: compaction.id(),
             segment: compaction.spec().segment().clone(),
             destination,
@@ -551,7 +573,11 @@ impl CompactionWorkerHandler {
                 }
 
                 let mut updated = existing.with_worker(Some(worker_spec.clone()));
-                if let Some(ctx) = self.job_progress.get(&id).and_then(|ctx| ctx.clone()) {
+                if let Some(ctx) = self
+                    .job_progress
+                    .get(&id)
+                    .and_then(|active| active.ctx.clone())
+                {
                     published_output_ssts += total_output_ssts(ctx.subcompactions());
                     updated.set_ctx(Some(ctx));
                 }
@@ -643,11 +669,12 @@ impl CompactionWorkerHandler {
     // To release ownership of a job, use `release_claim` instead.
     fn stop_compaction_job(
         executor: &Arc<dyn CompactionExecutor + Send + Sync>,
-        job_progress: &mut BTreeMap<Ulid, Option<CompactionContext>>,
+        job_progress: &mut BTreeMap<Ulid, ActiveCompaction>,
         compaction_id: Ulid,
     ) {
-        executor.stop_compaction_job(compaction_id);
-        job_progress.remove(&compaction_id);
+        if let Some(active) = job_progress.remove(&compaction_id) {
+            executor.stop_compaction_job(active.execution_id);
+        }
     }
 
     /// Returns a claim to `Scheduled` so it can be re-attempted by any worker
@@ -693,11 +720,38 @@ impl CompactionWorkerHandler {
         id: Ulid,
         result: Result<SortedRun, SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        self.job_progress.remove(&id);
         match result {
-            Ok(sorted_run) => self.write_compacted(id, sorted_run).await?,
+            Ok(sorted_run) => {
+                self.job_progress.remove(&id);
+                self.job_failures.remove(&id);
+                self.write_compacted(id, sorted_run).await?;
+            }
             Err(e) => {
                 error!("compaction job failed [id={}, error={:?}]", id, e);
+                if let Some(max_retries) = self.options.compaction_job_max_retries {
+                    let failures = self.job_failures.entry(id).or_default();
+                    *failures = failures.saturating_add(1);
+                    if *failures > u64::from(max_retries) {
+                        let stored = self.stored.as_mut().expect(Self::EXPECT_LOADED);
+                        // A refresh failure replaces the execution error.
+                        let still_owned = stored.refresh().await?.get(&id).is_some_and(|c| {
+                            c.status() == CompactionStatus::Running
+                                && c.worker().is_some_and(|w| w.worker_id == self.worker_id)
+                        });
+                        if still_owned {
+                            error!(
+                                "compaction job exhausted its retries [id={}, failures={}, error={:?}]",
+                                id, failures, e
+                            );
+                            // Keep the claim for cleanup. The dispatcher records
+                            // this error before cleanup releases the claim.
+                            return Err(e);
+                        }
+                        self.job_progress.remove(&id);
+                        return Ok(());
+                    }
+                }
+                self.job_progress.remove(&id);
                 self.release_claim(id).await?;
             }
         }
@@ -741,14 +795,18 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
                 self.heartbeat_owned_jobs().await?;
             }
             WorkerMessage::CompactionJobFinished { id, result } => {
-                self.handle_finished(id, result).await?;
+                if let Some(compaction_id) = self.compaction_for_execution(id) {
+                    self.handle_finished(compaction_id, result).await?;
+                }
             }
             WorkerMessage::CompactionJobProgress {
                 id,
                 bytes_processed,
                 ctx,
             } => {
-                self.record_progress(id, bytes_processed, ctx);
+                if let Some(compaction_id) = self.compaction_for_execution(id) {
+                    self.record_progress(compaction_id, bytes_processed, ctx);
+                }
             }
         }
         Ok(())
@@ -1002,6 +1060,7 @@ mod tests {
             Arc::new(DefaultSystemClock::new()),
             CompactionWorkerOptions {
                 max_concurrent_compactions: 1,
+                compaction_job_max_retries: Some(0),
                 ..CompactionWorkerOptions::default()
             },
         )
@@ -1040,11 +1099,43 @@ mod tests {
             1,
             "worker must not dispatch a duplicate execution"
         );
-        assert_eq!(fx.executor.stopped_jobs(), vec![id]);
+        assert_eq!(fx.executor.stopped_jobs(), vec![fx.executor.jobs()[0].id]);
         assert!(!fx.handler.job_progress.contains_key(&id));
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Scheduled);
         assert!(c.worker().is_none());
+
+        let old_execution = fx.executor.jobs()[0].id;
+        fx.handler.poll_and_claim().await.unwrap();
+        let current_execution = fx.executor.jobs()[1].id;
+        assert_ne!(old_execution, current_execution);
+
+        // Events from the retired execution must leave the new execution untouched.
+        for message in [
+            WorkerMessage::CompactionJobProgress {
+                id: old_execution,
+                bytes_processed: 1,
+                ctx: CompactionContext::new(vec![], Some(123)),
+            },
+            WorkerMessage::CompactionJobFinished {
+                id: old_execution,
+                result: Ok(SortedRun::new(0, [])),
+            },
+            WorkerMessage::CompactionJobFinished {
+                id: old_execution,
+                result: Err(SlateDBError::InvalidDBState),
+            },
+        ] {
+            fx.handler.handle(message).await.unwrap();
+        }
+        let active = fx.handler.job_progress.get(&id).unwrap();
+        assert_eq!(active.execution_id, current_execution);
+        assert!(active.ctx.is_none());
+        assert!(fx.handler.job_failures.is_empty());
+        assert_eq!(
+            fx.read_compaction(id).await.unwrap().status(),
+            CompactionStatus::Running
+        );
     }
 
     #[tokio::test]
@@ -1084,7 +1175,7 @@ mod tests {
 
         fx.handler.heartbeat_owned_jobs().await.unwrap();
 
-        assert_eq!(fx.executor.stopped_jobs(), vec![id]);
+        assert_eq!(fx.executor.stopped_jobs(), vec![fx.executor.jobs()[0].id]);
         assert!(!fx.handler.job_progress.contains_key(&id));
         let c = fx.read_compaction(id).await.expect("compaction missing");
         assert_eq!(c.status(), CompactionStatus::Running);
@@ -1521,7 +1612,14 @@ mod tests {
         mock_clock.advance(Duration::from_secs(5)).await;
         fx.handler.heartbeat_owned_jobs().await.unwrap();
 
-        assert_eq!(fx.executor.stopped_jobs(), vec![lost_id]);
+        let lost_execution = fx
+            .executor
+            .jobs()
+            .iter()
+            .find(|job| job.compaction_id == lost_id)
+            .unwrap()
+            .id;
+        assert_eq!(fx.executor.stopped_jobs(), vec![lost_execution]);
         assert!(!fx.handler.job_progress.contains_key(&lost_id));
         assert!(fx.handler.job_progress.contains_key(&kept_id));
 
@@ -1691,5 +1789,284 @@ mod tests {
         assert_eq!(ctx.subcompactions().len(), 1);
         assert_eq!(ctx.subcompactions()[0].output_ssts().len(), 1);
         assert_eq!(ctx.subcompactions()[0].output_ssts()[0].id, sst1.id);
+    }
+
+    #[tokio::test]
+    async fn test_worker_retry_limits_and_cleanup() {
+        for limit in [Some(0), Some(2), None] {
+            let mut fx = WorkerFixture::new_with_clock(
+                "worker-A",
+                Arc::new(DefaultSystemClock::new()),
+                CompactionWorkerOptions {
+                    compaction_job_max_retries: limit,
+                    ..Default::default()
+                },
+            )
+            .await;
+            let id = Ulid::from_parts(1, 0);
+            fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+                .await;
+            let attempts = limit.map_or(5, |n| n + 1);
+            for attempt in 1..=attempts {
+                fx.handler.poll_and_claim().await.unwrap();
+                let err = SlateDBError::from(object_store::Error::NotFound {
+                    path: "missing.sst".into(),
+                    source: "missing".into(),
+                });
+                let result = fx.handler.handle_finished(id, Err(err)).await;
+                if limit.is_some_and(|n| attempt > n) {
+                    let err = result.unwrap_err();
+                    assert_eq!(
+                        crate::Error::from(err.clone()).kind(),
+                        crate::ErrorKind::Data
+                    );
+                    assert!(fx.handler.job_progress.contains_key(&id));
+                    fx.handler
+                        .cleanup(futures::stream::empty().boxed(), Err(err))
+                        .await
+                        .unwrap();
+                } else {
+                    result.unwrap();
+                }
+                if limit.is_none() {
+                    assert!(fx.handler.job_failures.is_empty());
+                }
+                let job = fx.read_compaction(id).await.unwrap();
+                assert_eq!(job.status(), CompactionStatus::Scheduled);
+                assert!(job.worker().is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_worker_success_clears_failure_count() {
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-A",
+            Arc::new(DefaultSystemClock::new()),
+            CompactionWorkerOptions {
+                compaction_job_max_retries: Some(1),
+                ..Default::default()
+            },
+        )
+        .await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        fx.handler
+            .handle_finished(id, Err(SlateDBError::InvalidDBState))
+            .await
+            .unwrap();
+        assert_eq!(fx.handler.job_failures.get(&id), Some(&1));
+        fx.handler.poll_and_claim().await.unwrap();
+        fx.handler
+            .handle_finished(id, Ok(SortedRun::new(0, [])))
+            .await
+            .unwrap();
+        assert!(fx.handler.job_failures.is_empty());
+        assert_eq!(
+            fx.read_compaction(id).await.unwrap().status(),
+            CompactionStatus::Compacted
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::released(Some(CompactionStatus::Scheduled), None)]
+    #[case::stolen(Some(CompactionStatus::Running), Some("worker-B"))]
+    #[case::missing(None, None)]
+    #[tokio::test]
+    async fn test_worker_stale_failure_does_not_close_worker(
+        #[case] status: Option<CompactionStatus>,
+        #[case] owner: Option<&str>,
+        #[values(None, Some(0), Some(2))] max_retries: Option<u32>,
+    ) {
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-A",
+            Arc::new(DefaultSystemClock::new()),
+            CompactionWorkerOptions {
+                compaction_job_max_retries: max_retries,
+                ..Default::default()
+            },
+        )
+        .await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        let mut stored = StoredCompactions::load(fx.compactions_store.clone())
+            .await
+            .unwrap();
+        let mut dirty = stored.prepare_dirty().unwrap();
+        if let Some(status) = status {
+            let job = dirty.value.get(&id).unwrap().clone();
+            dirty.value.insert(
+                job.with_status(status)
+                    .with_worker(owner.map(|id| WorkerSpec::new(id.to_string(), 0))),
+            );
+        } else {
+            dirty.value = dirty.value.with_compactions(vec![]);
+        }
+        stored.update(dirty).await.unwrap();
+        fx.handler
+            .handle_finished(id, Err(SlateDBError::InvalidDBState))
+            .await
+            .unwrap();
+        assert!(!fx.handler.job_progress.contains_key(&id));
+        let job = fx.read_compaction(id).await;
+        assert_eq!(job.as_ref().map(|job| job.status()), status);
+        assert_eq!(
+            fx.handler.job_failures.get(&id).copied(),
+            max_retries.map(|_| 1)
+        );
+        assert_eq!(
+            job.as_ref()
+                .and_then(|job| job.worker().map(|worker| worker.worker_id.as_str())),
+            owner
+        );
+    }
+
+    #[tokio::test]
+    async fn test_worker_retry_budget_is_local() {
+        let options = CompactionWorkerOptions {
+            compaction_job_max_retries: Some(1),
+            ..Default::default()
+        };
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-A",
+            Arc::new(DefaultSystemClock::new()),
+            options.clone(),
+        )
+        .await;
+        let mut other = CompactionWorkerHandler::new(
+            "worker-B".into(),
+            Arc::new(options),
+            fx.compactions_store.clone(),
+            fx.handler.manifest_store.clone(),
+            Arc::new(NoopExecutor::new()),
+            Arc::new(DefaultSystemClock::new()),
+            Arc::new(DbRand::new(1)),
+            Arc::new(FailPointRegistry::new()),
+        );
+        other.ensure_loaded().await.unwrap();
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        for handler in [&mut fx.handler, &mut other] {
+            handler.poll_and_claim().await.unwrap();
+            handler
+                .handle_finished(id, Err(SlateDBError::InvalidDBState))
+                .await
+                .unwrap();
+        }
+        for handler in [&mut fx.handler, &mut other] {
+            handler.poll_and_claim().await.unwrap();
+            let err = handler
+                .handle_finished(id, Err(SlateDBError::InvalidDBState))
+                .await
+                .unwrap_err();
+            handler
+                .cleanup(futures::stream::empty().boxed(), Err(err))
+                .await
+                .unwrap();
+        }
+        assert_eq!(fx.executor.jobs().len(), 2);
+        assert_eq!(
+            fx.read_compaction(id).await.unwrap().status(),
+            CompactionStatus::Scheduled
+        );
+    }
+
+    #[tokio::test]
+    async fn test_worker_forgets_failures_of_finished_jobs() {
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-A",
+            Arc::new(DefaultSystemClock::new()),
+            CompactionWorkerOptions {
+                compaction_job_max_retries: Some(1),
+                ..Default::default()
+            },
+        )
+        .await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+        fx.handler
+            .handle_finished(id, Err(SlateDBError::InvalidDBState))
+            .await
+            .unwrap();
+
+        let mut stored = StoredCompactions::load(fx.compactions_store.clone())
+            .await
+            .unwrap();
+        let mut dirty = stored.prepare_dirty().unwrap();
+        let job = dirty.value.get(&id).unwrap().clone();
+        dirty
+            .value
+            .insert(job.with_status(CompactionStatus::Completed));
+        stored.update(dirty).await.unwrap();
+
+        fx.handler.poll_and_claim().await.unwrap();
+        assert!(fx.handler.job_failures.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_worker_run_returns_original_error_after_retries() {
+        let mut fx = WorkerFixture::new_with_clock(
+            "worker-A",
+            Arc::new(DefaultSystemClock::new()),
+            CompactionWorkerOptions {
+                compaction_job_max_retries: Some(0),
+                ..Default::default()
+            },
+        )
+        .await;
+        let id = Ulid::from_parts(1, 0);
+        fx.seed_scheduled_compaction(id, vec![SourceId::SstView(fx.l0_view.id)])
+            .await;
+        fx.handler.poll_and_claim().await.unwrap();
+
+        let cause = Arc::new(object_store::Error::Generic {
+            store: "test",
+            source: "service unavailable".into(),
+        });
+        let (tx, rx) = async_channel::unbounded();
+        tx.try_send(WorkerMessage::CompactionJobFinished {
+            id: fx.executor.jobs()[0].id,
+            result: Err(SlateDBError::ObjectStoreError(cause.clone())),
+        })
+        .unwrap();
+        let task_executor = Arc::new(MessageHandlerExecutor::new(
+            Arc::new(WatchableOnceCell::new()),
+            Arc::new(DefaultSystemClock::new()),
+        ));
+        task_executor
+            .add_handler(
+                COMPACTION_WORKER_TASK_NAME.to_string(),
+                Box::new(fx.handler),
+                rx,
+                &Handle::current(),
+            )
+            .unwrap();
+        let worker = CompactionWorker::new(task_executor);
+        let err = tokio::time::timeout(Duration::from_secs(10), worker.run())
+            .await
+            .expect("the worker must stop after its last retry")
+            .expect_err("the worker must return the execution error");
+
+        assert_eq!(err.kind(), crate::ErrorKind::Unavailable);
+        let source = std::error::Error::source(&err)
+            .and_then(|source| source.downcast_ref::<Arc<object_store::Error>>())
+            .expect("the worker must preserve the object-store error");
+        assert!(Arc::ptr_eq(source, &cause));
+        let jobs = fx
+            .compactions_store
+            .read_latest_compactions()
+            .await
+            .unwrap()
+            .compactions;
+        let job = jobs.get(&id).unwrap();
+        assert_eq!(job.status(), CompactionStatus::Scheduled);
+        assert!(job.worker().is_none());
     }
 }
