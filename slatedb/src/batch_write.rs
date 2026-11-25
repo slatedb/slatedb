@@ -376,15 +376,10 @@ impl DbInner {
             return Ok(());
         }
 
-        let replay_after_wal_id = self.wal_observer.status()?.last_flushed_wal_id;
-        let mut guard = self.state.write();
-        self.freeze_current_memtable_with_state_guard(&mut guard, replay_after_wal_id);
-        Ok(())
+        self.freeze_current_memtable()
     }
 
-    fn freeze_memtable_on_flush(&self) -> Result<(), SlateDBError> {
-        // This value may not include the flush above because we do not wait for it. Any earlier
-        // WAL is still a safe replay point.
+    fn freeze_current_memtable(&self) -> Result<(), SlateDBError> {
         let replay_after_wal_id = self.wal_observer.status()?.last_flushed_wal_id;
         let mut guard = self.state.write();
         self.freeze_current_memtable_with_state_guard(&mut guard, replay_after_wal_id);
@@ -402,7 +397,9 @@ impl DbInner {
             async { Ok(()) }.boxed()
         };
         if freeze_memtable {
-            self.freeze_memtable_on_flush()?;
+            // `last_flushed_wal_id` may not include the flush above because we do not wait for it.
+            // Any earlier WAL is still a safe replay point.
+            self.freeze_current_memtable()?;
         }
         Ok(flush_rx)
     }
@@ -422,7 +419,7 @@ impl DbInner {
             wal_file,
         };
         if freeze_memtable {
-            self.freeze_memtable_on_flush()?;
+            self.freeze_current_memtable()?;
         }
         Ok(cursor)
     }
