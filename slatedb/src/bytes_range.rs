@@ -19,7 +19,8 @@ pub trait ByteRangeBounds {
     fn end_bound(&self) -> Bound<&[u8]>;
 }
 
-fn bound_as_bytes<K: AsRef<[u8]>>(bound: Bound<&K>) -> Bound<&[u8]> {
+/// Borrows the key in `bound` as a byte slice. Nothing is copied.
+pub(crate) fn bound_as_slice<K: AsRef<[u8]>>(bound: Bound<&K>) -> Bound<&[u8]> {
     match bound {
         Included(k) => Included(k.as_ref()),
         Excluded(k) => Excluded(k.as_ref()),
@@ -39,11 +40,11 @@ impl<K: AsRef<[u8]>> ByteRangeBounds for Range<K> {
 
 impl<K: AsRef<[u8]>> ByteRangeBounds for RangeInclusive<K> {
     fn start_bound(&self) -> Bound<&[u8]> {
-        bound_as_bytes(RangeBounds::start_bound(self))
+        bound_as_slice(RangeBounds::start_bound(self))
     }
 
     fn end_bound(&self) -> Bound<&[u8]> {
-        bound_as_bytes(RangeBounds::end_bound(self))
+        bound_as_slice(RangeBounds::end_bound(self))
     }
 }
 
@@ -124,16 +125,10 @@ impl Serialize for BytesRange {
     }
 }
 
-#[cfg(test)]
-// Checks for the annoying case when we have ("prefix", "prefix\0").
-// When both bounds are excluded, the range is empty even though
-// "prefix" < "prefix\0".
-pub(crate) fn is_prefix_increment(prefix: &[u8], b: &[u8]) -> bool {
-    if !b.starts_with(prefix.as_ref()) {
-        return false;
-    }
-
-    b[prefix.len()..] == [u8::MIN]
+/// Whether `key` is `prev` with one `0x00` byte added. That is the smallest key greater
+/// than `prev`, so no key lies strictly between them.
+pub(crate) fn is_next_key(prev: &[u8], key: &[u8]) -> bool {
+    key.starts_with(prev) && key[prev.len()..] == [u8::MIN]
 }
 
 impl RangeBounds<Bytes> for BytesRange {
@@ -277,6 +272,19 @@ impl BytesRange {
             .map(|inner| Self { inner })
     }
 
+    pub(crate) fn intersects(&self, other: &Self) -> bool {
+        self.inner.intersects(&other.inner)
+    }
+
+    /// Returns a borrowed view of this range so bounds can be compared without
+    /// cloning [`Bytes`].
+    pub(crate) fn as_slice_range(&self) -> ComparableRange<&[u8]> {
+        ComparableRange::new(
+            ByteRangeBounds::start_bound(self),
+            ByteRangeBounds::end_bound(self),
+        )
+    }
+
     pub(crate) fn is_start_bound_included_or_unbounded(&self) -> bool {
         !matches!(ByteRangeBounds::start_bound(self), Excluded(_))
     }
@@ -330,6 +338,14 @@ pub(crate) mod tests {
         proptest!(|(range in arbitrary::empty_range(10))| {
             assert!(range.empty());
         });
+    }
+
+    #[test]
+    fn test_try_new_rejects_excluded_bounds_with_no_key_between() {
+        let a = Bytes::from_static(b"a");
+        let next = Bytes::from_static(b"a\0");
+        assert!(BytesRange::try_new(Excluded(a.clone()), Excluded(next.clone())).is_none());
+        assert!(BytesRange::try_new(Excluded(a), Included(next)).is_some());
     }
 
     #[test]
@@ -512,7 +528,9 @@ pub(crate) mod tests {
         proptest!(|(
             non_empty_range in arbitrary::nonempty_range(10),
         )| {
-            assert!(BytesRange::new_empty().intersect(&non_empty_range).is_none())
+            let empty = BytesRange::new_empty();
+            assert!(empty.intersect(&non_empty_range).is_none());
+            assert!(!empty.intersects(&non_empty_range));
         });
     }
 
@@ -521,6 +539,7 @@ pub(crate) mod tests {
         proptest!(|(non_empty_range in arbitrary::nonempty_range(10))| {
             let unbounded_range = BytesRange::new(Unbounded, Unbounded);
             assert!(non_empty_range.intersect(&unbounded_range).is_some());
+            assert!(non_empty_range.intersects(&unbounded_range));
         });
     }
 
@@ -545,7 +564,8 @@ pub(crate) mod tests {
         proptest!(|(
             (non_empty_1, non_empty_2) in arbitrary::nonempty_intersecting_ranges(10),
         )| {
-            assert!(non_empty_1.intersect(&non_empty_2).is_some())
+            assert!(non_empty_1.intersect(&non_empty_2).is_some());
+            assert!(non_empty_1.intersects(&non_empty_2));
         });
     }
 

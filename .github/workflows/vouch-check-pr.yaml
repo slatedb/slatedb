@@ -1,11 +1,14 @@
 name: Vouch Check PR
 
-# Close pull requests from authors who are not in .github/VOUCHED.td. Users with write access and
-# bots skip the check. This workflow does not check out pull request code, so
+# Close pull requests from authors who are not in .github/VOUCHED.td. Users with write access,
+# bots, and README.md-only pull requests skip the check. Include `synchronize` so a later push to
+# other files still triggers the check. This workflow does not check out pull request code, so
 # pull_request_target is safe here.
 on:
   pull_request_target:
-    types: [opened, reopened]
+    types: [opened, reopened, synchronize]
+    paths-ignore:
+      - 'README.md'
 
 permissions:
   contents: read
