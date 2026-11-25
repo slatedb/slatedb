@@ -29,9 +29,9 @@ through `Db`'s memory write path. `Lsm` only publishes the files. Reads go
 through `DbReader`, and a compactor merges the files later.
 
 The application opens `Lsm` before it builds the files. `Lsm` assigns each
-file's final path and ID, so ingestion can publish it without copying it.
-Destination sequences live in the manifest, with no change to the physical SST
-format. Once loading is done, the application closes `Lsm` and switches to `Db`
+file's final path, ID, and sequence, so ingestion can publish it without
+copying it. The rows store real sequences, so the SST and manifest formats do
+not change. Once loading is done, the application closes `Lsm` and switches to `Db`
 for ordinary writes. Only one of them can be the active writer for a database.
 
 ## Motivation
@@ -97,9 +97,8 @@ processes, through `CompactorBuilder` and `GarbageCollectorBuilder`, or through
 
 `Db`, `Lsm`, and `Compactor` share the code that reads and writes SST files.
 That includes `Db`'s L0 flushes and `Compactor`'s output files. Each client still
-keeps its own sequence and publication rules. Normal flushes and compaction
-outputs store their sequence numbers in the files and do not use deferred
-ingestion.
+keeps its own sequence and publication rules. Files from all three clients
+store real sequences in their rows.
 
 Together with the pluggable WAL, this lets an application provide its own write
 frontend while SlateDB manages the LSM. The application still handles reads and
@@ -127,9 +126,9 @@ The writer reuses the existing streaming SST implementation. Its public surface
 includes the following methods:
 
 ```rust
-pub enum SstSequenceMode {
-    Preserve,
-    Deferred,
+pub enum SstSequence {
+    FromRows,
+    Fixed(u64),
 }
 
 pub struct SstArtifact {
@@ -137,7 +136,7 @@ pub struct SstArtifact {
     path: Path,
     encoded_size: u64,
     row_count: u64,
-    sequence_mode: SstSequenceMode,
+    sequences: RangeInclusive<u64>,
 }
 
 impl SstArtifact {
@@ -145,7 +144,7 @@ impl SstArtifact {
     pub fn path(&self) -> &Path;
     pub fn encoded_size(&self) -> u64;
     pub fn row_count(&self) -> u64;
-    pub fn sequence_mode(&self) -> &SstSequenceMode;
+    pub fn sequences(&self) -> &RangeInclusive<u64>;
 }
 
 impl SstWriter {
@@ -171,21 +170,24 @@ impl SstReader {
 ```
 
 Each writer produces one file. Options select the format version, compression,
-filters, block transformation, and sequence mode:
+filters, block transformation, and sequence:
 
-| Mode | Record contract | Use |
+| Sequence | Row contract | Use |
 | --- | --- | --- |
-| Preserve | Supplied sequences and timestamps, including versions and merge operands | Standalone creation and inspection |
-| Deferred | Sequence zero, one regular value, merge operand, or tombstone per key, no timestamps | `Lsm::ingest` |
+| `FromRows` | Each row keeps its sequence. A key can have many versions. | Standalone creation and inspection |
+| `Fixed(s)` | The writer stores `s` in every row and ignores the sequence in each `RowEntry`. One value, merge operand, or tombstone per key. | `Lsm::new_sst_writer` |
 
-Keys ascend in byte order, with versions in descending sequence order. The writer
-rejects unordered entries, duplicate key-sequence pairs, empty files, and records
-outside the selected mode or format limits before passing them to the builder.
+In both cases, rows keep their `create_ts` and `expire_ts`. Keys ascend in byte
+order, with versions in descending sequence order. The writer rejects unordered
+entries, duplicate key-sequence pairs, empty files, and records outside the
+format limits before passing them to the builder. With `Fixed(s)`, a repeated
+key is a duplicate key-sequence pair.
 
 When `close()` succeeds, the file is uploaded and the caller gets an
 `SstArtifact` with the fields shown above. Its handle includes the file ID, key
-bounds, and format metadata. If upload fails, the writer attempts to abort it
-and returns no artifact.
+bounds, and format metadata. `sequences` holds the lowest and highest sequence
+in the file. For a `Fixed(s)` file, both are `s`. If upload fails, the writer
+attempts to abort it and returns no artifact.
 
 The artifact can stay in memory. An application can save its metadata if a
 standalone tool needs it, but the API doesn't require a JSON file or a
@@ -195,7 +197,7 @@ records whether it was published.
 Standalone tools can use `SstWriter::new` with an explicit path and physical ID.
 The caller owns the upload and cleanup and must keep the completed file
 immutable. For ingestion into `Lsm`, the application uses `Lsm::new_sst_writer`,
-which supplies the path, ID, and configuration.
+which supplies the path, ID, sequence, and configuration.
 
 A standalone reader opens an SST with `SstReader::open_at(path, id)`, so it does
 not need a database root. Callers without artifact metadata use a fresh ID.
@@ -204,8 +206,7 @@ A standalone reader can take a block cache through `SstReaderOptions`, or run
 without one. `Lsm` has no reads, so it has no cache.
 
 Readers sharing a cache scope need to agree on which file each ID refers to and
-how to decode it. Sequence overrides happen after reading cached blocks, and
-writes use the final file ID when caching is enabled.
+how to decode it. Writes use the final file ID when caching is enabled.
 
 ### Producing Sorted Files
 
@@ -228,25 +229,15 @@ pub enum IngestSequence {
     Explicit(u64),
 }
 
-pub struct IngestOptions {
-    pub sequence: IngestSequence,
-}
-
-pub struct IngestResult {
-    pub sequence: u64,
-    pub sst_id: Ulid,
-}
-
 impl Lsm {
     pub fn builder(path: Path, store: Arc<dyn ObjectStore>) -> LsmBuilder;
 
-    pub async fn new_sst_writer(&self) -> Result<SstWriter, Error>;
-
-    pub async fn ingest(
+    pub async fn new_sst_writer(
         &self,
-        artifact: SstArtifact,
-        options: IngestOptions,
-    ) -> Result<IngestResult, Error>;
+        sequence: IngestSequence,
+    ) -> Result<SstWriter, Error>;
+
+    pub async fn ingest(&self, artifact: SstArtifact) -> Result<(), Error>;
 
     pub async fn close(&self) -> Result<(), Error>;
 }
@@ -264,29 +255,30 @@ fencing and recovery checks when switching from `Db`. Imports don't append WAL
 records. The handoff section describes those checks.
 
 `Lsm::new_sst_writer` returns an `SstWriter` with the final path, file ID, and
-deferred record mode. The application adds sorted records, closes the writer,
-and passes the artifact to `ingest`. It requests writers in publication order.
-Files can build and upload in parallel, but `Lsm` publishes them in the order it
-allocated their IDs.
+sequence `s`, in `Fixed(s)` mode. The application adds sorted records, closes
+the writer, and passes the artifact to `ingest`. It requests writers in
+publication order. Files can build and upload in parallel, but `Lsm` publishes
+them in the order it allocated their IDs.
 
-`Allocate` asks the client's oracle for the next sequence. `Explicit` works like
-`WriteOptions::seqnum`: the caller supplies a sequence above the current maximum
-and keeps those values ordered across imports and later `Db` writes.
-Each call accepts one deferred file, and publication order decides which record
-wins when files overlap. The returned SST ID is useful for diagnostics, but
+`Allocate` takes the next sequence from the oracle of the client. `Explicit`
+works like `WriteOptions::seqnum`. The caller supplies a sequence above every
+sequence that `Lsm` gave out or published. It also keeps those values ordered
+across imports and later `Db` writes. `Lsm` reserves the sequence when it creates the
+writer, so sequences rise in allocation order, and publication order decides
+which record wins when files overlap. If the application drops a writer, its
+sequence stays unused. That gap is safe, because `WriteOptions::seqnum` can
+also skip sequences. The SST ID in the artifact is useful for diagnostics, but
 compaction can replace and collect the object it identifies.
 
-We're leaving creation and expiration timestamps out of the first release to
-keep the initial work focused on bulk loading. They can use overrides in SST
-view metadata, just like sequences. Before adding that support, we need to
-define when the expiration period starts and how reads, merges, compaction, and
-snapshots apply the assigned times.
-
-For now, deferred records don't expire, even if the database has a default TTL,
-so there is no per-import TTL option. Compaction doesn't invent timestamps when
-rewriting a deferred record. If that record merges with later `Db` records, the
-existing merge rules still apply. Filters must handle missing timestamps, and
-`KeyValue` continues to return zero for a missing creation time.
+Rows keep the `create_ts` and `expire_ts` that the application sets in each
+`RowEntry`. A row without `expire_ts` does not expire, even if the database has
+a default TTL. `Db` applies the default TTL only when it writes a row.
+A writer from `Lsm` rejects a row with a `create_ts` above the current time of
+the `Lsm` clock. `Db` starts its clock at `last_l0_clock_tick`, so a future
+value can make `Db` writes fail after the handoff. Compaction also uses
+`last_l0_clock_tick` as its clock, so a future value can expire rows too early.
+Filters must handle missing timestamps, and `KeyValue` continues to return zero
+for a missing creation time.
 
 ### Ingestion and Publication
 
@@ -295,15 +287,14 @@ the handoff section. Otherwise, an import could advance the sequence frontier
 past writes that still need replay.
 
 `DbReader` reads and a separate compactor can continue while files are built
-and ingested. `SstWriter`
-checks the records, writes block checksums, and uploads the file to its final
-path. We rely on upload success and supported transport checksums instead of
-reading the whole file back.
+and ingested. `SstWriter` checks the records, writes block checksums, and
+uploads the file to its final path. We rely on upload success and supported
+transport checksums instead of reading the whole file back.
 
 `ingest` uses the file ID to check that the file was built through this `Lsm`
-client. It also checks the path, sequence mode, and format. Once L0 has space,
-it assigns a sequence and publishes the SST using its handle. There is no copy
-or second record scan.
+client. It also checks the path, the sequence, and the format. Once L0 has
+space, it publishes the SST using its handle. There is no copy or second record
+scan.
 
 `Lsm` follows [RFC 0029](0029-gc-safe-sst-ulid-timestamps.md): it allocates each
 final SST ID before construction, and the physical ID and initial view ID match.
@@ -316,11 +307,12 @@ before publication starts. An abandoned file cannot be published later. This
 keeps unfinished files protected by the existing GC cutoff without adding
 durable pending-import metadata.
 
-Once the file is uploaded, one manifest update publishes its view and sequence
-override. It advances `last_l0_seq` and the monotonic `last_l0_clock_tick`,
-records the sequence/time sample, and sets `recent_snapshot_min_seq` to the new
-`last_l0_seq`. A `Db` flush does the same when it has no active snapshots, and
-`Lsm` has no snapshots. The WAL replay boundary stays at the frontier
+Once the file is uploaded, one manifest update publishes its view. It advances
+`last_l0_seq` to the sequence of the file. It advances `last_l0_clock_tick` to
+the current time of the `Lsm` clock, which is not below any `create_ts` in the
+file. It records the sequence/time sample, and sets `recent_snapshot_min_seq`
+to the new `last_l0_seq`. A `Db` flush does the same when it has no active
+snapshots, and `Lsm` has no snapshots. The WAL replay boundary stays at the frontier
 established before opening `Lsm`. Imports advance committed and durable progress
 after the manifest update succeeds, without advancing WAL progress or waiting
 for a nonexistent WAL record. Success means the file and publication are
@@ -362,7 +354,8 @@ reuses the existing WAL recovery boundary without a separate handoff record.
 Before closing `Lsm`, the application stops producing records. `Lsm::close`
 stops accepting work, cancels unfinished file work, and settles publication
 already in progress before releasing ownership. The next `Db` reads the latest
-manifest and starts above the last imported sequence.
+manifest and starts above the last imported sequence. `Db` can reuse the
+sequences of dropped writers. That is safe, because their files never publish.
 
 If close or publication has an uncertain outcome, the next client still has to
 fence older writers and perform the recovery checks.
@@ -394,30 +387,11 @@ replay that stops at a given WAL file.
 
 ### Manifest Representation
 
-Sequence interpretation belongs to the view:
-
-```fbs
-table CompactedSsTableView {
-    id: Ulid (required);
-    sst_id: Ulid (required);
-    visible_range: BytesRange;
-    sequence_override: ulong = null;
-}
-```
-
-Absent overrides preserve stored sequences. Populated overrides apply one
-sequence before snapshot filtering, version selection, or merge resolution.
-Translation occurs above raw caches, while standalone readers expose physical
-metadata. Checkpoints, clones, and projections preserve the override while
-referencing the original file. Compaction inputs resolve these views from the
-manifest.
-
-Compactions that rewrite records materialize effective sequences and omit
-overrides from their output views. When `enable_trivial_move` is enabled and
-effective key ranges are disjoint, compaction reuses the views with their
-overrides intact. `SortedRunV2` already stores `CompactedSsTableView`, so sequence
-translation applies in sorted runs as well as L0. The manifest contains no
-durable request history or pending-import collection.
+Ingested files use the existing manifest format. An ingested file has the
+same kind of L0 view as a file from a `Db` flush, and its rows hold their real
+sequences. So reads, compaction, trivial moves, checkpoints, clones, and
+projections need no change. The manifest contains no durable request history or
+pending-import collection.
 
 ### Failures and Retries
 
@@ -452,8 +426,8 @@ unreferenced files.
 There is no request ID or status lookup, so after a lost response the application
 has to reconcile its progress before retrying. Publishing the same data again
 at a new sequence can overwrite imports made in between. Another writer
-advancing the frontier doesn't identify the earlier request, and `Allocate`
-returns its sequence only on success. Having the SST object or its saved
+advancing the frontier doesn't identify the earlier request. Having the SST
+object or its saved
 metadata doesn't tell us whether publication succeeded. Neither proves that an
 old, unreferenced file is safe to publish under the current GC cutoff.
 
@@ -482,7 +456,7 @@ old, unreferenced file is safe to publish under the current GC cutoff.
 
 ### Metadata, Coordination, and Lifecycles
 
-- [x] Manifest format
+- [ ] Manifest format - ingested files use the existing format.
 - [x] Checkpoints
 - [x] Clones
 - [x] Garbage collection
@@ -515,14 +489,11 @@ old, unreferenced file is safe to publish under the current GC cutoff.
 
 ### Performance & Cost
 
-A sequence override contributes eight payload bytes per populated view, before
-FlatBuffers alignment and vtable overhead. Trivial moves retain overrides in
-sorted runs, so their count is not bounded by L0 admission alone. Measure
-equivalent current and proposed manifests with absent and populated overrides
-in L0 and sorted runs, realistic key bounds, segments, projections, and retained
-checkpoints. Include configured L0 limits and stress cases of 1,000, 10,000, and
-100,000 views. Report encoded size, encode/decode time, decoded memory, and traffic
-from repeated full manifest uploads.
+Ingested files add no manifest fields. Each file adds one L0 view, the same as
+a `Db` flush. Measure manifests with 1,000, 10,000, and 100,000 L0 views, with
+realistic key bounds, segments, and retained checkpoints. Report encoded size,
+encode and decode time, decoded memory, and the traffic of repeated full
+manifest uploads.
 
 Building an SST of `S` bytes through `Lsm` uploads those bytes once. Ingestion
 then adds one successful manifest update, without downloading, uploading, or
@@ -564,25 +535,11 @@ dependencies. Move `CompressionCodec` with the file code while preserving
 `slatedb::config::CompressionCodec` and forwarding existing compression features.
 Expose the handle's format version through an accessor.
 
-Manifest format version 3 uses the extended `ManifestV2` table. New decoders
-continue to read versions 1 and 2. Writers emit v3 only when a sequence override
-is present and v2 otherwise. The `.compactions` format stays unchanged: input
-sources are view or sorted-run IDs, and output `CompactedSsTable` entries contain
-physical file metadata. Overrides live in the manifest, whose version makes old
-consumers reject them instead of silently interpreting zero sequences.
-
-Upgrade readers, writers, compactors, workers, GC, CLI tools, and binding runtimes
-before the first import. This includes reader-ordering changes for consumers
-that follow WAL across a handoff.
-
-Trivial moves can retain overrides indefinitely, so disabling ingestion alone
-does not permit downgrade. Stop writes and imports, finish active compactions,
-and set `enable_trivial_move=false` on the compactor. Use `Admin::submit_compaction`
-to submit full compactions for affected trees, then verify completion and a v2
-manifest without overrides. Release or expire checkpoints retaining v3 manifests
-and allow obsolete versions to be collected before opening with old code.
-Retained v3 checkpoints continue to block downgrade, and clones need the same
-checks independently.
+The manifest, `.compactions`, SST, and WAL formats do not change. Ingested files
+look like flushed L0 files, so older readers, compactors, and garbage
+collectors can read a database after an import. Upgrade every `DbReader` that
+follows the WAL before the first import, so that it uses the WAL-first order
+from Read Visibility. A downgrade needs no extra steps.
 
 Block transformation must remain compatible across clients and compactors for
 the file's lifetime. Imported changes bypass WAL-based CDC, so consumers of that
@@ -591,11 +548,12 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
 
 ## Testing
 
-- SST contracts: Round-trip both modes and standalone paths, including versions,
-  timestamps, merges, tombstones, compression, transformers, and stats. Check
-  that invalid ordering and mode or format violations are rejected before
-  reaching the builder. Merge effects must survive ordered deferred files and
-  later `Db` writes.
+- SST contracts: Round-trip `FromRows` and `Fixed(s)` files and standalone
+  paths, including versions, timestamps, merges, tombstones, compression,
+  transformers, stats, and sequence ranges. Check that invalid ordering, repeated
+  keys in `Fixed(s)` files, and format violations are rejected before reaching
+  the builder. Merge effects must survive ordered ingested files and later `Db`
+  writes. Reject a `create_ts` above the `Lsm` clock.
 - Direct construction: Check that `Lsm` assigns the final path and ID before
   writing and uploads each file once. Finish uploads out of order and verify
   that publication stays in allocation order. Abandon an earlier file before
@@ -605,8 +563,7 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
   scanning records at publication time.
 - Publication and reads: Import 101 over earlier data while retaining an older
   checkpoint. Read through `DbReader` with get, scan, projections, and restart.
-  Overrides must survive trivial moves, and rewrites must materialize their
-  sequences.
+  Trivial moves and rewrites must keep the sequences of ingested rows.
 - Handoff: Close `Db` with write 100 published, import 101 through `Lsm`, then
   reopen `Db` and write 102. Race that handoff with a long-lived `DbReader` still
   holding the old manifest, and include explicit sequence gaps.
@@ -624,11 +581,10 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
   and GC during uploads that outlast the minimum file age.
 - Segments: Route files belonging to one segment and reject missing bounds,
   mixed prefixes, and conflicting prefixes. Unrelated segments must stay intact.
-- Compatibility: Test old-reader rejection, conditional manifest versions,
-  unchanged `.compactions` encoding, and worker lookup of overridden input
-  views. Test downgrade after forced rewrites and rejection while v3 checkpoints
-  remain. Include timestamp-free imports with a configured default TTL,
-  optional reader roots and caches, and unchanged public exports.
+- Compatibility: Test that older readers, compactors, and garbage collectors
+  read a database after an import. Include imports without `expire_ts` under a
+  configured default TTL, dropped writers that leave sequence gaps, optional
+  reader roots and caches, and unchanged public exports.
 - Simulation and cost: Combine construction, ingestion, compaction, GC, fencing,
   and restart in the existing simulation framework. Run the metadata and
   end-to-end experiments described above.
@@ -637,9 +593,8 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
 
 1. Measure manifest growth and establish a bulk-load baseline, including sorting and L0 waits.
 2. Extract shared SST code with compatible exports, then expose the standalone writer and reader paths.
-3. Add conditional manifest versions and propagate overrides through reads, compaction, and retained manifests.
-4. Add `Lsm` file allocation, direct SST construction, and ingestion, including exclusive fencing and handling of uncertain outcomes.
-5. Validate the `Db` handoff, long-lived readers, and segment routing.
+3. Add `Lsm` file allocation, direct SST construction, and ingestion, including exclusive fencing and handling of uncertain outcomes.
+4. Validate the `Db` handoff, long-lived readers, and segment routing.
 
 The standalone interfaces can ship on their own. The `Lsm` release needs to
 document the supported WAL handoffs and segment scope, along with file
@@ -685,18 +640,27 @@ responses, at the cost of metadata growth, retention rules, and capacity limits.
 Separate outcome storage still needs an atomic link to publication. The first
 API documents uncertain outcomes without promising durable deduplication.
 
-### Rewrite or Translate Imports
+### Sequence Offsets in the Manifest
 
-Rewriting during ingestion embeds destination sequences and timestamps at the
-cost of decoding and encoding every record. An override avoids that rewrite for
-deferred files. Sequence offsets preserve source history but require additional
-rules for overlap, bounds, and snapshots.
+[RFC #1146](https://github.com/slatedb/slatedb/pull/1146#discussion_r2649854164)
+proposes an offset in the manifest view. The file keeps its own sequences, and
+readers add the offset when they read. So a file does not depend on the
+database, and a tool can build it before `Lsm` opens. The cost is a new view
+field, the offset in every read and compaction, and offsets that stay in sorted
+runs after trivial moves. Each release must read data from the next release.
+So a new manifest version needs one release that reads it before a release that
+writes it. This RFC builds every file under `Lsm`, so a sequence from
+`new_sst_writer` has no such cost. A later mode that ingests files built
+outside `Lsm` can add offsets.
+
+Rewriting each file during ingestion also puts the destination sequence into
+the rows, but it decodes and encodes every record.
 
 ## Open Questions
 
 1. Does the first `Lsm` release include single-segment ingestion, or does adoption wait for a later segment milestone?
 2. What manifest growth is acceptable for a large load?
-3. Does a concrete workload require import-time timestamps, atomic multi-file publication, or durable retry tracking?
+3. Does a concrete workload require atomic multi-file publication or durable retry tracking?
 
 ## References
 
