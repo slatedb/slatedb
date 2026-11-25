@@ -29,37 +29,32 @@ assigns each file a path, an ID, and a sequence number. The application supplies
 sorted rows, and the writer stores that sequence number in every row.
 
 `Lsm` publishes a batch of completed files in one manifest update. Each file is
-built at its final path, so nothing is copied. The rows hold their sequence
-numbers, so the SST and manifest formats do not change. `Lsm` has no reads and
-starts no compactor. Applications read published files through `DbReader`, also
-during the load, and a compactor merges the files later. After the load, the
+built at its final path, so nothing is copied. The SST and manifest formats stay
+the same. `Lsm` has no reads and starts no compactor. Applications can read
+published files through `DbReader` during the load. After the load, the
 application closes `Lsm` and reopens `Db` for ordinary writes. Only one of them
 writes to a database at a time.
 
 ## Motivation
 
 [Issue #1143](https://github.com/slatedb/slatedb/issues/1143) requests SST creation
-outside a running database. Applications in
-[issue #1105](https://github.com/slatedb/slatedb/issues/1105) also accumulate
-updates in structures such as vectors or bitmaps and encode them at flush time.
-These applications can keep their vectors or bitmaps, write SSTs when they
-flush, and let SlateDB manage those files.
+outside a running database. The applications in
+[issue #1105](https://github.com/slatedb/slatedb/issues/1105) accumulate updates
+in vectors or bitmaps. They can write them as SSTs at flush time and let
+SlateDB manage those files.
 
 Bulk loads are one example. An
 [Iceberg primary-key index](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5789501302)
-stores one key for each source row. An initial build or a full rebuild writes
-every key one time through `Db`, with the WAL off. Normal reads, writes, and
-deletes follow, with the WAL on. During the load, L0 fills fast, and writes wait
-for compaction. Compaction used 33% of all CPU in an initial load and 54% in a
-rebuild ([#2148](https://github.com/slatedb/slatedb/issues/2148)), although
-almost every key has one version. Files built outside `Db` skip the memtable and
-its flushes, but the application must sort the keys.
+builds through `Db` with the WAL off, then takes ordinary writes with the WAL
+on. Writes stall when L0 fills. Compaction accounted for 33% of process CPU
+samples during the initial load and 54% during a rebuild
+([#2148](https://github.com/slatedb/slatedb/issues/2148)), although almost
+every key had one version. Writing SSTs directly skips the memtable flush. The
+application still has to sort its keys.
 
-An application can use one database for each table, so one table can load
-while the others take normal writes
+This index can use a separate database for each table, so a bulk load pauses
+writes only for that table
 ([per-table handoff](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5800449727)).
-Each database switches between `Db` and `Lsm` on its own
-([ingestion-only client](https://github.com/slatedb/slatedb/pull/2103#pullrequestreview-5286827487)).
 
 This proposal builds on [RFC #1146](https://github.com/slatedb/slatedb/pull/1146),
 by [KarinaMilet](https://github.com/KarinaMilet), with shared SST interfaces and
@@ -104,8 +99,7 @@ public API leaves out. The compactor uses the block size returned by the
 internal writer to decide when to start a new file. A `Db` flush can cancel a
 close in progress. This is the same split as `Reader`, which `Db` and `DbReader`
 share. Each client keeps its own ID allocation, segment split, upload limits,
-sequence rules, and manifest publication. Files from all three clients store
-real sequences in their rows.
+sequence rules, and manifest publication.
 
 Together with the pluggable WAL, this lets an application provide its own write
 frontend while SlateDB manages the LSM. The application still handles reads and
@@ -123,9 +117,8 @@ flowchart LR
     M --> C[Compactor and GC: separate processes]
 ```
 
-For one database path, `Db` and `Lsm` operate at different times. Shared SST
-reading and writing live in `slatedb-sst`; client coordination remains in
-`slatedb`.
+Shared SST reading and writing live in `slatedb-sst`; client coordination
+remains in `slatedb`.
 
 ### SST Interfaces
 
@@ -220,15 +213,14 @@ how to decode it. Writes use the final file ID when caching is enabled.
 The application sorts its input before it adds rows to `SstWriter`, and it owns
 any temporary storage for the sort.
 
-A file for `Lsm::ingest` holds at most one entry per key. If the input has
-several puts or deletes for one key, the application keeps the newest one before
-it writes the file. When two files have the same key, the file that publishes
-later wins. A merge operand in an ingested file combines with older values, the
-same as a merge from `Db`. To keep several merge operands for one key, the
-application writes them to separate files and publishes those files in order.
-`Lsm` takes no merge operator, so the application must configure the same merge
-operator on every reader, compactor, and later `Db` that processes those rows.
-Without it, reads and compaction of those keys fail.
+A file for `Lsm::ingest` holds at most one entry per key. If files overlap,
+publication order decides which put or delete a reader sees. A merge operand in
+an ingested file combines with older values, the same as a merge from `Db`. To
+keep several merge operands for one key, the application writes them to separate
+files and publishes those files in order. `Lsm` takes no merge operator, so the
+application must configure the same merge operator on every reader, compactor,
+and later `Db` that processes those rows. Without it, reads and compaction of
+those keys fail.
 
 ### Lsm API
 
@@ -256,12 +248,11 @@ Configure the object store, block transformer, file format, segment extractor,
 WAL, and system clock on the `Lsm` builder. The builder takes no block cache,
 merge operator, or compaction settings, because `Lsm` does not read or compact.
 Files use the client's store, transformer, and format configuration, with no
-per-import override. `Lsm` has no get, scan, put, write, delete, or transaction
-methods.
+per-import override.
 
 The WAL configuration selects the WAL store or custom `WriterInit` used for
 fencing and recovery checks when switching from `Db`. Imports don't append WAL
-records. The handoff section describes those checks.
+records.
 
 `Lsm::new_sst_writer` returns an `SstWriter` with the final path, file ID, and
 sequence `s`, in `Fixed(s)` mode. The application adds sorted records, closes
@@ -290,10 +281,6 @@ Filters must handle missing timestamps, and `KeyValue` continues to return zero
 for a missing creation time.
 
 ### Ingestion and Publication
-
-`Lsm` opens only when published SSTs cover earlier WAL writes, as described in
-the handoff section. Otherwise, an import could advance the sequence frontier
-past writes that still need replay.
 
 `SstWriter` checks the records, writes block checksums, and uploads the file to
 its final path. We rely on upload success and supported transport checksums
@@ -352,12 +339,13 @@ finish active transactions before closing it. `Db` must close with a successful
 `FlushType::MemTable` flush so the files cover its accepted writes. A WAL-only
 flush is insufficient.
 
-Before it accepts imports, `Lsm` uses the existing `WriterFencer` and
-configured `WriterInit::fence_and_init` to fence both manifest and WAL writers.
-It consumes the returned bounded replay iterator, ignoring rows already covered
-by `last_l0_seq`. If any row has a higher sequence, opening fails and the
-application must recover and flush through `Db` first. Iterator errors also
-abort startup.
+Before it accepts imports, `Lsm` uses the existing `WriterFencer` and configured
+`WriterInit::fence_and_init` to fence both manifest and WAL writers. It consumes
+the returned bounded replay iterator, ignoring rows already covered by
+`last_l0_seq`. If any row has a higher sequence, opening fails and the
+application must recover and flush through `Db` first. Otherwise, an import
+can advance the published sequence past WAL writes that still need replay.
+Iterator errors also abort startup.
 
 Startup closes the returned WAL writer without appending imported rows,
 including when replay validation fails. If replay validation or WAL close fails,
@@ -523,8 +511,7 @@ Building an SST of `S` bytes through `Lsm` uploads those bytes once. Ingestion
 then adds one successful manifest update for each batch, without downloading,
 uploading, or scanning the file again. That count excludes opening and fencing,
 concurrent compaction, multipart requests, and retries. Manifest reads and
-object listings during open, recovery, and GC also add requests. The application
-budgets its local sorting scratch separately.
+object listings during open, recovery, and GC also add requests.
 
 Manifest publication stays ordered while file construction and uploads can
 overlap. Benchmark file sizes, batch sizes, and construction concurrency to see
@@ -535,15 +522,12 @@ Measure how long ordinary writes stop, from closing `Db` until it reopens after
 publication. Include file construction and upload. Use that duration to compare
 this design with staging files before the handoff.
 
-Compare the complete pipeline with normal batch writes: sorting and spill,
-SST construction, index/filter buffers, upload, validation, publication, and
-compaction. Ingested L0 files still need compaction, unless trivial moves
-apply. Independent databases avoid a shared writer pause but multiply cache
-budgets, polling, and maintenance work.
+Compare the complete pipeline with normal batch writes: sorting and spill, SST
+construction, index/filter buffers, upload, validation, publication, and
+compaction. Ingested L0 files still need compaction, unless trivial moves apply.
 
 ### Observability
 
-Applications opt in by opening `Lsm`; there is no ingestion setting on `Db`.
 Track bytes built and imported, batch sizes, L0 file counts, file build and
 publication time, failures, uncertain outcomes, and manifest size.
 Expose the published sequence and clock along with handoff failures and errors
@@ -638,9 +622,7 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
 4. Add `Lsm` file allocation, direct SST construction, and ingestion, including exclusive fencing and handling of uncertain outcomes.
 5. Validate the `Db` handoff, the `DbReader` WAL order, and segment routing.
 
-The standalone interfaces can ship on their own. The `Lsm` release needs to
-document the supported WAL handoffs and segment scope, along with file
-ownership, upload cleanup, retries, client switching, and upgrades.
+The standalone interfaces can ship on their own.
 
 ## Alternatives
 
@@ -709,10 +691,8 @@ the rows, but it decodes and encodes every record.
 
 - [Issue #1143](https://github.com/slatedb/slatedb/issues/1143) and [RFC #1146](https://github.com/slatedb/slatedb/pull/1146), by [KarinaMilet](https://github.com/KarinaMilet).
 - RFC #1146 requests for the [package boundary](https://github.com/slatedb/slatedb/pull/1146#discussion_r2649290355), [reader paths](https://github.com/slatedb/slatedb/pull/1146#discussion_r2649289303), [returned handle](https://github.com/slatedb/slatedb/pull/1146#discussion_r2674413603), and [SlateDB manifest representation](https://github.com/slatedb/slatedb/pull/1146#discussion_r2674447687).
-- RFC #2103 discussions of the [Lsm client](https://github.com/slatedb/slatedb/pull/2103#pullrequestreview-5286827487), [per-table databases](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5800449727), [producer requirements](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5808365694), [retry guarantees](https://github.com/slatedb/slatedb/pull/2103#discussion_r4078981105), and [shared configuration](https://github.com/slatedb/slatedb/pull/2103#discussion_r4079040923).
-- RFC #2103 reviews of [building SSTs without copying](https://github.com/slatedb/slatedb/pull/2103#discussion_r4202127474), [sorting in the application](https://github.com/slatedb/slatedb/pull/2103#discussion_r4204482400), and [routing from key bounds](https://github.com/slatedb/slatedb/pull/2103#discussion_r4204648367).
+- RFC #2103 discussions of the [Lsm client](https://github.com/slatedb/slatedb/pull/2103#pullrequestreview-5286827487), [retry guarantees](https://github.com/slatedb/slatedb/pull/2103#discussion_r4078981105), [shared configuration](https://github.com/slatedb/slatedb/pull/2103#discussion_r4079040923), [building SSTs without copying](https://github.com/slatedb/slatedb/pull/2103#discussion_r4202127474), [sorting in the application](https://github.com/slatedb/slatedb/pull/2103#discussion_r4204482400), and [routing from key bounds](https://github.com/slatedb/slatedb/pull/2103#discussion_r4204648367).
 - RFC #2103 reviews of the [write-only Lsm](https://github.com/slatedb/slatedb/pull/2103#discussion_r4575091524), [sequences at ingestion](https://github.com/slatedb/slatedb/pull/2103#discussion_r4575091605), [batch ingestion](https://github.com/slatedb/slatedb/pull/2103#discussion_r4575091581), [L0 overrun and trivial moves](https://github.com/slatedb/slatedb/pull/2103#discussion_r4645403774), and [one entry per key](https://github.com/slatedb/slatedb/pull/2103#discussion_r4645441858).
-- [Sequence offsets](https://github.com/slatedb/slatedb/pull/1146#discussion_r2649854164) in RFC #1146, [manual `DbReader` refresh](https://github.com/slatedb/slatedb/pull/2186), and the [storage format support window](https://github.com/slatedb/slatedb/pull/2289).
 - [Issue #1105](https://github.com/slatedb/slatedb/issues/1105), including [read and freeze coordination](https://github.com/slatedb/slatedb/issues/1105#issuecomment-3666587872).
 - [Pluggable WAL](0030-pluggable-wal.md), [sequence tracking](0012-sequence-tracker.md), [checkpoints](0004-checkpoints.md), and [GC-safe SST identifiers](0029-gc-safe-sst-ulid-timestamps.md).
 - [Segment-oriented compaction](0024-segment-oriented-compaction.md) and [compaction filters](0017-compaction-filters.md).
