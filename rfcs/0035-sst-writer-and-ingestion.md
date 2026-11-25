@@ -23,17 +23,18 @@ Authors:
 
 ## Summary
 
-This RFC adds standalone tools to write and read SSTs, and an `Lsm` client that
-ingests SSTs into a database. The application builds sorted files without going
-through `Db`'s memory write path. `Lsm` only publishes the files. Reads go
-through `DbReader`, and a compactor merges the files later.
+This RFC adds a standalone SST writer and reader, and a bulk-load client called
+`Lsm`. For a bulk load, the application closes `Db` and opens `Lsm`. `Lsm`
+assigns each file a path, an ID, and a sequence number. The application supplies
+sorted rows, and the writer stores that sequence number in every row.
 
-The application opens `Lsm` before it builds the files. `Lsm` assigns each
-file's final path, ID, and sequence, so ingestion can publish it without
-copying it. The rows store real sequences, so the SST and manifest formats do
-not change. Once loading is done, the application closes `Lsm` and switches to
-`Db` for ordinary writes. Only one of them can be the active writer for a
-database.
+`Lsm` publishes a batch of completed files in one manifest update. Each file is
+built at its final path, so nothing is copied. The rows hold their sequence
+numbers, so the SST and manifest formats do not change. `Lsm` has no reads and
+starts no compactor. Applications read published files through `DbReader`, also
+during the load, and a compactor merges the files later. After the load, the
+application closes `Lsm` and reopens `Db` for ordinary writes. Only one of them
+writes to a database at a time.
 
 ## Motivation
 
@@ -41,8 +42,8 @@ database.
 outside a running database. Applications in
 [issue #1105](https://github.com/slatedb/slatedb/issues/1105) also accumulate
 updates in structures such as vectors or bitmaps and encode them at flush time.
-Shared file interfaces let these producers reuse SlateDB's storage layer while
-keeping their own memory representation.
+These applications can keep their vectors or bitmaps, write SSTs when they
+flush, and let SlateDB manage those files.
 
 Bulk loads are one example. An
 [Iceberg primary-key index](https://github.com/slatedb/slatedb/pull/2103#issuecomment-5789501302)
@@ -98,13 +99,13 @@ processes, through `CompactorBuilder` and `GarbageCollectorBuilder`, or through
 `Db`, `Lsm`, and `Compactor` share the code that reads and writes SST files.
 Today, the `Db` memtable flush and the compactor build files with the same
 internal writer, `TableStore::table_writer`. `SstWriter` is the public form of
-that writer. `Db` and the compactor keep the internal operations of the shared
-implementation. Their `add` returns the size of each finished block, which the
-compactor uses to start a new file. The flush can also cancel a close in
-progress. The public API stays small. This is the same split as `Reader`, which
-`Db` and `DbReader` share. Each client keeps its own ID allocation, segment
-split, upload limits, sequence rules, and manifest publication. Files from all
-three clients store real sequences in their rows.
+that writer. `Db` and the compactor also use internal writer operations that the
+public API leaves out. The compactor uses the block size returned by the
+internal writer to decide when to start a new file. A `Db` flush can cancel a
+close in progress. This is the same split as `Reader`, which `Db` and `DbReader`
+share. Each client keeps its own ID allocation, segment split, upload limits,
+sequence rules, and manifest publication. Files from all three clients store
+real sequences in their rows.
 
 Together with the pluggable WAL, this lets an application provide its own write
 frontend while SlateDB manages the LSM. The application still handles reads and
@@ -122,14 +123,11 @@ flowchart LR
     M --> C[Compactor and GC: separate processes]
 ```
 
-For one database path, `Db` and `Lsm` operate at different times. Read-only
-consumers can coexist under the visibility rules below. Shared SST reading and
-writing live in `slatedb-sst`; client coordination remains in `slatedb`.
+For one database path, `Db` and `Lsm` operate at different times. Shared SST
+reading and writing live in `slatedb-sst`; client coordination remains in
+`slatedb`.
 
 ### SST Interfaces
-
-The writer reuses the existing streaming SST implementation. Its public surface
-includes the following methods:
 
 ```rust
 pub enum SstSequence {
@@ -254,12 +252,12 @@ impl Lsm {
 }
 ```
 
-The builder follows the existing SlateDB configuration conventions for file
-access and the segment extractor. It also takes the database's WAL
-configuration and system clock. It takes no block cache, merge operator, or
-compaction settings, because `Lsm` does not read or compact. Files use the
-client's store, transformer, and format configuration, with no per-import
-override. `Lsm` has no get, scan, put, write, delete, or transaction methods.
+Configure the object store, block transformer, file format, segment extractor,
+WAL, and system clock on the `Lsm` builder. The builder takes no block cache,
+merge operator, or compaction settings, because `Lsm` does not read or compact.
+Files use the client's store, transformer, and format configuration, with no
+per-import override. `Lsm` has no get, scan, put, write, delete, or transaction
+methods.
 
 The WAL configuration selects the WAL store or custom `WriterInit` used for
 fencing and recovery checks when switching from `Db`. Imports don't append WAL
@@ -271,15 +269,15 @@ the writer, and passes the artifact to `ingest`, alone or in a batch with other
 artifacts. It requests writers in publication order. Files can build and upload
 in parallel.
 
-`Allocate` takes the next sequence from the oracle of the client. `Explicit`
-works like `WriteOptions::seqnum`. The caller supplies a sequence above every
-sequence that `Lsm` gave out or published. It also keeps those values ordered
-across imports and later `Db` writes. `Lsm` reserves the sequence when it
-creates the writer, so sequences rise in allocation order, and publication order
-decides which record wins when files overlap. If the application drops a writer,
-its sequence stays unused. That gap is safe, because `WriteOptions::seqnum` can
-also skip sequences. The SST ID in the artifact is useful for diagnostics, but
-compaction can replace and collect the object it identifies.
+With `Allocate`, `Lsm` assigns the next sequence number. `Explicit` works like
+`WriteOptions::seqnum`. The caller supplies a sequence above every sequence that
+`Lsm` gave out or published. It also keeps those values ordered across imports
+and later `Db` writes. `Lsm` reserves the sequence when it creates the writer,
+so sequences rise in allocation order, and publication order decides which
+record wins when files overlap. If the application drops a writer, its sequence
+stays unused. That gap is safe, because `WriteOptions::seqnum` can also skip
+sequences. The SST ID in the artifact is useful for diagnostics, but compaction
+can replace and collect the object it identifies.
 
 Rows keep the `create_ts` and `expire_ts` that the application sets in each
 `RowEntry`. A row without `expire_ts` does not expire, even if the database has
@@ -316,24 +314,23 @@ final SST ID before construction, and the physical ID and initial view ID match.
 Their timestamps must meet the current L0 cutoff and never go backwards in
 allocation order. Equal timestamp milliseconds are allowed.
 
-Publication follows allocation order even when uploads finish out of order.
-A batch waits until every file allocated before its first file is published or
-is abandoned before publication starts. An abandoned file cannot be published
-later. This keeps unfinished files protected by the existing GC cutoff without
-adding durable pending-import metadata. The files in a batch follow allocation
-order, with no gap except abandoned files. `ingest` rejects a batch with any
-other gap, because a later batch cannot publish the missing file first.
+`Lsm` publishes files in allocation order, even when uploads finish out of
+order. Suppose that it allocates A, B, and C. A batch that contains B and C
+waits until A publishes or the application abandons A. A batch that contains A
+and C skips B, so `ingest` rejects it unless the application already abandoned
+B. An abandoned file can never publish. This order keeps unfinished files safe
+from garbage collection without recording pending imports in the manifest.
 
 One manifest update publishes the views of all files in the batch, or none of
 them. It advances `last_l0_seq` to the highest sequence in the batch. It
 advances `last_l0_clock_tick` to the current time of the `Lsm` clock, which is
-not below any `create_ts` in the batch. It records the sequence/time sample,
-and sets `recent_snapshot_min_seq` to the new `last_l0_seq`. A `Db` flush does
-the same when it has no active snapshots, and `Lsm` has no snapshots. The WAL
-replay boundary stays at the frontier established before opening `Lsm`.
-Imports advance committed and durable progress after the manifest update
-succeeds, without advancing WAL progress or waiting for a nonexistent WAL
-record. Success means that the files and their publication are durable.
+not below any `create_ts` in the batch. It records the sequence/time sample, and
+sets `recent_snapshot_min_seq` to the new `last_l0_seq`. A `Db` flush does the
+same when it has no active snapshots, and `Lsm` has no snapshots. Imports leave
+the WAL replay position where it was when `Lsm` opened. Imports advance
+committed and durable progress after the manifest update succeeds, without
+advancing WAL progress or waiting for a nonexistent WAL record. Success means
+that the files and their publication are durable.
 
 ### Segments
 
@@ -362,11 +359,12 @@ by `last_l0_seq`. If any row has a higher sequence, opening fails and the
 application must recover and flush through `Db` first. Iterator errors also
 abort startup.
 
-Startup closes the returned WAL writer without appending imported rows, including
-when replay validation fails. Opening succeeds only after validation and WAL
-close succeed, with manifest ownership rechecked before admission. The monotonic
-clock starts from `last_l0_clock_tick` using the configured system clock. This
-reuses the existing WAL recovery boundary without a separate handoff record.
+Startup closes the returned WAL writer without appending imported rows,
+including when replay validation fails. If replay validation or WAL close fails,
+`Lsm` returns an error. Before it accepts imports, `Lsm` checks that it still
+owns the manifest. The monotonic clock starts from `last_l0_clock_tick` using
+the configured system clock. This reuses the existing WAL recovery boundary
+without a separate handoff record.
 
 Before closing `Lsm`, the application stops producing records. `Lsm::close`
 stops accepting work, cancels unfinished file work, and settles publication
@@ -437,9 +435,9 @@ If reads or writes remain uncertain, or another writer fences the client,
 the call doesn't let later imports pass an unresolved publication.
 
 After a restart, published data comes from the manifest. The application owns
-its unpublished input, sorting scratch, and load progress. This RFC doesn't
-define automatic resumption of unfinished uploads or adoption of old
-unreferenced files.
+its unpublished input, sorting scratch, and load progress. A new `Lsm` does not
+resume unfinished uploads or publish files that the old client left
+unreferenced.
 
 There is no request ID or status lookup, so after a lost response the application
 has to reconcile its progress before retrying. Publishing the same data again
@@ -533,10 +531,9 @@ overlap. Benchmark file sizes, batch sizes, and construction concurrency to see
 whether upload, publication, or compaction limits throughput. Measure peak
 memory and concurrent uploads alongside throughput.
 
-The tradeoff is that `Db` writes to that database stay paused while the files
-are built, uploaded, and published. `DbReader` reads can continue under the
-visibility rules above. This whole pause needs to be measured when comparing
-direct construction with a future mode that stages files before the handoff.
+Measure how long ordinary writes stop, from closing `Db` until it reopens after
+publication. Include file construction and upload. Use that duration to compare
+this design with staging files before the handoff.
 
 Compare the complete pipeline with normal batch writes: sorting and spill,
 SST construction, index/filter buffers, upload, validation, publication, and
@@ -680,10 +677,11 @@ path is needed.
 
 ### Durable Request Tracking
 
-A manifest-backed outcome collection can prevent duplicate imports after lost
-responses, at the cost of metadata growth, retention rules, and capacity limits.
-Separate outcome storage still needs an atomic link to publication. The first
-API documents uncertain outcomes without promising durable deduplication.
+One option is to record each request and its result in the manifest. A caller
+can then check whether an import succeeded before retrying. The records grow the
+manifest and need a retention limit. If SlateDB stores them elsewhere, it must
+still record the result atomically with publication. The first API documents
+uncertain outcomes without promising durable deduplication.
 
 ### Sequence Offsets in the Manifest
 
@@ -705,7 +703,7 @@ the rows, but it decodes and encodes every record.
 
 1. Does the first `Lsm` release support segmented databases, or does segment support come later?
 2. What manifest growth is acceptable for a large load?
-3. Does a concrete workload require durable retry tracking?
+3. Which bulk loads need to look up an import by request ID after a restart?
 
 ## References
 
