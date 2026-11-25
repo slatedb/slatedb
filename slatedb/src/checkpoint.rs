@@ -123,7 +123,7 @@ impl Db {
         let id = self.inner.rand.rng().gen_uuid();
         let (floor, wait_for_l0) = match scope {
             CheckpointScope::All => {
-                let floor = self.inner.begin_batch_writer_flush().await?;
+                let floor = self.inner.force_batch_writer_flush(true).await?;
                 (Some(floor), true)
             }
             CheckpointScope::Durable => (None, false),
