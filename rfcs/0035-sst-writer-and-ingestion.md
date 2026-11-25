@@ -98,10 +98,13 @@ processes, through `CompactorBuilder` and `GarbageCollectorBuilder`, or through
 `Db`, `Lsm`, and `Compactor` share the code that reads and writes SST files.
 Today, the `Db` memtable flush and the compactor build files with the same
 internal writer, `TableStore::table_writer`. `SstWriter` is the public form of
-that writer, and all three clients use it. This is the same split as `Reader`,
-which `Db` and `DbReader` share. Each client keeps its own ID allocation,
-segment split, upload limits, sequence rules, and manifest publication. Files
-from all three clients store real sequences in their rows.
+that writer. `Db` and the compactor keep the internal operations of the shared
+implementation. Their `add` returns the size of each finished block, which the
+compactor uses to start a new file. The flush can also cancel a close in
+progress. The public API stays small. This is the same split as `Reader`, which
+`Db` and `DbReader` share. Each client keeps its own ID allocation, segment
+split, upload limits, sequence rules, and manifest publication. Files from all
+three clients store real sequences in their rows.
 
 Together with the pluggable WAL, this lets an application provide its own write
 frontend while SlateDB manages the LSM. The application still handles reads and
@@ -219,13 +222,15 @@ how to decode it. Writes use the final file ID when caching is enabled.
 The application sorts its input before it adds rows to `SstWriter`, and it owns
 any temporary storage for the sort.
 
-A file for `Lsm::ingest` holds at most one entry per key. If the input has the
-same key more than once, the application keeps the newest entry before it
-writes the file. When two files have the same key, the file that publishes
-later wins. A merge operand in an ingested file combines with older values
-through the merge operator of the database, the same as a merge from `Db`. To
-keep several merge operands for one key, the application writes them to
-separate files and publishes those files in order.
+A file for `Lsm::ingest` holds at most one entry per key. If the input has
+several puts or deletes for one key, the application keeps the newest one before
+it writes the file. When two files have the same key, the file that publishes
+later wins. A merge operand in an ingested file combines with older values, the
+same as a merge from `Db`. To keep several merge operands for one key, the
+application writes them to separate files and publishes those files in order.
+`Lsm` takes no merge operator, so the application must configure the same merge
+operator on every reader, compactor, and later `Db` that processes those rows.
+Without it, reads and compaction of those keys fail.
 
 ### Lsm API
 
@@ -296,10 +301,12 @@ past writes that still need replay.
 its final path. We rely on upload success and supported transport checksums
 instead of reading the whole file back.
 
-`ingest` takes a batch of one or more artifacts. For each file, it uses the file
-ID to check that this `Lsm` client built the file. It also checks the path, the
-sequence, and the format. It publishes the files using their handles. There is
-no copy or second record scan. It does not wait for L0 space, because `Db` is
+`ingest` takes a batch of one or more artifacts. When a writer from `Lsm`
+closes, `Lsm` records the handle of the completed file. For each artifact,
+`ingest` finds that record by the file ID and publishes the recorded handle. It
+rejects an artifact without a record, such as one from a standalone writer. This
+holds even when the ID, path, sequence, and format match a pending file. There
+is no copy or second record scan. It does not wait for L0 space, because `Db` is
 closed and `Lsm` starts no compactor, so a wait can block forever. L0 can grow
 past `l0_max_ssts`, which adds manifest views and L0 reads for `DbReader`. A
 reader can avoid those reads with a checkpoint from before the load.
@@ -368,19 +375,20 @@ manifest and starts above the last imported sequence. `Db` can reuse the
 sequences of dropped writers. That is safe, because their files never publish.
 
 Before `Db` opens, the application can compact the ingested files.
-`CompactionRequest::Full` leaves L0 out, so this needs a running compactor or a
-`CompactionRequest::Spec` request that names the L0 files. With
-`enable_trivial_move`, files whose key ranges do not overlap move into sorted
-runs without a rewrite. If `Db` opens while L0 is at `l0_max_ssts`, its flushes
-wait until a compactor drains L0.
+`CompactionRequest::Full` leaves L0 out, so this needs a running compactor. The
+compactor can choose the files, or run a `CompactionRequest::Spec` request that
+names them. With `enable_trivial_move`, files whose key ranges do not overlap
+move into sorted runs without a rewrite. If `Db` opens while L0 is at
+`l0_max_ssts`, its flushes wait until a compactor drains L0.
 
 If close or publication has an uncertain outcome, the next client still has to
 fence older writers and perform the recovery checks.
 
 ### Read Visibility
 
-`Lsm` writes no WAL, so while it runs, a `DbReader` only follows the manifest. A
-reader sees an import after its next manifest poll.
+`Lsm` appends no WAL records for imported rows, so while it runs, a `DbReader`
+only follows the manifest. The default WAL writes one empty WAL file when `Lsm`
+fences the old writer. A reader sees an import after its next manifest poll.
 [#2186](https://github.com/slatedb/slatedb/pull/2186) proposes a refresh on
 demand, so that a reader can see an import as soon as `ingest` returns. A reader
 pinned to an earlier checkpoint keeps its old manifest.
@@ -442,9 +450,12 @@ Neither proves that an old, unreferenced file is safe to publish under the
 current GC cutoff.
 
 The application knows the sequences of its files before publication. After it
-opens a new `Lsm`, which fences the old one, it reads `last_l0_seq`. If no other
-client wrote since the lost response, a value at or above the highest sequence
-of the batch shows that the batch published.
+opens a new `Lsm`, which fences the old one, it reads the latest manifest with
+`Admin::read_manifest`. Suppose that the application controls every writer, and
+no other client wrote since the lost response. Then a `last_l0_seq` at or above
+the highest sequence of the batch shows that the batch published. A lower value
+shows that it did not. If another client wrote, and the application has no other
+evidence, the outcome stays unknown.
 
 ## Impact Analysis
 
@@ -556,7 +567,10 @@ look like flushed L0 files, so reads, compaction, trivial moves, checkpoints,
 clones, and projections need no change. Older readers, compactors, and garbage
 collectors can read a database after an import. Upgrade every `DbReader` that
 follows the WAL before the first import, so that it uses the WAL-first order
-from Read Visibility. A downgrade needs no extra steps.
+from Read Visibility. A downgrade needs no extra steps for the files. But an old
+`DbReader` that follows the WAL can again show write 102 before import 101 if it
+runs across a later handoff. So after a downgrade, do not run a handoff while
+such readers run.
 
 Block transformation must remain compatible across clients and compactors for
 the file's lifetime. Imported changes bypass WAL-based CDC, so consumers of that
@@ -567,17 +581,19 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
 
 - SST contracts: Round-trip `FromRows` and `Fixed(s)` files and standalone
   paths, including versions, timestamps, merges, tombstones, compression,
-  transformers, stats, and sequence ranges. Check that invalid ordering, repeated
-  keys in `Fixed(s)` files, and format violations are rejected before reaching
-  the builder. Merge effects must survive ordered ingested files and later `Db`
-  writes. Reject a `create_ts` above the `Lsm` clock.
+  transformers, stats, and sequence ranges. Check that invalid ordering,
+  repeated keys in `Fixed(s)` files, and format violations are rejected before
+  reaching the builder. Merge effects must survive ordered ingested files and
+  later `Db` writes. Reject a `create_ts` above the `Lsm` clock. Read and
+  compact merge operands with and without the merge operator.
 - Direct construction: Check that `Lsm` assigns the final path, ID, and sequence
   before writing and uploads each file once. Finish uploads out of order and
   verify that publication stays in allocation order. Abandon an earlier file
   before ingestion and verify that later files can progress without publishing
   the abandoned ID. Check that artifacts match the issued physical IDs and
-  file configuration. Segment routing must use the completed key bounds
-  without scanning records at publication time.
+  file configuration. Reject an artifact from a standalone writer that copies
+  the ID, path, sequence, and format of a pending file. Segment routing must
+  use the completed key bounds without scanning records at publication time.
 - Batches: Publish a batch in one manifest update, across segments. Reject an
   empty batch, a batch out of allocation order, and a batch with a gap that is
   not an abandoned file. A rejected batch abandons its files.
@@ -599,10 +615,12 @@ unchanged. New writer and `Lsm` bindings are follow-up work.
   publication. After a lost response, retry the identical update at the same
   manifest ID, including a delayed original write and a competing metadata
   update. Keep epoch fencing and metadata GC boundary checks in place. Another
-  writer publishing 102 must not count as proof that an import at 101 succeeded.
-  After a lost response, a new `Lsm` must report the right state of the batch.
-  Test writer and artifact cleanup, recovery of published state after restart,
-  and GC during uploads that outlast the minimum file age.
+  writer publishing 102 must not count as proof that an import at 101
+  succeeded. After a lost response and a fence, read the manifest. Under
+  exclusive control, it must show the real outcome of the batch. After another
+  writer publishes, the outcome must stay unknown. Test writer and artifact
+  cleanup, recovery of published state after restart, and GC during uploads
+  that outlast the minimum file age.
 - Segments: Route files belonging to one segment and reject missing bounds,
   mixed prefixes, and conflicting prefixes. Unrelated segments must stay intact.
 - Compatibility: Test that older readers, compactors, and garbage collectors
