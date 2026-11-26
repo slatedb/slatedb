@@ -80,37 +80,10 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
     ) -> BTreeMap<Reverse<u64>, RowEntry> {
         let mut filtered_versions = BTreeMap::new();
         for (_, entry) in versions.into_iter() {
-            // filter out any expired entries -- eventually we can consider
-            // abstracting this away into generic, pluggable compaction filters
-            // but for now we do it inline
-            let is_merge = matches!(&entry.value, ValueDeletable::Merge(_));
-            let entry = match entry.expire_ts.as_ref() {
-                Some(expire_ts) if *expire_ts <= compaction_start_ts => {
-                    if is_merge {
-                        // just skip expired merge entries rather than write a tombstone
-                        // as earlier merges may still be un-expired
-                        if let Some(m) = metrics {
-                            m.expired_entries_purged_merge.increment(1);
-                        }
-                        continue;
-                    }
-                    // for values, insert a tombstone instead of just filtering out the
-                    // value in the iterator because this may otherwise "revive"
-                    // an older version of the KV pair that has a larger TTL in
-                    // a lower level of the LSM tree
-                    if let Some(m) = metrics {
-                        m.expired_entries_purged_value.increment(1);
-                    }
-                    RowEntry {
-                        key: entry.key,
-                        value: Tombstone,
-                        seq: entry.seq,
-                        expire_ts: None,
-                        create_ts: entry.create_ts,
-                    }
-                }
-                _ => entry,
+            let Some(entry) = Self::apply_expiry(entry, compaction_start_ts, metrics) else {
+                continue;
             };
+            let is_merge = matches!(&entry.value, ValueDeletable::Merge(_));
 
             let entry_seq = entry.seq;
 
@@ -155,6 +128,36 @@ impl<T: RowEntryIterator> RetentionIterator<T> {
         }
 
         filtered_versions
+    }
+
+    /// Applies the same expiry rules to single-version and multi-version keys.
+    fn apply_expiry(
+        entry: RowEntry,
+        compaction_start_ts: i64,
+        metrics: Option<&RetentionMetrics>,
+    ) -> Option<RowEntry> {
+        match entry.expire_ts {
+            Some(expire_ts) if expire_ts <= compaction_start_ts => {
+                if matches!(&entry.value, ValueDeletable::Merge(_)) {
+                    if let Some(metrics) = metrics {
+                        metrics.expired_entries_purged_merge.increment(1);
+                    }
+                    return None;
+                }
+                // A tombstone prevents an older value in another SST from becoming visible.
+                if let Some(metrics) = metrics {
+                    metrics.expired_entries_purged_value.increment(1);
+                }
+                Some(RowEntry {
+                    key: entry.key,
+                    value: Tombstone,
+                    seq: entry.seq,
+                    expire_ts: None,
+                    create_ts: entry.create_ts,
+                })
+            }
+            _ => Some(entry),
+        }
     }
 }
 
@@ -205,16 +208,23 @@ impl<T: RowEntryIterator> RowEntryIterator for RetentionIterator<T> {
                     // Apply retention filtering to collected versions
                     let compaction_start_ts = self.compaction_start_ts;
                     let retention_min_seq = self.retention_min_seq;
-                    let metrics = self.metrics.clone();
-                    self.buffer.process_retention(|versions| {
-                        Self::apply_retention_filter(
-                            versions,
-                            compaction_start_ts,
-                            retention_min_seq,
-                            self.filter_tombstone,
-                            metrics.as_ref(),
-                        )
-                    })?;
+                    let filter_tombstone = self.filter_tombstone;
+                    let metrics = self.metrics.as_ref();
+                    self.buffer.process_retention(
+                        |entry| {
+                            Self::apply_expiry(entry, compaction_start_ts, metrics)
+                                .filter(|entry| !filter_tombstone || !entry.value.is_tombstone())
+                        },
+                        |versions| {
+                            Self::apply_retention_filter(
+                                versions,
+                                compaction_start_ts,
+                                retention_min_seq,
+                                filter_tombstone,
+                                metrics,
+                            )
+                        },
+                    );
                 }
             }
         }
@@ -237,14 +247,22 @@ impl<T: TrackedRowEntryIterator> TrackedRowEntryIterator for RetentionIterator<T
     }
 }
 
+#[derive(Default)]
+enum CurrentVersions {
+    #[default]
+    Empty,
+    Single(RowEntry),
+    Multiple(BTreeMap<Reverse<u64>, RowEntry>),
+}
+
 /// A buffer that collects and manages multiple versions of the same key from an iterator.
 ///
 /// This buffer implements a state machine to efficiently collect all versions of a key
 /// before applying retention filtering. It maintains the current key's versions and
 /// a preview of the next key's first entry.
 struct RetentionBuffer {
-    /// All versions of the current key being processed, ordered by sequence number (latest first)
-    current_versions: BTreeMap<Reverse<u64>, RowEntry>,
+    /// Keep one version inline. Order multiple versions by sequence number, newest first.
+    current_versions: CurrentVersions,
     /// The first entry of the next key (if available). This is used to note the current key has
     /// been exhausted, and await to process the current key versions.
     next: Option<RowEntry>,
@@ -274,7 +292,7 @@ impl RetentionBuffer {
     /// Creates a new empty retention buffer
     fn new() -> Self {
         Self {
-            current_versions: BTreeMap::new(),
+            current_versions: CurrentVersions::Empty,
             next: None,
             processed: false,
             end_of_input: false,
@@ -308,7 +326,7 @@ impl RetentionBuffer {
     ///
     /// Called when seeking to a new position in the iterator.
     fn clear(&mut self) {
-        self.current_versions.clear();
+        self.current_versions = CurrentVersions::Empty;
         self.next = None;
         self.processed = false;
         self.end_of_input = false;
@@ -327,50 +345,74 @@ impl RetentionBuffer {
     /// It maintains the invariant that all versions of the current key are collected
     /// before moving to the next key.
     fn push(&mut self, entry: RowEntry) {
-        let current_key = match self.current_versions.values().next() {
-            Some(entry) => entry.key.clone(),
-            None => {
-                // If current versions are empty, this is the first entry
-                self.current_versions.insert(Reverse(entry.seq), entry);
-                return;
-            }
+        let current = match &self.current_versions {
+            CurrentVersions::Empty => None,
+            CurrentVersions::Single(entry) => Some(entry),
+            CurrentVersions::Multiple(versions) => versions.values().next(),
         };
-
-        // Different key detected - store as next entry and signal key transition
-        if entry.key != current_key {
+        if current.is_some_and(|current| entry.key != current.key) {
             self.next = Some(entry);
             return;
         }
 
-        // Same key - append to current versions
-        self.current_versions.insert(Reverse(entry.seq), entry);
+        self.current_versions = match std::mem::take(&mut self.current_versions) {
+            CurrentVersions::Empty => CurrentVersions::Single(entry),
+            CurrentVersions::Single(first) => {
+                // Keep the map's ordering and replacement behavior for multiple versions.
+                let mut versions = BTreeMap::new();
+                versions.insert(Reverse(first.seq), first);
+                versions.insert(Reverse(entry.seq), entry);
+                CurrentVersions::Multiple(versions)
+            }
+            CurrentVersions::Multiple(mut versions) => {
+                versions.insert(Reverse(entry.seq), entry);
+                CurrentVersions::Multiple(versions)
+            }
+        };
     }
 
     /// Applies retention filtering to the collected versions
     fn process_retention(
         &mut self,
-        f: impl FnOnce(BTreeMap<Reverse<u64>, RowEntry>) -> BTreeMap<Reverse<u64>, RowEntry>,
-    ) -> Result<(), SlateDBError> {
+        filter_single: impl FnOnce(RowEntry) -> Option<RowEntry>,
+        filter_multiple: impl FnOnce(
+            BTreeMap<Reverse<u64>, RowEntry>,
+        ) -> BTreeMap<Reverse<u64>, RowEntry>,
+    ) {
         if self.processed {
-            return Ok(());
+            return;
         }
-        let current_versions = std::mem::take(&mut self.current_versions);
-        let processed_versions = f(current_versions);
-        self.current_versions = processed_versions;
+        self.current_versions = match std::mem::take(&mut self.current_versions) {
+            CurrentVersions::Empty => CurrentVersions::Empty,
+            CurrentVersions::Single(entry) => filter_single(entry)
+                .map(CurrentVersions::Single)
+                .unwrap_or_default(),
+            CurrentVersions::Multiple(versions) => {
+                CurrentVersions::Multiple(filter_multiple(versions))
+            }
+        };
         self.processed = true;
-        Ok(())
     }
 
     /// Pops the next entry from the current versions
     /// When current versions are exhausted, it promotes the next entry to become the new current key.
     fn pop(&mut self) -> Option<RowEntry> {
-        match self.current_versions.pop_first() {
-            Some((_, entry)) => Some(entry),
+        let entry = match std::mem::take(&mut self.current_versions) {
+            CurrentVersions::Empty => None,
+            CurrentVersions::Single(entry) => Some(entry),
+            CurrentVersions::Multiple(mut versions) => {
+                let entry = versions.pop_first().map(|(_, entry)| entry);
+                self.current_versions = CurrentVersions::Multiple(versions);
+                entry
+            }
+        };
+        match entry {
+            Some(entry) => Some(entry),
             None => {
                 // Current versions exhausted - promote next entry to current versions
                 let next = self.next.take();
                 if let Some(entry) = next {
-                    self.current_versions.insert(Reverse(entry.seq), entry);
+                    self.current_versions = CurrentVersions::Single(entry);
                     self.processed = false;
                     None // Signal that we need to continue processing
                 } else if self.end_of_input {
@@ -444,7 +486,7 @@ mod tests {
         build: || {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
-            buffer.process_retention(|versions| versions).unwrap();
+            buffer.process_retention(Some, |versions| versions);
             buffer
         },
         expected_current_versions_len: 1,
@@ -459,7 +501,7 @@ mod tests {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer.mark_end_of_input();
-            buffer.process_retention(|versions| versions).unwrap();
+            buffer.process_retention(Some, |versions| versions);
             buffer
         },
         expected_current_versions_len: 1,
@@ -489,7 +531,7 @@ mod tests {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer.push(RowEntry::new_value(b"key1", b"value2", 2));
-            buffer.process_retention(|versions| versions).unwrap();
+            buffer.process_retention(Some, |versions| versions);
             buffer.pop(); // Execute pop operation in the build function
             buffer
         },
@@ -505,7 +547,7 @@ mod tests {
             let mut buffer = RetentionBuffer::new();
             buffer.push(RowEntry::new_value(b"key1", b"value1", 1));
             buffer.push(RowEntry::new_value(b"key2", b"value2", 2));
-            buffer.process_retention(|versions| versions).unwrap();
+            buffer.process_retention(Some, |versions| versions);
             buffer.mark_end_of_input();
             buffer.clear(); // Execute clear operation in the build function
             buffer
@@ -550,7 +592,11 @@ mod tests {
 
         // Verify expected state
         assert_eq!(
-            buffer.current_versions.len(),
+            match &buffer.current_versions {
+                CurrentVersions::Empty => 0,
+                CurrentVersions::Single(_) => 1,
+                CurrentVersions::Multiple(versions) => versions.len(),
+            },
             test_case.expected_current_versions_len,
             "Test case '{}': current_versions_len mismatch",
             test_case.name
@@ -873,33 +919,28 @@ mod tests {
         ],
         filter_tombstone: false,
     })]
-    #[test]
     #[cfg(feature = "test-util")]
-    fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
+    #[tokio::test]
+    async fn test_retention_iterator_table_driven(#[case] test_case: RetentionIteratorTestCase) {
         use crate::test_utils::TestIterator;
 
-        // Test filtering directly to preserve each entry's timestamps.
-        let mut versions = BTreeMap::new();
-        for entry in test_case.input_entries.iter() {
-            versions.insert(Reverse(entry.seq), entry.clone());
-        }
-
-        let filtered_versions = RetentionIterator::<TestIterator>::apply_retention_filter(
-            versions,
-            test_case.compaction_start_ts,
+        let inner = test_case
+            .input_entries
+            .into_iter()
+            .fold(TestIterator::new(), TestIterator::with_row_entry);
+        let mut iter = RetentionIterator::new(
+            inner,
             test_case.retention_min_seq,
             test_case.filter_tombstone,
+            test_case.compaction_start_ts,
             None,
-        );
-
-        // Convert filtered versions back to expected order
+        )
+        .await
+        .unwrap();
         let mut actual_entries = Vec::new();
-        for (_, entry) in filtered_versions.iter() {
-            actual_entries.push(entry.clone());
+        while let Some(entry) = iter.next().await.unwrap() {
+            actual_entries.push(entry);
         }
-
-        // Sort by sequence number (descending) to match expected order
-        actual_entries.sort_by(|a, b| b.seq.cmp(&a.seq));
 
         assert_eq!(
             actual_entries.len(),
@@ -944,6 +985,35 @@ mod tests {
     }
 
     #[cfg(feature = "test-util")]
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn test_seek_clears_single_and_multiple_versions(#[case] multiple: bool) {
+        use crate::test_utils::TestIterator;
+
+        let mut inner = TestIterator::new().with_entry(b"a", b"new", 3);
+        if multiple {
+            inner = inner.with_entry(b"a", b"old", 2);
+        }
+        inner = inner.with_entry(b"b", b"b", 4).with_entry(b"c", b"c", 5);
+        let mut iter = RetentionIterator::new(inner, Some(0), false, 1000, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            iter.next().await.unwrap().unwrap().value,
+            ValueDeletable::Value("new".into())
+        );
+        iter.seek(b"c").await.unwrap();
+        assert_eq!(
+            iter.next().await.unwrap(),
+            Some(RowEntry::new_value(b"c", b"c", 5))
+        );
+        assert!(iter.next().await.unwrap().is_none());
+        assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[cfg(feature = "test-util")]
     mod expired_entries_metrics {
         use super::*;
         use crate::compactor::stats::{
@@ -984,6 +1054,50 @@ mod tests {
                 EXPIRED_ENTRIES_PURGED,
                 &[(ENTRY_TYPE_LABEL, ENTRY_TYPE_MERGE)],
             )
+        }
+
+        #[rstest]
+        #[case(false)]
+        #[case(true)]
+        #[tokio::test]
+        async fn iterator_handles_key_transitions_and_duplicate_sequences(
+            #[case] filter_tombstone: bool,
+        ) {
+            let (recorder, metrics) = build_metrics();
+            let inner = TestIterator::new()
+                .with_row_entry(RowEntry::new_merge(b"a", b"expired", 1).with_expire_ts(1000))
+                .with_row_entry(RowEntry::new_value(b"b", b"expired", 2).with_expire_ts(999))
+                .with_entry(b"c", b"old", 10)
+                .with_entry(b"c", b"boundary", 20)
+                .with_row_entry(RowEntry::new_merge(b"c", b"replaced", 30).with_expire_ts(500))
+                .with_entry(b"c", b"new", 30)
+                .with_row_entry(RowEntry::new_merge(b"d", b"merge", 31))
+                .with_row_entry(RowEntry::new_tombstone(b"e", 32))
+                .with_row_entry(RowEntry::new_value(b"f", b"live", 33).with_expire_ts(1001));
+            let mut iter =
+                RetentionIterator::new(inner, Some(25), filter_tombstone, 1000, Some(metrics))
+                    .await
+                    .unwrap();
+            let mut expected = vec![];
+            if !filter_tombstone {
+                expected.push(RowEntry::new_tombstone(b"b", 2));
+            }
+            expected.extend([
+                RowEntry::new_value(b"c", b"new", 30),
+                RowEntry::new_value(b"c", b"boundary", 20),
+                RowEntry::new_merge(b"d", b"merge", 31),
+            ]);
+            if !filter_tombstone {
+                expected.push(RowEntry::new_tombstone(b"e", 32));
+            }
+            expected.push(RowEntry::new_value(b"f", b"live", 33).with_expire_ts(1001));
+            for entry in expected {
+                assert_eq!(iter.next().await.unwrap(), Some(entry));
+            }
+            assert!(iter.next().await.unwrap().is_none());
+            assert!(iter.next().await.unwrap().is_none());
+            assert_eq!(value_count(recorder.as_ref()), Some(1));
+            assert_eq!(merge_count(recorder.as_ref()), Some(1));
         }
 
         #[test]

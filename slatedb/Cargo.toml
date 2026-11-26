@@ -179,6 +179,10 @@ required-features = ["foyer"]
 [lints]
 workspace = true
 
+[[example]]
+name = "retention_throughput"
+required-features = ["wal_disable", "lz4", "zstd"]
+
 [[test]]
 name = "foyer_cache_flush"
 required-features = ["foyer"]
