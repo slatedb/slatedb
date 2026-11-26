@@ -969,13 +969,13 @@ impl CompactorState {
         &self.compactions
     }
 
-    /// The `.compactions` invariant rejects a new job with an older id than a stored job.
+    /// Raises older, unsaved proposals to the newest stored job timestamp.
     pub(crate) fn advance_unpersisted_ids(&mut self, stored: &Compactions) {
         let Some(watermark) = stored.max_id_timestamp_ms() else {
             return;
         };
         let recent = &mut self.compactions.value.core.recent_compactions;
-        // The invariant accepts stored ids, and an admin caller reads its job by the stored id.
+        // Admin callers use the stored ID to look up their job.
         let behind = recent
             .extract_if(..Ulid::from_parts(watermark, 0), |id, c| {
                 c.status() == CompactionStatus::Submitted && stored.get(id).is_none()

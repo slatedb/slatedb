@@ -546,11 +546,10 @@ impl Compactor {
         let mut attempted: Option<Ulid> = None;
         loop {
             let mut dirty = stored_compactions.prepare_dirty()?;
-            // A write can persist and still report a conflict. Then the reload contains the job.
+            // The store can report a conflict after it saves the job.
             if let Some(id) = attempted.filter(|id| dirty.value.get(id).is_some()) {
                 return Ok(id);
             }
-            // The `.compactions` invariant rejects a new job with an older id than a stored job.
             let compaction_id = rand.rng().gen_ulid_at_least(
                 system_clock.as_ref(),
                 dirty.value.max_id_timestamp_ms().unwrap_or(0),
@@ -4503,7 +4502,6 @@ mod tests {
         .unwrap();
 
         if report_conflict {
-            // The write persists the job but reports a conflict.
             os.arm_put_succeeds_but_returns_already_exists_once();
         }
         let spec = CompactionSpec::new(vec![SourceId::SortedRun(0)], 0);

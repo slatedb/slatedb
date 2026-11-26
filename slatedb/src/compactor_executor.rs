@@ -113,7 +113,6 @@ struct SubcompactionArgs {
     is_dest_last_run: bool,
     retention_min_seq: Option<u64>,
     output_ssts: Vec<SsTableHandle>,
-    // The `.compactions` invariant rejects an output SST id older than its job id.
     output_id_floor_ms: u64,
 }
 
