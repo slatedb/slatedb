@@ -7,7 +7,9 @@ use fail_parallel::{fail_point, FailPointRegistry};
 use futures::{future::join_all, StreamExt};
 use log::{debug, warn};
 use object_store::path::Path;
-use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutMode, PutOptions};
+use object_store::{
+    GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutMode, PutOptions, PutPayload,
+};
 use serde::Serialize;
 use slatedb_common::object_metadata::IdentifiedObjectMetadata;
 use slatedb_common::ObjectMetadata;
@@ -17,7 +19,9 @@ use crate::db_state::{SsTableInfo, SstType};
 use crate::error::SlateDBError;
 use crate::flatbuffer_types::SsTableIndexOwned;
 use crate::format::block::Block;
-use crate::format::sst::{EncodedSsTable, SsTableFormat};
+#[cfg(test)]
+use crate::format::sst::EncodedSsTable;
+use crate::format::sst::SsTableFormat;
 use crate::object_store_tag::{ObjectStoreCallTag, TableStoreKind};
 use crate::paths::PathResolver;
 use crate::sst_io::{read_with_validation_retry, ReadOnlyObject};
@@ -193,16 +197,13 @@ impl WalTableStore {
     }
 
     /// Writes a WAL SST with create-if-absent semantics required for fencing.
+    #[cfg(test)]
     pub(crate) async fn write_sst(
         &self,
         wal_id: WalFileId,
         encoded_sst: &EncodedSsTable,
     ) -> Result<WalFileHandle, SlateDBError> {
-        fail_point!(self.fp_registry.clone(), "write-wal-sst-io-error", |_| {
-            Err(slatedb_io_error())
-        });
-
-        self.write_create(wal_id, encoded_sst.remaining_as_bytes())
+        self.write_encoded(wal_id, encoded_sst.remaining_as_payload())
             .await?;
         Ok(WalFileHandle::new(
             wal_id,
@@ -211,15 +212,31 @@ impl WalTableStore {
         ))
     }
 
+    /// Writes a WAL SST's encoded blocks and footer with create-if-absent
+    /// semantics required for fencing. The caller may drop the encoded SST
+    /// the payload came from, and with it the decoded blocks, before the
+    /// upload starts.
+    pub(crate) async fn write_encoded(
+        &self,
+        wal_id: WalFileId,
+        payload: PutPayload,
+    ) -> Result<(), SlateDBError> {
+        fail_point!(self.fp_registry.clone(), "write-wal-sst-io-error", |_| {
+            Err(slatedb_io_error())
+        });
+
+        self.write_create(wal_id, payload).await
+    }
+
     /// Writes a zero-byte WAL object as a fencing marker.
     pub(crate) async fn write_wal_fence(&self, wal_id: WalFileId) -> Result<(), SlateDBError> {
         fail_point!(self.fp_registry.clone(), "write-wal-sst-io-error", |_| {
             Err(slatedb_io_error())
         });
-        self.write_create(wal_id, Bytes::new()).await
+        self.write_create(wal_id, PutPayload::new()).await
     }
 
-    async fn write_create(&self, wal_id: WalFileId, data: Bytes) -> Result<(), SlateDBError> {
+    async fn write_create(&self, wal_id: WalFileId, data: PutPayload) -> Result<(), SlateDBError> {
         let path = self.path(wal_id);
         let opts = PutOptions {
             mode: PutMode::Create,
@@ -227,7 +244,7 @@ impl WalTableStore {
             ..PutOptions::default()
         };
         self.object_store
-            .put_opts(&path, data.into(), opts)
+            .put_opts(&path, data, opts)
             .await
             .map_err(|error| match error {
                 object_store::Error::AlreadyExists { .. } => {
