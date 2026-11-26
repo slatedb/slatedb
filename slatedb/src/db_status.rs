@@ -34,6 +34,13 @@ pub struct DbStatus {
     /// than or equal to this value are durably persisted to object storage
     /// and will survive process restarts.
     pub durable_seq: u64,
+    /// The committed sequence number. Every write that a read can see without
+    /// requiring durability (and without `dirty`) has a sequence number less
+    /// than or equal to this value: a commit is reported here before reads can
+    /// see it. It is never less than `durable_seq`. A commit updates it without
+    /// notifying subscribers, so every snapshot read after the commit carries
+    /// it.
+    pub committed_seq: u64,
     /// The current in-memory manifest snapshot observed by this handle,
     /// paired with its manifest version ID.
     pub current_manifest: VersionedManifest,
@@ -112,6 +119,7 @@ impl DbStatusManager {
     ) -> Self {
         let (tx, _) = watch::channel(DbStatus {
             durable_seq: initial_durable_seq,
+            committed_seq: initial_durable_seq,
             current_manifest: initial_manifest,
             memtable_segments: initial_memtable_segments,
             close_reason: None,
@@ -129,6 +137,7 @@ impl DbStatusManager {
     pub(crate) fn report_fence_manifest(&self, durable_seq: u64, manifest: VersionedManifest) {
         self.tx.send_if_modified(|s| {
             s.durable_seq = durable_seq;
+            s.committed_seq = s.committed_seq.max(durable_seq);
             s.current_manifest = manifest;
             true
         });
@@ -138,10 +147,20 @@ impl DbStatusManager {
         self.tx.send_if_modified(|s| {
             if seq > s.durable_seq {
                 s.durable_seq = seq;
+                s.committed_seq = s.committed_seq.max(seq);
                 true
             } else {
                 false
             }
+        });
+    }
+
+    /// Advances the committed sequence number without notifying subscribers,
+    /// since it moves with every write.
+    pub(crate) fn report_committed_seq(&self, seq: u64) {
+        self.tx.send_if_modified(|s| {
+            s.committed_seq = s.committed_seq.max(seq);
+            false
         });
     }
 
@@ -623,5 +642,48 @@ mod tests {
 
         // then
         assert!(!rx.has_changed().unwrap());
+    }
+
+    #[test]
+    fn should_advance_committed_seq_without_notifying() {
+        // given
+        let mgr = DbStatusManager::new(3);
+        let mut rx = mgr.subscribe();
+        rx.borrow_and_update();
+        assert_eq!(mgr.status().committed_seq, 3);
+
+        // when
+        mgr.report_committed_seq(7);
+        mgr.report_committed_seq(5);
+
+        // then
+        assert!(!rx.has_changed().unwrap());
+        assert_eq!(rx.borrow().committed_seq, 7);
+        assert_eq!(mgr.status().committed_seq, 7);
+        assert_eq!(mgr.status().durable_seq, 3);
+    }
+
+    #[test]
+    fn should_keep_committed_seq_at_least_durable_seq() {
+        // given
+        let mgr = DbStatusManager::new(0);
+        mgr.report_committed_seq(4);
+
+        // when
+        mgr.report_durable_seq(9);
+
+        // then
+        let status = mgr.status();
+        assert_eq!(status.durable_seq, 9);
+        assert_eq!(status.committed_seq, 9);
+
+        // when
+        mgr.report_committed_seq(12);
+        mgr.report_durable_seq(10);
+
+        // then
+        let status = mgr.status();
+        assert_eq!(status.durable_seq, 10);
+        assert_eq!(status.committed_seq, 12);
     }
 }
