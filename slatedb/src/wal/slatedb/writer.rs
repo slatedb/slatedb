@@ -11,7 +11,7 @@ use crate::types::RowEntry;
 use crate::utils::SafeSender;
 use crate::utils::{format_bytes_si, WatchableOnceCellReader};
 use crate::wal;
-use crate::wal::{WalError, WalEvent, WalFlushResult, WalStatus, WalWriter};
+use crate::wal::{FlushResultFuture, WalError, WalEvent, WalFlushResult, WalStatus, WalWriter};
 use async_trait::async_trait;
 use futures::{stream::BoxStream, FutureExt, StreamExt};
 use log::{error, trace, warn};
@@ -179,7 +179,7 @@ impl SlateDbWalWriter {
                     .compare_exchange(last, flush_epoch, Ordering::Relaxed, Ordering::Relaxed)
                     .is_ok()
             {
-                self.send_flush_request()?;
+                self.send_flush_request(None)?;
             }
         }
 
@@ -191,11 +191,14 @@ impl SlateDbWalWriter {
     }
 
     /// Send a flush request to the background flush worker.
-    fn send_flush_request(&self) -> Result<(), WalError> {
+    fn send_flush_request(
+        &self,
+        result_tx: Option<oneshot::Sender<Result<(), WalError>>>,
+    ) -> Result<(), WalError> {
         self.stats.flush_requests.increment(1);
         self.inner
             .read()
-            .send_flush_msg(WalFlushWork::FreezeAndFlush)
+            .send_flush_msg(WalFlushWork::FreezeAndFlush { result_tx })
     }
 }
 
@@ -246,6 +249,17 @@ impl WalWriter for SlateDbWalWriter {
             }
             .boxed(),
         })
+    }
+
+    async fn request_flush(&mut self) -> Result<FlushResultFuture, WalError> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.send_flush_request(Some(result_tx))?;
+        Ok(async {
+            result_rx
+                .await
+                .unwrap_or_else(|e| Err(WalError::InternalError(Arc::new(e))))
+        }
+        .boxed())
     }
 
     async fn close(&mut self) -> Result<(), WalError> {
@@ -455,9 +469,12 @@ impl WalBufferIterator {
 }
 
 enum WalFlushWork {
-    /// Freeze the current WAL, then flush all frozen WALs. Sent by the ticker and
-    /// when the current WAL exceeds its size limit.
-    FreezeAndFlush,
+    /// Freeze the current WAL when this message runs, then flush all frozen WALs.
+    /// Sent by the ticker, when the current WAL exceeds its size limit, and by
+    /// plain flush requests that do not need a frozen WAL ID up front.
+    FreezeAndFlush {
+        result_tx: Option<oneshot::Sender<Result<(), WalError>>>,
+    },
     /// Flush the already-frozen WALs without freezing the current one. The caller
     /// must freeze the current WAL first if it wants it included in the flush.
     FlushFrozen {
@@ -471,7 +488,7 @@ enum WalFlushWork {
 impl Debug for WalFlushWork {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            WalFlushWork::FreezeAndFlush => f.write_str("FreezeAndFlush"),
+            WalFlushWork::FreezeAndFlush { .. } => f.write_str("FreezeAndFlush"),
             WalFlushWork::FlushFrozen { .. } => f.write_str("FlushFrozen"),
             WalFlushWork::Subscribe { .. } => f.write_str("Subscribe"),
         }
@@ -556,7 +573,7 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
         if let Some(max_flush_interval) = self.max_flush_interval {
             return vec![MessageTickerDef::new(
                 max_flush_interval,
-                Box::new(|| WalFlushWork::FreezeAndFlush),
+                Box::new(|| WalFlushWork::FreezeAndFlush { result_tx: None }),
             )];
         }
         vec![]
@@ -564,7 +581,13 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
 
     async fn handle(&mut self, message: WalFlushWork) -> Result<(), SlateDBError> {
         match message {
-            WalFlushWork::FreezeAndFlush => self.do_flush(true).await,
+            WalFlushWork::FreezeAndFlush { result_tx } => {
+                let result = self.do_flush(true).await;
+                if let Some(result_tx) = result_tx {
+                    let _ = result_tx.send(result.clone().map_err(WalError::from));
+                }
+                Ok(result?)
+            }
             WalFlushWork::FlushFrozen { result_tx } => {
                 let result = self.do_flush(false).await;
                 let _ = result_tx.send(result.clone().map_err(WalError::from));
@@ -599,7 +622,11 @@ impl MessageHandler<WalFlushWork> for WalFlushHandler {
         // drain remaining messages
         while let Some(msg) = messages.next().await {
             match msg {
-                WalFlushWork::FreezeAndFlush => {}
+                WalFlushWork::FreezeAndFlush { result_tx } => {
+                    if let Some(result_tx) = result_tx {
+                        let _ = result_tx.send(Err(error.clone()));
+                    }
+                }
                 WalFlushWork::FlushFrozen { result_tx } => {
                     let _ = result_tx.send(Err(error.clone()));
                 }
@@ -980,6 +1007,138 @@ mod tests {
             assert!(iter.next().await.unwrap().is_none());
         }
         writer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_request_flush_includes_writes_appended_before_flush_runs() {
+        // No ticker: its first tick fires immediately and would freeze the current WAL.
+        let (mut writer, table_store, _, recorder) =
+            setup_wal_buffer_with_args(None, Arc::new(|_status| {})).await;
+        writer
+            .append(&[make_entry("before", "v1", 1, None)])
+            .await
+            .unwrap();
+        let flush = writer.request_flush().await.unwrap();
+        let status = writer.status().unwrap();
+        assert_eq!(status.last_flushed_wal_id, 0);
+        assert_eq!(status.buffered_wal_entries_count, 1);
+
+        // Appended after request_flush() queued the work but before the flush task runs.
+        writer
+            .append(&[make_entry("after", "v2", 2, None)])
+            .await
+            .unwrap();
+        flush.await.unwrap();
+
+        // Both entries land in one WAL object and become durable together.
+        let status = writer.status().unwrap();
+        assert_eq!(status.last_flushed_wal_id, 1);
+        assert_eq!(status.last_flushed_seq, Some(2));
+        assert_eq!(status.buffered_wal_entries_count, 0);
+        assert_eq!(lookup_metric(&recorder, stats::WAL_BUFFER_FLUSHES), Some(1));
+
+        let table = table_store.open_sst(1.into()).await.unwrap();
+        let mut iter =
+            WalSstIterator::new(table, table_store.clone(), WalSstIteratorOptions::default())
+                .await
+                .unwrap();
+        let first = iter.next().await.unwrap().unwrap();
+        assert_eq!(first.key, Bytes::from("before"));
+        assert_eq!(first.seq, 1);
+        let second = iter.next().await.unwrap().unwrap();
+        assert_eq!(second.key, Bytes::from("after"));
+        assert_eq!(second.seq, 2);
+        assert!(iter.next().await.unwrap().is_none());
+
+        // Requesting a flush with an empty buffer succeeds without writing another WAL.
+        writer.request_flush().await.unwrap().await.unwrap();
+        assert_eq!(writer.status().unwrap().last_flushed_wal_id, 1);
+        assert_eq!(lookup_metric(&recorder, stats::WAL_BUFFER_FLUSHES), Some(1));
+        writer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_request_flush_interleaved_with_eager_flush() {
+        let (mut writer, table_store, _, _) =
+            setup_wal_buffer_with_args(None, Arc::new(|_status| {})).await;
+
+        // Eager flush followed by deferred request_flush: eager flush cuts WAL 1, and
+        // request_flush coalesces both later writes into WAL 2.
+        writer
+            .append(&[make_entry("k1", "v1", 1, None)])
+            .await
+            .unwrap();
+        let eager = writer.flush().await.unwrap();
+        assert_eq!(eager.wal_id, 1);
+        writer
+            .append(&[make_entry("k2", "v2", 2, None)])
+            .await
+            .unwrap();
+        let deferred = writer.request_flush().await.unwrap();
+        writer
+            .append(&[make_entry("k3", "v3", 3, None)])
+            .await
+            .unwrap();
+        eager.completion.await.unwrap();
+        deferred.await.unwrap();
+
+        let status = writer.status().unwrap();
+        assert_eq!(status.last_flushed_wal_id, 2);
+        assert_eq!(status.last_flushed_seq, Some(3));
+
+        // Deferred request_flush followed by eager flush: eager flush freezes WAL 3 with
+        // rows appended before it; rows after it go to WAL 4.
+        writer
+            .append(&[make_entry("k4", "v4", 4, None)])
+            .await
+            .unwrap();
+        let deferred = writer.request_flush().await.unwrap();
+        writer
+            .append(&[make_entry("k5", "v5", 5, None)])
+            .await
+            .unwrap();
+        let eager = writer.flush().await.unwrap();
+        assert_eq!(eager.wal_id, 3);
+        writer
+            .append(&[make_entry("k6", "v6", 6, None)])
+            .await
+            .unwrap();
+        deferred.await.unwrap();
+        eager.completion.await.unwrap();
+
+        let status = writer.status().unwrap();
+        assert_eq!(status.last_flushed_wal_id, 4);
+        assert_eq!(status.last_flushed_seq, Some(6));
+
+        for (wal_id, expected_keys) in [
+            (1, vec!["k1"]),
+            (2, vec!["k2", "k3"]),
+            (3, vec!["k4", "k5"]),
+            (4, vec!["k6"]),
+        ] {
+            let table = table_store.open_sst(wal_id.into()).await.unwrap();
+            let mut iter =
+                WalSstIterator::new(table, table_store.clone(), WalSstIteratorOptions::default())
+                    .await
+                    .unwrap();
+            let mut actual_keys = Vec::new();
+            while let Some(entry) = iter.next().await.unwrap() {
+                actual_keys.push(String::from_utf8(entry.key.to_vec()).unwrap());
+            }
+            assert_eq!(actual_keys, expected_keys);
+        }
+        writer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_request_flush_returns_error_when_closed() {
+        let (mut writer, _, _, _) = setup_wal_buffer_with_args(None, Arc::new(|_status| {})).await;
+        writer.close().await.unwrap();
+
+        assert!(matches!(
+            writer.request_flush().await,
+            Err(WalError::Closed)
+        ));
     }
 
     #[tokio::test]
