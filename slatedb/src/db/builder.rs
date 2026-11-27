@@ -140,7 +140,7 @@ use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheAndScope, DbCacheWrapper, UnownedDbCache};
-use crate::db_reader::{DbReader, DbReaderMode};
+use crate::db_reader::{DbReader, DbReaderMode, ReaderRowCacheOptions};
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
@@ -1867,6 +1867,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
+    row_cache: Option<Arc<dyn RowCache>>,
 }
 
 impl<P: Into<Path>> DbReaderBuilder<P> {
@@ -1887,7 +1888,19 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
+            row_cache: None,
         }
+    }
+
+    /// Attaches a pluggable logical [`RowCache`] to the reader.
+    ///
+    /// The reader's manifest poller owns the cache's write side: it feeds the cache the writes it
+    /// replays from the WAL before the reader's sequence number advances past them. Reads and
+    /// scans consult the cache first, as on a [`crate::Db`]. With a row cache, a reader in
+    /// [`DbReaderMode::Checkpoint`] runs a poller too, which only serves the cache.
+    pub fn with_row_cache(mut self, row_cache: Arc<dyn RowCache>) -> Self {
+        self.row_cache = Some(row_cache);
+        self
     }
 
     /// Sets how the reader chooses and refreshes database state.
@@ -2020,6 +2033,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// Builds and returns a DbReader instance.
     pub async fn build(self) -> Result<DbReader, crate::Error> {
         let path = self.path.into();
+        let metrics_recorder = Arc::clone(&self.metrics_recorder);
         let recorder = MetricsRecorderHelper::new(
             self.metrics_recorder,
             self.options.metric_level.unwrap_or_default(),
@@ -2110,7 +2124,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             wal_object_store,
             sst_format,
             path_resolver,
-            fp_registry,
+            Arc::clone(&fp_registry),
             TableStoreKind::Reader,
         ));
 
@@ -2126,6 +2140,11 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             self.system_clock,
             self.rand,
             recorder,
+            self.row_cache.map(|cache| ReaderRowCacheOptions {
+                cache,
+                metrics_recorder,
+                fp_registry,
+            }),
         )
         .await
         .map_err(crate::Error::from)

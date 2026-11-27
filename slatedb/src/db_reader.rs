@@ -18,11 +18,14 @@ use {
         },
         mem_table::{ImmutableMemtable, KVTable, WritableKVTable},
         merge_operator::MergeOperatorType,
-        oracle::DbReaderOracle,
+        oracle::{DbReaderOracle, Oracle},
         prefix_extractor::PrefixExtractor,
         reader::{DbStateReader, Reader, ScanContext},
+        row_cache::{
+            scan_start_key, GetOutcome, OpenContext as RowCacheOpenContext, RowCache, ScanOutcome,
+        },
         tablestore::TableStore,
-        types::KeyValue,
+        types::{KeyValue, RowEntry},
         utils::IdGenerator,
         wal::slatedb::store::WalTableStore,
         wal::WalReader as WalReaderTrait,
@@ -31,13 +34,14 @@ use {
     },
     async_trait::async_trait,
     bytes::Bytes,
+    fail_parallel::FailPointRegistry,
     futures::stream::BoxStream,
     log::{info, warn},
     object_store::{path::Path, ObjectStore},
-    parking_lot::RwLock,
-    slatedb_common::{clock::SystemClock, DbRand},
+    parking_lot::{Mutex, RwLock},
+    slatedb_common::{clock::SystemClock, metrics::MetricsRecorder, DbRand},
     std::{
-        collections::{BTreeSet, VecDeque},
+        collections::{hash_map::Entry, BTreeSet, HashMap, VecDeque},
         ops::Sub,
         sync::{Arc, LazyLock},
     },
@@ -109,35 +113,101 @@ impl WalReplayEnd {
 pub struct DbReader {
     inner: Arc<DbReaderInner>,
     task_executor: MessageHandlerExecutor,
+    /// `None` when no manifest poller runs (a pinned reader without a row cache).
+    poller: Option<async_channel::Sender<DbReaderMessage>>,
 }
 
-struct DbReaderInner {
+pub(crate) struct DbReaderInner {
     manifest_store: Arc<ManifestStore>,
-    table_store: Arc<TableStore>,
+    pub(crate) table_store: Arc<TableStore>,
     wal_reader: Arc<dyn WalReaderTrait>,
     options: DbReaderOptions,
     mode: DbReaderMode,
-    state: RwLock<Arc<ReaderState>>,
-    system_clock: Arc<dyn SystemClock>,
-    oracle: Arc<DbReaderOracle>,
-    reader: Reader,
-    status_manager: DbStatusManager,
+    pub(crate) state: RwLock<Arc<ReaderState>>,
+    pub(crate) system_clock: Arc<dyn SystemClock>,
+    pub(crate) oracle: Arc<DbReaderOracle>,
+    pub(crate) reader: Reader,
+    pub(crate) status_manager: DbStatusManager,
     segment_extractor: Option<Arc<dyn PrefixExtractor>>,
-    rand: Arc<DbRand>,
+    pub(crate) rand: Arc<DbRand>,
     /// Kept alive so the underlying `MetricsRecorder` is not dropped while
     /// metric handles in `DbStats` (and other stats structs) are still in use.
     /// See: https://github.com/slatedb/slatedb/issues/1469
     #[allow(dead_code)]
     recorder: slatedb_common::metrics::MetricsRecorderHelper,
+    row_cache: Option<ReaderRowCache>,
+    /// Held shared while a host snapshot pins the current checkpoint and exclusively while the
+    /// poller replaces it, so a snapshot never pins a checkpoint being deleted.
+    checkpoint_replace: tokio::sync::RwLock<()>,
+    checkpoint_pins: Arc<CheckpointPins>,
+}
+
+struct ReaderRowCache {
+    cache: Arc<dyn RowCache>,
+    /// The newest state the poller built, installed before the cache is fed its writes, so the
+    /// cache always reads a state holding every write it applied.
+    view: RwLock<Arc<ReaderState>>,
+}
+
+pub(crate) struct ReaderRowCacheOptions {
+    pub(crate) cache: Arc<dyn RowCache>,
+    pub(crate) metrics_recorder: Arc<dyn MetricsRecorder>,
+    pub(crate) fp_registry: Arc<FailPointRegistry>,
+}
+
+/// Pins that live [`ReaderSnapshotGuard`]s hold on reader checkpoints, and the checkpoints the
+/// poller superseded while pinned, which it refreshes until unpinned and then deletes.
+#[derive(Default)]
+struct CheckpointPins {
+    counts: Mutex<HashMap<Uuid, usize>>,
+    retired: Mutex<Vec<Checkpoint>>,
+}
+
+impl CheckpointPins {
+    fn pin(&self, id: Uuid) {
+        *self.counts.lock().entry(id).or_default() += 1;
+    }
+
+    fn unpin(&self, id: Uuid) {
+        let mut counts = self.counts.lock();
+        if let Entry::Occupied(mut count) = counts.entry(id) {
+            *count.get_mut() -= 1;
+            if *count.get() == 0 {
+                count.remove();
+            }
+        }
+    }
+
+    fn is_pinned(&self, id: Uuid) -> bool {
+        self.counts.lock().contains_key(&id)
+    }
+}
+
+/// The reader side of a [`HostSnapshot`](crate::row_cache::HostSnapshot): a state and, in
+/// [`DbReaderMode::ManagedCheckpoint`], a pin on its checkpoint.
+pub(crate) struct ReaderSnapshotGuard {
+    pub(crate) seq: u64,
+    _state: Arc<ReaderState>,
+    pin: Option<(Arc<CheckpointPins>, Uuid)>,
+}
+
+impl Drop for ReaderSnapshotGuard {
+    fn drop(&mut self) {
+        if let Some((pins, id)) = self.pin.take() {
+            pins.unpin(id);
+        }
+    }
 }
 
 #[derive(Debug)]
-enum DbReaderMessage {
+pub(crate) enum DbReaderMessage {
     PollManifest,
+    /// Sent by [`Host::request_drain`](crate::row_cache::Host::request_drain).
+    DrainRowCache,
 }
 
 #[derive(Clone)]
-struct ReaderState {
+pub(crate) struct ReaderState {
     manifest_id: u64,
     checkpoint: Option<Checkpoint>,
     manifest: Manifest,
@@ -271,8 +341,73 @@ impl DbReaderInner {
             segment_extractor,
             rand,
             recorder,
+            row_cache: None,
+            checkpoint_replace: tokio::sync::RwLock::new(()),
+            checkpoint_pins: Arc::new(CheckpointPins::default()),
         };
         Ok(inner)
+    }
+
+    fn attach_row_cache(&mut self, cache: Arc<dyn RowCache>) {
+        let view = RwLock::new(Arc::clone(&self.state.read()));
+        self.row_cache = Some(ReaderRowCache { cache, view });
+    }
+
+    pub(crate) fn row_cache_view(&self) -> Arc<ReaderState> {
+        match &self.row_cache {
+            Some(row_cache) => Arc::clone(&row_cache.view.read()),
+            None => Arc::clone(&self.state.read()),
+        }
+    }
+
+    /// Snapshots the current state for [`Host::snapshot`](crate::row_cache::Host::snapshot).
+    pub(crate) async fn host_snapshot(&self) -> Result<ReaderSnapshotGuard, SlateDBError> {
+        self.check_closed()?;
+        let _replace = self.checkpoint_replace.read().await;
+        self.check_closed()?;
+        let state = Arc::clone(&self.state.read());
+        let seq = state
+            .last_remote_persisted_seq
+            .max(state.core().last_l0_seq);
+        let pin = match (self.mode, state.checkpoint.as_ref()) {
+            (DbReaderMode::ManagedCheckpoint, Some(checkpoint)) => {
+                self.checkpoint_pins.pin(checkpoint.id);
+                Some((Arc::clone(&self.checkpoint_pins), checkpoint.id))
+            }
+            _ => None,
+        };
+        Ok(ReaderSnapshotGuard {
+            seq,
+            _state: state,
+            pin,
+        })
+    }
+
+    /// Installs `new_state` as the row cache's view and feeds the cache its writes above the
+    /// reader's seq, before that seq advances. Writes in an L0 above the reader's seq were never
+    /// replayed, so the cache is invalidated first. Runs on the poller task only.
+    fn feed_row_cache(&self, new_state: &Arc<ReaderState>) {
+        let Some(row_cache) = &self.row_cache else {
+            return;
+        };
+        *row_cache.view.write() = Arc::clone(new_state);
+        let prev_seq = self.oracle.last_committed_seq();
+        let mut applied = prev_seq;
+        let last_l0_seq = new_state.core().last_l0_seq;
+        if last_l0_seq > prev_seq {
+            row_cache.cache.invalidate_all(prev_seq, last_l0_seq);
+            applied = last_l0_seq;
+        }
+        for batch in writes_after(new_state.imm_memtable(), applied) {
+            let seq = batch[0].seq;
+            row_cache.cache.apply_write(&batch, applied);
+            applied = seq;
+        }
+        if new_state.last_remote_persisted_seq > applied {
+            row_cache
+                .cache
+                .drain_writer(new_state.last_remote_persisted_seq);
+        }
     }
 
     async fn get_or_create_checkpoint(
@@ -321,10 +456,26 @@ impl DbReaderInner {
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, SlateDBError> {
         self.check_closed()?;
+        let key = key.as_ref();
+        let miss = if let Some(row_cache) = &self.row_cache {
+            match row_cache.cache.get(key, options, None) {
+                GetOutcome::Hit(result) => {
+                    return result.map_err(|err| SlateDBError::RowCache(Arc::new(err)));
+                }
+                GetOutcome::Miss(token) => token,
+            }
+        } else {
+            None
+        };
         let db_state = Arc::clone(&self.state.read());
-        self.reader
+        let result = self
+            .reader
             .get_key_value_with_options(key, options, db_state.as_ref(), None, None)
-            .await
+            .await;
+        if let (Some(row_cache), Some(token)) = (&self.row_cache, miss) {
+            row_cache.cache.record_miss(token, key);
+        }
+        result
     }
 
     async fn scan_with_options(
@@ -334,8 +485,27 @@ impl DbReaderInner {
         prefix: Option<Bytes>,
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
+        let miss = if let Some(row_cache) = &self.row_cache {
+            let bounds = (
+                ByteRangeBounds::start_bound(&range),
+                ByteRangeBounds::end_bound(&range),
+            );
+            match row_cache
+                .cache
+                .scan(bounds, options, prefix.as_deref(), None)
+            {
+                ScanOutcome::Hit(result) => {
+                    let iter = result.map_err(|err| SlateDBError::RowCache(Arc::new(err)))?;
+                    return Ok(DbIterator::from_row_cache(range, iter));
+                }
+                ScanOutcome::Miss(token) => token.map(|token| (token, scan_start_key(&range))),
+            }
+        } else {
+            None
+        };
         let db_state = Arc::clone(&self.state.read());
-        self.reader
+        let result = self
+            .reader
             .scan_with_options(
                 range,
                 options,
@@ -346,7 +516,11 @@ impl DbReaderInner {
                     prefix,
                 },
             )
-            .await
+            .await;
+        if let (Some(row_cache), Some((token, start_key))) = (&self.row_cache, miss) {
+            row_cache.cache.record_miss(token, &start_key);
+        }
+        result
     }
 
     fn should_reestablish_checkpoint(&self, latest: &ManifestCore) -> bool {
@@ -363,25 +537,40 @@ impl DbReaderInner {
             || latest.segments != current_state.segments
     }
 
-    async fn replace_checkpoint(
+    /// Replaces the reader's checkpoint with one on the latest manifest and installs its state.
+    /// A pinned checkpoint is retired rather than deleted.
+    async fn replace_and_reestablish_checkpoint(
         &self,
         stored_manifest: &mut StoredManifest,
-    ) -> Result<Checkpoint, SlateDBError> {
-        let current_checkpoint_id = self
+    ) -> Result<(), SlateDBError> {
+        let _replace = self.checkpoint_replace.write().await;
+        let current_checkpoint = self
             .state
             .read()
             .checkpoint
-            .as_ref()
-            .expect("managed reader must have a checkpoint")
-            .id;
+            .clone()
+            .expect("managed reader must have a checkpoint");
         let options = CheckpointOptions {
             lifetime: Some(self.options.checkpoint_lifetime),
             ..CheckpointOptions::default()
         };
         let new_checkpoint_id = self.rand.rng().gen_uuid();
-        stored_manifest
-            .replace_checkpoint(current_checkpoint_id, new_checkpoint_id, &options)
-            .await
+        let checkpoint = if self.checkpoint_pins.is_pinned(current_checkpoint.id) {
+            let checkpoint = stored_manifest
+                .write_checkpoint(new_checkpoint_id, &options)
+                .await?;
+            info!(
+                "kept pinned reader checkpoint [checkpoint_id={}, new_checkpoint_id={}]",
+                current_checkpoint.id, checkpoint.id
+            );
+            self.checkpoint_pins.retired.lock().push(current_checkpoint);
+            checkpoint
+        } else {
+            stored_manifest
+                .replace_checkpoint(current_checkpoint.id, new_checkpoint_id, &options)
+                .await?
+        };
+        self.reestablish_checkpoint(checkpoint).await
     }
 
     async fn reestablish_checkpoint(&self, checkpoint: Checkpoint) -> Result<(), SlateDBError> {
@@ -390,13 +579,51 @@ impl DbReaderInner {
         Ok(())
     }
 
+    /// Refreshes pinned retired checkpoints past half their lifetime, and deletes unpinned ones.
+    async fn maintain_retired_checkpoints(
+        &self,
+        stored_manifest: &mut StoredManifest,
+    ) -> Result<(), SlateDBError> {
+        let lifetime = self.options.checkpoint_lifetime;
+        let now = self.system_clock.now();
+        let retired = self.checkpoint_pins.retired.lock().clone();
+        for checkpoint in retired {
+            let id = checkpoint.id;
+            let refreshed = if !self.checkpoint_pins.is_pinned(id) {
+                stored_manifest.delete_checkpoint(id).await?;
+                info!("deleted retired reader checkpoint [checkpoint_id={id}]");
+                None
+            } else if checkpoint
+                .expire_time
+                .is_some_and(|expire_time| now <= expire_time.sub(lifetime / 2))
+            {
+                continue;
+            } else {
+                match stored_manifest.refresh_checkpoint(id, lifetime).await {
+                    Ok(refreshed) => Some(refreshed),
+                    Err(SlateDBError::CheckpointMissing(_)) => {
+                        warn!("retired reader checkpoint missing [checkpoint_id={id}]");
+                        None
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+            let mut retired = self.checkpoint_pins.retired.lock();
+            retired.retain(|cp| cp.id != id);
+            retired.extend(refreshed);
+        }
+        Ok(())
+    }
+
     fn install_state(&self, new_state: ReaderState) {
         let durable_seq = new_state.last_remote_persisted_seq;
         let versioned_manifest = VersionedManifest::from(&new_state);
         let touched_segments = collect_touched_segments(&new_state);
+        let new_state = Arc::new(new_state);
+        self.feed_row_cache(&new_state);
         self.oracle.advance_durable_seq(durable_seq);
         let mut write_guard = self.state.write();
-        *write_guard = Arc::new(new_state);
+        *write_guard = new_state;
         drop(write_guard);
         self.status_manager
             .report_manifest_and_memtable_segments(versioned_manifest, touched_segments);
@@ -420,9 +647,7 @@ impl DbReaderInner {
         .await?;
 
         if last_wal_id > current_state.last_wal_id {
-            self.oracle.advance_durable_seq(last_committed_seq);
-            let mut write_guard = self.state.write();
-            *write_guard = Arc::new(ReaderState {
+            let new_state = Arc::new(ReaderState {
                 manifest_id: current_state.manifest_id,
                 checkpoint: current_state.checkpoint.clone(),
                 manifest: current_state.manifest.clone(),
@@ -430,6 +655,10 @@ impl DbReaderInner {
                 last_wal_id,
                 last_remote_persisted_seq: last_committed_seq,
             });
+            self.feed_row_cache(&new_state);
+            self.oracle.advance_durable_seq(last_committed_seq);
+            let mut write_guard = self.state.write();
+            *write_guard = new_state;
             drop(write_guard);
             self.status_manager
                 .report_memtable_segments(collect_touched_segments(self.state.read().as_ref()));
@@ -586,9 +815,9 @@ impl DbReaderInner {
                     // GC reaped it. Re-establish a fresh checkpoint against the latest
                     // manifest instead of failing the reader permanently.
                     warn!("reader checkpoint missing, re-establishing [checkpoint_id={id}]");
-                    let checkpoint = self.replace_checkpoint(stored_manifest).await?;
-                    self.reestablish_checkpoint(checkpoint).await?;
-                    return Ok(());
+                    return self
+                        .replace_and_reestablish_checkpoint(stored_manifest)
+                        .await;
                 }
                 Err(e) => return Err(e),
             };
@@ -624,11 +853,11 @@ impl DbReaderInner {
     fn spawn_manifest_poller(
         self: &Arc<Self>,
         task_executor: &MessageHandlerExecutor,
-    ) -> Result<(), SlateDBError> {
+    ) -> Result<async_channel::Sender<DbReaderMessage>, SlateDBError> {
         let poller = ManifestPoller {
             inner: Arc::clone(self),
         };
-        let (_tx, rx) = async_channel::unbounded();
+        let (tx, rx) = async_channel::unbounded();
         let result = task_executor.add_handler(
             DB_READER_TASK_NAME.to_string(),
             Box::new(poller),
@@ -636,7 +865,7 @@ impl DbReaderInner {
             &Handle::current(),
         );
         task_executor.monitor_on(&Handle::current())?;
-        result
+        result.map(|()| tx)
     }
 
     /// The `(last replayed WAL id, last committed seq)` the reader has already
@@ -780,6 +1009,32 @@ impl DbReaderInner {
     }
 }
 
+/// The writes in `tables` above `seq`, one key-ordered batch per seq in ascending order.
+fn writes_after(tables: &VecDeque<Arc<ImmutableMemtable>>, seq: u64) -> Vec<Vec<RowEntry>> {
+    let mut entries = Vec::new();
+    for table in tables {
+        let table = table.table();
+        if table.last_seq().is_none_or(|last| last <= seq) {
+            continue;
+        }
+        let mut iter = table.iter();
+        while let Some(entry) = iter.next_sync() {
+            if entry.seq > seq {
+                entries.push(entry);
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.seq.cmp(&b.seq).then_with(|| a.key.cmp(&b.key)));
+    let mut batches: Vec<Vec<RowEntry>> = Vec::new();
+    for entry in entries {
+        match batches.last_mut() {
+            Some(batch) if batch[0].seq == entry.seq => batch.push(entry),
+            _ => batches.push(vec![entry]),
+        }
+    }
+    batches
+}
+
 struct ManifestPoller {
     inner: Arc<DbReaderInner>,
 }
@@ -787,6 +1042,10 @@ struct ManifestPoller {
 #[async_trait]
 impl MessageHandler<DbReaderMessage> for ManifestPoller {
     fn tickers(&mut self) -> Vec<MessageTickerDef<DbReaderMessage>> {
+        // A pinned reader runs a poller only to serve its row cache.
+        if matches!(self.inner.mode, DbReaderMode::Checkpoint(_)) {
+            return Vec::new();
+        }
         vec![MessageTickerDef::new(
             self.inner.options.manifest_poll_interval,
             Box::new(|| DbReaderMessage::PollManifest),
@@ -794,7 +1053,14 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
     }
 
     async fn handle(&mut self, message: DbReaderMessage) -> Result<(), SlateDBError> {
-        assert!(matches!(message, DbReaderMessage::PollManifest));
+        if matches!(message, DbReaderMessage::DrainRowCache) {
+            if let Some(row_cache) = &self.inner.row_cache {
+                row_cache
+                    .cache
+                    .drain_writer(self.inner.oracle.last_committed_seq());
+            }
+            return Ok(());
+        }
         match self.inner.mode {
             DbReaderMode::ManagedCheckpoint => {
                 let mut manifest = StoredManifest::load(
@@ -808,13 +1074,15 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
                     .inner
                     .should_reestablish_checkpoint(&latest_manifest.core)
                 {
-                    let checkpoint = self.inner.replace_checkpoint(&mut manifest).await?;
-                    self.inner.reestablish_checkpoint(checkpoint).await?;
+                    self.inner
+                        .replace_and_reestablish_checkpoint(&mut manifest)
+                        .await?;
                 } else {
                     self.inner.maybe_replay_new_wals().await?;
                 }
 
-                self.inner.maybe_refresh_checkpoint(&mut manifest).await
+                self.inner.maybe_refresh_checkpoint(&mut manifest).await?;
+                self.inner.maintain_retired_checkpoints(&mut manifest).await
             }
             DbReaderMode::FollowLatest => {
                 let result = self.inner.refresh_latest_manifest().await;
@@ -833,6 +1101,10 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
         _messages: BoxStream<'async_trait, DbReaderMessage>,
         _result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
+        // First, so queued cache requests are refused rather than left waiting.
+        if let Some(row_cache) = &self.inner.row_cache {
+            row_cache.cache.close_writer();
+        }
         if self.inner.mode != DbReaderMode::ManagedCheckpoint {
             return Ok(());
         }
@@ -854,6 +1126,14 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
             checkpoint_id
         );
         manifest.delete_checkpoint(checkpoint_id).await?;
+        let retired = std::mem::take(&mut *self.inner.checkpoint_pins.retired.lock());
+        for checkpoint in retired {
+            info!(
+                "deleting retired reader checkpoint for shutdown [checkpoint_id={}]",
+                checkpoint.id
+            );
+            manifest.delete_checkpoint(checkpoint.id).await?;
+        }
         Ok(())
     }
 }
@@ -951,6 +1231,7 @@ impl DbReader {
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
         recorder: slatedb_common::metrics::MetricsRecorderHelper,
+        row_cache: Option<ReaderRowCacheOptions>,
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(mode, &options)?;
 
@@ -964,38 +1245,58 @@ impl DbReader {
             .db_state()
             .validate_extractor_configuration(segment_extractor.as_deref())?;
 
-        let inner = Arc::new(
-            DbReaderInner::new(
-                manifest_store,
-                table_store,
-                wal_store,
-                wal_reader,
-                options,
-                mode,
-                merge_operator,
-                segment_extractor,
-                system_clock.clone(),
-                rand,
-                recorder,
-                manifest,
-            )
-            .await?,
-        );
+        let mut inner = DbReaderInner::new(
+            manifest_store,
+            table_store,
+            wal_store,
+            wal_reader,
+            options,
+            mode,
+            merge_operator,
+            segment_extractor,
+            system_clock.clone(),
+            rand,
+            recorder,
+            manifest,
+        )
+        .await?;
+        if let Some(row_cache) = &row_cache {
+            inner.attach_row_cache(Arc::clone(&row_cache.cache));
+        }
+        let inner = Arc::new(inner);
         let task_executor = MessageHandlerExecutor::new(
             Arc::new(inner.status_manager.clone()),
             system_clock.clone(),
         );
 
         // Pinned checkpoints never advance. Managed checkpoints and unprotected readers both
-        // poll for newer database state according to `DbReaderOptions`.
-        if !matches!(mode, DbReaderMode::Checkpoint(_)) {
-            inner.spawn_manifest_poller(&task_executor)?;
-        }
+        // poll for newer database state according to `DbReaderOptions`. A row cache needs the
+        // poller in every mode: it owns the cache's write side.
+        let poller = if matches!(mode, DbReaderMode::Checkpoint(_)) && row_cache.is_none() {
+            None
+        } else {
+            Some(inner.spawn_manifest_poller(&task_executor)?)
+        };
 
-        Ok(Self {
+        let reader = Self {
             inner,
             task_executor,
-        })
+            poller,
+        };
+        if let (Some(options), Some(poller)) = (row_cache, &reader.poller) {
+            let ctx = RowCacheOpenContext::new_reader(
+                &reader.inner,
+                poller.clone(),
+                Handle::current(),
+                options.metrics_recorder,
+                options.fp_registry,
+            );
+            if let Err(err) = options.cache.open(ctx) {
+                reader.shutdown().await;
+                return Err(SlateDBError::RowCache(Arc::new(err)));
+            }
+        }
+        Ok(reader)
     }
 
     /// Get a value from the database with default read options.
@@ -1346,6 +1647,11 @@ impl DbReader {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
+        // Before the poller stops, so cache jobs can finish their handshakes with it.
+        if let Some(row_cache) = &self.inner.row_cache {
+            row_cache.cache.close().await;
+        }
+
         self.task_executor
             .shutdown_task(DB_READER_TASK_NAME)
             .await
@@ -1356,6 +1662,16 @@ impl DbReader {
         }
 
         Ok(())
+    }
+
+    /// Stops the poller and the block cache of a reader whose open failed.
+    async fn shutdown(&self) {
+        if let Err(e) = self.task_executor.shutdown_task(DB_READER_TASK_NAME).await {
+            warn!("failed to shutdown manifest poller [error={:?}]", e);
+        }
+        if let Err(e) = self.inner.table_store.close_cache().await {
+            warn!("failed to close block cache [error={:?}]", e);
+        }
     }
 }
 
@@ -1673,6 +1989,7 @@ mod tests {
             test_provider.system_clock.clone(),
             test_provider.rand.clone(),
             slatedb_common::metrics::MetricsRecorderHelper::noop(),
+            None,
         )
         .await
         .unwrap();
@@ -2037,6 +2354,7 @@ mod tests {
             test_provider.system_clock.clone(),
             test_provider.rand.clone(),
             slatedb_common::metrics::MetricsRecorderHelper::noop(),
+            None,
         )
         .await
         .unwrap();
@@ -3107,6 +3425,7 @@ mod tests {
                 self.system_clock.clone(),
                 self.rand.clone(),
                 slatedb_common::metrics::MetricsRecorderHelper::noop(),
+                None,
             )
             .await
         }
@@ -3327,6 +3646,9 @@ mod tests {
             segment_extractor: None,
             rand: test_provider.rand.clone(),
             recorder,
+            row_cache: None,
+            checkpoint_replace: tokio::sync::RwLock::new(()),
+            checkpoint_pins: Arc::new(super::CheckpointPins::default()),
         };
 
         let rebuilt_state = inner
@@ -3414,6 +3736,9 @@ mod tests {
             segment_extractor: None,
             rand: test_provider.rand.clone(),
             recorder,
+            row_cache: None,
+            checkpoint_replace: tokio::sync::RwLock::new(()),
+            checkpoint_pins: Arc::new(super::CheckpointPins::default()),
         }
     }
 

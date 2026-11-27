@@ -1,7 +1,8 @@
 //! Pluggable row cache interface.
 //!
 //! A [`RowCache`] caches logical MVCC rows and key ranges above SlateDB's LSM tree. It observes
-//! committed writes on the batch writer task, serves committed point reads and ascending scans
+//! committed writes on the batch writer task (or, on a [`DbReader`](crate::DbReader), replayed
+//! WAL writes on the manifest poller task), serves committed point reads and ascending scans
 //! synchronously from local state, and falls back to SlateDB's normal read path on misses.
 
 use std::future::Future;
@@ -19,17 +20,18 @@ use tokio::runtime::Handle;
 
 use crate::batch_write::BatchWriterMessage;
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
-use crate::config::{ReadOptions, ScanOptions};
+use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::db::DbInner;
 use crate::db_iter::DbIterator;
+use crate::db_reader::{DbReaderInner, DbReaderMessage, ReaderSnapshotGuard, ReaderState};
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{DbStateView, SsTableHandle};
 use crate::db_stats::DbStats;
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::error::SlateDBError;
-use crate::manifest::VersionedManifest;
+use crate::manifest::{ManifestCore, VersionedManifest};
 use crate::merge_operator::MergeOperatorType;
-use crate::oracle::{DbOracle, Oracle};
+use crate::oracle::{DbOracle, DbReaderOracle, Oracle};
 use crate::read_trace::ReadTrace;
 use crate::reader::{DbStateReader, ScanContext};
 use crate::sst_reader::SstIndex;
@@ -140,7 +142,21 @@ pub trait ScanIterator: Send + Sync + 'static {
 ///
 /// Created by [`Host::capture_state_view`] and passed to [`Host::scan_view`],
 /// [`Host::is_memtable_current`], and [`Host::retains_seq`].
-pub struct StateView(DbStateView);
+pub struct StateView(ViewState);
+
+enum ViewState {
+    Writer(DbStateView),
+    Reader(Arc<ReaderState>),
+}
+
+impl StateView {
+    fn core(&self) -> &ManifestCore {
+        match &self.0 {
+            ViewState::Writer(view) => view.core(),
+            ViewState::Reader(state) => state.core(),
+        }
+    }
+}
 
 /// Iterator returned by [`Host::scan_view`] over SlateDB's normal read path.
 ///
@@ -168,41 +184,103 @@ impl ViewIterator {
     }
 }
 
-/// Handle passed to a [`RowCache`] for reading SlateDB state and requesting batch writer drains.
+/// Retention snapshot returned by [`Host::snapshot`].
+///
+/// On a [`Db`](crate::Db), flush and compaction keep every version visible at [`Self::seq`]
+/// while it lives. On a [`DbReader`](crate::DbReader), it holds the current state and, with a
+/// managed checkpoint, keeps that state's checkpoint alive until it drops.
+pub struct HostSnapshot(HostSnapshotKind);
+
+enum HostSnapshotKind {
+    Writer(Arc<DbSnapshot>),
+    Reader(ReaderSnapshotGuard),
+}
+
+impl HostSnapshot {
+    /// Returns the sequence number the snapshot reads at.
+    pub fn seq(&self) -> u64 {
+        match &self.0 {
+            HostSnapshotKind::Writer(snapshot) => snapshot.seq(),
+            HostSnapshotKind::Reader(snapshot) => snapshot.seq,
+        }
+    }
+}
+
+/// Handle passed to a [`RowCache`] for reading SlateDB state and requesting drains on the task
+/// that owns the cache's write side: the batch writer, or a reader's manifest poller.
 ///
 /// Hot-path methods read direct references to cycle-free components without upgrading a `Weak`
 /// pointer. Cold-path methods upgrade a weak reference to the database so holding `Host` inside a
 /// [`RowCache`] creates no reference cycle.
 #[derive(Clone)]
 pub struct Host {
-    oracle: Arc<DbOracle>,
-    status_manager: Arc<DbStatusManager>,
-    write_notifier: SafeSender<BatchWriterMessage>,
+    status_manager: DbStatusManager,
     db_stats: DbStats,
-    inner: Weak<DbInner>,
+    kind: HostKind,
+}
+
+#[derive(Clone)]
+enum HostKind {
+    Writer {
+        oracle: Arc<DbOracle>,
+        write_notifier: SafeSender<BatchWriterMessage>,
+        inner: Weak<DbInner>,
+    },
+    Reader {
+        oracle: Arc<DbReaderOracle>,
+        wake_tx: async_channel::Sender<DbReaderMessage>,
+        inner: Weak<DbReaderInner>,
+    },
+}
+
+enum Upgraded {
+    Writer(Arc<DbInner>),
+    Reader(Arc<DbReaderInner>),
 }
 
 impl Host {
     pub(crate) fn new(inner: &Arc<DbInner>) -> Self {
         Self {
-            oracle: Arc::clone(&inner.oracle),
-            status_manager: Arc::clone(&inner.status_manager),
-            write_notifier: inner.write_notifier.clone(),
+            status_manager: (*inner.status_manager).clone(),
             db_stats: inner.db_stats.clone(),
-            inner: Arc::downgrade(inner),
+            kind: HostKind::Writer {
+                oracle: Arc::clone(&inner.oracle),
+                write_notifier: inner.write_notifier.clone(),
+                inner: Arc::downgrade(inner),
+            },
         }
     }
 
-    fn upgrade(&self) -> Result<Arc<DbInner>, crate::Error> {
-        self.inner
-            .upgrade()
-            .ok_or_else(|| SlateDBError::Closed.into())
+    pub(crate) fn new_reader(
+        inner: &Arc<DbReaderInner>,
+        wake_tx: async_channel::Sender<DbReaderMessage>,
+    ) -> Self {
+        Self {
+            status_manager: inner.status_manager.clone(),
+            db_stats: inner.reader.db_stats.clone(),
+            kind: HostKind::Reader {
+                oracle: Arc::clone(&inner.oracle),
+                wake_tx,
+                inner: Arc::downgrade(inner),
+            },
+        }
     }
 
-    /// Returns the newest committed sequence number.
+    fn upgrade(&self) -> Result<Upgraded, crate::Error> {
+        let upgraded = match &self.kind {
+            HostKind::Writer { inner, .. } => inner.upgrade().map(Upgraded::Writer),
+            HostKind::Reader { inner, .. } => inner.upgrade().map(Upgraded::Reader),
+        };
+        upgraded.ok_or_else(|| SlateDBError::Closed.into())
+    }
+
+    /// Returns the newest committed sequence number (on a reader, the durable seq it serves).
     #[inline]
     pub fn last_committed_seq(&self) -> u64 {
-        self.oracle.last_committed_seq()
+        match &self.kind {
+            HostKind::Writer { oracle, .. } => oracle.last_committed_seq(),
+            HostKind::Reader { oracle, .. } => oracle.last_committed_seq(),
+        }
     }
 
     /// Returns an error if the database is closed or failed.
@@ -220,13 +298,19 @@ impl Host {
         Ok(())
     }
 
-    /// Schedules a [`RowCache::drain_writer`] call on the batch writer task without blocking.
+    /// Schedules a [`RowCache::drain_writer`] call on the task that owns the cache's write side
+    /// without blocking.
     ///
-    /// Returns `false` if the batch writer has stopped.
+    /// Returns `false` if that task has stopped.
     pub fn request_drain(&self) -> bool {
-        self.write_notifier
-            .send(BatchWriterMessage::DrainRowCache)
-            .is_ok()
+        match &self.kind {
+            HostKind::Writer { write_notifier, .. } => write_notifier
+                .send(BatchWriterMessage::DrainRowCache)
+                .is_ok(),
+            HostKind::Reader { wake_tx, .. } => {
+                wake_tx.try_send(DbReaderMessage::DrainRowCache).is_ok()
+            }
+        }
     }
 
     /// Adds `count` to SlateDB's point-read request counter.
@@ -242,41 +326,57 @@ impl Host {
     }
 
     /// Captures a consistent view of the active memtable, immutable memtables, and manifest.
+    /// On a reader, this is the newest state the poller built, which holds every applied write.
     pub fn capture_state_view(&self) -> Result<StateView, crate::Error> {
-        let inner = self.upgrade()?;
-        let view = inner.state.read().view();
+        let view = match self.upgrade()? {
+            Upgraded::Writer(inner) => ViewState::Writer(inner.state.read().view()),
+            Upgraded::Reader(inner) => ViewState::Reader(inner.row_cache_view()),
+        };
         Ok(StateView(view))
     }
 
     /// Returns `true` if `view` still points to the database's current active memtable.
+    /// On a reader, this holds while `view` is the newest state the poller built.
     pub fn is_memtable_current(&self, view: &StateView) -> bool {
-        self.inner.upgrade().is_some_and(|inner| {
-            Arc::ptr_eq(&view.0.memtable, inner.state.read().memtable().table())
-        })
+        match (self.upgrade(), &view.0) {
+            (Ok(Upgraded::Writer(inner)), ViewState::Writer(view)) => {
+                Arc::ptr_eq(&view.memtable, inner.state.read().memtable().table())
+            }
+            (Ok(Upgraded::Reader(inner)), ViewState::Reader(state)) => {
+                Arc::ptr_eq(state, &inner.row_cache_view())
+            }
+            _ => false,
+        }
     }
 
     /// Returns `true` if `view` retains every version visible at `seq`.
     ///
-    /// This holds when no flushed L0 SST contains versions newer than `seq`, or when an active
-    /// snapshot or transaction (or one of its open scan iterators) retains a sequence number at
-    /// or below `seq`.
+    /// This holds when no flushed L0 SST contains versions newer than `seq`, or, on a
+    /// [`Db`](crate::Db) only, when an active snapshot or transaction (or one of its open scan
+    /// iterators) retains a sequence number at or below `seq`. The writer's compactor does not
+    /// know a reader's snapshots.
     pub fn retains_seq(&self, view: &StateView, seq: u64) -> bool {
-        let Some(inner) = self.inner.upgrade() else {
-            return false;
-        };
-        view.0.core().last_l0_seq <= seq
-            || [
+        if view.core().last_l0_seq <= seq {
+            return true;
+        }
+        match (self.upgrade(), &view.0) {
+            (Ok(Upgraded::Writer(inner)), ViewState::Writer(_)) => [
                 inner.snapshot_manager.min_active_seq(),
                 inner.txn_manager.min_active_seq(),
             ]
             .into_iter()
             .flatten()
             .min()
-            .is_some_and(|registered| registered <= seq)
+            .is_some_and(|registered| registered <= seq),
+            _ => false,
+        }
     }
 
     /// Scans `range` directly against `view` on SlateDB's normal read path, bypassing the row
     /// cache.
+    ///
+    /// `max_seq` bounds the versions the scan sees; `None` reads at the newest committed
+    /// sequence number.
     pub async fn scan_view<T>(
         &self,
         view: &StateView,
@@ -293,42 +393,81 @@ impl Host {
         let Some(range) = BytesRange::try_new(start, end) else {
             return Err(crate::Error::invalid("empty scan range".to_string()));
         };
-        let inner = self.upgrade()?;
-        let iter = inner
-            .reader
-            .scan_with_options(
-                range,
-                options,
-                ScanContext {
-                    db_state: &view.0,
-                    write_batch_iter: None,
-                    max_seq,
-                    prefix,
-                },
-            )
-            .await?;
+        let iter = match (self.upgrade()?, &view.0) {
+            (Upgraded::Writer(inner), ViewState::Writer(state)) => {
+                inner
+                    .reader
+                    .scan_with_options(
+                        range,
+                        options,
+                        ScanContext {
+                            db_state: state,
+                            write_batch_iter: None,
+                            max_seq,
+                            prefix,
+                        },
+                    )
+                    .await?
+            }
+            (Upgraded::Reader(inner), ViewState::Reader(state)) => {
+                // The view may lead the reader's seq, which would clamp `max_seq`; every row of
+                // a reader state is durable.
+                let max_seq = max_seq.unwrap_or_else(|| self.last_committed_seq());
+                let options = ScanOptions {
+                    durability_filter: DurabilityLevel::Memory,
+                    dirty: true,
+                    ..options.clone()
+                };
+                inner
+                    .reader
+                    .scan_with_options(
+                        range,
+                        &options,
+                        ScanContext {
+                            db_state: state.as_ref(),
+                            write_batch_iter: None,
+                            max_seq: Some(max_seq),
+                            prefix,
+                        },
+                    )
+                    .await?
+            }
+            _ => {
+                return Err(crate::Error::invalid(
+                    "state view of another database".to_string(),
+                ))
+            }
+        };
         Ok(ViewIterator { inner: iter })
     }
 
-    /// Opens a retention snapshot at the current committed sequence number.
-    pub fn snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
+    /// Opens a retention snapshot at the current committed sequence number. On a reader, this
+    /// waits while the poller replaces the current checkpoint.
+    pub async fn snapshot(&self) -> Result<HostSnapshot, crate::Error> {
         self.check_closed()?;
-        let inner = self.upgrade()?;
-        Ok(DbSnapshot::new(inner, None))
+        let snapshot = match self.upgrade()? {
+            Upgraded::Writer(inner) => HostSnapshotKind::Writer(DbSnapshot::new(inner, None)),
+            Upgraded::Reader(inner) => HostSnapshotKind::Reader(inner.host_snapshot().await?),
+        };
+        Ok(HostSnapshot(snapshot))
     }
 
     /// Returns a snapshot of the database's current manifest.
     pub fn manifest(&self) -> Result<VersionedManifest, crate::Error> {
-        let inner = self.upgrade()?;
-        Ok(inner.manifest())
+        Ok(match self.upgrade()? {
+            Upgraded::Writer(inner) => inner.manifest(),
+            Upgraded::Reader(inner) => VersionedManifest::from(inner.row_cache_view().as_ref()),
+        })
     }
 
     /// Reads the zero-copy block index of `handle` through the database's table store and block
     /// cache.
     pub async fn read_sst_index(&self, handle: &SsTableHandle) -> Result<SstIndex, crate::Error> {
-        let inner = self.upgrade()?;
-        let index = inner
-            .table_store
+        let table_store = match self.upgrade()? {
+            Upgraded::Writer(inner) => Arc::clone(&inner.table_store),
+            Upgraded::Reader(inner) => Arc::clone(&inner.table_store),
+        };
+        let index = table_store
             .read_index(handle, true, Some(Bytes::new()), &ReadTrace::none(), None)
             .await?;
         Ok(SstIndex::from_owned(index))
@@ -337,7 +476,7 @@ impl Host {
 
 /// Startup context passed to [`RowCache::open`] after WAL replay finishes.
 pub struct OpenContext {
-    /// Handle for reading SlateDB state and requesting batch writer drains.
+    /// Handle for reading SlateDB state and requesting write-side drains.
     pub host: Host,
     /// System clock configured on the database.
     pub clock: Arc<dyn SystemClock>,
@@ -352,7 +491,8 @@ pub struct OpenContext {
     pub merge_operator: Option<MergeOperatorType>,
     /// Failpoint registry configured on the database.
     pub fp_registry: Arc<FailPointRegistry>,
-    /// True if a compaction filter supplier is configured on the embedded compactor.
+    /// True if a compaction filter supplier is configured on the embedded compactor (never on a
+    /// reader).
     pub has_compaction_filter: bool,
 }
 
@@ -374,20 +514,44 @@ impl OpenContext {
             has_compaction_filter,
         }
     }
+
+    pub(crate) fn new_reader(
+        inner: &Arc<DbReaderInner>,
+        wake_tx: async_channel::Sender<DbReaderMessage>,
+        runtime: Handle,
+        metrics_recorder: Arc<dyn MetricsRecorder>,
+        fp_registry: Arc<FailPointRegistry>,
+    ) -> Self {
+        Self {
+            host: Host::new_reader(inner, wake_tx),
+            clock: Arc::clone(&inner.system_clock),
+            rand: Arc::clone(&inner.rand),
+            runtime,
+            metrics_recorder,
+            merge_operator: inner.reader.read_merge_operator.clone(),
+            fp_registry,
+            has_compaction_filter: false,
+        }
+    }
 }
 
 /// Pluggable logical row cache attached through
-/// [`DbBuilder::with_row_cache`](crate::DbBuilder::with_row_cache).
+/// [`DbBuilder::with_row_cache`](crate::DbBuilder::with_row_cache) or
+/// [`DbReaderBuilder::with_row_cache`](crate::DbReaderBuilder::with_row_cache).
+///
+/// On a [`DbReader`](crate::DbReader), the manifest poller task plays the batch writer's role,
+/// feeding the cache replayed WAL writes one batch per sequence number in ascending order.
 pub trait RowCache: Send + Sync + 'static {
     /// Initializes the cache after the database finishes WAL replay.
     ///
     /// Returning an error aborts database open and closes internal tasks cleanly.
     fn open(&self, ctx: OpenContext) -> Result<(), crate::Error>;
 
-    /// Stops background cache tasks during [`Db::close`](crate::Db::close).
+    /// Stops background cache tasks during [`Db::close`](crate::Db::close) or
+    /// [`DbReader::close`](crate::DbReader::close).
     ///
-    /// SlateDB calls this before stopping the batch writer task so in-flight background jobs can
-    /// finish writer handshakes cleanly.
+    /// SlateDB calls this before stopping the batch writer (or reader poller) task so in-flight
+    /// background jobs can finish writer handshakes cleanly.
     fn close(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 
     /// Applies one write batch on the single batch writer task.
@@ -399,9 +563,19 @@ pub trait RowCache: Send + Sync + 'static {
     /// Drains queued control work on the single batch writer task after [`Host::request_drain`].
     ///
     /// `committed_seq` is the current committed sequence number with no write batch in flight.
+    /// A reader's poller also calls it with a new state's seq when its last fed batch lies below.
     fn drain_writer(&self, committed_seq: u64);
 
+    /// Drops every cached row above `sealed_at` on a [`DbReader`](crate::DbReader) whose poller
+    /// moves, before its seq advances, to a state whose L0 holds writes up to `new_seq` that it
+    /// never replayed. Reads at or below `sealed_at` stay valid; later batches chain from
+    /// `new_seq`. A flush or compaction of replayed writes calls nothing.
+    ///
+    /// The default implementation does nothing, which suits caches that never serve reads.
+    fn invalidate_all(&self, _sealed_at: u64, _new_seq: u64) {}
+
     /// Notifies the cache on the batch writer task that the writer is stopping (close or fence).
+    /// On a reader, the manifest poller calls it as it stops.
     ///
     /// Runs before the batch writer fails remaining queued write requests. Implementations must
     /// stop serving and refuse queued control requests so waiters do not deadlock.
