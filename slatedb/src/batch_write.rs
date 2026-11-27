@@ -71,8 +71,8 @@ pub(crate) enum BatchWriterMessage {
         /// Sends the cursor after the writer processes this message.
         done: oneshot::Sender<Result<CheckpointCursor, SlateDBError>>,
     },
-    /// Drain queued row cache work when the batch writer is idle.
-    DrainRowCache,
+    /// Run a row cache callback on the batch writer task at the current committed seq.
+    RowCacheTask(crate::row_cache::WriterTask),
 }
 
 pub(crate) struct WriteBatchRequest {
@@ -105,7 +105,7 @@ impl std::fmt::Debug for BatchWriterMessage {
                 .debug_struct("ForceFlush")
                 .field("freeze_memtable", freeze_memtable)
                 .finish(),
-            BatchWriterMessage::DrainRowCache => f.debug_struct("DrainRowCache").finish(),
+            BatchWriterMessage::RowCacheTask(_) => f.debug_struct("RowCacheTask").finish(),
         }
     }
 }
@@ -188,10 +188,8 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
                     }
                 }
             }
-            BatchWriterMessage::DrainRowCache => {
-                if let Some(row_cache) = &self.db_inner.row_cache {
-                    row_cache.drain_writer(self.db_inner.oracle.last_committed_seq());
-                }
+            BatchWriterMessage::RowCacheTask(task) => {
+                task(self.db_inner.oracle.last_committed_seq());
                 Ok(())
             }
         }
@@ -202,10 +200,6 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
         mut messages: BoxStream<'async_trait, BatchWriterMessage>,
         result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        // Stop serving the row cache before failing remaining messages (close or fence).
-        if let Some(row_cache) = &self.db_inner.row_cache {
-            row_cache.close_writer();
-        }
         let error = result.clone().err().unwrap_or(SlateDBError::Closed);
         while let Some(msg) = messages.next().await {
             match msg {
@@ -224,7 +218,7 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
                 } => {
                     let _ = done.send(Err(error.clone()));
                 }
-                BatchWriterMessage::DrainRowCache => {}
+                BatchWriterMessage::RowCacheTask(_) => {}
             }
         }
         if let Some(wal_writer) = self.wal_writer.as_mut() {
@@ -310,10 +304,10 @@ impl DbInner {
             wal_writer.append(&entries).await?;
             // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
             // in another Pull Request.
-            self.write_entries_to_memtable(entries, touched_segments);
+            self.write_entries_to_memtable(commit_seq, entries, touched_segments);
         } else {
             assert!(!self.wal_enabled);
-            self.write_entries_to_memtable(entries, touched_segments);
+            self.write_entries_to_memtable(commit_seq, entries, touched_segments);
         };
         // increment memtable_write_bytes by the size of the keys and values inserted into the memtable
         // after merge operators and overwrites are collapsed
@@ -537,6 +531,7 @@ impl DbInner {
     /// `touched_segments` is empty and recording is a no-op.
     fn write_entries_to_memtable(
         &self,
+        commit_seq: u64,
         entries: Vec<RowEntry>,
         touched_segments: BTreeSet<Bytes>,
     ) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
@@ -550,7 +545,7 @@ impl DbInner {
             entries.iter().for_each(|entry| memtable.put(entry.clone()));
             let durable_watcher = memtable.table().durable_watcher();
             drop(guard);
-            row_cache.apply_write(&entries, self.oracle.last_committed_seq());
+            row_cache.write(commit_seq, &entries);
             return durable_watcher;
         }
         entries.into_iter().for_each(|entry| memtable.put(entry));

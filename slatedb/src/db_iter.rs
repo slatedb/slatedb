@@ -12,7 +12,7 @@ use crate::merge_operator::{
     MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
 };
 use crate::read_trace::{ReadTrace, SstTraceLevel};
-use crate::row_cache::{self, BatchStatus};
+use crate::row_cache::{self, BatchStep, SyncStep};
 use crate::segment_iterator::{build_l0_point_iters, build_sr_point_iters, SegmentScanContext};
 use crate::snapshot_manager::RetentionPin;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -259,7 +259,7 @@ impl RowEntryIterator for ScanIterator {
 
 enum IterSource {
     Internal(Box<dyn RowEntryIterator + 'static>),
-    External(Box<dyn row_cache::ScanIterator>),
+    External(Box<dyn row_cache::DynScanIterator>),
 }
 
 /// An external source checks the cooperative budget once in this many entries, not for each
@@ -359,13 +359,10 @@ impl DbIterator {
     }
 
     /// Builds an iterator over a pre-resolved ascending row cache source.
-    pub(crate) fn from_row_cache(
-        range: BytesRange,
-        iter: Box<dyn row_cache::ScanIterator>,
-    ) -> Self {
+    pub(crate) fn from_row_cache(range: BytesRange, iter: row_cache::BoxedScanIterator) -> Self {
         DbIterator {
             range,
-            iter: IterSource::External(iter),
+            iter: IterSource::External(iter.0),
             invalidated_error: None,
             last_key: None,
             order: IterationOrder::Ascending,
@@ -432,18 +429,23 @@ impl DbIterator {
                     IterSource::External(iter) => iter.next_batch_sync(out, want),
                     IterSource::Internal(_) => unreachable!("checked external source"),
                 };
-                n += step.count;
-                self.unbudgeted += step.count as u32;
-                match step.status {
-                    BatchStatus::More => {
+                match step {
+                    BatchStep::More(count) => {
+                        n += count;
+                        self.unbudgeted += count as u32;
                         if self.unbudgeted >= EXTERNAL_BUDGET_EVERY {
                             self.unbudgeted = 0;
                             self.set_last_key(out, n);
                             tokio::task::coop::consume_budget().await;
                         }
                     }
-                    BatchStatus::Done => break,
-                    BatchStatus::NeedsAsync => {
+                    BatchStep::Done(count) => {
+                        n += count;
+                        self.unbudgeted += count as u32;
+                        break;
+                    }
+                    BatchStep::NeedsAsync(count) => {
+                        n += count;
                         self.set_last_key(out, n);
                         match self.next_external_async().await? {
                             Some(kv) => {
@@ -453,7 +455,8 @@ impl DbIterator {
                             None => return Ok(n),
                         }
                     }
-                    BatchStatus::Error(err) => {
+                    BatchStep::Error(count, err) => {
+                        n += count;
                         self.set_last_key(out, n);
                         return Err(self.invalidate_public(err));
                     }
@@ -475,35 +478,29 @@ impl DbIterator {
     }
 
     async fn next_external(&mut self) -> Result<Option<KeyValue>, crate::Error> {
-        if self.unbudgeted + 1 < EXTERNAL_BUDGET_EVERY {
-            let sync = match &mut self.iter {
-                IterSource::External(iter) => iter.next_sync(),
-                IterSource::Internal(_) => unreachable!("checked external source"),
-            };
-            if let Some(result) = sync {
-                return match result {
-                    Ok(Some(kv)) => {
-                        self.unbudgeted += 1;
-                        self.last_key = Some(kv.key.clone());
-                        Ok(Some(kv))
-                    }
-                    Ok(None) => Ok(None),
-                    Err(err) => Err(self.invalidate_public(err)),
-                };
-            }
-        }
-        let next = match &mut self.iter {
-            IterSource::External(iter) => match iter.next_sync() {
-                Some(result) => result,
-                None => iter.next().await,
-            },
+        let step = match &mut self.iter {
+            IterSource::External(iter) => iter.next_sync(),
             IterSource::Internal(_) => unreachable!("checked external source"),
         };
-        self.unbudgeted += 1;
-        if self.unbudgeted >= EXTERNAL_BUDGET_EVERY {
-            self.unbudgeted = 0;
-            tokio::task::coop::consume_budget().await;
-        }
+        let next = match step {
+            SyncStep::Row(kv) => {
+                self.unbudgeted += 1;
+                if self.unbudgeted >= EXTERNAL_BUDGET_EVERY {
+                    self.unbudgeted = 0;
+                    tokio::task::coop::consume_budget().await;
+                }
+                self.last_key = Some(kv.key.clone());
+                return Ok(Some(kv));
+            }
+            SyncStep::Done => return Ok(None),
+            SyncStep::Error(err) => return Err(self.invalidate_public(err)),
+            SyncStep::NeedsAsync => match &mut self.iter {
+                IterSource::External(iter) => iter.next().await,
+                IterSource::Internal(_) => unreachable!("checked external source"),
+            },
+        };
+        self.unbudgeted = 0;
+        tokio::task::coop::consume_budget().await;
         match next {
             Ok(Some(kv)) => {
                 self.last_key = Some(kv.key.clone());

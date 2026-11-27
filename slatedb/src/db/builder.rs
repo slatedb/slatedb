@@ -479,6 +479,10 @@ impl<P: Into<Path>> DbBuilder<P> {
     }
 
     /// Attaches a pluggable logical [`RowCache`] to the database.
+    ///
+    /// The batch writer feeds every committed write batch to the cache before the committed
+    /// sequence number advances. Point reads and ascending scans consult the cache first and fall
+    /// back to the LSM read path on misses. See [`crate::row_cache`] for the full contract.
     pub fn with_row_cache(mut self, row_cache: Arc<dyn RowCache>) -> Self {
         self.row_cache = Some(row_cache);
         self
@@ -904,7 +908,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             );
             if let Err(err) = row_cache.open(ctx) {
                 let _ = db
-                    .close_inner(CloseOptions { flush_type: None }, false)
+                    .close_with_options(CloseOptions { flush_type: None })
                     .await;
                 return Err(err);
             }
@@ -1894,10 +1898,11 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
 
     /// Attaches a pluggable logical [`RowCache`] to the reader.
     ///
-    /// The reader's manifest poller owns the cache's write side: it feeds the cache the writes it
-    /// replays from the WAL before the reader's sequence number advances past them. Reads and
-    /// scans consult the cache first, as on a [`crate::Db`]. With a row cache, a reader in
-    /// [`DbReaderMode::Checkpoint`] runs a poller too, which only serves the cache.
+    /// The manifest poller owns the cache's write side and feeds replayed WAL writes before the
+    /// reader's sequence number advances. Point reads and ascending scans consult the cache first,
+    /// as on [`crate::Db`]. With a row cache, [`DbReaderMode::Checkpoint`] also runs a poller to
+    /// run [`Host::run_on_writer`](crate::row_cache::Host::run_on_writer) callbacks. See
+    /// [`crate::row_cache`] for the full contract.
     pub fn with_row_cache(mut self, row_cache: Arc<dyn RowCache>) -> Self {
         self.row_cache = Some(row_cache);
         self

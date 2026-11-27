@@ -2,9 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::num::NonZeroU64;
 use std::ops::Bound;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -13,29 +11,29 @@ use bytes::Bytes;
 use slatedb::admin::Admin;
 use slatedb::config::{
     CheckpointOptions, CheckpointScope, CompactionWorkerOptions, CompactorOptions, DbReaderOptions,
-    FlushOptions, FlushType, ReadOptions, ScanOptions, Settings,
+    DurabilityLevel, FlushOptions, FlushType, ReadOptions, ScanOptions, Settings,
     SizeTieredCompactionSchedulerOptions,
 };
 use slatedb::db_stats::REQUEST_COUNT;
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::row_cache::{
-    BatchStatus, BatchStep, GetOutcome, Host, MissToken, OpenContext, RowCache, ScanIterator,
-    ScanOutcome,
+    BatchStep, GetOutcome, Host, KeyRange, OpenContext, RowCache, ScanIterator, ScanOutcome,
+    SyncStep, ViewScanOptions,
 };
 use slatedb::{
-    Db, DbIterator, DbReader, DbReaderMode, DbStatus, Error, ErrorKind, IsolationLevel, KeyValue,
-    MergeOperator, MergeOperatorError, RowEntry, ValueDeletable, WriteBatch,
+    Db, DbIterator, DbReader, DbReaderMode, DbStatus, Error, ErrorKind, IsolationLevel,
+    IterationOrder, KeyValue, MergeOperator, MergeOperatorError, RowEntry, ValueDeletable,
+    WriteBatch,
 };
 use slatedb_common::metrics::{lookup_metric_with_labels, DefaultMetricsRecorder};
-use tokio::sync::{watch, Notify};
+use tokio::sync::watch;
 
 #[derive(Default)]
 struct Events {
-    lifecycle: Vec<&'static str>,
+    opened: usize,
     applied_batches: Vec<(u64, Vec<RowEntry>)>,
-    drained_seqs: Vec<u64>,
-    recorded_misses: Vec<(u64, Bytes)>,
+    misses: Vec<Bytes>,
     invalidations: Vec<(u64, u64)>,
 }
 
@@ -44,12 +42,8 @@ struct TestRowCache {
     events: Mutex<Events>,
     versions: Mutex<BTreeMap<Bytes, Vec<RowEntry>>>,
     serve_reads: AtomicBool,
-    sample_misses: AtomicBool,
-    next_token: AtomicU64,
     reject_open: AtomicBool,
     fail_next_get: AtomicBool,
-    drain_notify: Notify,
-    wake_on_close: AtomicBool,
     /// When set, only keys under this prefix are served; everything else misses.
     covered_prefix: Option<&'static [u8]>,
 }
@@ -59,11 +53,9 @@ impl TestRowCache {
         Self::with_prefix(None)
     }
 
-    /// A cache that serves only `prefix` and samples every miss.
+    /// A cache that serves only `prefix`.
     fn covering(prefix: &'static [u8]) -> Arc<Self> {
-        let cache = Self::with_prefix(Some(prefix));
-        cache.sample_misses.store(true, Ordering::Relaxed);
-        cache
+        Self::with_prefix(Some(prefix))
     }
 
     fn with_prefix(covered_prefix: Option<&'static [u8]>) -> Arc<Self> {
@@ -72,45 +64,28 @@ impl TestRowCache {
             events: Mutex::new(Events::default()),
             versions: Mutex::new(BTreeMap::new()),
             serve_reads: AtomicBool::new(true),
-            sample_misses: AtomicBool::new(false),
-            next_token: AtomicU64::new(1),
             reject_open: AtomicBool::new(false),
             fail_next_get: AtomicBool::new(false),
-            drain_notify: Notify::new(),
-            wake_on_close: AtomicBool::new(false),
             covered_prefix,
         })
     }
 
-    fn covers(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> bool {
+    fn covers(&self, range: KeyRange<'_>) -> bool {
         let Some(prefix) = self.covered_prefix else {
             return true;
         };
         let mut prefix_end = prefix.to_vec();
         *prefix_end.last_mut().unwrap() += 1;
-        matches!(start, Bound::Included(s) | Bound::Excluded(s) if s.starts_with(prefix))
-            && matches!(end, Bound::Included(e) | Bound::Excluded(e) if e <= &prefix_end[..])
+        range.start_key().is_some_and(|s| s.starts_with(prefix))
+            && range.end_key().is_some_and(|e| e <= &prefix_end[..])
     }
 
     fn misses(&self) -> Vec<Bytes> {
-        let events = self.events.lock().unwrap();
-        events
-            .recorded_misses
-            .iter()
-            .map(|(_, key)| key.clone())
-            .collect()
+        self.events.lock().unwrap().misses.clone()
     }
 
     fn host(&self) -> &Host {
         self.host.get().expect("row cache was opened")
-    }
-
-    fn next_token(&self) -> Option<MissToken> {
-        if !self.sample_misses.load(Ordering::Relaxed) {
-            return None;
-        }
-        let id = self.next_token.fetch_add(1, Ordering::Relaxed);
-        NonZeroU64::new(id).map(MissToken)
     }
 
     fn lookup_at(&self, key: &[u8], seq: u64) -> Option<Option<KeyValue>> {
@@ -144,55 +119,47 @@ struct VecScanIterator {
 }
 
 impl ScanIterator for VecScanIterator {
-    fn next_sync(&mut self) -> Option<Result<Option<KeyValue>, Error>> {
+    fn next_sync(&mut self) -> SyncStep {
         if self.fail_at == Some(self.pos) {
             self.fail_at = None;
-            return Some(Err(Error::data("injected scan failure".to_string())));
+            return SyncStep::Error(Error::data("injected scan failure".to_string()));
         }
         if self.async_at == Some(self.pos) {
-            return None;
+            return SyncStep::NeedsAsync;
         }
         if self.pos >= self.rows.len() {
-            return Some(Ok(None));
+            return SyncStep::Done;
         }
         let kv = self.rows[self.pos].clone();
         self.pos += 1;
-        Some(Ok(Some(kv)))
+        SyncStep::Row(kv)
     }
 
-    fn next(
-        &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<KeyValue>, Error>> + Send + '_>> {
-        Box::pin(async move {
-            self.async_calls.fetch_add(1, Ordering::Relaxed);
-            if self.async_at == Some(self.pos) {
-                self.async_at = None;
-            }
-            if self.pos >= self.rows.len() {
-                return Ok(None);
-            }
-            let kv = self.rows[self.pos].clone();
+    async fn next(&mut self) -> Result<Option<KeyValue>, Error> {
+        self.async_calls.fetch_add(1, Ordering::Relaxed);
+        if self.async_at == Some(self.pos) {
+            self.async_at = None;
+        }
+        if self.pos >= self.rows.len() {
+            return Ok(None);
+        }
+        let kv = self.rows[self.pos].clone();
+        self.pos += 1;
+        Ok(Some(kv))
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), Error> {
+        while self.pos < self.rows.len() && self.rows[self.pos].key.as_ref() < next_key {
             self.pos += 1;
-            Ok(Some(kv))
-        })
-    }
-
-    fn seek<'a>(
-        &'a mut self,
-        next_key: &'a [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'a>> {
-        Box::pin(async move {
-            while self.pos < self.rows.len() && self.rows[self.pos].key.as_ref() < next_key {
-                self.pos += 1;
-            }
-            Ok(())
-        })
+        }
+        Ok(())
     }
 }
 
 impl RowCache for TestRowCache {
     fn open(&self, ctx: OpenContext) -> Result<(), Error> {
-        self.events.lock().unwrap().lifecycle.push("open");
+        assert!(!format!("{ctx:?}").is_empty());
+        self.events.lock().unwrap().opened += 1;
         let _ = self.host.set(ctx.host);
         if self.reject_open.load(Ordering::Relaxed) {
             return Err(Error::invalid("row cache rejected open".to_string()));
@@ -200,27 +167,14 @@ impl RowCache for TestRowCache {
         Ok(())
     }
 
-    fn close(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            self.events.lock().unwrap().lifecycle.push("close");
-            if self.wake_on_close.load(Ordering::Relaxed) {
-                let notified = self.drain_notify.notified();
-                assert!(
-                    self.host().request_drain(),
-                    "batch writer must still accept drain requests during RowCache::close"
-                );
-                notified.await;
-            }
-        })
-    }
-
-    fn apply_write(&self, entries: &[RowEntry], committed_seq: u64) {
-        let seq = entries.first().expect("a batch holds a write").seq;
-        assert!(committed_seq < seq, "batches come in ascending seq order");
+    fn write(&self, seq: u64, entries: &[RowEntry]) {
         assert!(
             self.host().last_committed_seq() < seq,
-            "apply_write must run before committed_seq advances"
+            "write must run before committed_seq advances"
         );
+        if entries.is_empty() {
+            return;
+        }
         assert!(entries.iter().all(|e| e.seq == seq), "one seq per batch");
         assert!(
             entries.windows(2).all(|w| w[0].key < w[1].key),
@@ -237,80 +191,83 @@ impl RowCache for TestRowCache {
             .lock()
             .unwrap()
             .applied_batches
-            .push((committed_seq, entries.to_vec()));
+            .push((seq, entries.to_vec()));
     }
 
-    fn drain_writer(&self, committed_seq: u64) {
-        self.events.lock().unwrap().drained_seqs.push(committed_seq);
-        self.drain_notify.notify_waiters();
-    }
-
-    fn invalidate_all(&self, sealed_at: u64, new_seq: u64) {
-        assert!(new_seq > sealed_at);
+    fn invalidate(&self, valid_through: u64, new_seq: u64) {
+        assert!(new_seq > valid_through);
         assert_eq!(
             self.host().last_committed_seq(),
-            sealed_at,
+            valid_through,
             "invalidation runs before the reader's seq advances"
         );
         self.versions.lock().unwrap().clear();
-        let mut events = self.events.lock().unwrap();
-        events.invalidations.push((sealed_at, new_seq));
-    }
-
-    fn close_writer(&self) {
-        self.events.lock().unwrap().lifecycle.push("close_writer");
+        self.events
+            .lock()
+            .unwrap()
+            .invalidations
+            .push((valid_through, new_seq));
     }
 
     fn get(&self, key: &[u8], options: &ReadOptions, at: Option<u64>) -> GetOutcome {
         if self.fail_next_get.swap(false, Ordering::Relaxed) {
-            return GetOutcome::Hit(Err(Error::invalid("injected get error".to_string())));
+            return GetOutcome::Error(Error::invalid("injected get error".to_string()));
         }
-        let covered = self.covers(Bound::Included(key), Bound::Included(key));
-        if !covered || !self.serve_reads.load(Ordering::Relaxed) || options.dirty {
-            return GetOutcome::Miss(self.next_token());
+        let key_range = KeyRange {
+            start: Bound::Included(key),
+            end: Bound::Included(key),
+        };
+        if !self.covers(key_range)
+            || !self.serve_reads.load(Ordering::Relaxed)
+            || !self.host().allows_read(options)
+        {
+            self.events
+                .lock()
+                .unwrap()
+                .misses
+                .push(Bytes::copy_from_slice(key));
+            return GetOutcome::Miss;
         }
-        let seq = at
-            .map(|at| at.min(self.host().last_committed_seq()))
-            .unwrap_or_else(|| self.host().last_committed_seq());
+        let seq = self.host().read_seq(at);
         match self.lookup_at(key, seq) {
             Some(kv) => {
                 self.host().record_get_requests(1);
-                GetOutcome::Hit(Ok(kv))
+                GetOutcome::Hit(kv)
             }
-            None => GetOutcome::Miss(self.next_token()),
+            None => {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .misses
+                    .push(Bytes::copy_from_slice(key));
+                GetOutcome::Miss
+            }
         }
     }
 
     fn scan(
         &self,
-        range: (Bound<&[u8]>, Bound<&[u8]>),
+        range: KeyRange<'_>,
         options: &ScanOptions,
         _prefix: Option<&[u8]>,
         at: Option<u64>,
     ) -> ScanOutcome {
-        let covered = self.covers(range.0, range.1);
-        if !covered || !self.serve_reads.load(Ordering::Relaxed) || options.dirty {
-            return ScanOutcome::Miss(self.next_token());
+        if !self.covers(range)
+            || !self.serve_reads.load(Ordering::Relaxed)
+            || !self.host().allows_scan(options)
+        {
+            let start = range.start_key().unwrap_or_default();
+            self.events
+                .lock()
+                .unwrap()
+                .misses
+                .push(Bytes::copy_from_slice(start));
+            return ScanOutcome::Miss;
         }
-        let seq = at
-            .map(|at| at.min(self.host().last_committed_seq()))
-            .unwrap_or_else(|| self.host().last_committed_seq());
+        let seq = self.host().read_seq(at);
         let versions = self.versions.lock().unwrap();
         let mut rows = Vec::new();
-        for (key, history) in versions.iter() {
-            let after_start = match range.0 {
-                Bound::Unbounded => true,
-                Bound::Included(s) => key.as_ref() >= s,
-                Bound::Excluded(s) => key.as_ref() > s,
-            };
-            let before_end = match range.1 {
-                Bound::Unbounded => true,
-                Bound::Included(e) => key.as_ref() <= e,
-                Bound::Excluded(e) => key.as_ref() < e,
-            };
-            if !after_start || !before_end {
-                continue;
-            }
+        for (_key, history) in versions.range::<[u8], _>(range) {
             for entry in history.iter().rev() {
                 if entry.seq <= seq {
                     if let ValueDeletable::Value(val) = &entry.value {
@@ -327,21 +284,13 @@ impl RowCache for TestRowCache {
             }
         }
         self.host().record_scan_requests(1);
-        ScanOutcome::Hit(Ok(Box::new(VecScanIterator {
+        ScanOutcome::hit(VecScanIterator {
             rows,
             pos: 0,
             async_at: None,
             fail_at: None,
             async_calls: Arc::new(AtomicU64::new(0)),
-        })))
-    }
-
-    fn record_miss(&self, token: MissToken, key: &[u8]) {
-        self.events
-            .lock()
-            .unwrap()
-            .recorded_misses
-            .push((token.0.get(), Bytes::copy_from_slice(key)));
+        })
     }
 }
 
@@ -363,7 +312,6 @@ impl MergeOperator for ConcatMergeOperator {
 #[tokio::test]
 async fn test_row_cache_lifecycle_writes_reads_and_host_apis() {
     let cache = TestRowCache::new();
-    cache.wake_on_close.store(true, Ordering::Relaxed);
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let db = Db::builder("/tmp/test_row_cache_lifecycle", Arc::new(InMemory::new()))
         .with_metrics_recorder(recorder.clone())
@@ -373,21 +321,32 @@ async fn test_row_cache_lifecycle_writes_reads_and_host_apis() {
         .await
         .unwrap();
 
-    // Writes pass through apply_write strictly before committed_seq advances.
+    assert_eq!(cache.events.lock().unwrap().opened, 1);
+    assert!(!cache.host().is_reader());
+    assert!(cache.host().allows_read(&ReadOptions::default()));
+    assert!(!cache.host().allows_read(&ReadOptions {
+        durability_filter: DurabilityLevel::Remote,
+        ..ReadOptions::default()
+    }));
+    assert!(!cache.host().allows_read(&ReadOptions {
+        dirty: true,
+        ..ReadOptions::default()
+    }));
+    assert!(cache.host().allows_scan(&ScanOptions::default()));
+    assert!(!cache.host().allows_scan(&ScanOptions {
+        order: IterationOrder::Descending,
+        ..ScanOptions::default()
+    }));
+
+    // Writes pass through write() strictly before committed_seq advances.
     db.put(b"a", b"1").await.unwrap();
     db.put(b"b", b"2").await.unwrap();
     db.merge(b"m", b"part1").await.unwrap();
     assert_eq!(cache.events.lock().unwrap().applied_batches.len(), 3);
 
-    // Idle writer drain runs at the current committed sequence number.
-    let notified = cache.drain_notify.notified();
-    assert!(cache.host().request_drain());
-    notified.await;
-    let committed = cache.host().last_committed_seq();
-    assert_eq!(
-        cache.events.lock().unwrap().drained_seqs.last().copied(),
-        Some(committed)
-    );
+    // run_on_writer executes on the batch writer at the current committed sequence number.
+    let writer_seq = cache.host().run_on_writer(|seq| seq).await.unwrap();
+    assert_eq!(writer_seq, cache.host().last_committed_seq());
 
     // Point reads hit the cache and update SlateDB's request counter.
     assert_eq!(db.get(b"a").await.unwrap(), Some(Bytes::from_static(b"1")));
@@ -411,6 +370,33 @@ async fn test_row_cache_lifecycle_writes_reads_and_host_apis() {
     );
     assert_eq!(db.get(b"a").await.unwrap(), Some(Bytes::from_static(b"2")));
 
+    // Descending scans bypass the row cache automatically.
+    let desc_opts = ScanOptions {
+        order: IterationOrder::Descending,
+        ..ScanOptions::default()
+    };
+    let desc_rows = collect(db.scan_with_options(b"a"..b"c", &desc_opts).await.unwrap()).await;
+    assert_eq!(
+        desc_rows,
+        vec![
+            (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
+            (Bytes::from_static(b"a"), Bytes::from_static(b"2")),
+        ]
+    );
+    let snap_desc = collect(
+        snap.scan_with_options(b"a"..b"c", &desc_opts)
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        snap_desc,
+        vec![
+            (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
+            (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
+        ]
+    );
+
     // Transactions see uncommitted puts/deletes and fall through on uncommitted merges.
     let txn = db.begin(IsolationLevel::Snapshot).unwrap();
     txn.put(b"a", b"txn_val").unwrap();
@@ -425,7 +411,7 @@ async fn test_row_cache_lifecycle_writes_reads_and_host_apis() {
         txn.get(b"m").await.unwrap(),
         Some(Bytes::from_static(b"part1+part2"))
     );
-    // Overlapping scan bypasses cache to see txn writes; non-overlapping scan hits cache.
+    // Overlapping scan bypasses cache to see txn writes.
     let mut txn_scan = txn.scan(b"a"..b"c").await.unwrap();
     let mut txn_rows = Vec::new();
     txn_scan.next_batch(&mut txn_rows, 10).await.unwrap();
@@ -434,23 +420,27 @@ async fn test_row_cache_lifecycle_writes_reads_and_host_apis() {
     assert_eq!(txn_rows[0].value, Bytes::from_static(b"txn_val"));
     txn.rollback();
 
-    // Host::capture_state_view, is_memtable_current, retains_seq, scan_view, and next_entry.
+    // Host::capture_state_view, is_view_current, retains_seq, scan_view, and next_entry.
     let view_before_flush = cache.host().capture_state_view().unwrap();
-    assert!(cache.host().is_memtable_current(&view_before_flush));
+    assert!(cache.host().is_view_current(&view_before_flush));
     assert!(cache.host().retains_seq(&view_before_flush, snap_seq));
+    assert!(format!("{:?}", cache.host()).contains("writer"));
+    assert!(format!("{view_before_flush:?}").contains("writer"));
 
     // scan_view bypasses the row cache and preserves ValueDeletable::Merge on unbased merges.
     let mut raw = cache
         .host()
         .scan_view(
             &view_before_flush,
-            b"m"..b"n",
-            &ScanOptions::default(),
-            None,
-            None,
+            KeyRange {
+                start: Bound::Included(b"m"),
+                end: Bound::Excluded(b"n"),
+            },
+            &ViewScanOptions::default(),
         )
         .await
         .unwrap();
+    assert!(format!("{raw:?}").contains("ViewIterator"));
     let entry = raw.next_entry().await.unwrap().unwrap();
     assert_eq!(entry.key, Bytes::from_static(b"m"));
     assert_eq!(
@@ -464,15 +454,15 @@ async fn test_row_cache_lifecycle_writes_reads_and_host_apis() {
     })
     .await
     .unwrap();
-    assert!(!cache.host().is_memtable_current(&view_before_flush));
+    assert!(!cache.host().is_view_current(&view_before_flush));
     let view_after_flush = cache.host().capture_state_view().unwrap();
     assert!(cache.host().retains_seq(&view_after_flush, snap_seq));
     drop(snap);
 
-    // Host::snapshot opens a retention snapshot at the committed sequence number, which keeps
-    // every version visible at it after the L0 moves past it.
+    // Host::snapshot opens a retention snapshot at the committed sequence number.
     let host_snap = cache.host().snapshot().await.unwrap();
     assert_eq!(host_snap.seq(), cache.host().last_committed_seq());
+    assert!(format!("{host_snap:?}").contains(&host_snap.seq().to_string()));
     db.put(b"hs", b"1").await.unwrap();
     db.flush_with_options(FlushOptions {
         flush_type: FlushType::MemTable,
@@ -491,23 +481,19 @@ async fn test_row_cache_lifecycle_writes_reads_and_host_apis() {
     let sst_index = cache.host().read_sst_index(&l0.sst).await.unwrap();
     assert!(!sst_index.is_empty());
 
-    // Sampled misses invoke record_miss for both gets and scans.
+    // Misses are observed directly inside get and scan.
     cache.serve_reads.store(false, Ordering::Relaxed);
-    cache.sample_misses.store(true, Ordering::Relaxed);
     assert_eq!(db.get(b"a").await.unwrap(), Some(Bytes::from_static(b"2")));
     let _ = db.scan(b"b"..b"z").await.unwrap();
-    let misses = cache.events.lock().unwrap().recorded_misses.clone();
-    assert_eq!(misses.len(), 2);
-    assert_eq!(misses[0].1, Bytes::from_static(b"a"));
-    assert_eq!(misses[1].1, Bytes::from_static(b"b"));
-
-    // Close runs RowCache::close before stopping the batch writer (close_writer).
-    db.close().await.unwrap();
     assert_eq!(
-        cache.events.lock().unwrap().lifecycle,
-        vec!["open", "close", "close_writer"]
+        cache.misses(),
+        vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")]
     );
+
+    // Closing the database stops the writer task and fails subsequent run_on_writer calls.
+    db.close().await.unwrap();
     assert!(cache.host().check_closed().is_err());
+    assert!(cache.host().run_on_writer(|seq| seq).await.is_err());
 
     // Dropping Db breaks the weak reference in Host (no Arc cycle).
     drop(db);
@@ -515,7 +501,7 @@ async fn test_row_cache_lifecycle_writes_reads_and_host_apis() {
 }
 
 #[tokio::test]
-async fn test_row_cache_open_rejection_cleans_up_without_calling_close() {
+async fn test_row_cache_open_rejection_aborts_build() {
     let cache = TestRowCache::new();
     cache.reject_open.store(true, Ordering::Relaxed);
     let err = Db::builder("/tmp/test_row_cache_reject_open", Arc::new(InMemory::new()))
@@ -525,9 +511,104 @@ async fn test_row_cache_open_rejection_cleans_up_without_calling_close() {
         .err()
         .expect("open rejection must fail build");
     assert_eq!(err.kind(), ErrorKind::Invalid);
-    let lifecycle = cache.events.lock().unwrap().lifecycle.clone();
-    assert_eq!(lifecycle[0], "open");
-    assert!(!lifecycle.contains(&"close"));
+    assert_eq!(cache.events.lock().unwrap().opened, 1);
+    assert!(cache.host().run_on_writer(|seq| seq).await.is_err());
+}
+
+#[tokio::test]
+async fn test_row_cache_minimal_defaults() {
+    struct MinimalPointCache {
+        host: OnceLock<Host>,
+        rows: Mutex<BTreeMap<Bytes, (u64, Option<KeyValue>)>>,
+        hits: AtomicU64,
+    }
+
+    impl RowCache for MinimalPointCache {
+        fn open(&self, ctx: OpenContext) -> Result<(), Error> {
+            let _ = self.host.set(ctx.host);
+            Ok(())
+        }
+
+        fn write(&self, seq: u64, entries: &[RowEntry]) {
+            let mut rows = self.rows.lock().unwrap();
+            for e in entries {
+                match &e.value {
+                    ValueDeletable::Value(val) => {
+                        let kv = KeyValue::new(
+                            e.key.clone(),
+                            val.clone(),
+                            seq,
+                            e.create_ts.unwrap_or(0),
+                            e.expire_ts,
+                        );
+                        rows.insert(e.key.clone(), (seq, Some(kv)));
+                    }
+                    ValueDeletable::Tombstone => {
+                        rows.insert(e.key.clone(), (seq, None));
+                    }
+                    ValueDeletable::Merge(_) => {
+                        rows.remove(&e.key);
+                    }
+                }
+            }
+        }
+
+        fn get(&self, key: &[u8], options: &ReadOptions, at: Option<u64>) -> GetOutcome {
+            let Some(host) = self.host.get() else {
+                return GetOutcome::Miss;
+            };
+            if !host.allows_read(options) {
+                return GetOutcome::Miss;
+            }
+            let seq = host.read_seq(at);
+            let rows = self.rows.lock().unwrap();
+            match rows.get(key) {
+                Some((entry_seq, kv)) if *entry_seq <= seq => {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    host.record_get_requests(1);
+                    GetOutcome::Hit(kv.clone())
+                }
+                _ => GetOutcome::Miss,
+            }
+        }
+    }
+
+    let cache = Arc::new(MinimalPointCache {
+        host: OnceLock::new(),
+        rows: Mutex::default(),
+        hits: AtomicU64::new(0),
+    });
+    let db = Db::builder("/tmp/test_row_cache_minimal", Arc::new(InMemory::new()))
+        .with_row_cache(cache.clone())
+        .build()
+        .await
+        .unwrap();
+
+    db.put(b"a", b"1").await.unwrap();
+    db.put(b"b", b"2").await.unwrap();
+    db.delete(b"b").await.unwrap();
+    assert_eq!(db.get(b"a").await.unwrap(), Some(Bytes::from_static(b"1")));
+    assert_eq!(db.get(b"b").await.unwrap(), None);
+    assert_eq!(cache.hits.load(Ordering::Relaxed), 2);
+
+    // Default RowCache::scan misses and falls back to SlateDB's LSM scan.
+    let scanned = collect(db.scan(b"a"..b"z").await.unwrap()).await;
+    assert_eq!(
+        scanned,
+        vec![(Bytes::from_static(b"a"), Bytes::from_static(b"1"))]
+    );
+    db.close().await.unwrap();
+
+    let range = KeyRange {
+        start: Bound::Included(b"b"),
+        end: Bound::Excluded(b"d"),
+    };
+    assert!(!range.contains(b"a") && range.contains(b"b") && !range.contains(b"d"));
+    assert_eq!(
+        (range.start_key(), range.end_key()),
+        (Some(&b"b"[..]), Some(&b"d"[..]))
+    );
+    assert!(matches!(BatchStep::Done(0), BatchStep::Done(0)));
 }
 
 #[tokio::test]
@@ -538,21 +619,15 @@ async fn test_row_cache_scan_next_batch_async_gap_seek_and_invalidation() {
     }
 
     impl RowCache for CustomBatchCache {
-        fn open(&self, _ctx: OpenContext) -> Result<(), Error> {
-            Ok(())
-        }
-        fn close(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-            Box::pin(async {})
-        }
-        fn apply_write(&self, _entries: &[RowEntry], _committed_seq: u64) {}
-        fn drain_writer(&self, _committed_seq: u64) {}
-        fn close_writer(&self) {}
+        fn write(&self, _seq: u64, _entries: &[RowEntry]) {}
+
         fn get(&self, _key: &[u8], _options: &ReadOptions, _at: Option<u64>) -> GetOutcome {
-            GetOutcome::Miss(None)
+            GetOutcome::Miss
         }
+
         fn scan(
             &self,
-            _range: (Bound<&[u8]>, Bound<&[u8]>),
+            _range: KeyRange<'_>,
             _options: &ScanOptions,
             _prefix: Option<&[u8]>,
             _at: Option<u64>,
@@ -568,15 +643,14 @@ async fn test_row_cache_scan_next_batch_async_gap_seek_and_invalidation() {
                     )
                 })
                 .collect();
-            ScanOutcome::Hit(Ok(Box::new(VecScanIterator {
+            ScanOutcome::hit(VecScanIterator {
                 rows,
                 pos: 0,
                 async_at: Some(2),
                 fail_at: self.fail_at,
                 async_calls: self.async_calls.clone(),
-            })))
+            })
         }
-        fn record_miss(&self, _token: MissToken, _key: &[u8]) {}
     }
 
     // Mixed sync + NeedsAsync + seek through next_batch.
@@ -622,12 +696,22 @@ async fn test_row_cache_scan_next_batch_async_gap_seek_and_invalidation() {
     assert_eq!(second.kind(), ErrorKind::Data);
     db.close().await.unwrap();
 
-    // Verify BatchStep / BatchStatus are publicly constructible for custom overrides.
-    let step = BatchStep {
-        count: 0,
-        status: BatchStatus::Done,
-    };
-    assert_eq!(step.count, 0);
+    // Default ScanIterator::next returns an internal error if NeedsAsync is not overridden.
+    struct SyncOnlyBrokenIter;
+
+    impl ScanIterator for SyncOnlyBrokenIter {
+        fn next_sync(&mut self) -> SyncStep {
+            SyncStep::NeedsAsync
+        }
+
+        async fn seek(&mut self, _next_key: &[u8]) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    let mut broken = SyncOnlyBrokenIter;
+    let err = broken.next().await.unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Internal);
 }
 
 // DbReader tests. A writer and a reader share one in-memory store; the reader's cache covers
@@ -763,7 +847,6 @@ async fn test_reader_row_cache_lifecycle_replay_reads_and_host_apis() {
     db.put(b"cold/a", b"a1").await.unwrap();
     db.flush().await.unwrap();
     let cache = TestRowCache::covering(HOT);
-    cache.wake_on_close.store(true, Ordering::Relaxed);
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let reader = DbReader::builder(PATH, Arc::clone(&store))
         .with_options(reader_options(20, Duration::from_secs(3600)))
@@ -774,10 +857,15 @@ async fn test_reader_row_cache_lifecycle_replay_reads_and_host_apis() {
         .unwrap();
     let mut status = reader.subscribe();
     let host = cache.host().clone();
+    assert!(host.is_reader());
+    assert!(host.allows_read(&ReadOptions {
+        durability_filter: DurabilityLevel::Remote,
+        ..ReadOptions::default()
+    }));
+    assert!(format!("{host:?}").contains("reader"));
     let opened_at = host.last_committed_seq();
 
-    // Replay feeds one key-ordered batch per seq, ascending and chained, before the seq is
-    // visible (asserted by apply_write).
+    // Replay feeds one key-ordered batch per seq in ascending order, before the seq is visible.
     let mut batch = WriteBatch::new();
     batch.put(hot("c"), b"c1");
     batch.put(hot("a"), b"a1");
@@ -787,27 +875,27 @@ async fn test_reader_row_cache_lifecycle_replay_reads_and_host_apis() {
     caught_up(&mut status, &db).await;
     let batches = cache.events.lock().unwrap().applied_batches.clone();
     assert_eq!(batches.len(), 3);
-    assert_eq!(batches[0].0, opened_at);
+    assert!(batches[0].0 > opened_at);
     let keys: Vec<Bytes> = batches[0].1.iter().map(|e| e.key.clone()).collect();
     assert_eq!(keys, vec![hot("a"), hot("b"), hot("c")]);
     assert_eq!(batches[0].1[1].value, ValueDeletable::Tombstone);
-    assert!(batches.windows(2).all(|w| w[1].0 == w[0].1[0].seq));
-    assert_eq!(host.last_committed_seq(), batches[2].1[0].seq);
+    assert!(batches.windows(2).all(|w| w[1].0 > w[0].0));
+    assert_eq!(host.last_committed_seq(), batches[2].0);
 
-    // An uncovered key misses, falls through to the LSM, and is reported; covered keys hit.
+    // An uncovered key misses and falls through to the LSM; covered keys hit.
     let gets = lookup_metric_with_labels(&recorder, REQUEST_COUNT, &[("op", "get")]).unwrap();
     assert_eq!(reader.get(b"cold/a").await.unwrap(), value("a1"));
     assert_eq!(cache.misses(), vec![Bytes::from_static(b"cold/a")]);
     assert_eq!(reader.get(hot("x")).await.unwrap(), value("x1"));
     let kv = reader.get_key_value(hot("a")).await.unwrap().unwrap();
-    assert_eq!(kv.seq, batches[0].1[0].seq);
+    assert_eq!(kv.seq, batches[0].0);
     assert_eq!(reader.get(hot("b")).await.unwrap(), None);
     assert_eq!(
         lookup_metric_with_labels(&recorder, REQUEST_COUNT, &[("op", "get")]),
         Some(gets + 4)
     );
 
-    // Covered scans and prefix scans hit; uncovered ones miss with their start key.
+    // Covered scans and prefix scans hit; uncovered ones miss.
     let expected = rows(&[("a", "a1"), ("c", "c1"), ("x", "x1"), ("y", "y1")]);
     let scanned = collect(reader.scan(hot("a")..hot("z")).await.unwrap()).await;
     assert_eq!(scanned, expected);
@@ -818,40 +906,49 @@ async fn test_reader_row_cache_lifecycle_replay_reads_and_host_apis() {
     assert_eq!(cold.len(), 1);
     assert_eq!(cache.misses().last(), Some(&Bytes::from_static(b"cold/")));
 
-    // A drain request runs drain_writer on the idle poller at the reader's seq.
-    let notified = cache.drain_notify.notified();
-    assert!(host.request_drain());
-    notified.await;
-    let drained = cache.events.lock().unwrap().drained_seqs.last().copied();
-    assert_eq!(drained, Some(host.last_committed_seq()));
+    // run_on_writer executes on the idle poller at the reader's seq.
+    let poller_seq = host.run_on_writer(|seq| seq).await.unwrap();
+    assert_eq!(poller_seq, host.last_committed_seq());
 
     // Views: currency, retention, and scans that bypass the cache.
     assert!(host.check_closed().is_ok());
     let x1_seq = host.last_committed_seq();
     let view = host.capture_state_view().unwrap();
-    assert!(host.is_memtable_current(&view));
+    assert!(host.is_view_current(&view));
     assert!(host.retains_seq(&view, x1_seq));
+    assert!(format!("{view:?}").contains("reader"));
     put_durable(&db, &[("x", "x2")]).await;
     caught_up(&mut status, &db).await;
-    assert!(!host.is_memtable_current(&view));
+    assert!(!host.is_view_current(&view));
     let view = host.capture_state_view().unwrap();
-    assert!(host.is_memtable_current(&view));
-    let opts = ScanOptions::default();
+    assert!(host.is_view_current(&view));
     let mut old = host
-        .scan_view(&view, hot("x")..hot("y"), &opts, None, Some(x1_seq))
+        .scan_view(
+            &view,
+            hot("x")..hot("y"),
+            &ViewScanOptions {
+                max_seq: Some(x1_seq),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let old = old.next().await.unwrap().unwrap();
     assert_eq!(Some(old.value), value("x1"));
-    let prefix = Some(Bytes::from_static(HOT));
+    let prefix_opts = ViewScanOptions {
+        prefix: Some(Bytes::from_static(HOT)),
+        ..Default::default()
+    };
     let mut newest = host
-        .scan_view(&view, hot("x")..hot("y"), &opts, prefix, None)
+        .scan_view(&view, hot("x")..hot("y"), &prefix_opts)
         .await
         .unwrap();
     let entry = newest.next_entry().await.unwrap().unwrap();
     assert_eq!(entry.value, ValueDeletable::Value(value("x2").unwrap()));
-    let empty_range = host.scan_view(&view, hot("b")..hot("a"), &opts, None, None);
-    assert!(empty_range.await.is_err());
+    let empty_range = host
+        .scan_view(&view, hot("b")..hot("a"), &ViewScanOptions::default())
+        .await;
+    assert!(empty_range.is_err());
 
     let snapshot = host.snapshot().await.unwrap();
     assert_eq!(snapshot.seq(), host.last_committed_seq());
@@ -883,12 +980,10 @@ async fn test_reader_row_cache_lifecycle_replay_reads_and_host_apis() {
     assert_eq!(cache.misses().len(), 2);
     drop(snapshot);
 
-    // Close runs `close` while the poller still answers drains, then `close_writer`.
+    // Closing the reader stops the poller and fails subsequent run_on_writer and snapshot calls.
     reader.close().await.unwrap();
-    let lifecycle = cache.events.lock().unwrap().lifecycle.clone();
-    assert_eq!(lifecycle, vec!["open", "close", "close_writer"]);
     assert!(host.check_closed().is_err());
-    assert!(!host.request_drain());
+    assert!(host.run_on_writer(|seq| seq).await.is_err());
     assert!(host.snapshot().await.is_err());
     // Dropping the reader breaks the weak reference in Host.
     drop(reader);
@@ -902,8 +997,7 @@ async fn test_reader_row_cache_invalidation_on_l0_jump_and_skip_wal() {
     let db = open_writer(&store, false).await;
 
     // A WAL-enabled reader whose next poll finds an L0 holding writes it never replayed drops
-    // its rows above its seq, then receives the WAL writes above the L0. The writes run right
-    // after a poll, well within the 150ms before the next one.
+    // its rows above its seq, then receives the WAL writes above the L0.
     let cache = TestRowCache::covering(HOT);
     let options = reader_options(150, Duration::from_secs(10));
     let reader = open_reader(&store, &cache, options).await;
@@ -924,7 +1018,8 @@ async fn test_reader_row_cache_invalidation_on_l0_jump_and_skip_wal() {
         (events.invalidations.clone(), last)
     };
     assert_eq!(invalidations, vec![(before, last_l0_seq)]);
-    assert_eq!((last.0, &last.1[0].key), (last_l0_seq, &hot("z")));
+    assert!(last.0 > last_l0_seq);
+    assert_eq!(&last.1[0].key, &hot("z"));
     // x2 comes from the L0 (a miss), z1 from the cache.
     assert_eq!(reader.get(hot("x")).await.unwrap(), value("x2"));
     assert_eq!(reader.get(hot("z")).await.unwrap(), value("z1"));
@@ -997,8 +1092,7 @@ async fn test_reader_row_cache_host_snapshot_pins_checkpoint() {
     assert!(kept.contains(&pinned_id));
     assert!(host.last_committed_seq() > seq);
 
-    // The poller refreshes the kept checkpoint past half its lifetime (expiry times are whole
-    // seconds, so the wait crosses more than one).
+    // The poller refreshes the kept checkpoint past half its lifetime.
     let expiry = || async {
         let checkpoints = admin.list_checkpoints(None).await.unwrap();
         let kept = checkpoints.iter().find(|cp| cp.id == pinned_id);
@@ -1009,9 +1103,15 @@ async fn test_reader_row_cache_host_snapshot_pins_checkpoint() {
     eventually(|| async { expiry().await > first_expiry }).await;
 
     // The old view still reads the pinned state at the snapshot's seq.
-    let opts = ScanOptions::default();
     let mut old = host
-        .scan_view(&old_view, hot("a")..hot("z"), &opts, None, Some(seq))
+        .scan_view(
+            &old_view,
+            hot("a")..hot("z"),
+            &ViewScanOptions {
+                max_seq: Some(seq),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1052,7 +1152,7 @@ async fn test_reader_row_cache_pinned_mode_and_open_rejection() {
         .await
         .unwrap();
 
-    // A pinned reader runs a poller for its cache: it answers drains but never polls.
+    // A pinned reader runs a poller for its cache: it runs run_on_writer callbacks but never polls.
     let cache = TestRowCache::covering(HOT);
     let reader = DbReader::builder(PATH, Arc::clone(&store))
         .with_reader_mode(DbReaderMode::Checkpoint(checkpoint.id))
@@ -1062,11 +1162,7 @@ async fn test_reader_row_cache_pinned_mode_and_open_rejection() {
         .await
         .unwrap();
     let seq = cache.host().last_committed_seq();
-    let notified = cache.drain_notify.notified();
-    assert!(cache.host().request_drain());
-    notified.await;
-    let drained = cache.events.lock().unwrap().drained_seqs.last().copied();
-    assert_eq!(drained, Some(seq));
+    assert_eq!(cache.host().run_on_writer(|s| s).await.unwrap(), seq);
     put_durable(&db, &[("x", "x2")]).await;
     flush_memtable(&db).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1075,12 +1171,9 @@ async fn test_reader_row_cache_pinned_mode_and_open_rejection() {
     assert_eq!(reader.get(hot("x")).await.unwrap(), value("x1"));
     assert_eq!(cache.host().snapshot().await.unwrap().seq(), seq);
     reader.close().await.unwrap();
-    let lifecycle = cache.events.lock().unwrap().lifecycle.clone();
-    assert_eq!(lifecycle, vec!["open", "close", "close_writer"]);
     admin.delete_checkpoint(checkpoint.id).await.unwrap();
 
-    // A cache that rejects open fails the build, stops the poller (`close_writer`, no `close`),
-    // and leaves no reader checkpoint behind.
+    // A cache that rejects open fails the build, stops the poller, and leaves no checkpoint.
     let cache = TestRowCache::covering(HOT);
     cache.reject_open.store(true, Ordering::Relaxed);
     let err = DbReader::builder(PATH, Arc::clone(&store))
@@ -1090,9 +1183,8 @@ async fn test_reader_row_cache_pinned_mode_and_open_rejection() {
         .err()
         .expect("open rejection must fail build");
     assert_eq!(err.kind(), ErrorKind::Invalid);
-    let lifecycle = cache.events.lock().unwrap().lifecycle.clone();
-    assert_eq!(lifecycle, vec!["open", "close_writer"]);
-    assert!(!cache.host().request_drain());
+    assert_eq!(cache.events.lock().unwrap().opened, 1);
+    assert!(cache.host().run_on_writer(|s| s).await.is_err());
     assert!(checkpoint_ids(&admin).await.is_empty());
     db.close().await.unwrap();
 }

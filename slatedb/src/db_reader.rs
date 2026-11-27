@@ -12,6 +12,7 @@ use {
         db_status::{ClosedResultWriter, DbStatus, DbStatusManager},
         dispatcher::{MessageHandler, MessageHandlerExecutor, MessageTickerDef},
         error::SlateDBError,
+        iter::IterationOrder,
         manifest::{
             store::{ManifestStore, StoredManifest},
             Manifest, ManifestCore, VersionedManifest,
@@ -22,7 +23,8 @@ use {
         prefix_extractor::PrefixExtractor,
         reader::{DbStateReader, Reader, ScanContext},
         row_cache::{
-            scan_start_key, GetOutcome, OpenContext as RowCacheOpenContext, RowCache, ScanOutcome,
+            GetOutcome, KeyRange, OpenContext as RowCacheOpenContext, RowCache, ScanOutcome,
+            WriterTask,
         },
         tablestore::TableStore,
         types::{KeyValue, RowEntry},
@@ -199,11 +201,19 @@ impl Drop for ReaderSnapshotGuard {
     }
 }
 
-#[derive(Debug)]
 pub(crate) enum DbReaderMessage {
     PollManifest,
-    /// Sent by [`Host::request_drain`](crate::row_cache::Host::request_drain).
-    DrainRowCache,
+    /// Sent by [`Host::run_on_writer`](crate::row_cache::Host::run_on_writer).
+    RowCacheTask(WriterTask),
+}
+
+impl std::fmt::Debug for DbReaderMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DbReaderMessage::PollManifest => f.write_str("PollManifest"),
+            DbReaderMessage::RowCacheTask(_) => f.write_str("RowCacheTask"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -395,18 +405,18 @@ impl DbReaderInner {
         let mut applied = prev_seq;
         let last_l0_seq = new_state.core().last_l0_seq;
         if last_l0_seq > prev_seq {
-            row_cache.cache.invalidate_all(prev_seq, last_l0_seq);
+            row_cache.cache.invalidate(prev_seq, last_l0_seq);
             applied = last_l0_seq;
         }
         for batch in writes_after(new_state.imm_memtable(), applied) {
             let seq = batch[0].seq;
-            row_cache.cache.apply_write(&batch, applied);
+            row_cache.cache.write(seq, &batch);
             applied = seq;
         }
         if new_state.last_remote_persisted_seq > applied {
             row_cache
                 .cache
-                .drain_writer(new_state.last_remote_persisted_seq);
+                .write(new_state.last_remote_persisted_seq, &[]);
         }
     }
 
@@ -457,25 +467,17 @@ impl DbReaderInner {
     ) -> Result<Option<KeyValue>, SlateDBError> {
         self.check_closed()?;
         let key = key.as_ref();
-        let miss = if let Some(row_cache) = &self.row_cache {
+        if let Some(row_cache) = &self.row_cache {
             match row_cache.cache.get(key, options, None) {
-                GetOutcome::Hit(result) => {
-                    return result.map_err(|err| SlateDBError::RowCache(Arc::new(err)));
-                }
-                GetOutcome::Miss(token) => token,
+                GetOutcome::Hit(kv) => return Ok(kv),
+                GetOutcome::Error(err) => return Err(SlateDBError::RowCache(Arc::new(err))),
+                GetOutcome::Miss => {}
             }
-        } else {
-            None
-        };
-        let db_state = Arc::clone(&self.state.read());
-        let result = self
-            .reader
-            .get_key_value_with_options(key, options, db_state.as_ref(), None, None)
-            .await;
-        if let (Some(row_cache), Some(token)) = (&self.row_cache, miss) {
-            row_cache.cache.record_miss(token, key);
         }
-        result
+        let db_state = Arc::clone(&self.state.read());
+        self.reader
+            .get_key_value_with_options(key, options, db_state.as_ref(), None, None)
+            .await
     }
 
     async fn scan_with_options(
@@ -485,27 +487,21 @@ impl DbReaderInner {
         prefix: Option<Bytes>,
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
-        let miss = if let Some(row_cache) = &self.row_cache {
-            let bounds = (
-                ByteRangeBounds::start_bound(&range),
-                ByteRangeBounds::end_bound(&range),
-            );
-            match row_cache
-                .cache
-                .scan(bounds, options, prefix.as_deref(), None)
-            {
-                ScanOutcome::Hit(result) => {
-                    let iter = result.map_err(|err| SlateDBError::RowCache(Arc::new(err)))?;
-                    return Ok(DbIterator::from_row_cache(range, iter));
+        if let Some(row_cache) = &self.row_cache {
+            if matches!(options.order, IterationOrder::Ascending) {
+                let key_range = KeyRange::from_bytes_range(&range);
+                match row_cache
+                    .cache
+                    .scan(key_range, options, prefix.as_deref(), None)
+                {
+                    ScanOutcome::Hit(iter) => return Ok(DbIterator::from_row_cache(range, iter)),
+                    ScanOutcome::Error(err) => return Err(SlateDBError::RowCache(Arc::new(err))),
+                    ScanOutcome::Miss => {}
                 }
-                ScanOutcome::Miss(token) => token.map(|token| (token, scan_start_key(&range))),
             }
-        } else {
-            None
-        };
+        }
         let db_state = Arc::clone(&self.state.read());
-        let result = self
-            .reader
+        self.reader
             .scan_with_options(
                 range,
                 options,
@@ -516,11 +512,7 @@ impl DbReaderInner {
                     prefix,
                 },
             )
-            .await;
-        if let (Some(row_cache), Some((token, start_key))) = (&self.row_cache, miss) {
-            row_cache.cache.record_miss(token, &start_key);
-        }
-        result
+            .await
     }
 
     fn should_reestablish_checkpoint(&self, latest: &ManifestCore) -> bool {
@@ -1053,12 +1045,8 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
     }
 
     async fn handle(&mut self, message: DbReaderMessage) -> Result<(), SlateDBError> {
-        if matches!(message, DbReaderMessage::DrainRowCache) {
-            if let Some(row_cache) = &self.inner.row_cache {
-                row_cache
-                    .cache
-                    .drain_writer(self.inner.oracle.last_committed_seq());
-            }
+        if let DbReaderMessage::RowCacheTask(task) = message {
+            task(self.inner.oracle.last_committed_seq());
             return Ok(());
         }
         match self.inner.mode {
@@ -1098,13 +1086,11 @@ impl MessageHandler<DbReaderMessage> for ManifestPoller {
 
     async fn cleanup(
         &mut self,
-        _messages: BoxStream<'async_trait, DbReaderMessage>,
+        messages: BoxStream<'async_trait, DbReaderMessage>,
         _result: Result<(), SlateDBError>,
     ) -> Result<(), SlateDBError> {
-        // First, so queued cache requests are refused rather than left waiting.
-        if let Some(row_cache) = &self.inner.row_cache {
-            row_cache.cache.close_writer();
-        }
+        // Drop queued cache tasks first so any run_on_writer waiters wake immediately.
+        drop(messages);
         if self.inner.mode != DbReaderMode::ManagedCheckpoint {
             return Ok(());
         }
@@ -1647,11 +1633,6 @@ impl DbReader {
     /// }
     /// ```
     pub async fn close(&self) -> Result<(), crate::Error> {
-        // Before the poller stops, so cache jobs can finish their handshakes with it.
-        if let Some(row_cache) = &self.inner.row_cache {
-            row_cache.cache.close().await;
-        }
-
         self.task_executor
             .shutdown_task(DB_READER_TASK_NAME)
             .await
