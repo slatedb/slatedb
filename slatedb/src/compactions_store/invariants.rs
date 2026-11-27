@@ -14,7 +14,7 @@ pub(crate) fn compaction_job_id_cutoff(
     dirty: &Compactions,
     current: &Compactions,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let Some(watermark) = current.iter().map(|job| job.id().timestamp_ms()).max() else {
+    let Some(watermark) = current.max_id_timestamp_ms() else {
         return Ok(());
     };
 
@@ -31,7 +31,7 @@ pub(crate) fn compaction_job_id_cutoff(
 }
 
 /// Rejects an output SST with a timestamp below its compaction job timestamp.
-/// This covers final and partial outputs. Final sorted-run views use the same ID as their physical SST.
+/// Checks the physical SST IDs for both final and partial outputs.
 pub(crate) fn sorted_run_ulid_cutoff(
     dirty: &Compactions,
     _current: &Compactions,

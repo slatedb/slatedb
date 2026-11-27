@@ -300,11 +300,14 @@ impl CompactorStateWriter {
     /// - `Ok(())` when compactions are successfully written.
     /// - `SlateDBError` if an unrecoverable error occurs.
     pub(crate) async fn write_compactions_safely(&mut self) -> Result<(), SlateDBError> {
-        let mut desired_value = self.state.compactions().value.clone();
-        desired_value.retain_active_and_last_finished();
         loop {
             let mut dirty_compactions = self.compactions.prepare_dirty()?;
-            dirty_compactions.value = desired_value.clone();
+            // A write can persist and still report a conflict. Move the id in local state so the
+            // retry finds the job in the reload.
+            self.state.advance_unpersisted_ids(&dirty_compactions.value);
+            let mut desired_value = self.state.compactions().value.clone();
+            desired_value.retain_active_and_last_finished();
+            dirty_compactions.value = desired_value;
             match self.compactions.update(dirty_compactions).await {
                 Ok(()) => {
                     let refreshed = self.compactions.prepare_dirty()?;
@@ -318,8 +321,6 @@ impl CompactorStateWriter {
                     // progress. Local terminal entries also prevent stale remote active states
                     // for the same ids from being resurrected.
                     self.load_compactions().await?;
-                    desired_value = self.state.compactions().value.clone();
-                    desired_value.retain_active_and_last_finished();
                 }
                 Err(err) => return Err(err),
             }
@@ -354,11 +355,12 @@ mod tests {
     use crate::manifest::store::{ManifestStore, StoredManifest};
     use crate::manifest::{ExternalDb, Manifest, ManifestCore, VersionedManifest};
     use crate::subcompaction::Subcompaction;
-    use crate::test_utils::GatedObjectStore;
+    use crate::test_utils::{FlakyObjectStore, GatedObjectStore};
     use bytes::Bytes;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use rstest::rstest;
     use slatedb_common::clock::{DefaultSystemClock, SystemClock};
     use slatedb_common::MockSystemClock;
     use slatedb_txn_obj::test_utils::new_dirty_object;
@@ -837,16 +839,23 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::rejected_write(false, 2)]
+    #[case::committed_write_reports_conflict(true, 3)]
     #[tokio::test]
-    async fn test_write_compactions_safely_retries_on_version_conflict() {
+    async fn test_write_compactions_safely_retries_on_version_conflict(
+        #[case] write_commits: bool,
+        #[case] versions: u64,
+    ) {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let flaky = Arc::new(FlakyObjectStore::new(Arc::clone(&object_store), 0));
         let manifest_store = Arc::new(ManifestStore::new(
             &Path::from(ROOT),
             Arc::clone(&object_store),
         ));
         let compactions_store = Arc::new(CompactionsStore::new(
             &Path::from(ROOT),
-            Arc::clone(&object_store),
+            flaky.clone() as Arc<dyn ObjectStore>,
         ));
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
 
@@ -879,14 +888,20 @@ mod tests {
             .unwrap()
             .id;
 
+        // The local proposal gets its id before an external writer stores a newer job.
+        let spec = CompactionSpec::new(vec![], 0);
+        writer
+            .state
+            .insert_compaction_for_test(Compaction::new(Ulid::from_parts(10, 1), spec.clone()));
+
         // Simulate an external writer racing and creating the next version.
+        let external_id = Ulid::from_parts(1_000, 0);
         let mut external = StoredCompactions::load(compactions_store.clone())
             .await
             .unwrap();
-        external
-            .update(external.prepare_dirty().unwrap())
-            .await
-            .unwrap();
+        let mut dirty = external.prepare_dirty().unwrap();
+        dirty.value.insert(Compaction::new(external_id, spec));
+        external.update(dirty).await.unwrap();
 
         let conflicting_id = compactions_store
             .read_latest_compactions()
@@ -895,15 +910,26 @@ mod tests {
             .id;
         assert_eq!(conflicting_id, start_id + 1);
 
+        if write_commits {
+            // The writer sees the external job. Its first write persists but reports a conflict.
+            writer.load_compactions().await.unwrap();
+            flaky.arm_put_succeeds_but_returns_already_exists_once();
+        }
+
         // This should retry on conflict and succeed with a new version.
         writer.write_compactions_safely().await.unwrap();
 
-        let final_id = compactions_store
-            .read_latest_compactions()
-            .await
-            .unwrap()
-            .id;
-        assert_eq!(final_id, start_id + 2);
+        let persisted = compactions_store.read_latest_compactions().await.unwrap();
+        assert_eq!(persisted.id, start_id + versions);
+        let proposals = persisted
+            .compactions
+            .iter()
+            .filter(|compaction| compaction.id() != external_id)
+            .collect::<Vec<_>>();
+        assert_eq!(proposals.len(), 1, "expected one proposal: {proposals:?}");
+        let proposal_id = proposals[0].id();
+        assert!(proposal_id.timestamp_ms() >= external_id.timestamp_ms());
+        assert!(writer.state.compactions().value.get(&proposal_id).is_some());
     }
 
     #[tokio::test]

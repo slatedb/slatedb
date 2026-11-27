@@ -676,6 +676,7 @@ pub(crate) struct FlakyObjectStore {
     // Put options: if set, write succeeds but returns AlreadyExists error
     // This simulates a timeout that occurs after the write completes but before the response
     put_succeeds_but_returns_already_exists: std::sync::atomic::AtomicBool,
+    put_succeeds_but_returns_already_exists_once: std::sync::atomic::AtomicBool,
     // Head: transient failures on first N attempts
     fail_first_head: AtomicUsize,
     head_attempts: AtomicUsize,
@@ -712,6 +713,7 @@ impl FlakyObjectStore {
             put_multipart_attempts: AtomicUsize::new(0),
             put_precondition_always: std::sync::atomic::AtomicBool::new(false),
             put_succeeds_but_returns_already_exists: std::sync::atomic::AtomicBool::new(false),
+            put_succeeds_but_returns_already_exists_once: std::sync::atomic::AtomicBool::new(false),
             fail_first_head: AtomicUsize::new(0),
             head_attempts: AtomicUsize::new(0),
             fail_first_list: AtomicUsize::new(0),
@@ -749,6 +751,12 @@ impl FlakyObjectStore {
         self.put_succeeds_but_returns_already_exists
             .store(true, Ordering::SeqCst);
         self
+    }
+
+    /// Makes the next write succeed but return an AlreadyExists error. Later writes succeed.
+    pub(crate) fn arm_put_succeeds_but_returns_already_exists_once(&self) {
+        self.put_succeeds_but_returns_already_exists_once
+            .store(true, Ordering::SeqCst);
     }
 
     pub(crate) fn with_head_failures(self, n: usize) -> Self {
@@ -981,6 +989,9 @@ impl ObjectStore for FlakyObjectStore {
         if self
             .put_succeeds_but_returns_already_exists
             .load(Ordering::SeqCst)
+            || self
+                .put_succeeds_but_returns_already_exists_once
+                .swap(false, Ordering::SeqCst)
         {
             // Actually write the data
             let _ = self.inner.put_opts(location, payload, opts).await?;

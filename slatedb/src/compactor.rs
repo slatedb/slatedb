@@ -537,17 +537,27 @@ impl Compactor {
         rand: Arc<DbRand>,
         system_clock: Arc<dyn SystemClock>,
     ) -> Result<Ulid, Error> {
-        let compaction_id = rand.rng().gen_ulid(system_clock.as_ref());
-        let compaction = Compaction::new(compaction_id, spec);
         let mut stored_compactions =
             match StoredCompactions::try_load(compactions_store.clone()).await? {
                 Some(stored) => stored,
                 None => return Err(Error::from(SlateDBError::InvalidDBState)),
             };
 
+        let mut attempted: Option<Ulid> = None;
         loop {
             let mut dirty = stored_compactions.prepare_dirty()?;
-            dirty.value.insert(compaction.clone());
+            // The store can report a conflict after it saves the job.
+            if let Some(id) = attempted.filter(|id| dirty.value.get(id).is_some()) {
+                return Ok(id);
+            }
+            let compaction_id = rand.rng().gen_ulid_at_least(
+                system_clock.as_ref(),
+                dirty.value.max_id_timestamp_ms().unwrap_or(0),
+            );
+            attempted = Some(compaction_id);
+            dirty
+                .value
+                .insert(Compaction::new(compaction_id, spec.clone()));
             match stored_compactions.update(dirty).await {
                 Ok(()) => return Ok(compaction_id),
                 Err(err) if err.is_sequenced_write_conflict() => {
@@ -1780,7 +1790,8 @@ mod tests {
     use crate::sst_iter::{SstIterator, SstIteratorOptions};
     use crate::tablestore::{TableStore, TableStoreKind};
     use crate::test_utils::{
-        assert_iterator, bounded_sst_view, FixedThreeBytePrefixExtractor, GatedObjectStore,
+        assert_iterator, bounded_sst_view, FixedThreeBytePrefixExtractor, FlakyObjectStore,
+        GatedObjectStore,
     };
     use crate::types::KeyValue;
     use crate::types::RowEntry;
@@ -4464,9 +4475,12 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::write_succeeds(false)]
+    #[case::committed_write_reports_conflict(true)]
     #[tokio::test]
-    async fn test_submit_persists_compaction() {
-        let os = Arc::new(InMemory::new());
+    async fn test_submit_persists_compaction(#[case] report_conflict: bool) {
+        let os = Arc::new(FlakyObjectStore::new(Arc::new(InMemory::new()), 0));
         let (manifest_store, compactions_store, _table_store) = build_test_stores(os.clone());
         let system_clock: Arc<dyn SystemClock> = Arc::new(DefaultSystemClock::new());
 
@@ -4487,6 +4501,9 @@ mod tests {
         .await
         .unwrap();
 
+        if report_conflict {
+            os.arm_put_succeeds_but_returns_already_exists_once();
+        }
         let spec = CompactionSpec::new(vec![SourceId::SortedRun(0)], 0);
         let compaction_id = Compactor::submit(
             spec.clone(),
@@ -4505,6 +4522,7 @@ mod tests {
 
         assert_eq!(stored.spec(), &spec);
         assert_eq!(stored.status(), CompactionStatus::Submitted);
+        assert_eq!(compactions.compactions.iter().count(), 1);
     }
 
     #[tokio::test]
@@ -4574,11 +4592,17 @@ mod tests {
         assert_eq!(external.id(), start_id + 1);
 
         // A second external write leaves a live latest version above the future boundary,
-        // so the stale writer can make progress after refreshing.
-        external
-            .update(external.prepare_dirty().unwrap())
-            .await
-            .unwrap();
+        // so the stale writer can make progress after refreshing. It stores a job with a
+        // newer id than the submit clock can produce.
+        let external_job_id = Ulid::from_parts(
+            u64::try_from(system_clock.now().timestamp_millis()).unwrap() + 60_000,
+            0,
+        );
+        let mut dirty = external.prepare_dirty().unwrap();
+        dirty
+            .value
+            .insert(Compaction::new(external_job_id, spec.clone()));
+        external.update(dirty).await.unwrap();
         assert_eq!(external.id(), start_id + 2);
 
         // GC fences and removes the stale writer's next id, but preserves the live latest
@@ -4612,6 +4636,7 @@ mod tests {
         assert_eq!(compactions.id, start_id + 3);
         assert_eq!(stored.spec(), &spec);
         assert_eq!(stored.status(), CompactionStatus::Submitted);
+        assert!(compaction_id.timestamp_ms() >= external_job_id.timestamp_ms());
     }
 
     #[tokio::test]

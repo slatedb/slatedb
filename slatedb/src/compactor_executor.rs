@@ -113,6 +113,7 @@ struct SubcompactionArgs {
     is_dest_last_run: bool,
     retention_min_seq: Option<u64>,
     output_ssts: Vec<SsTableHandle>,
+    output_id_floor_ms: u64,
 }
 
 /// A compaction that has been planned and is ready to be executed
@@ -502,6 +503,7 @@ impl TokioCompactionExecutorInner {
                 is_dest_last_run: args.is_dest_last_run,
                 retention_min_seq: ctx.retention_min_seq(),
                 output_ssts: s.output_ssts().clone(),
+                output_id_floor_ms: args.compaction_id.timestamp_ms(),
             })
             .collect::<Vec<_>>();
         Ok(PlannedCompaction {
@@ -764,7 +766,11 @@ impl TokioCompactionExecutorInner {
         let mut all_iter = self.load_iterators(&args).await?;
         let mut output_ssts = args.output_ssts.clone();
         let mut current_writer = self.table_store.table_writer(
-            SsTableId::from(self.rand.rng().gen_ulid(self.clock.as_ref())),
+            SsTableId::from(
+                self.rand
+                    .rng()
+                    .gen_ulid_at_least(self.clock.as_ref(), args.output_id_floor_ms),
+            ),
             Some(args.segment.clone()),
         );
         let mut bytes_written = 0usize;
@@ -823,7 +829,11 @@ impl TokioCompactionExecutorInner {
                 let finished_writer = mem::replace(
                     &mut current_writer,
                     self.table_store.table_writer(
-                        SsTableId::from(self.rand.rng().gen_ulid(self.clock.as_ref())),
+                        SsTableId::from(
+                            self.rand
+                                .rng()
+                                .gen_ulid_at_least(self.clock.as_ref(), args.output_id_floor_ms),
+                        ),
                         Some(args.segment.clone()),
                     ),
                 );
@@ -1534,6 +1544,7 @@ mod tests {
             is_dest_last_run: false,
             retention_min_seq,
             output_ssts,
+            output_id_floor_ms: 0,
         };
 
         // Verify the resumed iterator yields all remaining rows, starting immediately
@@ -3128,6 +3139,43 @@ mod tests {
         );
         assert_eq!(next.seq, retention_min_seq_num);
         assert!(iter.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_compaction_job_output_ids_are_not_older_than_the_job_id() {
+        let ctx = TestContextBuilder::new("testdb").build().await;
+        let table_store = ctx.table_store.clone();
+        let entries = [RowEntry::new_value(b"foo", b"1", 1)];
+        let l0_ssts = write_sst(&table_store, &entries, usize::MAX).await;
+
+        // The job id is one hour ahead of the executor clock.
+        let job_ms =
+            u64::try_from(ctx.executor.inner.clock.now().timestamp_millis()).unwrap() + 3_600_000;
+        let job_id = Ulid::from_parts(job_ms, 0);
+        let result = ctx
+            .run_job(StartCompactionJobArgs {
+                id: job_id,
+                compaction_id: job_id,
+                segment: Bytes::new(),
+                destination: 0,
+                l0_sst_views: l0_ssts.into_iter().map(SsTableView::identity).collect(),
+                sorted_runs: vec![],
+                compaction_clock_tick: 0,
+                is_dest_last_run: false,
+                retention_min_seq: None,
+                ctx: Some(CompactionContext::new(
+                    vec![Subcompaction::new(BytesRange::unbounded())],
+                    None,
+                )),
+            })
+            .await
+            .unwrap();
+
+        assert!(result
+            .sst_views()
+            .iter()
+            .all(|view| view.sst.id.value().timestamp_ms() >= job_ms));
+        assert_eq!(read_run_entries(&table_store, &result).await, entries);
     }
 
     #[cfg(feature = "compaction_filters")]
