@@ -3617,7 +3617,7 @@ mod tests {
                                         max_concurrent_sources: 1,
                                         filter_context: None,
                                         tracing_options: None,
-                                        use_row_cache: true,
+                                        row_cache: true,
                                     }
                                 )
                                 .await

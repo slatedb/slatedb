@@ -348,7 +348,7 @@ async fn test_row_cache_writes_reads_options_and_metrics() {
     let get_calls_before = cache.events.lock().unwrap().get_calls;
     let scan_calls_before = cache.events.lock().unwrap().scan_calls;
     assert_eq!(
-        db.get_with_options(b"a", &ReadOptions::new().with_use_row_cache(false))
+        db.get_with_options(b"a", &ReadOptions::new().with_row_cache(false))
             .await
             .unwrap(),
         Some(Bytes::from_static(b"1"))
@@ -369,7 +369,7 @@ async fn test_row_cache_writes_reads_options_and_metrics() {
         None
     );
     let _ = collect(
-        db.scan_with_options(b"a"..b"c", &ScanOptions::new().with_use_row_cache(false))
+        db.scan_with_options(b"a"..b"c", &ScanOptions::new().with_row_cache(false))
             .await
             .unwrap(),
     )
@@ -401,7 +401,7 @@ async fn test_row_cache_writes_reads_options_and_metrics() {
     assert_eq!(db.get(b"a").await.unwrap(), Some(Bytes::from_static(b"2")));
     let get_calls_before = cache.events.lock().unwrap().get_calls;
     assert_eq!(
-        snap.get_with_options(b"a", &ReadOptions::new().with_use_row_cache(false))
+        snap.get_with_options(b"a", &ReadOptions::new().with_row_cache(false))
             .await
             .unwrap(),
         Some(Bytes::from_static(b"1"))
@@ -1085,11 +1085,11 @@ async fn test_reader_row_cache_replay_reads_and_metrics() {
         Some(gets + 4)
     );
 
-    // use_row_cache: false bypasses the cache on DbReader.
+    // row_cache: false bypasses the cache on DbReader.
     let get_calls_before = cache.events.lock().unwrap().get_calls;
     assert_eq!(
         reader
-            .get_with_options(hot("x"), &ReadOptions::new().with_use_row_cache(false))
+            .get_with_options(hot("x"), &ReadOptions::new().with_row_cache(false))
             .await
             .unwrap(),
         value("x1")

@@ -303,7 +303,7 @@ pub struct ReadOptions {
     pub tracing_options: Option<TracingOptions>,
     /// Whether this read consults a configured [`RowCache`](crate::row_cache::RowCache).
     /// Defaults to `true`.
-    pub use_row_cache: bool,
+    pub row_cache: bool,
 }
 
 impl Default for ReadOptions {
@@ -315,7 +315,7 @@ impl Default for ReadOptions {
             max_concurrent_sources: 1,
             filter_context: None,
             tracing_options: None,
-            use_row_cache: true,
+            row_cache: true,
         }
     }
 }
@@ -364,11 +364,8 @@ impl ReadOptions {
         }
     }
 
-    pub fn with_use_row_cache(self, use_row_cache: bool) -> Self {
-        Self {
-            use_row_cache,
-            ..self
-        }
+    pub fn with_row_cache(self, row_cache: bool) -> Self {
+        Self { row_cache, ..self }
     }
 }
 #[derive(Clone, Debug)]
@@ -407,7 +404,7 @@ pub struct ScanOptions {
     pub tracing_options: Option<TracingOptions>,
     /// Whether this scan consults a configured [`RowCache`](crate::row_cache::RowCache).
     /// Defaults to `true`.
-    pub use_row_cache: bool,
+    pub row_cache: bool,
 }
 
 impl Default for ScanOptions {
@@ -422,7 +419,7 @@ impl Default for ScanOptions {
             order: IterationOrder::Ascending,
             filter_context: None,
             tracing_options: None,
-            use_row_cache: true,
+            row_cache: true,
         }
     }
 }
@@ -482,11 +479,8 @@ impl ScanOptions {
         }
     }
 
-    pub fn with_use_row_cache(self, use_row_cache: bool) -> Self {
-        Self {
-            use_row_cache,
-            ..self
-        }
+    pub fn with_row_cache(self, row_cache: bool) -> Self {
+        Self { row_cache, ..self }
     }
 }
 

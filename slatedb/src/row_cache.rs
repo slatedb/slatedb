@@ -74,16 +74,16 @@
 //!   [`DbTransaction`](crate::DbTransaction).
 //! - **Option gating and metrics:** SlateDB skips the cache for dirty reads, remote-durability
 //!   reads on [`Db`](crate::Db), descending scans, custom filter contexts, tracing,
-//!   `use_row_cache: false`, and overlapping uncommitted transaction writes. SlateDB updates its
-//!   own read and scan request counters on cache hits.
+//!   `row_cache: false`, and overlapping uncommitted transaction writes. SlateDB updates its own
+//!   read and scan request counters on cache hits.
 //! - **Deletes, merges, TTLs:** Never emit tombstones or expired rows (`expire_ts <= now_ms`).
 //!   Resolve merges with the database's merge operator or return a miss.
 //! - **Partial scans:** [`ScanOutcome::Partial`] returns ordered [`ScanSegment`] values that
 //!   partition the requested range. SlateDB stitches cached segments and reads each uncached gap
 //!   lazily from the LSM tree at the same `seq`.
 //! - **Cold loading:** Populate cold ranges outside SlateDB by reading with
-//!   `ReadOptions::with_use_row_cache(false)` or `ScanOptions::with_use_row_cache(false)` (for
-//!   example through a [`DbSnapshot`](crate::DbSnapshot)).
+//!   `ReadOptions::with_row_cache(false)` or `ScanOptions::with_row_cache(false)` (for example
+//!   through a [`DbSnapshot`](crate::DbSnapshot)).
 //!
 //! # Threading and lifecycle
 //!
@@ -440,7 +440,7 @@ impl<I: ScanIterator> DynScanIterator for I {
 /// Returns `true` when `options` allows a point read to consult a [`RowCache`].
 #[inline]
 pub(crate) fn can_use_row_cache_get(options: &ReadOptions, is_reader: bool) -> bool {
-    options.use_row_cache
+    options.row_cache
         && !options.dirty
         && options.filter_context.is_none()
         && options.tracing_options.is_none()
@@ -450,7 +450,7 @@ pub(crate) fn can_use_row_cache_get(options: &ReadOptions, is_reader: bool) -> b
 /// Returns `true` when `options` allows a scan to consult a [`RowCache`].
 #[inline]
 pub(crate) fn can_use_row_cache_scan(options: &ScanOptions, is_reader: bool) -> bool {
-    options.use_row_cache
+    options.row_cache
         && !options.dirty
         && matches!(options.order, IterationOrder::Ascending)
         && options.filter_context.is_none()
