@@ -15,7 +15,7 @@ use crate::merge_operator::{
 };
 use crate::read_trace::{ReadTrace, SstTraceLevel};
 use crate::reader::{DbStateReader, Reader, ScanContext};
-use crate::row_cache::{self, BatchStep, ScanSegment, SyncStep};
+use crate::row_cache::{self, ScanSegment};
 use crate::segment_iterator::{build_l0_point_iters, build_sr_point_iters, SegmentScanContext};
 use crate::snapshot_manager::RetentionPin;
 use crate::sorted_run_iterator::SortedRunIterator;
@@ -304,7 +304,7 @@ impl PartialGapContext {
 
 enum ActiveSegment {
     Cached {
-        iter: Box<dyn row_cache::DynScanIterator>,
+        iter: Box<dyn row_cache::ScanIterator>,
         end: Bound<Bytes>,
     },
     Gap {
@@ -334,7 +334,7 @@ impl PartialScan {
         while self.active.is_none() {
             match self.remaining.pop_front() {
                 Some(ScanSegment::Cached { iter, end }) => {
-                    self.active = Some(ActiveSegment::Cached { iter: iter.0, end });
+                    self.active = Some(ActiveSegment::Cached { iter, end });
                 }
                 Some(ScanSegment::Gap { start, end }) => {
                     let Some(gap_range) =
@@ -355,7 +355,7 @@ impl PartialScan {
         if let Some(active) = &mut self.active {
             match active {
                 ActiveSegment::Cached { iter, end } if !key_past_end(next_key, end) => {
-                    return iter.seek(next_key).await;
+                    return iter.seek(next_key);
                 }
                 ActiveSegment::Gap { iter, end } if !key_past_end(next_key, end) => {
                     return iter.seek(next_key).await.map_err(Into::into);
@@ -369,8 +369,8 @@ impl PartialScan {
                     if key_past_end(next_key, &end) {
                         continue;
                     }
-                    iter.0.seek(next_key).await?;
-                    self.active = Some(ActiveSegment::Cached { iter: iter.0, end });
+                    iter.seek(next_key)?;
+                    self.active = Some(ActiveSegment::Cached { iter, end });
                     return Ok(());
                 }
                 ScanSegment::Gap { start, end } => {
@@ -401,7 +401,7 @@ impl PartialScan {
 
 enum IterSource {
     Internal(Box<dyn RowEntryIterator + 'static>),
-    External(Box<dyn row_cache::DynScanIterator>),
+    External(Box<dyn row_cache::ScanIterator>),
     Partial(Box<PartialScan>),
 }
 
@@ -424,41 +424,28 @@ fn update_last_key(last_key: &mut Option<Bytes>, out: &[KeyValue], appended: usi
 }
 
 /// Pulls one row from a row-cache scan iterator, checking Tokio's cooperative budget every
-/// `EXTERNAL_BUDGET_EVERY` synchronous rows and falling back to `iter.next()` on `NeedsAsync`.
+/// `EXTERNAL_BUDGET_EVERY` rows.
 async fn next_from_cached(
-    iter: &mut dyn row_cache::DynScanIterator,
+    iter: &mut dyn row_cache::ScanIterator,
     unbudgeted: &mut u32,
     last_key: &mut Option<Bytes>,
 ) -> Result<Option<KeyValue>, crate::Error> {
-    let next = match iter.next_sync() {
-        SyncStep::Row(kv) => {
-            *unbudgeted += 1;
-            if *unbudgeted >= EXTERNAL_BUDGET_EVERY {
-                *unbudgeted = 0;
-                tokio::task::coop::consume_budget().await;
-            }
-            *last_key = Some(kv.key.clone());
-            return Ok(Some(kv));
-        }
-        SyncStep::Done => return Ok(None),
-        SyncStep::Error(err) => return Err(err),
-        SyncStep::NeedsAsync => {
+    let kv = iter.next()?;
+    if let Some(ref kv) = kv {
+        *unbudgeted += 1;
+        if *unbudgeted >= EXTERNAL_BUDGET_EVERY {
             *unbudgeted = 0;
-            let next = iter.next().await;
             tokio::task::coop::consume_budget().await;
-            next
         }
-    };
-    if let Ok(Some(ref kv)) = next {
         *last_key = Some(kv.key.clone());
     }
-    next
+    Ok(kv)
 }
 
-/// Appends up to `max` rows from a row-cache scan iterator into `out`, using `next_batch_sync`
-/// and falling back to `iter.next()` on `NeedsAsync`.
+/// Appends up to `max` rows from a row-cache scan iterator into `out`, checking Tokio's
+/// cooperative budget every `EXTERNAL_BUDGET_EVERY` rows.
 async fn next_batch_from_cached(
-    iter: &mut dyn row_cache::DynScanIterator,
+    iter: &mut dyn row_cache::ScanIterator,
     unbudgeted: &mut u32,
     last_key: &mut Option<Bytes>,
     out: &mut Vec<KeyValue>,
@@ -468,9 +455,12 @@ async fn next_batch_from_cached(
     while n < max {
         let budget_left = (EXTERNAL_BUDGET_EVERY - *unbudgeted).max(1) as usize;
         let want = (max - n).min(budget_left);
-        match iter.next_batch_sync(out, want) {
-            BatchStep::More(count) => {
-                n += count;
+        let before = out.len();
+        let res = iter.next_batch(out, want);
+        let count = out.len() - before;
+        n += count;
+        match res {
+            Ok(true) if count > 0 => {
                 *unbudgeted += count as u32;
                 if *unbudgeted >= EXTERNAL_BUDGET_EVERY {
                     *unbudgeted = 0;
@@ -478,30 +468,12 @@ async fn next_batch_from_cached(
                     tokio::task::coop::consume_budget().await;
                 }
             }
-            BatchStep::Done(count) => {
-                n += count;
+            Ok(_) => {
                 *unbudgeted += count as u32;
                 update_last_key(last_key, out, n);
                 return CachedBatchOutcome::Done(n);
             }
-            BatchStep::NeedsAsync(count) => {
-                n += count;
-                update_last_key(last_key, out, n);
-                *unbudgeted = 0;
-                let next = iter.next().await;
-                tokio::task::coop::consume_budget().await;
-                match next {
-                    Ok(Some(kv)) => {
-                        *last_key = Some(kv.key.clone());
-                        out.push(kv);
-                        n += 1;
-                    }
-                    Ok(None) => return CachedBatchOutcome::Done(n),
-                    Err(err) => return CachedBatchOutcome::Error(err),
-                }
-            }
-            BatchStep::Error(count, err) => {
-                n += count;
+            Err(err) => {
                 update_last_key(last_key, out, n);
                 return CachedBatchOutcome::Error(err);
             }
@@ -637,10 +609,13 @@ impl DbIterator {
     }
 
     /// Builds an iterator over a pre-resolved ascending row cache source.
-    pub(crate) fn from_row_cache(range: BytesRange, iter: row_cache::BoxedScanIterator) -> Self {
+    pub(crate) fn from_row_cache(
+        range: BytesRange,
+        iter: Box<dyn row_cache::ScanIterator>,
+    ) -> Self {
         DbIterator {
             range,
-            iter: IterSource::External(iter.0),
+            iter: IterSource::External(iter),
             invalidated_error: None,
             last_key: None,
             order: IterationOrder::Ascending,
@@ -969,7 +944,6 @@ impl DbIterator {
                 }
                 IterSource::External(iter) => iter
                     .seek(next_key)
-                    .await
                     .map_err(|err| self.invalidate_public(err)),
                 IterSource::Partial(partial) => partial
                     .seek(next_key)

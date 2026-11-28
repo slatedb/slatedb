@@ -9,8 +9,8 @@
 //!
 //! # Quick start
 //!
-//! Implement [`RowCache::get`] and [`RowCache::write`]. Other methods default to misses or no-ops,
-//! and async iterator methods use plain `async fn` with no macro:
+//! Implement [`RowCache::get`] and [`RowCache::write`]. Other methods default to misses or
+//! no-ops, and all trait methods are synchronous:
 //!
 //! ```
 //! use std::collections::BTreeMap;
@@ -84,6 +84,9 @@
 //! - **Cold loading:** Populate cold ranges outside SlateDB by reading with
 //!   `ReadOptions::with_row_cache(false)` or `ScanOptions::with_row_cache(false)` (for example
 //!   through a [`DbSnapshot`](crate::DbSnapshot)).
+//! - **Startup and compaction filters:** WAL replay on [`Db`](crate::Db) startup does not call
+//!   `write`; attach a fresh cache or invalidate before reopening. Mutating compaction filters
+//!   rewrite keys outside the batch writer and require external invalidation.
 //!
 //! # Threading and lifecycle
 //!
@@ -97,9 +100,7 @@
 //!   override `invalidate`.
 
 use std::fmt;
-use std::future::Future;
 use std::ops::{Bound, RangeBounds};
-use std::pin::Pin;
 
 use bytes::Bytes;
 
@@ -151,23 +152,6 @@ pub enum GetOutcome {
     Error(crate::Error),
 }
 
-/// Type-erased [`ScanIterator`] returned inside [`ScanOutcome::Hit`] or [`ScanSegment::Cached`].
-pub struct BoxedScanIterator(pub(crate) Box<dyn DynScanIterator>);
-
-impl BoxedScanIterator {
-    /// Wraps a concrete [`ScanIterator`] for return from [`RowCache::scan`].
-    #[inline]
-    pub fn new<I: ScanIterator>(iter: I) -> Self {
-        Self(Box::new(iter))
-    }
-}
-
-impl fmt::Debug for BoxedScanIterator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BoxedScanIterator").finish_non_exhaustive()
-    }
-}
-
 /// One ordered slice of a [`ScanOutcome::Partial`] scan.
 ///
 /// Segments must partition the requested range in ascending key order with no overlaps or gaps.
@@ -176,7 +160,7 @@ pub enum ScanSegment {
     /// A cached subrange served by `iter`, ending at `end`.
     Cached {
         /// Pre-resolved ascending iterator over this cached subrange.
-        iter: BoxedScanIterator,
+        iter: Box<dyn ScanIterator>,
         /// Upper key bound of this cached subrange.
         end: Bound<Bytes>,
     },
@@ -194,7 +178,7 @@ impl ScanSegment {
     #[inline]
     pub fn cached<I: ScanIterator>(iter: I, end: Bound<Bytes>) -> Self {
         Self::Cached {
-            iter: BoxedScanIterator::new(iter),
+            iter: Box::new(iter),
             end,
         }
     }
@@ -209,11 +193,10 @@ impl ScanSegment {
 impl fmt::Debug for ScanSegment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Cached { iter, end } => f
+            Self::Cached { end, .. } => f
                 .debug_struct("Cached")
-                .field("iter", iter)
                 .field("end", end)
-                .finish(),
+                .finish_non_exhaustive(),
             Self::Gap { start, end } => f
                 .debug_struct("Gap")
                 .field("start", start)
@@ -226,7 +209,7 @@ impl fmt::Debug for ScanSegment {
 /// Result of [`RowCache::scan`].
 pub enum ScanOutcome {
     /// The cache answered the entire scan with an ascending iterator.
-    Hit(BoxedScanIterator),
+    Hit(Box<dyn ScanIterator>),
     /// The cache split the scan into ordered cached slices and uncached LSM gaps.
     Partial(Vec<ScanSegment>),
     /// The cache missed; SlateDB falls back to its normal LSM scan path.
@@ -239,14 +222,14 @@ impl ScanOutcome {
     /// Returns a [`Self::Hit`] wrapping a concrete [`ScanIterator`].
     #[inline]
     pub fn hit<I: ScanIterator>(iter: I) -> Self {
-        Self::Hit(BoxedScanIterator::new(iter))
+        Self::Hit(Box::new(iter))
     }
 }
 
 impl fmt::Debug for ScanOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Hit(iter) => f.debug_tuple("Hit").field(iter).finish(),
+            Self::Hit(_) => f.debug_tuple("Hit").field(&"..").finish(),
             Self::Partial(segments) => f.debug_tuple("Partial").field(segments).finish(),
             Self::Miss => f.write_str("Miss"),
             Self::Error(err) => f.debug_tuple("Error").field(err).finish(),
@@ -329,111 +312,35 @@ impl ByteRangeBounds for KeyRange<'_> {
     }
 }
 
-/// Result of [`ScanIterator::next_sync`].
-#[derive(Debug)]
-pub enum SyncStep {
-    /// Yielded the next row synchronously.
-    Row(KeyValue),
-    /// Reached the end of the iterator.
-    Done,
-    /// The next row requires an async poll through [`ScanIterator::next`].
-    NeedsAsync,
-    /// Encountered an error.
-    Error(crate::Error),
-}
-
-/// Result of [`ScanIterator::next_batch_sync`], carrying the number of rows appended to `out`.
-#[derive(Debug)]
-pub enum BatchStep {
-    /// Appended `count` rows synchronously; more rows may follow.
-    More(usize),
-    /// Appended `count` rows and reached the end of the iterator.
-    Done(usize),
-    /// Appended `count` rows; the next row requires [`ScanIterator::next`].
-    NeedsAsync(usize),
-    /// Appended `count` rows before encountering an error.
-    Error(usize, crate::Error),
-}
-
-/// Pre-resolved ascending scan iterator returned by [`RowCache::scan`].
+/// Synchronous, pre-resolved ascending scan iterator returned by [`RowCache::scan`].
 ///
 /// Yield unique non-tombstone, non-expired rows in ascending key order with sequence filtering
-/// and merges already resolved. Pure in-memory iterators implement only [`Self::next_sync`] and
-/// [`Self::seek`] (using plain `async fn`).
+/// and merges already resolved. Implement [`Self::next`] and [`Self::seek`]; override
+/// [`Self::next_batch`] to avoid per-row dynamic dispatch during
+/// [`DbIterator::next_batch`](crate::DbIterator::next_batch).
 pub trait ScanIterator: Send + Sync + 'static {
-    /// Advances to the next row without awaiting.
-    fn next_sync(&mut self) -> SyncStep;
+    /// Returns the next row, or `None` when the iterator reaches its end.
+    fn next(&mut self) -> Result<Option<KeyValue>, crate::Error>;
 
     /// Seeks forward to the first key at or after `next_key`.
-    fn seek(&mut self, next_key: &[u8]) -> impl Future<Output = Result<(), crate::Error>> + Send;
+    fn seek(&mut self, next_key: &[u8]) -> Result<(), crate::Error>;
 
-    /// Appends up to `max` rows to `out` synchronously. Override to avoid per-row dynamic
-    /// dispatch during [`DbIterator::next_batch`](crate::DbIterator::next_batch).
-    fn next_batch_sync(&mut self, out: &mut Vec<KeyValue>, max: usize) -> BatchStep {
+    /// Appends up to `max` rows to `out`. Returns `true` if more rows may follow, or `false`
+    /// when the iterator reaches its end.
+    ///
+    /// Rows appended before an error stay in `out`.
+    fn next_batch(&mut self, out: &mut Vec<KeyValue>, max: usize) -> Result<bool, crate::Error> {
         let mut count = 0;
         while count < max {
-            match self.next_sync() {
-                SyncStep::Row(kv) => {
+            match self.next()? {
+                Some(kv) => {
                     out.push(kv);
                     count += 1;
                 }
-                SyncStep::Done => return BatchStep::Done(count),
-                SyncStep::NeedsAsync => return BatchStep::NeedsAsync(count),
-                SyncStep::Error(err) => return BatchStep::Error(count, err),
+                None => return Ok(false),
             }
         }
-        BatchStep::More(count)
-    }
-
-    /// Returns the next row asynchronously when [`Self::next_sync`] returns
-    /// [`SyncStep::NeedsAsync`].
-    fn next(&mut self) -> impl Future<Output = Result<Option<KeyValue>, crate::Error>> + Send {
-        async {
-            match self.next_sync() {
-                SyncStep::Row(kv) => Ok(Some(kv)),
-                SyncStep::Done => Ok(None),
-                SyncStep::Error(err) => Err(err),
-                SyncStep::NeedsAsync => Err(crate::Error::internal(
-                    "ScanIterator::next_sync returned NeedsAsync without overriding next"
-                        .to_string(),
-                )),
-            }
-        }
-    }
-}
-
-/// Internal dyn-compatible bridge for [`ScanIterator`]; boxes futures only on `next` and `seek`.
-pub(crate) trait DynScanIterator: Send + Sync + 'static {
-    fn next_sync(&mut self) -> SyncStep;
-    fn next_batch_sync(&mut self, out: &mut Vec<KeyValue>, max: usize) -> BatchStep;
-    fn next(
-        &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<KeyValue>, crate::Error>> + Send + '_>>;
-    fn seek<'a>(
-        &'a mut self,
-        next_key: &'a [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<(), crate::Error>> + Send + 'a>>;
-}
-
-impl<I: ScanIterator> DynScanIterator for I {
-    #[inline]
-    fn next_sync(&mut self) -> SyncStep {
-        ScanIterator::next_sync(self)
-    }
-    #[inline]
-    fn next_batch_sync(&mut self, out: &mut Vec<KeyValue>, max: usize) -> BatchStep {
-        ScanIterator::next_batch_sync(self, out, max)
-    }
-    fn next(
-        &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<KeyValue>, crate::Error>> + Send + '_>> {
-        Box::pin(ScanIterator::next(self))
-    }
-    fn seek<'a>(
-        &'a mut self,
-        next_key: &'a [u8],
-    ) -> Pin<Box<dyn Future<Output = Result<(), crate::Error>> + Send + 'a>> {
-        Box::pin(ScanIterator::seek(self, next_key))
+        Ok(true)
     }
 }
 

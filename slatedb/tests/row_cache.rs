@@ -16,9 +16,7 @@ use slatedb::config::{
 use slatedb::db_stats::REQUEST_COUNT;
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
-use slatedb::row_cache::{
-    BatchStep, GetOutcome, KeyRange, RowCache, ScanIterator, ScanOutcome, ScanSegment, SyncStep,
-};
+use slatedb::row_cache::{GetOutcome, KeyRange, RowCache, ScanIterator, ScanOutcome, ScanSegment};
 use slatedb::{
     Db, DbIterator, DbReader, DbReaderMode, DbStatus, Error, ErrorKind, IsolationLevel,
     IterationOrder, KeyValue, MergeOperator, MergeOperatorError, RowEntry, ValueDeletable,
@@ -145,9 +143,7 @@ impl TestRowCache {
 struct VecScanIterator {
     rows: Vec<KeyValue>,
     pos: usize,
-    async_at: Option<usize>,
     fail_at: Option<usize>,
-    async_calls: Arc<AtomicU64>,
 }
 
 impl VecScanIterator {
@@ -155,34 +151,16 @@ impl VecScanIterator {
         Self {
             rows,
             pos: 0,
-            async_at: None,
             fail_at: None,
-            async_calls: Arc::new(AtomicU64::new(0)),
         }
     }
 }
 
 impl ScanIterator for VecScanIterator {
-    fn next_sync(&mut self) -> SyncStep {
+    fn next(&mut self) -> Result<Option<KeyValue>, Error> {
         if self.fail_at == Some(self.pos) {
             self.fail_at = None;
-            return SyncStep::Error(Error::data("injected scan failure".to_string()));
-        }
-        if self.async_at == Some(self.pos) {
-            return SyncStep::NeedsAsync;
-        }
-        if self.pos >= self.rows.len() {
-            return SyncStep::Done;
-        }
-        let kv = self.rows[self.pos].clone();
-        self.pos += 1;
-        SyncStep::Row(kv)
-    }
-
-    async fn next(&mut self) -> Result<Option<KeyValue>, Error> {
-        self.async_calls.fetch_add(1, Ordering::Relaxed);
-        if self.async_at == Some(self.pos) {
-            self.async_at = None;
+            return Err(Error::data("injected scan failure".to_string()));
         }
         if self.pos >= self.rows.len() {
             return Ok(None);
@@ -192,7 +170,7 @@ impl ScanIterator for VecScanIterator {
         Ok(Some(kv))
     }
 
-    async fn seek(&mut self, next_key: &[u8]) -> Result<(), Error> {
+    fn seek(&mut self, next_key: &[u8]) -> Result<(), Error> {
         while self.pos < self.rows.len() && self.rows[self.pos].key.as_ref() < next_key {
             self.pos += 1;
         }
@@ -538,13 +516,11 @@ async fn test_row_cache_minimal_defaults() {
     assert_eq!(KeyRange::all().start_key(), None);
     assert_eq!(KeyRange::all().end_key(), None);
     assert!(KeyRange::all().contains(b"anything"));
-    assert!(matches!(BatchStep::Done(0), BatchStep::Done(0)));
 }
 
 #[tokio::test]
-async fn test_row_cache_scan_next_batch_async_and_invalidation() {
+async fn test_row_cache_scan_next_batch_seek_and_invalidation() {
     struct CustomBatchCache {
-        async_calls: Arc<AtomicU64>,
         fail_at: Option<usize>,
     }
 
@@ -570,20 +546,14 @@ async fn test_row_cache_scan_next_batch_async_and_invalidation() {
             ScanOutcome::hit(VecScanIterator {
                 rows,
                 pos: 0,
-                async_at: Some(2),
                 fail_at: self.fail_at,
-                async_calls: self.async_calls.clone(),
             })
         }
     }
 
-    // Mixed sync + NeedsAsync + seek through next_batch.
-    let async_calls = Arc::new(AtomicU64::new(0));
+    // Batch read + seek through next_batch.
     let db = Db::builder("/tmp/test_row_cache_batch_scan", Arc::new(InMemory::new()))
-        .with_row_cache(Arc::new(CustomBatchCache {
-            async_calls: async_calls.clone(),
-            fail_at: None,
-        }))
+        .with_row_cache(Arc::new(CustomBatchCache { fail_at: None }))
         .build()
         .await
         .unwrap();
@@ -592,7 +562,6 @@ async fn test_row_cache_scan_next_batch_async_and_invalidation() {
     let mut out = Vec::new();
     let n = iter.next_batch(&mut out, 3).await.unwrap();
     assert_eq!(n, 3);
-    assert_eq!(async_calls.load(Ordering::Relaxed), 1);
     assert_eq!(out[2].key, Bytes::from_static(b"k2"));
 
     iter.seek(b"k4").await.unwrap();
@@ -603,10 +572,7 @@ async fn test_row_cache_scan_next_batch_async_and_invalidation() {
 
     // Error midway through next_batch preserves preceding rows and invalidates the iterator.
     let db = Db::builder("/tmp/test_row_cache_batch_err", Arc::new(InMemory::new()))
-        .with_row_cache(Arc::new(CustomBatchCache {
-            async_calls: Arc::new(AtomicU64::new(0)),
-            fail_at: Some(2),
-        }))
+        .with_row_cache(Arc::new(CustomBatchCache { fail_at: Some(2) }))
         .build()
         .await
         .unwrap();
@@ -619,23 +585,6 @@ async fn test_row_cache_scan_next_batch_async_and_invalidation() {
     let second = iter.next().await.unwrap_err();
     assert_eq!(second.kind(), ErrorKind::Data);
     db.close().await.unwrap();
-
-    // Default ScanIterator::next returns an internal error if NeedsAsync is not overridden.
-    struct SyncOnlyBrokenIter;
-
-    impl ScanIterator for SyncOnlyBrokenIter {
-        fn next_sync(&mut self) -> SyncStep {
-            SyncStep::NeedsAsync
-        }
-
-        async fn seek(&mut self, _next_key: &[u8]) -> Result<(), Error> {
-            Ok(())
-        }
-    }
-
-    let mut broken = SyncOnlyBrokenIter;
-    let err = broken.next().await.unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Internal);
 }
 
 #[tokio::test]
@@ -714,9 +663,7 @@ async fn test_row_cache_partial_scan_stitching_seek_and_metrics() {
                     VecScanIterator {
                         rows: filter(a_rows),
                         pos: 0,
-                        async_at: None,
                         fail_at,
-                        async_calls: Arc::new(AtomicU64::new(0)),
                     },
                     Bound::Excluded(Bytes::from_static(b"b/")),
                 ),
