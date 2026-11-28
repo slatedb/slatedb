@@ -1359,3 +1359,82 @@ async fn test_row_cache_startup_wal_replay_on_db_and_reader() {
     reader.close().await.unwrap();
     db.close().await.unwrap();
 }
+
+#[cfg(feature = "compaction_filters")]
+#[tokio::test]
+async fn test_row_cache_disallows_compaction_filter_supplier() {
+    use async_trait::async_trait;
+    use slatedb::{
+        CompactionFilter, CompactionFilterDecision, CompactionFilterError,
+        CompactionFilterSupplier, CompactionJobContext, CompactorBuilder,
+    };
+
+    struct NoopFilter;
+
+    #[async_trait]
+    impl CompactionFilter for NoopFilter {
+        async fn filter(
+            &mut self,
+            _entry: &RowEntry,
+        ) -> Result<CompactionFilterDecision, CompactionFilterError> {
+            Ok(CompactionFilterDecision::Keep)
+        }
+
+        async fn on_compaction_end(&mut self) -> Result<(), CompactionFilterError> {
+            Ok(())
+        }
+    }
+
+    struct NoopFilterSupplier;
+
+    #[async_trait]
+    impl CompactionFilterSupplier for NoopFilterSupplier {
+        async fn create_compaction_filter(
+            &self,
+            _context: &CompactionJobContext,
+        ) -> Result<Box<dyn CompactionFilter>, CompactionFilterError> {
+            Ok(Box::new(NoopFilter))
+        }
+    }
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let path = "row_cache_disallows_compaction_filter";
+
+    // Rejects with_row_cache followed by with_compactor_builder(filter).
+    let compactor = CompactorBuilder::new(path, Arc::clone(&store))
+        .with_compaction_filter_supplier(Arc::new(NoopFilterSupplier));
+    let err = match Db::builder(path, Arc::clone(&store))
+        .with_row_cache(TestRowCache::new())
+        .with_compactor_builder(compactor)
+        .build()
+        .await
+    {
+        Ok(_) => panic!("expected invalid configuration error"),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind(), ErrorKind::Invalid);
+
+    // Rejects with_compactor_builder(filter) followed by with_row_cache.
+    let compactor = CompactorBuilder::new(path, Arc::clone(&store))
+        .with_compaction_filter_supplier(Arc::new(NoopFilterSupplier));
+    let err = match Db::builder(path, Arc::clone(&store))
+        .with_compactor_builder(compactor)
+        .with_row_cache(TestRowCache::new())
+        .build()
+        .await
+    {
+        Ok(_) => panic!("expected invalid configuration error"),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind(), ErrorKind::Invalid);
+
+    // Allows with_row_cache with a CompactorBuilder that has no compaction filter.
+    let compactor = CompactorBuilder::new(path, Arc::clone(&store));
+    let db = Db::builder(path, Arc::clone(&store))
+        .with_row_cache(TestRowCache::new())
+        .with_compactor_builder(compactor)
+        .build()
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+}

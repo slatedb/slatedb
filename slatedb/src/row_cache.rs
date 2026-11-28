@@ -88,8 +88,13 @@
 //!   WAL entries above `last_l0_seq` through `write` in ascending sequence order during open. A
 //!   persistent cache skips sequence numbers at or below its saved watermark and checks
 //!   `manifest().last_l0_seq()` for any L0 gap.
-//! - **Compaction filters:** Mutating compaction filters rewrite keys outside the batch writer and
-//!   require external invalidation.
+//! - **Compaction filters and segment drains:** Do not use a `RowCache` with compaction filters
+//!   or segment drains. They drop or modify rows outside the write path without advancing
+//!   sequence numbers. [`DbBuilder::build`](crate::DbBuilder::build) rejects configuring both a
+//!   `RowCache` and an embedded compaction filter. Do not run standalone compactors or compaction
+//!   workers with compaction filters against a database that uses a `RowCache`, because neither
+//!   [`Db`](crate::Db) nor [`DbReader`](crate::DbReader) can detect those rewrites and reads can
+//!   return stale rows.
 //!
 //! # Threading and lifecycle
 //!

@@ -482,6 +482,11 @@ impl<P: Into<Path>> DbBuilder<P> {
     /// The batch writer feeds every committed write batch to the cache before the committed
     /// sequence number advances. Point reads and ascending scans consult the cache first and fall
     /// back to the LSM read path on misses. See [`crate::row_cache`] for the full contract.
+    ///
+    /// **Warning:** Do not combine a [`RowCache`] with compaction filters or segment drains.
+    /// [`DbBuilder::build`] returns [`ErrorKind::Invalid`](crate::ErrorKind::Invalid) when the
+    /// embedded [`CompactorBuilder`] configures a compaction filter. Standalone compactors and
+    /// compaction workers that rewrite or drop rows can cause stale cache reads.
     pub fn with_row_cache(mut self, row_cache: Arc<dyn RowCache>) -> Self {
         self.row_cache = Some(row_cache);
         self
@@ -510,6 +515,18 @@ impl<P: Into<Path>> DbBuilder<P> {
     pub async fn build(self) -> Result<Db, crate::Error> {
         self.settings.validate()?;
         validate_block_alignment(self.sst_block_alignment, self.settings.compression_codec)?;
+        #[cfg(feature = "compaction_filters")]
+        if self.row_cache.is_some()
+            && self
+                .compactor_builder
+                .as_ref()
+                .is_some_and(|b| b.compaction_filter_supplier.is_some())
+        {
+            return Err(SlateDBError::InvalidConfiguration(
+                "row_cache cannot be combined with a compaction_filter_supplier".into(),
+            )
+            .into());
+        }
 
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
@@ -981,6 +998,10 @@ impl<P: Into<Path>> AdminBuilder<P> {
     ///
     /// When running a standalone compactor via [`Admin::run_compactor`], ensure it is
     /// configured with the same filter supplier as the `DbBuilder`.
+    ///
+    /// **Warning:** Do not run a standalone compactor with compaction filters against a database
+    /// that uses a [`RowCache`]. The cache does not see compactor rewrites, so reads can return
+    /// stale rows.
     #[cfg(feature = "compaction_filters")]
     pub fn with_compaction_filter_supplier(
         mut self,
@@ -1412,6 +1433,11 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// See [`crate::CompactionFilter`] for detailed documentation, examples, and the
     /// filter API.
     ///
+    /// **Warning:** Compaction filters are incompatible with [`RowCache`]. [`DbBuilder::build`]
+    /// rejects an embedded compactor with a compaction filter when you also configure a row cache.
+    /// Do not run a standalone compactor with compaction filters against a database that uses a
+    /// [`RowCache`].
+    ///
     /// # Arguments
     ///
     /// * `supplier` - An Arc-wrapped compaction filter supplier implementation.
@@ -1682,6 +1708,11 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
         self
     }
 
+    /// Sets the compaction filter supplier for this worker.
+    ///
+    /// **Warning:** Do not run compaction workers with compaction filters against a database that
+    /// uses a [`RowCache`]. The cache does not see compactor rewrites, so reads can return stale
+    /// rows.
     #[cfg(feature = "compaction_filters")]
     pub fn with_compaction_filter_supplier(
         mut self,
@@ -1876,6 +1907,10 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// The manifest poller feeds replayed WAL writes before the reader's sequence number advances,
     /// and invalidates ranges touched by unreplayed L0 updates. Point reads and ascending scans
     /// consult the cache first, as on [`crate::Db`]. See [`crate::row_cache`] for the contract.
+    ///
+    /// **Warning:** Do not attach a [`RowCache`] to a database whose compactor (embedded or
+    /// standalone) runs compaction filters or segment drains. The reader cannot detect out-of-band
+    /// row rewrites and may serve stale data.
     pub fn with_row_cache(mut self, row_cache: Arc<dyn RowCache>) -> Self {
         self.row_cache = Some(row_cache);
         self
