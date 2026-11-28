@@ -64,6 +64,7 @@ pub(crate) struct ScanContext<'a> {
     pub(crate) prefix: Option<Bytes>,
 }
 
+#[derive(Clone)]
 pub(crate) struct Reader {
     pub(crate) table_store: Arc<TableStore>,
     pub(crate) db_stats: DbStats,
@@ -328,8 +329,23 @@ impl Reader {
         ctx: ScanContext<'_>,
     ) -> Result<DbIterator, SlateDBError> {
         let read_trace = Self::read_trace(options.tracing_options.as_ref());
-        let read = self.scan_with_options_inner(range, options, ctx, read_trace.clone());
+        let read = self.scan_with_options_inner(range, options, ctx, read_trace.clone(), true);
         read.instrument(read_trace.read_span()).await
+    }
+
+    /// Scans an uncached gap of a [`crate::row_cache::ScanOutcome::Partial`] scan without
+    /// incrementing `scan_requests` again.
+    pub(crate) async fn scan_gap(
+        &self,
+        range: BytesRange,
+        options: &ScanOptions,
+        ctx: ScanContext<'_>,
+    ) -> Result<Box<dyn RowEntryIterator + 'static>, SlateDBError> {
+        let read_trace = Self::read_trace(options.tracing_options.as_ref());
+        let read = self.scan_with_options_inner(range, options, ctx, read_trace.clone(), false);
+        read.instrument(read_trace.read_span())
+            .await
+            .map(DbIterator::into_internal)
     }
 
     async fn scan_with_options_inner(
@@ -338,8 +354,11 @@ impl Reader {
         options: &ScanOptions,
         ctx: ScanContext<'_>,
         read_trace: ReadTrace,
+        record_metric: bool,
     ) -> Result<DbIterator, SlateDBError> {
-        self.db_stats.scan_requests.increment(1);
+        if record_metric {
+            self.db_stats.scan_requests.increment(1);
+        }
         let max_seq = self.prepare_max_seq(ctx.max_seq, options.durability_filter, options.dirty);
 
         let sst_iter_options = SstIteratorOptions {

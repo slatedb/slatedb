@@ -1,10 +1,9 @@
 #![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -18,8 +17,7 @@ use slatedb::db_stats::REQUEST_COUNT;
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::row_cache::{
-    BatchStep, GetOutcome, Host, KeyRange, OpenContext, RowCache, ScanIterator, ScanOutcome,
-    SyncStep, ViewScanOptions,
+    BatchStep, GetOutcome, KeyRange, RowCache, ScanIterator, ScanOutcome, ScanSegment, SyncStep,
 };
 use slatedb::{
     Db, DbIterator, DbReader, DbReaderMode, DbStatus, Error, ErrorKind, IsolationLevel,
@@ -29,63 +27,97 @@ use slatedb::{
 use slatedb_common::metrics::{lookup_metric_with_labels, DefaultMetricsRecorder};
 use tokio::sync::watch;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OwnedRange {
+    start: Bound<Bytes>,
+    end: Bound<Bytes>,
+}
+
+impl OwnedRange {
+    fn from_key_range(range: KeyRange<'_>) -> Self {
+        Self {
+            start: range.start.map(Bytes::copy_from_slice),
+            end: range.end.map(Bytes::copy_from_slice),
+        }
+    }
+
+    fn is_all(&self) -> bool {
+        matches!(
+            (&self.start, &self.end),
+            (Bound::Unbounded, Bound::Unbounded)
+        )
+    }
+
+    fn contains(&self, key: &[u8]) -> bool {
+        let start_ok = match &self.start {
+            Bound::Included(s) => key >= s.as_ref(),
+            Bound::Excluded(s) => key > s.as_ref(),
+            Bound::Unbounded => true,
+        };
+        let end_ok = match &self.end {
+            Bound::Included(e) => key <= e.as_ref(),
+            Bound::Excluded(e) => key < e.as_ref(),
+            Bound::Unbounded => true,
+        };
+        start_ok && end_ok
+    }
+}
+
 #[derive(Default)]
 struct Events {
-    opened: usize,
     applied_batches: Vec<(u64, Vec<RowEntry>)>,
+    last_written_seq: u64,
     misses: Vec<Bytes>,
-    invalidations: Vec<(u64, u64)>,
+    invalidations: Vec<OwnedRange>,
+    get_calls: usize,
+    scan_calls: usize,
 }
 
 struct TestRowCache {
-    host: OnceLock<Host>,
     events: Mutex<Events>,
     versions: Mutex<BTreeMap<Bytes, Vec<RowEntry>>>,
     serve_reads: AtomicBool,
-    reject_open: AtomicBool,
     fail_next_get: AtomicBool,
-    /// When set, only keys under this prefix are served; everything else misses.
-    covered_prefix: Option<&'static [u8]>,
+    /// When set, only keys matching one of these prefixes are served; everything else misses.
+    covered_prefixes: Vec<&'static [u8]>,
 }
 
 impl TestRowCache {
     fn new() -> Arc<Self> {
-        Self::with_prefix(None)
+        Self::covering(&[])
     }
 
-    /// A cache that serves only `prefix`.
-    fn covering(prefix: &'static [u8]) -> Arc<Self> {
-        Self::with_prefix(Some(prefix))
-    }
-
-    fn with_prefix(covered_prefix: Option<&'static [u8]>) -> Arc<Self> {
+    fn covering(prefixes: &[&'static [u8]]) -> Arc<Self> {
         Arc::new(Self {
-            host: OnceLock::new(),
             events: Mutex::new(Events::default()),
             versions: Mutex::new(BTreeMap::new()),
             serve_reads: AtomicBool::new(true),
-            reject_open: AtomicBool::new(false),
             fail_next_get: AtomicBool::new(false),
-            covered_prefix,
+            covered_prefixes: prefixes.to_vec(),
         })
     }
 
-    fn covers(&self, range: KeyRange<'_>) -> bool {
-        let Some(prefix) = self.covered_prefix else {
+    fn covers_key(&self, key: &[u8]) -> bool {
+        if self.covered_prefixes.is_empty() {
             return true;
-        };
-        let mut prefix_end = prefix.to_vec();
-        *prefix_end.last_mut().unwrap() += 1;
-        range.start_key().is_some_and(|s| s.starts_with(prefix))
-            && range.end_key().is_some_and(|e| e <= &prefix_end[..])
+        }
+        self.covered_prefixes.iter().any(|p| key.starts_with(p))
+    }
+
+    fn covers_range(&self, range: KeyRange<'_>) -> bool {
+        if self.covered_prefixes.is_empty() {
+            return true;
+        }
+        self.covered_prefixes.iter().any(|prefix| {
+            let mut prefix_end = prefix.to_vec();
+            *prefix_end.last_mut().unwrap() += 1;
+            range.start_key().is_some_and(|s| s.starts_with(prefix))
+                && range.end_key().is_some_and(|e| e <= &prefix_end[..])
+        })
     }
 
     fn misses(&self) -> Vec<Bytes> {
         self.events.lock().unwrap().misses.clone()
-    }
-
-    fn host(&self) -> &Host {
-        self.host.get().expect("row cache was opened")
     }
 
     fn lookup_at(&self, key: &[u8], seq: u64) -> Option<Option<KeyValue>> {
@@ -116,6 +148,18 @@ struct VecScanIterator {
     async_at: Option<usize>,
     fail_at: Option<usize>,
     async_calls: Arc<AtomicU64>,
+}
+
+impl VecScanIterator {
+    fn from_rows(rows: Vec<KeyValue>) -> Self {
+        Self {
+            rows,
+            pos: 0,
+            async_at: None,
+            fail_at: None,
+            async_calls: Arc::new(AtomicU64::new(0)),
+        }
+    }
 }
 
 impl ScanIterator for VecScanIterator {
@@ -157,21 +201,15 @@ impl ScanIterator for VecScanIterator {
 }
 
 impl RowCache for TestRowCache {
-    fn open(&self, ctx: OpenContext) -> Result<(), Error> {
-        assert!(!format!("{ctx:?}").is_empty());
-        self.events.lock().unwrap().opened += 1;
-        let _ = self.host.set(ctx.host);
-        if self.reject_open.load(Ordering::Relaxed) {
-            return Err(Error::invalid("row cache rejected open".to_string()));
-        }
-        Ok(())
-    }
-
     fn write(&self, seq: u64, entries: &[RowEntry]) {
-        assert!(
-            self.host().last_committed_seq() < seq,
-            "write must run before committed_seq advances"
-        );
+        {
+            let mut events = self.events.lock().unwrap();
+            assert!(
+                seq > events.last_written_seq,
+                "write sequence numbers must strictly increase"
+            );
+            events.last_written_seq = seq;
+        }
         if entries.is_empty() {
             return;
         }
@@ -194,33 +232,21 @@ impl RowCache for TestRowCache {
             .push((seq, entries.to_vec()));
     }
 
-    fn invalidate(&self, valid_through: u64, new_seq: u64) {
-        assert!(new_seq > valid_through);
-        assert_eq!(
-            self.host().last_committed_seq(),
-            valid_through,
-            "invalidation runs before the reader's seq advances"
-        );
-        self.versions.lock().unwrap().clear();
-        self.events
-            .lock()
-            .unwrap()
-            .invalidations
-            .push((valid_through, new_seq));
+    fn invalidate(&self, range: KeyRange<'_>) {
+        let owned = OwnedRange::from_key_range(range);
+        {
+            let mut versions = self.versions.lock().unwrap();
+            versions.retain(|key, _| !owned.contains(key));
+        }
+        self.events.lock().unwrap().invalidations.push(owned);
     }
 
-    fn get(&self, key: &[u8], options: &ReadOptions, at: Option<u64>) -> GetOutcome {
+    fn get(&self, key: &[u8], seq: u64) -> GetOutcome {
+        self.events.lock().unwrap().get_calls += 1;
         if self.fail_next_get.swap(false, Ordering::Relaxed) {
             return GetOutcome::Error(Error::invalid("injected get error".to_string()));
         }
-        let key_range = KeyRange {
-            start: Bound::Included(key),
-            end: Bound::Included(key),
-        };
-        if !self.covers(key_range)
-            || !self.serve_reads.load(Ordering::Relaxed)
-            || !self.host().allows_read(options)
-        {
+        if !self.covers_key(key) || !self.serve_reads.load(Ordering::Relaxed) {
             self.events
                 .lock()
                 .unwrap()
@@ -228,12 +254,8 @@ impl RowCache for TestRowCache {
                 .push(Bytes::copy_from_slice(key));
             return GetOutcome::Miss;
         }
-        let seq = self.host().read_seq(at);
         match self.lookup_at(key, seq) {
-            Some(kv) => {
-                self.host().record_get_requests(1);
-                GetOutcome::Hit(kv)
-            }
+            Some(kv) => GetOutcome::Hit(kv),
             None => {
                 self.events
                     .lock()
@@ -245,17 +267,9 @@ impl RowCache for TestRowCache {
         }
     }
 
-    fn scan(
-        &self,
-        range: KeyRange<'_>,
-        options: &ScanOptions,
-        _prefix: Option<&[u8]>,
-        at: Option<u64>,
-    ) -> ScanOutcome {
-        if !self.covers(range)
-            || !self.serve_reads.load(Ordering::Relaxed)
-            || !self.host().allows_scan(options)
-        {
+    fn scan(&self, range: KeyRange<'_>, seq: u64, _prefix: Option<&[u8]>) -> ScanOutcome {
+        self.events.lock().unwrap().scan_calls += 1;
+        if !self.covers_range(range) || !self.serve_reads.load(Ordering::Relaxed) {
             let start = range.start_key().unwrap_or_default();
             self.events
                 .lock()
@@ -264,7 +278,6 @@ impl RowCache for TestRowCache {
                 .push(Bytes::copy_from_slice(start));
             return ScanOutcome::Miss;
         }
-        let seq = self.host().read_seq(at);
         let versions = self.versions.lock().unwrap();
         let mut rows = Vec::new();
         for (_key, history) in versions.range::<[u8], _>(range) {
@@ -283,14 +296,7 @@ impl RowCache for TestRowCache {
                 }
             }
         }
-        self.host().record_scan_requests(1);
-        ScanOutcome::hit(VecScanIterator {
-            rows,
-            pos: 0,
-            async_at: None,
-            fail_at: None,
-            async_calls: Arc::new(AtomicU64::new(0)),
-        })
+        ScanOutcome::hit(VecScanIterator::from_rows(rows))
     }
 }
 
@@ -310,10 +316,14 @@ impl MergeOperator for ConcatMergeOperator {
 }
 
 #[tokio::test]
-async fn test_row_cache_lifecycle_writes_reads_and_host_apis() {
+async fn test_row_cache_writes_reads_options_and_metrics() {
     let cache = TestRowCache::new();
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let db = Db::builder("/tmp/test_row_cache_lifecycle", Arc::new(InMemory::new()))
+        .with_settings(Settings {
+            flush_interval: None,
+            ..Settings::default()
+        })
         .with_metrics_recorder(recorder.clone())
         .with_merge_operator(Arc::new(ConcatMergeOperator))
         .with_row_cache(cache.clone())
@@ -321,67 +331,80 @@ async fn test_row_cache_lifecycle_writes_reads_and_host_apis() {
         .await
         .unwrap();
 
-    assert_eq!(cache.events.lock().unwrap().opened, 1);
-    assert!(!cache.host().is_reader());
-    assert!(cache.host().allows_read(&ReadOptions::default()));
-    assert!(!cache.host().allows_read(&ReadOptions {
-        durability_filter: DurabilityLevel::Remote,
-        ..ReadOptions::default()
-    }));
-    assert!(!cache.host().allows_read(&ReadOptions {
-        dirty: true,
-        ..ReadOptions::default()
-    }));
-    assert!(cache.host().allows_scan(&ScanOptions::default()));
-    assert!(!cache.host().allows_scan(&ScanOptions {
-        order: IterationOrder::Descending,
-        ..ScanOptions::default()
-    }));
-
-    // Writes pass through write() strictly before committed_seq advances.
+    // Writes pass through write() in ascending sequence order.
     db.put(b"a", b"1").await.unwrap();
     db.put(b"b", b"2").await.unwrap();
     db.merge(b"m", b"part1").await.unwrap();
     assert_eq!(cache.events.lock().unwrap().applied_batches.len(), 3);
 
-    // run_on_writer executes on the batch writer at the current committed sequence number.
-    let writer_seq = cache.host().run_on_writer(|seq| seq).await.unwrap();
-    assert_eq!(writer_seq, cache.host().last_committed_seq());
-
-    // Point reads hit the cache and update SlateDB's request counter.
+    // Point reads hit the cache and SlateDB updates its own request counter.
     assert_eq!(db.get(b"a").await.unwrap(), Some(Bytes::from_static(b"1")));
     assert_eq!(
         lookup_metric_with_labels(&recorder, REQUEST_COUNT, &[("op", "get")]),
         Some(1)
     );
 
+    // Option gating bypasses the cache without invoking RowCache::get or RowCache::scan.
+    let get_calls_before = cache.events.lock().unwrap().get_calls;
+    let scan_calls_before = cache.events.lock().unwrap().scan_calls;
+    assert_eq!(
+        db.get_with_options(b"a", &ReadOptions::new().with_use_row_cache(false))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"1"))
+    );
+    assert_eq!(
+        db.get_with_options(b"a", &ReadOptions::new().with_dirty(true))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"1"))
+    );
+    assert_eq!(
+        db.get_with_options(
+            b"a",
+            &ReadOptions::new().with_durability_filter(DurabilityLevel::Remote),
+        )
+        .await
+        .unwrap(),
+        None
+    );
+    let _ = collect(
+        db.scan_with_options(b"a"..b"c", &ScanOptions::new().with_use_row_cache(false))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let desc_opts = ScanOptions::new().with_order(IterationOrder::Descending);
+    let desc_rows = collect(db.scan_with_options(b"a"..b"c", &desc_opts).await.unwrap()).await;
+    assert_eq!(
+        desc_rows,
+        vec![
+            (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
+            (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
+        ]
+    );
+    assert_eq!(cache.events.lock().unwrap().get_calls, get_calls_before);
+    assert_eq!(cache.events.lock().unwrap().scan_calls, scan_calls_before);
+
     // Errors returned from the cache preserve ErrorKind.
     cache.fail_next_get.store(true, Ordering::Relaxed);
     let err = db.get(b"a").await.unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Invalid);
 
-    // Snapshots read at their started_seq.
+    // Snapshots read at their started_seq and support bypassing the cache for cold loading.
     let snap = db.snapshot().unwrap();
-    let snap_seq = snap.seq();
     db.put(b"a", b"2").await.unwrap();
     assert_eq!(
         snap.get(b"a").await.unwrap(),
         Some(Bytes::from_static(b"1"))
     );
     assert_eq!(db.get(b"a").await.unwrap(), Some(Bytes::from_static(b"2")));
-
-    // Descending scans bypass the row cache automatically.
-    let desc_opts = ScanOptions {
-        order: IterationOrder::Descending,
-        ..ScanOptions::default()
-    };
-    let desc_rows = collect(db.scan_with_options(b"a"..b"c", &desc_opts).await.unwrap()).await;
+    let get_calls_before = cache.events.lock().unwrap().get_calls;
     assert_eq!(
-        desc_rows,
-        vec![
-            (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
-            (Bytes::from_static(b"a"), Bytes::from_static(b"2")),
-        ]
+        snap.get_with_options(b"a", &ReadOptions::new().with_use_row_cache(false))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"1"))
     );
     let snap_desc = collect(
         snap.scan_with_options(b"a"..b"c", &desc_opts)
@@ -396,6 +419,8 @@ async fn test_row_cache_lifecycle_writes_reads_and_host_apis() {
             (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
         ]
     );
+    assert_eq!(cache.events.lock().unwrap().get_calls, get_calls_before);
+    drop(snap);
 
     // Transactions see uncommitted puts/deletes and fall through on uncommitted merges.
     let txn = db.begin(IsolationLevel::Snapshot).unwrap();
@@ -411,7 +436,6 @@ async fn test_row_cache_lifecycle_writes_reads_and_host_apis() {
         txn.get(b"m").await.unwrap(),
         Some(Bytes::from_static(b"part1+part2"))
     );
-    // Overlapping scan bypasses cache to see txn writes.
     let mut txn_scan = txn.scan(b"a"..b"c").await.unwrap();
     let mut txn_rows = Vec::new();
     txn_scan.next_batch(&mut txn_rows, 10).await.unwrap();
@@ -419,67 +443,6 @@ async fn test_row_cache_lifecycle_writes_reads_and_host_apis() {
     assert_eq!(txn_rows[0].key, Bytes::from_static(b"a"));
     assert_eq!(txn_rows[0].value, Bytes::from_static(b"txn_val"));
     txn.rollback();
-
-    // Host::capture_state_view, is_view_current, retains_seq, scan_view, and next_entry.
-    let view_before_flush = cache.host().capture_state_view().unwrap();
-    assert!(cache.host().is_view_current(&view_before_flush));
-    assert!(cache.host().retains_seq(&view_before_flush, snap_seq));
-    assert!(format!("{:?}", cache.host()).contains("writer"));
-    assert!(format!("{view_before_flush:?}").contains("writer"));
-
-    // scan_view bypasses the row cache and preserves ValueDeletable::Merge on unbased merges.
-    let mut raw = cache
-        .host()
-        .scan_view(
-            &view_before_flush,
-            KeyRange {
-                start: Bound::Included(b"m"),
-                end: Bound::Excluded(b"n"),
-            },
-            &ViewScanOptions::default(),
-        )
-        .await
-        .unwrap();
-    assert!(format!("{raw:?}").contains("ViewIterator"));
-    let entry = raw.next_entry().await.unwrap().unwrap();
-    assert_eq!(entry.key, Bytes::from_static(b"m"));
-    assert_eq!(
-        entry.value,
-        ValueDeletable::Merge(Bytes::from_static(b"part1"))
-    );
-
-    // Flushing freezes the active memtable and creates an L0 SST whose index Host can inspect.
-    db.flush_with_options(FlushOptions {
-        flush_type: FlushType::MemTable,
-    })
-    .await
-    .unwrap();
-    assert!(!cache.host().is_view_current(&view_before_flush));
-    let view_after_flush = cache.host().capture_state_view().unwrap();
-    assert!(cache.host().retains_seq(&view_after_flush, snap_seq));
-    drop(snap);
-
-    // Host::snapshot opens a retention snapshot at the committed sequence number.
-    let host_snap = cache.host().snapshot().await.unwrap();
-    assert_eq!(host_snap.seq(), cache.host().last_committed_seq());
-    assert!(format!("{host_snap:?}").contains(&host_snap.seq().to_string()));
-    db.put(b"hs", b"1").await.unwrap();
-    db.flush_with_options(FlushOptions {
-        flush_type: FlushType::MemTable,
-    })
-    .await
-    .unwrap();
-    let view_after_snap = cache.host().capture_state_view().unwrap();
-    assert!(cache.host().retains_seq(&view_after_snap, host_snap.seq()));
-    drop(host_snap);
-    assert!(!cache
-        .host()
-        .retains_seq(&cache.host().capture_state_view().unwrap(), snap_seq));
-
-    let manifest = cache.host().manifest().unwrap();
-    let l0 = manifest.l0().front().expect("flushed L0 SST");
-    let sst_index = cache.host().read_sst_index(&l0.sst).await.unwrap();
-    assert!(!sst_index.is_empty());
 
     // Misses are observed directly inside get and scan.
     cache.serve_reads.store(false, Ordering::Relaxed);
@@ -490,45 +453,18 @@ async fn test_row_cache_lifecycle_writes_reads_and_host_apis() {
         vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")]
     );
 
-    // Closing the database stops the writer task and fails subsequent run_on_writer calls.
+    // Closing the database does not close or invalidate the caller-owned cache.
     db.close().await.unwrap();
-    assert!(cache.host().check_closed().is_err());
-    assert!(cache.host().run_on_writer(|seq| seq).await.is_err());
-
-    // Dropping Db breaks the weak reference in Host (no Arc cycle).
-    drop(db);
-    assert!(cache.host().capture_state_view().is_err());
-}
-
-#[tokio::test]
-async fn test_row_cache_open_rejection_aborts_build() {
-    let cache = TestRowCache::new();
-    cache.reject_open.store(true, Ordering::Relaxed);
-    let err = Db::builder("/tmp/test_row_cache_reject_open", Arc::new(InMemory::new()))
-        .with_row_cache(cache.clone())
-        .build()
-        .await
-        .err()
-        .expect("open rejection must fail build");
-    assert_eq!(err.kind(), ErrorKind::Invalid);
-    assert_eq!(cache.events.lock().unwrap().opened, 1);
-    assert!(cache.host().run_on_writer(|seq| seq).await.is_err());
 }
 
 #[tokio::test]
 async fn test_row_cache_minimal_defaults() {
     struct MinimalPointCache {
-        host: OnceLock<Host>,
         rows: Mutex<BTreeMap<Bytes, (u64, Option<KeyValue>)>>,
         hits: AtomicU64,
     }
 
     impl RowCache for MinimalPointCache {
-        fn open(&self, ctx: OpenContext) -> Result<(), Error> {
-            let _ = self.host.set(ctx.host);
-            Ok(())
-        }
-
         fn write(&self, seq: u64, entries: &[RowEntry]) {
             let mut rows = self.rows.lock().unwrap();
             for e in entries {
@@ -553,19 +489,11 @@ async fn test_row_cache_minimal_defaults() {
             }
         }
 
-        fn get(&self, key: &[u8], options: &ReadOptions, at: Option<u64>) -> GetOutcome {
-            let Some(host) = self.host.get() else {
-                return GetOutcome::Miss;
-            };
-            if !host.allows_read(options) {
-                return GetOutcome::Miss;
-            }
-            let seq = host.read_seq(at);
+        fn get(&self, key: &[u8], seq: u64) -> GetOutcome {
             let rows = self.rows.lock().unwrap();
             match rows.get(key) {
                 Some((entry_seq, kv)) if *entry_seq <= seq => {
                     self.hits.fetch_add(1, Ordering::Relaxed);
-                    host.record_get_requests(1);
                     GetOutcome::Hit(kv.clone())
                 }
                 _ => GetOutcome::Miss,
@@ -574,7 +502,6 @@ async fn test_row_cache_minimal_defaults() {
     }
 
     let cache = Arc::new(MinimalPointCache {
-        host: OnceLock::new(),
         rows: Mutex::default(),
         hits: AtomicU64::new(0),
     });
@@ -608,11 +535,14 @@ async fn test_row_cache_minimal_defaults() {
         (range.start_key(), range.end_key()),
         (Some(&b"b"[..]), Some(&b"d"[..]))
     );
+    assert_eq!(KeyRange::all().start_key(), None);
+    assert_eq!(KeyRange::all().end_key(), None);
+    assert!(KeyRange::all().contains(b"anything"));
     assert!(matches!(BatchStep::Done(0), BatchStep::Done(0)));
 }
 
 #[tokio::test]
-async fn test_row_cache_scan_next_batch_async_gap_seek_and_invalidation() {
+async fn test_row_cache_scan_next_batch_async_and_invalidation() {
     struct CustomBatchCache {
         async_calls: Arc<AtomicU64>,
         fail_at: Option<usize>,
@@ -621,17 +551,11 @@ async fn test_row_cache_scan_next_batch_async_gap_seek_and_invalidation() {
     impl RowCache for CustomBatchCache {
         fn write(&self, _seq: u64, _entries: &[RowEntry]) {}
 
-        fn get(&self, _key: &[u8], _options: &ReadOptions, _at: Option<u64>) -> GetOutcome {
+        fn get(&self, _key: &[u8], _seq: u64) -> GetOutcome {
             GetOutcome::Miss
         }
 
-        fn scan(
-            &self,
-            _range: KeyRange<'_>,
-            _options: &ScanOptions,
-            _prefix: Option<&[u8]>,
-            _at: Option<u64>,
-        ) -> ScanOutcome {
+        fn scan(&self, _range: KeyRange<'_>, _seq: u64, _prefix: Option<&[u8]>) -> ScanOutcome {
             let rows = (0..5u8)
                 .map(|i| {
                     KeyValue::new(
@@ -714,15 +638,295 @@ async fn test_row_cache_scan_next_batch_async_gap_seek_and_invalidation() {
     assert_eq!(err.kind(), ErrorKind::Internal);
 }
 
+#[tokio::test]
+async fn test_row_cache_partial_scan_stitching_seek_and_metrics() {
+    /// Caches only `a/` and `c/` prefixes; leaves `b/` and `d/` as uncached LSM gaps.
+    struct PartialRowCache {
+        versions: Mutex<BTreeMap<Bytes, Vec<RowEntry>>>,
+        fail_cached_at: Mutex<Option<usize>>,
+        return_empty: AtomicBool,
+    }
+
+    impl PartialRowCache {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                versions: Mutex::new(BTreeMap::new()),
+                fail_cached_at: Mutex::new(None),
+                return_empty: AtomicBool::new(false),
+            })
+        }
+
+        fn cached_rows(&self, start: &[u8], end: &[u8], seq: u64) -> Vec<KeyValue> {
+            let versions = self.versions.lock().unwrap();
+            let mut rows = Vec::new();
+            for (_key, history) in versions.range::<[u8], _>(KeyRange {
+                start: Bound::Included(start),
+                end: Bound::Excluded(end),
+            }) {
+                for entry in history.iter().rev() {
+                    if entry.seq <= seq {
+                        if let ValueDeletable::Value(val) = &entry.value {
+                            rows.push(KeyValue::new(
+                                entry.key.clone(),
+                                val.clone(),
+                                entry.seq,
+                                entry.create_ts.unwrap_or(0),
+                                entry.expire_ts,
+                            ));
+                        }
+                        break;
+                    }
+                }
+            }
+            rows
+        }
+    }
+
+    impl RowCache for PartialRowCache {
+        fn write(&self, _seq: u64, entries: &[RowEntry]) {
+            let mut versions = self.versions.lock().unwrap();
+            for e in entries {
+                if e.key.starts_with(b"a/") || e.key.starts_with(b"c/") {
+                    versions.entry(e.key.clone()).or_default().push(e.clone());
+                }
+            }
+        }
+
+        fn get(&self, _key: &[u8], _seq: u64) -> GetOutcome {
+            GetOutcome::Miss
+        }
+
+        fn scan(&self, range: KeyRange<'_>, seq: u64, _prefix: Option<&[u8]>) -> ScanOutcome {
+            if self.return_empty.load(Ordering::Relaxed) {
+                return ScanOutcome::Partial(Vec::new());
+            }
+            let fail_at = *self.fail_cached_at.lock().unwrap();
+            let a_rows = self.cached_rows(b"a/", b"b/", seq);
+            let c_rows = self.cached_rows(b"c/", b"d/", seq);
+            // Clip cached rows to the requested range.
+            let filter = |rows: Vec<KeyValue>| -> Vec<KeyValue> {
+                rows.into_iter()
+                    .filter(|kv| range.contains(&kv.key))
+                    .collect()
+            };
+            let segments = vec![
+                ScanSegment::cached(
+                    VecScanIterator {
+                        rows: filter(a_rows),
+                        pos: 0,
+                        async_at: None,
+                        fail_at,
+                        async_calls: Arc::new(AtomicU64::new(0)),
+                    },
+                    Bound::Excluded(Bytes::from_static(b"b/")),
+                ),
+                // Empty gap between segments must be skipped without opening an LSM scan.
+                ScanSegment::gap(
+                    Bound::Excluded(Bytes::from_static(b"b/")),
+                    Bound::Excluded(Bytes::from_static(b"b/")),
+                ),
+                ScanSegment::gap(
+                    Bound::Included(Bytes::from_static(b"b/")),
+                    Bound::Excluded(Bytes::from_static(b"c/")),
+                ),
+                ScanSegment::cached(
+                    VecScanIterator::from_rows(filter(c_rows)),
+                    Bound::Excluded(Bytes::from_static(b"d/")),
+                ),
+                ScanSegment::gap(Bound::Included(Bytes::from_static(b"d/")), Bound::Unbounded),
+            ];
+            let outcome = ScanOutcome::Partial(segments);
+            assert!(format!("{outcome:?}").contains("Partial"));
+            outcome
+        }
+    }
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let cache = PartialRowCache::new();
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let db = Db::builder("partial_scan_db", Arc::clone(&store))
+        .with_metrics_recorder(recorder.clone())
+        .with_row_cache(cache.clone())
+        .build()
+        .await
+        .unwrap();
+
+    // Put rows across cached (a/, c/) and uncached (b/, d/) prefixes, flushing b/ and d/ to L0.
+    for (k, v) in [
+        ("a/1", "av1"),
+        ("a/2", "av2"),
+        ("b/1", "bv1"),
+        ("b/2", "bv2"),
+        ("c/1", "cv1"),
+        ("c/2", "cv2"),
+        ("d/1", "dv1"),
+        ("d/2", "dv2"),
+    ] {
+        db.put(k.as_bytes(), v.as_bytes()).await.unwrap();
+    }
+    flush_memtable(&db).await;
+    // Add one more write in memtable to test both L0 and memtable gaps.
+    db.put(b"b/3", b"bv3").await.unwrap();
+    db.put(b"c/3", b"cv3").await.unwrap();
+
+    let expected: Vec<(Bytes, Bytes)> = [
+        ("a/1", "av1"),
+        ("a/2", "av2"),
+        ("b/1", "bv1"),
+        ("b/2", "bv2"),
+        ("b/3", "bv3"),
+        ("c/1", "cv1"),
+        ("c/2", "cv2"),
+        ("c/3", "cv3"),
+        ("d/1", "dv1"),
+        ("d/2", "dv2"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (Bytes::from(k), Bytes::from(v)))
+    .collect();
+
+    // 1. Full next() walk across Cached -> Gap -> Cached -> Gap counts scan_requests once.
+    assert_eq!(
+        collect(db.scan(b"a/"..b"e/").await.unwrap()).await,
+        expected
+    );
+    assert_eq!(
+        lookup_metric_with_labels(&recorder, REQUEST_COUNT, &[("op", "scan")]),
+        Some(1)
+    );
+
+    // 2. next_batch() across all segment boundaries matches next() identically.
+    let mut iter = db.scan(b"a/"..b"e/").await.unwrap();
+    let mut batched = Vec::new();
+    loop {
+        let n = iter.next_batch(&mut batched, 3).await.unwrap();
+        if n == 0 {
+            break;
+        }
+    }
+    let batched_pairs: Vec<(Bytes, Bytes)> =
+        batched.into_iter().map(|kv| (kv.key, kv.value)).collect();
+    assert_eq!(batched_pairs, expected);
+    assert_eq!(
+        lookup_metric_with_labels(&recorder, REQUEST_COUNT, &[("op", "scan")]),
+        Some(2)
+    );
+
+    // 3. seek() across Cached -> skip unopened Gap -> Cached -> clamp into unopened Gap -> end.
+    let mut iter = db.scan(b"a/"..b"e/").await.unwrap();
+    assert_eq!(
+        iter.next().await.unwrap().unwrap().key,
+        Bytes::from_static(b"a/1")
+    );
+    // Jump over b/ gap straight into c/2 (never opens b/ gap).
+    iter.seek(b"c/2").await.unwrap();
+    assert_eq!(
+        iter.next().await.unwrap().unwrap().key,
+        Bytes::from_static(b"c/2")
+    );
+    // Seek into unopened d/ gap twice before calling next(), clamping start forward.
+    iter.seek(b"d/1").await.unwrap();
+    iter.seek(b"d/2").await.unwrap();
+    assert_eq!(
+        iter.next().await.unwrap().unwrap().key,
+        Bytes::from_static(b"d/2")
+    );
+    assert!(iter.next().await.unwrap().is_none());
+
+    // Seek inside an already-open Gap segment.
+    let mut iter = db.scan(b"a/"..b"e/").await.unwrap();
+    iter.seek(b"b/1").await.unwrap();
+    assert_eq!(
+        iter.next().await.unwrap().unwrap().key,
+        Bytes::from_static(b"b/1")
+    );
+    iter.seek(b"b/3").await.unwrap();
+    assert_eq!(
+        iter.next().await.unwrap().unwrap().key,
+        Bytes::from_static(b"b/3")
+    );
+    // Seek past all remaining keys returns None.
+    iter.seek(b"d/9").await.unwrap();
+    assert!(iter.next().await.unwrap().is_none());
+
+    // 4. Snapshot and Transaction partial scans read both cached and gap segments at started_seq.
+    let snap = db.snapshot().unwrap();
+    let txn = db.begin(IsolationLevel::Snapshot).unwrap();
+    db.put(b"a/1", b"av1_new").await.unwrap();
+    db.put(b"b/1", b"bv1_new").await.unwrap();
+    db.put(b"c/1", b"cv1_new").await.unwrap();
+    db.put(b"d/1", b"dv1_new").await.unwrap();
+    flush_memtable(&db).await;
+
+    assert_eq!(
+        collect(snap.scan(b"a/"..b"e/").await.unwrap()).await,
+        expected
+    );
+    assert_eq!(
+        collect(txn.scan(b"a/"..b"e/").await.unwrap()).await,
+        expected
+    );
+    txn.rollback();
+    drop(snap);
+
+    // 5. DbReader partial scan stitches cached and uncached segments from object storage.
+    let reader_cache = PartialRowCache::new();
+    let reader = DbReader::builder("partial_scan_db", Arc::clone(&store))
+        .with_options(reader_options(20, Duration::from_secs(60)))
+        .with_row_cache(reader_cache.clone())
+        .build()
+        .await
+        .unwrap();
+    let mut r_status = reader.subscribe();
+    db.put(b"a/9", b"av9").await.unwrap();
+    db.put(b"b/9", b"bv9").await.unwrap();
+    db.flush().await.unwrap();
+    caught_up(&mut r_status, &db).await;
+    // Reader's cache has a/9 (replayed from WAL) and misses b/9 (read from WAL/LSM gap).
+    let reader_rows = collect(reader.scan(&b"a/9"[..]..&b"c/"[..]).await.unwrap()).await;
+    assert_eq!(
+        reader_rows,
+        vec![
+            (Bytes::from_static(b"a/9"), Bytes::from_static(b"av9")),
+            (Bytes::from_static(b"b/1"), Bytes::from_static(b"bv1_new")),
+            (Bytes::from_static(b"b/2"), Bytes::from_static(b"bv2")),
+            (Bytes::from_static(b"b/3"), Bytes::from_static(b"bv3")),
+            (Bytes::from_static(b"b/9"), Bytes::from_static(b"bv9")),
+        ]
+    );
+    reader.close().await.unwrap();
+
+    // 6. Empty Partial segment list returns no rows cleanly.
+    cache.return_empty.store(true, Ordering::Relaxed);
+    assert!(collect(db.scan(b"a/"..b"e/").await.unwrap())
+        .await
+        .is_empty());
+    cache.return_empty.store(false, Ordering::Relaxed);
+
+    // 7. Error inside a Cached segment invalidates the partial iterator and preserves ErrorKind.
+    *cache.fail_cached_at.lock().unwrap() = Some(1);
+    let mut iter = db.scan(b"a/"..b"e/").await.unwrap();
+    let mut out = Vec::new();
+    let err = iter.next_batch(&mut out, 5).await.unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Data);
+    assert_eq!(out.len(), 1);
+    assert_eq!(iter.next().await.unwrap_err().kind(), ErrorKind::Data);
+    db.close().await.unwrap();
+}
+
 // DbReader tests. A writer and a reader share one in-memory store; the reader's cache covers
-// `hot/`, which the writer writes only after the reader opened, so those keys reach the cache
-// through the manifest poller.
+// `hot/` (and `warm/` in range-invalidation tests) written after the reader opens.
 
 const PATH: &str = "reader_row_cache";
 const HOT: &[u8] = b"hot/";
+const WARM: &[u8] = b"warm/";
 
 fn hot(name: &str) -> Bytes {
     Bytes::from(format!("hot/{name}"))
+}
+
+fn warm(name: &str) -> Bytes {
+    Bytes::from(format!("warm/{name}"))
 }
 
 fn reader_options(poll_ms: u64, checkpoint_lifetime: Duration) -> DbReaderOptions {
@@ -808,16 +1012,6 @@ async fn caught_up(status: &mut Status, db: &Db) {
     .await;
 }
 
-async fn eventually<F: Future<Output = bool>>(mut condition: impl FnMut() -> F) {
-    for _ in 0..1000 {
-        if condition().await {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("condition did not hold in time");
-}
-
 async fn collect(mut iter: DbIterator) -> Vec<(Bytes, Bytes)> {
     let mut rows = Vec::new();
     while let Some(row) = iter.next().await.unwrap() {
@@ -831,22 +1025,17 @@ fn rows(pairs: &[(&str, &'static str)]) -> Vec<(Bytes, Bytes)> {
     pairs.iter().map(row).collect()
 }
 
-async fn checkpoint_ids(admin: &Admin) -> Vec<uuid::Uuid> {
-    let checkpoints = admin.list_checkpoints(None).await.unwrap();
-    checkpoints.into_iter().map(|cp| cp.id).collect()
-}
-
 fn value(v: &'static str) -> Option<Bytes> {
     Some(Bytes::from_static(v.as_bytes()))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_reader_row_cache_lifecycle_replay_reads_and_host_apis() {
+async fn test_reader_row_cache_replay_reads_and_metrics() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let db = open_writer(&store, true).await;
     db.put(b"cold/a", b"a1").await.unwrap();
     db.flush().await.unwrap();
-    let cache = TestRowCache::covering(HOT);
+    let cache = TestRowCache::covering(&[HOT]);
     let recorder = Arc::new(DefaultMetricsRecorder::new());
     let reader = DbReader::builder(PATH, Arc::clone(&store))
         .with_options(reader_options(20, Duration::from_secs(3600)))
@@ -856,16 +1045,9 @@ async fn test_reader_row_cache_lifecycle_replay_reads_and_host_apis() {
         .await
         .unwrap();
     let mut status = reader.subscribe();
-    let host = cache.host().clone();
-    assert!(host.is_reader());
-    assert!(host.allows_read(&ReadOptions {
-        durability_filter: DurabilityLevel::Remote,
-        ..ReadOptions::default()
-    }));
-    assert!(format!("{host:?}").contains("reader"));
-    let opened_at = host.last_committed_seq();
+    let opened_at = reader.status().durable_seq;
 
-    // Replay feeds one key-ordered batch per seq in ascending order, before the seq is visible.
+    // Replay feeds one key-ordered batch per seq in ascending order.
     let mut batch = WriteBatch::new();
     batch.put(hot("c"), b"c1");
     batch.put(hot("a"), b"a1");
@@ -880,13 +1062,21 @@ async fn test_reader_row_cache_lifecycle_replay_reads_and_host_apis() {
     assert_eq!(keys, vec![hot("a"), hot("b"), hot("c")]);
     assert_eq!(batches[0].1[1].value, ValueDeletable::Tombstone);
     assert!(batches.windows(2).all(|w| w[1].0 > w[0].0));
-    assert_eq!(host.last_committed_seq(), batches[2].0);
 
-    // An uncovered key misses and falls through to the LSM; covered keys hit.
+    // Uncovered key misses; covered keys hit (including DurabilityLevel::Remote on DbReader).
     let gets = lookup_metric_with_labels(&recorder, REQUEST_COUNT, &[("op", "get")]).unwrap();
     assert_eq!(reader.get(b"cold/a").await.unwrap(), value("a1"));
     assert_eq!(cache.misses(), vec![Bytes::from_static(b"cold/a")]);
-    assert_eq!(reader.get(hot("x")).await.unwrap(), value("x1"));
+    assert_eq!(
+        reader
+            .get_with_options(
+                hot("x"),
+                &ReadOptions::new().with_durability_filter(DurabilityLevel::Remote),
+            )
+            .await
+            .unwrap(),
+        value("x1")
+    );
     let kv = reader.get_key_value(hot("a")).await.unwrap().unwrap();
     assert_eq!(kv.seq, batches[0].0);
     assert_eq!(reader.get(hot("b")).await.unwrap(), None);
@@ -895,7 +1085,19 @@ async fn test_reader_row_cache_lifecycle_replay_reads_and_host_apis() {
         Some(gets + 4)
     );
 
-    // Covered scans and prefix scans hit; uncovered ones miss.
+    // use_row_cache: false bypasses the cache on DbReader.
+    let get_calls_before = cache.events.lock().unwrap().get_calls;
+    assert_eq!(
+        reader
+            .get_with_options(hot("x"), &ReadOptions::new().with_use_row_cache(false))
+            .await
+            .unwrap(),
+        value("x1")
+    );
+    assert_eq!(cache.events.lock().unwrap().get_calls, get_calls_before);
+
+    // Covered scans and prefix scans hit; uncovered ones miss; scan_requests increments.
+    let scans = lookup_metric_with_labels(&recorder, REQUEST_COUNT, &[("op", "scan")]).unwrap();
     let expected = rows(&[("a", "a1"), ("c", "c1"), ("x", "x1"), ("y", "y1")]);
     let scanned = collect(reader.scan(hot("a")..hot("z")).await.unwrap()).await;
     assert_eq!(scanned, expected);
@@ -905,64 +1107,14 @@ async fn test_reader_row_cache_lifecycle_replay_reads_and_host_apis() {
     let cold = collect(reader.scan_prefix(b"cold/", ..).await.unwrap()).await;
     assert_eq!(cold.len(), 1);
     assert_eq!(cache.misses().last(), Some(&Bytes::from_static(b"cold/")));
+    assert_eq!(
+        lookup_metric_with_labels(&recorder, REQUEST_COUNT, &[("op", "scan")]),
+        Some(scans + 3)
+    );
 
-    // run_on_writer executes on the idle poller at the reader's seq.
-    let poller_seq = host.run_on_writer(|seq| seq).await.unwrap();
-    assert_eq!(poller_seq, host.last_committed_seq());
-
-    // Views: currency, retention, and scans that bypass the cache.
-    assert!(host.check_closed().is_ok());
-    let x1_seq = host.last_committed_seq();
-    let view = host.capture_state_view().unwrap();
-    assert!(host.is_view_current(&view));
-    assert!(host.retains_seq(&view, x1_seq));
-    assert!(format!("{view:?}").contains("reader"));
-    put_durable(&db, &[("x", "x2")]).await;
-    caught_up(&mut status, &db).await;
-    assert!(!host.is_view_current(&view));
-    let view = host.capture_state_view().unwrap();
-    assert!(host.is_view_current(&view));
-    let mut old = host
-        .scan_view(
-            &view,
-            hot("x")..hot("y"),
-            &ViewScanOptions {
-                max_seq: Some(x1_seq),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let old = old.next().await.unwrap().unwrap();
-    assert_eq!(Some(old.value), value("x1"));
-    let prefix_opts = ViewScanOptions {
-        prefix: Some(Bytes::from_static(HOT)),
-        ..Default::default()
-    };
-    let mut newest = host
-        .scan_view(&view, hot("x")..hot("y"), &prefix_opts)
-        .await
-        .unwrap();
-    let entry = newest.next_entry().await.unwrap().unwrap();
-    assert_eq!(entry.value, ValueDeletable::Value(value("x2").unwrap()));
-    let empty_range = host
-        .scan_view(&view, hot("b")..hot("a"), &ViewScanOptions::default())
-        .await;
-    assert!(empty_range.is_err());
-
-    let snapshot = host.snapshot().await.unwrap();
-    assert_eq!(snapshot.seq(), host.last_committed_seq());
-    assert_eq!(snapshot.seq(), reader.status().durable_seq);
-
-    // Flushing replayed writes to L0 invalidates nothing; the host reads the flushed SST.
+    // Flushing and compacting already-replayed writes invalidates nothing.
     flush_memtable(&db).await;
     caught_up(&mut status, &db).await;
-    let manifest = host.manifest().unwrap();
-    let l0 = manifest.l0().front().expect("flushed L0 SST");
-    assert!(!host.read_sst_index(&l0.sst).await.unwrap().is_empty());
-
-    // So does compacting them. A view retains only seqs at or above its L0, even with a live
-    // snapshot: the writer's compactor does not know the reader's snapshots.
     put_durable(&db, &[("z", "z1")]).await;
     caught_up(&mut status, &db).await;
     flush_memtable(&db).await;
@@ -970,190 +1122,94 @@ async fn test_reader_row_cache_lifecycle_replay_reads_and_host_apis() {
         s.current_manifest.l0().is_empty() && !s.current_manifest.compacted().is_empty()
     })
     .await;
-    let view = host.capture_state_view().unwrap();
-    assert!(host.retains_seq(&view, host.manifest().unwrap().last_l0_seq()));
-    assert!(!host.retains_seq(&view, x1_seq));
     assert!(cache.events.lock().unwrap().invalidations.is_empty());
-    assert_eq!(cache.events.lock().unwrap().applied_batches.len(), 5);
-    assert_eq!(reader.get(hot("x")).await.unwrap(), value("x2"));
+    assert_eq!(reader.get(hot("x")).await.unwrap(), value("x1"));
     assert_eq!(reader.get(hot("z")).await.unwrap(), value("z1"));
     assert_eq!(cache.misses().len(), 2);
-    drop(snapshot);
 
-    // Closing the reader stops the poller and fails subsequent run_on_writer and snapshot calls.
     reader.close().await.unwrap();
-    assert!(host.check_closed().is_err());
-    assert!(host.run_on_writer(|seq| seq).await.is_err());
-    assert!(host.snapshot().await.is_err());
-    // Dropping the reader breaks the weak reference in Host.
-    drop(reader);
-    assert!(host.capture_state_view().is_err());
     db.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn test_reader_row_cache_invalidation_on_l0_jump_and_skip_wal() {
+async fn test_reader_row_cache_range_invalidation_compaction_fallback_and_pinned_mode() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let db = open_writer(&store, false).await;
 
-    // A WAL-enabled reader whose next poll finds an L0 holding writes it never replayed drops
-    // its rows above its seq, then receives the WAL writes above the L0.
-    let cache = TestRowCache::covering(HOT);
-    let options = reader_options(150, Duration::from_secs(10));
+    // 1. Range-scoped invalidation: an unreplayed L0 touching only `warm/` keeps `hot/` warm!
+    let cache = TestRowCache::covering(&[HOT, WARM]);
+    let options = reader_options(300, Duration::from_secs(10));
     let reader = open_reader(&store, &cache, options).await;
     let mut status = reader.subscribe();
-    let host = cache.host().clone();
-    put_durable(&db, &[("x", "x1")]).await;
+    db.put(hot("a"), b"h1").await.unwrap();
+    db.put(warm("a"), b"w1").await.unwrap();
+    db.flush().await.unwrap();
     caught_up(&mut status, &db).await;
-    let before = host.last_committed_seq();
-    put_durable(&db, &[("x", "x2")]).await;
     flush_memtable(&db).await;
-    put_durable(&db, &[("z", "z1")]).await;
     caught_up(&mut status, &db).await;
-    let last_l0_seq = host.manifest().unwrap().last_l0_seq();
-    assert!(last_l0_seq > before);
-    let (invalidations, last) = {
-        let events = cache.events.lock().unwrap();
-        let last = events.applied_batches.last().cloned().unwrap();
-        (events.invalidations.clone(), last)
-    };
-    assert_eq!(invalidations, vec![(before, last_l0_seq)]);
-    assert!(last.0 > last_l0_seq);
-    assert_eq!(&last.1[0].key, &hot("z"));
-    // x2 comes from the L0 (a miss), z1 from the cache.
-    assert_eq!(reader.get(hot("x")).await.unwrap(), value("x2"));
-    assert_eq!(reader.get(hot("z")).await.unwrap(), value("z1"));
-    assert_eq!(cache.misses(), vec![hot("x")]);
+    assert!(cache.events.lock().unwrap().invalidations.is_empty());
+
+    // Now write ONLY `warm/a` and flush before the reader polls again, plus a WAL write `hot/z`.
+    db.put(warm("a"), b"w2").await.unwrap();
+    db.flush().await.unwrap();
+    flush_memtable(&db).await;
+    db.put(hot("z"), b"hz").await.unwrap();
+    db.flush().await.unwrap();
+    caught_up(&mut status, &db).await;
+
+    let invalidations = cache.events.lock().unwrap().invalidations.clone();
+    assert_eq!(invalidations.len(), 1);
+    assert!(
+        !invalidations[0].is_all(),
+        "L0 flush should be range-scoped"
+    );
+    assert!(invalidations[0].contains(&warm("a")));
+    assert!(!invalidations[0].contains(&hot("a")));
+
+    // hot/a stayed cached (hit), hot/z arrived via WAL replay (hit), warm/a missed -> LSM w2.
+    assert_eq!(reader.get(hot("a")).await.unwrap(), value("h1"));
+    assert_eq!(reader.get(hot("z")).await.unwrap(), value("hz"));
+    assert_eq!(reader.get(warm("a")).await.unwrap(), value("w2"));
+    assert_eq!(cache.misses(), vec![warm("a")]);
     reader.close().await.unwrap();
 
-    // A reader that skips WAL replay feeds nothing, and invalidates at each L0 flush.
-    let cache = TestRowCache::covering(HOT);
+    // 2. skip_wal_replay: feeds no non-empty batches and invalidates the flushed L0 range.
+    let cache = TestRowCache::covering(&[HOT]);
     let options = DbReaderOptions {
         skip_wal_replay: true,
         ..reader_options(20, Duration::from_secs(10))
     };
     let reader = open_reader(&store, &cache, options).await;
     let mut status = reader.subscribe();
-    let host = cache.host().clone();
     let mut previous = reader.get(hot("y")).await.unwrap();
     for (round, v) in ["y1", "y2"].into_iter().enumerate() {
-        let before = host.last_committed_seq();
+        let before = reader.status().durable_seq;
         put_durable(&db, &[("y", v)]).await;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(80)).await;
         assert_eq!(cache.events.lock().unwrap().invalidations.len(), round);
         assert_eq!(reader.get(hot("y")).await.unwrap(), previous);
         flush_memtable(&db).await;
         wait_for_status(&mut status, |s| s.durable_seq > before).await;
         let invalidations = cache.events.lock().unwrap().invalidations.clone();
-        assert_eq!(
-            invalidations.last(),
-            Some(&(before, host.last_committed_seq()))
-        );
         assert_eq!(invalidations.len(), round + 1);
+        assert!(invalidations[round].contains(&hot("y")));
+        assert_eq!(
+            cache.events.lock().unwrap().last_written_seq,
+            reader.status().durable_seq
+        );
         previous = reader.get(hot("y")).await.unwrap();
         assert_eq!(previous, value(v));
     }
     assert!(cache.events.lock().unwrap().applied_batches.is_empty());
     reader.close().await.unwrap();
-    db.close().await.unwrap();
-}
 
-#[tokio::test]
-async fn test_reader_row_cache_host_snapshot_pins_checkpoint() {
-    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let db = open_writer(&store, false).await;
+    // 3. Pinned DbReaderMode::Checkpoint never polls or invalidates.
     let admin = Admin::builder(PATH, Arc::clone(&store)).build();
-    let cache = TestRowCache::covering(HOT);
-    let lifetime = Duration::from_secs(2);
-    let reader = open_reader(&store, &cache, reader_options(20, lifetime)).await;
-    let mut status = reader.subscribe();
-    let host = cache.host().clone();
-    let initial = checkpoint_ids(&admin).await;
-    assert_eq!(initial.len(), 1);
-
-    // Without a pin, the replacement swaps the checkpoint in place.
-    put_durable(&db, &[("x", "x1")]).await;
-    flush_memtable(&db).await;
-    caught_up(&mut status, &db).await;
-    let unpinned = checkpoint_ids(&admin).await;
-    assert_eq!(unpinned.len(), 1);
-    assert_ne!(unpinned, initial);
-    let pinned_id = unpinned[0];
-
-    // A snapshot pins its checkpoint through a replacement.
-    let snapshot = host.snapshot().await.unwrap();
-    let seq = snapshot.seq();
-    let old_view = host.capture_state_view().unwrap();
-    put_durable(&db, &[("x", "x2")]).await;
-    flush_memtable(&db).await;
-    caught_up(&mut status, &db).await;
-    let kept = checkpoint_ids(&admin).await;
-    assert_eq!(kept.len(), 2);
-    assert!(kept.contains(&pinned_id));
-    assert!(host.last_committed_seq() > seq);
-
-    // The poller refreshes the kept checkpoint past half its lifetime.
-    let expiry = || async {
-        let checkpoints = admin.list_checkpoints(None).await.unwrap();
-        let kept = checkpoints.iter().find(|cp| cp.id == pinned_id);
-        kept.and_then(|cp| cp.expire_time).expect("kept checkpoint")
-    };
-    let first_expiry = expiry().await;
-    tokio::time::sleep(lifetime / 2 + Duration::from_millis(200)).await;
-    eventually(|| async { expiry().await > first_expiry }).await;
-
-    // The old view still reads the pinned state at the snapshot's seq.
-    let mut old = host
-        .scan_view(
-            &old_view,
-            hot("a")..hot("z"),
-            &ViewScanOptions {
-                max_seq: Some(seq),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        old.next().await.unwrap().unwrap().value,
-        value("x1").unwrap()
-    );
-    drop((old, old_view));
-
-    // Once unpinned, the next poll deletes the kept checkpoint.
-    drop(snapshot);
-    eventually(|| async {
-        let ids = checkpoint_ids(&admin).await;
-        ids.len() == 1 && !ids.contains(&pinned_id)
-    })
-    .await;
-
-    // Close deletes the reader's checkpoint and any it kept for a pin.
-    let snapshot = host.snapshot().await.unwrap();
-    put_durable(&db, &[("x", "x3")]).await;
-    flush_memtable(&db).await;
-    caught_up(&mut status, &db).await;
-    assert_eq!(checkpoint_ids(&admin).await.len(), 2);
-    reader.close().await.unwrap();
-    assert!(checkpoint_ids(&admin).await.is_empty());
-    drop(snapshot);
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn test_reader_row_cache_pinned_mode_and_open_rejection() {
-    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let db = open_writer(&store, false).await;
-    let admin = Admin::builder(PATH, Arc::clone(&store)).build();
-    put_durable(&db, &[("x", "x1")]).await;
-    flush_memtable(&db).await;
     let checkpoint = db
         .create_checkpoint(CheckpointScope::All, &CheckpointOptions::default())
         .await
         .unwrap();
-
-    // A pinned reader runs a poller for its cache: it runs run_on_writer callbacks but never polls.
-    let cache = TestRowCache::covering(HOT);
+    let cache = TestRowCache::covering(&[HOT]);
     let reader = DbReader::builder(PATH, Arc::clone(&store))
         .with_reader_mode(DbReaderMode::Checkpoint(checkpoint.id))
         .with_options(reader_options(5, Duration::from_secs(10)))
@@ -1161,30 +1217,46 @@ async fn test_reader_row_cache_pinned_mode_and_open_rejection() {
         .build()
         .await
         .unwrap();
-    let seq = cache.host().last_committed_seq();
-    assert_eq!(cache.host().run_on_writer(|s| s).await.unwrap(), seq);
-    put_durable(&db, &[("x", "x2")]).await;
+    let pinned_seq = reader.status().durable_seq;
+    put_durable(&db, &[("y", "y3")]).await;
     flush_memtable(&db).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(cache.host().last_committed_seq(), seq);
+    assert_eq!(reader.status().durable_seq, pinned_seq);
     assert!(cache.events.lock().unwrap().applied_batches.is_empty());
-    assert_eq!(reader.get(hot("x")).await.unwrap(), value("x1"));
-    assert_eq!(cache.host().snapshot().await.unwrap().seq(), seq);
+    assert!(cache.events.lock().unwrap().invalidations.is_empty());
+    assert_eq!(reader.get(hot("y")).await.unwrap(), value("y2"));
     reader.close().await.unwrap();
     admin.delete_checkpoint(checkpoint.id).await.unwrap();
+    db.close().await.unwrap();
 
-    // A cache that rejects open fails the build, stops the poller, and leaves no checkpoint.
-    let cache = TestRowCache::covering(HOT);
-    cache.reject_open.store(true, Ordering::Relaxed);
-    let err = DbReader::builder(PATH, Arc::clone(&store))
-        .with_row_cache(cache.clone())
-        .build()
-        .await
-        .err()
-        .expect("open rejection must fail build");
-    assert_eq!(err.kind(), ErrorKind::Invalid);
-    assert_eq!(cache.events.lock().unwrap().opened, 1);
-    assert!(cache.host().run_on_writer(|s| s).await.is_err());
-    assert!(checkpoint_ids(&admin).await.is_empty());
+    // 4. Compaction fallback: when unseen L0s compact before a poll, invalidate(KeyRange::all()).
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = open_writer(&store, true).await;
+    let cache = TestRowCache::covering(&[HOT]);
+    // Synchronize right after a poll tick so the full poll interval is available for two L0
+    // flushes plus compaction before the next poll runs.
+    let reader = open_reader(&store, &cache, reader_options(400, Duration::from_secs(10))).await;
+    let mut r_status = reader.subscribe();
+    let mut w_status = db.subscribe();
+    put_durable(&db, &[("a", "a1")]).await;
+    caught_up(&mut r_status, &db).await;
+
+    put_durable(&db, &[("b", "b1")]).await;
+    flush_memtable(&db).await;
+    put_durable(&db, &[("c", "c1")]).await;
+    flush_memtable(&db).await;
+    wait_for_status(&mut w_status, |s| {
+        s.current_manifest.l0().is_empty() && !s.current_manifest.compacted().is_empty()
+    })
+    .await;
+    caught_up(&mut r_status, &db).await;
+
+    let invalidations = cache.events.lock().unwrap().invalidations.clone();
+    assert!(
+        invalidations.iter().any(OwnedRange::is_all),
+        "expected KeyRange::all() invalidation after compaction, got {invalidations:?}"
+    );
+    assert_eq!(reader.get(hot("c")).await.unwrap(), value("c1"));
+    reader.close().await.unwrap();
     db.close().await.unwrap();
 }

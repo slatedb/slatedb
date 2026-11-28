@@ -3,13 +3,15 @@ use std::sync::Arc;
 
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
 use crate::config::{ReadOptions, ScanOptions};
-use crate::db_iter::DbIterator;
+use crate::db_iter::{DbIterator, PartialDbState, PartialGapContext};
 use crate::types::KeyValue;
 
 use crate::db::DbInner;
-use crate::iter::IterationOrder;
+use crate::oracle::Oracle;
 use crate::reader::ScanContext;
-use crate::row_cache::{GetOutcome, KeyRange, ScanOutcome};
+use crate::row_cache::{
+    can_use_row_cache_get, can_use_row_cache_scan, GetOutcome, KeyRange, ScanOutcome,
+};
 use crate::snapshot_manager::RetentionPin;
 use crate::DbReadOps;
 
@@ -85,10 +87,18 @@ impl DbSnapshot {
         self.db_inner.check_closed()?;
         let key_ref = key.as_ref();
         if let Some(row_cache) = &self.db_inner.row_cache {
-            match row_cache.get(key_ref, options, Some(self.started_seq)) {
-                GetOutcome::Hit(kv) => return Ok(kv),
-                GetOutcome::Error(err) => return Err(err),
-                GetOutcome::Miss => {}
+            if can_use_row_cache_get(options, false) {
+                let seq = self
+                    .started_seq
+                    .min(self.db_inner.oracle.last_committed_seq());
+                match row_cache.get(key_ref, seq) {
+                    GetOutcome::Hit(kv) => {
+                        self.db_inner.db_stats.get_requests.increment(1);
+                        return Ok(kv);
+                    }
+                    GetOutcome::Error(err) => return Err(err),
+                    GetOutcome::Miss => {}
+                }
             }
         }
         let db_state = self.db_inner.state.read().view();
@@ -198,17 +208,32 @@ impl DbSnapshot {
     ) -> Result<DbIterator, crate::Error> {
         self.db_inner.check_closed()?;
         if let Some(row_cache) = &self.db_inner.row_cache {
-            if matches!(options.order, IterationOrder::Ascending) {
+            if can_use_row_cache_scan(options, false) {
+                let seq = self
+                    .started_seq
+                    .min(self.db_inner.oracle.last_committed_seq());
                 let key_range = KeyRange::from_bytes_range(&range);
-                match row_cache.scan(
-                    key_range,
-                    options,
-                    prefix.as_deref(),
-                    Some(self.started_seq),
-                ) {
+                match row_cache.scan(key_range, seq, prefix.as_deref()) {
                     ScanOutcome::Hit(iter) => {
+                        self.db_inner.db_stats.scan_requests.increment(1);
                         return Ok(DbIterator::from_row_cache(range, iter)
                             .retaining(self.retention.clone()));
+                    }
+                    ScanOutcome::Partial(segments) => {
+                        let db_state = self.db_inner.state.read().view();
+                        self.db_inner.db_stats.scan_requests.increment(1);
+                        return Ok(DbIterator::from_row_cache_partial(
+                            range,
+                            segments,
+                            PartialGapContext {
+                                reader: self.db_inner.reader.clone(),
+                                state: PartialDbState::Writer(db_state),
+                                options: options.clone(),
+                                prefix,
+                                max_seq: seq,
+                            },
+                        )
+                        .retaining(self.retention.clone()));
                     }
                     ScanOutcome::Error(err) => return Err(err),
                     ScanOutcome::Miss => {}

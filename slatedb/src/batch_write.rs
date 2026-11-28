@@ -71,8 +71,6 @@ pub(crate) enum BatchWriterMessage {
         /// Sends the cursor after the writer processes this message.
         done: oneshot::Sender<Result<CheckpointCursor, SlateDBError>>,
     },
-    /// Run a row cache callback on the batch writer task at the current committed seq.
-    RowCacheTask(crate::row_cache::WriterTask),
 }
 
 pub(crate) struct WriteBatchRequest {
@@ -105,7 +103,6 @@ impl std::fmt::Debug for BatchWriterMessage {
                 .debug_struct("ForceFlush")
                 .field("freeze_memtable", freeze_memtable)
                 .finish(),
-            BatchWriterMessage::RowCacheTask(_) => f.debug_struct("RowCacheTask").finish(),
         }
     }
 }
@@ -188,10 +185,6 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
                     }
                 }
             }
-            BatchWriterMessage::RowCacheTask(task) => {
-                task(self.db_inner.oracle.last_committed_seq());
-                Ok(())
-            }
         }
     }
 
@@ -218,7 +211,6 @@ impl MessageHandler<BatchWriterMessage> for WriteBatchEventHandler {
                 } => {
                     let _ = done.send(Err(error.clone()));
                 }
-                BatchWriterMessage::RowCacheTask(_) => {}
             }
         }
         if let Some(wal_writer) = self.wal_writer.as_mut() {

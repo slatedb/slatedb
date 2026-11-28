@@ -51,12 +51,11 @@ use crate::config::{
     Settings, WriteOptions,
 };
 use crate::db_common::extract_segment_prefix;
-use crate::db_iter::{DbIterator, DbRecencyIterator};
+use crate::db_iter::{DbIterator, DbRecencyIterator, PartialDbState, PartialGapContext};
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{collect_touched_segments, DbState, SsTableHandle, SsTableId};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
-use crate::iter::IterationOrder;
 use crate::manifest::{Manifest, VersionedManifest};
 use crate::mem_table::KVTableMetadata;
 use crate::memtable_flusher::{FlushResult, FlushTarget, MemtableFlusher};
@@ -64,7 +63,9 @@ use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
 use crate::prefix_extractor::PrefixExtractor;
 use crate::reader::{Reader, ScanContext};
-use crate::row_cache::{GetOutcome, KeyRange, RowCache, ScanOutcome};
+use crate::row_cache::{
+    can_use_row_cache_get, can_use_row_cache_scan, GetOutcome, KeyRange, RowCache, ScanOutcome,
+};
 use crate::snapshot_manager::SnapshotManager;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
@@ -225,10 +226,16 @@ impl DbInner {
         self.check_closed()?;
         let key_ref = key.as_ref();
         if let Some(row_cache) = &self.row_cache {
-            match row_cache.get(key_ref, options, None) {
-                GetOutcome::Hit(kv) => return Ok(kv),
-                GetOutcome::Error(err) => return Err(SlateDBError::RowCache(Arc::new(err))),
-                GetOutcome::Miss => {}
+            if can_use_row_cache_get(options, false) {
+                let seq = self.oracle.last_committed_seq();
+                match row_cache.get(key_ref, seq) {
+                    GetOutcome::Hit(kv) => {
+                        self.db_stats.get_requests.increment(1);
+                        return Ok(kv);
+                    }
+                    GetOutcome::Error(err) => return Err(SlateDBError::RowCache(Arc::new(err))),
+                    GetOutcome::Miss => {}
+                }
             }
         }
         let db_state = self.state.read().view();
@@ -248,10 +255,31 @@ impl DbInner {
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
         if let Some(row_cache) = &self.row_cache {
-            if matches!(options.order, IterationOrder::Ascending) {
+            if can_use_row_cache_scan(options, false) {
+                let seq = self.oracle.last_committed_seq();
                 let key_range = KeyRange::from_bytes_range(&range);
-                match row_cache.scan(key_range, options, prefix.as_deref(), None) {
-                    ScanOutcome::Hit(iter) => return Ok(DbIterator::from_row_cache(range, iter)),
+                match row_cache.scan(key_range, seq, prefix.as_deref()) {
+                    ScanOutcome::Hit(iter) => {
+                        self.db_stats.scan_requests.increment(1);
+                        return Ok(DbIterator::from_row_cache(range, iter));
+                    }
+                    ScanOutcome::Partial(segments) => {
+                        let db_state = self.state.read().view();
+                        if db_state.state.core().last_l0_seq <= seq {
+                            self.db_stats.scan_requests.increment(1);
+                            return Ok(DbIterator::from_row_cache_partial(
+                                range,
+                                segments,
+                                PartialGapContext {
+                                    reader: self.reader.clone(),
+                                    state: PartialDbState::Writer(db_state),
+                                    options: options.clone(),
+                                    prefix,
+                                    max_seq: seq,
+                                },
+                            ));
+                        }
+                    }
                     ScanOutcome::Error(err) => return Err(SlateDBError::RowCache(Arc::new(err))),
                     ScanOutcome::Miss => {}
                 }
@@ -3589,6 +3617,7 @@ mod tests {
                                         max_concurrent_sources: 1,
                                         filter_context: None,
                                         tracing_options: None,
+                                        use_row_cache: true,
                                     }
                                 )
                                 .await

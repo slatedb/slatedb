@@ -131,7 +131,6 @@ use crate::compactor::CompactorMessage;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
-use crate::config::CloseOptions;
 use crate::config::DbReaderOptions;
 use crate::config::GarbageCollectorOptions;
 use crate::config::{CompactionWorkerOptions, CompactorOptions};
@@ -140,7 +139,7 @@ use crate::db::Db;
 use crate::db::DbInner;
 use crate::db_cache::SplitCache;
 use crate::db_cache::{DbCache, DbCacheAndScope, DbCacheWrapper, UnownedDbCache};
-use crate::db_reader::{DbReader, DbReaderMode, ReaderRowCacheOptions};
+use crate::db_reader::{DbReader, DbReaderMode};
 use crate::db_status::{ClosedResultWriter, DbStatusManager};
 use crate::dispatcher::MessageHandlerExecutor;
 use crate::error::SlateDBError;
@@ -156,7 +155,7 @@ use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
 use crate::paths::PathResolver;
 use crate::retrying_object_store::RetryingObjectStore;
-use crate::row_cache::{OpenContext as RowCacheOpenContext, RowCache};
+use crate::row_cache::RowCache;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::ObjectStoreType;
 use crate::utils::SafeSender;
@@ -722,14 +721,6 @@ impl<P: Into<Path>> DbBuilder<P> {
         let reader = status_manager.result_reader();
         let (write_tx, write_rx) = SafeSender::unbounded_channel(reader);
 
-        #[cfg(feature = "compaction_filters")]
-        let has_compaction_filter = self
-            .compactor_builder
-            .as_ref()
-            .is_some_and(|b| b.compaction_filter_supplier.is_some());
-        #[cfg(not(feature = "compaction_filters"))]
-        let has_compaction_filter = false;
-
         // Create the database inner state
         let memtable_flusher = Arc::new(MemtableFlusher::new(status_manager.as_ref()));
         let inner = Arc::new(
@@ -895,27 +886,11 @@ impl<P: Into<Path>> DbBuilder<P> {
         // Replay WAL
         inner.replay_wal(replay_iterator).await?;
 
-        let db = Db {
+        // Create and return the Db instance
+        Ok(Db {
             inner,
             task_executor,
-        };
-        if let Some(row_cache) = &db.inner.row_cache {
-            let ctx = RowCacheOpenContext::new(
-                &db.inner,
-                tokio_handle,
-                metrics_recorder,
-                has_compaction_filter,
-            );
-            if let Err(err) = row_cache.open(ctx) {
-                let _ = db
-                    .close_with_options(CloseOptions { flush_type: None })
-                    .await;
-                return Err(err);
-            }
-        }
-
-        // Create and return the Db instance
-        Ok(db)
+        })
     }
 }
 
@@ -1898,11 +1873,9 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
 
     /// Attaches a pluggable logical [`RowCache`] to the reader.
     ///
-    /// The manifest poller owns the cache's write side and feeds replayed WAL writes before the
-    /// reader's sequence number advances. Point reads and ascending scans consult the cache first,
-    /// as on [`crate::Db`]. With a row cache, [`DbReaderMode::Checkpoint`] also runs a poller to
-    /// run [`Host::run_on_writer`](crate::row_cache::Host::run_on_writer) callbacks. See
-    /// [`crate::row_cache`] for the full contract.
+    /// The manifest poller feeds replayed WAL writes before the reader's sequence number advances,
+    /// and invalidates ranges touched by unreplayed L0 updates. Point reads and ascending scans
+    /// consult the cache first, as on [`crate::Db`]. See [`crate::row_cache`] for the contract.
     pub fn with_row_cache(mut self, row_cache: Arc<dyn RowCache>) -> Self {
         self.row_cache = Some(row_cache);
         self
@@ -2038,7 +2011,6 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
     /// Builds and returns a DbReader instance.
     pub async fn build(self) -> Result<DbReader, crate::Error> {
         let path = self.path.into();
-        let metrics_recorder = Arc::clone(&self.metrics_recorder);
         let recorder = MetricsRecorderHelper::new(
             self.metrics_recorder,
             self.options.metric_level.unwrap_or_default(),
@@ -2145,11 +2117,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             self.system_clock,
             self.rand,
             recorder,
-            self.row_cache.map(|cache| ReaderRowCacheOptions {
-                cache,
-                metrics_recorder,
-                fp_registry,
-            }),
+            self.row_cache,
         )
         .await
         .map_err(crate::Error::from)

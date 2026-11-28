@@ -6,16 +6,17 @@ use uuid::Uuid;
 
 use crate::batch::{WriteBatch, WriteBatchIterator, WriteOp};
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
-use crate::config::{
-    DurabilityLevel, MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions,
-};
+use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db::DbInner;
 use crate::db::WriteHandle;
-use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
+use crate::db_iter::{DbIterator, DbIteratorRangeTracker, PartialDbState, PartialGapContext};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
+use crate::oracle::Oracle;
 use crate::reader::ScanContext;
-use crate::row_cache::{GetOutcome, KeyRange, ScanOutcome};
+use crate::row_cache::{
+    can_use_row_cache_get, can_use_row_cache_scan, GetOutcome, KeyRange, ScanOutcome,
+};
 use crate::snapshot_manager::RetentionPin;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::KeyValue;
@@ -165,40 +166,43 @@ impl DbTransaction {
 
         let key_slice = key.as_ref();
         if let Some(row_cache) = &self.db_inner.row_cache {
-            enum BatchLookup {
-                Absent,
-                Resolved(Option<KeyValue>),
-                Fallthrough,
-            }
-            let lookup = {
-                let batch = self.write_batch.read();
-                match batch.ops.get_key_value(key_slice) {
-                    None => BatchLookup::Absent,
-                    Some((batch_key, ops)) => match ops.last() {
-                        Some(op @ WriteOp::Put(..)) => BatchLookup::Resolved(Some(KeyValue::from(
-                            op.to_row_entry(batch_key, u64::MAX, None, None),
-                        ))),
-                        Some(WriteOp::Delete) => BatchLookup::Resolved(None),
-                        Some(WriteOp::Merge(..)) | None => BatchLookup::Fallthrough,
-                    },
+            if can_use_row_cache_get(options, false) {
+                enum BatchLookup {
+                    Absent,
+                    Resolved(Option<KeyValue>),
+                    Fallthrough,
                 }
-            };
-            match lookup {
-                BatchLookup::Resolved(kv)
-                    if matches!(options.durability_filter, DurabilityLevel::Memory)
-                        && !options.dirty
-                        && options.filter_context.is_none()
-                        && options.tracing_options.is_none() =>
-                {
-                    self.db_inner.db_stats.get_requests.increment(1);
-                    return Ok(kv);
-                }
-                BatchLookup::Resolved(_) | BatchLookup::Fallthrough => {}
-                BatchLookup::Absent => {
-                    match row_cache.get(key_slice, options, Some(self.started_seq)) {
-                        GetOutcome::Hit(kv) => return Ok(kv),
-                        GetOutcome::Error(err) => return Err(err),
-                        GetOutcome::Miss => {}
+                let lookup = {
+                    let batch = self.write_batch.read();
+                    match batch.ops.get_key_value(key_slice) {
+                        None => BatchLookup::Absent,
+                        Some((batch_key, ops)) => match ops.last() {
+                            Some(op @ WriteOp::Put(..)) => BatchLookup::Resolved(Some(
+                                KeyValue::from(op.to_row_entry(batch_key, u64::MAX, None, None)),
+                            )),
+                            Some(WriteOp::Delete) => BatchLookup::Resolved(None),
+                            Some(WriteOp::Merge(..)) | None => BatchLookup::Fallthrough,
+                        },
+                    }
+                };
+                match lookup {
+                    BatchLookup::Resolved(kv) => {
+                        self.db_inner.db_stats.get_requests.increment(1);
+                        return Ok(kv);
+                    }
+                    BatchLookup::Fallthrough => {}
+                    BatchLookup::Absent => {
+                        let seq = self
+                            .started_seq
+                            .min(self.db_inner.oracle.last_committed_seq());
+                        match row_cache.get(key_slice, seq) {
+                            GetOutcome::Hit(kv) => {
+                                self.db_inner.db_stats.get_requests.increment(1);
+                                return Ok(kv);
+                            }
+                            GetOutcome::Error(err) => return Err(err),
+                            GetOutcome::Miss => {}
+                        }
                     }
                 }
             }
@@ -352,30 +356,46 @@ impl DbTransaction {
 
         // Serve from the row cache when the transaction has no pending writes in `range`.
         if let Some(row_cache) = &self.db_inner.row_cache {
-            let batch_overlaps = {
-                let guard = self.write_batch.read();
-                guard
-                    .ops
-                    .range::<Bytes, _>((
-                        std::ops::RangeBounds::start_bound(&range),
-                        std::ops::RangeBounds::end_bound(&range),
-                    ))
-                    .next()
-                    .is_some()
-            };
-            if !batch_overlaps && matches!(options.order, IterationOrder::Ascending) {
-                let key_range = KeyRange::from_bytes_range(&range);
-                match row_cache.scan(
-                    key_range,
-                    options,
-                    prefix.as_deref(),
-                    Some(self.started_seq),
-                ) {
-                    ScanOutcome::Hit(iter) => {
-                        return Ok(self.retaining(DbIterator::from_row_cache(range, iter)));
+            if can_use_row_cache_scan(options, false) {
+                let batch_overlaps = {
+                    let guard = self.write_batch.read();
+                    guard
+                        .ops
+                        .range::<Bytes, _>((
+                            std::ops::RangeBounds::start_bound(&range),
+                            std::ops::RangeBounds::end_bound(&range),
+                        ))
+                        .next()
+                        .is_some()
+                };
+                if !batch_overlaps {
+                    let seq = self
+                        .started_seq
+                        .min(self.db_inner.oracle.last_committed_seq());
+                    let key_range = KeyRange::from_bytes_range(&range);
+                    match row_cache.scan(key_range, seq, prefix.as_deref()) {
+                        ScanOutcome::Hit(iter) => {
+                            self.db_inner.db_stats.scan_requests.increment(1);
+                            return Ok(self.retaining(DbIterator::from_row_cache(range, iter)));
+                        }
+                        ScanOutcome::Partial(segments) => {
+                            let db_state = self.db_inner.state.read().view();
+                            self.db_inner.db_stats.scan_requests.increment(1);
+                            return Ok(self.retaining(DbIterator::from_row_cache_partial(
+                                range,
+                                segments,
+                                PartialGapContext {
+                                    reader: self.db_inner.reader.clone(),
+                                    state: PartialDbState::Writer(db_state),
+                                    options: options.clone(),
+                                    prefix,
+                                    max_seq: seq,
+                                },
+                            )));
+                        }
+                        ScanOutcome::Error(err) => return Err(err),
+                        ScanOutcome::Miss => {}
                     }
-                    ScanOutcome::Error(err) => return Err(err),
-                    ScanOutcome::Miss => {}
                 }
             }
         }
