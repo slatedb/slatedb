@@ -15,6 +15,7 @@ use slatedb_common::clock::SystemClock;
 use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use ulid::Ulid;
 use uuid::Uuid;
@@ -48,6 +49,10 @@ impl ObjectStoreType {
 pub(crate) struct WatchableOnceCell<T: Clone> {
     rx: tokio::sync::watch::Receiver<Option<T>>,
     tx: tokio::sync::watch::Sender<Option<T>>,
+    /// Set before the first value is sent, so a reader that sees a value also sees the flag.
+    /// A reader that finds it false knows that no value is visible yet, without touching the
+    /// channel, whose read lock and reference counts all readers share.
+    written: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Debug)]
@@ -58,12 +63,18 @@ pub(crate) struct WatchableOnceCellReader<T: Clone> {
 impl<T: Clone> WatchableOnceCell<T> {
     pub(crate) fn new() -> Self {
         let (tx, rx) = tokio::sync::watch::channel(None);
-        Self { rx, tx }
+        Self {
+            rx,
+            tx,
+            written: Default::default(),
+        }
     }
 
     /// Writes the value if not already set. Returns `true` if the value was
     /// written, `false` if a value was already present.
     pub(crate) fn write(&self, val: T) -> bool {
+        // Before the send: once a value is visible, the flag is set.
+        self.written.store(true, Ordering::Release);
         self.tx.send_if_modified(|v| {
             if v.is_some() {
                 return false;
@@ -71,6 +82,12 @@ impl<T: Clone> WatchableOnceCell<T> {
             v.replace(val);
             true
         })
+    }
+
+    /// Returns false if no value is visible yet. It reads one atomic flag and does not touch
+    /// the channel. True means that a value may be visible: read it to know.
+    pub(crate) fn maybe_written(&self) -> bool {
+        self.written.load(Ordering::Acquire)
     }
 
     pub(crate) fn reader(&self) -> WatchableOnceCellReader<T> {
@@ -1008,6 +1025,42 @@ mod tests {
         assert_eq!(reader.read(), Some(123));
         register.write(456);
         assert_eq!(reader.read(), Some(123));
+    }
+
+    #[tokio::test]
+    async fn test_should_flag_a_written_register() {
+        let register = WatchableOnceCell::new();
+        let reader = register.reader();
+        assert!(!register.maybe_written());
+        assert_eq!(reader.read(), None);
+        register.write(123);
+        assert!(register.maybe_written());
+        assert_eq!(reader.read(), Some(123));
+        // A clone shares the flag.
+        let clone = register.clone();
+        clone.write(456);
+        assert!(register.maybe_written());
+        assert_eq!(reader.read(), Some(123));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_should_set_the_flag_before_a_value_is_visible() {
+        // A reader on another worker never sees a value without the flag.
+        for _ in 0..200 {
+            let register = WatchableOnceCell::new();
+            let reader = register.reader();
+            let observer = {
+                let register = register.clone();
+                tokio::spawn(async move {
+                    while reader.read().is_none() {
+                        tokio::task::yield_now().await;
+                    }
+                    assert!(register.maybe_written());
+                })
+            };
+            register.write(1u8);
+            observer.await.unwrap();
+        }
     }
 
     #[tokio::test]

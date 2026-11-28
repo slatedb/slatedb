@@ -1,6 +1,8 @@
 use crate::batch::WriteBatchIterator;
 use crate::bytes_range::BytesRange;
-use crate::db_state::{SortedRun, SsTableView};
+use crate::config::ScanOptions;
+use crate::db_reader::ReaderState;
+use crate::db_state::{DbStateView, SortedRun, SsTableView};
 use crate::db_stats::DbStats;
 use crate::error::SlateDBError;
 use crate::filter_iterator::FilterIterator;
@@ -12,7 +14,10 @@ use crate::merge_operator::{
     MergeOperatorIterator, MergeOperatorRequiredIterator, MergeOperatorType,
 };
 use crate::read_trace::{ReadTrace, SstTraceLevel};
+use crate::reader::{DbStateReader, Reader, ScanContext};
+use crate::row_cache::{self, ScanSegment};
 use crate::segment_iterator::{build_l0_point_iters, build_sr_point_iters, SegmentScanContext};
+use crate::snapshot_manager::RetentionPin;
 use crate::sorted_run_iterator::SortedRunIterator;
 use crate::sst_iter::{SstIterator, SstIteratorOptions, SstTracingContext};
 use crate::tablestore::TableStore;
@@ -23,7 +28,7 @@ use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::ops::RangeBounds;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 use tracing::Instrument;
 
@@ -255,13 +260,268 @@ impl RowEntryIterator for ScanIterator {
     }
 }
 
+pub(crate) enum PartialDbState {
+    Writer(DbStateView),
+    Reader(Arc<ReaderState>),
+}
+
+impl PartialDbState {
+    fn as_state_reader(&self) -> &(dyn DbStateReader + Sync) {
+        match self {
+            Self::Writer(view) => view,
+            Self::Reader(state) => state.as_ref(),
+        }
+    }
+}
+
+pub(crate) struct PartialGapContext {
+    pub(crate) reader: Reader,
+    pub(crate) state: PartialDbState,
+    pub(crate) options: ScanOptions,
+    pub(crate) prefix: Option<Bytes>,
+    pub(crate) max_seq: u64,
+}
+
+impl PartialGapContext {
+    async fn open_gap(
+        &self,
+        range: BytesRange,
+    ) -> Result<Box<dyn RowEntryIterator + 'static>, SlateDBError> {
+        self.reader
+            .scan_gap(
+                range,
+                &self.options,
+                ScanContext {
+                    db_state: self.state.as_state_reader(),
+                    write_batch_iter: None,
+                    max_seq: Some(self.max_seq),
+                    prefix: self.prefix.clone(),
+                },
+            )
+            .await
+    }
+}
+
+enum ActiveSegment {
+    Cached {
+        iter: Box<dyn row_cache::ScanIterator>,
+        end: Bound<Bytes>,
+    },
+    Gap {
+        iter: Box<dyn RowEntryIterator + 'static>,
+        end: Bound<Bytes>,
+    },
+}
+
+struct PartialScan {
+    active: Option<ActiveSegment>,
+    remaining: VecDeque<ScanSegment>,
+    ctx: PartialGapContext,
+}
+
+fn key_past_end(key: &[u8], end: &Bound<Bytes>) -> bool {
+    match end {
+        Bound::Included(e) => key > e.as_ref(),
+        Bound::Excluded(e) => key >= e.as_ref(),
+        Bound::Unbounded => false,
+    }
+}
+
+impl PartialScan {
+    /// Ensures `self.active` is populated from `self.remaining`, opening the next non-empty gap
+    /// lazily. Returns `Ok(false)` when all segments are exhausted.
+    async fn ensure_active(&mut self, range: &BytesRange) -> Result<bool, SlateDBError> {
+        while self.active.is_none() {
+            match self.remaining.pop_front() {
+                Some(ScanSegment::Cached { iter, end }) => {
+                    self.active = Some(ActiveSegment::Cached { iter, end });
+                }
+                Some(ScanSegment::Gap { start, end }) => {
+                    let Some(gap_range) =
+                        BytesRange::try_new(start, end.clone()).and_then(|r| r.intersect(range))
+                    else {
+                        continue;
+                    };
+                    let iter = self.ctx.open_gap(gap_range).await?;
+                    self.active = Some(ActiveSegment::Gap { iter, end });
+                }
+                None => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    async fn seek(&mut self, next_key: &[u8]) -> Result<(), crate::Error> {
+        if let Some(active) = &mut self.active {
+            match active {
+                ActiveSegment::Cached { iter, end } if !key_past_end(next_key, end) => {
+                    return iter.seek(next_key);
+                }
+                ActiveSegment::Gap { iter, end } if !key_past_end(next_key, end) => {
+                    return iter.seek(next_key).await.map_err(Into::into);
+                }
+                _ => self.active = None,
+            }
+        }
+        while let Some(segment) = self.remaining.pop_front() {
+            match segment {
+                ScanSegment::Cached { mut iter, end } => {
+                    if key_past_end(next_key, &end) {
+                        continue;
+                    }
+                    iter.seek(next_key)?;
+                    self.active = Some(ActiveSegment::Cached { iter, end });
+                    return Ok(());
+                }
+                ScanSegment::Gap { start, end } => {
+                    if key_past_end(next_key, &end) {
+                        continue;
+                    }
+                    let clamped_start = match start {
+                        Bound::Unbounded => Bound::Included(Bytes::copy_from_slice(next_key)),
+                        Bound::Included(s) if next_key > s.as_ref() => {
+                            Bound::Included(Bytes::copy_from_slice(next_key))
+                        }
+                        Bound::Excluded(s) if next_key > s.as_ref() => {
+                            Bound::Included(Bytes::copy_from_slice(next_key))
+                        }
+                        other => other,
+                    };
+                    self.remaining.push_front(ScanSegment::Gap {
+                        start: clamped_start,
+                        end,
+                    });
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+enum IterSource {
+    Internal(Box<dyn RowEntryIterator + 'static>),
+    External(Box<dyn row_cache::ScanIterator>),
+    Partial(Box<PartialScan>),
+}
+
+/// An external source checks the cooperative budget once in this many entries, not for each
+/// entry. Its entries come from memory or local pages, so a task still yields often.
+const EXTERNAL_BUDGET_EVERY: u32 = 32;
+
+enum CachedBatchOutcome {
+    More(usize),
+    Done(usize),
+    Error(crate::Error),
+}
+
+fn update_last_key(last_key: &mut Option<Bytes>, out: &[KeyValue], appended: usize) {
+    if appended > 0 {
+        if let Some(kv) = out.last() {
+            *last_key = Some(kv.key.clone());
+        }
+    }
+}
+
+/// Pulls one row from a row-cache scan iterator, checking Tokio's cooperative budget every
+/// `EXTERNAL_BUDGET_EVERY` rows.
+async fn next_from_cached(
+    iter: &mut dyn row_cache::ScanIterator,
+    unbudgeted: &mut u32,
+    last_key: &mut Option<Bytes>,
+) -> Result<Option<KeyValue>, crate::Error> {
+    let kv = iter.next()?;
+    if let Some(ref kv) = kv {
+        *unbudgeted += 1;
+        if *unbudgeted >= EXTERNAL_BUDGET_EVERY {
+            *unbudgeted = 0;
+            tokio::task::coop::consume_budget().await;
+        }
+        *last_key = Some(kv.key.clone());
+    }
+    Ok(kv)
+}
+
+/// Appends up to `max` rows from a row-cache scan iterator into `out`, checking Tokio's
+/// cooperative budget every `EXTERNAL_BUDGET_EVERY` rows.
+async fn next_batch_from_cached(
+    iter: &mut dyn row_cache::ScanIterator,
+    unbudgeted: &mut u32,
+    last_key: &mut Option<Bytes>,
+    out: &mut Vec<KeyValue>,
+    max: usize,
+) -> CachedBatchOutcome {
+    let mut n = 0;
+    while n < max {
+        let budget_left = EXTERNAL_BUDGET_EVERY.saturating_sub(*unbudgeted).max(1) as usize;
+        let want = (max - n).min(budget_left);
+        let before = out.len();
+        let res = iter.next_batch(out, want);
+        let count = out.len() - before;
+        n += count;
+        let count_u32 = u32::try_from(count).unwrap_or(u32::MAX);
+        match res {
+            Ok(true) if count > 0 => {
+                *unbudgeted = unbudgeted.saturating_add(count_u32);
+                if *unbudgeted >= EXTERNAL_BUDGET_EVERY {
+                    *unbudgeted = 0;
+                    update_last_key(last_key, out, n);
+                    tokio::task::coop::consume_budget().await;
+                }
+            }
+            Ok(_) => {
+                *unbudgeted = unbudgeted.saturating_add(count_u32);
+                update_last_key(last_key, out, n);
+                if *unbudgeted >= EXTERNAL_BUDGET_EVERY {
+                    *unbudgeted = 0;
+                    tokio::task::coop::consume_budget().await;
+                }
+                return CachedBatchOutcome::Done(n);
+            }
+            Err(err) => {
+                update_last_key(last_key, out, n);
+                return CachedBatchOutcome::Error(err);
+            }
+        }
+    }
+    update_last_key(last_key, out, n);
+    CachedBatchOutcome::More(n)
+}
+
+/// Pulls the next non-tombstone entry from an internal LSM iterator.
+async fn next_from_internal(
+    iter: &mut dyn RowEntryIterator,
+    last_key: &mut Option<Bytes>,
+) -> Result<Option<RowEntry>, SlateDBError> {
+    loop {
+        let next = iter.next().await;
+        // Keep cached iteration cooperative.
+        tokio::task::coop::consume_budget().await;
+        match next {
+            Ok(Some(entry)) => match entry.value {
+                ValueDeletable::Tombstone => continue,
+                _ => {
+                    *last_key = Some(entry.key.clone());
+                    return Ok(Some(entry));
+                }
+            },
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 pub struct DbIterator {
     range: BytesRange,
-    iter: Box<dyn RowEntryIterator + 'static>,
+    iter: IterSource,
     invalidated_error: Option<SlateDBError>,
     last_key: Option<Bytes>,
     order: IterationOrder,
     read_span: tracing::Span,
+    /// Entries returned from an external source since the last cooperative budget check.
+    unbudgeted: u32,
+    /// Keeps the snapshot or transaction registered until this iterator drops.
+    retention: Option<Arc<RetentionPin>>,
 }
 
 impl DbIterator {
@@ -333,12 +593,70 @@ impl DbIterator {
 
         Ok(DbIterator {
             range,
-            iter,
+            iter: IterSource::Internal(iter),
             invalidated_error: None,
             last_key: None,
             order,
             read_span,
+            unbudgeted: 0,
+            retention: None,
         })
+    }
+
+    /// Unwraps an internal LSM [`DbIterator`] built by [`DbIterator::new`].
+    pub(crate) fn into_internal(self) -> Box<dyn RowEntryIterator + 'static> {
+        match self.iter {
+            IterSource::Internal(iter) => iter,
+            IterSource::External(_) | IterSource::Partial(_) => {
+                unreachable!("into_internal called on non-internal DbIterator")
+            }
+        }
+    }
+
+    /// Builds an iterator over a pre-resolved ascending row cache source.
+    pub(crate) fn from_row_cache(
+        range: BytesRange,
+        iter: Box<dyn row_cache::ScanIterator>,
+    ) -> Self {
+        DbIterator {
+            range,
+            iter: IterSource::External(iter),
+            invalidated_error: None,
+            last_key: None,
+            order: IterationOrder::Ascending,
+            read_span: tracing::Span::none(),
+            unbudgeted: 0,
+            retention: None,
+        }
+    }
+
+    /// Builds an iterator stitching cached segments and lazy LSM gaps.
+    pub(crate) fn from_row_cache_partial(
+        range: BytesRange,
+        segments: Vec<ScanSegment>,
+        ctx: PartialGapContext,
+    ) -> Self {
+        DbIterator {
+            range,
+            iter: IterSource::Partial(Box::new(PartialScan {
+                active: None,
+                remaining: VecDeque::from(segments),
+                ctx,
+            })),
+            invalidated_error: None,
+            last_key: None,
+            order: IterationOrder::Ascending,
+            read_span: tracing::Span::none(),
+            unbudgeted: 0,
+            retention: None,
+        }
+    }
+
+    /// Holds `pin`, the registration of the snapshot or the transaction that the scan reads in,
+    /// until the iterator drops.
+    pub(crate) fn retaining(mut self, pin: Arc<RetentionPin>) -> Self {
+        self.retention = Some(pin);
+        self
     }
 
     /// Get the next key-value pair.
@@ -350,6 +668,14 @@ impl DbIterator {
     ///
     /// Returns [`Error`] if the iterator has been invalidated due to an underlying error.
     pub async fn next(&mut self) -> Result<Option<KeyValue>, crate::Error> {
+        if let Some(error) = self.invalidated_error.clone() {
+            return Err(error.into());
+        }
+        match self.iter {
+            IterSource::External(_) => return self.next_external().await,
+            IterSource::Partial(_) => return self.next_partial().await,
+            IterSource::Internal(_) => {}
+        }
         let entry_opt = self.next_entry().await?;
         match entry_opt {
             Some(entry) => {
@@ -362,34 +688,209 @@ impl DbIterator {
         }
     }
 
+    /// Appends up to `max` rows to `out` and returns the appended count.
+    ///
+    /// Returns `0` when the iterator reaches its end or `max` is `0`. Produces the same rows and
+    /// iterator state as calling [`DbIterator::next`] repeatedly. On row-cache scans, reads rows
+    /// synchronously without a per-row future.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error from [`DbIterator::next`]. Rows appended before the error stay in `out`.
+    pub async fn next_batch(
+        &mut self,
+        out: &mut Vec<KeyValue>,
+        max: usize,
+    ) -> Result<usize, crate::Error> {
+        if self.invalidated_error.is_none() {
+            match self.iter {
+                IterSource::External(_) => return self.next_batch_external(out, max).await,
+                IterSource::Partial(_) => return self.next_batch_partial(out, max).await,
+                IterSource::Internal(_) => {}
+            }
+        }
+        let mut n = 0;
+        while n < max {
+            match self.next().await? {
+                Some(kv) => {
+                    out.push(kv);
+                    n += 1;
+                }
+                None => break,
+            }
+        }
+        Ok(n)
+    }
+
+    async fn next_batch_external(
+        &mut self,
+        out: &mut Vec<KeyValue>,
+        max: usize,
+    ) -> Result<usize, crate::Error> {
+        let IterSource::External(iter) = &mut self.iter else {
+            unreachable!("checked external source");
+        };
+        match next_batch_from_cached(
+            iter.as_mut(),
+            &mut self.unbudgeted,
+            &mut self.last_key,
+            out,
+            max,
+        )
+        .await
+        {
+            CachedBatchOutcome::More(n) | CachedBatchOutcome::Done(n) => Ok(n),
+            CachedBatchOutcome::Error(err) => Err(self.invalidate_public(err)),
+        }
+    }
+
+    async fn next_batch_partial(
+        &mut self,
+        out: &mut Vec<KeyValue>,
+        max: usize,
+    ) -> Result<usize, crate::Error> {
+        let mut n = 0;
+        while n < max {
+            let IterSource::Partial(partial) = &mut self.iter else {
+                unreachable!("checked partial source");
+            };
+            match partial.ensure_active(&self.range).await {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(err) => {
+                    self.invalidated_error = Some(err.clone());
+                    return Err(err.into());
+                }
+            }
+            match partial.active.as_mut() {
+                Some(ActiveSegment::Cached { iter, .. }) => {
+                    match next_batch_from_cached(
+                        iter.as_mut(),
+                        &mut self.unbudgeted,
+                        &mut self.last_key,
+                        out,
+                        max - n,
+                    )
+                    .await
+                    {
+                        CachedBatchOutcome::More(count) => n += count,
+                        CachedBatchOutcome::Done(count) => {
+                            n += count;
+                            partial.active = None;
+                        }
+                        CachedBatchOutcome::Error(err) => {
+                            return Err(self.invalidate_public(err));
+                        }
+                    }
+                }
+                Some(ActiveSegment::Gap { iter, .. }) => {
+                    match next_from_internal(iter.as_mut(), &mut self.last_key).await {
+                        Ok(Some(entry)) => {
+                            out.push(KeyValue::from(entry));
+                            n += 1;
+                        }
+                        Ok(None) => partial.active = None,
+                        Err(err) => {
+                            self.invalidated_error = Some(err.clone());
+                            return Err(err.into());
+                        }
+                    }
+                }
+                None => unreachable!("ensure_active returned true"),
+            }
+        }
+        Ok(n)
+    }
+
+    async fn next_partial(&mut self) -> Result<Option<KeyValue>, crate::Error> {
+        loop {
+            let IterSource::Partial(partial) = &mut self.iter else {
+                unreachable!("checked partial source");
+            };
+            match partial.ensure_active(&self.range).await {
+                Ok(true) => {}
+                Ok(false) => return Ok(None),
+                Err(err) => {
+                    self.invalidated_error = Some(err.clone());
+                    return Err(err.into());
+                }
+            }
+            match partial.active.as_mut() {
+                Some(ActiveSegment::Cached { iter, .. }) => {
+                    match next_from_cached(iter.as_mut(), &mut self.unbudgeted, &mut self.last_key)
+                        .await
+                    {
+                        Ok(Some(kv)) => return Ok(Some(kv)),
+                        Ok(None) => partial.active = None,
+                        Err(err) => return Err(self.invalidate_public(err)),
+                    }
+                }
+                Some(ActiveSegment::Gap { iter, .. }) => {
+                    match next_from_internal(iter.as_mut(), &mut self.last_key).await {
+                        Ok(Some(entry)) => return Ok(Some(KeyValue::from(entry))),
+                        Ok(None) => partial.active = None,
+                        Err(err) => {
+                            self.invalidated_error = Some(err.clone());
+                            return Err(err.into());
+                        }
+                    }
+                }
+                None => unreachable!("ensure_active returned true"),
+            }
+        }
+    }
+
+    async fn next_external(&mut self) -> Result<Option<KeyValue>, crate::Error> {
+        let IterSource::External(iter) = &mut self.iter else {
+            unreachable!("checked external source");
+        };
+        next_from_cached(iter.as_mut(), &mut self.unbudgeted, &mut self.last_key)
+            .await
+            .map_err(|err| self.invalidate_public(err))
+    }
+
+    fn invalidate_public(&mut self, err: crate::Error) -> crate::Error {
+        self.invalidated_error = Some(SlateDBError::RowCache(Arc::new(err.clone_without_source())));
+        err
+    }
+
     pub(crate) async fn next_entry(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
+        if matches!(self.iter, IterSource::External(_) | IterSource::Partial(_)) {
+            if let Some(error) = self.invalidated_error.clone() {
+                return Err(error);
+            }
+            let next = match self.iter {
+                IterSource::External(_) => self.next_external().await,
+                IterSource::Partial(_) => self.next_partial().await,
+                IterSource::Internal(_) => unreachable!("checked non-internal source"),
+            };
+            return next
+                .map(|kv_opt| {
+                    kv_opt.map(|kv| {
+                        RowEntry::new(
+                            kv.key,
+                            ValueDeletable::Value(kv.value),
+                            kv.seq,
+                            Some(kv.create_ts),
+                            kv.expire_ts,
+                        )
+                    })
+                })
+                .map_err(|err| SlateDBError::RowCache(Arc::new(err)));
+        }
         let read_span = self.read_span.clone();
         self.next_entry_inner().instrument(read_span).await
     }
 
     async fn next_entry_inner(&mut self) -> Result<Option<RowEntry>, SlateDBError> {
         if let Some(error) = self.invalidated_error.clone() {
-            Err(error)
-        } else {
-            let result = loop {
-                let next = self.iter.next().await;
-                // Keep cached iteration cooperative.
-                tokio::task::coop::consume_budget().await;
-                match next {
-                    Ok(Some(entry)) => match entry.value {
-                        ValueDeletable::Tombstone => continue,
-                        _ => break Ok(Some(entry)),
-                    },
-                    Ok(None) => break Ok(None),
-                    Err(e) => break Err(e),
-                }
-            };
-            let result = self.maybe_invalidate(result);
-            if let Ok(Some(ref entry)) = result {
-                self.last_key = Some(entry.key.clone());
-            }
-            result
+            return Err(error);
         }
+        let IterSource::Internal(iter) = &mut self.iter else {
+            unreachable!("handled in next_entry");
+        };
+        let result = next_from_internal(iter.as_mut(), &mut self.last_key).await;
+        self.maybe_invalidate(result)
     }
 
     fn maybe_invalidate<T: Clone>(
@@ -441,8 +942,19 @@ impl DbIterator {
         {
             Err(SlateDBError::SeekKeyLessThanLastReturnedKey.into())
         } else {
-            let result = self.iter.seek(next_key).await;
-            self.maybe_invalidate(result).map_err(Into::into)
+            match &mut self.iter {
+                IterSource::Internal(iter) => {
+                    let result = iter.seek(next_key).await;
+                    self.maybe_invalidate(result).map_err(Into::into)
+                }
+                IterSource::External(iter) => iter
+                    .seek(next_key)
+                    .map_err(|err| self.invalidate_public(err)),
+                IterSource::Partial(partial) => partial
+                    .seek(next_key)
+                    .await
+                    .map_err(|err| self.invalidate_public(err)),
+            }
         }
     }
 }

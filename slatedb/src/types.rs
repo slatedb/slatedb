@@ -11,6 +11,19 @@ pub struct KeyValue {
     pub expire_ts: Option<i64>,
 }
 
+impl KeyValue {
+    /// Creates a new key-value pair.
+    pub fn new(key: Bytes, value: Bytes, seq: u64, create_ts: i64, expire_ts: Option<i64>) -> Self {
+        Self {
+            key,
+            value,
+            seq,
+            create_ts,
+            expire_ts,
+        }
+    }
+}
+
 /// Represents a key-value pair that may be a tombstone.
 ///
 /// This is the entry type passed to compaction for each key value pair.

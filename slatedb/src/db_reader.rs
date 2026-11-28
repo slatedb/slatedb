@@ -7,6 +7,7 @@ use {
         db_cache::CacheTarget,
         db_cache_manager,
         db_common::extract_segment_prefix,
+        db_iter::{PartialDbState, PartialGapContext},
         db_state::{collect_touched_segments, SsTableHandle, SsTableId},
         db_stats::DbStats,
         db_status::{ClosedResultWriter, DbStatus, DbStatusManager},
@@ -18,9 +19,13 @@ use {
         },
         mem_table::{ImmutableMemtable, KVTable, WritableKVTable},
         merge_operator::MergeOperatorType,
-        oracle::DbReaderOracle,
+        oracle::{DbReaderOracle, Oracle},
         prefix_extractor::PrefixExtractor,
         reader::{DbStateReader, Reader, ScanContext},
+        row_cache::{
+            can_use_row_cache_get, can_use_row_cache_scan, feed_tables_to_row_cache, GetOutcome,
+            KeyRange, RowCache, ScanOutcome,
+        },
         tablestore::TableStore,
         types::KeyValue,
         utils::IdGenerator,
@@ -129,15 +134,16 @@ struct DbReaderInner {
     /// See: https://github.com/slatedb/slatedb/issues/1469
     #[allow(dead_code)]
     recorder: slatedb_common::metrics::MetricsRecorderHelper,
+    row_cache: Option<Arc<dyn RowCache>>,
 }
 
 #[derive(Debug)]
-enum DbReaderMessage {
+pub(crate) enum DbReaderMessage {
     PollManifest,
 }
 
 #[derive(Clone)]
-struct ReaderState {
+pub(crate) struct ReaderState {
     manifest_id: u64,
     checkpoint: Option<Checkpoint>,
     manifest: Manifest,
@@ -182,6 +188,7 @@ impl DbReaderInner {
         rand: Arc<DbRand>,
         recorder: slatedb_common::metrics::MetricsRecorderHelper,
         mut manifest: StoredManifest,
+        row_cache: Option<Arc<dyn RowCache>>,
     ) -> Result<Self, SlateDBError> {
         let checkpoint =
             Self::get_or_create_checkpoint(&mut manifest, mode, &options, rand.clone()).await?;
@@ -232,6 +239,24 @@ impl DbReaderInner {
         let initial_durable_seq = initial_state
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
+        if let Some(row_cache) = &row_cache {
+            let last_l0_seq = initial_state.core().last_l0_seq;
+            row_cache.open(last_l0_seq);
+            let tables: Vec<Arc<KVTable>> = initial_state
+                .imm_memtable
+                .iter()
+                .map(|imm| imm.table())
+                .collect();
+            let last_written = feed_tables_to_row_cache(
+                row_cache.as_ref(),
+                tables.iter().map(Arc::as_ref),
+                last_l0_seq,
+            )
+            .unwrap_or(last_l0_seq);
+            if initial_durable_seq > last_written {
+                row_cache.write(initial_durable_seq, &[]);
+            }
+        }
         status_manager.report_durable_seq(
             initial_state
                 .last_remote_persisted_seq
@@ -271,8 +296,41 @@ impl DbReaderInner {
             segment_extractor,
             rand,
             recorder,
+            row_cache,
         };
         Ok(inner)
+    }
+
+    /// Feeds the row cache writes above the reader's seq before that seq advances. Writes in an L0
+    /// above the reader's seq were not replayed, so the affected ranges are invalidated first.
+    /// Runs on the poller task only.
+    fn feed_row_cache(&self, new_state: &Arc<ReaderState>) {
+        let Some(row_cache) = &self.row_cache else {
+            return;
+        };
+        let prev_seq = self.oracle.last_committed_seq();
+        let mut replayed_after = prev_seq;
+        let last_l0_seq = new_state.core().last_l0_seq;
+        if last_l0_seq > prev_seq {
+            let prev_state = Arc::clone(&self.state.read());
+            invalidate_unreplayed_l0(row_cache.as_ref(), prev_state.core(), new_state.core());
+            replayed_after = last_l0_seq;
+        }
+        let tables: Vec<Arc<KVTable>> = new_state
+            .imm_memtable()
+            .iter()
+            .map(|imm| imm.table())
+            .collect();
+        let last_written = feed_tables_to_row_cache(
+            row_cache.as_ref(),
+            tables.iter().map(Arc::as_ref),
+            replayed_after,
+        )
+        .unwrap_or(prev_seq);
+        let final_seq = new_state.last_remote_persisted_seq.max(last_l0_seq);
+        if final_seq > last_written {
+            row_cache.write(final_seq, &[]);
+        }
     }
 
     async fn get_or_create_checkpoint(
@@ -321,6 +379,21 @@ impl DbReaderInner {
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, SlateDBError> {
         self.check_closed()?;
+        let key = key.as_ref();
+        if let Some(row_cache) = &self.row_cache {
+            if can_use_row_cache_get(options, true) {
+                let seq = self.oracle.last_committed_seq();
+                let now_ms = self.reader.mono_clock.now_millis_sync();
+                match row_cache.get(key, seq, now_ms) {
+                    GetOutcome::Hit(kv) => {
+                        self.reader.db_stats.get_requests.increment(1);
+                        return Ok(kv);
+                    }
+                    GetOutcome::Error(err) => return Err(SlateDBError::RowCache(Arc::new(err))),
+                    GetOutcome::Miss => {}
+                }
+            }
+        }
         let db_state = Arc::clone(&self.state.read());
         self.reader
             .get_key_value_with_options(key, options, db_state.as_ref(), None, None)
@@ -334,6 +407,41 @@ impl DbReaderInner {
         prefix: Option<Bytes>,
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
+        if let Some(row_cache) = &self.row_cache {
+            if can_use_row_cache_scan(options, true) {
+                let seq = self.oracle.last_committed_seq();
+                let now_ms = self.reader.mono_clock.now_millis_sync();
+                let key_range = KeyRange::from_bytes_range(&range);
+                match row_cache.scan(key_range, seq, now_ms, prefix.as_deref()) {
+                    ScanOutcome::Hit(iter) => {
+                        self.reader.db_stats.scan_requests.increment(1);
+                        return Ok(DbIterator::from_row_cache(range, iter));
+                    }
+                    ScanOutcome::Partial(segments) => {
+                        let db_state = Arc::clone(&self.state.read());
+                        let state_seq = db_state
+                            .last_remote_persisted_seq
+                            .max(db_state.core().last_l0_seq);
+                        if db_state.core().last_l0_seq <= seq && state_seq >= seq {
+                            self.reader.db_stats.scan_requests.increment(1);
+                            return Ok(DbIterator::from_row_cache_partial(
+                                range,
+                                segments,
+                                PartialGapContext {
+                                    reader: self.reader.clone(),
+                                    state: PartialDbState::Reader(db_state),
+                                    options: options.clone(),
+                                    prefix,
+                                    max_seq: seq,
+                                },
+                            ));
+                        }
+                    }
+                    ScanOutcome::Error(err) => return Err(SlateDBError::RowCache(Arc::new(err))),
+                    ScanOutcome::Miss => {}
+                }
+            }
+        }
         let db_state = Arc::clone(&self.state.read());
         self.reader
             .scan_with_options(
@@ -391,13 +499,21 @@ impl DbReaderInner {
     }
 
     fn install_state(&self, new_state: ReaderState) {
-        let durable_seq = new_state.last_remote_persisted_seq;
+        let durable_seq = new_state
+            .last_remote_persisted_seq
+            .max(new_state.core().last_l0_seq);
         let versioned_manifest = VersionedManifest::from(&new_state);
         let touched_segments = collect_touched_segments(&new_state);
-        self.oracle.advance_durable_seq(durable_seq);
-        let mut write_guard = self.state.write();
-        *write_guard = Arc::new(new_state);
-        drop(write_guard);
+        let new_state = Arc::new(new_state);
+        self.reader
+            .mono_clock
+            .advance_last_tick(new_state.core().last_l0_clock_tick);
+        self.feed_row_cache(&new_state);
+        {
+            let mut write_guard = self.state.write();
+            *write_guard = new_state;
+            self.oracle.advance_durable_seq(durable_seq);
+        }
         self.status_manager
             .report_manifest_and_memtable_segments(versioned_manifest, touched_segments);
     }
@@ -420,9 +536,7 @@ impl DbReaderInner {
         .await?;
 
         if last_wal_id > current_state.last_wal_id {
-            self.oracle.advance_durable_seq(last_committed_seq);
-            let mut write_guard = self.state.write();
-            *write_guard = Arc::new(ReaderState {
+            let new_state = Arc::new(ReaderState {
                 manifest_id: current_state.manifest_id,
                 checkpoint: current_state.checkpoint.clone(),
                 manifest: current_state.manifest.clone(),
@@ -430,7 +544,12 @@ impl DbReaderInner {
                 last_wal_id,
                 last_remote_persisted_seq: last_committed_seq,
             });
-            drop(write_guard);
+            self.feed_row_cache(&new_state);
+            {
+                let mut write_guard = self.state.write();
+                *write_guard = new_state;
+                self.oracle.advance_durable_seq(last_committed_seq);
+            }
             self.status_manager
                 .report_memtable_segments(collect_touched_segments(self.state.read().as_ref()));
         }
@@ -587,8 +706,7 @@ impl DbReaderInner {
                     // manifest instead of failing the reader permanently.
                     warn!("reader checkpoint missing, re-establishing [checkpoint_id={id}]");
                     let checkpoint = self.replace_checkpoint(stored_manifest).await?;
-                    self.reestablish_checkpoint(checkpoint).await?;
-                    return Ok(());
+                    return self.reestablish_checkpoint(checkpoint).await;
                 }
                 Err(e) => return Err(e),
             };
@@ -780,6 +898,42 @@ impl DbReaderInner {
     }
 }
 
+/// Invalidates cached rows touched by L0 SSTs added between `prev` and `next` without WAL replay.
+/// Uses each new L0 SST's effective key range when no compaction or segment update obscures the
+/// diff, and falls back to [`KeyRange::all`] otherwise.
+fn invalidate_unreplayed_l0(cache: &dyn RowCache, prev: &ManifestCore, next: &ManifestCore) {
+    if !prev.segments.is_empty()
+        || !next.segments.is_empty()
+        || prev.tree.last_compacted_l0_sst_view_id != next.tree.last_compacted_l0_sst_view_id
+        || prev.tree.last_compacted_l0_sst_id != next.tree.last_compacted_l0_sst_id
+    {
+        cache.invalidate(KeyRange::all());
+        return;
+    }
+    let prev_front = prev.tree.l0.front().map(|v| v.id);
+    let mut new_l0s = Vec::new();
+    let mut matched_front = prev_front.is_none();
+    for view in &next.tree.l0 {
+        if Some(view.id) == prev_front {
+            matched_front = true;
+            break;
+        }
+        new_l0s.push(view);
+    }
+    if !matched_front
+        || new_l0s.is_empty()
+        || new_l0s
+            .iter()
+            .any(|v| !v.compacted_effective_range().non_empty())
+    {
+        cache.invalidate(KeyRange::all());
+        return;
+    }
+    for view in new_l0s {
+        cache.invalidate(KeyRange::from_bytes_range(view.compacted_effective_range()));
+    }
+}
+
 struct ManifestPoller {
     inner: Arc<DbReaderInner>,
 }
@@ -951,6 +1105,7 @@ impl DbReader {
         system_clock: Arc<dyn SystemClock>,
         rand: Arc<DbRand>,
         recorder: slatedb_common::metrics::MetricsRecorderHelper,
+        row_cache: Option<Arc<dyn RowCache>>,
     ) -> Result<Self, SlateDBError> {
         Self::validate_options(mode, &options)?;
 
@@ -978,6 +1133,7 @@ impl DbReader {
                 rand,
                 recorder,
                 manifest,
+                row_cache,
             )
             .await?,
         );
@@ -1673,6 +1829,7 @@ mod tests {
             test_provider.system_clock.clone(),
             test_provider.rand.clone(),
             slatedb_common::metrics::MetricsRecorderHelper::noop(),
+            None,
         )
         .await
         .unwrap();
@@ -2037,6 +2194,7 @@ mod tests {
             test_provider.system_clock.clone(),
             test_provider.rand.clone(),
             slatedb_common::metrics::MetricsRecorderHelper::noop(),
+            None,
         )
         .await
         .unwrap();
@@ -2237,6 +2395,7 @@ mod tests {
             test_provider.rand.clone(),
             recorder,
             stored_manifest,
+            None,
         )
         .await
         .unwrap();
@@ -2334,6 +2493,7 @@ mod tests {
             test_provider.rand.clone(),
             recorder,
             stored_manifest,
+            None,
         )
         .await
         .unwrap();
@@ -3107,6 +3267,7 @@ mod tests {
                 self.system_clock.clone(),
                 self.rand.clone(),
                 slatedb_common::metrics::MetricsRecorderHelper::noop(),
+                None,
             )
             .await
         }
@@ -3327,6 +3488,7 @@ mod tests {
             segment_extractor: None,
             rand: test_provider.rand.clone(),
             recorder,
+            row_cache: None,
         };
 
         let rebuilt_state = inner
@@ -3414,6 +3576,7 @@ mod tests {
             segment_extractor: None,
             rand: test_provider.rand.clone(),
             recorder,
+            row_cache: None,
         }
     }
 

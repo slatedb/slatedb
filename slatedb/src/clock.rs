@@ -49,6 +49,19 @@ impl MonotonicClock {
         self.enforce_monotonic(tick)
     }
 
+    /// Advances `last_tick` to at least `tick` without failing when `tick` is older.
+    pub(crate) fn advance_last_tick(&self, tick: i64) {
+        self.last_tick.fetch_max(tick, Ordering::Relaxed);
+    }
+
+    /// Returns the current wall-clock timestamp in milliseconds, floored at `last_tick`.
+    pub(crate) fn now_millis_sync(&self) -> i64 {
+        self.delegate
+            .now()
+            .timestamp_millis()
+            .max(self.last_tick.load(Ordering::Relaxed))
+    }
+
     #[cfg_attr(dst, allow(dead_code))]
     pub(crate) async fn now(&self) -> Result<i64, SlateDBError> {
         let tick = self.delegate.now().timestamp_millis();

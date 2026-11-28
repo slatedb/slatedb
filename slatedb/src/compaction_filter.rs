@@ -8,6 +8,11 @@
 //! causing snapshot reads to return unexpected results. Users who need consistent
 //! snapshots should carefully consider their filter logic.
 //!
+//! **Warning:** Compaction filters are incompatible with [`crate::RowCache`].
+//! [`crate::DbBuilder::build`] rejects an embedded compaction filter combined with a row cache.
+//! Standalone compactors or compaction workers running compaction filters against a database with
+//! a row cache can cause stale reads.
+//!
 //! # Example
 //!
 //! ```no_run

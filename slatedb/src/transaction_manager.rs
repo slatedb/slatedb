@@ -90,6 +90,10 @@ struct TransactionManagerInner {
     ///   committed_seq` and follow the same GC rule.
     /// - If there are no active transactions, this deque can be fully drained.
     recent_committed_txns: VecDeque<TransactionState>,
+    /// The started sequence numbers that flushes and compaction retain what they see of, by
+    /// transaction id: a transaction's, from its start until it ends, or until the last
+    /// iterator of its scans drops if one outlives it (see `RetentionPin`).
+    retained: HashMap<Uuid, u64>,
     /// The oracle for tracking the last committed sequence number.
     oracle: Arc<DbOracle>,
 }
@@ -100,6 +104,7 @@ impl TransactionManager {
             inner: Arc::new(RwLock::new(TransactionManagerInner {
                 active_txns: HashMap::new(),
                 recent_committed_txns: VecDeque::new(),
+                retained: HashMap::new(),
                 oracle,
             })),
             db_rand,
@@ -125,6 +130,7 @@ impl TransactionManager {
                 read_ranges: Vec::new(),
             },
         );
+        inner.retained.insert(txn_id, seq);
         (txn_id, seq)
     }
 
@@ -142,20 +148,40 @@ impl TransactionManager {
         {
             let mut inner = self.inner.write();
             inner.active_txns.insert(txn_id, txn_state);
+            inner.retained.insert(txn_id, seq);
         }
 
         txn_id
     }
 
+    /// [`Self::drop_txn_with`], ending the transaction's retention too.
+    #[cfg(test)]
+    pub(crate) fn drop_txn(&self, txn_id: &Uuid) {
+        self.drop_txn_with(txn_id, true);
+    }
+
     /// Remove a transaction state when it's dropped. If the txn has not been committed,
     /// it should be considered as rolled back, no side effect should be produced.
-    /// Please note that a committed txn can also run into drop_txn() on `drop()`, this
+    /// Please note that a committed txn can also run into drop_txn_with() on `drop()`, this
     /// method does nothing on such case.
     /// Here's a chance to recycle the recent committed txns.
-    pub(crate) fn drop_txn(&self, txn_id: &Uuid) {
+    ///
+    /// It also ends the retention of the transaction's sequence number if
+    /// `release_retention`; otherwise an iterator of one of its scans still holds it, and the
+    /// last such iterator ends it ([`Self::release_retention`]).
+    pub(crate) fn drop_txn_with(&self, txn_id: &Uuid, release_retention: bool) {
         let mut inner = self.inner.write();
         inner.active_txns.remove(txn_id);
+        if release_retention {
+            inner.retained.remove(txn_id);
+        }
         inner.recycle_recent_committed_txns();
+    }
+
+    /// Ends the retention of the sequence number of the transaction `txn_id`, after the
+    /// transaction and every iterator of its scans dropped. Does nothing if it ended already.
+    pub(crate) fn release_retention(&self, txn_id: &Uuid) {
+        self.inner.write().retained.remove(txn_id);
     }
 
     /// Track write keys for a transaction. This is used for conflict detection.
@@ -216,9 +242,24 @@ impl TransactionManager {
         )
     }
 
+    /// [`Self::track_recent_committed_txn_with`], ending the transaction's retention too.
+    #[cfg(test)]
+    pub(crate) fn track_recent_committed_txn(&self, txn_id: &Uuid, committed_seq: u64) {
+        self.track_recent_committed_txn_with(txn_id, committed_seq, true);
+    }
+
     /// Record a recent committed transaction for conflict detection.
     /// This method should be called after confirming no conflicts exist.
-    pub(crate) fn track_recent_committed_txn(&self, txn_id: &Uuid, committed_seq: u64) {
+    ///
+    /// It also ends the retention of the transaction's sequence number if
+    /// `release_retention`; otherwise an iterator of one of its scans still holds it (see
+    /// [`Self::drop_txn_with`]).
+    pub(crate) fn track_recent_committed_txn_with(
+        &self,
+        txn_id: &Uuid,
+        committed_seq: u64,
+        release_retention: bool,
+    ) {
         // remove the transaction from active_txns, and add it to recent_committed_txns
         let mut inner = self.inner.write();
 
@@ -226,6 +267,9 @@ impl TransactionManager {
         if let Some(mut txn_state) = inner.active_txns.remove(txn_id) {
             txn_state.mark_as_committed(committed_seq);
             inner.track_recent_committed_state(txn_state);
+        }
+        if release_retention {
+            inner.retained.remove(txn_id);
         }
 
         // update the last_committed_seq, so the writes will be visible to the readers.
@@ -258,20 +302,16 @@ impl TransactionManager {
         inner.oracle.advance_committed_seq(committed_seq);
     }
 
-    /// The min started_seq of all active transactions. This value
-    /// is useful to inform the compactor about the min seq of data still needed to be
-    /// retained for active transactions, so that the compactor can avoid deleting the
-    /// data that is still needed.
+    /// The min started_seq of all active transactions, and of the ended ones that an iterator
+    /// of their scans still reads in. This value is useful to inform the compactor about the
+    /// min seq of data still needed to be retained for active transactions, so that the
+    /// compactor can avoid deleting the data that is still needed.
     ///
     /// The manifest writer samples this value for `recent_snapshot_min_seq`
     /// before each manifest write.
     pub(crate) fn min_active_seq(&self) -> Option<u64> {
         let inner = self.inner.read();
-        inner
-            .active_txns
-            .values()
-            .map(|state| state.started_seq)
-            .min()
+        inner.retained.values().copied().min()
     }
 }
 

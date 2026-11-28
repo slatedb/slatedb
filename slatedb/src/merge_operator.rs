@@ -490,6 +490,15 @@ impl<T: RowEntryIterator> RowEntryIterator for MergeOperatorIterator<T> {
     }
 
     async fn seek(&mut self, next_key: &[u8]) -> Result<(), SlateDBError> {
+        // The buffered entry is the next entry of the delegate, so the delegate is already past
+        // it. Keep the entry if it is at or after `next_key`, or the seek loses it.
+        if self
+            .buffered_entry
+            .as_ref()
+            .is_some_and(|entry| entry.key.as_ref() >= next_key)
+        {
+            return Ok(());
+        }
         self.buffered_entry = None;
         self.delegate.seek(next_key).await
     }
@@ -1294,6 +1303,31 @@ mod tests {
             vec![RowEntry::new_merge(b"key1", b"123", 3).with_expire_ts(50)],
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn should_keep_the_buffered_entry_on_seek() {
+        // given: a merge operand, whose merge reads ahead and buffers the next key
+        let merge_operator = Arc::new(MockMergeOperator {});
+        let delegate = crate::test_utils::TestIterator::new()
+            .with_row_entry(RowEntry::new_value(b"a", b"1", 3))
+            .with_row_entry(RowEntry::new_merge(b"b", b"x", 2))
+            .with_row_entry(RowEntry::new_value(b"c", b"2", 1));
+        let mut iterator =
+            MergeOperatorIterator::new(merge_operator, delegate, true, None, ReadTrace::none());
+        iterator.init().await.unwrap();
+        assert_eq!(iterator.next().await.unwrap().unwrap().key.as_ref(), b"a");
+        assert_eq!(iterator.next().await.unwrap().unwrap().key.as_ref(), b"b");
+
+        // when: seeking to the buffered key
+        iterator.seek(b"c").await.unwrap();
+
+        // then: the buffered entry is not lost
+        assert_eq!(
+            iterator.next().await.unwrap(),
+            Some(RowEntry::new_value(b"c", b"2", 1))
+        );
+        assert_eq!(iterator.next().await.unwrap(), None);
     }
 
     #[tokio::test]

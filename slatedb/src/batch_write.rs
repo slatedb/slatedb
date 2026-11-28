@@ -296,10 +296,10 @@ impl DbInner {
             wal_writer.append(&entries).await?;
             // TODO: handle sync here, if sync is enabled, we can call `flush` here. let's put this
             // in another Pull Request.
-            self.write_entries_to_memtable(entries, touched_segments);
+            self.write_entries_to_memtable(commit_seq, entries, touched_segments);
         } else {
             assert!(!self.wal_enabled);
-            self.write_entries_to_memtable(entries, touched_segments);
+            self.write_entries_to_memtable(commit_seq, entries, touched_segments);
         };
         // increment memtable_write_bytes by the size of the keys and values inserted into the memtable
         // after merge operators and overwrites are collapsed
@@ -316,8 +316,11 @@ impl DbInner {
         // track the recent committed txn for conflict check. if a txn is not supplied,
         // we still consider this as an transaction commit.
         if let Some(txn) = txn {
-            self.txn_manager
-                .track_recent_committed_txn(&txn.id(), commit_seq);
+            self.txn_manager.track_recent_committed_txn_with(
+                &txn.id(),
+                commit_seq,
+                !txn.scans_hold_retention(),
+            );
         } else {
             let write_keys = batch.keys();
             self.txn_manager
@@ -520,6 +523,7 @@ impl DbInner {
     /// `touched_segments` is empty and recording is a no-op.
     fn write_entries_to_memtable(
         &self,
+        commit_seq: u64,
         entries: Vec<RowEntry>,
         touched_segments: BTreeSet<Bytes>,
     ) -> WatchableOnceCellReader<Result<(), SlateDBError>> {
@@ -527,6 +531,15 @@ impl DbInner {
         let memtable = guard.memtable();
         self.status_manager.add_memtable_segments(&touched_segments);
         memtable.record_touched_segments(touched_segments.clone());
+        if let Some(row_cache) = &self.row_cache {
+            // Apply entries to the row cache after memtable insert and before the committed
+            // sequence number advances.
+            entries.iter().for_each(|entry| memtable.put(entry.clone()));
+            let durable_watcher = memtable.table().durable_watcher();
+            drop(guard);
+            row_cache.write(commit_seq, &entries);
+            return durable_watcher;
+        }
         entries.into_iter().for_each(|entry| memtable.put(entry));
         memtable.table().durable_watcher()
     }

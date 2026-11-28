@@ -51,7 +51,7 @@ use crate::config::{
     Settings, WriteOptions,
 };
 use crate::db_common::extract_segment_prefix;
-use crate::db_iter::{DbIterator, DbRecencyIterator};
+use crate::db_iter::{DbIterator, DbRecencyIterator, PartialDbState, PartialGapContext};
 use crate::db_snapshot::DbSnapshot;
 use crate::db_state::{collect_touched_segments, DbState, SsTableHandle, SsTableId};
 use crate::db_stats::DbStats;
@@ -63,6 +63,10 @@ use crate::merge_operator::{instrument_merge_operator, MergeOperatorType};
 use crate::oracle::{DbOracle, Oracle};
 use crate::prefix_extractor::PrefixExtractor;
 use crate::reader::{Reader, ScanContext};
+use crate::row_cache::{
+    can_use_row_cache_get, can_use_row_cache_scan, feed_tables_to_row_cache, GetOutcome, KeyRange,
+    RowCache, ScanOutcome,
+};
 use crate::snapshot_manager::SnapshotManager;
 use crate::tablestore::TableStore;
 use crate::transaction_manager::TransactionManager;
@@ -117,6 +121,8 @@ pub(crate) struct DbInner {
     /// L0 SSTs. When `None`, the database is the singleton `prefix=""`
     /// segment encoded in the manifest's top-level tree.
     pub(crate) segment_extractor: Option<Arc<dyn PrefixExtractor>>,
+    /// Pluggable logical row cache, configured through `DbBuilder::with_row_cache`.
+    pub(crate) row_cache: Option<Arc<dyn RowCache>>,
 }
 
 impl DbInner {
@@ -134,6 +140,7 @@ impl DbInner {
         merge_operator: Option<MergeOperatorType>,
         status_manager: Arc<DbStatusManager>,
         segment_extractor: Option<Arc<dyn PrefixExtractor>>,
+        row_cache: Option<Arc<dyn RowCache>>,
     ) -> Result<Self, SlateDBError> {
         // both last_seq and last_committed_seq will be updated after WAL replay.
         let last_l0_seq = manifest.value.core.last_l0_seq;
@@ -195,6 +202,7 @@ impl DbInner {
             snapshot_manager,
             status_manager,
             segment_extractor,
+            row_cache,
         };
         Ok(db_inner)
     }
@@ -217,9 +225,24 @@ impl DbInner {
         options: &ReadOptions,
     ) -> Result<Option<KeyValue>, SlateDBError> {
         self.check_closed()?;
+        let key_ref = key.as_ref();
+        if let Some(row_cache) = &self.row_cache {
+            if can_use_row_cache_get(options, false) {
+                let seq = self.oracle.last_committed_seq();
+                let now_ms = self.mono_clock.now_millis_sync();
+                match row_cache.get(key_ref, seq, now_ms) {
+                    GetOutcome::Hit(kv) => {
+                        self.db_stats.get_requests.increment(1);
+                        return Ok(kv);
+                    }
+                    GetOutcome::Error(err) => return Err(SlateDBError::RowCache(Arc::new(err))),
+                    GetOutcome::Miss => {}
+                }
+            }
+        }
         let db_state = self.state.read().view();
         self.reader
-            .get_key_value_with_options(key, options, &db_state, None, None)
+            .get_key_value_with_options(key_ref, options, &db_state, None, None)
             .await
     }
 
@@ -233,6 +256,38 @@ impl DbInner {
         prefix: Option<Bytes>,
     ) -> Result<DbIterator, SlateDBError> {
         self.check_closed()?;
+        if let Some(row_cache) = &self.row_cache {
+            if can_use_row_cache_scan(options, false) {
+                let seq = self.oracle.last_committed_seq();
+                let now_ms = self.mono_clock.now_millis_sync();
+                let key_range = KeyRange::from_bytes_range(&range);
+                match row_cache.scan(key_range, seq, now_ms, prefix.as_deref()) {
+                    ScanOutcome::Hit(iter) => {
+                        self.db_stats.scan_requests.increment(1);
+                        return Ok(DbIterator::from_row_cache(range, iter));
+                    }
+                    ScanOutcome::Partial(segments) => {
+                        let db_state = self.state.read().view();
+                        if db_state.state.core().last_l0_seq <= seq {
+                            self.db_stats.scan_requests.increment(1);
+                            return Ok(DbIterator::from_row_cache_partial(
+                                range,
+                                segments,
+                                PartialGapContext {
+                                    reader: self.reader.clone(),
+                                    state: PartialDbState::Writer(db_state),
+                                    options: options.clone(),
+                                    prefix,
+                                    max_seq: seq,
+                                },
+                            ));
+                        }
+                    }
+                    ScanOutcome::Error(err) => return Err(SlateDBError::RowCache(Arc::new(err))),
+                    ScanOutcome::Miss => {}
+                }
+            }
+        }
         let db_state = self.state.read().view();
         self.reader
             .scan_with_options(
@@ -475,6 +530,10 @@ impl DbInner {
             replay_options,
             Arc::clone(&self.table_store),
         )?;
+        let mut last_fed_seq = self.oracle.last_committed_seq();
+        if let Some(row_cache) = &self.row_cache {
+            row_cache.open(db_state.last_l0_seq);
+        }
 
         loop {
             let replayed_table = match replay_iter.next().await {
@@ -510,6 +569,19 @@ impl DbInner {
                 replayed_table
                     .table
                     .record_touched_segments(touched_segments);
+            }
+            if let Some(row_cache) = &self.row_cache {
+                let table = replayed_table.table.table();
+                let last_written = feed_tables_to_row_cache(
+                    row_cache.as_ref(),
+                    std::iter::once(table.as_ref()),
+                    last_fed_seq,
+                )
+                .unwrap_or(last_fed_seq);
+                if replayed_table.last_seq > last_written {
+                    row_cache.write(replayed_table.last_seq, &[]);
+                }
+                last_fed_seq = last_fed_seq.max(replayed_table.last_seq);
             }
             // Replayed rows come from WAL SSTs in remote storage, so they are already
             // durable. Update `last_remote_persisted_seq` before replaying to avoid a race with
@@ -552,6 +624,11 @@ impl DbInner {
     /// - `Err(e)` if the DB was closed with an error, where `e` is the error
     ///   (state.result_reader() returns Err(e)).
     pub(crate) fn check_closed(&self) -> Result<(), SlateDBError> {
+        // The common case reads one atomic flag. Reading the result clones a watch receiver
+        // and takes its read lock, which every concurrent read would share.
+        if !self.status_manager.maybe_closed() {
+            return Ok(());
+        }
         if let Some(result) = self.status_manager.result_reader().read() {
             return match result {
                 Ok(()) => Err(SlateDBError::Closed),
@@ -3560,6 +3637,7 @@ mod tests {
                                         max_concurrent_sources: 1,
                                         filter_context: None,
                                         tracing_options: None,
+                                        row_cache: true,
                                     }
                                 )
                                 .await

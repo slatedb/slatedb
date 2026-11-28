@@ -4,15 +4,20 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::batch::{WriteBatch, WriteBatchIterator};
+use crate::batch::{WriteBatch, WriteBatchIterator, WriteOp};
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
 use crate::config::{MergeOptions, PutOptions, ReadOptions, ScanOptions, WriteOptions};
 use crate::db::DbInner;
 use crate::db::WriteHandle;
-use crate::db_iter::{DbIterator, DbIteratorRangeTracker};
+use crate::db_iter::{DbIterator, DbIteratorRangeTracker, PartialDbState, PartialGapContext};
 use crate::error::SlateDBError;
 use crate::iter::IterationOrder;
+use crate::oracle::Oracle;
 use crate::reader::ScanContext;
+use crate::row_cache::{
+    can_use_row_cache_get, can_use_row_cache_scan, GetOutcome, KeyRange, ScanOutcome,
+};
+use crate::snapshot_manager::RetentionPin;
 use crate::transaction_manager::{IsolationLevel, TransactionManager};
 use crate::types::KeyValue;
 use crate::{DbReadOps, DbTransactionOps};
@@ -75,6 +80,10 @@ pub struct DbTransaction {
     range_trackers: Mutex<Vec<DbIteratorRangeTracker>>,
     /// Keys that should be excluded from write conflict detection when committing.
     untracked_write_keys: RwLock<HashSet<Bytes>>,
+    /// The retention of the transaction's sequence number, which the iterators of its scans
+    /// hold too, so that it outlives the transaction while one of them reads on. `None` only
+    /// while the transaction drops.
+    retention: Option<Arc<RetentionPin>>,
 }
 
 impl DbTransaction {
@@ -89,6 +98,7 @@ impl DbTransaction {
         Self {
             txn_id,
             started_seq: seq,
+            retention: Some(RetentionPin::transaction(txn_manager.clone(), txn_id)),
             txn_manager,
             write_batch: RwLock::new(WriteBatch::new()),
             db_inner,
@@ -154,13 +164,57 @@ impl DbTransaction {
             self.txn_manager.track_read_keys(&self.txn_id, read_keys);
         }
 
+        let key_slice = key.as_ref();
+        if let Some(row_cache) = &self.db_inner.row_cache {
+            if can_use_row_cache_get(options, false) {
+                enum BatchLookup {
+                    Absent,
+                    Resolved(Option<KeyValue>),
+                    Fallthrough,
+                }
+                let lookup = {
+                    let batch = self.write_batch.read();
+                    match batch.ops.get_key_value(key_slice) {
+                        None => BatchLookup::Absent,
+                        Some((batch_key, ops)) => match ops.last() {
+                            Some(op @ WriteOp::Put(..)) => BatchLookup::Resolved(Some(
+                                KeyValue::from(op.to_row_entry(batch_key, u64::MAX, None, None)),
+                            )),
+                            Some(WriteOp::Delete) => BatchLookup::Resolved(None),
+                            Some(WriteOp::Merge(..)) | None => BatchLookup::Fallthrough,
+                        },
+                    }
+                };
+                match lookup {
+                    BatchLookup::Resolved(kv) => {
+                        self.db_inner.db_stats.get_requests.increment(1);
+                        return Ok(kv);
+                    }
+                    BatchLookup::Fallthrough => {}
+                    BatchLookup::Absent => {
+                        let seq = self
+                            .started_seq
+                            .min(self.db_inner.oracle.last_committed_seq());
+                        let now_ms = self.db_inner.mono_clock.now_millis_sync();
+                        match row_cache.get(key_slice, seq, now_ms) {
+                            GetOutcome::Hit(kv) => {
+                                self.db_inner.db_stats.get_requests.increment(1);
+                                return Ok(kv);
+                            }
+                            GetOutcome::Error(err) => return Err(err),
+                            GetOutcome::Miss => {}
+                        }
+                    }
+                }
+            }
+        }
+
         let db_state = self.db_inner.state.read().view();
 
         // Build the write batch iterator synchronously while holding the read
         // guard, avoiding a clone of the full batch. The iterator materializes
         // only the entries overlapping the read range (a single key for a
         // point get), so this is O(log N) instead of O(N).
-        let key_slice = key.as_ref();
         let range = BytesRange::from_slice(key_slice..=key_slice);
         let write_batch_iter = {
             let guard = self.write_batch.read();
@@ -174,19 +228,17 @@ impl DbTransaction {
             ))
         };
 
-        let kv = self
-            .db_inner
+        self.db_inner
             .reader
             .get_key_value_with_options(
-                key,
+                key_slice,
                 options,
                 &db_state,
                 write_batch_iter,
                 Some(self.started_seq),
             )
             .await
-            .map_err(crate::Error::from)?;
-        Ok(kv)
+            .map_err(crate::Error::from)
     }
 
     /// Scan a range of keys using the default scan options.
@@ -302,6 +354,54 @@ impl DbTransaction {
         }
 
         self.db_inner.check_closed()?;
+
+        // Serve from the row cache when the transaction has no pending writes in `range`.
+        if let Some(row_cache) = &self.db_inner.row_cache {
+            if can_use_row_cache_scan(options, false) {
+                let batch_overlaps = {
+                    let guard = self.write_batch.read();
+                    guard
+                        .ops
+                        .range::<Bytes, _>((
+                            std::ops::RangeBounds::start_bound(&range),
+                            std::ops::RangeBounds::end_bound(&range),
+                        ))
+                        .next()
+                        .is_some()
+                };
+                if !batch_overlaps {
+                    let seq = self
+                        .started_seq
+                        .min(self.db_inner.oracle.last_committed_seq());
+                    let now_ms = self.db_inner.mono_clock.now_millis_sync();
+                    let key_range = KeyRange::from_bytes_range(&range);
+                    match row_cache.scan(key_range, seq, now_ms, prefix.as_deref()) {
+                        ScanOutcome::Hit(iter) => {
+                            self.db_inner.db_stats.scan_requests.increment(1);
+                            return Ok(self.retaining(DbIterator::from_row_cache(range, iter)));
+                        }
+                        ScanOutcome::Partial(segments) => {
+                            let db_state = self.db_inner.state.read().view();
+                            self.db_inner.db_stats.scan_requests.increment(1);
+                            return Ok(self.retaining(DbIterator::from_row_cache_partial(
+                                range,
+                                segments,
+                                PartialGapContext {
+                                    reader: self.db_inner.reader.clone(),
+                                    state: PartialDbState::Writer(db_state),
+                                    options: options.clone(),
+                                    prefix,
+                                    max_seq: seq,
+                                },
+                            )));
+                        }
+                        ScanOutcome::Error(err) => return Err(err),
+                        ScanOutcome::Miss => {}
+                    }
+                }
+            }
+        }
+
         let db_state = self.db_inner.state.read().view();
 
         // Build the write batch iterator synchronously while holding the read
@@ -332,7 +432,23 @@ impl DbTransaction {
                 },
             )
             .await
+            .map(|iter| self.retaining(iter))
             .map_err(Into::into)
+    }
+
+    /// Attaches the transaction's retention pin to `iter`.
+    fn retaining(&self, iter: DbIterator) -> DbIterator {
+        match &self.retention {
+            Some(pin) => iter.retaining(pin.clone()),
+            None => iter,
+        }
+    }
+
+    /// Returns true if an open scan iterator still holds this transaction's retention pin.
+    pub(crate) fn scans_hold_retention(&self) -> bool {
+        self.retention
+            .as_ref()
+            .is_some_and(|pin| Arc::strong_count(pin) > 1)
     }
 
     /// Put a key-value pair into the transaction.
@@ -791,7 +907,15 @@ impl DbTransactionOps for DbTransaction {
 /// If the transaction hasn't been committed, it's considered rolled back.
 impl Drop for DbTransaction {
     fn drop(&mut self) {
-        self.txn_manager.drop_txn(&self.txn_id);
+        // If no iterator of the transaction's scans holds its retention, it ends here with the
+        // rest of the transaction's state; otherwise the last such iterator ends it.
+        let pin = self.retention.take().and_then(Arc::into_inner);
+        let release_retention = pin.is_some();
+        if let Some(pin) = pin {
+            pin.disarm();
+        }
+        self.txn_manager
+            .drop_txn_with(&self.txn_id, release_retention);
     }
 }
 
@@ -2324,5 +2448,61 @@ mod tests {
             .unwrap();
 
         assert!(result.is_none());
+    }
+
+    /// The iterator of a scan keeps the transaction's sequence number registered after the
+    /// transaction commits, rolls back or drops, until the iterator drops: a newer version and a
+    /// memtable flush in between leave the scan reading the transaction's rows, and the flush's
+    /// retention boundary stays at or below the transaction.
+    #[rstest]
+    #[case::committed("commit")]
+    #[case::rolled_back("rollback")]
+    #[case::dropped("drop")]
+    #[tokio::test]
+    async fn test_scan_keeps_transaction_registered_until_iterator_drops(#[case] end: &str) {
+        let db = crate::Db::open(
+            format!("/tmp/test_scan_keeps_transaction_registered_{end}"),
+            Arc::new(InMemory::new()),
+        )
+        .await
+        .unwrap();
+        for i in 0..20u8 {
+            db.put([b'k', i], [b'v', i]).await.unwrap();
+        }
+        let txn = db.begin(IsolationLevel::Snapshot).unwrap();
+        let seq = txn.seqnum();
+        let mut iter = txn.scan(..).await.unwrap();
+        let mut got = vec![iter.next().await.unwrap().unwrap()];
+        match end {
+            "commit" => {
+                txn.put(b"z", b"after the scan").unwrap();
+                txn.commit().await.unwrap();
+            }
+            "rollback" => txn.rollback(),
+            _ => drop(txn),
+        }
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(seq));
+        assert!(db
+            .inner
+            .compute_flush_retention_seq(u64::MAX)
+            .is_some_and(|boundary| boundary <= seq));
+        db.put([b'k', 15], b"newer").await.unwrap();
+        db.flush_with_options(crate::config::FlushOptions {
+            flush_type: crate::config::FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        while let Some(kv) = iter.next().await.unwrap() {
+            got.push(kv);
+        }
+        let want: Vec<(Bytes, Bytes)> = (0..20u8)
+            .map(|i| (Bytes::from(vec![b'k', i]), Bytes::from(vec![b'v', i])))
+            .collect();
+        let got: Vec<(Bytes, Bytes)> = got.into_iter().map(|kv| (kv.key, kv.value)).collect();
+        assert_eq!(got, want);
+        assert_eq!(db.inner.txn_manager.min_active_seq(), Some(seq));
+        drop(iter);
+        assert_eq!(db.inner.txn_manager.min_active_seq(), None);
+        db.close().await.unwrap();
     }
 }

@@ -155,6 +155,7 @@ use crate::memtable_flusher::MemtableFlusher;
 use crate::merge_operator::MergeOperatorType;
 use crate::paths::PathResolver;
 use crate::retrying_object_store::RetryingObjectStore;
+use crate::row_cache::RowCache;
 use crate::tablestore::{TableStore, TableStoreKind};
 use crate::utils::ObjectStoreType;
 use crate::utils::SafeSender;
@@ -199,6 +200,7 @@ pub struct DbBuilder<P: Into<Path>> {
     segment_extractor: Option<Arc<dyn crate::prefix_extractor::PrefixExtractor>>,
     wal_writer_init: Option<Box<dyn wal::WriterInit>>,
     epoch_claim: EpochClaim,
+    row_cache: Option<Arc<dyn RowCache>>,
 }
 
 impl<P: Into<Path>> DbBuilder<P> {
@@ -232,6 +234,7 @@ impl<P: Into<Path>> DbBuilder<P> {
             segment_extractor: None,
             wal_writer_init: None,
             epoch_claim: EpochClaim::default(),
+            row_cache: None,
         }
     }
 
@@ -474,6 +477,22 @@ impl<P: Into<Path>> DbBuilder<P> {
         self
     }
 
+    /// Attaches a pluggable logical [`RowCache`] to the database.
+    ///
+    /// The batch writer feeds every committed write batch to the cache before the committed
+    /// sequence number advances. Point reads and ascending scans consult the cache first and fall
+    /// back to the LSM read path on misses. See [`crate::row_cache`] for the full contract.
+    ///
+    /// **Warning:** Do not combine a [`RowCache`] with compaction filters or segment drains.
+    /// [`DbBuilder::build`] returns [`ErrorKind::Invalid`](crate::ErrorKind::Invalid) when the
+    /// embedded [`CompactorBuilder`] sets a compaction filter, or sets a custom scheduler on a
+    /// segmented database. Standalone compactors and compaction workers that rewrite or drain
+    /// rows can cause stale cache reads.
+    pub fn with_row_cache(mut self, row_cache: Arc<dyn RowCache>) -> Self {
+        self.row_cache = Some(row_cache);
+        self
+    }
+
     /// Sets the filter policies used for SST filter construction and evaluation.
     ///
     /// Each policy produces a separate filter per SST, stored in a composite
@@ -497,6 +516,31 @@ impl<P: Into<Path>> DbBuilder<P> {
     pub async fn build(self) -> Result<Db, crate::Error> {
         self.settings.validate()?;
         validate_block_alignment(self.sst_block_alignment, self.settings.compression_codec)?;
+        #[cfg(feature = "compaction_filters")]
+        if self.row_cache.is_some()
+            && self
+                .compactor_builder
+                .as_ref()
+                .is_some_and(|b| b.compaction_filter_supplier.is_some())
+        {
+            return Err(SlateDBError::InvalidConfiguration(
+                "row_cache cannot be combined with a compaction_filter_supplier".into(),
+            )
+            .into());
+        }
+        if self.row_cache.is_some()
+            && self.segment_extractor.is_some()
+            && self
+                .compactor_builder
+                .as_ref()
+                .is_some_and(|b| b.scheduler_supplier.is_some())
+        {
+            return Err(SlateDBError::InvalidConfiguration(
+                "row_cache cannot be combined with segment_extractor and a custom compaction scheduler"
+                    .into(),
+            )
+            .into());
+        }
 
         let path = self.path.into();
         // TODO: proper URI generation, for now it works just as a flag
@@ -725,6 +769,7 @@ impl<P: Into<Path>> DbBuilder<P> {
                 self.merge_operator.clone(),
                 status_manager,
                 self.segment_extractor.clone(),
+                self.row_cache,
             )
             .await?,
         );
@@ -967,6 +1012,10 @@ impl<P: Into<Path>> AdminBuilder<P> {
     ///
     /// When running a standalone compactor via [`Admin::run_compactor`], ensure it is
     /// configured with the same filter supplier as the `DbBuilder`.
+    ///
+    /// **Warning:** Do not run a standalone compactor with compaction filters against a database
+    /// that uses a [`RowCache`]. The cache does not see compactor rewrites, so reads can return
+    /// stale rows.
     #[cfg(feature = "compaction_filters")]
     pub fn with_compaction_filter_supplier(
         mut self,
@@ -1350,6 +1399,11 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     }
 
     /// Sets the compaction scheduler supplier to use for the compactor.
+    ///
+    /// **Warning:** Segment drains ([`crate::compactor::CompactionSpec::drain_segment`]) are
+    /// incompatible with [`RowCache`]. [`DbBuilder::build`] rejects an embedded custom scheduler
+    /// on a segmented database with a [`RowCache`]. Do not run a standalone compactor that
+    /// schedules segment drains against a database that uses a [`RowCache`].
     pub fn with_scheduler_supplier(
         mut self,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,
@@ -1397,6 +1451,11 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     ///
     /// See [`crate::CompactionFilter`] for detailed documentation, examples, and the
     /// filter API.
+    ///
+    /// **Warning:** Compaction filters are incompatible with [`RowCache`]. [`DbBuilder::build`]
+    /// rejects an embedded compactor with a compaction filter when you also configure a row cache.
+    /// Do not run a standalone compactor with compaction filters against a database that uses a
+    /// [`RowCache`].
     ///
     /// # Arguments
     ///
@@ -1668,6 +1727,11 @@ impl<P: Into<Path>> CompactionWorkerBuilder<P> {
         self
     }
 
+    /// Sets the compaction filter supplier for this worker.
+    ///
+    /// **Warning:** Do not run compaction workers with compaction filters against a database that
+    /// uses a [`RowCache`]. The cache does not see compactor rewrites, so reads can return stale
+    /// rows.
     #[cfg(feature = "compaction_filters")]
     pub fn with_compaction_filter_supplier(
         mut self,
@@ -1832,6 +1896,7 @@ pub struct DbReaderBuilder<P: Into<Path>> {
     system_clock: Arc<dyn SystemClock>,
     rand: Arc<DbRand>,
     metrics_recorder: Arc<dyn MetricsRecorder>,
+    row_cache: Option<Arc<dyn RowCache>>,
 }
 
 impl<P: Into<Path>> DbReaderBuilder<P> {
@@ -1852,7 +1917,22 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             system_clock: Arc::new(DefaultSystemClock::default()),
             rand: Arc::new(DbRand::default()),
             metrics_recorder: Arc::new(NoopMetricsRecorder::new()),
+            row_cache: None,
         }
+    }
+
+    /// Attaches a pluggable logical [`RowCache`] to the reader.
+    ///
+    /// The manifest poller feeds replayed WAL writes before the reader's sequence number advances,
+    /// and invalidates ranges touched by unreplayed L0 updates. Point reads and ascending scans
+    /// consult the cache first, as on [`crate::Db`]. See [`crate::row_cache`] for the contract.
+    ///
+    /// **Warning:** Do not attach a [`RowCache`] to a database whose compactor (embedded or
+    /// standalone) runs compaction filters or segment drains. The reader cannot detect out-of-band
+    /// row rewrites and may serve stale data.
+    pub fn with_row_cache(mut self, row_cache: Arc<dyn RowCache>) -> Self {
+        self.row_cache = Some(row_cache);
+        self
     }
 
     /// Sets how the reader chooses and refreshes database state.
@@ -2075,7 +2155,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             wal_object_store,
             sst_format,
             path_resolver,
-            fp_registry,
+            Arc::clone(&fp_registry),
             TableStoreKind::Reader,
         ));
 
@@ -2091,6 +2171,7 @@ impl<P: Into<Path>> DbReaderBuilder<P> {
             self.system_clock,
             self.rand,
             recorder,
+            self.row_cache,
         )
         .await
         .map_err(crate::Error::from)
