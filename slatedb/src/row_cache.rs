@@ -84,9 +84,12 @@
 //! - **Cold loading:** Populate cold ranges outside SlateDB by reading with
 //!   `ReadOptions::with_row_cache(false)` or `ScanOptions::with_row_cache(false)` (for example
 //!   through a [`DbSnapshot`](crate::DbSnapshot)).
-//! - **Startup and compaction filters:** WAL replay on [`Db`](crate::Db) startup does not call
-//!   `write`; attach a fresh cache or invalidate before reopening. Mutating compaction filters
-//!   rewrite keys outside the batch writer and require external invalidation.
+//! - **Startup WAL replay:** [`Db`](crate::Db) and [`DbReader`](crate::DbReader) replay unflushed
+//!   WAL entries above `last_l0_seq` through `write` in ascending sequence order during open. A
+//!   persistent cache skips sequence numbers at or below its saved watermark and checks
+//!   `manifest().last_l0_seq()` for any L0 gap.
+//! - **Compaction filters:** Mutating compaction filters rewrite keys outside the batch writer and
+//!   require external invalidation.
 //!
 //! # Threading and lifecycle
 //!
@@ -107,6 +110,7 @@ use bytes::Bytes;
 use crate::bytes_range::{ByteRangeBounds, BytesRange};
 use crate::config::{DurabilityLevel, ReadOptions, ScanOptions};
 use crate::iter::IterationOrder;
+use crate::mem_table::KVTable;
 use crate::types::{KeyValue, RowEntry};
 
 /// Pluggable logical row cache attached through
@@ -363,4 +367,39 @@ pub(crate) fn can_use_row_cache_scan(options: &ScanOptions, is_reader: bool) -> 
         && options.filter_context.is_none()
         && options.tracing_options.is_none()
         && (is_reader || matches!(options.durability_filter, DurabilityLevel::Memory))
+}
+
+/// Feeds every entry in `tables` with `entry.seq > after_seq` to `cache.write`, one key-ordered
+/// batch per sequence number in ascending order. Returns the highest sequence number written.
+pub(crate) fn feed_tables_to_row_cache<'a>(
+    cache: &dyn RowCache,
+    tables: impl IntoIterator<Item = &'a KVTable>,
+    after_seq: u64,
+) -> Option<u64> {
+    let mut entries = Vec::new();
+    for table in tables {
+        if table.last_seq().is_none_or(|last| last <= after_seq) {
+            continue;
+        }
+        let mut iter = table.iter();
+        while let Some(entry) = iter.next_sync() {
+            if entry.seq > after_seq {
+                entries.push(entry);
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.seq.cmp(&b.seq).then_with(|| a.key.cmp(&b.key)));
+    let mut last_written = None;
+    let mut i = 0;
+    while i < entries.len() {
+        let seq = entries[i].seq;
+        let mut j = i + 1;
+        while j < entries.len() && entries[j].seq == seq {
+            j += 1;
+        }
+        cache.write(seq, &entries[i..j]);
+        last_written = Some(seq);
+        i = j;
+    }
+    last_written
 }

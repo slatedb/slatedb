@@ -9,8 +9,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use slatedb::admin::Admin;
 use slatedb::config::{
-    CheckpointOptions, CheckpointScope, CompactionWorkerOptions, CompactorOptions, DbReaderOptions,
-    DurabilityLevel, FlushOptions, FlushType, ReadOptions, ScanOptions, Settings,
+    CheckpointOptions, CheckpointScope, CloseOptions, CompactionWorkerOptions, CompactorOptions,
+    DbReaderOptions, DurabilityLevel, FlushOptions, FlushType, ReadOptions, ScanOptions, Settings,
     SizeTieredCompactionSchedulerOptions,
 };
 use slatedb::db_stats::REQUEST_COUNT;
@@ -993,6 +993,9 @@ async fn test_reader_row_cache_replay_reads_and_metrics() {
         .unwrap();
     let mut status = reader.subscribe();
     let opened_at = reader.status().durable_seq;
+    // Startup WAL replay already fed `cold/a` before build() returned.
+    assert_eq!(cache.events.lock().unwrap().applied_batches.len(), 1);
+    assert_eq!(cache.events.lock().unwrap().applied_batches[0].0, opened_at);
 
     // Replay feeds one key-ordered batch per seq in ascending order.
     let mut batch = WriteBatch::new();
@@ -1002,7 +1005,7 @@ async fn test_reader_row_cache_replay_reads_and_metrics() {
     db.write(batch).await.unwrap();
     put_durable(&db, &[("y", "y1"), ("x", "x1")]).await;
     caught_up(&mut status, &db).await;
-    let batches = cache.events.lock().unwrap().applied_batches.clone();
+    let batches = cache.events.lock().unwrap().applied_batches[1..].to_vec();
     assert_eq!(batches.len(), 3);
     assert!(batches[0].0 > opened_at);
     let keys: Vec<Bytes> = batches[0].1.iter().map(|e| e.key.clone()).collect();
@@ -1204,6 +1207,155 @@ async fn test_reader_row_cache_range_invalidation_compaction_fallback_and_pinned
         "expected KeyRange::all() invalidation after compaction, got {invalidations:?}"
     );
     assert_eq!(reader.get(hot("c")).await.unwrap(), value("c1"));
+    reader.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_row_cache_startup_wal_replay_on_db_and_reader() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let path = "startup_wal_replay_cache";
+    let writer_settings = || Settings {
+        flush_interval: None,
+        compactor_options: None,
+        garbage_collector_options: None,
+        ..Settings::default()
+    };
+
+    // 1. Seed L0 (`k1`, `k2`), then leave unflushed WAL batches (`k3`, multi-key batch deleting
+    // `k2` and putting `k4`, `k5`) by closing with WAL flush only.
+    let db = Db::builder(path, Arc::clone(&store))
+        .with_settings(writer_settings())
+        .build()
+        .await
+        .unwrap();
+    let h1 = db.put(b"k1", b"v1").await.unwrap();
+    let h2 = db.put(b"k2", b"v2").await.unwrap();
+    flush_memtable(&db).await;
+    let last_l0_seq = db.status().current_manifest.last_l0_seq();
+    assert_eq!(last_l0_seq, h2.seqnum());
+
+    let h3 = db.put(b"k3", b"v3").await.unwrap();
+    let mut batch = WriteBatch::new();
+    batch.put(b"k5", b"v5");
+    batch.put(b"k4", b"v4");
+    batch.delete(b"k2");
+    let h4 = db.write(batch).await.unwrap();
+    db.close_with_options(CloseOptions {
+        flush_type: Some(FlushType::Wal),
+    })
+    .await
+    .unwrap();
+
+    // 2. Reopen Db with a persistent-style cache pre-seeded with the L0 rows (`k1`, `k2`).
+    let cache = TestRowCache::new();
+    {
+        let mut versions = cache.versions.lock().unwrap();
+        versions.insert(
+            Bytes::from_static(b"k1"),
+            vec![RowEntry {
+                key: Bytes::from_static(b"k1"),
+                value: ValueDeletable::Value(Bytes::from_static(b"v1")),
+                seq: h1.seqnum(),
+                create_ts: Some(0),
+                expire_ts: None,
+            }],
+        );
+        versions.insert(
+            Bytes::from_static(b"k2"),
+            vec![RowEntry {
+                key: Bytes::from_static(b"k2"),
+                value: ValueDeletable::Value(Bytes::from_static(b"v2")),
+                seq: h2.seqnum(),
+                create_ts: Some(0),
+                expire_ts: None,
+            }],
+        );
+    }
+    let db = Db::builder(path, Arc::clone(&store))
+        .with_settings(writer_settings())
+        .with_row_cache(cache.clone())
+        .build()
+        .await
+        .unwrap();
+
+    // Startup WAL replay fed both unflushed batches in ascending (seq, key) order before open
+    // returned, without re-sending L0 entries at or below `last_l0_seq`.
+    let batches = cache.events.lock().unwrap().applied_batches.clone();
+    assert_eq!(batches.len(), 2);
+    assert_eq!(batches[0].0, h3.seqnum());
+    assert_eq!(batches[1].0, h4.seqnum());
+    let batch2_keys: Vec<Bytes> = batches[1].1.iter().map(|e| e.key.clone()).collect();
+    assert_eq!(
+        batch2_keys,
+        vec![
+            Bytes::from_static(b"k2"),
+            Bytes::from_static(b"k4"),
+            Bytes::from_static(b"k5"),
+        ]
+    );
+    assert_eq!(batches[1].1[0].value, ValueDeletable::Tombstone);
+
+    // Every key (pre-seeded L0 + replayed WAL puts + replayed WAL delete) hits the cache cleanly.
+    assert_eq!(
+        db.get(b"k1").await.unwrap(),
+        Some(Bytes::from_static(b"v1"))
+    );
+    assert_eq!(db.get(b"k2").await.unwrap(), None);
+    assert_eq!(
+        db.get(b"k3").await.unwrap(),
+        Some(Bytes::from_static(b"v3"))
+    );
+    assert_eq!(
+        db.get(b"k4").await.unwrap(),
+        Some(Bytes::from_static(b"v4"))
+    );
+    assert_eq!(
+        db.get(b"k5").await.unwrap(),
+        Some(Bytes::from_static(b"v5"))
+    );
+    assert!(cache.misses().is_empty());
+
+    // Live writes continue strictly above the replayed sequence number.
+    let h5 = db.put(b"k6", b"v6").await.unwrap();
+    assert!(h5.seqnum() > h4.seqnum());
+    assert_eq!(
+        db.get(b"k6").await.unwrap(),
+        Some(Bytes::from_static(b"v6"))
+    );
+    db.flush().await.unwrap();
+
+    // 3. DbReader::open also feeds initial replayed WAL batches before returning.
+    let reader_cache = TestRowCache::new();
+    let reader = DbReader::builder(path, Arc::clone(&store))
+        .with_options(reader_options(500, Duration::from_secs(60)))
+        .with_row_cache(reader_cache.clone())
+        .build()
+        .await
+        .unwrap();
+    let replayed = reader_cache.events.lock().unwrap().applied_batches.clone();
+    assert!(!replayed.is_empty());
+    assert_eq!(replayed.last().unwrap().0, h5.seqnum());
+    assert_eq!(
+        reader.get(b"k6").await.unwrap(),
+        Some(Bytes::from_static(b"v6"))
+    );
+    assert!(reader_cache.misses().is_empty());
+    reader.close().await.unwrap();
+
+    // 4. DbReader with skip_wal_replay: true feeds nothing on open.
+    let skip_cache = TestRowCache::new();
+    let reader = DbReader::builder(path, Arc::clone(&store))
+        .with_options(DbReaderOptions {
+            skip_wal_replay: true,
+            ..reader_options(500, Duration::from_secs(60))
+        })
+        .with_row_cache(skip_cache.clone())
+        .build()
+        .await
+        .unwrap();
+    assert!(skip_cache.events.lock().unwrap().applied_batches.is_empty());
+    assert_eq!(skip_cache.events.lock().unwrap().last_written_seq, 0);
     reader.close().await.unwrap();
     db.close().await.unwrap();
 }

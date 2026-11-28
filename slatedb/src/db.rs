@@ -64,7 +64,8 @@ use crate::oracle::{DbOracle, Oracle};
 use crate::prefix_extractor::PrefixExtractor;
 use crate::reader::{Reader, ScanContext};
 use crate::row_cache::{
-    can_use_row_cache_get, can_use_row_cache_scan, GetOutcome, KeyRange, RowCache, ScanOutcome,
+    can_use_row_cache_get, can_use_row_cache_scan, feed_tables_to_row_cache, GetOutcome, KeyRange,
+    RowCache, ScanOutcome,
 };
 use crate::snapshot_manager::SnapshotManager;
 use crate::tablestore::TableStore;
@@ -527,6 +528,7 @@ impl DbInner {
             replay_options,
             Arc::clone(&self.table_store),
         )?;
+        let mut last_fed_seq = self.oracle.last_committed_seq();
 
         loop {
             let replayed_table = match replay_iter.next().await {
@@ -562,6 +564,19 @@ impl DbInner {
                 replayed_table
                     .table
                     .record_touched_segments(touched_segments);
+            }
+            if let Some(row_cache) = &self.row_cache {
+                let table = replayed_table.table.table();
+                let last_written = feed_tables_to_row_cache(
+                    row_cache.as_ref(),
+                    std::iter::once(table.as_ref()),
+                    last_fed_seq,
+                )
+                .unwrap_or(last_fed_seq);
+                if replayed_table.last_seq > last_written {
+                    row_cache.write(replayed_table.last_seq, &[]);
+                }
+                last_fed_seq = last_fed_seq.max(replayed_table.last_seq);
             }
             // Replayed rows come from WAL SSTs in remote storage, so they are already
             // durable. Update `last_remote_persisted_seq` before replaying to avoid a race with

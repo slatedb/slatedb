@@ -23,11 +23,11 @@ use {
         prefix_extractor::PrefixExtractor,
         reader::{DbStateReader, Reader, ScanContext},
         row_cache::{
-            can_use_row_cache_get, can_use_row_cache_scan, GetOutcome, KeyRange, RowCache,
-            ScanOutcome,
+            can_use_row_cache_get, can_use_row_cache_scan, feed_tables_to_row_cache, GetOutcome,
+            KeyRange, RowCache, ScanOutcome,
         },
         tablestore::TableStore,
-        types::{KeyValue, RowEntry},
+        types::KeyValue,
         utils::IdGenerator,
         wal::slatedb::store::WalTableStore,
         wal::WalReader as WalReaderTrait,
@@ -239,6 +239,23 @@ impl DbReaderInner {
         let initial_durable_seq = initial_state
             .last_remote_persisted_seq
             .max(initial_state.core().last_l0_seq);
+        if let Some(row_cache) = &row_cache {
+            let last_l0_seq = initial_state.core().last_l0_seq;
+            let tables: Vec<Arc<KVTable>> = initial_state
+                .imm_memtable
+                .iter()
+                .map(|imm| imm.table())
+                .collect();
+            let last_written = feed_tables_to_row_cache(
+                row_cache.as_ref(),
+                tables.iter().map(Arc::as_ref),
+                last_l0_seq,
+            )
+            .unwrap_or(last_l0_seq);
+            if initial_durable_seq > last_written {
+                row_cache.write(initial_durable_seq, &[]);
+            }
+        }
         status_manager.report_durable_seq(
             initial_state
                 .last_remote_persisted_seq
@@ -292,18 +309,23 @@ impl DbReaderInner {
         };
         let prev_seq = self.oracle.last_committed_seq();
         let mut replayed_after = prev_seq;
-        let mut last_written = prev_seq;
         let last_l0_seq = new_state.core().last_l0_seq;
         if last_l0_seq > prev_seq {
             let prev_state = Arc::clone(&self.state.read());
             invalidate_unreplayed_l0(row_cache.as_ref(), prev_state.core(), new_state.core());
             replayed_after = last_l0_seq;
         }
-        for batch in writes_after(new_state.imm_memtable(), replayed_after) {
-            let seq = batch[0].seq;
-            row_cache.write(seq, &batch);
-            last_written = seq;
-        }
+        let tables: Vec<Arc<KVTable>> = new_state
+            .imm_memtable()
+            .iter()
+            .map(|imm| imm.table())
+            .collect();
+        let last_written = feed_tables_to_row_cache(
+            row_cache.as_ref(),
+            tables.iter().map(Arc::as_ref),
+            replayed_after,
+        )
+        .unwrap_or(prev_seq);
         let final_seq = new_state.last_remote_persisted_seq.max(last_l0_seq);
         if final_seq > last_written {
             row_cache.write(final_seq, &[]);
@@ -899,32 +921,6 @@ fn invalidate_unreplayed_l0(cache: &dyn RowCache, prev: &ManifestCore, next: &Ma
     for view in new_l0s {
         cache.invalidate(KeyRange::from_bytes_range(view.compacted_effective_range()));
     }
-}
-
-/// The writes in `tables` above `seq`, one key-ordered batch per seq in ascending order.
-fn writes_after(tables: &VecDeque<Arc<ImmutableMemtable>>, seq: u64) -> Vec<Vec<RowEntry>> {
-    let mut entries = Vec::new();
-    for table in tables {
-        let table = table.table();
-        if table.last_seq().is_none_or(|last| last <= seq) {
-            continue;
-        }
-        let mut iter = table.iter();
-        while let Some(entry) = iter.next_sync() {
-            if entry.seq > seq {
-                entries.push(entry);
-            }
-        }
-    }
-    entries.sort_by(|a, b| a.seq.cmp(&b.seq).then_with(|| a.key.cmp(&b.key)));
-    let mut batches: Vec<Vec<RowEntry>> = Vec::new();
-    for entry in entries {
-        match batches.last_mut() {
-            Some(batch) if batch[0].seq == entry.seq => batch.push(entry),
-            _ => batches.push(vec![entry]),
-        }
-    }
-    batches
 }
 
 struct ManifestPoller {
