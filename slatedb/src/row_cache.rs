@@ -42,10 +42,17 @@
 //!         }
 //!     }
 //!
-//!     fn get(&self, key: &[u8], seq: u64) -> GetOutcome {
+//!     fn get(&self, key: &[u8], seq: u64, now_ms: i64) -> GetOutcome {
 //!         let rows = self.rows.lock().unwrap();
 //!         match rows.get(key) {
-//!             Some((entry_seq, kv)) if *entry_seq <= seq => GetOutcome::Hit(kv.clone()),
+//!             Some((entry_seq, Some(kv))) if *entry_seq <= seq => {
+//!                 if kv.expire_ts.is_some_and(|ts| ts <= now_ms) {
+//!                     GetOutcome::Hit(None)
+//!                 } else {
+//!                     GetOutcome::Hit(Some(kv.clone()))
+//!                 }
+//!             }
+//!             Some((entry_seq, None)) if *entry_seq <= seq => GetOutcome::Hit(None),
 //!             _ => GetOutcome::Miss,
 //!         }
 //!     }
@@ -76,30 +83,39 @@
 //!   reads on [`Db`](crate::Db), descending scans, custom filter contexts, tracing,
 //!   `row_cache: false`, and overlapping uncommitted transaction writes. SlateDB updates its own
 //!   read and scan request counters on cache hits.
-//! - **Deletes, merges, TTLs:** Never emit tombstones or expired rows (`expire_ts <= now_ms`).
-//!   Resolve merges with the database's merge operator or return a miss.
+//! - **Deletes, merges, TTLs:** Never emit tombstones or expired rows (`expire_ts <= now_ms`),
+//!   using the `now_ms` timestamp passed to [`RowCache::get`] and [`RowCache::scan`]. Treat an
+//!   expired value as absent. Resolve merges with the database's merge operator or return a
+//!   miss. For expiring merge operands, drop expired operands before merging (matching
+//!   compaction) or return a miss so unexpired earlier values still surface.
 //! - **Partial scans:** [`ScanOutcome::Partial`] returns ordered [`ScanSegment`] values that
 //!   partition the requested range. SlateDB stitches cached segments and reads each uncached gap
 //!   lazily from the LSM tree at the same `seq`.
 //! - **Cold loading:** Populate cold ranges outside SlateDB by reading with
 //!   `ReadOptions::with_row_cache(false)` or `ScanOptions::with_row_cache(false)` (for example
 //!   through a [`DbSnapshot`](crate::DbSnapshot)).
-//! - **Startup WAL replay:** [`Db`](crate::Db) and [`DbReader`](crate::DbReader) replay unflushed
-//!   WAL entries above `last_l0_seq` through `write` in ascending sequence order during open. A
-//!   persistent cache skips sequence numbers at or below its saved watermark and checks
-//!   `manifest().last_l0_seq()` for any L0 gap.
+//! - **Startup WAL replay:** During open, [`Db`](crate::Db) and [`DbReader`](crate::DbReader)
+//!   call [`RowCache::open`] with `last_l0_seq` after loading the manifest. They then replay
+//!   unflushed WAL entries above `last_l0_seq` through `write` in ascending sequence order. In
+//!   `open`, a persistent cache clears or invalidates stale state when its saved watermark is
+//!   below `last_l0_seq`. In `write`, it skips sequence numbers at or below its saved watermark.
+//!   Persist cache state only up to `db.status().durable_seq` so a crash before WAL flush never
+//!   leaves unconfirmed writes on disk.
 //! - **Compaction filters and segment drains:** Do not use a `RowCache` with compaction filters
 //!   or segment drains. They drop or modify rows outside the write path without advancing
-//!   sequence numbers. [`DbBuilder::build`](crate::DbBuilder::build) rejects configuring both a
-//!   `RowCache` and an embedded compaction filter. Do not run standalone compactors or compaction
-//!   workers with compaction filters against a database that uses a `RowCache`, because neither
-//!   [`Db`](crate::Db) nor [`DbReader`](crate::DbReader) can detect those rewrites and reads can
-//!   return stale rows.
+//!   sequence numbers. [`DbBuilder::build`](crate::DbBuilder::build) rejects configuring a
+//!   `RowCache` with an embedded compaction filter, or with both a segment extractor and an
+//!   embedded custom compaction scheduler. Do not run standalone compactors or compaction
+//!   workers with compaction filters or segment drains against a database that uses a
+//!   `RowCache`. Neither [`Db`](crate::Db) nor [`DbReader`](crate::DbReader) detects those
+//!   changes, so reads can return stale rows.
 //!
 //! # Threading and lifecycle
 //!
-//! - Write-side callbacks (`write` and `invalidate`) run sequentially on one task: the batch
-//!   writer on [`Db`](crate::Db), or the manifest poller on [`DbReader`](crate::DbReader).
+//! - Startup callbacks (`open` and startup WAL replay through `write`) run sequentially on the
+//!   `build()` caller task before `build()` returns.
+//! - Live write-side callbacks (`write` and `invalidate`) run sequentially on one task: the
+//!   batch writer on [`Db`](crate::Db), or the manifest poller on [`DbReader`](crate::DbReader).
 //! - Read-side callbacks (`get` and `scan`) run concurrently on caller threads.
 //! - `write` runs in ascending sequence order before readers observe `seq`.
 //! - The caller owns the cache and stops any background tasks outside SlateDB.
@@ -125,8 +141,9 @@ use crate::types::{KeyValue, RowEntry};
 /// Implement [`Self::get`] and [`Self::write`]; other methods provide safe defaults. See the
 /// [module documentation](self) for the full contract and lifecycle.
 pub trait RowCache: Send + Sync + 'static {
-    /// Serves a point read synchronously at sequence number `seq`.
-    fn get(&self, key: &[u8], seq: u64) -> GetOutcome;
+    /// Serves a point read synchronously at sequence number `seq` and wall-clock time `now_ms`
+    /// (milliseconds since the Unix epoch).
+    fn get(&self, key: &[u8], seq: u64, now_ms: i64) -> GetOutcome;
 
     /// Applies committed rows for `seq` on the write task, before readers observe `seq`.
     ///
@@ -134,10 +151,17 @@ pub trait RowCache: Send + Sync + 'static {
     /// when `seq` advances with no row changes.
     fn write(&self, seq: u64, entries: &[RowEntry]);
 
-    /// Serves an ascending scan synchronously at sequence number `seq`.
+    /// Serves an ascending scan synchronously at sequence number `seq` and wall-clock time
+    /// `now_ms` (milliseconds since the Unix epoch).
     ///
     /// When `prefix` is `Some`, every key in `range` starts with `prefix`.
-    fn scan(&self, _range: KeyRange<'_>, _seq: u64, _prefix: Option<&[u8]>) -> ScanOutcome {
+    fn scan(
+        &self,
+        _range: KeyRange<'_>,
+        _seq: u64,
+        _now_ms: i64,
+        _prefix: Option<&[u8]>,
+    ) -> ScanOutcome {
         ScanOutcome::Miss
     }
 
@@ -148,6 +172,14 @@ pub trait RowCache: Send + Sync + 'static {
     /// new L0 SST key range when SlateDB can isolate it, or [`KeyRange::all`] otherwise. Caches
     /// on a polling `DbReader` must override this method.
     fn invalidate(&self, _range: KeyRange<'_>) {}
+
+    /// Notifies the cache when a [`Db`](crate::Db) or [`DbReader`](crate::DbReader) opens.
+    ///
+    /// Runs on the `build()` caller task after loading the manifest and before startup WAL
+    /// replay feeds entries above `last_l0_seq`. A persistent cache whose saved watermark is
+    /// below `last_l0_seq` must clear or invalidate stale state here so it does not miss L0
+    /// writes.
+    fn open(&self, _last_l0_seq: u64) {}
 }
 
 /// Result of [`RowCache::get`].

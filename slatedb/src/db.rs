@@ -229,7 +229,8 @@ impl DbInner {
         if let Some(row_cache) = &self.row_cache {
             if can_use_row_cache_get(options, false) {
                 let seq = self.oracle.last_committed_seq();
-                match row_cache.get(key_ref, seq) {
+                let now_ms = self.mono_clock.now_millis_sync();
+                match row_cache.get(key_ref, seq, now_ms) {
                     GetOutcome::Hit(kv) => {
                         self.db_stats.get_requests.increment(1);
                         return Ok(kv);
@@ -258,8 +259,9 @@ impl DbInner {
         if let Some(row_cache) = &self.row_cache {
             if can_use_row_cache_scan(options, false) {
                 let seq = self.oracle.last_committed_seq();
+                let now_ms = self.mono_clock.now_millis_sync();
                 let key_range = KeyRange::from_bytes_range(&range);
-                match row_cache.scan(key_range, seq, prefix.as_deref()) {
+                match row_cache.scan(key_range, seq, now_ms, prefix.as_deref()) {
                     ScanOutcome::Hit(iter) => {
                         self.db_stats.scan_requests.increment(1);
                         return Ok(DbIterator::from_row_cache(range, iter));
@@ -529,6 +531,9 @@ impl DbInner {
             Arc::clone(&self.table_store),
         )?;
         let mut last_fed_seq = self.oracle.last_committed_seq();
+        if let Some(row_cache) = &self.row_cache {
+            row_cache.open(db_state.last_l0_seq);
+        }
 
         loop {
             let replayed_table = match replay_iter.next().await {

@@ -485,8 +485,9 @@ impl<P: Into<Path>> DbBuilder<P> {
     ///
     /// **Warning:** Do not combine a [`RowCache`] with compaction filters or segment drains.
     /// [`DbBuilder::build`] returns [`ErrorKind::Invalid`](crate::ErrorKind::Invalid) when the
-    /// embedded [`CompactorBuilder`] configures a compaction filter. Standalone compactors and
-    /// compaction workers that rewrite or drop rows can cause stale cache reads.
+    /// embedded [`CompactorBuilder`] sets a compaction filter, or sets a custom scheduler on a
+    /// segmented database. Standalone compactors and compaction workers that rewrite or drain
+    /// rows can cause stale cache reads.
     pub fn with_row_cache(mut self, row_cache: Arc<dyn RowCache>) -> Self {
         self.row_cache = Some(row_cache);
         self
@@ -524,6 +525,19 @@ impl<P: Into<Path>> DbBuilder<P> {
         {
             return Err(SlateDBError::InvalidConfiguration(
                 "row_cache cannot be combined with a compaction_filter_supplier".into(),
+            )
+            .into());
+        }
+        if self.row_cache.is_some()
+            && self.segment_extractor.is_some()
+            && self
+                .compactor_builder
+                .as_ref()
+                .is_some_and(|b| b.scheduler_supplier.is_some())
+        {
+            return Err(SlateDBError::InvalidConfiguration(
+                "row_cache cannot be combined with segment_extractor and a custom compaction scheduler"
+                    .into(),
             )
             .into());
         }
@@ -1385,6 +1399,11 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     }
 
     /// Sets the compaction scheduler supplier to use for the compactor.
+    ///
+    /// **Warning:** Segment drains ([`crate::compactor::CompactionSpec::drain_segment`]) are
+    /// incompatible with [`RowCache`]. [`DbBuilder::build`] rejects an embedded custom scheduler
+    /// on a segmented database with a [`RowCache`]. Do not run a standalone compactor that
+    /// schedules segment drains against a database that uses a [`RowCache`].
     pub fn with_scheduler_supplier(
         mut self,
         scheduler_supplier: Arc<dyn CompactionSchedulerSupplier>,

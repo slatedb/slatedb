@@ -241,6 +241,7 @@ impl DbReaderInner {
             .max(initial_state.core().last_l0_seq);
         if let Some(row_cache) = &row_cache {
             let last_l0_seq = initial_state.core().last_l0_seq;
+            row_cache.open(last_l0_seq);
             let tables: Vec<Arc<KVTable>> = initial_state
                 .imm_memtable
                 .iter()
@@ -382,7 +383,8 @@ impl DbReaderInner {
         if let Some(row_cache) = &self.row_cache {
             if can_use_row_cache_get(options, true) {
                 let seq = self.oracle.last_committed_seq();
-                match row_cache.get(key, seq) {
+                let now_ms = self.reader.mono_clock.now_millis_sync();
+                match row_cache.get(key, seq, now_ms) {
                     GetOutcome::Hit(kv) => {
                         self.reader.db_stats.get_requests.increment(1);
                         return Ok(kv);
@@ -408,8 +410,9 @@ impl DbReaderInner {
         if let Some(row_cache) = &self.row_cache {
             if can_use_row_cache_scan(options, true) {
                 let seq = self.oracle.last_committed_seq();
+                let now_ms = self.reader.mono_clock.now_millis_sync();
                 let key_range = KeyRange::from_bytes_range(&range);
-                match row_cache.scan(key_range, seq, prefix.as_deref()) {
+                match row_cache.scan(key_range, seq, now_ms, prefix.as_deref()) {
                     ScanOutcome::Hit(iter) => {
                         self.reader.db_stats.scan_requests.increment(1);
                         return Ok(DbIterator::from_row_cache(range, iter));
@@ -502,6 +505,9 @@ impl DbReaderInner {
         let versioned_manifest = VersionedManifest::from(&new_state);
         let touched_segments = collect_touched_segments(&new_state);
         let new_state = Arc::new(new_state);
+        self.reader
+            .mono_clock
+            .advance_last_tick(new_state.core().last_l0_clock_tick);
         self.feed_row_cache(&new_state);
         {
             let mut write_guard = self.state.write();
@@ -914,7 +920,12 @@ fn invalidate_unreplayed_l0(cache: &dyn RowCache, prev: &ManifestCore, next: &Ma
         }
         new_l0s.push(view);
     }
-    if !matched_front || new_l0s.is_empty() {
+    if !matched_front
+        || new_l0s.is_empty()
+        || new_l0s
+            .iter()
+            .any(|v| !v.compacted_effective_range().non_empty())
+    {
         cache.invalidate(KeyRange::all());
         return;
     }

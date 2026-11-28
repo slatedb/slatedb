@@ -195,7 +195,8 @@ impl DbTransaction {
                         let seq = self
                             .started_seq
                             .min(self.db_inner.oracle.last_committed_seq());
-                        match row_cache.get(key_slice, seq) {
+                        let now_ms = self.db_inner.mono_clock.now_millis_sync();
+                        match row_cache.get(key_slice, seq, now_ms) {
                             GetOutcome::Hit(kv) => {
                                 self.db_inner.db_stats.get_requests.increment(1);
                                 return Ok(kv);
@@ -372,8 +373,9 @@ impl DbTransaction {
                     let seq = self
                         .started_seq
                         .min(self.db_inner.oracle.last_committed_seq());
+                    let now_ms = self.db_inner.mono_clock.now_millis_sync();
                     let key_range = KeyRange::from_bytes_range(&range);
-                    match row_cache.scan(key_range, seq, prefix.as_deref()) {
+                    match row_cache.scan(key_range, seq, now_ms, prefix.as_deref()) {
                         ScanOutcome::Hit(iter) => {
                             self.db_inner.db_stats.scan_requests.increment(1);
                             return Ok(self.retaining(DbIterator::from_row_cache(range, iter)));

@@ -150,6 +150,10 @@ impl CompactionSpec {
     /// Creates a drain-segment spec targeting the named (non-empty-prefix)
     /// segment. `sources` lists the L0s and SRs the compactor has observed in
     /// the segment and is draining.
+    ///
+    /// **Warning:** Segment drains are incompatible with [`crate::RowCache`]. Do not schedule
+    /// segment drains against a database that uses a [`crate::RowCache`], because neither
+    /// [`crate::Db`] nor [`crate::DbReader`] invalidates cached rows for drained segments.
     pub fn drain_segment(segment: Bytes, sources: Vec<SourceId>) -> Self {
         CompactionSpec::DrainSegment(DrainSegmentSpec { segment, sources })
     }

@@ -10,8 +10,8 @@ use bytes::Bytes;
 use slatedb::admin::Admin;
 use slatedb::config::{
     CheckpointOptions, CheckpointScope, CloseOptions, CompactionWorkerOptions, CompactorOptions,
-    DbReaderOptions, DurabilityLevel, FlushOptions, FlushType, ReadOptions, ScanOptions, Settings,
-    SizeTieredCompactionSchedulerOptions,
+    DbReaderOptions, DurabilityLevel, FlushOptions, FlushType, MergeOptions, PutOptions,
+    ReadOptions, ScanOptions, Settings, SizeTieredCompactionSchedulerOptions, Ttl, WriteOptions,
 };
 use slatedb::db_stats::REQUEST_COUNT;
 use slatedb::object_store::memory::InMemory;
@@ -22,6 +22,7 @@ use slatedb::{
     IterationOrder, KeyValue, MergeOperator, MergeOperatorError, RowEntry, ValueDeletable,
     WriteBatch,
 };
+use slatedb_common::clock::{MockSystemClock, SystemClock};
 use slatedb_common::metrics::{lookup_metric_with_labels, DefaultMetricsRecorder};
 use tokio::sync::watch;
 
@@ -118,19 +119,25 @@ impl TestRowCache {
         self.events.lock().unwrap().misses.clone()
     }
 
-    fn lookup_at(&self, key: &[u8], seq: u64) -> Option<Option<KeyValue>> {
+    fn lookup_at(&self, key: &[u8], seq: u64, now_ms: i64) -> Option<Option<KeyValue>> {
         let versions = self.versions.lock().unwrap();
         let history = versions.get(key)?;
         for entry in history.iter().rev() {
             if entry.seq <= seq {
                 return match &entry.value {
-                    ValueDeletable::Value(val) => Some(Some(KeyValue::new(
-                        entry.key.clone(),
-                        val.clone(),
-                        entry.seq,
-                        entry.create_ts.unwrap_or(0),
-                        entry.expire_ts,
-                    ))),
+                    ValueDeletable::Value(val) => {
+                        if entry.expire_ts.is_some_and(|ts| ts <= now_ms) {
+                            Some(None)
+                        } else {
+                            Some(Some(KeyValue::new(
+                                entry.key.clone(),
+                                val.clone(),
+                                entry.seq,
+                                entry.create_ts.unwrap_or(0),
+                                entry.expire_ts,
+                            )))
+                        }
+                    }
                     ValueDeletable::Tombstone => Some(None),
                     ValueDeletable::Merge(_) => None,
                 };
@@ -219,7 +226,7 @@ impl RowCache for TestRowCache {
         self.events.lock().unwrap().invalidations.push(owned);
     }
 
-    fn get(&self, key: &[u8], seq: u64) -> GetOutcome {
+    fn get(&self, key: &[u8], seq: u64, now_ms: i64) -> GetOutcome {
         self.events.lock().unwrap().get_calls += 1;
         if self.fail_next_get.swap(false, Ordering::Relaxed) {
             return GetOutcome::Error(Error::invalid("injected get error".to_string()));
@@ -232,7 +239,7 @@ impl RowCache for TestRowCache {
                 .push(Bytes::copy_from_slice(key));
             return GetOutcome::Miss;
         }
-        match self.lookup_at(key, seq) {
+        match self.lookup_at(key, seq, now_ms) {
             Some(kv) => GetOutcome::Hit(kv),
             None => {
                 self.events
@@ -245,7 +252,13 @@ impl RowCache for TestRowCache {
         }
     }
 
-    fn scan(&self, range: KeyRange<'_>, seq: u64, _prefix: Option<&[u8]>) -> ScanOutcome {
+    fn scan(
+        &self,
+        range: KeyRange<'_>,
+        seq: u64,
+        now_ms: i64,
+        _prefix: Option<&[u8]>,
+    ) -> ScanOutcome {
         self.events.lock().unwrap().scan_calls += 1;
         if !self.covers_range(range) || !self.serve_reads.load(Ordering::Relaxed) {
             let start = range.start_key().unwrap_or_default();
@@ -261,14 +274,28 @@ impl RowCache for TestRowCache {
         for (_key, history) in versions.range::<[u8], _>(range) {
             for entry in history.iter().rev() {
                 if entry.seq <= seq {
-                    if let ValueDeletable::Value(val) = &entry.value {
-                        rows.push(KeyValue::new(
-                            entry.key.clone(),
-                            val.clone(),
-                            entry.seq,
-                            entry.create_ts.unwrap_or(0),
-                            entry.expire_ts,
-                        ));
+                    match &entry.value {
+                        ValueDeletable::Value(val)
+                            if entry.expire_ts.is_none_or(|ts| ts > now_ms) =>
+                        {
+                            rows.push(KeyValue::new(
+                                entry.key.clone(),
+                                val.clone(),
+                                entry.seq,
+                                entry.create_ts.unwrap_or(0),
+                                entry.expire_ts,
+                            ));
+                        }
+                        ValueDeletable::Merge(_) => {
+                            let start = range.start_key().unwrap_or_default();
+                            self.events
+                                .lock()
+                                .unwrap()
+                                .misses
+                                .push(Bytes::copy_from_slice(start));
+                            return ScanOutcome::Miss;
+                        }
+                        _ => {}
                     }
                     break;
                 }
@@ -467,12 +494,20 @@ async fn test_row_cache_minimal_defaults() {
             }
         }
 
-        fn get(&self, key: &[u8], seq: u64) -> GetOutcome {
+        fn get(&self, key: &[u8], seq: u64, now_ms: i64) -> GetOutcome {
             let rows = self.rows.lock().unwrap();
             match rows.get(key) {
-                Some((entry_seq, kv)) if *entry_seq <= seq => {
+                Some((entry_seq, Some(kv))) if *entry_seq <= seq => {
                     self.hits.fetch_add(1, Ordering::Relaxed);
-                    GetOutcome::Hit(kv.clone())
+                    if kv.expire_ts.is_some_and(|ts| ts <= now_ms) {
+                        GetOutcome::Hit(None)
+                    } else {
+                        GetOutcome::Hit(Some(kv.clone()))
+                    }
+                }
+                Some((entry_seq, None)) if *entry_seq <= seq => {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    GetOutcome::Hit(None)
                 }
                 _ => GetOutcome::Miss,
             }
@@ -527,11 +562,17 @@ async fn test_row_cache_scan_next_batch_seek_and_invalidation() {
     impl RowCache for CustomBatchCache {
         fn write(&self, _seq: u64, _entries: &[RowEntry]) {}
 
-        fn get(&self, _key: &[u8], _seq: u64) -> GetOutcome {
+        fn get(&self, _key: &[u8], _seq: u64, _now_ms: i64) -> GetOutcome {
             GetOutcome::Miss
         }
 
-        fn scan(&self, _range: KeyRange<'_>, _seq: u64, _prefix: Option<&[u8]>) -> ScanOutcome {
+        fn scan(
+            &self,
+            _range: KeyRange<'_>,
+            _seq: u64,
+            _now_ms: i64,
+            _prefix: Option<&[u8]>,
+        ) -> ScanOutcome {
             let rows = (0..5u8)
                 .map(|i| {
                     KeyValue::new(
@@ -605,7 +646,7 @@ async fn test_row_cache_partial_scan_stitching_seek_and_metrics() {
             })
         }
 
-        fn cached_rows(&self, start: &[u8], end: &[u8], seq: u64) -> Vec<KeyValue> {
+        fn cached_rows(&self, start: &[u8], end: &[u8], seq: u64, now_ms: i64) -> Vec<KeyValue> {
             let versions = self.versions.lock().unwrap();
             let mut rows = Vec::new();
             for (_key, history) in versions.range::<[u8], _>(KeyRange {
@@ -615,13 +656,15 @@ async fn test_row_cache_partial_scan_stitching_seek_and_metrics() {
                 for entry in history.iter().rev() {
                     if entry.seq <= seq {
                         if let ValueDeletable::Value(val) = &entry.value {
-                            rows.push(KeyValue::new(
-                                entry.key.clone(),
-                                val.clone(),
-                                entry.seq,
-                                entry.create_ts.unwrap_or(0),
-                                entry.expire_ts,
-                            ));
+                            if entry.expire_ts.is_none_or(|ts| ts > now_ms) {
+                                rows.push(KeyValue::new(
+                                    entry.key.clone(),
+                                    val.clone(),
+                                    entry.seq,
+                                    entry.create_ts.unwrap_or(0),
+                                    entry.expire_ts,
+                                ));
+                            }
                         }
                         break;
                     }
@@ -641,17 +684,23 @@ async fn test_row_cache_partial_scan_stitching_seek_and_metrics() {
             }
         }
 
-        fn get(&self, _key: &[u8], _seq: u64) -> GetOutcome {
+        fn get(&self, _key: &[u8], _seq: u64, _now_ms: i64) -> GetOutcome {
             GetOutcome::Miss
         }
 
-        fn scan(&self, range: KeyRange<'_>, seq: u64, _prefix: Option<&[u8]>) -> ScanOutcome {
+        fn scan(
+            &self,
+            range: KeyRange<'_>,
+            seq: u64,
+            now_ms: i64,
+            _prefix: Option<&[u8]>,
+        ) -> ScanOutcome {
             if self.return_empty.load(Ordering::Relaxed) {
                 return ScanOutcome::Partial(Vec::new());
             }
             let fail_at = *self.fail_cached_at.lock().unwrap();
-            let a_rows = self.cached_rows(b"a/", b"b/", seq);
-            let c_rows = self.cached_rows(b"c/", b"d/", seq);
+            let a_rows = self.cached_rows(b"a/", b"b/", seq, now_ms);
+            let c_rows = self.cached_rows(b"c/", b"d/", seq, now_ms);
             // Clip cached rows to the requested range.
             let filter = |rows: Vec<KeyValue>| -> Vec<KeyValue> {
                 rows.into_iter()
@@ -1436,5 +1485,775 @@ async fn test_row_cache_disallows_compaction_filter_supplier() {
         .build()
         .await
         .unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_row_cache_ttl_expiration() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let path = "row_cache_ttl_expiration";
+    let clock = Arc::new(MockSystemClock::with_time(1000));
+    let cache = TestRowCache::new();
+    let db = Db::builder(path, Arc::clone(&store))
+        .with_settings(Settings {
+            flush_interval: None,
+            default_ttl_millis: Some(50),
+            compactor_options: None,
+            garbage_collector_options: None,
+            ..Settings::default()
+        })
+        .with_system_clock(clock.clone())
+        .with_merge_operator(Arc::new(ConcatMergeOperator))
+        .with_row_cache(cache.clone())
+        .build()
+        .await
+        .unwrap();
+
+    let no_expiry = PutOptions { ttl: Ttl::NoExpiry };
+    let write_opts = WriteOptions::default();
+
+    // Write keys with default TTL (1050), relative TTL (1100), absolute TTL (1200), and no expiry.
+    db.put_with_options(b"k_default", b"d1", &PutOptions::default(), &write_opts)
+        .await
+        .unwrap();
+    db.put_with_options(
+        b"k_after",
+        b"a1",
+        &PutOptions {
+            ttl: Ttl::ExpireAfterMillis(100),
+        },
+        &write_opts,
+    )
+    .await
+    .unwrap();
+    db.put_with_options(
+        b"k_at",
+        b"at1",
+        &PutOptions {
+            ttl: Ttl::ExpireAtMillis(1200),
+        },
+        &write_opts,
+    )
+    .await
+    .unwrap();
+    db.put_with_options(b"k_forever", b"f1", &no_expiry, &write_opts)
+        .await
+        .unwrap();
+    // Overwrite an unexpired value with an expiring one; expiry must hide the key, not revive old.
+    db.put_with_options(b"k_overwrite", b"old", &no_expiry, &write_opts)
+        .await
+        .unwrap();
+    db.put_with_options(
+        b"k_overwrite",
+        b"new",
+        &PutOptions {
+            ttl: Ttl::ExpireAfterMillis(100),
+        },
+        &write_opts,
+    )
+    .await
+    .unwrap();
+    // Expiring merge operand on top of an unexpired base value.
+    db.put_with_options(b"m_ttl", b"base", &no_expiry, &write_opts)
+        .await
+        .unwrap();
+    db.merge_with_options(
+        b"m_ttl",
+        b"+tmp",
+        &MergeOptions {
+            ttl: Ttl::ExpireAfterMillis(50),
+        },
+        &write_opts,
+    )
+    .await
+    .unwrap();
+
+    let snap = db.snapshot().unwrap();
+    let txn = db.begin(IsolationLevel::Snapshot).unwrap();
+
+    // At t = 1049, all keys are live and served from the cache with their expire_ts intact.
+    clock.set(1049);
+    assert_eq!(
+        db.get_key_value(b"k_default")
+            .await
+            .unwrap()
+            .unwrap()
+            .expire_ts,
+        Some(1050)
+    );
+    assert_eq!(
+        db.get(b"k_after").await.unwrap(),
+        Some(Bytes::from_static(b"a1"))
+    );
+    assert_eq!(
+        db.get(b"k_at").await.unwrap(),
+        Some(Bytes::from_static(b"at1"))
+    );
+    assert_eq!(
+        db.get(b"k_forever").await.unwrap(),
+        Some(Bytes::from_static(b"f1"))
+    );
+    assert_eq!(
+        db.get(b"k_overwrite").await.unwrap(),
+        Some(Bytes::from_static(b"new"))
+    );
+    let expected_1049 = vec![
+        (Bytes::from_static(b"k_after"), Bytes::from_static(b"a1")),
+        (Bytes::from_static(b"k_at"), Bytes::from_static(b"at1")),
+        (Bytes::from_static(b"k_default"), Bytes::from_static(b"d1")),
+        (Bytes::from_static(b"k_forever"), Bytes::from_static(b"f1")),
+        (
+            Bytes::from_static(b"k_overwrite"),
+            Bytes::from_static(b"new"),
+        ),
+    ];
+    assert_eq!(
+        collect(db.scan(b"k_"..b"k`").await.unwrap()).await,
+        expected_1049
+    );
+    assert_eq!(
+        collect(snap.scan(b"k_"..b"k`").await.unwrap()).await,
+        expected_1049
+    );
+    assert_eq!(
+        collect(txn.scan(b"k_"..b"k`").await.unwrap()).await,
+        expected_1049
+    );
+    assert!(cache.misses().is_empty());
+
+    // Merge key misses cache and resolves via LSM at t = 1049.
+    assert_eq!(
+        db.get(b"m_ttl").await.unwrap(),
+        Some(Bytes::from_static(b"base+tmp"))
+    );
+    assert_eq!(cache.misses(), vec![Bytes::from_static(b"m_ttl")]);
+
+    // At t = 1050, k_default expires on Db, DbSnapshot, and DbTransaction via cache hits.
+    clock.set(1050);
+    assert_eq!(db.get(b"k_default").await.unwrap(), None);
+    assert_eq!(snap.get(b"k_default").await.unwrap(), None);
+    assert_eq!(txn.get(b"k_default").await.unwrap(), None);
+    let expected_1050 = vec![
+        (Bytes::from_static(b"k_after"), Bytes::from_static(b"a1")),
+        (Bytes::from_static(b"k_at"), Bytes::from_static(b"at1")),
+        (Bytes::from_static(b"k_forever"), Bytes::from_static(b"f1")),
+        (
+            Bytes::from_static(b"k_overwrite"),
+            Bytes::from_static(b"new"),
+        ),
+    ];
+    assert_eq!(
+        collect(db.scan(b"k_"..b"k`").await.unwrap()).await,
+        expected_1050
+    );
+    assert_eq!(
+        collect(snap.scan(b"k_"..b"k`").await.unwrap()).await,
+        expected_1050
+    );
+    assert_eq!(
+        collect(txn.scan(b"k_"..b"k`").await.unwrap()).await,
+        expected_1050
+    );
+    assert_eq!(cache.misses().len(), 1);
+    txn.rollback();
+    drop(snap);
+
+    // At t = 1100, k_after and k_overwrite expire without resurrecting "old".
+    clock.set(1100);
+    assert_eq!(db.get(b"k_after").await.unwrap(), None);
+    assert_eq!(db.get(b"k_overwrite").await.unwrap(), None);
+    assert_eq!(
+        collect(db.scan(b"k_"..b"k`").await.unwrap()).await,
+        vec![
+            (Bytes::from_static(b"k_at"), Bytes::from_static(b"at1")),
+            (Bytes::from_static(b"k_forever"), Bytes::from_static(b"f1")),
+        ]
+    );
+    // Advance memtable tick to 1100 and flush so RetentionIterator purges expired entries.
+    db.put_with_options(b"z_tick", b"t1", &no_expiry, &write_opts)
+        .await
+        .unwrap();
+    flush_memtable(&db).await;
+    assert_eq!(
+        db.get_with_options(b"k_overwrite", &ReadOptions::new().with_row_cache(false))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        db.get(b"m_ttl").await.unwrap(),
+        Some(Bytes::from_static(b"base"))
+    );
+
+    // Write a WAL-only expiring key at t = 1100 (expire_ts = 1200) for DbReader tests.
+    db.put_with_options(
+        b"r_key",
+        b"r1",
+        &PutOptions {
+            ttl: Ttl::ExpireAtMillis(1200),
+        },
+        &write_opts,
+    )
+    .await
+    .unwrap();
+    db.flush().await.unwrap();
+
+    // DbReader sharing the system clock observes expiration on both get and scan.
+    let reader_cache = TestRowCache::new();
+    let reader = DbReader::builder(path, Arc::clone(&store))
+        .with_system_clock(clock.clone())
+        .with_options(reader_options(50, Duration::from_secs(3600)))
+        .with_row_cache(reader_cache.clone())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(
+        reader.get(b"r_key").await.unwrap(),
+        Some(Bytes::from_static(b"r1"))
+    );
+    assert_eq!(
+        collect(reader.scan(b"r_"..b"r`").await.unwrap()).await,
+        vec![(Bytes::from_static(b"r_key"), Bytes::from_static(b"r1"))]
+    );
+    clock.set(1200);
+    assert_eq!(reader.get(b"r_key").await.unwrap(), None);
+    assert!(collect(reader.scan(b"r_"..b"r`").await.unwrap())
+        .await
+        .is_empty());
+    assert!(reader_cache.misses().is_empty());
+    reader.close().await.unwrap();
+
+    // A DbReader with a lagging local clock floors now_ms at manifest.last_l0_clock_tick after
+    // polling, so it does not serve a row that the writer already flushed/expired at t = 1200.
+    let lagging_clock = Arc::new(MockSystemClock::with_time(500));
+    let lagging_cache = TestRowCache::new();
+    let lagging_reader = DbReader::builder(path, Arc::clone(&store))
+        .with_system_clock(lagging_clock.clone())
+        .with_options(reader_options(50, Duration::from_secs(3600)))
+        .with_row_cache(lagging_cache.clone())
+        .build()
+        .await
+        .unwrap();
+    let mut lagging_status = lagging_reader.subscribe();
+    // Initial last_l0_clock_tick is 1100, so r_key (expire_ts = 1200) is still live.
+    assert_eq!(
+        lagging_reader.get(b"r_key").await.unwrap(),
+        Some(Bytes::from_static(b"r1"))
+    );
+    // Writer writes z_tick2 at t = 1200 and flushes WAL so the reader replays it without L0
+    // invalidation, then flushes the memtable to advance last_l0_clock_tick to 1200.
+    db.put_with_options(b"z_tick2", b"t2", &no_expiry, &write_opts)
+        .await
+        .unwrap();
+    db.flush().await.unwrap();
+    lagging_clock.advance(Duration::from_millis(100)).await;
+    caught_up(&mut lagging_status, &db).await;
+    flush_memtable(&db).await;
+    // Advance lagging_clock by only 100ms (to 700, still behind 1200) to fire a poll tick.
+    lagging_clock.advance(Duration::from_millis(100)).await;
+    caught_up(&mut lagging_status, &db).await;
+    assert!(lagging_cache
+        .events
+        .lock()
+        .unwrap()
+        .invalidations
+        .is_empty());
+    assert_eq!(lagging_reader.get(b"r_key").await.unwrap(), None);
+    assert!(lagging_cache.misses().is_empty());
+    lagging_reader.close().await.unwrap();
+    db.close().await.unwrap();
+
+    // An operand-preserving cache uses now_ms to drop expired merge operands while keeping base.
+    struct MergeTtlRowCache {
+        versions: Mutex<BTreeMap<Bytes, Vec<RowEntry>>>,
+        hits: AtomicU64,
+    }
+
+    impl RowCache for MergeTtlRowCache {
+        fn write(&self, _seq: u64, entries: &[RowEntry]) {
+            let mut versions = self.versions.lock().unwrap();
+            for entry in entries {
+                versions
+                    .entry(entry.key.clone())
+                    .or_default()
+                    .push(entry.clone());
+            }
+        }
+
+        fn get(&self, key: &[u8], seq: u64, now_ms: i64) -> GetOutcome {
+            let versions = self.versions.lock().unwrap();
+            let Some(history) = versions.get(key) else {
+                return GetOutcome::Miss;
+            };
+            let mut operands = Vec::new();
+            let mut base: Option<&RowEntry> = None;
+            let mut latest_seq = 0;
+            let mut latest_create_ts = 0;
+            let mut min_expire_ts: Option<i64> = None;
+            for entry in history.iter().rev() {
+                if entry.seq > seq {
+                    continue;
+                }
+                let expired = entry.expire_ts.is_some_and(|ts| ts <= now_ms);
+                match &entry.value {
+                    ValueDeletable::Merge(op) => {
+                        if expired {
+                            continue;
+                        }
+                        if latest_seq == 0 {
+                            latest_seq = entry.seq;
+                            latest_create_ts = entry.create_ts.unwrap_or(0);
+                        }
+                        min_expire_ts = match (min_expire_ts, entry.expire_ts) {
+                            (Some(a), Some(b)) => Some(a.min(b)),
+                            (a, b) => a.or(b),
+                        };
+                        operands.push(op.clone());
+                    }
+                    ValueDeletable::Value(_) => {
+                        if !expired {
+                            if latest_seq == 0 {
+                                latest_seq = entry.seq;
+                                latest_create_ts = entry.create_ts.unwrap_or(0);
+                            }
+                            min_expire_ts = match (min_expire_ts, entry.expire_ts) {
+                                (Some(a), Some(b)) => Some(a.min(b)),
+                                (a, b) => a.or(b),
+                            };
+                            base = Some(entry);
+                        }
+                        break;
+                    }
+                    ValueDeletable::Tombstone => break,
+                }
+            }
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            let mut merged = match base {
+                Some(RowEntry {
+                    value: ValueDeletable::Value(v),
+                    ..
+                }) => Some(v.clone()),
+                _ => None,
+            };
+            for op in operands.into_iter().rev() {
+                merged = Some(
+                    ConcatMergeOperator
+                        .merge(&Bytes::copy_from_slice(key), merged, op)
+                        .unwrap(),
+                );
+            }
+            GetOutcome::Hit(merged.map(|value| {
+                KeyValue::new(
+                    Bytes::copy_from_slice(key),
+                    value,
+                    latest_seq,
+                    latest_create_ts,
+                    min_expire_ts,
+                )
+            }))
+        }
+    }
+
+    let merge_clock = Arc::new(MockSystemClock::with_time(2000));
+    let merge_cache = Arc::new(MergeTtlRowCache {
+        versions: Mutex::default(),
+        hits: AtomicU64::new(0),
+    });
+    let db = Db::builder("row_cache_merge_ttl", Arc::new(InMemory::new()))
+        .with_settings(Settings {
+            flush_interval: None,
+            compactor_options: None,
+            garbage_collector_options: None,
+            ..Settings::default()
+        })
+        .with_system_clock(merge_clock.clone())
+        .with_merge_operator(Arc::new(ConcatMergeOperator))
+        .with_row_cache(merge_cache.clone())
+        .build()
+        .await
+        .unwrap();
+
+    db.put_with_options(b"m", b"base", &no_expiry, &write_opts)
+        .await
+        .unwrap();
+    db.merge_with_options(
+        b"m",
+        b"+tmp",
+        &MergeOptions {
+            ttl: Ttl::ExpireAfterMillis(50),
+        },
+        &write_opts,
+    )
+    .await
+    .unwrap();
+
+    let kv = db.get_key_value(b"m").await.unwrap().unwrap();
+    assert_eq!(kv.value, Bytes::from_static(b"base+tmp"));
+    assert_eq!(kv.expire_ts, Some(2050));
+
+    merge_clock.set(2050);
+    let kv = db.get_key_value(b"m").await.unwrap().unwrap();
+    assert_eq!(kv.value, Bytes::from_static(b"base"));
+    assert_eq!(kv.expire_ts, None);
+    assert_eq!(merge_cache.hits.load(Ordering::Relaxed), 2);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_row_cache_disallows_segmented_custom_scheduler() {
+    use slatedb::compactor::{CompactorBuilder, SizeTieredCompactionSchedulerSupplier};
+    use slatedb::{PrefixExtractor, PrefixTarget};
+
+    struct FixedThreeByteExtractor;
+
+    impl PrefixExtractor for FixedThreeByteExtractor {
+        fn name(&self) -> &str {
+            "fixed-3"
+        }
+
+        fn prefix_len(&self, target: &PrefixTarget) -> Option<usize> {
+            let bytes = match target {
+                PrefixTarget::Point(b) | PrefixTarget::Prefix(b) => b,
+            };
+            (bytes.len() >= 3).then_some(3)
+        }
+    }
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let path = "row_cache_disallows_segmented_custom_scheduler";
+
+    // Rejects with_row_cache + with_segment_extractor + embedded custom scheduler.
+    let compactor = CompactorBuilder::new(path, Arc::clone(&store))
+        .with_scheduler_supplier(Arc::new(SizeTieredCompactionSchedulerSupplier));
+    let err = match Db::builder(path, Arc::clone(&store))
+        .with_row_cache(TestRowCache::new())
+        .with_segment_extractor(Arc::new(FixedThreeByteExtractor))
+        .with_compactor_builder(compactor)
+        .build()
+        .await
+    {
+        Ok(_) => panic!("expected invalid configuration error"),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind(), ErrorKind::Invalid);
+
+    // Rejects regardless of builder call order.
+    let compactor = CompactorBuilder::new(path, Arc::clone(&store))
+        .with_scheduler_supplier(Arc::new(SizeTieredCompactionSchedulerSupplier));
+    let err = match Db::builder(path, Arc::clone(&store))
+        .with_compactor_builder(compactor)
+        .with_segment_extractor(Arc::new(FixedThreeByteExtractor))
+        .with_row_cache(TestRowCache::new())
+        .build()
+        .await
+    {
+        Ok(_) => panic!("expected invalid configuration error"),
+        Err(err) => err,
+    };
+    assert_eq!(err.kind(), ErrorKind::Invalid);
+
+    // Allows with_row_cache + with_segment_extractor using the default scheduler.
+    let compactor = CompactorBuilder::new(path, Arc::clone(&store));
+    let db = Db::builder(path, Arc::clone(&store))
+        .with_row_cache(TestRowCache::new())
+        .with_segment_extractor(Arc::new(FixedThreeByteExtractor))
+        .with_compactor_builder(compactor)
+        .build()
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+
+    // Allows with_row_cache + embedded custom scheduler when segments are not enabled.
+    let unsegmented_path = "row_cache_allows_unsegmented_custom_scheduler";
+    let compactor = CompactorBuilder::new(unsegmented_path, Arc::clone(&store))
+        .with_scheduler_supplier(Arc::new(SizeTieredCompactionSchedulerSupplier));
+    let db = Db::builder(unsegmented_path, Arc::clone(&store))
+        .with_row_cache(TestRowCache::new())
+        .with_compactor_builder(compactor)
+        .build()
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_row_cache_persistent_open_reconciliation() {
+    #[derive(Default)]
+    struct PersistentState {
+        watermark: u64,
+        rows: BTreeMap<Bytes, KeyValue>,
+        /// Ordered log of `("open", last_l0_seq)` and `("write", seq)` events.
+        log: Vec<(&'static str, u64)>,
+        misses: Vec<Bytes>,
+    }
+
+    struct PersistentRowCache {
+        state: Mutex<PersistentState>,
+    }
+
+    impl PersistentRowCache {
+        fn new_at(watermark: u64, initial_rows: &[(&[u8], &[u8], u64)]) -> Arc<Self> {
+            let mut rows = BTreeMap::new();
+            for &(k, v, seq) in initial_rows {
+                rows.insert(
+                    Bytes::copy_from_slice(k),
+                    KeyValue::new(
+                        Bytes::copy_from_slice(k),
+                        Bytes::copy_from_slice(v),
+                        seq,
+                        0,
+                        None,
+                    ),
+                );
+            }
+            Arc::new(Self {
+                state: Mutex::new(PersistentState {
+                    watermark,
+                    rows,
+                    log: Vec::new(),
+                    misses: Vec::new(),
+                }),
+            })
+        }
+
+        fn take_misses(&self) -> Vec<Bytes> {
+            std::mem::take(&mut self.state.lock().unwrap().misses)
+        }
+    }
+
+    impl RowCache for PersistentRowCache {
+        fn open(&self, last_l0_seq: u64) {
+            let mut st = self.state.lock().unwrap();
+            st.log.push(("open", last_l0_seq));
+            if st.watermark < last_l0_seq {
+                st.rows.clear();
+                st.watermark = last_l0_seq;
+            }
+        }
+
+        fn write(&self, seq: u64, entries: &[RowEntry]) {
+            let mut st = self.state.lock().unwrap();
+            st.log.push(("write", seq));
+            if seq <= st.watermark {
+                return;
+            }
+            for e in entries {
+                match &e.value {
+                    ValueDeletable::Value(v) => {
+                        st.rows.insert(
+                            e.key.clone(),
+                            KeyValue::new(
+                                e.key.clone(),
+                                v.clone(),
+                                seq,
+                                e.create_ts.unwrap_or(0),
+                                e.expire_ts,
+                            ),
+                        );
+                    }
+                    ValueDeletable::Tombstone | ValueDeletable::Merge(_) => {
+                        st.rows.remove(&e.key);
+                    }
+                }
+            }
+            st.watermark = seq;
+        }
+
+        fn get(&self, key: &[u8], seq: u64, now_ms: i64) -> GetOutcome {
+            let mut st = self.state.lock().unwrap();
+            if let Some(kv) = st.rows.get(key) {
+                if kv.seq <= seq {
+                    if kv.expire_ts.is_some_and(|ts| ts <= now_ms) {
+                        return GetOutcome::Hit(None);
+                    }
+                    return GetOutcome::Hit(Some(kv.clone()));
+                }
+            }
+            st.misses.push(Bytes::copy_from_slice(key));
+            GetOutcome::Miss
+        }
+    }
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let path = "row_cache_persistent_open_reconciliation";
+    let settings = || Settings {
+        flush_interval: None,
+        compactor_options: None,
+        garbage_collector_options: None,
+        ..Settings::default()
+    };
+
+    // Seed: k1=v1_old (h1), k1=v1_new (h2), k2=v2 (h3) flushed to L0 (last_l0_seq=h3),
+    // then k3=v3 (h4) left in WAL only.
+    let db = Db::builder(path, Arc::clone(&store))
+        .with_settings(settings())
+        .build()
+        .await
+        .unwrap();
+    let h1 = db.put(b"k1", b"v1_old").await.unwrap();
+    let h2 = db.put(b"k1", b"v1_new").await.unwrap();
+    let h3 = db.put(b"k2", b"v2").await.unwrap();
+    flush_memtable(&db).await;
+    let last_l0_seq = db.status().current_manifest.last_l0_seq();
+    assert_eq!(last_l0_seq, h3.seqnum());
+
+    let h4 = db.put(b"k3", b"v3").await.unwrap();
+    db.close_with_options(CloseOptions {
+        flush_type: Some(FlushType::Wal),
+    })
+    .await
+    .unwrap();
+
+    // 1. L0 gap + unflushed WAL on Db: open(h3) runs BEFORE write(h4), clearing stale k1
+    // while keeping the newly replayed WAL entry k3 cached.
+    let stale_cache = PersistentRowCache::new_at(h1.seqnum(), &[(b"k1", b"v1_old", h1.seqnum())]);
+    let db = Db::builder(path, Arc::clone(&store))
+        .with_settings(settings())
+        .with_row_cache(stale_cache.clone())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(
+        stale_cache.state.lock().unwrap().log,
+        vec![("open", h3.seqnum()), ("write", h4.seqnum())]
+    );
+    assert_eq!(
+        db.get(b"k1").await.unwrap(),
+        Some(Bytes::from_static(b"v1_new"))
+    );
+    assert_eq!(
+        db.get(b"k2").await.unwrap(),
+        Some(Bytes::from_static(b"v2"))
+    );
+    assert_eq!(
+        stale_cache.take_misses(),
+        vec![Bytes::from_static(b"k1"), Bytes::from_static(b"k2")]
+    );
+    // k3 landed via WAL replay after open(h3) cleared the stale state, so it hits cache.
+    assert_eq!(
+        db.get(b"k3").await.unwrap(),
+        Some(Bytes::from_static(b"v3"))
+    );
+    assert!(stale_cache.take_misses().is_empty());
+
+    // Add one more WAL-only write (h5) and close with WAL flush only.
+    let h5 = db.put(b"k4", b"v4").await.unwrap();
+    db.close_with_options(CloseOptions {
+        flush_type: Some(FlushType::Wal),
+    })
+    .await
+    .unwrap();
+
+    // 2. Caught-up persistent cache (watermark=h4 >= last_l0_seq=h3) keeps persisted rows,
+    // skips overlapping WAL entry h4, and applies h5.
+    let warm_cache = PersistentRowCache::new_at(
+        h4.seqnum(),
+        &[
+            (b"k1", b"v1_new", h2.seqnum()),
+            (b"k2", b"v2", h3.seqnum()),
+            (b"k3", b"v3", h4.seqnum()),
+        ],
+    );
+    let db = Db::builder(path, Arc::clone(&store))
+        .with_settings(settings())
+        .with_row_cache(warm_cache.clone())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(
+        warm_cache.state.lock().unwrap().log,
+        vec![
+            ("open", h3.seqnum()),
+            ("write", h4.seqnum()),
+            ("write", h5.seqnum()),
+        ]
+    );
+    for (k, v) in [
+        (&b"k1"[..], &b"v1_new"[..]),
+        (b"k2", b"v2"),
+        (b"k3", b"v3"),
+        (b"k4", b"v4"),
+    ] {
+        assert_eq!(db.get(k).await.unwrap(), Some(Bytes::copy_from_slice(v)));
+    }
+    assert!(warm_cache.take_misses().is_empty());
+
+    // 3. DbReader open reconciliation with WAL replay: open(h3) clears stale k1 before
+    // replaying h4 and h5 into the cache.
+    let reader_stale = PersistentRowCache::new_at(h1.seqnum(), &[(b"k1", b"v1_old", h1.seqnum())]);
+    let reader = DbReader::builder(path, Arc::clone(&store))
+        .with_options(reader_options(500, Duration::from_secs(60)))
+        .with_row_cache(reader_stale.clone())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(
+        reader_stale.state.lock().unwrap().log,
+        vec![
+            ("open", h3.seqnum()),
+            ("write", h4.seqnum()),
+            ("write", h5.seqnum()),
+        ]
+    );
+    assert_eq!(
+        reader.get(b"k1").await.unwrap(),
+        Some(Bytes::from_static(b"v1_new"))
+    );
+    assert_eq!(reader_stale.take_misses(), vec![Bytes::from_static(b"k1")]);
+    assert_eq!(
+        reader.get(b"k4").await.unwrap(),
+        Some(Bytes::from_static(b"v4"))
+    );
+    assert!(reader_stale.take_misses().is_empty());
+    reader.close().await.unwrap();
+
+    // 4. DbReader with skip_wal_replay still invokes open(last_l0_seq) and clears stale state.
+    let reader_skip = PersistentRowCache::new_at(h1.seqnum(), &[(b"k1", b"v1_old", h1.seqnum())]);
+    let reader = DbReader::builder(path, Arc::clone(&store))
+        .with_options(DbReaderOptions {
+            skip_wal_replay: true,
+            ..reader_options(500, Duration::from_secs(60))
+        })
+        .with_row_cache(reader_skip.clone())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(
+        reader_skip.state.lock().unwrap().log,
+        vec![("open", h3.seqnum())]
+    );
+    assert_eq!(
+        reader.get(b"k1").await.unwrap(),
+        Some(Bytes::from_static(b"v1_new"))
+    );
+    assert_eq!(reader_skip.take_misses(), vec![Bytes::from_static(b"k1")]);
+    reader.close().await.unwrap();
+
+    // 5. Empty WAL + L0 gap on Db: open(last_l0_seq) still fires with zero write() calls.
+    flush_memtable(&db).await;
+    let final_l0_seq = db.status().current_manifest.last_l0_seq();
+    assert_eq!(final_l0_seq, h5.seqnum());
+    db.close().await.unwrap();
+
+    let empty_wal_cache =
+        PersistentRowCache::new_at(h1.seqnum(), &[(b"k1", b"v1_old", h1.seqnum())]);
+    let db = Db::builder(path, Arc::clone(&store))
+        .with_settings(settings())
+        .with_row_cache(empty_wal_cache.clone())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(
+        empty_wal_cache.state.lock().unwrap().log,
+        vec![("open", final_l0_seq)]
+    );
+    assert_eq!(
+        db.get(b"k1").await.unwrap(),
+        Some(Bytes::from_static(b"v1_new"))
+    );
+    assert_eq!(
+        empty_wal_cache.take_misses(),
+        vec![Bytes::from_static(b"k1")]
+    );
     db.close().await.unwrap();
 }
