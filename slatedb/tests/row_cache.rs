@@ -2257,3 +2257,75 @@ async fn test_row_cache_persistent_open_reconciliation() {
     );
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn test_row_cache_partial_next_batch_across_many_cached_segments() {
+    struct MultiSegmentCache;
+
+    fn make_row(i: usize) -> KeyValue {
+        KeyValue::new(
+            Bytes::from(format!("k{i:03}")),
+            Bytes::from(format!("v{i:03}")),
+            (i + 1) as u64,
+            0,
+            None,
+        )
+    }
+
+    impl RowCache for MultiSegmentCache {
+        fn write(&self, _seq: u64, _entries: &[RowEntry]) {}
+
+        fn get(&self, _key: &[u8], _seq: u64, _now_ms: i64) -> GetOutcome {
+            GetOutcome::Miss
+        }
+
+        fn scan(
+            &self,
+            _range: KeyRange<'_>,
+            _seq: u64,
+            _now_ms: i64,
+            _prefix: Option<&[u8]>,
+        ) -> ScanOutcome {
+            // Segment sizes 31 + 1 + 1 + 2 = 35 cross EXTERNAL_BUDGET_EVERY (32) across
+            // consecutive Cached segment completions within a single next_batch() call.
+            let segments = vec![
+                ScanSegment::cached(
+                    VecScanIterator::from_rows((0..31).map(make_row).collect()),
+                    Bound::Excluded(Bytes::from_static(b"k031")),
+                ),
+                ScanSegment::cached(
+                    VecScanIterator::from_rows((31..32).map(make_row).collect()),
+                    Bound::Excluded(Bytes::from_static(b"k032")),
+                ),
+                ScanSegment::cached(
+                    VecScanIterator::from_rows((32..33).map(make_row).collect()),
+                    Bound::Excluded(Bytes::from_static(b"k033")),
+                ),
+                ScanSegment::cached(
+                    VecScanIterator::from_rows((33..35).map(make_row).collect()),
+                    Bound::Unbounded,
+                ),
+            ];
+            ScanOutcome::Partial(segments)
+        }
+    }
+
+    let db = Db::builder(
+        "row_cache_partial_many_cached_segments",
+        Arc::new(InMemory::new()),
+    )
+    .with_row_cache(Arc::new(MultiSegmentCache))
+    .build()
+    .await
+    .unwrap();
+
+    let mut iter = db.scan(..).await.unwrap();
+    let mut out = Vec::new();
+    let count = iter.next_batch(&mut out, 100).await.unwrap();
+    assert_eq!(count, 35);
+    assert_eq!(out.len(), 35);
+    assert_eq!(out[0].key, Bytes::from_static(b"k000"));
+    assert_eq!(out[34].key, Bytes::from_static(b"k034"));
+    assert_eq!(iter.next_batch(&mut out, 10).await.unwrap(), 0);
+    db.close().await.unwrap();
+}

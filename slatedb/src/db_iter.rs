@@ -453,15 +453,16 @@ async fn next_batch_from_cached(
 ) -> CachedBatchOutcome {
     let mut n = 0;
     while n < max {
-        let budget_left = (EXTERNAL_BUDGET_EVERY - *unbudgeted).max(1) as usize;
+        let budget_left = EXTERNAL_BUDGET_EVERY.saturating_sub(*unbudgeted).max(1) as usize;
         let want = (max - n).min(budget_left);
         let before = out.len();
         let res = iter.next_batch(out, want);
         let count = out.len() - before;
         n += count;
+        let count_u32 = u32::try_from(count).unwrap_or(u32::MAX);
         match res {
             Ok(true) if count > 0 => {
-                *unbudgeted += count as u32;
+                *unbudgeted = unbudgeted.saturating_add(count_u32);
                 if *unbudgeted >= EXTERNAL_BUDGET_EVERY {
                     *unbudgeted = 0;
                     update_last_key(last_key, out, n);
@@ -469,8 +470,12 @@ async fn next_batch_from_cached(
                 }
             }
             Ok(_) => {
-                *unbudgeted += count as u32;
+                *unbudgeted = unbudgeted.saturating_add(count_u32);
                 update_last_key(last_key, out, n);
+                if *unbudgeted >= EXTERNAL_BUDGET_EVERY {
+                    *unbudgeted = 0;
+                    tokio::task::coop::consume_budget().await;
+                }
                 return CachedBatchOutcome::Done(n);
             }
             Err(err) => {
